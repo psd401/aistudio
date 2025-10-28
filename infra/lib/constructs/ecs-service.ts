@@ -523,7 +523,7 @@ export class EcsServiceConstruct extends Construct {
       maxHealthyPercent: 200,
       securityGroups: [ecsSecurityGroup],
       vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC }, // Public subnets for internet access (Cognito auth requires internet)
-      assignPublicIp: true, // CRITICAL: Tasks need public IPs to reach internet via internet gateway
+      assignPublicIp: false, // FIX: Public subnet already assigns IPs via MapPublicIpOnLaunch - setting true causes IdempotentParameterMismatch
       capacityProviderStrategies: this.createCapacityProviderStrategy(environment, props),
       circuitBreaker: {
         rollback: true, // Safe with fromAsset - image exists before service creation
