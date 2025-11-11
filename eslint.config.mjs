@@ -43,12 +43,16 @@ export default [
       "**/*.spec.tsx",
       ".eslintrc.custom.js",
       "eslint-plugin-logging/**",
-      // Infrastructure and build artifacts
-      "infra/bin/**",
-      "infra/cdk.out/**",
+      // Infrastructure - all files (CommonJS, CDK artifacts, build outputs)
+      "infra/**",
+      // TypeScript declaration files
+      "**/*.d.ts",
       // Jest setup and mocks (CommonJS)
       "jest.setup.js",
       "**/__mocks__/**",
+      "tests/mocks/**",
+      // Test scripts
+      "test-*.js",
       // Package dist folders
       "packages/**/dist/**",
     ],
@@ -156,6 +160,18 @@ export default [
     files: [
       "lib/env-validation.ts",
       "middleware.ts",
+    ],
+    rules: {
+      "no-console": "off",
+    },
+  },
+
+  // Rule 5: Allow console in test/performance files
+  {
+    files: [
+      "tests/**/*.ts",
+      "tests/**/*.tsx",
+      "scripts/**/*.ts",
     ],
     rules: {
       "no-console": "off",
