@@ -653,8 +653,8 @@ async function assignTagsToPrompt(
   )
 
   // Get tag IDs using JSON array
-  const tagResults = await executeSQL<{ id: number }>(
-    `SELECT id FROM prompt_tags WHERE name IN (SELECT value FROM json_array_elements_text(:names::json))`,
+  const tagResults = await executeSQL<{ id: number; name: string }>(
+    `SELECT id, name FROM prompt_tags WHERE name IN (SELECT value FROM json_array_elements_text(:names::json))`,
     [
       {
         name: "names",
@@ -662,6 +662,16 @@ async function assignTagsToPrompt(
       }
     ]
   )
+
+  // Validate that tags were created or found
+  if (tagResults.length === 0) {
+    log.error("No tags were created or found", { tagNames: trimmedNames })
+    throw ErrorFactories.dbQueryFailed(
+      "INSERT/SELECT prompt_tags",
+      new Error("Failed to create or retrieve tags"),
+      { details: { tagNames: trimmedNames } }
+    )
+  }
 
   // Batch insert associations using JSON array
   await executeSQL(
