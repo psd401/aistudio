@@ -43,8 +43,8 @@ This project provisions all core infrastructure using AWS CDK, following the AWS
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/psd401/aistudio.psd401.ai.git
-   cd aistudio.psd401.ai
+   git clone https://github.com/psd401/aistudio.git
+   cd aistudio
    ```
 
 2. Install dependencies:

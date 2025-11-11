@@ -5,7 +5,7 @@
  * Supports configurable delays, error injection, and connection simulation.
  *
  * @see ../sse-event-types.ts for event type definitions
- * @see https://github.com/psd401/aistudio.psd401.ai/issues/364
+ * @see https://github.com/psd401/aistudio/issues/364
  */
 
 import { SSEEvent } from '../sse-event-types';

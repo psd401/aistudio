@@ -5,7 +5,7 @@
  * and version-specific behavior. This helps prevent breaking changes when
  * upgrading dependencies.
  *
- * @see https://github.com/psd401/aistudio.psd401.ai/issues/366
+ * @see https://github.com/psd401/aistudio/issues/366
  */
 
 import { readFileSync } from 'fs';

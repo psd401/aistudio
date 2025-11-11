@@ -11,7 +11,7 @@
  * - Detailed logging for debugging
  * - Forward compatibility with future AI SDK versions
  *
- * @see https://github.com/psd401/aistudio.psd401.ai/issues/365
+ * @see https://github.com/psd401/aistudio/issues/365
  */
 
 import { createLogger } from '@/lib/client-logger'

@@ -638,40 +638,41 @@ async function assignTagsToPrompt(
 
   const trimmedNames = tagNames.map(t => t.trim())
 
-  // Batch insert tags if they don't exist using unnest
+  // Batch insert tags if they don't exist using JSON
+  // RDS Data API doesn't support array parameters, so we use JSON instead
   await executeSQL(
     `INSERT INTO prompt_tags (name)
-     SELECT unnest(:names::text[])
+     SELECT value FROM json_array_elements_text(:names::json)
      ON CONFLICT (name) DO NOTHING`,
     [
       {
         name: "names",
-        value: { arrayValue: { stringValues: trimmedNames } }
+        value: { stringValue: JSON.stringify(trimmedNames) }
       }
     ]
   )
 
-  // Get tag IDs
+  // Get tag IDs using JSON array
   const tagResults = await executeSQL<{ id: number }>(
-    `SELECT id FROM prompt_tags WHERE name = ANY(:names)`,
+    `SELECT id FROM prompt_tags WHERE name IN (SELECT value FROM json_array_elements_text(:names::json))`,
     [
       {
         name: "names",
-        value: { arrayValue: { stringValues: trimmedNames } }
+        value: { stringValue: JSON.stringify(trimmedNames) }
       }
     ]
   )
 
-  // Batch insert associations using unnest
+  // Batch insert associations using JSON array
   await executeSQL(
     `INSERT INTO prompt_library_tags (prompt_id, tag_id)
-     SELECT :promptId, unnest(:tagIds::bigint[])
+     SELECT :promptId::uuid, value::bigint FROM json_array_elements_text(:tagIds::json)
      ON CONFLICT DO NOTHING`,
     [
       { name: "promptId", value: { stringValue: promptId } },
       {
         name: "tagIds",
-        value: { arrayValue: { longValues: tagResults.map(t => t.id) } }
+        value: { stringValue: JSON.stringify(tagResults.map(t => t.id)) }
       }
     ]
   )
