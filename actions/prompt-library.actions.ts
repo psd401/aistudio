@@ -131,7 +131,7 @@ export async function createPrompt(
         `SELECT t.name
          FROM prompt_tags t
          JOIN prompt_library_tags plt ON t.id = plt.tag_id
-         WHERE plt.prompt_id = :promptId`,
+         WHERE plt.prompt_id = :promptId::uuid`,
         [{ name: "promptId", value: { stringValue: prompt.id } }]
       )
       prompt.tags = tagResults.map(t => t.name)
