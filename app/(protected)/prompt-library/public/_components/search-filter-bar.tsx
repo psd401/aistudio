@@ -10,6 +10,7 @@ import {
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { X } from "lucide-react"
+import { TagFilterDropdown } from "./tag-filter-dropdown"
 
 interface SearchFilterBarProps {
   selectedTags: string[]
@@ -37,6 +38,7 @@ export function SearchFilterBar({
   return (
     <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 p-4 bg-muted/50 rounded-lg border">
       <div className="flex items-center gap-3 flex-wrap">
+        {/* Sort Dropdown */}
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium text-muted-foreground">
             Sort by:
@@ -53,13 +55,25 @@ export function SearchFilterBar({
           </Select>
         </div>
 
+        {/* Separator */}
+        <div className="h-6 w-px bg-border" />
+
+        {/* Tag Filter Dropdown */}
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-muted-foreground">
+            Filter by tags:
+          </span>
+          <TagFilterDropdown
+            selectedTags={selectedTags}
+            onTagsChange={onTagsChange}
+          />
+        </div>
+
+        {/* Selected Tags Display */}
         {selectedTags.length > 0 && (
           <>
             <div className="h-6 w-px bg-border" />
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="text-sm font-medium text-muted-foreground">
-                Tags:
-              </span>
               {selectedTags.map((tag) => (
                 <Badge key={tag} variant="secondary" className="gap-1">
                   {tag}
