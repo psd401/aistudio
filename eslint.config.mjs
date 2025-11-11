@@ -1,51 +1,114 @@
-import { dirname } from "path";
-import { fileURLToPath } from "url";
-import { FlatCompat } from "@eslint/eslintrc";
+import js from "@eslint/js";
+import tseslint from "typescript-eslint";
+import reactPlugin from "eslint-plugin-react";
+import reactHooksPlugin from "eslint-plugin-react-hooks";
 import loggingPlugin from "./eslint-plugin-logging/index.js";
+
 /**
- * ESLint Configuration for AI Studio
- * 
+ * ESLint Configuration for AI Studio (ESLint 9 Flat Config)
+ *
  * LOGGING ENFORCEMENT:
  * - NO console.log/error/warn in server code (actions/, app/api/)
  * - Must use logger from @/lib/logger
  * - All server actions must generate requestId
  * - All async functions must have proper error handling
- * 
- * Custom rules defined in .eslintrc.custom.js:
+ *
+ * Custom rules implemented in ./eslint-plugin-logging/index.js:
  * - no-console-in-server: Prevents console usage in server code
- * - require-request-id-in-server-actions: Ensures request ID generation
- * - require-error-handling-in-async: Ensures try-catch or handleError
+ * - require-request-id: Ensures request ID generation
+ * - require-timer: Ensures performance timing
+ * - require-logger-in-server-actions: Enforces logger usage
  * - no-generic-error-messages: Prevents "DB error" type messages
- * - use-typed-errors: Encourages ErrorFactories over plain Error
- * 
- * Custom rules are now implemented in ./eslint-plugin-logging/index.js
+ * - use-error-factories: Encourages ErrorFactories over plain Error
  */
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+export default [
+  // Ignore build outputs and generated files
+  {
+    ignores: [
+      ".next/**",
+      "out/**",
+      "build/**",
+      "dist/**",
+      "node_modules/**",
+      "next-env.d.ts",
+      "**/*.config.js",
+      "**/*.config.mjs",
+      "**/*.config.ts",
+      ".jest/**",
+      "jest.*.js",
+      "**/*.test.ts",
+      "**/*.test.tsx",
+      "**/*.spec.ts",
+      "**/*.spec.tsx",
+      ".eslintrc.custom.js",
+      "eslint-plugin-logging/**",
+    ],
+  },
 
-const compat = new FlatCompat({
-  baseDirectory: __dirname,
-});
+  // Base ESLint recommended rules
+  js.configs.recommended,
 
-const eslintConfig = [
-  ...compat.config({
-    extends: ["next/core-web-vitals", "next/typescript"],
-  }),
+  // TypeScript configuration
+  ...tseslint.configs.recommended,
+  {
+    files: ["**/*.ts", "**/*.tsx"],
+    languageOptions: {
+      parser: tseslint.parser,
+      parserOptions: {
+        ecmaVersion: "latest",
+        sourceType: "module",
+        ecmaFeatures: {
+          jsx: true,
+        },
+      },
+    },
+  },
+
+  // React configuration
+  {
+    files: ["**/*.jsx", "**/*.tsx"],
+    plugins: {
+      react: reactPlugin,
+      "react-hooks": reactHooksPlugin,
+    },
+    settings: {
+      react: {
+        version: "detect",
+      },
+    },
+    rules: {
+      ...reactPlugin.configs.recommended.rules,
+      ...reactPlugin.configs["jsx-runtime"].rules,
+      ...reactHooksPlugin.configs.recommended.rules,
+      "react/prop-types": "off", // Using TypeScript for prop validation
+      "react/react-in-jsx-scope": "off", // Not needed in Next.js
+    },
+  },
+
   // Add custom logging plugin
   {
     plugins: {
       logging: loggingPlugin,
     },
   },
+
   // LOGGING ENFORCEMENT RULES
-  // Rule 1: Disallow all console.* calls in server code
+  // Rule 1: Disallow all console.* calls by default
   {
     rules: {
-      // All logging must use Winston logger in server code. No console.* allowed.
-      'no-console': 'error',
+      "no-console": "error",
+      "@typescript-eslint/no-explicit-any": "error",
+      "@typescript-eslint/no-unused-vars": [
+        "error",
+        {
+          argsIgnorePattern: "^_",
+          varsIgnorePattern: "^_",
+        },
+      ],
     },
   },
+
   // Rule 2: Stricter rules for server actions and API routes
   {
     files: [
@@ -55,17 +118,16 @@ const eslintConfig = [
       "app/api/**/*.tsx",
     ],
     rules: {
-      // Enforce no console usage at all in server actions and API routes
-      'no-console': 'error',
-      // Custom logging enforcement rules
-      'logging/no-console-in-server': 'error',
-      'logging/require-request-id': 'error',
-      'logging/require-timer': 'error',
-      'logging/require-logger-in-server-actions': 'error',
-      'logging/no-generic-error-messages': 'error',
-      'logging/use-error-factories': 'warn',
+      "no-console": "error",
+      "logging/no-console-in-server": "error",
+      "logging/require-request-id": "error",
+      "logging/require-timer": "error",
+      "logging/require-logger-in-server-actions": "error",
+      "logging/no-generic-error-messages": "error",
+      "logging/use-error-factories": "warn",
     },
   },
+
   // Rule 3: Allow console.error ONLY in client components/hooks
   {
     files: [
@@ -74,13 +136,13 @@ const eslintConfig = [
       "lib/hooks/**/*.ts",
     ],
     rules: {
-      // Allow console.error in client code for actionable errors only
-      'no-console': [
-        'error',
-        { allow: ['error'] },
+      "no-console": [
+        "error",
+        { allow: ["error"] },
       ],
     },
   },
+
   // Rule 4: Special exceptions for Edge Runtime compatibility
   {
     files: [
@@ -88,11 +150,7 @@ const eslintConfig = [
       "middleware.ts",
     ],
     rules: {
-      // These files need console for Edge Runtime compatibility
-      // They should use eslint-disable-next-line comments
-      'no-console': 'off',
+      "no-console": "off",
     },
   },
 ];
-
-export default eslintConfig;
