@@ -36,32 +36,32 @@ export function PromptGalleryCard({ prompt }: PromptGalleryCardProps) {
   return (
     <>
       <Card className="group hover:shadow-xl transition-all duration-300 hover:-translate-y-1 flex flex-col h-full">
-        <CardHeader className="pb-3 flex-none">
+        <CardHeader className="pb-2 flex-none">
           <div className="flex items-start gap-3">
             {/* Icon */}
             <div className="flex-shrink-0 mt-0.5">
-              <div className="h-12 w-12 rounded-lg bg-gradient-to-br from-primary/10 to-primary/5 flex items-center justify-center">
-                <BrainCircuit className="h-6 w-6 text-primary" />
+              <div className="h-10 w-10 rounded-lg bg-gradient-to-br from-primary/10 to-primary/5 flex items-center justify-center">
+                <BrainCircuit className="h-5 w-5 text-primary" />
               </div>
             </div>
 
             {/* Title */}
             <div className="flex-1 min-w-0">
-              <h3 className="font-semibold text-lg line-clamp-2">
+              <h3 className="font-semibold text-base line-clamp-2">
                 {prompt.title}
               </h3>
             </div>
           </div>
         </CardHeader>
 
-        <CardContent className="pb-3 flex-grow flex flex-col gap-3">
+        <CardContent className="pb-2 flex-grow flex flex-col gap-2">
           {/* Description */}
-          <p className="text-sm text-muted-foreground line-clamp-3">
+          <p className="text-sm text-muted-foreground line-clamp-2">
             {prompt.description || prompt.preview}
           </p>
 
           {/* Tags - Always show tag area */}
-          <div className="flex flex-wrap gap-1 min-h-[24px]">
+          <div className="flex flex-wrap gap-1">
             {prompt.tags && prompt.tags.length > 0 ? (
               <>
                 {prompt.tags.slice(0, 3).map((tag) => (
@@ -81,7 +81,7 @@ export function PromptGalleryCard({ prompt }: PromptGalleryCardProps) {
           </div>
 
           {/* Stats */}
-          <div className="flex items-center justify-between text-xs text-muted-foreground pt-2 border-t">
+          <div className="flex items-center justify-between text-xs text-muted-foreground pt-1.5 border-t">
             <div className="flex items-center gap-3">
               <span className="flex items-center gap-1">
                 <CopyIcon className="h-3 w-3" />
@@ -100,7 +100,7 @@ export function PromptGalleryCard({ prompt }: PromptGalleryCardProps) {
           </div>
         </CardContent>
 
-        <CardFooter className="pt-3 border-t flex-none">
+        <CardFooter className="pt-2 border-t flex-none">
           <div className="flex items-center gap-2 w-full">
             <Button
               variant="outline"
