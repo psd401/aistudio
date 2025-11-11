@@ -319,12 +319,12 @@ export async function listPrompts(
           SELECT 1 FROM prompt_library_tags plt
           JOIN prompt_tags t ON plt.tag_id = t.id
           WHERE plt.prompt_id = p.id
-          AND t.name = ANY(:tags)
+          AND t.name IN (SELECT value FROM json_array_elements_text(:tags::json))
         )
       `)
       parameters.push({
         name: "tags",
-        value: { arrayValue: { stringValues: validated.tags } }
+        value: { stringValue: JSON.stringify(validated.tags) }
       })
     }
 
