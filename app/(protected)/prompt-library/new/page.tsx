@@ -3,6 +3,7 @@
 import { useState } from "react"
 import { useRouter } from "next/navigation"
 import { createPrompt } from "@/actions/prompt-library.actions"
+import { useAction } from "@/lib/hooks/use-action"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -19,41 +20,53 @@ import { toast } from "sonner"
 import { ArrowLeft, Save } from "lucide-react"
 import { TagInput } from "../_components/tag-input"
 import type { PromptVisibility } from "@/lib/prompt-library/types"
+import { createPromptSchema } from "@/lib/prompt-library/validation"
+
+interface NewPromptFormData {
+  title: string
+  content: string
+  description: string
+  visibility: PromptVisibility
+  tags: string[]
+}
 
 export default function NewPromptPage() {
   const router = useRouter()
-  const [isCreating, setIsCreating] = useState(false)
-  const [formData, setFormData] = useState({
+  const [formData, setFormData] = useState<NewPromptFormData>({
     title: '',
     content: '',
     description: '',
-    visibility: 'private' as PromptVisibility,
-    tags: [] as string[]
+    visibility: 'private',
+    tags: []
+  })
+
+  const { execute: executeCreate, isPending: isCreating } = useAction(createPrompt, {
+    onSuccess: (data) => {
+      toast.success("Prompt created successfully")
+      // Redirect to view the newly created prompt
+      router.push(`/prompt-library/${data.id}`)
+    },
+    onError: (error) => {
+      toast.error(error)
+    }
   })
 
   const handleCreate = async () => {
-    if (!formData.title || !formData.content) {
-      toast.error("Title and content are required")
+    // Validate using Zod schema for consistency with server-side validation
+    const validation = createPromptSchema.safeParse(formData)
+    if (!validation.success) {
+      const firstError = validation.error.issues[0]
+      toast.error(firstError.message)
       return
     }
 
-    setIsCreating(true)
-    const result = await createPrompt({
+    await executeCreate({
       title: formData.title,
       content: formData.content,
       description: formData.description || undefined,
       visibility: formData.visibility,
       tags: formData.tags
     })
-
-    if (result?.isSuccess) {
-      toast.success("Prompt created successfully")
-      // Redirect to the edit page for the newly created prompt
-      router.push(`/prompt-library/${result.data.id}`)
-    } else {
-      toast.error(result?.message || "Failed to create prompt")
-      setIsCreating(false)
-    }
   }
 
   return (
@@ -88,7 +101,9 @@ export default function NewPromptPage() {
         <CardContent className="space-y-6">
           {/* Title */}
           <div className="space-y-2">
-            <Label htmlFor="title">Title *</Label>
+            <Label htmlFor="title">
+              Title * ({formData.title.length}/255)
+            </Label>
             <Input
               id="title"
               value={formData.title}
@@ -96,12 +111,17 @@ export default function NewPromptPage() {
                 setFormData({ ...formData, title: e.target.value })
               }
               placeholder="Enter prompt title"
+              maxLength={255}
+              aria-required="true"
+              aria-invalid={!formData.title}
             />
           </div>
 
           {/* Description */}
           <div className="space-y-2">
-            <Label htmlFor="description">Description</Label>
+            <Label htmlFor="description">
+              Description ({formData.description.length}/1000)
+            </Label>
             <Textarea
               id="description"
               value={formData.description}
@@ -110,12 +130,15 @@ export default function NewPromptPage() {
               }
               placeholder="Enter a brief description"
               rows={3}
+              maxLength={1000}
             />
           </div>
 
           {/* Content */}
           <div className="space-y-2">
-            <Label htmlFor="content">Prompt Content *</Label>
+            <Label htmlFor="content">
+              Prompt Content * ({formData.content.length}/50000)
+            </Label>
             <Textarea
               id="content"
               value={formData.content}
@@ -125,6 +148,9 @@ export default function NewPromptPage() {
               placeholder="Enter your prompt content"
               rows={10}
               className="font-mono"
+              maxLength={50000}
+              aria-required="true"
+              aria-invalid={!formData.content}
             />
             <p className="text-xs text-muted-foreground">
               Use variables like {`{{variable_name}}`} for dynamic content
