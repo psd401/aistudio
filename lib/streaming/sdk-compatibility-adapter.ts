@@ -7,8 +7,8 @@
  *
  * This prevents silent failures when the SDK is upgraded and event formats change.
  *
- * @see https://github.com/psd401/aistudio.psd401.ai/issues/366
- * @see https://github.com/psd401/aistudio.psd401.ai/issues/355 (Original bug)
+ * @see https://github.com/psd401/aistudio/issues/366
+ * @see https://github.com/psd401/aistudio/issues/355 (Original bug)
  */
 
 import { SDKVersionDetector, type SDKVersionInfo } from './sdk-version-detector';

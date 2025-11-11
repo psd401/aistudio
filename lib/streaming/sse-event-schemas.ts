@@ -10,7 +10,7 @@
  * - Incorrect field types
  * - Field name mismatches (e.g., textDelta vs delta)
  *
- * @see https://github.com/psd401/aistudio.psd401.ai/issues/365
+ * @see https://github.com/psd401/aistudio/issues/365
  * @see /lib/streaming/sse-event-types.ts
  */
 

@@ -8,8 +8,8 @@
  * Based on Vercel AI SDK v5 stream protocol and production event logs.
  *
  * @see https://sdk.vercel.ai/docs/ai-sdk-ui/stream-protocol
- * @see https://github.com/psd401/aistudio.psd401.ai/issues/363
- * @see https://github.com/psd401/aistudio.psd401.ai/issues/366
+ * @see https://github.com/psd401/aistudio/issues/363
+ * @see https://github.com/psd401/aistudio/issues/366
  */
 
 /**
