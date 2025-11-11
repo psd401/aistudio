@@ -1807,7 +1807,7 @@ export async function approveAssistantArchitectAction(
     `, [{ name: 'link', value: { stringValue: navLink } }]);
     
     if (!existingNavResult || existingNavResult.length === 0) {
-      let baseNavId = generateToolIdentifier(updatedTool.name);
+      const baseNavId = generateToolIdentifier(updatedTool.name);
       let navId = baseNavId;
       let navSuffix = 2;
       

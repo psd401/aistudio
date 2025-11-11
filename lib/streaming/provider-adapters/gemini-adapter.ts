@@ -88,7 +88,7 @@ export class GeminiAdapter extends BaseProviderAdapter {
   /**
    * Get list of tools supported by Gemini models
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   getSupportedTools(_modelId: string): string[] {
     // All Gemini models support search
     // Code execution is built-in, not a tool

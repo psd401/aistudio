@@ -19,7 +19,7 @@ export async function canAccessPromptLibrary(userId?: number): Promise<boolean> 
 /**
  * Check if user can moderate prompts (admin only)
  */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+ 
 export async function canModeratePrompts(_userId: number): Promise<boolean> {
   // Use role-based access control (matches pattern used throughout codebase)
   // Note: hasRole checks the current session, userId parameter kept for API compatibility

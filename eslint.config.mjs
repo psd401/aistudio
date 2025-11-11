@@ -43,6 +43,14 @@ export default [
       "**/*.spec.tsx",
       ".eslintrc.custom.js",
       "eslint-plugin-logging/**",
+      // Infrastructure and build artifacts
+      "infra/bin/**",
+      "infra/cdk.out/**",
+      // Jest setup and mocks (CommonJS)
+      "jest.setup.js",
+      "**/__mocks__/**",
+      // Package dist folders
+      "packages/**/dist/**",
     ],
   },
 

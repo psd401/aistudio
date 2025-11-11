@@ -331,7 +331,7 @@ function chunkText(text: string, maxChunkSize: number = 2000): ChunkData[] {
   const chunks: ChunkData[] = [];
   const lines = text.split('\n');
   let currentChunk = '';
-  let chunkIndex = 0;
+  const chunkIndex = 0;
   
   for (const line of lines) {
     if ((currentChunk + line).length > maxChunkSize && currentChunk.length > 0) {
@@ -459,7 +459,7 @@ async function processFile(job: ProcessingJob) {
     
     // Extract text
     const extractionResult = await extractText(buffer, job.fileType);
-    let text = extractionResult.text;
+    const text = extractionResult.text;
     
     // Check if this is a PDF that needs OCR
     if (text === null && job.fileType.toLowerCase().includes('pdf')) {

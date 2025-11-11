@@ -432,7 +432,7 @@ This might be because:
     return name.replace(/[^a-zA-Z0-9.-]/g, '_').substring(0, 255);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   async remove(_attachment: PendingAttachment): Promise<void> {
     // Cleanup if needed
   }
@@ -517,7 +517,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
     };
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   async remove(_attachment: PendingAttachment): Promise<void> {
     // Cleanup if needed (e.g., revoke object URLs if you created any)
   }

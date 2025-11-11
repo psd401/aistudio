@@ -64,7 +64,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
     };
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   async remove(_attachment: PendingAttachment): Promise<void> {
     // Cleanup if needed (e.g., revoke object URLs if you created any)
   }
@@ -171,7 +171,7 @@ export class PDFAttachmentAdapter implements AttachmentAdapter {
     };
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   async remove(_attachment: PendingAttachment): Promise<void> {
     // Cleanup if needed
   }
