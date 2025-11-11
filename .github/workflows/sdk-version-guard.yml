@@ -98,7 +98,7 @@ jobs:
         if: |
           github.event_name == 'pull_request' &&
           steps.version-check.outputs.major_change == 'true'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const oldVersion = '${{ steps.version-check.outputs.old_version }}';
@@ -145,7 +145,7 @@ jobs:
           github.event_name == 'pull_request' &&
           steps.version-check.outputs.version_changed == 'true' &&
           steps.version-check.outputs.major_change == 'false'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const oldVersion = '${{ steps.version-check.outputs.old_version }}';
