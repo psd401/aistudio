@@ -12,6 +12,9 @@ import {
 import { Input } from "@/components/ui/input"
 import { getPopularTags } from "@/actions/prompt-library-tags.actions"
 import type { PromptTag } from "@/lib/prompt-library/types"
+import { createLogger } from "@/lib/client-logger"
+
+const log = createLogger({ moduleName: "tag-filter-dropdown" })
 
 interface TagFilterDropdownProps {
   selectedTags: string[]
@@ -34,11 +37,22 @@ export function TagFilterDropdown({
 
   const loadTags = async () => {
     setLoading(true)
-    const result = await getPopularTags(50)
-    if (result.isSuccess) {
-      setAvailableTags(result.data)
+    try {
+      const result = await getPopularTags(50)
+      if (result.isSuccess) {
+        setAvailableTags(result.data)
+      } else {
+        // Handle failure gracefully - show empty state
+        log.error("Failed to load tags", { message: result.message })
+        setAvailableTags([])
+      }
+    } catch (error) {
+      // Handle unexpected errors
+      log.error("Unexpected error loading tags", { error })
+      setAvailableTags([])
+    } finally {
+      setLoading(false)
     }
-    setLoading(false)
   }
 
   const filteredTags = searchQuery
@@ -80,6 +94,7 @@ export function TagFilterDropdown({
         <div className="p-2">
           <Input
             placeholder="Search tags..."
+            aria-label="Search tags"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             className="h-8"
