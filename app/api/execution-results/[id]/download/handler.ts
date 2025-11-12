@@ -14,7 +14,9 @@ function sanitizeMarkdownContent(content: string): string {
 
   return content
     // Remove null bytes first
+    // eslint-disable-next-line no-control-regex
     .replace(/\x00/g, '')
+    // eslint-disable-next-line no-control-regex
     .replace(/\u0000/g, '')
     .replace(/\0/g, '')
     // Remove dangerous HTML/XML elements
@@ -346,7 +348,9 @@ function generateSafeFilename(scheduleName: string): string {
   return scheduleName
     .toLowerCase()
     // Remove null bytes (multiple representations)
+    // eslint-disable-next-line no-control-regex
     .replace(/\x00/g, '') // Actual null byte
+    // eslint-disable-next-line no-control-regex
     .replace(/\u0000/g, '') // Unicode null
     .replace(/\0/g, '') // Null character
     // Remove path traversal patterns

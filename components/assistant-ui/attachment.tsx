@@ -67,7 +67,6 @@ const AttachmentPreview: FC<AttachmentPreviewProps> = ({ src }) => {
   const [isLoaded, setIsLoaded] = useState(false);
 
   return (
-    // eslint-disable-next-line @next/next/no-img-element
     <img
       src={src}
       style={{
@@ -183,9 +182,10 @@ const AttachmentUI: FC<AttachmentUIProps> = ({ processingAttachments }) => {
         return "Document";
       case "file":
         return "File";
-      default:
+      default: {
         const _exhaustiveCheck: never = type;
         throw new Error(`Unknown attachment type: ${_exhaustiveCheck}`);
+      }
     }
   });
   return (

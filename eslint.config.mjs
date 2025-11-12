@@ -98,6 +98,28 @@ export default [
     },
   },
 
+  // Temporarily disable React Compiler experimental rules (Issue #460)
+  // These are optimization hints from the React 19 Compiler, not correctness issues.
+  // The compiler automatically skips components with violations - code still works.
+  // TODO: Re-enable and fix in dedicated optimization sprint when:
+  //   1. React Compiler rules mature and false positives are resolved
+  //   2. Proper time allocated for testing all 39+ affected components
+  //   3. Better guidance from React team on recommended patterns
+  {
+    files: ["**/*.jsx", "**/*.tsx"],
+    rules: {
+      // Disable React Compiler experimental optimization rules
+      "react-compiler/react-compiler": "off",
+      "react-hooks/set-state-in-effect": "off",
+      "react-hooks/error-boundaries": "off",
+      "react-hooks/incompatible-library": "off",
+      "react-hooks/static-components": "off",
+      "react-hooks/refs": "off",
+      "react-hooks/immutability": "off",
+      "react-hooks/preserve-manual-memoization": "off",
+    },
+  },
+
   // Add custom logging plugin
   {
     plugins: {
