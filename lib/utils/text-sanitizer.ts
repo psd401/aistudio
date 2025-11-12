@@ -33,11 +33,13 @@ export function sanitizeTextForDatabase(text: string): string {
   }
 
   // Remove null bytes (0x00) - PostgreSQL cannot store these in text fields
+  // eslint-disable-next-line no-control-regex
   let sanitized = text.replace(/\x00/g, '');
 
   // Remove other problematic control characters while preserving meaningful whitespace
   // Removes: 0x00-0x08, 0x0B-0x0C, 0x0E-0x1F, 0x7F (DEL)
   // Preserves: 0x09 (tab), 0x0A (newline), 0x0D (carriage return)
+  // eslint-disable-next-line no-control-regex
   sanitized = sanitized.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '');
 
   // Normalize Unicode to canonical form (NFC) for consistent storage
@@ -82,12 +84,14 @@ export function validateTextEncoding(text: string): {
   }
 
   // Check for null bytes
+  // eslint-disable-next-line no-control-regex
   if (/\x00/.test(text)) {
     hasNullBytes = true;
     issues.push('Contains null bytes (0x00)');
   }
 
   // Check for other problematic control characters
+  // eslint-disable-next-line no-control-regex
   if (/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/.test(text)) {
     hasControlChars = true;
     issues.push('Contains problematic control characters');
@@ -137,15 +141,19 @@ export function sanitizeTextWithMetrics(text: string): {
   const originalLength = text.length;
 
   // Count null bytes before removal
+  // eslint-disable-next-line no-control-regex
   const nullBytesRemoved = (text.match(/\x00/g) || []).length;
 
   // Remove null bytes
+  // eslint-disable-next-line no-control-regex
   let sanitized = text.replace(/\x00/g, '');
 
   // Count control characters before removal
+  // eslint-disable-next-line no-control-regex
   const controlCharsRemoved = (sanitized.match(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g) || []).length;
 
   // Remove other problematic control characters
+  // eslint-disable-next-line no-control-regex
   sanitized = sanitized.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '');
 
   // Normalize Unicode
