@@ -801,12 +801,16 @@ export async function deleteInputFieldAction(
 
     const field = fieldResult[0];
 
+    // Get assistant_architect_id from the snake_case database result
+    const architectIdRaw = (field as unknown as { assistant_architect_id?: number }).assistant_architect_id
+    const architectId = Number(architectIdRaw)
+
     // Check if user is the creator of the tool
     const toolResult = await executeSQL<FormattedRow>(`
       SELECT user_id
       FROM assistant_architects
       WHERE id = :toolId
-    `, [{ name: 'toolId', value: { longValue: Number((field as SelectToolInputField & { assistant_architect_id?: number }).assistant_architect_id || field.assistantArchitectId) } }]);
+    `, [{ name: 'toolId', value: { longValue: architectId } }]);
 
     if (!toolResult || toolResult.length === 0) {
       return { isSuccess: false, message: "Tool not found" }
@@ -1279,8 +1283,10 @@ export async function updatePromptAction(
         } else if (typeof value === 'object') {
           // Special handling for arrays and objects
           if (key === 'repositoryIds' && Array.isArray(value)) {
+            // Ensure all elements are numbers before serializing
+            const numericIds = value.every(item => typeof item === 'number') ? value as number[] : null
             // Use the serialization utility for repository IDs
-            paramValue = { stringValue: serializeRepositoryIds(value) || '[]' };
+            paramValue = { stringValue: serializeRepositoryIds(numericIds) || '[]' };
           } else if (key === 'enabledTools' && Array.isArray(value)) {
             // Validate array elements and prevent prototype pollution
             const safeArray = value.filter(item => {
@@ -1580,19 +1586,19 @@ export async function updatePromptResultAction(
     const updates: { name: string; value: SqlParameter['value'] }[] = []
     const setClauses: string[] = []
 
-    if (result.result !== undefined) {
+    if (result.result !== undefined && typeof result.result === 'string') {
       setClauses.push('result = :result')
       updates.push({ name: 'result', value: { stringValue: result.result } })
     }
-    if (result.error !== undefined) {
+    if (result.error !== undefined && typeof result.error === 'string') {
       setClauses.push('error = :error')
       updates.push({ name: 'error', value: { stringValue: result.error } })
     }
-    if (result.executionTime !== undefined) {
+    if (result.executionTime !== undefined && typeof result.executionTime === 'number') {
       setClauses.push('execution_time = :executionTime')
       updates.push({ name: 'executionTime', value: { longValue: result.executionTime } })
     }
-    if (result.tokensUsed !== undefined) {
+    if (result.tokensUsed !== undefined && typeof result.tokensUsed === 'number') {
       setClauses.push('tokens_used = :tokensUsed')
       updates.push({ name: 'tokensUsed', value: { longValue: result.tokensUsed } })
     }
@@ -2078,7 +2084,7 @@ export async function getExecutionResultsAction(
     // Transform to match SelectPromptResult type - note: the DB schema has evolved
     // but the type definition hasn't been updated to match
     const promptResultsData = promptResultsRaw.map((result: FormattedRow) => {
-      const transformedResult = transformSnakeToCamel<SelectPromptResult>(result);
+      const transformedResult = transformSnakeToCamel(result) as unknown as SelectPromptResult;
       // Add additional fields from actual DB that aren't in the type definition
       return {
         ...transformedResult,
@@ -2092,7 +2098,7 @@ export async function getExecutionResultsAction(
         startedAt: result.started_at,
         completedAt: result.completed_at,
         executionTimeMs: result.execution_time_ms
-      } as SelectPromptResult & {
+      } as unknown as SelectPromptResult & {
         inputData?: Record<string, unknown>;
         outputData?: string;
         status?: string;

@@ -264,7 +264,7 @@ export async function POST(req: Request) {
     };
 
     try {
-      const streamResponse = await executePromptChain(prompts, inputs, context, requestId, log);
+      const streamResponse = await executePromptChain(prompts as ChainPrompt[], inputs, context, requestId, log);
 
       // 9. Update execution status to completed on stream completion
       // This is done in the onFinish callback of the last prompt
