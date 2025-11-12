@@ -7,7 +7,7 @@ import {
   AuthFlowType
 } from "@aws-sdk/client-cognito-identity-provider"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
-import { handleError, createSuccess } from "@/lib/error-utils"
+import { handleError, createSuccess, ErrorFactories } from "@/lib/error-utils"
 import type { ActionState } from "@/types/actions-types"
 
 interface RefreshTokenParams {
@@ -203,12 +203,12 @@ async function performTokenRefresh(
     // Input validation
     if (!params.refreshToken || typeof params.refreshToken !== 'string' || params.refreshToken.length < 10) {
       log.warn("Invalid refresh token provided", { tokenSub: params.tokenSub })
-      throw new Error("Invalid refresh token")
+      throw ErrorFactories.validationFailed([{ field: 'refreshToken', message: 'Invalid refresh token', value: params.refreshToken }])
     }
 
     if (!params.tokenSub || typeof params.tokenSub !== 'string') {
       log.warn("Invalid token sub provided")
-      throw new Error("Invalid token sub")
+      throw ErrorFactories.validationFailed([{ field: 'tokenSub', message: 'Invalid token sub', value: params.tokenSub }])
     }
 
     // Check rate limiting with polling context awareness
@@ -219,7 +219,7 @@ async function performTokenRefresh(
         tokenSub: params.tokenSub,
         isPollingContext
       });
-      throw new Error("Rate limit exceeded. Please try again later.")
+      throw ErrorFactories.externalApiRateLimit("cognito", 60)
     }
 
     // Cleanup is now handled deterministically in isRateLimited()
@@ -227,13 +227,13 @@ async function performTokenRefresh(
     const clientId = process.env.AUTH_COGNITO_CLIENT_ID
     if (!clientId) {
       log.error("AUTH_COGNITO_CLIENT_ID environment variable not set")
-      throw new Error("Authentication configuration error")
+      throw ErrorFactories.sysConfigurationError("Authentication configuration error")
     }
 
     const awsRegion = process.env.AWS_REGION
     if (!awsRegion) {
       log.error("AWS_REGION environment variable not set")
-      throw new Error("AWS region configuration required")
+      throw ErrorFactories.sysConfigurationError("AWS region configuration required")
     }
 
     log.info("Attempting Cognito token refresh", { tokenSub: params.tokenSub })
@@ -257,7 +257,7 @@ async function performTokenRefresh(
       log.warn("Token refresh failed - no authentication result returned", {
         tokenSub: params.tokenSub
       })
-      throw new Error("Token refresh failed")
+      throw ErrorFactories.authInvalidToken("refresh", { message: "Token refresh failed" })
     }
 
     const authResult = response.AuthenticationResult
@@ -270,7 +270,7 @@ async function performTokenRefresh(
         hasAccessToken: !!authResult.AccessToken,
         hasIdToken: !!authResult.IdToken
       })
-      throw new Error("Incomplete token refresh response")
+      throw ErrorFactories.authInvalidToken("refresh", { message: "Incomplete token refresh response" })
     }
 
     log.info("Token refresh successful", {

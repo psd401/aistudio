@@ -1297,7 +1297,7 @@ export async function updatePromptAction(
             });
             const jsonString = JSON.stringify(safeArray);
             if (jsonString.length > 10000) {
-              throw new Error('Enabled tools array too large');
+              throw ErrorFactories.validationFailed([{ field: 'enabledTools', message: 'Enabled tools array too large', value: safeArray }]);
             }
             paramValue = { stringValue: jsonString };
           } else if (Array.isArray(value)) {

@@ -81,7 +81,7 @@ function sanitizeNumericId(value: unknown): number {
 
   // Strict validation with early exit
   if (!Number.isInteger(num) || !Number.isFinite(num) || num <= 0 || num > Number.MAX_SAFE_INTEGER) {
-    throw new Error('Invalid numeric ID')
+    throw ErrorFactories.validationFailed([{ field: 'id', message: 'Invalid numeric ID', value }])
   }
 
   // Create a completely new clean value to break taint flow
@@ -115,7 +115,7 @@ function getEnvironment(): string {
   // Validate environment value against allowlist
   const allowedEnvironments = ['dev', 'prod']
   if (!allowedEnvironments.includes(env)) {
-    throw new Error(`Invalid environment: ${env}. Must be one of: ${allowedEnvironments.join(', ')}`)
+    throw ErrorFactories.sysConfigurationError(`Invalid environment: ${env}. Must be one of: ${allowedEnvironments.join(', ')}`)
   }
 
   return env
@@ -145,7 +145,7 @@ async function invokeScheduleManager(action: ScheduleLambdaPayload['action'], pa
 
   if (action === 'create') {
     if (!payload.scheduleConfig) {
-      throw new Error('scheduleConfig is required for create action')
+      throw ErrorFactories.validationFailed([{ field: 'scheduleConfig', message: 'scheduleConfig is required for create action' }])
     }
     const cronExpression = convertToCronExpression(payload.scheduleConfig)
     lambdaPayload = {
@@ -156,7 +156,7 @@ async function invokeScheduleManager(action: ScheduleLambdaPayload['action'], pa
     }
   } else if (action === 'update') {
     if (!payload.scheduleConfig) {
-      throw new Error('scheduleConfig is required for update action')
+      throw ErrorFactories.validationFailed([{ field: 'scheduleConfig', message: 'scheduleConfig is required for update action' }])
     }
     const cronExpression = convertToCronExpression(payload.scheduleConfig)
     lambdaPayload = {
@@ -209,7 +209,7 @@ async function invokeScheduleManager(action: ScheduleLambdaPayload['action'], pa
     return result
   }
 
-  throw new Error('No response from Lambda function')
+  throw ErrorFactories.externalServiceError('No response from Lambda function')
 }
 
 /**
@@ -357,7 +357,7 @@ function convertToCronExpression(scheduleConfig: ScheduleConfig): string {
 
     case 'weekly': {
       if (!daysOfWeek || daysOfWeek.length === 0) {
-        throw new Error('Days of week required for weekly schedules')
+        throw ErrorFactories.validationFailed([{ field: 'daysOfWeek', message: 'Days of week required for weekly schedules' }])
       }
       // Convert from 0=Sunday to 1=Sunday for cron
       const cronDays = daysOfWeek.map(day => day === 0 ? 7 : day).join(',')
@@ -370,7 +370,7 @@ function convertToCronExpression(scheduleConfig: ScheduleConfig): string {
     }
 
     default:
-      throw new Error(`Unsupported frequency: ${frequency}`)
+      throw ErrorFactories.validationFailed([{ field: 'frequency', message: `Unsupported frequency: ${frequency}`, value: frequency }])
   }
 }
 
@@ -391,13 +391,13 @@ async function _createEventBridgeSchedule(
     // SECURITY FIX: Validate schedule configuration before cron conversion
     const validationResult = validateScheduleConfig(scheduleConfig)
     if (!validationResult.isValid) {
-      throw new Error(`Invalid schedule configuration: ${validationResult.errors.join(', ')}`)
+      throw ErrorFactories.validationFailed([{ field: 'scheduleConfig', message: `Invalid schedule configuration: ${validationResult.errors.join(', ')}` }])
     }
 
     // SECURITY FIX: Validate and sanitize name input (AWS schedule name limit: 64 chars)
     const sanitizedName = name?.toString().trim().substring(0, 50) || ""
     if (!sanitizedName || sanitizedName.length === 0) {
-      throw new Error('Schedule name is required and cannot be empty')
+      throw ErrorFactories.validationFailed([{ field: 'name', message: 'Schedule name is required and cannot be empty', value: name }])
     }
 
     // SECURITY FIX: Validate environment and scheduleId are safe for interpolation
@@ -409,7 +409,7 @@ async function _createEventBridgeSchedule(
 
     // Validate schedule name length (AWS limit is 64 characters)
     if (scheduleName.length > 64) {
-      throw new Error(`Schedule name too long: ${scheduleName.length} chars (max: 64)`)
+      throw ErrorFactories.validationFailed([{ field: 'name', message: `Schedule name too long: ${scheduleName.length} chars (max: 64)`, value: scheduleName }])
     }
 
     log.info('Creating EventBridge schedule', {
@@ -471,13 +471,13 @@ async function _updateEventBridgeSchedule(
     // SECURITY FIX: Validate schedule configuration before cron conversion
     const validationResult = validateScheduleConfig(scheduleConfig)
     if (!validationResult.isValid) {
-      throw new Error(`Invalid schedule configuration: ${validationResult.errors.join(', ')}`)
+      throw ErrorFactories.validationFailed([{ field: 'scheduleConfig', message: `Invalid schedule configuration: ${validationResult.errors.join(', ')}` }])
     }
 
     // SECURITY FIX: Validate and sanitize name input
     const sanitizedName = name?.toString().trim().substring(0, 50) || ""
     if (!sanitizedName || sanitizedName.length === 0) {
-      throw new Error('Schedule name is required and cannot be empty')
+      throw ErrorFactories.validationFailed([{ field: 'name', message: 'Schedule name is required and cannot be empty', value: name }])
     }
 
     // SECURITY FIX: Validate environment and scheduleId are safe for interpolation
@@ -489,7 +489,7 @@ async function _updateEventBridgeSchedule(
 
     // Validate schedule name length
     if (scheduleName.length > 64) {
-      throw new Error(`Schedule name too long: ${scheduleName.length} chars (max: 64)`)
+      throw ErrorFactories.validationFailed([{ field: 'name', message: `Schedule name too long: ${scheduleName.length} chars (max: 64)`, value: scheduleName }])
     }
 
     log.info('Updating EventBridge schedule', {

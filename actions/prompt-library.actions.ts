@@ -250,7 +250,7 @@ export async function getPrompt(id: string): Promise<ActionState<Prompt>> {
         promptKeys: Object.keys(prompt),
         promptTypes: Object.entries(prompt).map(([k, v]) => `${k}: ${typeof v}`)
       })
-      throw new Error("Failed to serialize prompt data for Next.js")
+      throw ErrorFactories.sysInternalError("Failed to serialize prompt data for Next.js")
     }
 
     timer({ status: "success" })
@@ -523,7 +523,7 @@ export async function updatePrompt(
       // No changes requested, fetch and return current prompt
       const getResult = await getPrompt(id)
       if (!getResult.isSuccess) {
-        throw new Error("Failed to fetch prompt")
+        throw ErrorFactories.dbQueryFailed("Failed to fetch prompt")
       }
       return createSuccess(getResult.data, "No changes to update")
     }
@@ -554,7 +554,7 @@ export async function updatePrompt(
     // Fetch updated prompt with tags
     const getResult = await getPrompt(id)
     if (!getResult.isSuccess) {
-      throw new Error("Failed to fetch updated prompt")
+      throw ErrorFactories.dbQueryFailed("Failed to fetch updated prompt")
     }
 
     timer({ status: "success" })

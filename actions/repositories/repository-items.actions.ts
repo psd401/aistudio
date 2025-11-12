@@ -700,7 +700,7 @@ export async function removeRepositoryItem(
     timer({ status: "success", itemId })
 
     revalidatePath(`/repositories/${item.repositoryId}`)
-    return createSuccess(null, "Item removed successfully")
+    return createSuccess(undefined as void, "Item removed successfully")
   } catch (error) {
     timer({ status: "error" })
     
@@ -961,7 +961,7 @@ export async function updateItemProcessingStatus(
 
     timer({ status: "success", itemId })
 
-    return createSuccess(null, "Status updated successfully")
+    return createSuccess(undefined as void, "Status updated successfully")
   } catch (error) {
     timer({ status: "error" })
     

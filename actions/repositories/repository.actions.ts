@@ -325,7 +325,7 @@ export async function deleteRepository(
     timer({ status: "success", repositoryId: id })
 
     revalidatePath("/repositories")
-    return createSuccess(null, "Repository deleted successfully")
+    return createSuccess(undefined as void, "Repository deleted successfully")
   } catch (error) {
     
     timer({ status: "error" })
@@ -464,7 +464,7 @@ export async function getRepository(
 
 export async function getRepositoryAccess(
   repositoryId: number
-): Promise<ActionState<Array<{ id: number; userId: number; grantedBy: string; grantedAt: Date }>>> {
+): Promise<ActionState<Record<string, unknown>[]>> {
   const requestId = generateRequestId()
   const timer = startTimer("getRepositoryAccess")
   const log = createLogger({ requestId, action: "getRepositoryAccess" })
@@ -558,7 +558,7 @@ export async function grantRepositoryAccess(
     )
 
     revalidatePath(`/repositories/${repositoryId}`)
-    return { isSuccess: true, message: "Access granted successfully", data: null }
+    return createSuccess(undefined as void, "Access granted successfully")
   } catch (error) {
     return handleError(error, "Failed to grant repository access")
   }
@@ -583,7 +583,7 @@ export async function revokeRepositoryAccess(
       [{ name: "id", value: { longValue: accessId } }]
     )
 
-    return { isSuccess: true, message: "Access revoked successfully", data: null }
+    return createSuccess(undefined as void, "Access revoked successfully")
   } catch (error) {
     return handleError(error, "Failed to revoke repository access")
   }
