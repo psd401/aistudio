@@ -16,7 +16,6 @@ import {
   FlexibleTimeWindowMode,
   ScheduleState
 } from "@aws-sdk/client-scheduler"
-import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm"
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda"
 
 // Types for Schedule Management
@@ -50,6 +49,7 @@ export interface CreateScheduleRequest {
   name: string
   assistantArchitectId: number
   scheduleConfig: ScheduleConfig
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   inputData: Record<string, any>
 }
 
@@ -59,6 +59,7 @@ export interface Schedule {
   userId: number
   assistantArchitectId: number
   scheduleConfig: ScheduleConfig
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   inputData: Record<string, any>
   active: boolean
   createdAt: string
@@ -97,7 +98,6 @@ const MAX_INPUT_DATA_SIZE = 10485760
 
 // Initialize AWS clients
 const schedulerClient = new SchedulerClient({ region: process.env.AWS_REGION || 'us-east-1' })
-const ssmClient = new SSMClient({ region: process.env.AWS_REGION || 'us-east-1' })
 const lambdaClient = new LambdaClient({ region: process.env.AWS_REGION || 'us-east-1' })
 
 // Configuration caching
