@@ -1,4 +1,5 @@
 "use server"
+import { SqlParameter } from "@aws-sdk/client-rds-data"
 
 import { getServerSession } from "@/lib/auth/server-session"
 import { executeSQL, executeTransaction } from "@/lib/db/data-api-adapter"

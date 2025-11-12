@@ -168,7 +168,7 @@ export type SelectChainPrompt = {
   systemContext: string | null;
   modelId: number | null;
   position: number;
-  inputMapping: any | null;
+  inputMapping: Record<string, unknown> | null;
   parallelGroup: number | null;
   timeoutSeconds: number | null;
   repositoryIds: number[] | null;
@@ -181,7 +181,7 @@ export type SelectToolExecution = {
   id: number;
   assistantArchitectId: number;
   userId: number;
-  inputData: any;
+  inputData: Record<string, unknown>;
   status: string;
   errorMessage: string | null;
   startedAt: Date | null;
@@ -213,7 +213,7 @@ export type InsertToolInputField = {
   name: string;
   label: string;
   fieldType: string;
-  options?: any;
+  options?: Record<string, unknown>;
   position?: number;
 }
 
@@ -236,7 +236,7 @@ export type InsertToolExecution = {
   id?: number;
   assistantArchitectId: number;
   userId: number;
-  inputData: any;
+  inputData: Record<string, unknown>;
   status?: string;
   errorMessage?: string;
   startedAt?: Date;

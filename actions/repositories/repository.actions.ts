@@ -1,4 +1,5 @@
 "use server"
+import { SqlParameter } from "@aws-sdk/client-rds-data"
 
 import { getServerSession } from "@/lib/auth/server-session"
 import { executeSQL } from "@/lib/db/data-api-adapter"
@@ -166,7 +167,7 @@ export async function updateRepository(
     }
 
     const updates: string[] = []
-    const params: any[] = [
+    const params: SqlParameter[] = [
       { name: "id", value: { longValue: input.id } }
     ]
 

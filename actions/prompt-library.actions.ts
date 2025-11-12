@@ -3,6 +3,7 @@
 import { getServerSession } from "@/lib/auth/server-session"
 import { executeSQL } from "@/lib/db/data-api-adapter"
 import { transformSnakeToCamel } from "@/lib/db/field-mapper"
+import { SqlParameter } from "@aws-sdk/client-rds-data"
 import { type ActionState } from "@/types/actions-types"
 import {
   handleError,
@@ -295,7 +296,7 @@ export async function listPrompts(
 
     // Build query conditions
     const conditions = ["p.deleted_at IS NULL"]
-    const parameters: Array<{ name: string; value: any }> = []
+    const parameters: SqlParameter[] = []
 
     // Visibility filter
     if (validated.visibility === 'private') {
@@ -468,7 +469,7 @@ export async function updatePrompt(
 
     // Build update fields
     const fields: string[] = []
-    const parameters: Array<{ name: string; value: any }> = [
+    const parameters: SqlParameter[] = [
       { name: "id", value: { stringValue: id } }
     ]
 

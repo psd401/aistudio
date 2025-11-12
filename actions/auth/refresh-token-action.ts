@@ -213,7 +213,7 @@ async function performTokenRefresh(
 
     // Check rate limiting with polling context awareness
     // TODO: Replace with AsyncLocalStorage for request-scoped context isolation
-    const isPollingContext = typeof global !== 'undefined' && (global as any).__POLLING_CONTEXT__;
+    const isPollingContext = typeof global !== 'undefined' && (global as { __POLLING_CONTEXT__?: boolean }).__POLLING_CONTEXT__;
     if (isRateLimited(params.tokenSub, isPollingContext)) {
       log.warn("Token refresh blocked due to rate limiting", {
         tokenSub: params.tokenSub,
