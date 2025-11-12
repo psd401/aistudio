@@ -416,12 +416,13 @@ export class CostOptimizer {
         case 'speed':
           return (a.averageLatencyMs || 1000) - (b.averageLatencyMs || 1000);
           
-        case 'quality':
+        case 'quality': {
           const aScore = this.calculateQualityScore(a);
           const bScore = this.calculateQualityScore(b);
           return bScore - aScore;
-          
-        default:
+        }
+
+        default: {
           // Balanced scoring
           const aCost = this.calculateCostForModel(a, request.estimatedTokens);
           const bCost = this.calculateCostForModel(b, request.estimatedTokens);
@@ -429,12 +430,13 @@ export class CostOptimizer {
           const bSpeed = b.averageLatencyMs || 1000;
           const aQuality = this.calculateQualityScore(a);
           const bQuality = this.calculateQualityScore(b);
-          
+
           // Normalize and weight: 40% cost, 30% speed, 30% quality
           const aTotal = (aCost / 0.01) * 0.4 + (aSpeed / 1000) * 0.3 + (100 - aQuality) * 0.3;
           const bTotal = (bCost / 0.01) * 0.4 + (bSpeed / 1000) * 0.3 + (100 - bQuality) * 0.3;
-          
+
           return aTotal - bTotal;
+        }
       }
     });
   }
@@ -491,7 +493,7 @@ export class CostOptimizer {
       case 'speed':
         reasons.push(`Fast response time of ${model.averageLatencyMs || 1000}ms`);
         break;
-      case 'quality':
+      case 'quality': {
         const caps = (model.nexusCapabilities as Record<string, boolean>) || {};
         const features: string[] = [];
         if (caps.reasoning) features.push('advanced reasoning');
@@ -501,6 +503,7 @@ export class CostOptimizer {
           reasons.push(`High quality with ${features.join(', ')}`);
         }
         break;
+      }
     }
     
     if (request.budget) {

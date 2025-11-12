@@ -203,7 +203,7 @@ export class StreamClient {
                 connectionDropped = true;
                 break;
               }
-            } catch (parseError) {
+            } catch {
               // Skip unparseable chunks
               if (this.options.verbose) {
                 console.warn('Failed to parse SSE data:', data.substring(0, 100));

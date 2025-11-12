@@ -16,7 +16,7 @@ const mockRequest = class Request {
     if (typeof this.body === 'string') {
       try {
         return JSON.parse(this.body);
-      } catch (e) {
+      } catch {
         throw new Error('Invalid JSON');
       }
     }
@@ -41,7 +41,7 @@ const mockResponse = class Response {
 } as any;
 
 const mockHeaders = class Headers extends Map {
-  constructor(init?: HeadersInit) {
+  constructor(_init?: HeadersInit) {
     super();
   }
 } as any;

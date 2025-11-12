@@ -21,8 +21,6 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const log = createLogger({ hook: 'useExecutionResults' })
-
   const fetchResults = useCallback(async () => {
     const requestId = generateRequestId()
     const requestLog = createLogger({ hook: 'useExecutionResults', requestId })
