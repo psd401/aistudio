@@ -2,16 +2,42 @@ import js from "@eslint/js";
 import tseslint from "typescript-eslint";
 import reactPlugin from "eslint-plugin-react";
 import reactHooksPlugin from "eslint-plugin-react-hooks";
+import securityPlugin from "eslint-plugin-security";
+import jsxA11yPlugin from "eslint-plugin-jsx-a11y";
+import reactPerfPlugin from "eslint-plugin-react-perf";
+import unicornPlugin from "eslint-plugin-unicorn";
 import loggingPlugin from "./eslint-plugin-logging/index.js";
 
 /**
  * ESLint Configuration for AI Studio (ESLint 9 Flat Config)
+ * Phase 4: Enhanced Linting Rules (Issue #460)
  *
  * LOGGING ENFORCEMENT:
  * - NO console.log/error/warn in server code (actions/, app/api/)
  * - Must use logger from @/lib/logger
  * - All server actions must generate requestId
  * - All async functions must have proper error handling
+ *
+ * SECURITY (eslint-plugin-security):
+ * - Detect unsafe regex, eval(), SQL injection patterns
+ * - Prevent security vulnerabilities
+ *
+ * ACCESSIBILITY (eslint-plugin-jsx-a11y):
+ * - WCAG compliance for public sector (school district)
+ * - Accessible UI components for all students/staff
+ *
+ * PERFORMANCE (eslint-plugin-react-perf):
+ * - Detect inefficient React patterns
+ * - Prevent unnecessary re-renders
+ *
+ * CODE QUALITY (eslint-plugin-unicorn):
+ * - Modern JavaScript/TypeScript best practices
+ * - Consistent coding patterns
+ *
+ * COMPLEXITY LIMITS:
+ * - Max cyclomatic complexity: 15
+ * - Max nested depth: 4
+ * - Max function lines: 150
  *
  * Custom rules implemented in ./eslint-plugin-logging/index.js:
  * - no-console-in-server: Prevents console usage in server code
@@ -117,6 +143,143 @@ export default [
       "react-hooks/refs": "off",
       "react-hooks/immutability": "off",
       "react-hooks/preserve-manual-memoization": "off",
+    },
+  },
+
+  // PHASE 4: Enhanced Linting Rules (Issue #460)
+
+  // Security rules - detect vulnerabilities early
+  {
+    plugins: {
+      security: securityPlugin,
+    },
+    rules: {
+      "security/detect-unsafe-regex": "error",
+      "security/detect-buffer-noassert": "error",
+      "security/detect-child-process": "warn",
+      "security/detect-disable-mustache-escape": "error",
+      "security/detect-eval-with-expression": "error",
+      "security/detect-no-csrf-before-method-override": "error",
+      "security/detect-non-literal-fs-filename": "warn",
+      "security/detect-non-literal-regexp": "warn",
+      "security/detect-non-literal-require": "off", // Too noisy with dynamic imports
+      "security/detect-object-injection": "off", // Too many false positives
+      "security/detect-possible-timing-attacks": "warn",
+      "security/detect-pseudoRandomBytes": "error",
+    },
+  },
+
+  // Accessibility rules - WCAG compliance for public sector
+  {
+    files: ["**/*.jsx", "**/*.tsx"],
+    plugins: {
+      "jsx-a11y": jsxA11yPlugin,
+    },
+    rules: {
+      // Critical a11y rules
+      "jsx-a11y/alt-text": "error",
+      "jsx-a11y/anchor-has-content": "error",
+      "jsx-a11y/anchor-is-valid": "warn",
+      "jsx-a11y/aria-activedescendant-has-tabindex": "error",
+      "jsx-a11y/aria-props": "error",
+      "jsx-a11y/aria-proptypes": "error",
+      "jsx-a11y/aria-role": "error",
+      "jsx-a11y/aria-unsupported-elements": "error",
+      "jsx-a11y/heading-has-content": "error",
+      "jsx-a11y/html-has-lang": "error",
+      "jsx-a11y/iframe-has-title": "error",
+      "jsx-a11y/img-redundant-alt": "warn",
+      "jsx-a11y/interactive-supports-focus": "warn",
+      "jsx-a11y/label-has-associated-control": "warn",
+      "jsx-a11y/media-has-caption": "warn",
+      "jsx-a11y/mouse-events-have-key-events": "warn",
+      "jsx-a11y/no-access-key": "error",
+      "jsx-a11y/no-autofocus": "warn",
+      "jsx-a11y/no-distracting-elements": "error",
+      "jsx-a11y/no-interactive-element-to-noninteractive-role": "warn",
+      "jsx-a11y/no-noninteractive-element-interactions": "warn",
+      "jsx-a11y/no-noninteractive-tabindex": "warn",
+      "jsx-a11y/no-redundant-roles": "warn",
+      "jsx-a11y/no-static-element-interactions": "warn",
+      "jsx-a11y/role-has-required-aria-props": "error",
+      "jsx-a11y/role-supports-aria-props": "error",
+      "jsx-a11y/scope": "error",
+      "jsx-a11y/tabindex-no-positive": "warn",
+    },
+  },
+
+  // Performance rules - React optimization
+  {
+    files: ["**/*.jsx", "**/*.tsx"],
+    plugins: {
+      "react-perf": reactPerfPlugin,
+    },
+    rules: {
+      "react-perf/jsx-no-new-object-as-prop": "warn",
+      "react-perf/jsx-no-new-array-as-prop": "warn",
+      "react-perf/jsx-no-new-function-as-prop": "warn",
+      "react-perf/jsx-no-jsx-as-prop": "warn",
+    },
+  },
+
+  // Code quality rules - Unicorn (curated subset)
+  {
+    plugins: {
+      unicorn: unicornPlugin,
+    },
+    rules: {
+      // Error prevention
+      "unicorn/error-message": "error",
+      "unicorn/throw-new-error": "error",
+      "unicorn/prefer-type-error": "error",
+
+      // Better practices
+      "unicorn/no-array-for-each": "warn",
+      "unicorn/no-for-loop": "warn",
+      "unicorn/prefer-array-find": "warn",
+      "unicorn/prefer-array-some": "warn",
+      "unicorn/prefer-includes": "warn",
+      "unicorn/prefer-string-starts-ends-with": "warn",
+      "unicorn/prefer-string-trim-start-end": "warn",
+      "unicorn/prefer-modern-math-apis": "warn",
+      "unicorn/prefer-number-properties": "warn",
+      "unicorn/prefer-optional-catch-binding": "warn",
+
+      // Clarity
+      "unicorn/explicit-length-check": "warn",
+      "unicorn/prefer-negative-index": "warn",
+      "unicorn/prefer-node-protocol": "error",
+
+      // Prevent issues
+      "unicorn/no-instanceof-array": "error",
+      "unicorn/no-new-array": "warn",
+      "unicorn/no-new-buffer": "error",
+      "unicorn/prefer-date-now": "warn",
+
+      // Consistency
+      "unicorn/better-regex": "warn",
+      "unicorn/escape-case": "warn",
+      "unicorn/no-hex-escape": "warn",
+      "unicorn/number-literal-case": "warn",
+      "unicorn/prefer-add-event-listener": "warn",
+
+      // Too opinionated - disable
+      "unicorn/filename-case": "off",
+      "unicorn/prevent-abbreviations": "off",
+      "unicorn/no-null": "off",
+      "unicorn/prefer-top-level-await": "off",
+      "unicorn/prefer-module": "off",
+    },
+  },
+
+  // Complexity and code size limits
+  {
+    rules: {
+      "complexity": ["warn", 15],
+      "max-depth": ["warn", 4],
+      "max-lines-per-function": ["warn", { max: 150, skipBlankLines: true, skipComments: true }],
+      "max-nested-callbacks": ["warn", 3],
+      "max-params": ["warn", 5],
     },
   },
 
