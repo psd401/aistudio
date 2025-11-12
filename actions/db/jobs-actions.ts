@@ -238,7 +238,7 @@ export async function updateJobAction(
 
     const setClauses = Object.entries(data)
       .filter(([key, _]) => ALLOWED_COLUMNS[key]) // Only allow whitelisted columns
-      .map(([key, value]) => {
+      .map(([key, _value]) => {
         const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
         if (dbKey === 'status') {
           return `${dbKey} = :${key}::job_status`;

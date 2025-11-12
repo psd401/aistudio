@@ -34,8 +34,7 @@ import {
 import type {
   Prompt,
   PromptListItem,
-  PromptListResult,
-  PromptTag
+  PromptListResult
 } from "@/lib/prompt-library/types"
 
 /**

@@ -4,21 +4,18 @@ import { getServerSession } from "@/lib/auth/server-session"
 import { executeSQL, executeTransaction } from "@/lib/db/data-api-adapter"
 import { type ActionState } from "@/types/actions-types"
 import { hasToolAccess } from "@/utils/roles"
-import { 
+import {
   handleError,
-  createError,
   ErrorFactories,
   createSuccess
 } from "@/lib/error-utils"
 import {
   createLogger,
   generateRequestId,
-  startTimer,
-  sanitizeForLogging
+  startTimer
 } from "@/lib/logger"
 import { revalidatePath } from "next/cache"
 import { uploadDocument, deleteDocument } from "@/lib/aws/s3-client"
-import { createJobAction } from "@/actions/db/jobs-actions"
 import { queueFileForProcessing, processUrl } from "@/lib/services/file-processing-service"
 import { canModifyRepository, getUserIdFromSession } from "./repository-permissions"
 

@@ -3,7 +3,7 @@
 import { ActionState } from "@/types"
 import { Settings } from "@/lib/settings-manager"
 import { getServerSession } from "@/lib/auth/server-session"
-import { 
+import {
   handleError,
   ErrorFactories,
   createSuccess
@@ -14,12 +14,6 @@ import {
   startTimer,
   sanitizeForLogging
 } from "@/lib/logger"
-
-interface CreateFreshserviceTicketInput {
-  title: string
-  description: string
-  screenshot?: File | null
-}
 
 interface FreshserviceTicketResponse {
   ticket_url: string
@@ -37,7 +31,7 @@ interface FreshserviceTicketData {
   priority?: number
   created_at?: string
   updated_at?: string
-  [key: string]: any
+  [key: string]: unknown
 }
 
 // Freshservice API v2 wraps the ticket data in a "ticket" property
@@ -171,7 +165,7 @@ export async function createFreshserviceTicketAction(
       })
     } else {
       // Use JSON for requests without attachments
-      const ticketData: any = {
+      const ticketData: Record<string, string | number> = {
         subject: title,
         description: description,
         email: session.email || 'noreply@psd401.org',
