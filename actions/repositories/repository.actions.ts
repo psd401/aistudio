@@ -1,12 +1,11 @@
 "use server"
 
 import { getServerSession } from "@/lib/auth/server-session"
-import { executeSQL, executeTransaction } from "@/lib/db/data-api-adapter"
+import { executeSQL } from "@/lib/db/data-api-adapter"
 import { type ActionState } from "@/types/actions-types"
 import { hasToolAccess } from "@/utils/roles"
-import { 
+import {
   handleError,
-  createError,
   ErrorFactories,
   createSuccess
 } from "@/lib/error-utils"

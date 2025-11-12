@@ -104,15 +104,6 @@ const lambdaClient = new LambdaClient({ region: process.env.AWS_REGION || 'us-ea
 const configCache = new Map<string, { config: { targetArn: string; roleArn: string }; timestamp: number }>()
 const CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 
-// Error classification for better handling
-enum ScheduleErrorType {
-  VALIDATION_ERROR = 'validation',
-  AWS_CREDENTIALS = 'credentials',
-  SSM_PARAMETER = 'ssm_parameter',
-  EVENTBRIDGE_API = 'eventbridge_api',
-  DATABASE_ERROR = 'database'
-}
-
 /**
  * Gets the deployment environment for AWS service configuration
  */
@@ -135,49 +126,10 @@ function getEnvironment(): string {
 /**
  * Fetches EventBridge configuration from SSM Parameter Store with caching
  */
-async function getEventBridgeConfig(): Promise<{ targetArn: string; roleArn: string }> {
-  const environment = getEnvironment()
-  const cacheKey = `eventbridge-config-${environment}`
-  const cached = configCache.get(cacheKey)
-
-  // Return cached config if still valid
-  if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
-    return cached.config
-  }
-
-  try {
-    const [targetArnParam, roleArnParam] = await Promise.all([
-      ssmClient.send(new GetParameterCommand({
-        Name: `/aistudio/${environment}/schedule-executor-function-arn`,
-        WithDecryption: true
-      })),
-      ssmClient.send(new GetParameterCommand({
-        Name: `/aistudio/${environment}/scheduler-execution-role-arn`,
-        WithDecryption: true
-      }))
-    ])
-
-    const targetArn = targetArnParam.Parameter?.Value
-    const roleArn = roleArnParam.Parameter?.Value
-
-    if (!targetArn || !roleArn) {
-      throw new Error('EventBridge configuration parameters not found in SSM')
-    }
-
-    const config = { targetArn, roleArn }
-
-    // Cache the configuration
-    configCache.set(cacheKey, { config, timestamp: Date.now() })
-
-    return config
-  } catch (error) {
-    throw new Error(`Failed to fetch EventBridge configuration from SSM: ${error instanceof Error ? error.message : 'Unknown error'}`)
-  }
-}
-
 /**
  * Invokes the schedule-executor Lambda function to manage EventBridge schedules
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function invokeScheduleManager(action: ScheduleLambdaPayload['action'], payload: any, requestId?: string): Promise<ScheduleLambdaResponse> {
   const log = createLogger({ operation: 'invokeScheduleManager', action, requestId })
   const environment = getEnvironment()
@@ -282,7 +234,7 @@ function validateInputData(inputData: Record<string, any>): { isValid: boolean; 
     if (serializedData.length > MAX_INPUT_DATA_SIZE) {
       errors.push(`Input data exceeds maximum size limit of ${MAX_INPUT_DATA_SIZE / 1000}KB`)
     }
-  } catch (error) {
+  } catch (_error) {
     errors.push('Input data is not serializable to JSON')
   }
 
@@ -329,7 +281,7 @@ function validateScheduleConfig(config: ScheduleConfig): { isValid: boolean; err
       const trimmedCron = config.cron.trim()
 
       // First, ensure the cron string only contains allowed characters
-      if (!/^[0-9\*\-\/,\s]+$/.test(trimmedCron)) {
+      if (!/^[0-9*\-/,\s]+$/.test(trimmedCron)) {
         errors.push('Cron expression contains invalid characters')
       } else {
         const cronFields = trimmedCron.split(/\s+/)
@@ -380,7 +332,7 @@ function validateScheduleConfig(config: ScheduleConfig): { isValid: boolean; err
  * Converts schedule configuration to cron expression for EventBridge
  */
 function convertToCronExpression(scheduleConfig: ScheduleConfig): string {
-  const { frequency, time, timezone = 'UTC', daysOfWeek, dayOfMonth, cron } = scheduleConfig
+  const { frequency, time, daysOfWeek, dayOfMonth, cron } = scheduleConfig
 
   if (frequency === 'custom' && cron) {
     return cron
@@ -392,17 +344,19 @@ function convertToCronExpression(scheduleConfig: ScheduleConfig): string {
     case 'daily':
       return `${minutes} ${hours} * * ? *`
 
-    case 'weekly':
+    case 'weekly': {
       if (!daysOfWeek || daysOfWeek.length === 0) {
         throw new Error('Days of week required for weekly schedules')
       }
       // Convert from 0=Sunday to 1=Sunday for cron
       const cronDays = daysOfWeek.map(day => day === 0 ? 7 : day).join(',')
       return `${minutes} ${hours} ? * ${cronDays} *`
+    }
 
-    case 'monthly':
+    case 'monthly': {
       const day = dayOfMonth || 1
       return `${minutes} ${hours} ${day} * ? *`
+    }
 
     default:
       throw new Error(`Unsupported frequency: ${frequency}`)
@@ -418,7 +372,8 @@ async function createEventBridgeSchedule(
   scheduleConfig: ScheduleConfig,
   targetArn: string,
   roleArn: string,
-  inputData: any
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars
+  _inputData: any
 ): Promise<string> {
   const log = createLogger({ operation: 'createEventBridgeSchedule' })
 
