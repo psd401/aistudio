@@ -464,7 +464,7 @@ export async function getRepository(
 
 export async function getRepositoryAccess(
   repositoryId: number
-): Promise<ActionState<any[]>> {
+): Promise<ActionState<Array<{ id: number; userId: number; grantedBy: string; grantedAt: Date }>>> {
   const requestId = generateRequestId()
   const timer = startTimer("getRepositoryAccess")
   const log = createLogger({ requestId, action: "getRepositoryAccess" })
@@ -558,7 +558,7 @@ export async function grantRepositoryAccess(
     )
 
     revalidatePath(`/repositories/${repositoryId}`)
-    return { isSuccess: true, message: "Access granted successfully", data: undefined as any }
+    return { isSuccess: true, message: "Access granted successfully", data: null }
   } catch (error) {
     return handleError(error, "Failed to grant repository access")
   }
@@ -583,7 +583,7 @@ export async function revokeRepositoryAccess(
       [{ name: "id", value: { longValue: accessId } }]
     )
 
-    return { isSuccess: true, message: "Access revoked successfully", data: undefined as any }
+    return { isSuccess: true, message: "Access revoked successfully", data: null }
   } catch (error) {
     return handleError(error, "Failed to revoke repository access")
   }
@@ -621,7 +621,14 @@ export async function getUserAccessibleRepositoriesAction(): Promise<ActionState
     const userId = userResult[0].id
 
     // Get repositories the user has access to
-    const repositories = await executeSQL<any>(
+    const repositories = await executeSQL<{
+      id: number
+      name: string
+      description: string
+      is_public: boolean
+      item_count: number
+      last_updated: string | null
+    }>(
       `WITH accessible_repos AS (
         SELECT DISTINCT r.id, r.name, r.description, r.is_public
         FROM knowledge_repositories r
