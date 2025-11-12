@@ -207,6 +207,9 @@ export function ImportDialog({
               onDragOver={handleDrag}
               onDrop={handleDrop}
               onClick={() => document.getElementById('file-upload')?.click()}
+              onKeyDown={(e) => e.key === 'Enter' && document.getElementById('file-upload')?.click()}
+              role="button"
+              tabIndex={0}
             >
               <Upload className="mx-auto h-12 w-12 text-muted-foreground mb-4" />
               <p className="text-sm font-medium mb-1">

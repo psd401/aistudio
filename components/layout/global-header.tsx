@@ -421,8 +421,9 @@ function BugReportPopover() {
         ) : (
           <form onSubmit={handleSubmit} className="flex flex-col gap-4" onPaste={handlePaste}>
             <div>
-              <label className="block text-sm font-medium mb-1">Title</label>
+              <label htmlFor="feedback-title" className="block text-sm font-medium mb-1">Title</label>
               <Input
+                id="feedback-title"
                 value={title}
                 onChange={e => setTitle(e.target.value)}
                 required
@@ -431,8 +432,9 @@ function BugReportPopover() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1">Description</label>
+              <label htmlFor="feedback-description" className="block text-sm font-medium mb-1">Description</label>
               <Textarea
+                id="feedback-description"
                 value={description}
                 onChange={e => setDescription(e.target.value)}
                 required
@@ -440,10 +442,10 @@ function BugReportPopover() {
                 disabled={loading}
               />
             </div>
-            
+
             {/* Screenshot upload section */}
             <div>
-              <label className="block text-sm font-medium mb-1">Screenshot (optional)</label>
+              <div className="block text-sm font-medium mb-1" aria-label="Screenshot (optional)">Screenshot (optional)</div>
               <div className="space-y-2">
                 <Button
                   type="button"

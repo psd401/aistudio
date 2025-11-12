@@ -204,8 +204,9 @@ const ModelForm = React.memo(function ModelForm({
         
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-2">
-            <label className="text-sm font-medium">Name</label>
+            <label htmlFor="model-name" className="text-sm font-medium">Name</label>
             <Input
+              id="model-name"
               value={modelData.name}
               onChange={handleNameChange}
               required
@@ -213,7 +214,7 @@ const ModelForm = React.memo(function ModelForm({
           </div>
 
           <div className="space-y-2">
-            <label className="text-sm font-medium">Provider</label>
+            <div className="text-sm font-medium" aria-label="Provider">Provider</div>
             <Select
               value={modelData.provider || ''}
               onValueChange={handleProviderChange}
@@ -233,8 +234,9 @@ const ModelForm = React.memo(function ModelForm({
         </div>
 
         <div className="space-y-2">
-          <label className="text-sm font-medium">Model ID</label>
+          <label htmlFor="model-id" className="text-sm font-medium">Model ID</label>
           <Input
+            id="model-id"
             value={modelData.modelId}
             onChange={handleModelIdChange}
             required
@@ -242,15 +244,16 @@ const ModelForm = React.memo(function ModelForm({
         </div>
 
         <div className="space-y-2">
-          <label className="text-sm font-medium">Description</label>
+          <label htmlFor="model-description" className="text-sm font-medium">Description</label>
           <Textarea
+            id="model-description"
             value={modelData.description || ''}
             onChange={handleDescriptionChange}
           />
         </div>
 
         <div className="space-y-2">
-          <label className="text-sm font-medium">General Capabilities</label>
+          <div className="text-sm font-medium" aria-label="General Capabilities">General Capabilities</div>
           <MultiSelect
             options={capabilityOptions}
             value={modelData.capabilitiesList}
@@ -267,8 +270,9 @@ const ModelForm = React.memo(function ModelForm({
 
         <div className="grid grid-cols-2 gap-4">
           <div className="space-y-2">
-            <label className="text-sm font-medium">Max Tokens</label>
+            <label htmlFor="model-max-tokens" className="text-sm font-medium">Max Tokens</label>
             <Input
+              id="model-max-tokens"
               type="number"
               value={modelData.maxTokens?.toString() || '4096'}
               onChange={handleMaxTokensChange}
@@ -279,17 +283,19 @@ const ModelForm = React.memo(function ModelForm({
         <div className="flex items-center space-x-4">
           <div className="flex items-center space-x-2">
             <Switch
+              id="model-active"
               checked={modelData.active}
               onCheckedChange={handleActiveChange}
             />
-            <label className="text-sm font-medium">Active</label>
+            <label htmlFor="model-active" className="text-sm font-medium">Active</label>
           </div>
           <div className="flex items-center space-x-2">
             <Switch
+              id="model-chat-enabled"
               checked={modelData.chatEnabled}
               onCheckedChange={handleChatEnabledChange}
             />
-            <label className="text-sm font-medium">Chat Enabled</label>
+            <label htmlFor="model-chat-enabled" className="text-sm font-medium">Chat Enabled</label>
           </div>
         </div>
       </div>
@@ -308,8 +314,9 @@ const ModelForm = React.memo(function ModelForm({
         <CollapsibleContent className="space-y-4 mt-4">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium">Input Cost per 1K tokens ($)</label>
+              <label htmlFor="model-input-cost" className="text-sm font-medium">Input Cost per 1K tokens ($)</label>
               <Input
+                id="model-input-cost"
                 type="number"
                 step="0.000001"
                 value={modelData.inputCostPer1kTokens?.toString() || ''}
@@ -318,8 +325,9 @@ const ModelForm = React.memo(function ModelForm({
               />
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">Output Cost per 1K tokens ($)</label>
+              <label htmlFor="model-output-cost" className="text-sm font-medium">Output Cost per 1K tokens ($)</label>
               <Input
+                id="model-output-cost"
                 type="number"
                 step="0.000001"
                 value={modelData.outputCostPer1kTokens?.toString() || ''}
@@ -328,8 +336,9 @@ const ModelForm = React.memo(function ModelForm({
               />
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">Cached Input Cost per 1K tokens ($)</label>
+              <label htmlFor="model-cached-input-cost" className="text-sm font-medium">Cached Input Cost per 1K tokens ($)</label>
               <Input
+                id="model-cached-input-cost"
                 type="number"
                 step="0.000001"
                 value={modelData.cachedInputCostPer1kTokens?.toString() || ''}
@@ -355,8 +364,9 @@ const ModelForm = React.memo(function ModelForm({
         <CollapsibleContent className="space-y-4 mt-4">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium">Average Latency (ms)</label>
+              <label htmlFor="model-latency" className="text-sm font-medium">Average Latency (ms)</label>
               <Input
+                id="model-latency"
                 type="number"
                 value={modelData.averageLatencyMs?.toString() || ''}
                 onChange={handleLatencyChange}
@@ -364,8 +374,9 @@ const ModelForm = React.memo(function ModelForm({
               />
             </div>
             <div className="space-y-2">
-              <label className="text-sm font-medium">Max Concurrency</label>
+              <label htmlFor="model-concurrency" className="text-sm font-medium">Max Concurrency</label>
               <Input
+                id="model-concurrency"
                 type="number"
                 min="1"
                 max="100"
@@ -376,10 +387,11 @@ const ModelForm = React.memo(function ModelForm({
             </div>
             <div className="flex items-center space-x-2 pt-6">
               <Switch
+                id="model-batching"
                 checked={modelData.supportsBatching}
                 onCheckedChange={handleBatchingChange}
               />
-              <label className="text-sm font-medium">Supports Batching</label>
+              <label htmlFor="model-batching" className="text-sm font-medium">Supports Batching</label>
             </div>
           </div>
         </CollapsibleContent>
@@ -416,14 +428,14 @@ const ModelForm = React.memo(function ModelForm({
       {/* Access Control Section */}
       <div className="space-y-4">
         <h3 className="text-lg font-semibold">Access Control</h3>
-        
+
         <div className="space-y-2">
-          <label className="text-sm font-medium">
+          <div className="text-sm font-medium" aria-label="Allowed Roles">
             Allowed Roles
             {roleLoading && (
               <span className="ml-2 text-xs text-muted-foreground">(Loading...)</span>
             )}
-          </label>
+          </div>
           <MultiSelect
             options={roleOptions}
             value={modelData.allowedRoles}
@@ -451,8 +463,9 @@ const ModelForm = React.memo(function ModelForm({
         </CollapsibleTrigger>
         <CollapsibleContent className="space-y-4 mt-4">
           <div className="space-y-2">
-            <label className="text-sm font-medium">Provider Metadata (JSON)</label>
+            <label htmlFor="model-provider-metadata" className="text-sm font-medium">Provider Metadata (JSON)</label>
             <Textarea
+              id="model-provider-metadata"
               value={JSON.stringify(modelData.providerMetadata, null, 2)}
               onChange={handleProviderMetadataChange}
               className={`font-mono text-xs ${jsonError ? 'border-red-500' : ''}`}

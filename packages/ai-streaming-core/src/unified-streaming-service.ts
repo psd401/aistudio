@@ -263,7 +263,7 @@ export class UnifiedStreamingService {
       const generateConfig = {
         model: imageModel,
         prompt: request.prompt.trim(),
-        ...(request.size && { size: request.size }),
+        ...((request.size?.length ?? 0) > 0 && { size: request.size }),
         ...(request.style && { style: request.style }),
         providerOptions: adapter.getProviderOptions(request.modelId, request.options)
       };

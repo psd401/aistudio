@@ -119,7 +119,7 @@ export abstract class BaseProviderAdapter {
       const generateOptions: Record<string, unknown> = {
         model: config.model,
         prompt: config.prompt,
-        ...(config.size && { size: config.size }),
+        ...((config.size?.length ?? 0) > 0 && { size: config.size }),
         ...(config.providerOptions && { providerOptions: config.providerOptions })
       };
       

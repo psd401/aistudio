@@ -34,8 +34,8 @@ export async function GET() {
     const allCookies = cookieStore.getAll();
     
     // Clear each auth-related cookie
-    allCookies.forEach((cookie: { name: string; value: string }) => {
-      if (cookie.name.includes('auth') || 
+    for (const cookie of allCookies) {
+      if (cookie.name.includes('auth') ||
           cookie.name.includes('session') ||
           cookie.name.includes('csrf') ||
           cookie.name.includes('callback') ||
@@ -50,7 +50,7 @@ export async function GET() {
           secure: process.env.NODE_ENV === 'production'
         });
       }
-    });
+    }
     
     // Also try to clear with specific cookie names
     const cookiesToClear = [

@@ -76,7 +76,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
         // FileReader result is already a data URL
         resolve(reader.result as string);
       });
-      reader.onerror = reject;
+      reader.addEventListener('error', () => reject(reader.error));
       reader.readAsDataURL(file);
     });
   }
@@ -179,13 +179,15 @@ export class PDFAttachmentAdapter implements AttachmentAdapter {
   private async fileToBase64(file: File): Promise<string> {
     const arrayBuffer = await file.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
-    
+
     // For large files, we need to process in chunks to avoid stack overflow
     let binary = '';
     const chunkSize = 0x8000; // 32KB chunks
     for (let i = 0; i < bytes.length; i += chunkSize) {
       const chunk = bytes.subarray(i, i + chunkSize);
-      binary += String.fromCharCode.apply(null, Array.from(chunk));
+      for (const byte of chunk) {
+        binary += String.fromCharCode(byte);
+      }
     }
     return btoa(binary);
   }

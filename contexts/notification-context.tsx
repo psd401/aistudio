@@ -211,7 +211,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       try {
         eventSource = new EventSource('/api/notifications/stream')
 
-        eventSource.onmessage = (event) => {
+        eventSource.addEventListener('message', (event) => {
           try {
             const data = JSON.parse(event.data)
             log.info('Received notification update', { type: data.type })
@@ -228,9 +228,9 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
               error: err instanceof Error ? err.message : 'Unknown error'
             })
           }
-        }
+        })
 
-        eventSource.onerror = (event) => {
+        eventSource.addEventListener('error', (event) => {
           log.warn('SSE connection error, will retry', { event, retryCount })
           eventSource?.close()
 
@@ -245,7 +245,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
           })
 
           setTimeout(setupEventSource, delay)
-        }
+        })
 
         eventSource.addEventListener('open', () => {
           log.info('SSE connection established', { retryCount })

@@ -529,7 +529,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
         // FileReader result is already a data URL
         resolve(reader.result as string);
       });
-      reader.onerror = reject;
+      reader.addEventListener('error', () => reject(reader.error));
       reader.readAsDataURL(file);
     });
   }

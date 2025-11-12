@@ -1,11 +1,10 @@
-import { 
-  RDSDataClient, 
-  ExecuteStatementCommand, 
+import {
+  RDSDataClient,
+  ExecuteStatementCommand,
   ExecuteStatementCommandOutput,
   BeginTransactionCommand,
   CommitTransactionCommand,
   RollbackTransactionCommand,
-  Field,
   SqlParameter,
   ArrayValue
 } from "@aws-sdk/client-rds-data";
@@ -128,7 +127,7 @@ function formatDataApiResponse(response: DataApiResponse): FormattedRow[] {
   
   return response.records.map((record) => {
     const row: FormattedRow = {};
-    record.forEach((field: Field, index) => {
+    for (const [index, field] of record.entries()) {
       const columnName = columns[index];
       // Transform snake_case to camelCase for the property name
       const camelCaseColumnName = snakeToCamel(columnName);
@@ -165,7 +164,7 @@ function formatDataApiResponse(response: DataApiResponse): FormattedRow[] {
         value = null;
       }
       row[camelCaseColumnName] = value;
-    });
+    }
     return row;
   });
 }

@@ -377,8 +377,9 @@ export default function IdeasPage() {
 
           <div className="space-y-4">
             <div className="space-y-2">
-              <label className="text-sm font-medium">Title</label>
+              <label htmlFor="idea-title" className="text-sm font-medium">Title</label>
               <Input
+                id="idea-title"
                 value={formData.title}
                 onChange={(e) => setFormData({ ...formData, title: e.target.value })}
                 placeholder="Enter idea title"
@@ -386,8 +387,9 @@ export default function IdeasPage() {
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium">Description</label>
+              <label htmlFor="idea-description" className="text-sm font-medium">Description</label>
               <Textarea
+                id="idea-description"
                 value={formData.description}
                 onChange={(e) => setFormData({ ...formData, description: e.target.value })}
                 placeholder="Describe your idea"
@@ -396,7 +398,7 @@ export default function IdeasPage() {
             </div>
 
             <div className="space-y-2">
-              <label className="text-sm font-medium">Priority Level</label>
+              <div className="text-sm font-medium" aria-label="Priority level">Priority Level</div>
               <Select
                 value={formData.priorityLevel}
                 onValueChange={(value) => setFormData({ ...formData, priorityLevel: value })}

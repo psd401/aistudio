@@ -172,6 +172,9 @@ export function CreateForm({ initialData }: CreateFormProps) {
                             field.value === image ? 'border-primary ring-1 ring-primary' : 'border-transparent hover:border-muted-foreground'
                           }`}
                           onClick={() => field.onChange(image)}
+                          onKeyDown={(e) => e.key === 'Enter' && field.onChange(image)}
+                          role="button"
+                          tabIndex={0}
                           style={{ width: '40px', height: '40px' }}
                         >
                           <Image
