@@ -213,7 +213,7 @@ export type InsertToolInputField = {
   name: string;
   label: string;
   fieldType: string;
-  options?: Record<string, unknown>;
+  options?: ToolInputFieldOptions | { label: string; value: string }[];
   position?: number;
 }
 

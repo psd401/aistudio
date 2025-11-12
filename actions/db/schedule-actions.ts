@@ -130,7 +130,7 @@ function getEnvironment(): string {
 interface InvokeScheduleManagerPayload {
   scheduleId: number
   name?: string
-  scheduleConfig: ScheduleConfig
+  scheduleConfig?: ScheduleConfig
   inputData?: Record<string, unknown>
   active?: boolean
 }
@@ -144,6 +144,9 @@ async function invokeScheduleManager(action: ScheduleLambdaPayload['action'], pa
   let lambdaPayload: ScheduleLambdaPayload = { action, scheduledExecutionId: payload.scheduleId }
 
   if (action === 'create') {
+    if (!payload.scheduleConfig) {
+      throw new Error('scheduleConfig is required for create action')
+    }
     const cronExpression = convertToCronExpression(payload.scheduleConfig)
     lambdaPayload = {
       action,
@@ -152,6 +155,9 @@ async function invokeScheduleManager(action: ScheduleLambdaPayload['action'], pa
       timezone: payload.scheduleConfig.timezone || 'UTC'
     }
   } else if (action === 'update') {
+    if (!payload.scheduleConfig) {
+      throw new Error('scheduleConfig is required for update action')
+    }
     const cronExpression = convertToCronExpression(payload.scheduleConfig)
     lambdaPayload = {
       action,
@@ -880,7 +886,7 @@ export async function getSchedulesAction(): Promise<ActionState<Schedule[]>> {
       if (transformed.lastExecutedAt && transformed.lastExecutionStatus) {
         schedule.lastExecution = {
           executedAt: transformed.lastExecutedAt ? new Date(transformed.lastExecutedAt + ' UTC').toISOString() : '',
-          status: transformed.lastExecutionStatus
+          status: (transformed.lastExecutionStatus as 'success' | 'failed')
         }
       }
 
@@ -1116,8 +1122,8 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
       scheduleConfig,
       inputData,
       active: updated.active,
-      createdAt: updated.createdAt,
-      updatedAt: updated.updatedAt
+      createdAt: updated.createdAt.toISOString(),
+      updatedAt: updated.updatedAt.toISOString()
     }
 
     // Try to update EventBridge schedule if schedule-related fields changed
@@ -1388,15 +1394,15 @@ export async function getScheduleAction(id: number): Promise<ActionState<Schedul
       scheduleConfig,
       inputData,
       active: transformed.active,
-      createdAt: transformed.createdAt,
-      updatedAt: transformed.updatedAt
+      createdAt: transformed.createdAt.toISOString(),
+      updatedAt: transformed.updatedAt.toISOString()
     }
 
     // Add last execution info if available
     if (transformed.lastExecutedAt && transformed.lastExecutionStatus) {
       schedule.lastExecution = {
         executedAt: transformed.lastExecutedAt ? new Date(transformed.lastExecutedAt + ' UTC').toISOString() : '',
-        status: transformed.lastExecutionStatus
+        status: (transformed.lastExecutionStatus as 'success' | 'failed')
       }
     }
 
