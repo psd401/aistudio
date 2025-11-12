@@ -49,8 +49,7 @@ export interface CreateScheduleRequest {
   name: string
   assistantArchitectId: number
   scheduleConfig: ScheduleConfig
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  inputData: Record<string, any>
+  inputData: Record<string, unknown>
 }
 
 export interface Schedule {
@@ -59,8 +58,7 @@ export interface Schedule {
   userId: number
   assistantArchitectId: number
   scheduleConfig: ScheduleConfig
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  inputData: Record<string, any>
+  inputData: Record<string, unknown>
   active: boolean
   createdAt: string
   updatedAt: string
@@ -100,9 +98,8 @@ const MAX_INPUT_DATA_SIZE = 10485760
 const schedulerClient = new SchedulerClient({ region: process.env.AWS_REGION || 'us-east-1' })
 const lambdaClient = new LambdaClient({ region: process.env.AWS_REGION || 'us-east-1' })
 
-// Configuration caching
-const configCache = new Map<string, { config: { targetArn: string; roleArn: string }; timestamp: number }>()
-const CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+// NOTE: Configuration caching removed as it was not being used
+// If needed in future for performance optimization, restore from git history
 
 /**
  * Gets the deployment environment for AWS service configuration
@@ -129,8 +126,7 @@ function getEnvironment(): string {
 /**
  * Invokes the schedule-executor Lambda function to manage EventBridge schedules
  */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-async function invokeScheduleManager(action: ScheduleLambdaPayload['action'], payload: any, requestId?: string): Promise<ScheduleLambdaResponse> {
+async function invokeScheduleManager(action: ScheduleLambdaPayload['action'], payload: Record<string, unknown>, requestId?: string): Promise<ScheduleLambdaResponse> {
   const log = createLogger({ operation: 'invokeScheduleManager', action, requestId })
   const environment = getEnvironment()
   const functionName = `aistudio-${environment}-schedule-executor`
@@ -226,7 +222,7 @@ function validateAndSanitizeName(name: string): { isValid: boolean; sanitizedNam
 /**
  * Validates input data size and structure
  */
-function validateInputData(inputData: Record<string, any>): { isValid: boolean; errors: string[] } {
+function validateInputData(inputData: Record<string, unknown>): { isValid: boolean; errors: string[] } {
   const errors: string[] = []
 
   try {
@@ -234,7 +230,7 @@ function validateInputData(inputData: Record<string, any>): { isValid: boolean; 
     if (serializedData.length > MAX_INPUT_DATA_SIZE) {
       errors.push(`Input data exceeds maximum size limit of ${MAX_INPUT_DATA_SIZE / 1000}KB`)
     }
-  } catch (_error) {
+  } catch {
     errors.push('Input data is not serializable to JSON')
   }
 
@@ -366,14 +362,13 @@ function convertToCronExpression(scheduleConfig: ScheduleConfig): string {
 /**
  * Creates an EventBridge schedule
  */
-async function createEventBridgeSchedule(
+async function _createEventBridgeSchedule(
   scheduleId: number,
   name: string,
   scheduleConfig: ScheduleConfig,
   targetArn: string,
   roleArn: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any, @typescript-eslint/no-unused-vars
-  _inputData: any
+  _inputData: Record<string, unknown>
 ): Promise<string> {
   const log = createLogger({ operation: 'createEventBridgeSchedule' })
 
@@ -446,13 +441,13 @@ async function createEventBridgeSchedule(
 /**
  * Updates an EventBridge schedule
  */
-async function updateEventBridgeSchedule(
+async function _updateEventBridgeSchedule(
   scheduleId: number,
   name: string,
   scheduleConfig: ScheduleConfig,
   targetArn: string,
   roleArn: string,
-  inputData: any,
+  _inputData: Record<string, unknown>,
   active: boolean
 ): Promise<void> {
   const log = createLogger({ operation: 'updateEventBridgeSchedule' })
@@ -523,7 +518,7 @@ async function updateEventBridgeSchedule(
 /**
  * Deletes an EventBridge schedule
  */
-async function deleteEventBridgeSchedule(scheduleId: number): Promise<void> {
+async function _deleteEventBridgeSchedule(scheduleId: number): Promise<void> {
   const log = createLogger({ operation: 'deleteEventBridgeSchedule' })
 
   try {
@@ -799,7 +794,7 @@ export async function getSchedulesAction(): Promise<ActionState<Schedule[]>> {
     const userId = userResult[0].id
 
     // Get schedules with last execution info
-    const result = await executeSQL<any>(`
+    const result = await executeSQL<Record<string, unknown>>(`
       SELECT
         se.id,
         se.name,
@@ -826,11 +821,11 @@ export async function getSchedulesAction(): Promise<ActionState<Schedule[]>> {
 
     // Transform results
     const schedules: Schedule[] = result.map(row => {
-      const transformed = transformSnakeToCamel<any>(row)
+      const transformed = transformSnakeToCamel<Record<string, unknown>>(row)
 
       // Parse JSONB fields
       let scheduleConfig: ScheduleConfig
-      let inputData: Record<string, any>
+      let inputData: Record<string, unknown>
 
       try {
         scheduleConfig = typeof transformed.scheduleConfig === 'string'
@@ -924,7 +919,7 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
     const userId = userResult[0].id
 
     // Check if schedule exists and user owns it
-    const existingResult = await executeSQL<any>(`
+    const existingResult = await executeSQL<Record<string, unknown>>(`
       SELECT id, name, user_id, assistant_architect_id, schedule_config, input_data, active, created_at, updated_at
       FROM scheduled_executions
       WHERE id = :id AND user_id = :userId
@@ -942,7 +937,7 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
 
     // Build update query dynamically
     const updates: string[] = []
-    const parameters: any[] = [
+    const parameters: { name: string; value: { longValue: number } }[] = [
       createParameter('id', id),
       createParameter('userId', userId),
       createParameter('updatedBy', session.sub)
@@ -1039,7 +1034,7 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
     updates.push('updated_at = NOW()', 'updated_by = :updatedBy')
 
     // Execute update
-    const updateResult = await executeSQL<any>(`
+    const updateResult = await executeSQL<Record<string, unknown>>(`
       UPDATE scheduled_executions
       SET ${updates.join(', ')}
       WHERE id = :id AND user_id = :userId
@@ -1051,10 +1046,10 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
     }
 
     // Transform and return updated schedule
-    const updated = transformSnakeToCamel<any>(updateResult[0])
+    const updated = transformSnakeToCamel<Record<string, unknown>>(updateResult[0])
 
     let scheduleConfig: ScheduleConfig
-    let inputData: Record<string, any>
+    let inputData: Record<string, unknown>
 
     try {
       scheduleConfig = typeof updated.scheduleConfig === 'string'
@@ -1264,7 +1259,7 @@ export async function getScheduleAction(id: number): Promise<ActionState<Schedul
     const userId = userResult[0].id
 
     // Get schedule with last execution info
-    const result = await executeSQL<any>(`
+    const result = await executeSQL<Record<string, unknown>>(`
       SELECT
         se.id,
         se.name,
@@ -1298,11 +1293,11 @@ export async function getScheduleAction(id: number): Promise<ActionState<Schedul
 
     // Transform result
     const row = result[0]
-    const transformed = transformSnakeToCamel<any>(row)
+    const transformed = transformSnakeToCamel<Record<string, unknown>>(row)
 
     // Parse JSONB fields
     let scheduleConfig: ScheduleConfig
-    let inputData: Record<string, any>
+    let inputData: Record<string, unknown>
 
     try {
       scheduleConfig = typeof transformed.scheduleConfig === 'string'

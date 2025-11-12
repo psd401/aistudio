@@ -25,7 +25,7 @@ export interface Repository {
   description: string | null
   ownerId: number
   isPublic: boolean
-  metadata: Record<string, any>
+  metadata: Record<string, unknown>
   createdAt: Date
   updatedAt: Date
   ownerName?: string
@@ -36,7 +36,7 @@ export interface CreateRepositoryInput {
   name: string
   description?: string
   isPublic?: boolean
-  metadata?: Record<string, any>
+  metadata?: Record<string, unknown>
 }
 
 export interface UpdateRepositoryInput {
@@ -44,7 +44,7 @@ export interface UpdateRepositoryInput {
   name?: string
   description?: string
   isPublic?: boolean
-  metadata?: Record<string, any>
+  metadata?: Record<string, unknown>
 }
 
 

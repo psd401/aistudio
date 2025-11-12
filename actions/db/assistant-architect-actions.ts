@@ -320,7 +320,6 @@ export async function getAssistantArchitectByIdAction(
   id: string
 ): Promise<ActionState<ArchitectWithRelations | undefined>> {
   const requestId = generateRequestId()
-  const timer = startTimer("getAssistantArchitectById")
   const log = createLogger({ requestId, action: "getAssistantArchitectById" })
   
   try {
@@ -1556,7 +1555,7 @@ export async function createToolExecutionAction(
 export async function updatePromptResultAction(
   executionId: string,
   promptId: number,
-  result: Record<string, any>
+  result: Record<string, unknown>
 ): Promise<ActionState<void>> {
   const requestId = generateRequestId()
   const timer = startTimer("updatePromptResult")
@@ -1838,27 +1837,9 @@ export async function rejectAssistantArchitectAction(
 // Results are stored in prompt_results table and streamed via universal polling
 
 // Add a function to decode HTML entities and remove escapes for variable placeholders
-function decodePromptVariables(content: string): string {
-  // Replace HTML entity for $ with $
-  let decoded = content.replace(/&#x24;|&\#36;/g, '$');
-  // Remove backslash escapes before $
-  decoded = decoded.replace(/\\\$/g, '$');
-  // Remove backslash escapes before {
-  decoded = decoded.replace(/\\\{/g, '{');
-  // Remove backslash escapes before }
-  decoded = decoded.replace(/\\\}/g, '}');
-  // Remove backslash escapes before _
-  decoded = decoded.replace(/\\_/g, '_');
-  return decoded;
-}
-
-// Add slugify utility at the top (before executeAssistantArchitectJob)
-function slugify(str: string): string {
-  return str
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)+/g, '');
-}
+// Removed unused utility functions - if needed in future, restore from git history
+// - decodePromptVariables: HTML entity decoding for variable placeholders
+// - slugify: String to URL-safe slug conversion
 
 // For the public view, get only approved tools
 export async function getApprovedAssistantArchitectsAction(): Promise<

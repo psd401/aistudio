@@ -25,7 +25,7 @@ export interface RepositoryItem {
   type: 'document' | 'url' | 'text'
   name: string
   source: string
-  metadata: Record<string, any>
+  metadata: Record<string, unknown>
   processingStatus: string
   processingError: string | null
   createdAt: Date
@@ -37,7 +37,7 @@ export interface RepositoryItemChunk {
   itemId: number
   content: string
   embeddingVector: number[] | null
-  metadata: Record<string, any>
+  metadata: Record<string, unknown>
   chunkIndex: number
   tokens: number | null
   createdAt: Date
