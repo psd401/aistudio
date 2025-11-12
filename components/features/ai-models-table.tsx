@@ -93,7 +93,7 @@ const ModelForm = React.memo(function ModelForm({
       return;
     }
     const parsed = Number.parseFloat(value);
-    if (!isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
+    if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
       setModelData({ ...modelData, inputCostPer1kTokens: parsed });
     }
   };
@@ -105,7 +105,7 @@ const ModelForm = React.memo(function ModelForm({
       return;
     }
     const parsed = Number.parseFloat(value);
-    if (!isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
+    if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
       setModelData({ ...modelData, outputCostPer1kTokens: parsed });
     }
   };
@@ -117,7 +117,7 @@ const ModelForm = React.memo(function ModelForm({
       return;
     }
     const parsed = Number.parseFloat(value);
-    if (!isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
+    if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
       setModelData({ ...modelData, cachedInputCostPer1kTokens: parsed });
     }
   };
@@ -130,7 +130,7 @@ const ModelForm = React.memo(function ModelForm({
       return;
     }
     const parsed = Number.parseInt(value);
-    if (!isNaN(parsed) && parsed >= 0 && parsed <= 30000) {
+    if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 30000) {
       setModelData({ ...modelData, averageLatencyMs: parsed });
     }
   };
@@ -142,7 +142,7 @@ const ModelForm = React.memo(function ModelForm({
       return;
     }
     const parsed = Number.parseInt(value);
-    if (!isNaN(parsed) && parsed >= 1 && parsed <= 1000) {
+    if (!Number.isNaN(parsed) && parsed >= 1 && parsed <= 1000) {
       setModelData({ ...modelData, maxConcurrency: parsed });
     }
   };

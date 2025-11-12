@@ -13,7 +13,7 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
   try {
     const params = await context.params
     const notificationId = Number.parseInt(params.id)
-    if (isNaN(notificationId) || notificationId <= 0) {
+    if (Number.isNaN(notificationId) || notificationId <= 0) {
       throw ErrorFactories.invalidInput("id", params.id, "Must be a positive integer")
     }
 

@@ -114,7 +114,7 @@ export function SearchResults({ results, query, isLoading }: SearchResultsProps)
                 variant={result.similarity > 0.9 ? "default" : result.similarity > 0.8 ? "secondary" : "outline"}
                 className="ml-2"
               >
-                {!isNaN(result.similarity) ? `${(result.similarity * 100).toFixed(0)}% match` : 'Match'}
+                {!Number.isNaN(result.similarity) ? `${(result.similarity * 100).toFixed(0)}% match` : 'Match'}
               </Badge>
             </div>
           </CardHeader>

@@ -106,8 +106,8 @@ export async function canUpdatePrompt(
   const sessionUserId = Number(userId)
 
   // Validate conversions succeeded
-  const promptUserIdIsValid = !isNaN(promptUserId) && isFinite(promptUserId)
-  const sessionUserIdIsValid = !isNaN(sessionUserId) && isFinite(sessionUserId)
+  const promptUserIdIsValid = !Number.isNaN(promptUserId) && Number.isFinite(promptUserId)
+  const sessionUserIdIsValid = !Number.isNaN(sessionUserId) && Number.isFinite(sessionUserId)
 
   // Comprehensive debug logging
   log.info("Permission check comparison", {
@@ -213,7 +213,7 @@ export async function getUserIdFromSession(cognitoSub: string): Promise<number> 
   log.info("User ID found", {
     userId,
     userIdType,
-    isValidNumber: !isNaN(Number(userId)) && isFinite(Number(userId))
+    isValidNumber: !Number.isNaN(Number(userId)) && Number.isFinite(Number(userId))
   })
 
   return userId

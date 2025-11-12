@@ -250,7 +250,7 @@ export async function createFreshserviceTicketAction(
 
     // Robust ticket ID validation - handle both string and number formats
     const ticketId = typeof ticketData.id === 'string' ? Number.parseInt(ticketData.id, 10) : ticketData.id
-    if (!ticketId || isNaN(ticketId) || ticketId <= 0) {
+    if (!ticketId || Number.isNaN(ticketId) || ticketId <= 0) {
       log.error("Invalid ticket ID in response", {
         rawTicketId: ticketData.id,
         parsedTicketId: ticketId,

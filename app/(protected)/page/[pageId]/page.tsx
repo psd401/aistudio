@@ -53,7 +53,7 @@ export default async function PublicPage({ params }: PageProps) {
   // For each child, try to extract assistant/tool id from the link
   const childAssistantIds = childItems
     .map((child) => extractAssistantId(child.link))
-    .filter((id): id is number => id !== null && !isNaN(id))
+    .filter((id): id is number => id !== null && !Number.isNaN(id))
 
   let assistants: Record<number, SelectAssistantArchitect> = {}
   if (childAssistantIds.length > 0) {

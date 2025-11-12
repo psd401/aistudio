@@ -156,7 +156,7 @@ function safeParseInt(value: unknown, fieldName = 'value'): number {
   }
 
   const parsed = parseInt(stringValue, 10);
-  if (isNaN(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
+  if (Number.isNaN(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
     throw new Error(`Invalid ${fieldName}: must be a positive integer`);
   }
 

@@ -35,7 +35,7 @@ export async function PUT(
     log.debug("Updating assistant details", { assistantId: id, updates: body });
     
     const assistantId = Number.parseInt(id, 10)
-    if (isNaN(assistantId)) {
+    if (Number.isNaN(assistantId)) {
       log.warn("Invalid assistant ID format", { id });
       timer({ status: "error", reason: "invalid_id" });
       return NextResponse.json(
@@ -90,7 +90,7 @@ export async function DELETE(
     }
     
     const assistantId = Number.parseInt(id, 10)
-    if (isNaN(assistantId)) {
+    if (Number.isNaN(assistantId)) {
       log.warn("Invalid assistant ID format", { id });
       timer({ status: "error", reason: "invalid_id" });
       return NextResponse.json(
@@ -148,7 +148,7 @@ export async function POST(
     log.debug("Assistant action", { assistantId: id, action: body.action });
     
     const assistantId = Number.parseInt(id, 10)
-    if (isNaN(assistantId)) {
+    if (Number.isNaN(assistantId)) {
       log.warn("Invalid assistant ID format", { id });
       timer({ status: "error", reason: "invalid_id" });
       return NextResponse.json(

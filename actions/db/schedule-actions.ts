@@ -80,7 +80,7 @@ function sanitizeNumericId(value: unknown): number {
   const num = Number(value)
 
   // Strict validation with early exit
-  if (!Number.isInteger(num) || !Number.isFinite(num) || num <= 0 || num > Number.MAX_SAFE_INTEGER) {
+  if (!Number.isInteger(num) || !Number.Number.isFinite(num) || num <= 0 || num > Number.MAX_SAFE_INTEGER) {
     throw ErrorFactories.validationFailed([{ field: 'id', message: 'Invalid numeric ID', value }])
   }
 
@@ -615,7 +615,7 @@ export async function createScheduleAction(params: CreateScheduleRequest): Promi
       assistantArchitectId,
       type: typeof assistantArchitectId,
       value: assistantArchitectId,
-      isNaN: isNaN(Number(assistantArchitectId))
+      isNaN: Number.isNaN(Number(assistantArchitectId))
     })
     let cleanArchitectId: number
     try {
@@ -626,7 +626,7 @@ export async function createScheduleAction(params: CreateScheduleRequest): Promi
         assistantArchitectId,
         type: typeof assistantArchitectId,
         converted: Number(assistantArchitectId),
-        isNaN: isNaN(Number(assistantArchitectId)),
+        isNaN: Number.isNaN(Number(assistantArchitectId)),
         isInteger: Number.isInteger(Number(assistantArchitectId)),
         error: sanitizeForLogging(error)
       })

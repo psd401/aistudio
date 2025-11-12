@@ -17,7 +17,7 @@ export default async function RepositoryPage({ params }: RepositoryPageProps) {
 
   const { id } = await params
   const repositoryId = Number.parseInt(id)
-  if (isNaN(repositoryId)) {
+  if (Number.isNaN(repositoryId)) {
     notFound()
   }
 

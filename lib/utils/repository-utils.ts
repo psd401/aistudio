@@ -13,14 +13,14 @@ export function parseRepositoryIds(repositoryIds: string | number[] | null | und
 
   if (Array.isArray(repositoryIds)) {
     // Ensure all elements are numbers
-    return repositoryIds.filter(id => typeof id === 'number' && !isNaN(id));
+    return repositoryIds.filter(id => typeof id === 'number' && !Number.isNaN(id));
   }
 
   if (typeof repositoryIds === 'string') {
     try {
       const parsed = JSON.parse(repositoryIds);
       if (Array.isArray(parsed)) {
-        return parsed.filter(id => typeof id === 'number' && !isNaN(id));
+        return parsed.filter(id => typeof id === 'number' && !Number.isNaN(id));
       }
       logger.warn('Parsed repository_ids is not an array:', parsed);
       return [];
@@ -48,6 +48,6 @@ export function serializeRepositoryIds(repositoryIds: number[] | null | undefine
   }
   
   // Ensure all elements are valid numbers
-  const validIds = repositoryIds.filter(id => typeof id === 'number' && !isNaN(id));
+  const validIds = repositoryIds.filter(id => typeof id === 'number' && !Number.isNaN(id));
   return JSON.stringify(validIds);
 }

@@ -203,7 +203,7 @@ export async function moderatePrompt(
 
     // Convert string to number for INTEGER column (moderated_by is INTEGER in database)
     const userIdNum = Number.parseInt(userId, 10)
-    if (isNaN(userIdNum) || userIdNum <= 0) {
+    if (Number.isNaN(userIdNum) || userIdNum <= 0) {
       log.error("Invalid user ID format", { userId })
       throw ErrorFactories.sysInternalError("Invalid user ID format")
     }
@@ -295,7 +295,7 @@ export async function bulkModeratePrompts(
 
     // Convert string to number for INTEGER column (moderated_by is INTEGER in database)
     const userIdNum = Number.parseInt(userId, 10)
-    if (isNaN(userIdNum) || userIdNum <= 0) {
+    if (Number.isNaN(userIdNum) || userIdNum <= 0) {
       log.error("Invalid user ID format", { userId })
       throw ErrorFactories.sysInternalError("Invalid user ID format")
     }

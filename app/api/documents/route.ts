@@ -114,7 +114,7 @@ export async function GET(request: NextRequest) {
     if (conversationId) {
       const parsedConversationId = Number.parseInt(conversationId, 10);
       
-      if (isNaN(parsedConversationId)) {
+      if (Number.isNaN(parsedConversationId)) {
         log.warn("Invalid conversation ID", { conversationId });
         timer({ status: "error", reason: "invalid_id" });
         return NextResponse.json(
@@ -236,7 +236,7 @@ export async function DELETE(request: NextRequest) {
   }
 
   const docId = Number.parseInt(documentId, 10);
-  if (isNaN(docId)) {
+  if (Number.isNaN(docId)) {
     log.warn("Invalid document ID format", { documentId });
     timer({ status: "error", reason: "invalid_id" });
     return NextResponse.json(

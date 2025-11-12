@@ -961,7 +961,7 @@ export function PromptsPageClient({ assistantId, prompts: initialPrompts, models
                 />
               </div>
               <ToolSelectionSection
-                selectedModelId={modelId && !isNaN(Number.parseInt(modelId)) ? Number.parseInt(modelId) : null}
+                selectedModelId={modelId && !Number.isNaN(Number.parseInt(modelId)) ? Number.parseInt(modelId) : null}
                 enabledTools={enabledTools}
                 onToolsChange={setEnabledTools}
                 models={models}
@@ -1106,7 +1106,7 @@ export function PromptsPageClient({ assistantId, prompts: initialPrompts, models
                   />
                 </div>
                 <ToolSelectionSection
-                  selectedModelId={modelId && !isNaN(Number.parseInt(modelId)) ? Number.parseInt(modelId) : null}
+                  selectedModelId={modelId && !Number.isNaN(Number.parseInt(modelId)) ? Number.parseInt(modelId) : null}
                   enabledTools={enabledTools}
                   onToolsChange={setEnabledTools}
                   models={models}

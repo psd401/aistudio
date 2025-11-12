@@ -21,7 +21,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     const resolvedParams = await params;
     const { id } = resolvedParams;
     const ideaId = Number.parseInt(id);
-    if (isNaN(ideaId)) {
+    if (Number.isNaN(ideaId)) {
       return new NextResponse('Invalid idea ID', { status: 400 });
     }
 
@@ -73,7 +73,7 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
     const resolvedParams = await context.params;
     const { id } = resolvedParams;
     const ideaId = Number.parseInt(id);
-    if (isNaN(ideaId)) {
+    if (Number.isNaN(ideaId)) {
       return new NextResponse('Invalid idea ID', { status: 400 });
     }
 

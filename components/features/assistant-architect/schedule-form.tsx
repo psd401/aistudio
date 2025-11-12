@@ -119,7 +119,7 @@ export function ScheduleForm({ tool, inputData, onSuccess, onCancel }: ScheduleF
         throw new Error("Schedule name is required")
       }
 
-      if (!tool.id || isNaN(Number(tool.id))) {
+      if (!tool.id || Number.isNaN(Number(tool.id))) {
         throw new Error("Invalid assistant architect ID")
       }
 

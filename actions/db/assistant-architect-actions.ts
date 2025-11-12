@@ -41,7 +41,7 @@ type ArchitectWithRelations = SelectAssistantArchitect & {
 // Helper function to safely parse integers with validation
 function safeParseInt(value: string, fieldName: string): number {
   const parsed = Number.parseInt(value, 10);
-  if (isNaN(parsed) || parsed <= 0 || parsed > Number.MAX_SAFE_INTEGER) {
+  if (Number.isNaN(parsed) || parsed <= 0 || parsed > Number.MAX_SAFE_INTEGER) {
     throw ErrorFactories.validationFailed([{
       field: fieldName,
       message: `Invalid ${fieldName} format`
@@ -327,7 +327,7 @@ export async function getAssistantArchitectByIdAction(
     
     // Parse string ID to integer
     const idInt = Number.parseInt(id, 10);
-    if (isNaN(idInt)) {
+    if (Number.isNaN(idInt)) {
       log.warn("Invalid assistant architect ID provided", { architectId: id })
       throw createError("Invalid assistant architect ID", {
         code: "VALIDATION",
@@ -600,7 +600,7 @@ export async function deleteAssistantArchitectAction(
     
     // Parse and validate the ID
     const idInt = Number.parseInt(id, 10);
-    if (isNaN(idInt)) {
+    if (Number.isNaN(idInt)) {
       log.warn("Invalid assistant architect ID provided", { id })
       timer({ status: "error" })
       return { isSuccess: false, message: "Invalid assistant ID" }

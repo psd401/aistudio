@@ -9,7 +9,7 @@ export function ensureNumber(value: unknown): number {
   if (typeof value === 'number') return value;
   if (typeof value === 'string') {
     const parsed = Number.parseInt(value, 10);
-    return isNaN(parsed) ? 0 : parsed;
+    return Number.isNaN(parsed) ? 0 : parsed;
   }
   return 0;
 }
@@ -39,7 +39,7 @@ export function toNumberOrNull(value: unknown): number | null {
   if (typeof value === 'number') return value;
   if (typeof value === 'string') {
     const parsed = Number.parseInt(value, 10);
-    return isNaN(parsed) ? null : parsed;
+    return Number.isNaN(parsed) ? null : parsed;
   }
   return null;
 }
@@ -114,7 +114,7 @@ export function extractRDSNumber(value: RDSFieldValue): number | null {
   if (isRDSNumber(value)) return value;
   if (isRDSString(value)) {
     const parsed = Number.parseFloat(value);
-    return isNaN(parsed) ? null : parsed;
+    return Number.isNaN(parsed) ? null : parsed;
   }
   return null;
 }

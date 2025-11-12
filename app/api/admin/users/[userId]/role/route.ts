@@ -41,7 +41,7 @@ export async function PUT(
     
     // Update the user's role via Data API
     const userId = Number.parseInt(userIdString, 10);
-    if (isNaN(userId)) {
+    if (Number.isNaN(userId)) {
       log.warn("Invalid user ID", { userIdString });
       timer({ status: "error", reason: "invalid_user_id" });
       return NextResponse.json(

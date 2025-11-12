@@ -24,7 +24,7 @@ export async function GET(
       return authError;
     }
     
-    if (!modelId || isNaN(modelId)) {
+    if (!modelId || Number.isNaN(modelId)) {
       log.warn("Invalid model ID provided", { modelId: id });
       timer({ status: "error", reason: "invalid_id" });
       return NextResponse.json(
