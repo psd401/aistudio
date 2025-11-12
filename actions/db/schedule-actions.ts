@@ -17,6 +17,7 @@ import {
   ScheduleState
 } from "@aws-sdk/client-scheduler"
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda"
+import type { SqlParameter } from "@aws-sdk/client-rds-data"
 
 // Types for Schedule Management
 export interface ScheduleConfig {
@@ -126,7 +127,15 @@ function getEnvironment(): string {
 /**
  * Invokes the schedule-executor Lambda function to manage EventBridge schedules
  */
-async function invokeScheduleManager(action: ScheduleLambdaPayload['action'], payload: Record<string, unknown>, requestId?: string): Promise<ScheduleLambdaResponse> {
+interface InvokeScheduleManagerPayload {
+  scheduleId: number
+  name?: string
+  scheduleConfig: ScheduleConfig
+  inputData?: Record<string, unknown>
+  active?: boolean
+}
+
+async function invokeScheduleManager(action: ScheduleLambdaPayload['action'], payload: InvokeScheduleManagerPayload, requestId?: string): Promise<ScheduleLambdaResponse> {
   const log = createLogger({ operation: 'invokeScheduleManager', action, requestId })
   const environment = getEnvironment()
   const functionName = `aistudio-${environment}-schedule-executor`
@@ -821,7 +830,19 @@ export async function getSchedulesAction(): Promise<ActionState<Schedule[]>> {
 
     // Transform results
     const schedules: Schedule[] = result.map(row => {
-      const transformed = transformSnakeToCamel<Record<string, unknown>>(row)
+      const transformed = transformSnakeToCamel<{
+        id: number
+        userId: number
+        assistantArchitectId: number
+        name: string
+        scheduleConfig: ScheduleConfig | string
+        inputData: Record<string, string> | string
+        active: boolean
+        createdAt: string
+        updatedAt: string
+        lastExecutedAt: string | null
+        lastExecutionStatus: string | null
+      }>(row)
 
       // Parse JSONB fields
       let scheduleConfig: ScheduleConfig
@@ -937,7 +958,7 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
 
     // Build update query dynamically
     const updates: string[] = []
-    const parameters: { name: string; value: { longValue: number } }[] = [
+    const parameters: SqlParameter[] = [
       createParameter('id', id),
       createParameter('userId', userId),
       createParameter('updatedBy', session.sub)
@@ -1034,7 +1055,17 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
     updates.push('updated_at = NOW()', 'updated_by = :updatedBy')
 
     // Execute update
-    const updateResult = await executeSQL<Record<string, unknown>>(`
+    const updateResult = await executeSQL<{
+      id: number
+      name: string
+      user_id: number
+      assistant_architect_id: number
+      schedule_config: ScheduleConfig | string
+      input_data: Record<string, string> | string
+      active: boolean
+      created_at: Date
+      updated_at: Date
+    }>(`
       UPDATE scheduled_executions
       SET ${updates.join(', ')}
       WHERE id = :id AND user_id = :userId
@@ -1046,7 +1077,17 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
     }
 
     // Transform and return updated schedule
-    const updated = transformSnakeToCamel<Record<string, unknown>>(updateResult[0])
+    const updated = transformSnakeToCamel<{
+      id: number
+      name: string
+      userId: number
+      assistantArchitectId: number
+      scheduleConfig: ScheduleConfig | string
+      inputData: Record<string, string> | string
+      active: boolean
+      createdAt: Date
+      updatedAt: Date
+    }>(updateResult[0])
 
     let scheduleConfig: ScheduleConfig
     let inputData: Record<string, unknown>
@@ -1259,7 +1300,19 @@ export async function getScheduleAction(id: number): Promise<ActionState<Schedul
     const userId = userResult[0].id
 
     // Get schedule with last execution info
-    const result = await executeSQL<Record<string, unknown>>(`
+    const result = await executeSQL<{
+      id: number
+      name: string
+      user_id: number
+      assistant_architect_id: number
+      schedule_config: ScheduleConfig | string
+      input_data: Record<string, string> | string
+      active: boolean
+      created_at: Date
+      updated_at: Date
+      last_executed_at: Date | null
+      last_execution_status: string | null
+    }>(`
       SELECT
         se.id,
         se.name,
@@ -1293,7 +1346,19 @@ export async function getScheduleAction(id: number): Promise<ActionState<Schedul
 
     // Transform result
     const row = result[0]
-    const transformed = transformSnakeToCamel<Record<string, unknown>>(row)
+    const transformed = transformSnakeToCamel<{
+      id: number
+      name: string
+      userId: number
+      assistantArchitectId: number
+      scheduleConfig: ScheduleConfig | string
+      inputData: Record<string, string> | string
+      active: boolean
+      createdAt: Date
+      updatedAt: Date
+      lastExecutedAt: Date | null
+      lastExecutionStatus: string | null
+    }>(row)
 
     // Parse JSONB fields
     let scheduleConfig: ScheduleConfig
