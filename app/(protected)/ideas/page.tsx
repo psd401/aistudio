@@ -69,10 +69,11 @@ export default function IdeasPage() {
       
       // Then apply the selected sort within each group
       switch (sortBy) {
-        case 'priority':
+        case 'priority': {
           const priorityOrder = { high: 0, medium: 1, low: 2 };
-          return (priorityOrder[a.priorityLevel as keyof typeof priorityOrder] || 3) - 
+          return (priorityOrder[a.priorityLevel as keyof typeof priorityOrder] || 3) -
                  (priorityOrder[b.priorityLevel as keyof typeof priorityOrder] || 3);
+        }
         case 'votes':
           return b.votes - a.votes;
         case 'newest':
