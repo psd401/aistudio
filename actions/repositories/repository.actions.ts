@@ -323,9 +323,9 @@ export async function deleteRepository(
     
     
     timer({ status: "success", repositoryId: id })
-    
+
     revalidatePath("/repositories")
-    return createSuccess(undefined as any, "Repository deleted successfully")
+    return createSuccess(null, "Repository deleted successfully")
   } catch (error) {
     
     timer({ status: "error" })

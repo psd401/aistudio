@@ -3,7 +3,7 @@ const mockRequest = class Request {
   url: string;
   method: string;
   headers: Headers;
-  body: any;
+  body: unknown;
 
   constructor(url: string, init?: RequestInit) {
     this.url = url;
@@ -22,14 +22,14 @@ const mockRequest = class Request {
     }
     return this.body;
   }
-} as any;
+} as unknown as typeof Request;
 
 const mockResponse = class Response {
   status: number;
-  body: any;
+  body: unknown;
   headers: Headers;
 
-  constructor(body: any, init?: ResponseInit) {
+  constructor(body: unknown, init?: ResponseInit) {
     this.status = init?.status || 200;
     this.body = body;
     this.headers = new Headers(init?.headers);
@@ -38,13 +38,13 @@ const mockResponse = class Response {
   json() {
     return this.body;
   }
-} as any;
+} as unknown as typeof Response;
 
 const mockHeaders = class Headers extends Map {
   constructor(_init?: HeadersInit) {
     super();
   }
-} as any;
+} as unknown as typeof Headers;
 
 global.Request = mockRequest;
 global.Response = mockResponse;
@@ -60,4 +60,4 @@ jest.mock('next/server', () => ({
     })
   },
   NextRequest: mockRequest
-})); 
+}));
