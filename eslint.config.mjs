@@ -197,7 +197,12 @@ export default [
       "jsx-a11y/no-autofocus": "warn",
       "jsx-a11y/no-distracting-elements": "error",
       "jsx-a11y/no-interactive-element-to-noninteractive-role": "warn",
-      "jsx-a11y/no-noninteractive-element-interactions": "warn",
+      "jsx-a11y/no-noninteractive-element-interactions": ["warn", {
+        "handlers": ["onClick", "onMouseDown", "onMouseUp", "onKeyPress", "onKeyDown", "onKeyUp"],
+        "body": ["onError", "onLoad"],
+        "iframe": ["onError", "onLoad"],
+        "img": ["onError", "onLoad"]
+      }],
       "jsx-a11y/no-noninteractive-tabindex": "warn",
       "jsx-a11y/no-redundant-roles": "warn",
       "jsx-a11y/no-static-element-interactions": "warn",

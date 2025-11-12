@@ -65,9 +65,9 @@ export function CompareInput({
       {/* Model Selectors */}
       <div className="grid grid-cols-2 gap-4">
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
+          <div className="block text-sm font-medium text-gray-700 mb-2" aria-hidden="true">
             Model 1
-          </label>
+          </div>
           <ModelSelector
             models={models}
             value={selectedModel1}
@@ -78,12 +78,13 @@ export function CompareInput({
             groupByProvider={true}
             hideRoleRestricted={true}
             hideCapabilityMissing={true}
+            aria-label="Select first model"
           />
         </div>
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">
+          <div className="block text-sm font-medium text-gray-700 mb-2" aria-hidden="true">
             Model 2
-          </label>
+          </div>
           <ModelSelector
             models={models}
             value={selectedModel2}
@@ -94,6 +95,7 @@ export function CompareInput({
             groupByProvider={true}
             hideRoleRestricted={true}
             hideCapabilityMissing={true}
+            aria-label="Select second model"
           />
         </div>
       </div>

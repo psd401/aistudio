@@ -154,10 +154,11 @@ export function PromptReviewCard({
             {/* Moderation Notes */}
             {item.moderationStatus === 'pending' && (
               <div className="space-y-2">
-                <label className="text-sm font-medium">
+                <label htmlFor={`moderation-notes-${item.id}`} className="text-sm font-medium">
                   Moderation Notes (optional)
                 </label>
                 <Textarea
+                  id={`moderation-notes-${item.id}`}
                   value={notes}
                   onChange={(e) => setNotes(e.target.value)}
                   placeholder="Add any notes about this moderation decision..."

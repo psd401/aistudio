@@ -59,10 +59,11 @@ export function NexusComposer({
             value={input}
             onChange={onInputChange}
             onKeyDown={handleKeyDown}
+            // eslint-disable-next-line jsx-a11y/no-autofocus -- Intentional: chat input is primary page purpose
             autoFocus
             placeholder={
-              isLoading 
-                ? "AI is responding..." 
+              isLoading
+                ? "AI is responding..."
                 : placeholder
             }
             disabled={isLoading || disabled}
