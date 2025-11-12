@@ -104,14 +104,14 @@ export async function createRepository(
       name: result[0].name
     })
     
-    const endTimer = timer
-    endTimer({ status: "success", repositoryId: result[0].id })
+    
+    timer({ status: "success", repositoryId: result[0].id })
     
     revalidatePath("/repositories")
     return createSuccess(result[0], "Repository created successfully")
   } catch (error) {
-    const endTimer = timer
-    endTimer({ status: "error" })
+    
+    timer({ status: "error" })
     
     return handleError(error, "Failed to create repository. Please try again or contact support.", {
       context: "createRepository",
@@ -220,15 +220,15 @@ export async function updateRepository(
       name: result[0].name
     })
     
-    const endTimer = timer
-    endTimer({ status: "success", repositoryId: result[0].id })
+    
+    timer({ status: "success", repositoryId: result[0].id })
     
     revalidatePath("/repositories")
     revalidatePath(`/repositories/${input.id}`)
     return createSuccess(result[0], "Repository updated successfully")
   } catch (error) {
-    const endTimer = timer
-    endTimer({ status: "error" })
+    
+    timer({ status: "error" })
     
     return handleError(error, "Failed to update repository. Please try again or contact support.", {
       context: "updateRepository",
@@ -320,14 +320,14 @@ export async function deleteRepository(
 
     log.info("Repository deleted successfully", { repositoryId: id })
     
-    const endTimer = timer
-    endTimer({ status: "success", repositoryId: id })
+    
+    timer({ status: "success", repositoryId: id })
     
     revalidatePath("/repositories")
     return createSuccess(undefined as any, "Repository deleted successfully")
   } catch (error) {
-    const endTimer = timer
-    endTimer({ status: "error" })
+    
+    timer({ status: "error" })
     
     return handleError(error, "Failed to delete repository. Please try again or contact support.", {
       context: "deleteRepository",
@@ -378,13 +378,13 @@ export async function listRepositories(): Promise<ActionState<Repository[]>> {
       repositoryCount: repositories.length 
     })
     
-    const endTimer = timer
-    endTimer({ status: "success", count: repositories.length })
+    
+    timer({ status: "success", count: repositories.length })
     
     return createSuccess(repositories, "Repositories loaded successfully")
   } catch (error) {
-    const endTimer = timer
-    endTimer({ status: "error" })
+    
+    timer({ status: "error" })
     
     return handleError(error, "Failed to list repositories. Please try again or contact support.", {
       context: "listRepositories",
@@ -444,13 +444,13 @@ export async function getRepository(
       name: result[0].name
     })
     
-    const endTimer = timer
-    endTimer({ status: "success", repositoryId: id })
+    
+    timer({ status: "success", repositoryId: id })
     
     return createSuccess(result[0], "Repository loaded successfully")
   } catch (error) {
-    const endTimer = timer
-    endTimer({ status: "error" })
+    
+    timer({ status: "error" })
     
     return handleError(error, "Failed to get repository. Please try again or contact support.", {
       context: "getRepository",
@@ -506,13 +506,13 @@ export async function getRepositoryAccess(
       accessCount: access.length
     })
     
-    const endTimer = timer
-    endTimer({ status: "success", count: access.length })
+    
+    timer({ status: "success", count: access.length })
     
     return createSuccess(access, "Access list loaded successfully")
   } catch (error) {
-    const endTimer = timer
-    endTimer({ status: "error" })
+    
+    timer({ status: "error" })
     
     return handleError(error, "Failed to get repository access. Please try again or contact support.", {
       context: "getRepositoryAccess",
