@@ -149,6 +149,7 @@ export const authConfig: NextAuthConfig = {
 
       // Check if this is a long-running operation by examining request context
       // TODO: Replace with AsyncLocalStorage for better request-scoped context
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const isLongRunningOperation = (typeof global !== 'undefined' && (global as any).__POLLING_CONTEXT__)
 
       const shouldRefresh = shouldRefreshToken(token, {

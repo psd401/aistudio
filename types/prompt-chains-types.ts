@@ -46,6 +46,7 @@ export interface ToolExecutionInput {
 export interface PromptExecutionResult {
   promptId: string
   status: "pending" | "running" | "completed" | "failed"
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   input: Record<string, any>
   output?: string
   error?: string
