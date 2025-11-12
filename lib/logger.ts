@@ -6,7 +6,7 @@
 
 import winston, { Logger } from "winston"
 import { nanoid } from "nanoid"
-import { AsyncLocalStorage } from "async_hooks"
+import { AsyncLocalStorage } from "node:async_hooks"
 
 // Security: CodeQL-compliant log sanitization that breaks taint flow completely
 function sanitizeForLogger(data: unknown): unknown {
@@ -17,8 +17,8 @@ function sanitizeForLogger(data: unknown): unknown {
   if (typeof data === "string") {
     // CodeQL-compliant sanitization: explicit character allowlisting
     const safe = data
-      .replace(/[^\x20-\x7E]/g, '') // Only allow printable ASCII characters (space to tilde)
-      .replace(/[\r\n\t]/g, ' ')    // Replace line breaks with spaces
+      .replace(/[^\u0020-\u007E]/g, '') // Only allow printable ASCII characters (space to tilde)
+      .replace(/[\t\n\r]/g, ' ')    // Replace line breaks with spaces
       .substring(0, 1000)           // Explicit length limit to prevent log bloat
     return safe
   }
@@ -45,7 +45,7 @@ function sanitizeForLogger(data: unknown): unknown {
       const customProps = new Map<string, unknown>()
       for (const key of Object.keys(data)) {
         if (!(key in safeError)) {
-          const safeKey = String(key).replace(/[^\w\-_.]/g, '_')
+          const safeKey = String(key).replace(/[^\w.-]/g, '_')
           if (safeKey && safeKey !== '__proto__' && safeKey !== 'constructor' && safeKey !== 'prototype') {
             customProps.set(safeKey, sanitizeForLogger((data as unknown as Record<string, unknown>)[key]))
           }
@@ -60,7 +60,7 @@ function sanitizeForLogger(data: unknown): unknown {
       // Use Map to avoid prototype pollution completely
       const propMap = new Map<string, unknown>()
       for (const [key, value] of Object.entries(data)) {
-        const cleanKey = String(key).replace(/[^\w\-_.]/g, '_')
+        const cleanKey = String(key).replace(/[^\w.-]/g, '_')
         if (cleanKey && cleanKey !== '__proto__' && cleanKey !== 'constructor' && cleanKey !== 'prototype') {
           propMap.set(cleanKey, sanitizeForLogger(value))
         }
@@ -97,16 +97,16 @@ export interface LogContext {
 
 // Sensitive data patterns to filter from logs
 const SENSITIVE_PATTERNS = [
-  /password["\s]*[:=]\s*["']?[^"'\s,}]+/gi,
-  /token["\s]*[:=]\s*["']?[^"'\s,}]+/gi,
-  /api[_-]?key["\s]*[:=]\s*["']?[^"'\s,}]+/gi,
-  /secret["\s]*[:=]\s*["']?[^"'\s,}]+/gi,
-  /authorization["\s]*[:=]\s*["']?bearer\s+[^"'\s,}]+/gi,
-  /cognito[_-]?sub["\s]*[:=]\s*["']?[^"'\s,}]+/gi,
+  /password[\s"]*[:=]\s*["']?[^\s"',}]+/gi,
+  /token[\s"]*[:=]\s*["']?[^\s"',}]+/gi,
+  /api[_-]?key[\s"]*[:=]\s*["']?[^\s"',}]+/gi,
+  /secret[\s"]*[:=]\s*["']?[^\s"',}]+/gi,
+  /authorization[\s"]*[:=]\s*["']?bearer\s+[^\s"',}]+/gi,
+  /cognito[_-]?sub[\s"]*[:=]\s*["']?[^\s"',}]+/gi,
 ]
 
 // Email masking pattern (show domain only) - using simpler non-backtracking pattern
-const EMAIL_PATTERN = /\b[A-Za-z0-9][A-Za-z0-9._%+-]*@([A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,})\b/g
+const EMAIL_PATTERN = /\b[\dA-Za-z][\w%+.-]*@([\dA-Za-z][\d.A-Za-z-]*\.[A-Za-z]{2,})\b/g
 
 /**
  * Filters sensitive data from log messages and metadata
@@ -115,9 +115,9 @@ function filterSensitiveData(data: unknown): unknown {
   if (typeof data === "string") {
     let filtered = data
     // Filter out sensitive patterns
-    SENSITIVE_PATTERNS.forEach(pattern => {
+    for (const pattern of SENSITIVE_PATTERNS) {
       filtered = filtered.replace(pattern, "[REDACTED]")
-    })
+    }
     // Mask email addresses (keep domain for debugging)
     filtered = filtered.replace(EMAIL_PATTERN, "***@$1")
     return filtered
@@ -130,7 +130,7 @@ function filterSensitiveData(data: unknown): unknown {
   if (data && typeof data === "object") {
     const propMap = new Map<string, unknown>()
     for (const [key, value] of Object.entries(data)) {
-      const cleanKey = String(key).replace(/[^\w\-_.]/g, '_')
+      const cleanKey = String(key).replace(/[^\w.-]/g, '_')
       if (!cleanKey || cleanKey === '__proto__' || cleanKey === 'constructor' || cleanKey === 'prototype') {
         continue
       }
@@ -169,7 +169,7 @@ const devFormat = winston.format.printf(({ timestamp, level, message, ...meta })
   
   // Filter sensitive data in dev
   const filteredMeta = filterSensitiveData(allMeta)
-  const metaString = Object.keys(filteredMeta as object).length 
+  const metaString = Object.keys(filteredMeta as object).length > 0 
     ? `\n${JSON.stringify(filteredMeta, null, 2)}` 
     : ""
   

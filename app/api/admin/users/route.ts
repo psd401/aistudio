@@ -137,7 +137,7 @@ export async function PUT(request: Request) {
     
     log.debug("Updating user", { userId: id, updates });
 
-    const user = await updateUser(parseInt(String(id)), updates)
+    const user = await updateUser(Number.parseInt(String(id)), updates)
 
     log.info("User updated successfully", { userId: id });
     timer({ status: "success" });
@@ -188,7 +188,7 @@ export async function DELETE(request: Request) {
       )
     }
 
-    const user = await deleteUser(parseInt(String(id)))
+    const user = await deleteUser(Number.parseInt(String(id)))
 
     log.info("User deleted successfully", { userId: id });
     timer({ status: "success" });

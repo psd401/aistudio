@@ -40,7 +40,7 @@ export async function PUT(
     const { role: newRole } = validatedData!;
     
     // Update the user's role via Data API
-    const userId = parseInt(userIdString, 10);
+    const userId = Number.parseInt(userIdString, 10);
     if (isNaN(userId)) {
       log.warn("Invalid user ID", { userIdString });
       timer({ status: "error", reason: "invalid_user_id" });

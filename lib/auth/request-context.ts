@@ -1,5 +1,5 @@
 import { headers } from "next/headers";
-import crypto from "crypto";
+import crypto from "node:crypto";
 
 export async function getRequestId(): Promise<string> {
   const headersList = await headers();

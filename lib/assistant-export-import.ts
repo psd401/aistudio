@@ -39,7 +39,7 @@ export const CURRENT_EXPORT_VERSION = "1.0"
  * Fetches complete assistant data including prompts and input fields
  */
 export async function getAssistantDataForExport(assistantIds: number[]): Promise<ExportedAssistant[]> {
-  if (!assistantIds.length) return []
+  if (assistantIds.length === 0) return []
 
   // Create parameter placeholders for the IN clause
   const placeholders = assistantIds.map((_, index) => `:id${index}`).join(', ')

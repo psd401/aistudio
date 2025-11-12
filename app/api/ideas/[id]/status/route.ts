@@ -26,7 +26,7 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
   try {
     const resolvedParams = await context.params;
     const { id } = resolvedParams;
-    const ideaId = parseInt(id);
+    const ideaId = Number.parseInt(id);
     if (isNaN(ideaId)) {
       return new NextResponse('Invalid idea ID', { status: 400 });
     }

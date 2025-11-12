@@ -247,11 +247,11 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
           setTimeout(setupEventSource, delay)
         }
 
-        eventSource.onopen = () => {
+        eventSource.addEventListener('open', () => {
           log.info('SSE connection established', { retryCount })
           // Reset retry count on successful connection
           retryCount = 0
-        }
+        })
       } catch (err) {
         log.error('Failed to setup SSE connection', {
           error: err instanceof Error ? err.message : 'Unknown error',

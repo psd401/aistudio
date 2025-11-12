@@ -32,7 +32,7 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   try {
     const resolvedParams = await params;
     const { id } = resolvedParams;
-    const ideaId = parseInt(id);
+    const ideaId = Number.parseInt(id);
     
     if (isNaN(ideaId)) {
       log.warn("Invalid idea ID", { id });

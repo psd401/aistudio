@@ -47,7 +47,7 @@ const DAYS_OF_WEEK = [
 const scheduleSchema = z.object({
   name: z.string().min(1, "Schedule name is required").max(1000, "Name must be 1000 characters or less"),
   frequency: z.enum(["daily", "weekly", "monthly", "custom"]),
-  time: z.string().regex(/^([01]?[0-9]|2[0-3]):[0-5][0-9]$/, "Invalid time format (HH:MM)"),
+  time: z.string().regex(/^([01]?\d|2[0-3]):[0-5]\d$/, "Invalid time format (HH:MM)"),
   timezone: z.string().min(1, "Please select a timezone"),
   daysOfWeek: z.array(z.number()).optional(),
   dayOfMonth: z.number().min(1).max(31).optional(),
@@ -446,7 +446,7 @@ export function ScheduleForm({ tool, inputData, onSuccess, onCancel }: ScheduleF
                     max="31"
                     placeholder="1"
                     {...field}
-                    onChange={(e) => field.onChange(parseInt(e.target.value) || 1)}
+                    onChange={(e) => field.onChange(Number.parseInt(e.target.value) || 1)}
                     className="bg-muted"
                   />
                 </FormControl>

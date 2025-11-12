@@ -192,7 +192,7 @@ export function sanitizeFileName(fileName: string): string {
   
   // Sanitize the base name - remove all dangerous characters
   let sanitizedName = name
-    .replace(/[^a-zA-Z0-9_-]/g, '_') // Remove dots from name part to prevent path traversal
+    .replace(/[^\w-]/g, '_') // Remove dots from name part to prevent path traversal
     .replace(/^\.+|\.+$/g, '')        // Remove leading/trailing dots
     .replace(/_{2,}/g, '_')           // Collapse multiple underscores
     .replace(/^_+|_+$/g, '')          // Remove leading/trailing underscores
@@ -200,7 +200,7 @@ export function sanitizeFileName(fileName: string): string {
   
   // Sanitize extension
   const sanitizedExtension = extension
-    .replace(/[^a-zA-Z0-9]/g, '')     // Only allow alphanumeric in extension
+    .replace(/[^\dA-Za-z]/g, '')     // Only allow alphanumeric in extension
     .substring(0, 10);                // Limit extension length
   
   // Handle edge cases

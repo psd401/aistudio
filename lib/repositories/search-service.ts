@@ -148,15 +148,15 @@ export async function hybridSearch(
   const resultMap = new Map<number, SearchResult>()
   
   // Add vector results with weighted scores
-  vectorResults.forEach(result => {
+  for (const result of vectorResults) {
     resultMap.set(result.chunkId, {
       ...result,
       similarity: result.similarity * vectorWeight
     })
-  })
+  }
   
   // Merge keyword results
-  keywordResults.forEach(result => {
+  for (const result of keywordResults) {
     const existing = resultMap.get(result.chunkId)
     if (existing) {
       // Combine scores if chunk appears in both results
@@ -168,7 +168,7 @@ export async function hybridSearch(
         similarity: result.similarity * keywordWeight
       })
     }
-  })
+  }
   
   // Sort by combined score and return top results
   return Array.from(resultMap.values())

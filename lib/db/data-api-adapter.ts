@@ -1320,8 +1320,8 @@ export async function assignToolToRole(roleId: string, toolId: string) {
   `;
   
   const checkParams = [
-    { name: 'roleId', value: { longValue: parseInt(roleId, 10) } },
-    { name: 'toolId', value: { longValue: parseInt(toolId, 10) } }
+    { name: 'roleId', value: { longValue: Number.parseInt(roleId, 10) } },
+    { name: 'toolId', value: { longValue: Number.parseInt(toolId, 10) } }
   ];
   
   const existing = await executeSQL(checkSql, checkParams);
@@ -1338,8 +1338,8 @@ export async function assignToolToRole(roleId: string, toolId: string) {
   `;
   
   const insertParams = [
-    { name: 'roleId', value: { longValue: parseInt(roleId, 10) } },
-    { name: 'toolId', value: { longValue: parseInt(toolId, 10) } }
+    { name: 'roleId', value: { longValue: Number.parseInt(roleId, 10) } },
+    { name: 'toolId', value: { longValue: Number.parseInt(toolId, 10) } }
   ];
   
   const result = await executeSQL(insertSql, insertParams);
@@ -1357,8 +1357,8 @@ export async function removeToolFromRole(roleId: string, toolId: string) {
   `;
   
   const parameters = [
-    { name: 'roleId', value: { longValue: parseInt(roleId, 10) } },
-    { name: 'toolId', value: { longValue: parseInt(toolId, 10) } }
+    { name: 'roleId', value: { longValue: Number.parseInt(roleId, 10) } },
+    { name: 'toolId', value: { longValue: Number.parseInt(toolId, 10) } }
   ];
   
   const result = await executeSQL(sql, parameters);

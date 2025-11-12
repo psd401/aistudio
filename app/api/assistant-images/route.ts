@@ -1,8 +1,8 @@
 "use server"
 
 import { NextResponse } from "next/server"
-import fs from "fs"
-import path from "path"
+import fs from "node:fs"
+import path from "node:path"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 
 export async function GET() {

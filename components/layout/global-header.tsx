@@ -376,9 +376,9 @@ function BugReportPopover() {
     // Console Errors (if any)
     if (consoleErrors.length > 0) {
       metadata.push('<br><br><strong>=== RECENT CONSOLE ERRORS ===</strong>')
-      consoleErrors.forEach((err, index) => {
+      for (const [index, err] of consoleErrors.entries()) {
         metadata.push(`Error ${index + 1}: ${err}`)
-      })
+      }
     }
     
     // Join with HTML line breaks for proper Freshservice formatting

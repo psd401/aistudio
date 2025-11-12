@@ -361,9 +361,9 @@ export class SSEMonitor {
 
     // Build event breakdown for logging
     const eventBreakdown: Record<string, number> = {}
-    this.metrics.eventCounts.forEach((count, type) => {
+    for (const [type, count] of this.metrics.eventCounts.entries()) {
       eventBreakdown[type] = count
-    })
+    }
 
     log.info('SSE stream completed', {
       ...this.config.context,

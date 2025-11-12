@@ -309,7 +309,7 @@ export const authConfig: NextAuthConfig = {
   session: {
     strategy: "jwt",
     // Session max age in seconds (default: 24 hours)
-    maxAge: process.env.SESSION_MAX_AGE ? parseInt(process.env.SESSION_MAX_AGE) : 24 * 60 * 60,
+    maxAge: process.env.SESSION_MAX_AGE ? Number.parseInt(process.env.SESSION_MAX_AGE) : 24 * 60 * 60,
   },
   cookies: {
     sessionToken: {

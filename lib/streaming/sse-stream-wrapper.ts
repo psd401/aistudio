@@ -102,9 +102,9 @@ export function wrapStreamWithSSEEvents(
 
   // Add custom headers
   if (headers) {
-    Object.entries(headers).forEach(([key, value]) => {
+    for (const [key, value] of Object.entries(headers)) {
       responseHeaders.set(key, value);
-    });
+    }
   }
 
   // Ensure proper SSE headers
@@ -182,9 +182,9 @@ export function createSSEStream(
   responseHeaders.set('X-Accel-Buffering', 'no');
 
   if (headers) {
-    Object.entries(headers).forEach(([key, value]) => {
+    for (const [key, value] of Object.entries(headers)) {
       responseHeaders.set(key, value);
-    });
+    }
   }
 
   const response = new Response(stream, {

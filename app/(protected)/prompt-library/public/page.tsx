@@ -31,7 +31,7 @@ export default async function PublicPromptLibraryPage({
   const query = params.q || ""
   const tags = params.tags ? params.tags.split(",") : []
   const sort = (params.sort as 'created' | 'usage' | 'views') || 'usage'
-  const page = parseInt(params.page || "1", 10)
+  const page = Number.parseInt(params.page || "1", 10)
 
   const structuredData = generateGalleryStructuredData()
 

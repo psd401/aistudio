@@ -40,7 +40,7 @@ type ArchitectWithRelations = SelectAssistantArchitect & {
 
 // Helper function to safely parse integers with validation
 function safeParseInt(value: string, fieldName: string): number {
-  const parsed = parseInt(value, 10);
+  const parsed = Number.parseInt(value, 10);
   if (isNaN(parsed) || parsed <= 0 || parsed > Number.MAX_SAFE_INTEGER) {
     throw ErrorFactories.validationFailed([{
       field: fieldName,
@@ -326,7 +326,7 @@ export async function getAssistantArchitectByIdAction(
     log.info("Action started: Getting assistant architect by ID", { architectId: id })
     
     // Parse string ID to integer
-    const idInt = parseInt(id, 10);
+    const idInt = Number.parseInt(id, 10);
     if (isNaN(idInt)) {
       log.warn("Invalid assistant architect ID provided", { architectId: id })
       throw createError("Invalid assistant architect ID", {
@@ -489,7 +489,7 @@ export async function updateAssistantArchitectAction(
       SELECT id, name, description, status, image_path, user_id, created_at, updated_at
       FROM assistant_architects
       WHERE id = :id
-    `, [{ name: 'id', value: { longValue: parseInt(id, 10) } }]);
+    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
     
     if (!currentToolResult || currentToolResult.length === 0) {
       return { isSuccess: false, message: "Assistant not found" }
@@ -516,12 +516,12 @@ export async function updateAssistantArchitectAction(
         UPDATE tools 
         SET is_active = false 
         WHERE assistant_architect_id = :id
-      `, [{ name: 'id', value: { longValue: parseInt(id, 10) } }]);
+      `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
     }
     
     // Build update query dynamically
     const updateFields = [];
-    const parameters: SqlParameter[] = [{ name: 'id', value: { longValue: parseInt(id, 10) } }];
+    const parameters: SqlParameter[] = [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }];
     let paramIndex = 0;
     
     for (const [key, value] of Object.entries(data)) {
@@ -599,7 +599,7 @@ export async function deleteAssistantArchitectAction(
     log.debug("User authenticated", { userId: session.sub })
     
     // Parse and validate the ID
-    const idInt = parseInt(id, 10);
+    const idInt = Number.parseInt(id, 10);
     if (isNaN(idInt)) {
       log.warn("Invalid assistant architect ID provided", { id })
       timer({ status: "error" })
@@ -747,7 +747,7 @@ export async function addToolInputFieldAction(
       INSERT INTO tool_input_fields (assistant_architect_id, name, label, field_type, position, options, created_at, updated_at)
       VALUES (:toolId, :name, :label, :fieldType::field_type, :position, :options, NOW(), NOW())
     `, [
-      { name: 'toolId', value: { longValue: parseInt(architectId, 10) } },
+      { name: 'toolId', value: { longValue: Number.parseInt(architectId, 10) } },
       { name: 'name', value: { stringValue: data.name } },
       { name: 'label', value: { stringValue: data.label ?? data.name } },
       { name: 'fieldType', value: { stringValue: data.type } },
@@ -793,7 +793,7 @@ export async function deleteInputFieldAction(
       SELECT id, assistant_architect_id
       FROM tool_input_fields
       WHERE id = :fieldId
-    `, [{ name: 'fieldId', value: { longValue: parseInt(fieldId, 10) } }]);
+    `, [{ name: 'fieldId', value: { longValue: Number.parseInt(fieldId, 10) } }]);
 
     if (!fieldResult || fieldResult.length === 0) {
       return { isSuccess: false, message: "Input field not found" }
@@ -832,7 +832,7 @@ export async function deleteInputFieldAction(
     await executeSQL<never>(`
       DELETE FROM tool_input_fields
       WHERE id = :fieldId
-    `, [{ name: 'fieldId', value: { longValue: parseInt(fieldId, 10) } }]);
+    `, [{ name: 'fieldId', value: { longValue: Number.parseInt(fieldId, 10) } }]);
 
     log.info("Input field deleted successfully", { fieldId })
     timer({ status: "success", fieldId })
@@ -873,7 +873,7 @@ export async function updateInputFieldAction(
       SELECT id, assistant_architect_id, name, label, field_type, position, options, created_at, updated_at
       FROM tool_input_fields
       WHERE id = :id
-    `, [{ name: 'id', value: { longValue: parseInt(id, 10) } }]);
+    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
 
     if (!fieldResult || fieldResult.length === 0) {
       return { isSuccess: false, message: "Input field not found" }
@@ -906,7 +906,7 @@ export async function updateInputFieldAction(
 
     // Build update query dynamically
     const updateFields = [];
-    const parameters: SqlParameter[] = [{ name: 'id', value: { longValue: parseInt(id, 10) } }];
+    const parameters: SqlParameter[] = [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }];
     let paramIndex = 0;
     
     for (const [key, value] of Object.entries(data)) {
@@ -1004,7 +1004,7 @@ export async function reorderInputFieldsAction(
       SELECT user_id
       FROM assistant_architects
       WHERE id = :toolId
-    `, [{ name: 'toolId', value: { longValue: parseInt(toolId, 10) } }]);
+    `, [{ name: 'toolId', value: { longValue: Number.parseInt(toolId, 10) } }]);
 
     if (!toolResult || toolResult.length === 0) {
       return { isSuccess: false, message: "Tool not found" }
@@ -1032,7 +1032,7 @@ export async function reorderInputFieldsAction(
           RETURNING id, assistant_architect_id, name, label, field_type, position, options, created_at, updated_at
         `, [
           { name: 'position', value: { longValue: position } },
-          { name: 'id', value: { longValue: parseInt(id, 10) } }
+          { name: 'id', value: { longValue: Number.parseInt(id, 10) } }
         ]);
         return transformSnakeToCamel<SelectToolInputField>(result[0]);
       })
@@ -1154,7 +1154,7 @@ export async function updatePromptAction(
       SELECT id, assistant_architect_id, name, content, system_context, model_id, position, input_mapping, parallel_group, timeout_seconds, repository_ids, enabled_tools, created_at, updated_at
       FROM chain_prompts
       WHERE id = :id
-    `, [{ name: 'id', value: { longValue: parseInt(id, 10) } }]);
+    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
 
     if (!promptResult || promptResult.length === 0) {
       return { isSuccess: false, message: "Prompt not found" }
@@ -1323,7 +1323,7 @@ export async function updatePromptAction(
     }
 
     // Add the id parameter at the end
-    parameters.push({ name: 'id', value: { longValue: parseInt(id, 10) } });
+    parameters.push({ name: 'id', value: { longValue: Number.parseInt(id, 10) } });
     
 
     const sql = `UPDATE chain_prompts SET ${updateFields.join(', ')}, updated_at = NOW() WHERE id = :id RETURNING id, assistant_architect_id, name, content, system_context, model_id, position, input_mapping, parallel_group, timeout_seconds, repository_ids, enabled_tools, created_at, updated_at`;
@@ -1368,7 +1368,7 @@ export async function deletePromptAction(
       SELECT assistant_architect_id
       FROM chain_prompts
       WHERE id = :id
-    `, [{ name: 'id', value: { longValue: parseInt(id, 10) } }]);
+    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
 
     if (!promptResult || promptResult.length === 0) {
       return { isSuccess: false, message: "Prompt not found" }
@@ -1403,7 +1403,7 @@ export async function deletePromptAction(
     await executeSQL<never>(`
       DELETE FROM chain_prompts
       WHERE id = :id
-    `, [{ name: 'id', value: { longValue: parseInt(id, 10) } }]);
+    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
 
     log.info("Prompt deleted successfully", { id })
     timer({ status: "success", id })
@@ -1447,7 +1447,7 @@ export async function updatePromptPositionAction(
     // Find the prompt
     const promptResult = await executeSQL(
       `SELECT assistant_architect_id FROM chain_prompts WHERE id = :id`,
-      [{ name: 'id', value: { longValue: parseInt(id, 10) } }]
+      [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]
     )
 
     if (!promptResult || promptResult.length === 0) {
@@ -1481,7 +1481,7 @@ export async function updatePromptPositionAction(
       `UPDATE chain_prompts SET position = :position WHERE id = :id`,
       [
         { name: 'position', value: { longValue: position } },
-        { name: 'id', value: { longValue: parseInt(id, 10) } }
+        { name: 'id', value: { longValue: Number.parseInt(id, 10) } }
       ]
     )
 
@@ -1608,7 +1608,7 @@ export async function updatePromptResultAction(
     }
 
     updates.push(
-      { name: 'executionId', value: { longValue: parseInt(executionId, 10) } },
+      { name: 'executionId', value: { longValue: Number.parseInt(executionId, 10) } },
       { name: 'promptId', value: { longValue: promptId } }
     )
 
@@ -1665,7 +1665,7 @@ export async function approveAssistantArchitectAction(
       SET status = 'approved'::tool_status, updated_at = NOW()
       WHERE id = :id
       RETURNING id, name, description, status, image_path, user_id, created_at, updated_at
-    `, [{ name: 'id', value: { longValue: parseInt(id, 10) } }]);
+    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
     
     if (!updatedToolResult || updatedToolResult.length === 0) {
       return { isSuccess: false, message: "Tool not found" }
@@ -1676,7 +1676,7 @@ export async function approveAssistantArchitectAction(
     // Check if tool already exists in tools table
     const existingToolResult = await executeSQL<{ id: string }>(`
       SELECT id FROM tools WHERE assistant_architect_id = :id
-    `, [{ name: 'id', value: { longValue: parseInt(id, 10) } }]);
+    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
     
     let identifier = generateToolIdentifier(updatedTool.name);
     let finalToolId: string;
@@ -1691,7 +1691,7 @@ export async function approveAssistantArchitectAction(
         { name: 'identifier', value: { stringValue: identifier } },
         { name: 'name', value: { stringValue: updatedTool.name } },
         { name: 'description', value: { stringValue: updatedTool.description || '' } },
-        { name: 'id', value: { longValue: parseInt(id, 10) } }
+        { name: 'id', value: { longValue: Number.parseInt(id, 10) } }
       ]);
       finalToolId = existingToolResult[0].id as string;
     } else {
@@ -1713,7 +1713,7 @@ export async function approveAssistantArchitectAction(
         { name: 'identifier', value: { stringValue: identifier } },
         { name: 'name', value: { stringValue: updatedTool.name } },
         { name: 'description', value: { stringValue: updatedTool.description || '' } },
-        { name: 'assistantArchitectId', value: { longValue: parseInt(id, 10) } }
+        { name: 'assistantArchitectId', value: { longValue: Number.parseInt(id, 10) } }
       ]);
       finalToolId = newToolResult[0].id as string;
     }
@@ -1822,7 +1822,7 @@ export async function rejectAssistantArchitectAction(
       UPDATE assistant_architects
       SET status = 'rejected'::tool_status, updated_at = NOW()
       WHERE id = :id
-    `, [{ name: 'id', value: { longValue: parseInt(id, 10) } }]);
+    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
 
     log.info("Assistant architect rejected successfully", { id })
     timer({ status: "success", id })
@@ -1979,7 +1979,7 @@ export async function submitAssistantArchitectForApprovalAction(
       SELECT id, name, description, user_id, status
       FROM assistant_architects
       WHERE id = :id
-    `, [{ name: 'id', value: { longValue: parseInt(id, 10) } }]);
+    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
 
     if (!toolResult || toolResult.length === 0) {
       return { isSuccess: false, message: "Assistant not found" }
@@ -1999,10 +1999,10 @@ export async function submitAssistantArchitectForApprovalAction(
     const [inputFields, prompts] = await Promise.all([
       executeSQL<{ id: number }>(`
         SELECT id FROM tool_input_fields WHERE assistant_architect_id = :id
-      `, [{ name: 'id', value: { longValue: parseInt(id, 10) } }]),
+      `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]),
       executeSQL<{ id: number }>(`
         SELECT id FROM chain_prompts WHERE assistant_architect_id = :id
-      `, [{ name: 'id', value: { longValue: parseInt(id, 10) } }])
+      `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }])
     ]);
 
     if (!tool.name || !tool.description || inputFields.length === 0 || prompts.length === 0) {
@@ -2013,7 +2013,7 @@ export async function submitAssistantArchitectForApprovalAction(
       UPDATE assistant_architects
       SET status = 'pending_approval'::tool_status, updated_at = NOW()
       WHERE id = :id
-    `, [{ name: 'id', value: { longValue: parseInt(id, 10) } }]);
+    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
 
     log.info("Assistant architect submitted for approval", { id })
     timer({ status: "success", id })
@@ -2059,7 +2059,7 @@ export async function getExecutionResultsAction(
       JOIN users u ON te.user_id = u.id
       WHERE te.id = :executionId AND u.cognito_sub = :cognitoSub
     `, [
-      { name: 'executionId', value: { longValue: parseInt(executionId, 10) } },
+      { name: 'executionId', value: { longValue: Number.parseInt(executionId, 10) } },
       { name: 'cognitoSub', value: { stringValue: session.sub } }
     ]);
     
@@ -2079,7 +2079,7 @@ export async function getExecutionResultsAction(
       FROM prompt_results
       WHERE execution_id = :executionId
       ORDER BY started_at ASC
-    `, [{ name: 'executionId', value: { longValue: parseInt(executionId, 10) } }]);
+    `, [{ name: 'executionId', value: { longValue: Number.parseInt(executionId, 10) } }]);
     
     // Transform to match SelectPromptResult type - note: the DB schema has evolved
     // but the type definition hasn't been updated to match
@@ -2252,7 +2252,7 @@ export async function setPromptPositionsAction(
     // Verify permissions
     const toolResult = await executeSQL(
       `SELECT user_id FROM assistant_architects WHERE id = :id`,
-      [{ name: 'id', value: { longValue: parseInt(toolId, 10) } }]
+      [{ name: 'id', value: { longValue: Number.parseInt(toolId, 10) } }]
     )
 
     if (!toolResult || toolResult.length === 0) {
@@ -2273,7 +2273,7 @@ export async function setPromptPositionsAction(
         `UPDATE chain_prompts SET position = :position WHERE id = :id`,
         [
           { name: 'position', value: { longValue: position } },
-          { name: 'id', value: { longValue: parseInt(id, 10) } }
+          { name: 'id', value: { longValue: Number.parseInt(id, 10) } }
         ]
       )
     }
@@ -2343,11 +2343,11 @@ export async function getApprovedAssistantArchitectsForAdminAction(): Promise<
         const [inputFieldsResultRaw, promptsResultRaw] = await Promise.all([
           executeSQL(
             `SELECT id, assistant_architect_id, name, label, field_type, position, options, created_at, updated_at FROM tool_input_fields WHERE assistant_architect_id = :toolId ORDER BY position ASC`,
-            [{ name: 'toolId', value: { longValue: parseInt(toolId, 10) } }]
+            [{ name: 'toolId', value: { longValue: Number.parseInt(toolId, 10) } }]
           ),
           executeSQL(
             `SELECT id, assistant_architect_id, name, content, system_context, model_id, position, input_mapping, parallel_group, timeout_seconds, repository_ids, enabled_tools, created_at, updated_at FROM chain_prompts WHERE assistant_architect_id = :toolId ORDER BY position ASC`,
-            [{ name: 'toolId', value: { longValue: parseInt(toolId, 10) } }]
+            [{ name: 'toolId', value: { longValue: Number.parseInt(toolId, 10) } }]
           )
         ]);
         

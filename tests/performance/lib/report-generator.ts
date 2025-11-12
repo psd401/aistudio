@@ -4,8 +4,8 @@
  * Generates human-readable and machine-readable reports from aggregated metrics.
  */
 
-import { writeFileSync } from 'fs';
-import { join } from 'path';
+import { writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { AggregatedMetrics } from './metrics-collector';
 import type { PerformanceTargets } from '../config';
 
@@ -174,7 +174,7 @@ export class ReportGenerator {
     json: string;
     csv: string;
   } {
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const timestamp = new Date().toISOString().replace(/[.:]/g, '-');
     const baseName = `${options.testName}_${timestamp}`;
 
     // Generate markdown report

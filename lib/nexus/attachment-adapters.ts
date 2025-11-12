@@ -72,10 +72,10 @@ export class VisionImageAdapter implements AttachmentAdapter {
   private async fileToBase64DataURL(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onload = () => {
+      reader.addEventListener('load', () => {
         // FileReader result is already a data URL
         resolve(reader.result as string);
-      };
+      });
       reader.onerror = reject;
       reader.readAsDataURL(file);
     });
@@ -107,7 +107,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
 
   private sanitizeFileName(name: string): string {
     // Remove dangerous characters and limit length
-    return name.replace(/[^a-zA-Z0-9.-]/g, '_').substring(0, 255);
+    return name.replace(/[^\d.A-Za-z-]/g, '_').substring(0, 255);
   }
 }
 
@@ -207,7 +207,7 @@ export class PDFAttachmentAdapter implements AttachmentAdapter {
 
   private sanitizeFileName(name: string): string {
     // Remove dangerous characters and limit length
-    return name.replace(/[^a-zA-Z0-9.-]/g, '_').substring(0, 255);
+    return name.replace(/[^\d.A-Za-z-]/g, '_').substring(0, 255);
   }
 
   // Optional: Extract text from PDF using a library like pdf.js

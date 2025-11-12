@@ -67,7 +67,7 @@ export async function GET() {
       '__Secure-authjs.session-token.1',
     ];
     
-    cookiesToClear.forEach(cookieName => {
+    for (const cookieName of cookiesToClear) {
       response.cookies.set(cookieName, '', {
         expires: new Date(0),
         path: '/',
@@ -75,7 +75,7 @@ export async function GET() {
         sameSite: 'lax',
         secure: false
       });
-    });
+    }
     
     log.info("Federated signout successful");
     timer({ status: "success" });

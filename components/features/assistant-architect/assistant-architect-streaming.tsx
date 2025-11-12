@@ -74,7 +74,7 @@ function sanitizeImagePath(imagePath: string | null): string | null {
   const sanitized = imagePath.replace(/\.\./g, '').replace(/\//g, '')
 
   // Validate format (only allow alphanumeric, dash, underscore, and common image extensions)
-  const validPattern = /^[a-zA-Z0-9_-]+\.(png|jpg|jpeg|svg|webp)$/
+  const validPattern = /^[\w-]+\.(png|jpg|jpeg|svg|webp)$/
 
   if (!validPattern.test(sanitized)) {
     return null
@@ -89,7 +89,7 @@ function sanitizeImagePath(imagePath: string | null): string | null {
  * @returns Sanitized label or empty string if invalid
  */
 function sanitizeOptionLabel(label: string): string {
-  const SAFE_LABEL_REGEX = /^[a-zA-Z0-9\s\-_.,()]+$/
+  const SAFE_LABEL_REGEX = /^[\s\w(),.-]+$/
   return SAFE_LABEL_REGEX.test(label) ? label.trim() : ''
 }
 
@@ -149,13 +149,13 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
           const parts = []
 
           if (Array.isArray(message.content)) {
-            message.content.forEach(contentPart => {
+            for (const contentPart of message.content) {
               if (contentPart.type === 'text') {
                 parts.push({ type: 'text', text: contentPart.text })
               } else {
                 parts.push(contentPart)
               }
-            })
+            }
           } else if (typeof message.content === 'string') {
             parts.push({ type: 'text', text: message.content })
           }

@@ -2,7 +2,7 @@
  * Test data factories and utilities for execution result download tests
  */
 
-import { randomInt } from 'crypto'
+import { randomInt } from 'node:crypto'
 
 export interface MockExecutionResult {
   id: number
@@ -378,7 +378,7 @@ export const TestUtils = {
    */
   validateFilenameFormat(filename: string): boolean {
     // Should match pattern: {schedule-name}-{YYYY-MM-DD}-{HHMM}.md
-    const pattern = /^[a-z0-9-]+-\d{4}-\d{2}-\d{2}-\d{4}\.md$/
+    const pattern = /^[\da-z-]+-\d{4}-\d{2}-\d{2}-\d{4}\.md$/
     return pattern.test(filename)
   },
 

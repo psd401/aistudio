@@ -81,7 +81,7 @@ export interface AddDocumentWithPresignedUrlInput {
 function sanitizeFilename(filename: string): string {
   // Remove any directory components and special characters
   return filename
-    .replace(/[^a-zA-Z0-9.-]/g, '_') // Replace special chars with underscore
+    .replace(/[^\d.A-Za-z-]/g, '_') // Replace special chars with underscore
     .replace(/\.{2,}/g, '.') // Replace multiple dots with single dot
     .replace(/^\.+|\.+$/g, '') // Remove leading/trailing dots
     .slice(0, 255); // Limit length

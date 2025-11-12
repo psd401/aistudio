@@ -44,7 +44,7 @@ export async function createJobAction(
     }
 
     // Convert userId to number if it's a string
-    const userIdNum = typeof job.userId === 'string' ? parseInt(job.userId, 10) : job.userId;
+    const userIdNum = typeof job.userId === 'string' ? Number.parseInt(job.userId, 10) : job.userId;
     if (isNaN(userIdNum)) {
       log.warn("Invalid userId provided", { userId: job.userId })
       return { isSuccess: false, message: "Invalid userId provided." };
@@ -112,7 +112,7 @@ export async function getJobAction(id: string): Promise<ActionState<SelectJob>> 
     
     log.debug("User authenticated", { userId: session.sub })
     
-    const idNum = parseInt(id, 10);
+    const idNum = Number.parseInt(id, 10);
     if (isNaN(idNum)) {
       log.warn("Invalid job ID provided", { jobId: id })
       return { isSuccess: false, message: "Invalid job ID" };
@@ -167,7 +167,7 @@ export async function getUserJobsAction(userId: string): Promise<ActionState<Sel
     
     log.debug("User authenticated", { userId: session.sub })
     
-    const userIdNum = parseInt(userId, 10);
+    const userIdNum = Number.parseInt(userId, 10);
     if (isNaN(userIdNum)) {
       log.warn("Invalid user ID provided", { userId })
       return { isSuccess: false, message: "Invalid user ID" };
@@ -221,7 +221,7 @@ export async function updateJobAction(
     
     log.debug("User authenticated", { userId: session.sub })
     
-    const idNum = parseInt(id, 10);
+    const idNum = Number.parseInt(id, 10);
     if (isNaN(idNum)) {
       log.warn("Invalid job ID provided", { jobId: id })
       return { isSuccess: false, message: "Invalid job ID" };
@@ -313,7 +313,7 @@ export async function deleteJobAction(id: string): Promise<ActionState<void>> {
     
     log.debug("User authenticated", { userId: session.sub })
     
-    const idNum = parseInt(id, 10);
+    const idNum = Number.parseInt(id, 10);
     if (isNaN(idNum)) {
       log.warn("Invalid job ID provided", { jobId: id })
       return { isSuccess: false, message: "Invalid job ID" };

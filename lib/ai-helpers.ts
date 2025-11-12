@@ -248,9 +248,9 @@ export async function getEmbeddingConfig(): Promise<EmbeddingConfig> {
   return {
     provider: settings['EMBEDDING_MODEL_PROVIDER'],
     modelId: settings['EMBEDDING_MODEL_ID'],
-    dimensions: parseInt(settings['EMBEDDING_DIMENSIONS'] || '1536', 10),
-    maxTokens: parseInt(settings['EMBEDDING_MAX_TOKENS'] || '8192', 10),
-    batchSize: parseInt(settings['EMBEDDING_BATCH_SIZE'] || '100', 10)
+    dimensions: Number.parseInt(settings['EMBEDDING_DIMENSIONS'] || '1536', 10),
+    maxTokens: Number.parseInt(settings['EMBEDDING_MAX_TOKENS'] || '8192', 10),
+    batchSize: Number.parseInt(settings['EMBEDDING_BATCH_SIZE'] || '100', 10)
   }
 }
 
@@ -395,9 +395,9 @@ export function cosineSimilarity(embedding1: number[], embedding2: number[]): nu
   let norm1 = 0
   let norm2 = 0
   
-  for (let i = 0; i < embedding1.length; i++) {
-    dotProduct += embedding1[i] * embedding2[i]
-    norm1 += embedding1[i] * embedding1[i]
+  for (const [i, element] of embedding1.entries()) {
+    dotProduct += element * embedding2[i]
+    norm1 += element * element
     norm2 += embedding2[i] * embedding2[i]
   }
   

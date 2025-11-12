@@ -18,7 +18,7 @@ export const maxDuration = 900;
 const MAX_INPUT_SIZE_BYTES = 100000; // 100KB max input size
 const MAX_PROMPT_CHAIN_LENGTH = 20; // Max 20 prompts per execution
 const MAX_RESPONSE_SIZE_BYTES = 10485760; // 10MB max response size
-const MAX_ACCUMULATED_CONTEXT_MESSAGES = parseInt(
+const MAX_ACCUMULATED_CONTEXT_MESSAGES = Number.parseInt(
   process.env.MAX_CONTEXT_MESSAGES || '10',
   10
 ); // Keep last 10 messages (5 user/assistant exchanges) - configurable via env
@@ -951,7 +951,7 @@ function substituteVariables(
   mapping: Record<string, string>,
   currentPromptId?: number
 ): string {
-  return content.replace(/\{\{(\w+)\}\}/g, (match, varName) => {
+  return content.replace(/{{(\w+)}}/g, (match, varName) => {
     // 1. Check if there's an input mapping for this variable
     if (mapping[varName]) {
       const mappedPath = mapping[varName];
@@ -959,7 +959,7 @@ function substituteVariables(
       // Handle prompt output references: "prompt_X.output"
       const promptMatch = mappedPath.match(/^prompt_(\d+)\.output$/);
       if (promptMatch) {
-        const promptId = parseInt(promptMatch[1], 10);
+        const promptId = Number.parseInt(promptMatch[1], 10);
 
         // Validate prompt execution order - referenced prompt must have already executed
         if (!previousOutputs.has(promptId)) {

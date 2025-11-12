@@ -86,7 +86,7 @@ export async function createFreshserviceTicketAction(
     }
     
     // Validate domain format to prevent SSRF attacks
-    const domainRegex = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9]$/
+    const domainRegex = /^[\dA-Za-z][\dA-Za-z-]{0,61}[\dA-Za-z]$/
     if (!domainRegex.test(settings.domain)) {
       log.error("Invalid Freshservice domain format", { domain: sanitizeForLogging({ domain: settings.domain }) })
       throw ErrorFactories.validationFailed([
@@ -169,15 +169,15 @@ export async function createFreshserviceTicketAction(
         subject: title,
         description: description,
         email: session.email || 'noreply@psd401.org',
-        priority: parseInt(settings.priority),
-        status: parseInt(settings.status),
-        department_id: parseInt(settings.departmentId),
+        priority: Number.parseInt(settings.priority),
+        status: Number.parseInt(settings.status),
+        department_id: Number.parseInt(settings.departmentId),
         type: settings.ticketType
       }
       
       // Add workspace_id for JSON requests
       if (settings.workspaceId) {
-        ticketData.workspace_id = parseInt(settings.workspaceId)
+        ticketData.workspace_id = Number.parseInt(settings.workspaceId)
       }
       
       log.info("Calling Freshservice API with JSON", {
@@ -249,7 +249,7 @@ export async function createFreshserviceTicketAction(
     }
 
     // Robust ticket ID validation - handle both string and number formats
-    const ticketId = typeof ticketData.id === 'string' ? parseInt(ticketData.id, 10) : ticketData.id
+    const ticketId = typeof ticketData.id === 'string' ? Number.parseInt(ticketData.id, 10) : ticketData.id
     if (!ticketId || isNaN(ticketId) || ticketId <= 0) {
       log.error("Invalid ticket ID in response", {
         rawTicketId: ticketData.id,

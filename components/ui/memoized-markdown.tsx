@@ -83,7 +83,7 @@ const MemoizedMarkdownBlock = memo(
     React.useEffect(() => {
       if (block.type === 'code' && onCodeRender) {
         // Extract code content from the raw markdown
-        const codeMatch = block.content.match(/```[\s\S]*?\n([\s\S]*?)```/)
+        const codeMatch = block.content.match(/```[\S\s]*?\n([\S\s]*?)```/)
         const code = codeMatch ? codeMatch[1] : block.content
         onCodeRender(block.language, code)
       }
@@ -145,8 +145,7 @@ export const MemoizedMarkdown = memo(
       let codeBlockStartIndex = -1
       const processedLines: string[] = []
       
-      for (let i = 0; i < lines.length; i++) {
-        const line = lines[i]
+      for (const [i, line] of lines.entries()) {
         
         // Check for code fence
         if (line.startsWith('```')) {

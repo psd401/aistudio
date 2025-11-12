@@ -83,11 +83,11 @@ export async function GET(
     const offsetParam = url.searchParams.get('offset') || '0'
     
     // Validate and bound limit parameter (1-1000)
-    const parsedLimit = parseInt(limitParam, 10)
+    const parsedLimit = Number.parseInt(limitParam, 10)
     const limit = Math.min(Math.max(isNaN(parsedLimit) ? 50 : parsedLimit, 1), 1000)
     
     // Validate and bound offset parameter (0 or positive)
-    const parsedOffset = parseInt(offsetParam, 10)
+    const parsedOffset = Number.parseInt(offsetParam, 10)
     const offset = Math.max(isNaN(parsedOffset) ? 0 : parsedOffset, 0)
     
     // Additional validation to prevent potential abuse

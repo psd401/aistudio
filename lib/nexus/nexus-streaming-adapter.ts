@@ -55,7 +55,7 @@ export function createNexusStreamingAdapter(options: NexusStreamingAdapterOption
 
           // Process message content
           if (Array.isArray(message.content)) {
-            message.content.forEach(contentPart => {
+            for (const contentPart of message.content) {
               // Handle different content part types from assistant-ui
               if (contentPart.type === 'text') {
                 parts.push({ type: 'text', text: contentPart.text })
@@ -67,7 +67,7 @@ export function createNexusStreamingAdapter(options: NexusStreamingAdapterOption
                 // Pass through other types
                 parts.push(contentPart)
               }
-            })
+            }
           } else if (typeof message.content === 'string') {
             // Simple string content
             parts.push({ type: 'text', text: message.content })
@@ -76,9 +76,9 @@ export function createNexusStreamingAdapter(options: NexusStreamingAdapterOption
           // Process attachments and merge their content into parts
           const messageWithAttachments = message as { attachments?: Array<{ content?: Array<{ type: string; image?: string; url?: string; mediaType?: string }> }> }
           if (Array.isArray(messageWithAttachments.attachments)) {
-            messageWithAttachments.attachments.forEach((attachment) => {
+            for (const attachment of messageWithAttachments.attachments) {
               if (Array.isArray(attachment.content)) {
-                attachment.content.forEach((attachmentPart) => {
+                for (const attachmentPart of attachment.content) {
                   if (attachmentPart.type === 'image' && attachmentPart.image) {
                     parts.push({ type: 'image', image: attachmentPart.image })
                   } else if (attachmentPart.type === 'file' && attachmentPart.url) {
@@ -87,9 +87,9 @@ export function createNexusStreamingAdapter(options: NexusStreamingAdapterOption
                     // Pass through other attachment content
                     parts.push(attachmentPart)
                   }
-                })
+                }
               }
-            })
+            }
           }
 
           return {

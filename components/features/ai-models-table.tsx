@@ -77,7 +77,7 @@ const ModelForm = React.memo(function ModelForm({
     setModelData({ ...modelData, capabilitiesList: capabilities });
     
   const handleMaxTokensChange = (e: React.ChangeEvent<HTMLInputElement>) => 
-    setModelData({ ...modelData, maxTokens: parseInt(e.target.value) || 4096 });
+    setModelData({ ...modelData, maxTokens: Number.parseInt(e.target.value) || 4096 });
     
   const handleActiveChange = (checked: boolean) => 
     setModelData({ ...modelData, active: checked });
@@ -92,7 +92,7 @@ const ModelForm = React.memo(function ModelForm({
       setModelData({ ...modelData, inputCostPer1kTokens: null });
       return;
     }
-    const parsed = parseFloat(value);
+    const parsed = Number.parseFloat(value);
     if (!isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
       setModelData({ ...modelData, inputCostPer1kTokens: parsed });
     }
@@ -104,7 +104,7 @@ const ModelForm = React.memo(function ModelForm({
       setModelData({ ...modelData, outputCostPer1kTokens: null });
       return;
     }
-    const parsed = parseFloat(value);
+    const parsed = Number.parseFloat(value);
     if (!isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
       setModelData({ ...modelData, outputCostPer1kTokens: parsed });
     }
@@ -116,7 +116,7 @@ const ModelForm = React.memo(function ModelForm({
       setModelData({ ...modelData, cachedInputCostPer1kTokens: null });
       return;
     }
-    const parsed = parseFloat(value);
+    const parsed = Number.parseFloat(value);
     if (!isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
       setModelData({ ...modelData, cachedInputCostPer1kTokens: parsed });
     }
@@ -129,7 +129,7 @@ const ModelForm = React.memo(function ModelForm({
       setModelData({ ...modelData, averageLatencyMs: null });
       return;
     }
-    const parsed = parseInt(value);
+    const parsed = Number.parseInt(value);
     if (!isNaN(parsed) && parsed >= 0 && parsed <= 30000) {
       setModelData({ ...modelData, averageLatencyMs: parsed });
     }
@@ -141,7 +141,7 @@ const ModelForm = React.memo(function ModelForm({
       setModelData({ ...modelData, maxConcurrency: null });
       return;
     }
-    const parsed = parseInt(value);
+    const parsed = Number.parseInt(value);
     if (!isNaN(parsed) && parsed >= 1 && parsed <= 1000) {
       setModelData({ ...modelData, maxConcurrency: parsed });
     }

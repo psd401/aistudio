@@ -17,7 +17,7 @@ export async function POST(
   const log = createLogger({ requestId, route: "api.admin.models.replace" });
   
   const { id } = await params;
-  const targetModelId = parseInt(id);
+  const targetModelId = Number.parseInt(id);
   log.info("POST /api/admin/models/[id]/replace - Starting model replacement", { targetModelId });
   
   // Read request body as text first for error logging

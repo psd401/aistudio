@@ -12,7 +12,7 @@ export async function GET(
   const log = createLogger({ requestId, route: "api.admin.models.references" });
   
   const { id } = await params;
-  const modelId = parseInt(id);
+  const modelId = Number.parseInt(id);
   log.info("GET /api/admin/models/[id]/references - Checking model references", { modelId });
   
   try {

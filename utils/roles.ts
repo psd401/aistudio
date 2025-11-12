@@ -215,7 +215,7 @@ export async function getHighestUserRole(userId: string): Promise<string | null>
     log.debug("Getting highest user role", { userId });
     
     const userRoles = await getUserRoles(userId);
-    if (!userRoles.length) {
+    if (userRoles.length === 0) {
       log.info("User has no roles", { userId });
       timer({ status: "success", result: "no_roles" });
       return null;

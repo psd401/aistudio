@@ -88,7 +88,7 @@ export const AssistantArchitectChat = memo(function AssistantArchitectChat({
     }
     
     // SAFEGUARD: Ensure numeric execution ID
-    const numericExecId = typeof execId === 'number' ? execId : parseInt(String(execId), 10);
+    const numericExecId = typeof execId === 'number' ? execId : Number.parseInt(String(execId), 10);
     if (isNaN(numericExecId) || numericExecId <= 0) {
       console.error('[assistant-chat] Non-numeric or invalid execution ID:', execId);
       return null;
@@ -129,7 +129,7 @@ export const AssistantArchitectChat = memo(function AssistantArchitectChat({
         console.error('[assistant-chat] Invalid execution ID for API call:', execId);
       } else {
         // Ensure numeric ID
-        const numId = typeof execId === 'number' ? execId : parseInt(String(execId), 10);
+        const numId = typeof execId === 'number' ? execId : Number.parseInt(String(execId), 10);
         if (!isNaN(numId) && numId > 0) {
           validExecutionId = numId;
         } else {
@@ -158,7 +158,7 @@ export const AssistantArchitectChat = memo(function AssistantArchitectChat({
       // Get conversation ID from header if this is a new conversation
       const conversationIdHeader = response.headers.get('X-Conversation-Id')
       if (!currentConversationId && conversationIdHeader) {
-        const newConvId = parseInt(conversationIdHeader, 10)
+        const newConvId = Number.parseInt(conversationIdHeader, 10)
         if (!Number.isNaN(newConvId)) {
           setIsNewConversation(true);
           conversationIdRef.current = newConvId;

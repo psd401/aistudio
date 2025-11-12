@@ -16,7 +16,7 @@ export default async function EditRepositoryPage({ params }: EditRepositoryPageP
   }
 
   const { id } = await params
-  const repositoryId = parseInt(id)
+  const repositoryId = Number.parseInt(id)
   if (isNaN(repositoryId)) {
     notFound()
   }

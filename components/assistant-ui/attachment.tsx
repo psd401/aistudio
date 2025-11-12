@@ -50,7 +50,7 @@ const useAttachmentSrc = () => {
     useShallow((a): { file?: File; src?: string } => {
       if (a.type !== "image") return {};
       if (a.file) return { file: a.file };
-      const src = a.content?.filter((c) => c.type === "image")[0]?.image;
+      const src = a.content?.find((c) => c.type === "image")?.image;
       if (!src) return {};
       return { src };
     }),

@@ -61,12 +61,12 @@ export const MermaidDiagram: FC<MermaidDiagramProps> = ({
   // Observe theme changes
   useEffect(() => {
     const observer = new MutationObserver((mutations) => {
-      mutations.forEach((mutation) => {
+      for (const mutation of mutations) {
         if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
           const isDark = document.documentElement.classList.contains('dark');
           setTheme(isDark ? 'dark' : 'default');
         }
-      });
+      }
     });
 
     // Set initial theme

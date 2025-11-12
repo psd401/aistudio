@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
     }
     
     // Sanitize filename for S3 key
-    const sanitizedFileName = job.fileName.replace(/[^a-zA-Z0-9.-]/g, '_');
+    const sanitizedFileName = job.fileName.replace(/[^\d.A-Za-z-]/g, '_');
     
     // Complete multipart upload in S3
     await completeMultipartUpload(jobId, sanitizedFileName, uploadId, parts);

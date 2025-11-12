@@ -261,7 +261,7 @@ async function performTokenRefresh(
     }
 
     const authResult = response.AuthenticationResult
-    const defaultTokenLifetimeSeconds = parseInt(process.env.COGNITO_ACCESS_TOKEN_LIFETIME_SECONDS || "3600")
+    const defaultTokenLifetimeSeconds = Number.parseInt(process.env.COGNITO_ACCESS_TOKEN_LIFETIME_SECONDS || "3600")
     const newExpiresAt = Date.now() + ((authResult.ExpiresIn || defaultTokenLifetimeSeconds) * 1000)
 
     if (!authResult.AccessToken || !authResult.IdToken) {

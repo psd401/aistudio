@@ -215,14 +215,14 @@ export class CostOptimizer {
       
       // Get top models by cost
       const modelCosts = new Map<string, { cost: number; tokens: number }>();
-      usageResult.forEach((row) => {
+      for (const row of usageResult) {
         const key = `${row.provider}:${row.model_id}`;
         const existing = modelCosts.get(key) || { cost: 0, tokens: 0 };
         modelCosts.set(key, {
           cost: existing.cost + (row.total_cost || 0),
           tokens: existing.tokens + (row.total_tokens || 0)
         });
-      });
+      }
       
       const topModels = Array.from(modelCosts.entries())
         .map(([key, data]) => {
@@ -322,9 +322,9 @@ export class CostOptimizer {
       
       // Update cache
       this.modelCache.clear();
-      models.forEach((model) => {
+      for (const model of models) {
         this.modelCache.set(`${model.provider}:${model.modelId}`, model);
-      });
+      }
       this.lastCacheRefresh = Date.now();
       
       return models;

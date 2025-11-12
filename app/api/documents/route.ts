@@ -48,7 +48,7 @@ export async function GET(request: NextRequest) {
   try {
     // If documentId is provided, fetch single document
     if (documentId) {
-      const document = await getDocumentById({ id: parseInt(documentId, 10) });
+      const document = await getDocumentById({ id: Number.parseInt(documentId, 10) });
       
       if (!document) {
         log.warn("Document not found", { documentId });
@@ -112,7 +112,7 @@ export async function GET(request: NextRequest) {
     
     // If conversationId is provided, fetch documents for conversation
     if (conversationId) {
-      const parsedConversationId = parseInt(conversationId, 10);
+      const parsedConversationId = Number.parseInt(conversationId, 10);
       
       if (isNaN(parsedConversationId)) {
         log.warn("Invalid conversation ID", { conversationId });
@@ -235,7 +235,7 @@ export async function DELETE(request: NextRequest) {
     );
   }
 
-  const docId = parseInt(documentId, 10);
+  const docId = Number.parseInt(documentId, 10);
   if (isNaN(docId)) {
     log.warn("Invalid document ID format", { documentId });
     timer({ status: "error", reason: "invalid_id" });

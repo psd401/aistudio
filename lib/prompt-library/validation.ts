@@ -83,7 +83,7 @@ export const createTagSchema = z.object({
   name: z.string()
     .min(1, 'Tag name is required')
     .max(50, 'Tag name must be 50 characters or less')
-    .regex(/^[a-zA-Z0-9\s-]+$/, 'Tag name can only contain letters, numbers, spaces, and hyphens')
+    .regex(/^[\d\sA-Za-z-]+$/, 'Tag name can only contain letters, numbers, spaces, and hyphens')
 })
 
 export type CreateTagInput = z.infer<typeof createTagSchema>

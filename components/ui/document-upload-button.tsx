@@ -170,7 +170,7 @@ export default function DocumentUploadButton({
         
         // Enhanced error reporting with status code if available
         const status = error instanceof Error && error.message.includes('status:') 
-          ? parseInt(error.message.split('status:')[1]) 
+          ? Number.parseInt(error.message.split('status:')[1]) 
           : undefined;
         onError?.({ message: errorMessage, status })
         

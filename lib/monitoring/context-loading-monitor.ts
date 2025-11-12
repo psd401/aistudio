@@ -62,7 +62,7 @@ export class ContextLoadingMonitor {
     }
 
     if (typeof executionId === 'string' && executionId !== 'streaming') {
-      const parsed = parseInt(executionId, 10);
+      const parsed = Number.parseInt(executionId, 10);
       if (isNaN(parsed)) {
         errors.push(`ExecutionId "${executionId}" cannot be parsed to number`);
       } else if (parsed <= 0) {

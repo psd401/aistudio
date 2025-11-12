@@ -7,7 +7,7 @@ import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 // Escape special regex characters to prevent regex injection
 // Matches the behavior of lodash's escapeRegExp
 function escapeRegExp(string: string): string {
-  return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return string.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
 }
 
 export async function POST(request: NextRequest) {
@@ -58,7 +58,7 @@ export async function POST(request: NextRequest) {
     log.debug("Processing query", { conversationId, queryLength: query.length });
 
     // Get documents for the conversation
-    const documents = await getDocumentsByConversationId({ conversationId: parseInt(conversationId) });
+    const documents = await getDocumentsByConversationId({ conversationId: Number.parseInt(conversationId) });
     
     if (documents.length === 0) {
       log.info("No documents found for conversation", { conversationId });

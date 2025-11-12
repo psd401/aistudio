@@ -345,7 +345,7 @@ export async function POST(req: Request) {
 
       // Check if message has parts (new format)
       if (messageWithContent.parts && Array.isArray(messageWithContent.parts)) {
-        messageWithContent.parts.forEach((part) => {
+        for (const part of messageWithContent.parts) {
           const typedPart = part as Record<string, unknown>;
           if (part.type === 'text' && typeof typedPart.text === 'string') {
             // Sanitize text before adding to arrays to prevent JSONB parse errors
@@ -361,7 +361,7 @@ export async function POST(req: Request) {
               }
             });
           }
-        });
+        }
       }
       // Fallback to legacy content format
       else if (messageWithContent.content) {
@@ -371,7 +371,7 @@ export async function POST(req: Request) {
           userContent = sanitizedText;
           serializableParts = [{ type: 'text', text: sanitizedText }];
         } else if (Array.isArray(messageWithContent.content)) {
-          messageWithContent.content.forEach((part) => {
+          for (const part of messageWithContent.content) {
             if (part.type === 'text' && part.text) {
               // Sanitize text before adding to arrays to prevent JSONB parse errors
               const sanitizedText = sanitizeTextForDatabase(part.text);
@@ -385,7 +385,7 @@ export async function POST(req: Request) {
                 }
               });
             }
-          });
+          }
         }
       }
 

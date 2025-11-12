@@ -264,7 +264,7 @@ function validateScheduleConfig(config: ScheduleConfig): { isValid: boolean; err
   }
 
   // Validate time format (HH:MM)
-  const timeRegex = /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/
+  const timeRegex = /^([01]?\d|2[0-3]):[0-5]\d$/
   if (!timeRegex.test(config.time)) {
     errors.push('Invalid time format. Must be HH:MM (24-hour format)')
   }
@@ -292,7 +292,8 @@ function validateScheduleConfig(config: ScheduleConfig): { isValid: boolean; err
       const trimmedCron = config.cron.trim()
 
       // First, ensure the cron string only contains allowed characters
-      if (!/^[0-9*\-/,\s]+$/.test(trimmedCron)) {
+      // eslint-disable-next-line no-useless-escape
+      if (!/^[\d\s*,/\-]+$/.test(trimmedCron)) {
         errors.push('Cron expression contains invalid characters')
       } else {
         const cronFields = trimmedCron.split(/\s+/)
@@ -304,28 +305,28 @@ function validateScheduleConfig(config: ScheduleConfig): { isValid: boolean; err
           // Validate each field individually to prevent bypass attempts
           const [minute, hour, day, month, dayOfWeek] = cronFields
 
-          // Validate minute field (0-59)
-          if (!/^(\*|([0-5]?\d)(-([0-5]?\d))?(\/\d+)?)$/.test(minute)) {
+          // Validate minute field (0-59) - ReDoS-safe pattern
+          if (!/^\*$|^[0-5]?\d$|^[0-5]?\d-[0-5]?\d$|^[0-5]?\d\/\d+$|^\*\/\d+$/.test(minute)) {
             errors.push('Invalid minute field in cron expression')
           }
 
-          // Validate hour field (0-23)
-          if (!/^(\*|([01]?\d|2[0-3])(-([01]?\d|2[0-3]))?(\/\d+)?)$/.test(hour)) {
+          // Validate hour field (0-23) - ReDoS-safe pattern
+          if (!/^\*$|^(?:[01]?\d|2[0-3])$|^(?:[01]?\d|2[0-3])-(?:[01]?\d|2[0-3])$|^(?:[01]?\d|2[0-3])\/\d+$|^\*\/\d+$/.test(hour)) {
             errors.push('Invalid hour field in cron expression')
           }
 
-          // Validate day field (1-31)
-          if (!/^(\*|([12]?\d|3[01])(-([12]?\d|3[01]))?(\/\d+)?)$/.test(day)) {
+          // Validate day field (1-31) - ReDoS-safe pattern
+          if (!/^\*$|^(?:[12]?\d|3[01])$|^(?:[12]?\d|3[01])-(?:[12]?\d|3[01])$|^(?:[12]?\d|3[01])\/\d+$|^\*\/\d+$/.test(day)) {
             errors.push('Invalid day field in cron expression')
           }
 
-          // Validate month field (1-12)
-          if (!/^(\*|([1-9]|1[0-2])(-([1-9]|1[0-2]))?(\/\d+)?)$/.test(month)) {
+          // Validate month field (1-12) - ReDoS-safe pattern
+          if (!/^\*$|^(?:[1-9]|1[0-2])$|^(?:[1-9]|1[0-2])-(?:[1-9]|1[0-2])$|^(?:[1-9]|1[0-2])\/\d+$|^\*\/\d+$/.test(month)) {
             errors.push('Invalid month field in cron expression')
           }
 
-          // Validate day-of-week field (0-6)
-          if (!/^(\*|([0-6])(-([0-6]))?(\/\d+)?)$/.test(dayOfWeek)) {
+          // Validate day-of-week field (0-6) - ReDoS-safe pattern
+          if (!/^\*$|^[0-6]$|^[0-6]-[0-6]$|^[0-6]\/\d+$|^\*\/\d+$/.test(dayOfWeek)) {
             errors.push('Invalid day-of-week field in cron expression')
           }
         }

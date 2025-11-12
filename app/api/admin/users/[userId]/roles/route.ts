@@ -19,7 +19,7 @@ export async function GET(
   
   try {
     const params = await context.params;
-    const userId = parseInt(params.userId, 10);
+    const userId = Number.parseInt(params.userId, 10);
     
     if (isNaN(userId)) {
       log.warn("Invalid user ID", { userIdString: params.userId });
@@ -76,7 +76,7 @@ export async function PUT(
   
   try {
     const params = await context.params;
-    const userId = parseInt(params.userId, 10);
+    const userId = Number.parseInt(params.userId, 10);
     
     if (isNaN(userId)) {
       log.warn("Invalid user ID", { userIdString: params.userId });

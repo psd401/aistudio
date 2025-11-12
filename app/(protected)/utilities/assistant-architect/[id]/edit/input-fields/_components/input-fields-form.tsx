@@ -32,7 +32,7 @@ const baseFormSchema = z.object({
     .string()
     .min(1, "Name is required")
     .max(24, "Name must be 24 characters or less")
-    .regex(/^[a-z0-9_]+$/, "Name must be a single word, lowercase, and only contain letters, numbers, or underscores (no spaces or special characters)"),
+    .regex(/^[\d_a-z]+$/, "Name must be a single word, lowercase, and only contain letters, numbers, or underscores (no spaces or special characters)"),
   label: z.string().min(1, "Label is required"),
   fieldType: z.enum(["short_text", "long_text", "select", "multi_select", "file_upload"]),
   position: z.number().int().min(0),
@@ -305,7 +305,7 @@ export function InputFieldsForm({
                       type="number"
                       min="0"
                       {...field}
-                      onChange={(e) => field.onChange(parseInt(e.target.value))}
+                      onChange={(e) => field.onChange(Number.parseInt(e.target.value))}
                     />
                   </FormControl>
                   <FormMessage />

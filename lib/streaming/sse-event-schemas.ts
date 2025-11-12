@@ -468,7 +468,7 @@ export function generateValidationErrorMessage(result: ValidationResult): string
 
   if (result.error.issues.length > 0) {
     message += '\n\nIssues:'
-    result.error.issues.forEach(issue => {
+    for (const issue of result.error.issues) {
       const path = issue.path.length > 0 ? issue.path.join('.') : 'root'
       message += `\n  - ${path}: ${issue.message}`
       if (issue.expected) {
@@ -477,7 +477,7 @@ export function generateValidationErrorMessage(result: ValidationResult): string
       if (issue.received) {
         message += ` (received: ${issue.received})`
       }
-    })
+    }
   }
 
   if (result.error.hint) {

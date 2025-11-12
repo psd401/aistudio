@@ -8,17 +8,16 @@ export function collectEnabledToolsFromPrompts(prompts: SelectChainPrompt[]): st
   const allTools = new Set<string>();
 
   // Sort prompts by position to ensure correct execution order
-  prompts
-    .sort((a, b) => (a.position || 0) - (b.position || 0))
-    .forEach(prompt => {
+  for (const prompt of prompts
+    .sort((a, b) => (a.position || 0) - (b.position || 0))) {
       if (prompt.enabledTools && Array.isArray(prompt.enabledTools)) {
-        prompt.enabledTools.forEach(tool => {
+        for (const tool of prompt.enabledTools) {
           if (typeof tool === 'string' && tool.trim()) {
             allTools.add(tool.trim());
           }
-        });
+        }
       }
-    });
+    }
 
   return Array.from(allTools);
 }
@@ -40,7 +39,7 @@ export function getToolDisplayName(toolName: string): string {
     'calculator': 'Calculator'
   };
 
-  return toolDisplayNames[toolName] || toolName.charAt(0).toUpperCase() + toolName.slice(1).replace(/[-_]/g, ' ');
+  return toolDisplayNames[toolName] || toolName.charAt(0).toUpperCase() + toolName.slice(1).replace(/[_-]/g, ' ');
 }
 
 /**
@@ -56,7 +55,7 @@ export function sanitizeToolName(tool: string): string | null {
 
   // Allow alphanumeric characters, hyphens, and underscores
   // Must start with a letter
-  if (/^[a-zA-Z][a-zA-Z0-9\-_]*$/.test(sanitizedTool)) {
+  if (/^[A-Za-z][\w-]*$/.test(sanitizedTool)) {
     return sanitizedTool;
   }
 
@@ -71,18 +70,17 @@ export function collectAndSanitizeEnabledTools(prompts: SelectChainPrompt[]): st
   const allTools = new Set<string>();
 
   // Sort prompts by position to ensure correct execution order
-  prompts
-    .sort((a, b) => (a.position || 0) - (b.position || 0))
-    .forEach(prompt => {
+  for (const prompt of prompts
+    .sort((a, b) => (a.position || 0) - (b.position || 0))) {
       if (prompt.enabledTools && Array.isArray(prompt.enabledTools)) {
-        prompt.enabledTools.forEach(tool => {
+        for (const tool of prompt.enabledTools) {
           const sanitizedTool = sanitizeToolName(tool);
           if (sanitizedTool) {
             allTools.add(sanitizedTool);
           }
-        });
+        }
       }
-    });
+    }
 
   return Array.from(allTools);
 }
