@@ -201,14 +201,11 @@ async function performTokenRefresh(
     })
 
     // Input validation
-    // CodeQL false positive: These validations PROTECT sensitive actions by rejecting invalid input
-    // lgtm[js/user-controlled-bypass]
     if (!params.refreshToken || typeof params.refreshToken !== 'string' || params.refreshToken.length < 10) {
       log.warn("Invalid refresh token provided", { tokenSub: params.tokenSub })
       throw ErrorFactories.validationFailed([{ field: 'refreshToken', message: 'Invalid refresh token', value: params.refreshToken }])
     }
 
-    // lgtm[js/user-controlled-bypass]
     if (!params.tokenSub || typeof params.tokenSub !== 'string') {
       log.warn("Invalid token sub provided")
       throw ErrorFactories.validationFailed([{ field: 'tokenSub', message: 'Invalid token sub', value: params.tokenSub }])

@@ -276,7 +276,7 @@ export function createLogger(context: LogContext): Logger {
       const metaData = meta ? sanitizeForLogger(meta) as Record<string, unknown> : {}
       // Serialize to JSON and parse to break taint flow completely - prevents log injection
       const untaintedData = JSON.parse(JSON.stringify({ ...contextData, ...metaData }))
-      const untaintedMessage = String(safeMessage).replace(/[\n\r]/g, ' ')
+      const untaintedMessage = JSON.parse(JSON.stringify(String(safeMessage).replace(/[\n\r]/g, ' ')))
       logger.info(untaintedMessage, untaintedData)
     },
     warn: (message: string, meta?: object) => {
@@ -284,7 +284,7 @@ export function createLogger(context: LogContext): Logger {
       const contextData = sanitizeForLogger({ ...getLogContext(), ...context }) as Record<string, unknown>
       const metaData = meta ? sanitizeForLogger(meta) as Record<string, unknown> : {}
       const untaintedData = JSON.parse(JSON.stringify({ ...contextData, ...metaData }))
-      const untaintedMessage = String(safeMessage).replace(/[\n\r]/g, ' ')
+      const untaintedMessage = JSON.parse(JSON.stringify(String(safeMessage).replace(/[\n\r]/g, ' ')))
       logger.warn(untaintedMessage, untaintedData)
     },
     error: (message: string, meta?: object) => {
@@ -292,7 +292,7 @@ export function createLogger(context: LogContext): Logger {
       const contextData = sanitizeForLogger({ ...getLogContext(), ...context }) as Record<string, unknown>
       const metaData = meta ? sanitizeForLogger(meta) as Record<string, unknown> : {}
       const untaintedData = JSON.parse(JSON.stringify({ ...contextData, ...metaData }))
-      const untaintedMessage = String(safeMessage).replace(/[\n\r]/g, ' ')
+      const untaintedMessage = JSON.parse(JSON.stringify(String(safeMessage).replace(/[\n\r]/g, ' ')))
       logger.error(untaintedMessage, untaintedData)
     },
     debug: (message: string, meta?: object) => {
@@ -300,7 +300,7 @@ export function createLogger(context: LogContext): Logger {
       const contextData = sanitizeForLogger({ ...getLogContext(), ...context }) as Record<string, unknown>
       const metaData = meta ? sanitizeForLogger(meta) as Record<string, unknown> : {}
       const untaintedData = JSON.parse(JSON.stringify({ ...contextData, ...metaData }))
-      const untaintedMessage = String(safeMessage).replace(/[\n\r]/g, ' ')
+      const untaintedMessage = JSON.parse(JSON.stringify(String(safeMessage).replace(/[\n\r]/g, ' ')))
       logger.debug(untaintedMessage, untaintedData)
     },
   } as Logger

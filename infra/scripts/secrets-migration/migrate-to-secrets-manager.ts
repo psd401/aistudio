@@ -27,11 +27,7 @@ import {
   TagResourceCommand,
   PutResourcePolicyCommand,
 } from "@aws-sdk/client-secrets-manager"
-import {
-  SSMClient,
-  GetParameterCommand,
-  GetParametersByPathCommand,
-} from "@aws-sdk/client-ssm"
+import { SSMClient } from "@aws-sdk/client-ssm"
 import {
   LambdaClient,
   ListFunctionsCommand,
