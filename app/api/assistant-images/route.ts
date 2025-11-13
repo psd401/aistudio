@@ -11,9 +11,10 @@ export async function GET() {
   const log = createLogger({ requestId, route: "api.assistant-images" });
   
   log.info("GET /api/assistant-images - Fetching assistant images");
-  
+
   try {
     const imagesDir = path.join(process.cwd(), "public", "assistant_logos")
+    // eslint-disable-next-line security/detect-non-literal-fs-filename -- hardcoded path, not user input
     const files = fs.readdirSync(imagesDir)
     const images = files.filter(file => file.endsWith(".png"))
     

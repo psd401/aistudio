@@ -4,6 +4,7 @@
  * Generates human-readable and machine-readable reports from aggregated metrics.
  */
 
+/* eslint-disable security/detect-non-literal-fs-filename -- test/tooling code with controlled file paths */
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { AggregatedMetrics } from './metrics-collector';

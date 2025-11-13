@@ -8,6 +8,7 @@
  * @see https://github.com/psd401/aistudio/issues/366
  */
 
+/* eslint-disable security/detect-non-literal-fs-filename -- reads package.json from known paths, not user input */
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { createLogger } from '@/lib/logger';

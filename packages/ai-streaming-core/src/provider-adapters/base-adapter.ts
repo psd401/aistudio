@@ -1,3 +1,4 @@
+/* eslint-disable security/detect-non-literal-regexp -- library code with controlled inputs */
 import { streamText, experimental_generateImage } from 'ai';
 import { createLogger } from '../utils/logger';
 import type { ProviderCapabilities, StreamConfig, StreamingCallbacks } from '../types';

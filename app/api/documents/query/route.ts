@@ -7,7 +7,7 @@ import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 // Escape special regex characters to prevent regex injection
 // Matches the behavior of lodash's escapeRegExp
 function escapeRegExp(string: string): string {
-  return string.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&');
+  return string.replace(/[$()*+.?[\\\]^{|}\\-]/g, '\\$&');
 }
 
 export async function POST(request: NextRequest) {
@@ -95,6 +95,7 @@ export async function POST(request: NextRequest) {
           chunkIndex: chunk.chunkIndex,
           content: chunk.content,
           // Calculate a simple relevance score based on occurrence count
+          // eslint-disable-next-line security/detect-non-literal-regexp -- escapedQuery is sanitized via escapeRegExp function above
           relevance: (chunk.content.toLowerCase().match(new RegExp(escapedQuery, 'g')) || []).length
         };
       })

@@ -10,9 +10,10 @@ const AMPLIFY_COOKIE_PREFIX = 'amplify';
  */
 export function getAuthCookiePatterns(): RegExp[] {
   const clientId = process.env.NEXT_PUBLIC_COGNITO_CLIENT_ID;
-  
+
   return [
     // Cognito specific cookies
+    // eslint-disable-next-line security/detect-non-literal-regexp -- clientId from environment variable, not user input
     new RegExp(`^${COOKIE_PREFIX}\\.${clientId}\\..+`),
     // Generic Cognito cookies
     new RegExp(`^${COOKIE_PREFIX}\\..+`),
