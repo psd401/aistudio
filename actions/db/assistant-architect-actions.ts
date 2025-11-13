@@ -799,11 +799,9 @@ export async function deleteInputFieldAction(
       return { isSuccess: false, message: "Input field not found" }
     }
 
-    const field = fieldResult[0];
-
-    // Get assistant_architect_id from the snake_case database result
-    const architectIdRaw = (field as unknown as { assistant_architect_id?: number }).assistant_architect_id
-    const architectId = Number(architectIdRaw)
+    // Transform snake_case to camelCase for proper type access
+    const field = transformSnakeToCamel<{ id: number; assistantArchitectId: number }>(fieldResult[0])
+    const architectId = field.assistantArchitectId
 
     // Check if user is the creator of the tool
     const toolResult = await executeSQL<FormattedRow>(`

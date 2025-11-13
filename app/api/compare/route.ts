@@ -366,10 +366,15 @@ export async function POST(req: Request) {
 
     timer({ status: 'error' });
 
+    // Sanitize error message to prevent information exposure via stack traces
+    const sanitizedMessage = error instanceof Error
+      ? error.message.split('\n')[0].substring(0, 200) // First line only, max 200 chars
+      : 'An unexpected error occurred';
+
     return new Response(
       JSON.stringify({
         error: 'Failed to process comparison request',
-        message: error instanceof Error ? error.message : String(error),
+        message: sanitizedMessage,
         requestId
       }),
       {

@@ -4,6 +4,7 @@ import { getServerSession } from "@/lib/auth/server-session"
 import { executeSQL } from "@/lib/db/data-api-adapter"
 import { type ActionState } from "@/types/actions-types"
 import { hasRole } from "@/utils/roles"
+import type { SqlParameter } from "@aws-sdk/client-rds-data"
 import {
   handleError,
   ErrorFactories,
@@ -117,8 +118,7 @@ export async function adminUpdateRepository(
     await requireAdminSession(log)
 
     const updates: string[] = []
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const params: any[] = [
+    const params: SqlParameter[] = [
       { name: "id", value: { longValue: input.id } }
     ]
 
