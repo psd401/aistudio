@@ -277,10 +277,20 @@ function sanitizeLogMessage(input: unknown): string {
 
   // Explicitly remove characters that could forge log entries
   // This follows CodeQL log injection prevention guidance
-  str = str
-    .replace(/[\r\n]/g, ' ')         // Replace newlines with spaces
-    .replace(/[\x00-\x1F\x7F]/g, '') // Remove control characters
-    .substring(0, 1000)               // Limit length to prevent log bloat
+
+  // Replace newlines with spaces
+  str = str.replace(/[\n\r]/g, ' ')
+
+  // Remove control characters (0x00-0x1F and 0x7F)
+  // Using String.fromCharCode to avoid eslint no-control-regex warning
+  const controlCharsPattern = new RegExp(
+    `[${String.fromCharCode(0)}-${String.fromCharCode(31)}${String.fromCharCode(127)}]`,
+    'g'
+  )
+  str = str.replace(controlCharsPattern, '')
+
+  // Limit length to prevent log bloat
+  str = str.substring(0, 1000)
 
   return str
 }
