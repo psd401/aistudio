@@ -7,7 +7,7 @@ import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 // Escape special regex characters to prevent regex injection
 // Matches the behavior of lodash's escapeRegExp
 function escapeRegExp(string: string): string {
-  return string.replace(/[$()*+.?[\\\]^{|}\\-]/g, '\\$&');
+  return string.replace(/[$()*+.?[\]^{|}\\-]/g, '\\$&');
 }
 
 export async function POST(request: NextRequest) {
