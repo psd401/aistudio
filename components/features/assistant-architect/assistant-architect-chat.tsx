@@ -159,7 +159,7 @@ export const AssistantArchitectChat = memo(function AssistantArchitectChat({
       const conversationIdHeader = response.headers.get('X-Conversation-Id')
       if (!currentConversationId && conversationIdHeader) {
         const newConvId = Number.parseInt(conversationIdHeader, 10)
-        if (!Number.Number.isNaN(newConvId)) {
+        if (!Number.isNaN(newConvId)) {
           setIsNewConversation(true);
           conversationIdRef.current = newConvId;
           setCurrentConversationId(newConvId)

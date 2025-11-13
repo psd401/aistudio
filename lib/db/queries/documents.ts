@@ -14,7 +14,7 @@ export async function saveDocument(document: InsertDocument): Promise<SelectDocu
       { name: 'name', value: { stringValue: document.name } as Field },
       { name: 'type', value: { stringValue: document.type } as Field },
       { name: 'url', value: { stringValue: document.url } as Field },
-      { name: 'size', value: document.size > 0 ? { longValue: document.size } as Field : { isNull: true } as Field },
+      { name: 'size', value: (document.size ?? 0) > 0 ? { longValue: document.size ?? 0 } as Field : { isNull: true } as Field },
       { name: 'userId', value: { longValue: document.userId } as Field },
       { name: 'conversationId', value: document.conversationId ? { longValue: document.conversationId } as Field : { isNull: true } as Field },
       { name: 'metadata', value: document.metadata ? { stringValue: JSON.stringify(document.metadata) } as Field : { isNull: true } as Field }

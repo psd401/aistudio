@@ -80,7 +80,7 @@ function sanitizeNumericId(value: unknown): number {
   const num = Number(value)
 
   // Strict validation with early exit
-  if (!Number.isInteger(num) || !Number.Number.isFinite(num) || num <= 0 || num > Number.MAX_SAFE_INTEGER) {
+  if (!Number.isInteger(num) || !Number.isFinite(num) || num <= 0 || num > Number.MAX_SAFE_INTEGER) {
     throw ErrorFactories.validationFailed([{ field: 'id', message: 'Invalid numeric ID', value }])
   }
 
