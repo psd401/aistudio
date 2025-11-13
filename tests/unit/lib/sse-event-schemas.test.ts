@@ -13,11 +13,7 @@ import {
   validateSSEEvent,
   validateEventType,
   extractEventFields,
-  generateValidationErrorMessage,
-  TextDeltaSchema,
-  TextStartSchema,
-  ToolCallSchema,
-  ErrorEventSchema
+  generateValidationErrorMessage
 } from '@/lib/streaming/sse-event-schemas'
 
 describe('SSE Event Schemas', () => {
