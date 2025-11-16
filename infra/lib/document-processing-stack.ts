@@ -225,7 +225,7 @@ export class DocumentProcessingStack extends cdk.Stack {
         ...(props.rdsSecretArn && { DATABASE_SECRET_ARN: props.rdsSecretArn }),
         DATABASE_NAME: 'aistudio',
       },
-      deadLetterQueueEnabled: true,
+      deadLetterQueue: this.processingDLQ,
       retryAttempts: 2,
     });
 
@@ -248,7 +248,7 @@ export class DocumentProcessingStack extends cdk.Stack {
         ...(props.rdsSecretArn && { DATABASE_SECRET_ARN: props.rdsSecretArn }),
         DATABASE_NAME: 'aistudio',
       },
-      deadLetterQueueEnabled: true,
+      deadLetterQueue: this.processingDLQ,
       retryAttempts: 1, // Fewer retries for expensive operations
     });
 
