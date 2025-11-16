@@ -43,33 +43,48 @@ This directory contains comprehensive architectural diagrams for the AI Studio a
 
 ## Application Diagrams
 
-### 04. Database ERD *(Coming Soon)*
-**Entity-Relationship Diagram for all 30+ PostgreSQL tables**
+### [04. Database ERD](./04-database-erd.md)
+**Entity-Relationship Diagram for all 54 PostgreSQL tables**
 
-- Core tables (users, roles, tools)
-- AI & Chat tables (conversations, messages, token_usage)
-- Knowledge management (repositories, documents, embeddings)
-- Assistant Architect tables
+- Complete schema with 11 domain groupings
+- Core tables (users, roles, tools, RBAC)
+- Nexus Chat (conversations, folders, caching, metrics)
+- Assistant Architect (chain prompts, executions, scheduling)
+- Knowledge management (repositories, embeddings with pgvector)
+- MCP integration (servers, capabilities, audit logs)
+- Indexes, performance notes, retention policies
 
----
-
-### 05. Authentication Flow *(Coming Soon)*
-**OAuth 2.0 authentication flow with Cognito and Google**
-
-- User sign-in flow
-- JWT token generation and validation
-- Session management
-- Role-based access control (RBAC)
+**Use this when**: Understanding database structure, planning queries, schema migrations
 
 ---
 
-### 06. Request Flow Diagrams *(Coming Soon)*
-**End-to-end request flows for major features**
+### [05. Authentication Flow](./05-authentication-flow.md)
+**OAuth 2.0 authentication with AWS Cognito, Google, and NextAuth v5**
 
-- Chat conversation flow
-- Model comparison flow
-- Document upload and processing
-- Real-time streaming architecture
+- Complete OAuth flow sequence diagrams
+- Session management and JWT structure
+- Role-based access control (RBAC) flow
+- Tool permission matrix by role
+- First-time user creation
+- Security best practices
+
+**Use this when**: Implementing auth features, debugging permission issues, security audits
+
+---
+
+### [06. Request Flow Diagrams](./06-request-flow-diagrams.md)
+**End-to-end flows for all major features**
+
+- Nexus Chat real-time streaming (SSE)
+- Model Compare parallel execution
+- Document upload & processing pipeline
+- Assistant Architect multi-prompt chains
+- Knowledge repository vector search
+- Scheduled execution flow
+- Error handling & recovery patterns
+- Rate limiting & quotas
+
+**Use this when**: Understanding feature implementation, performance optimization, debugging production issues
 
 ---
 
@@ -144,5 +159,6 @@ When adding new diagrams:
 ---
 
 **Last Updated**: November 2025
-**Total Diagrams**: 3 (of 10+ planned)
+**Total Diagrams**: 6 (of 10+ planned)
 **Format**: Mermaid.js (text-based, version-controlled)
+**Lines of Documentation**: 5,000+
