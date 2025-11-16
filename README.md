@@ -1,153 +1,245 @@
-# AIStudio - Enterprise Next.js Template
+# AI Studio
 
-A modern, production-ready template for building internal enterprise applications with Next.js 14+, featuring:
+> **Bring frontier AI to K-12 education—securely, affordably, and responsibly.**
 
-- 🔒 Authentication with [AWS Cognito](https://aws.amazon.com/cognito/) + NextAuth v5
-- 🗄️ Database with [AWS RDS Aurora Serverless v2](https://aws.amazon.com/rds/aurora/) (PostgreSQL)
-- 🎨 UI with [Shadcn](https://ui.shadcn.com)
-- 🚀 Deployment with [AWS Amplify](https://aws.amazon.com/amplify)
-- 🏗️ Infrastructure as Code with [AWS CDK](https://aws.amazon.com/cdk/)
+AI Studio is an open-source platform that provides K-12 educators and students with access to cutting-edge generative AI models at **90% lower cost** than individual licenses. Built with privacy-first architecture and deployed within district infrastructure, it democratizes access to AI tools that were previously cost-prohibitive for schools.
 
-## AWS Architecture
+**Live demo**: [psd401.ai/aistudio](https://psd401.ai/aistudio)
 
-This project provisions all core infrastructure using AWS CDK, following the AWS Well-Architected Framework and best practices for cost tracking and security:
+## 🎯 Why AI Studio?
 
-- **Networking:** Isolated VPC with public and private subnets
-- **Database:** Aurora Serverless v2 PostgreSQL with RDS Data API and Secrets Manager
-- **Authentication:** Amazon Cognito with Google federated login + NextAuth v5
-- **Storage:** Private S3 bucket for document storage (SSE, versioning, lifecycle)
-- **Frontend Hosting:** AWS Amplify with SSR support (WEB_COMPUTE platform)
-- **Tagging:** All resources are tagged for cost allocation (Environment, Project, Owner)
+### The Problem
+- **Cost Barriers**: Individual AI subscriptions cost $20-200/month per user—unsustainable for districts
+- **Access Inequality**: Students lack exposure to frontier models used in higher education and industry
+- **Data Privacy**: Third-party AI services raise concerns about student data protection
+- **Complexity**: Creating custom AI assistants requires coding expertise
 
-## Features
+### The Solution
+AI Studio eliminates these barriers by:
+- **90% Cost Reduction**: Secure API architecture replaces expensive per-seat licenses
+- **Multi-Model Access**: Real-time switching between GPT-5, Claude Opus, and Google Gemini
+- **District-Level Security**: All data processed within your secure servers—nothing leaves your environment
+- **No-Code Customization**: Design custom AI assistants using visual prompt chains
+- **Open Source**: MIT-licensed, fully self-hostable on your infrastructure
 
-- Role-based access control with tool-specific permissions
-- Automatic user creation on first sign-in
-- Modern, responsive UI with dark mode support
-- Type-safe database operations with RDS Data API
-- AI-powered chat and utilities
-- Document management with S3 integration
-- Knowledge repository with embedding generation and vector search
-- Asynchronous file processing with text extraction and chunking
-- Test-driven development setup
+## ✨ Key Features
 
-## Getting Started
+### For Educators & Students
+
+- 🤖 **Nexus Chat** - Conversational AI with multiple frontier models
+  - Real-time streaming responses
+  - Conversation history and organization
+  - Model comparison side-by-side
+
+- 🏗️ **Assistant Architect** - No-code custom AI assistant builder
+  - Visual prompt chain designer
+  - Variable substitution between prompts
+  - Knowledge repository integration
+  - Scheduled execution
+
+- 📚 **Knowledge Repositories** - Upload and search documents
+  - PDF, DOCX, TXT support with OCR
+  - Vector embeddings for semantic search
+  - Context-aware AI responses
+
+- 📊 **Model Compare** - Side-by-side model evaluation
+  - Compare GPT-5, Claude Opus, Gemini responses
+  - Token usage and cost analysis
+  - Performance metrics
+
+### For Administrators
+
+- 🔒 **Enterprise Security**
+  - AWS Cognito authentication with Google SSO
+  - Role-based access control (RBAC)
+  - Tool-level permissions
+  - Audit logging
+
+- 💰 **Cost Control**
+  - Transparent usage tracking
+  - Per-user quotas and rate limiting
+  - Provider cost comparison
+  - Auto-pause dev environments
+
+- 📈 **Monitoring & Observability**
+  - CloudWatch dashboards
+  - OpenTelemetry tracing
+  - Circuit breaker for AI provider failures
+  - Performance metrics
+
+## 🏗️ Architecture
+
+Built on AWS with production-ready infrastructure:
+
+- **Frontend**: Next.js 15 (App Router) with React Server Components
+- **Backend**: ECS Fargate containers with Application Load Balancer
+- **Database**: Aurora Serverless v2 (PostgreSQL 15) with pgvector for embeddings
+- **Authentication**: AWS Cognito + NextAuth v5
+- **AI Providers**: OpenAI (GPT-5), Anthropic (Claude), Google (Gemini), AWS Bedrock
+- **Infrastructure**: AWS CDK (TypeScript) following Well-Architected Framework
+- **Streaming**: Server-Sent Events (SSE) over HTTP/2 for real-time responses
+
+See [Architecture Diagrams](./docs/diagrams/README.md) for detailed visualizations.
+
+## 🚀 Quick Start
 
 ### Prerequisites
 
-- Node.js 18+ and npm
+- Node.js 20.x and npm
 - AWS CLI configured with appropriate credentials
 - AWS CDK CLI (`npm install -g aws-cdk`)
+- Docker installed (for building container images)
 
 ### Local Development
 
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/psd401/aistudio.git
-   cd aistudio
-   ```
-
-2. Install dependencies:
-   ```bash
-   npm install
-   ```
-
-3. Copy `.env.example` to `.env.local` and fill in your environment variables:
-   ```bash
-   cp .env.example .env.local
-   ```
-
-4. Set up your local database (if using local PostgreSQL):
-   ```bash
-   npm run db:generate
-   npm run db:push
-   ```
-
-5. Run the development server:
-   ```bash
-   npm run dev
-   ```
-
-   Open [http://localhost:3000](http://localhost:3000) in your browser.
-
-## Testing
-
-Run the test suite:
 ```bash
-npm test
+# Clone repository
+git clone https://github.com/psd401/aistudio.git
+cd aistudio
+
+# Install dependencies
+npm install
+
+# Copy environment variables
+cp .env.example .env.local
+# Edit .env.local with your AWS RDS cluster ARN and secret ARN
+
+# Run development server
+npm run dev
 ```
 
-Watch mode:
-```bash
-npm run test:watch
-```
+Open [http://localhost:3000](http://localhost:3000) to see the application.
 
-Run specific test file:
-```bash
-npm test -- path/to/test.test.ts
-```
-
-## Database Management
-
-The project uses AWS RDS Data API for new features and migrations. Legacy code may still use Drizzle ORM.
-
-- Generate migrations: `npm run db:generate`
-- Push schema changes: `npm run db:push`
-- Open Drizzle Studio: `npm run db:studio`
-
-For production, all database operations go through the RDS Data API using the `executeSQL` function from `/lib/db/data-api-adapter.ts`.
-
-## Deployment
-
-### Quick Deploy
+### Deployment to AWS
 
 ```bash
+# Bootstrap CDK (one-time)
 cd infra
-cdk deploy --all \
-  --parameters AIStudio-AuthStack-Dev:GoogleClientId=your-dev-client-id \
-  --parameters AIStudio-AuthStack-Prod:GoogleClientId=your-prod-client-id \
-  --context baseDomain=yourdomain.com
+npx cdk bootstrap aws://ACCOUNT-ID/REGION
+
+# Deploy infrastructure stacks
+npx cdk deploy AIStudio-DatabaseStack-Dev
+npx cdk deploy AIStudio-AuthStack-Dev
+npx cdk deploy AIStudio-StorageStack-Dev
+npx cdk deploy AIStudio-DocumentProcessingStack-Dev
+npx cdk deploy AIStudio-FrontendStack-Dev
+
+# Or deploy all at once
+npx cdk deploy --all
 ```
 
-### Detailed Steps
+See [Deployment Guide](./docs/DEPLOYMENT.md) for detailed instructions.
 
-1. Create required AWS Secrets Manager secrets (see `DEPLOYMENT.md`)
-2. Bootstrap CDK in your AWS account
-3. Deploy the infrastructure stacks
-4. Configure environment variables in AWS Amplify Console
-5. Push code to trigger Amplify deployment
+## 📊 Cost Comparison
 
-See `docs/DEPLOYMENT.md` for full deployment instructions and `docs/OPERATIONS.md` for operational best practices.
-
-## Project Structure
-
+### Traditional Approach (Per-Seat Licenses)
 ```
-├── app/                  # Next.js App Router pages and layouts
-├── components/          # UI components (Shadcn)
-├── actions/            # Server actions for database operations
-├── db/                 # Database schemas and configuration
-├── lib/                # Utility functions and helpers
-├── infra/              # AWS CDK infrastructure code
-├── public/             # Static assets
-└── docs/               # Documentation
+100 users × $20/month (ChatGPT Plus) = $2,000/month = $24,000/year
 ```
 
-## Key Documentation
+### AI Studio (API-Based)
+```
+100 users × average 50,000 tokens/day
+= 1.5M tokens/day × 30 days = 45M tokens/month
+= $450/month (GPT-5) + $200 infrastructure = $650/month = $7,800/year
 
-- [Deployment Guide](./docs/DEPLOYMENT.md) - Detailed deployment instructions
-- [Operations Guide](./docs/OPERATIONS.md) - Operational procedures
+Savings: $16,200/year (67% reduction)
+```
+
+With mixed usage (Gemini + GPT-4 mini), costs drop to ~$200/month (**90% savings**).
+
+## 🛠️ Tech Stack
+
+### Frontend
+- Next.js 15 with App Router
+- React 19 with Server Components
+- Shadcn UI component library
+- Tailwind CSS for styling
+- Vercel AI SDK v5 for streaming
+
+### Backend
+- ECS Fargate for container hosting
+- Aurora Serverless v2 (PostgreSQL)
+- RDS Data API (no connection pooling needed)
+- AWS Lambda for async processing
+- S3 for document storage
+- AWS Textract for OCR
+
+### Infrastructure
+- AWS CDK for Infrastructure as Code
+- VPC with multi-AZ subnets
+- Application Load Balancer with HTTP/2
+- CloudWatch + ADOT for observability
+- Secrets Manager for credentials
+- Cognito for authentication
+
+## 📚 Documentation
+
+### Core Documentation
+- [Architecture Overview](./docs/ARCHITECTURE.md) - Complete system architecture
+- [Deployment Guide](./docs/DEPLOYMENT.md) - Step-by-step deployment
+- [API Reference](./docs/API_REFERENCE.md) - REST endpoints and server actions
+- [Error Reference](./docs/ERROR_REFERENCE.md) - Error codes and debugging
+- [Troubleshooting](./docs/TROUBLESHOOTING.md) - Common issues and solutions
+
+### Infrastructure
+- [CDK Infrastructure](./infra/README.md) - AWS CDK stack details
+- [VPC Network Topology](./docs/diagrams/02-vpc-network-topology.md)
+- [AWS Service Architecture](./docs/diagrams/03-aws-service-architecture.md)
+
+### Visual Architecture
+- [All Diagrams (9 total)](./docs/diagrams/README.md) - 10,000+ lines of visual documentation
+- [Database ERD](./docs/diagrams/04-database-erd.md) - 54 PostgreSQL tables
+- [Authentication Flow](./docs/diagrams/05-authentication-flow.md) - OAuth 2.0 flow
+- [Streaming Architecture](./docs/diagrams/09-streaming-architecture.md) - SSE implementation
+
+### Development
 - [Developer Guide](./DEVELOPER_GUIDE.md) - Development setup and workflow
-- [Environment Variables](./docs/ENVIRONMENT_VARIABLES.md) - Required environment variables
-- [Technical Specification](./docs/SPECIFICATION.md) - Architecture and design
-- [Navigation System](./docs/navigation.md) - Dynamic navigation documentation
-- [AI Features](./docs/AI_IMPROVEMENTS.md) - AI capabilities and improvements
-- [S3 Uploads](./docs/project-plan-s3-large-uploads.md) - Large file upload implementation
-- [CLAUDE.md](./CLAUDE.md) - Development guidelines for AI assistants
+- [Library Documentation](./lib/README.md) - Core utilities and patterns
+- [CLAUDE.md](./CLAUDE.md) - AI assistant development guidelines
 
-## Contributing
+## 🧪 Testing
 
-See [CONTRIBUTING.md](./CONTRIBUTING.md) for contribution guidelines.
+```bash
+# Run test suite
+npm test
 
-## License
+# Run tests in watch mode
+npm run test:watch
 
-MIT
+# Run linting
+npm run lint
+
+# Run type checking
+npm run typecheck
+```
+
+## 🤝 Contributing
+
+We welcome contributions! Please see [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines.
+
+## 📄 License
+
+MIT License - see [LICENSE](./LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+AI Studio was developed by Peninsula School District (PSD401) to bring world-class AI tools to K-12 education. Built with:
+
+- [Next.js](https://nextjs.org/) - React framework
+- [Vercel AI SDK](https://sdk.vercel.ai/) - AI streaming infrastructure
+- [AWS CDK](https://aws.amazon.com/cdk/) - Infrastructure as Code
+- [Shadcn UI](https://ui.shadcn.com/) - UI component library
+
+## 🔗 Links
+
+- **Website**: [psd401.ai/aistudio](https://psd401.ai/aistudio)
+- **Documentation**: [docs/](./docs/)
+- **Issues**: [GitHub Issues](https://github.com/psd401/aistudio/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/psd401/aistudio/discussions)
+
+---
+
+**Built with ❤️ for K-12 education**
+
+*Making frontier AI accessible, secure, and affordable for every student.*

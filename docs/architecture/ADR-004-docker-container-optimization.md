@@ -1,7 +1,9 @@
-# ADR-003: Docker Container Optimization Architecture
+# ADR-004: Docker Container Optimization Architecture
 
 ## Status
 Proposed
+
+> **Note**: Renamed from ADR-003 to ADR-004 (November 2025) to resolve numbering conflict with ADR-003: ECS Streaming Migration.
 
 ## Context
 

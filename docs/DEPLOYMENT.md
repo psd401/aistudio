@@ -1,349 +1,699 @@
 # Deployment Guide
 
-## GitHub Token Setup for Amplify/CDK
-To connect AWS Amplify to your GitHub repository via CDK, you need a GitHub Personal Access Token (PAT):
+This guide explains how to deploy the AI Studio infrastructure using AWS CDK with ECS Fargate hosting.
 
-1. Go to [GitHub Settings > Developer settings > Personal access tokens > Fine-grained tokens](https://github.com/settings/tokens?type=beta).
-2. Click **Generate new token**.
-3. Name it (e.g., `ai`), set an expiration (90 days recommended).
-4. Select the following settings:
-   - **Resource owner:** Your user or organization (must own the repo)
-   - **Repository access:** Only select repositories (choose your Amplify repo)
-   - **Permissions:**
-     - **Repository permissions:**
-       - Contents: Read and write
-       - Metadata: Read-only
-       - Webhooks: Read and write
-     - **Account permissions:**
-       - Read-only for user profile (if available)
-5. Generate and copy the token (you won't see it again).
-6. In AWS Secrets Manager, create a secret named `aistudio-github-token` with the token as the value (plain string).
-
-> **Note:** If your organization restricts fine-grained PATs or you encounter issues, you may need to use a classic PAT as a fallback. See [GitHub's documentation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens) and [AWS Amplify GitHub integration docs](https://docs.aws.amazon.com/amplify/latest/userguide/setting-up-GitHub-access.html) for the latest guidance.
-
-## Google OAuth Setup for Cognito
-To enable Google login in Cognito, you need OAuth credentials from Google:
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/apis/credentials).
-2. Create a new project (or select an existing one).
-3. Go to **APIs & Services > Credentials**.
-4. Click **Create Credentials > OAuth client ID**.
-5. Choose **Web application**.
-6. Set the following:
-   - **Authorized JavaScript origins:**
-     - `http://localhost:3000`
-     - `https://dev.<yourdomain>` (replace `<yourdomain>` with your domain)
-     - `https://prod.<yourdomain>` (replace `<yourdomain>` with your domain)
-   - **Authorized redirect URIs:**
-     - `https://<your-cognito-domain>/oauth2/idpresponse` 
-       - Replace `<your-cognito-domain>` with the domain of your Cognito User Pool (e.g., `aistudio-dev.auth.us-east-1.amazoncognito.com`). You can find this in your AWS Cognito User Pool settings after deployment.
-7. Save and copy the **Client ID** and **Client Secret**.
-8. In AWS Secrets Manager, create two secrets:
-   - `aistudio-dev-google-oauth` (JSON: `{ "clientSecret": "..." }`)
-   - `aistudio-prod-google-oauth` (JSON: `{ "clientSecret": "..." }`)
-   - **Do NOT store the client ID in Secrets Manager.**
-   - You will provide the client ID as a parameter at deploy time (see below).
+## Table of Contents
+- [Prerequisites](#prerequisites)
+- [Google OAuth Setup](#google-oauth-setup-for-cognito)
+- [Cost Allocation Tags](#cost-allocation-tags-for-billing)
+- [Initial Setup](#initial-setup)
+- [Environment Variables](#environment-variables)
+- [Stack Deployment](#stack-deployment)
+- [DNS and Certificate Configuration](#dns-and-certificate-configuration)
+- [Database Initialization](#database-initialization)
+- [Post-Deployment Verification](#post-deployment-verification)
+- [First Administrator Setup](#first-administrator-setup)
+- [Troubleshooting](#troubleshooting)
+- [Clean Up](#clean-up)
 
 ---
 
-This guide explains how to deploy the full AWS infrastructure stack for this project using AWS CDK.
-
 ## Prerequisites
-- AWS CLI installed and configured for the target account/role
-- AWS CDK installed globally (`npm install -g aws-cdk`)
-- Node.js and npm installed
-- Required secrets created in AWS Secrets Manager:
+
+Before deploying, ensure you have:
+
+- **AWS CLI** installed and configured for your target account/role
+- **AWS CDK** installed globally: `npm install -g aws-cdk`
+- **Node.js 20.x** and npm installed
+- **Docker** installed (for building container images)
+- **Domain name** with Route 53 hosted zone configured
+- **Required AWS Secrets** created in AWS Secrets Manager:
   - `aistudio-dev-google-oauth` (JSON: `{ "clientSecret": "..." }`)
   - `aistudio-prod-google-oauth` (JSON: `{ "clientSecret": "..." }`)
-  - `aistudio-github-token` (string: GitHub personal access token)
-- Google OAuth client IDs (for dev and prod) ready to provide as parameters
-- **Base domain** (e.g., `yourdomain.com`) must be provided as a context variable for the frontend stack. **No hardcoded domains are used.**
+- **Google OAuth client IDs** ready (for dev and prod)
+- **AWS account permissions** for CDK deployment
+
+---
+
+## Google OAuth Setup for Cognito
+
+To enable Google login in Cognito:
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/apis/credentials)
+2. Create a new project (or select existing)
+3. Navigate to **APIs & Services > Credentials**
+4. Click **Create Credentials > OAuth client ID**
+5. Choose **Web application**
+6. Configure:
+   - **Authorized JavaScript origins:**
+     - `http://localhost:3000` (for local development)
+     - `https://dev.aistudio.psd401.ai` (or your dev domain)
+     - `https://aistudio.psd401.ai` (or your prod domain)
+   - **Authorized redirect URIs:**
+     - `https://<cognito-domain>/oauth2/idpresponse`
+     - Replace `<cognito-domain>` with your Cognito domain (e.g., `aistudio-dev.auth.us-east-1.amazoncognito.com`)
+     - You'll find this in Cognito User Pool settings after deployment
+7. Save and copy the **Client ID** and **Client Secret**
+8. In AWS Secrets Manager, create environment-specific secrets:
+   ```bash
+   # Dev secret
+   aws secretsmanager create-secret \
+     --name aistudio-dev-google-oauth \
+     --secret-string '{"clientSecret":"YOUR_DEV_CLIENT_SECRET"}'
+
+   # Prod secret
+   aws secretsmanager create-secret \
+     --name aistudio-prod-google-oauth \
+     --secret-string '{"clientSecret":"YOUR_PROD_CLIENT_SECRET"}'
+   ```
+9. **Note:** Client ID is provided as a CDK parameter during deployment, NOT stored in Secrets Manager
+
+---
 
 ## Cost Allocation Tags for Billing
-To track costs by project, environment, or owner in AWS Cost Explorer and billing reports, you must activate cost allocation tags in the AWS Billing Console:
 
-1. Go to the [AWS Billing Console](https://console.aws.amazon.com/billing/).
-2. In the left menu, click **Cost allocation tags**.
-3. Find your tags (e.g., `Project`, `Owner`, `Environment`) in the list.
-4. Select the checkboxes for the tags you want to activate.
-5. Click **Activate**.
-6. It may take up to 24 hours for the tags to appear in Cost Explorer and billing reports.
+To track costs by project, environment, or owner in AWS Cost Explorer:
 
-> **Note:** Tagging in CDK is necessary, but not sufficient—you must activate the tags in the AWS Billing Console for cost reporting.
+1. Go to [AWS Billing Console](https://console.aws.amazon.com/billing/)
+2. In the left menu, click **Cost allocation tags**
+3. Find your tags (`Project`, `Owner`, `Environment`) in the list
+4. Select checkboxes for tags you want to activate
+5. Click **Activate**
+6. **Note:** Tags may take up to 24 hours to appear in Cost Explorer
 
-> **Important:** If you have previously deployed stacks without the `AIStudio-` prefix, you must destroy them before deploying the new stacks. Use `cdk list` to see all stacks, and `cdk destroy ...` to remove the old ones.
+> **Important:** CDK applies tags automatically, but you must activate them in the Billing Console for cost reporting.
 
-## 1. Install Dependencies and Build
-```sh
+---
+
+## Initial Setup
+
+### 1. Clone and Install Dependencies
+
+```bash
+# Clone repository (if not already done)
+cd aistudio
+
+# Install application dependencies
 npm install
-npm run build:lambdas  # Build Lambda functions for ProcessingStack
+
+# Build Lambda functions for processing stacks
+npm run build:lambdas
+
+# Navigate to infrastructure directory
+cd infra
+npm install
 ```
 
-## 2. Bootstrap the CDK Environment
-```sh
+### 2. Bootstrap CDK Environment
+
+**First-time setup only:**
+
+```bash
 cd infra
 cdk bootstrap
 ```
 
-## 3. Synthesize the CDK Stacks
-```sh
-cdk synth --context baseDomain=yourdomain.com
-```
+This creates the CDK staging bucket and IAM roles needed for deployments.
 
-## 4. Destroy Old Stacks (if renaming)
-If you previously deployed stacks without the `AIStudio-` prefix, destroy them first:
-```sh
-cdk destroy DatabaseStack-Dev AuthStack-Dev StorageStack-Dev FrontendStack-Dev \
-  DatabaseStack-Prod AuthStack-Prod StorageStack-Prod FrontendStack-Prod InfraStack \
-  --context baseDomain=yourdomain.com
-```
+### 3. Synthesize Stacks
 
-## 5. Deploy Stacks
-### Deploy all dev stacks (with Google client ID and base domain context):
-```sh
-cdk deploy AIStudio-DatabaseStack-Dev AIStudio-AuthStack-Dev AIStudio-StorageStack-Dev AIStudio-ProcessingStack-Dev AIStudio-FrontendStack-Dev \
-  --parameters AIStudio-AuthStack-Dev:GoogleClientId=your-dev-client-id \
-  --context baseDomain=yourdomain.com
-```
-### Deploy all prod stacks (with Google client ID and base domain context):
-```sh
-cdk deploy AIStudio-DatabaseStack-Prod AIStudio-AuthStack-Prod AIStudio-StorageStack-Prod AIStudio-ProcessingStack-Prod AIStudio-FrontendStack-Prod \
-  --parameters AIStudio-AuthStack-Prod:GoogleClientId=your-prod-client-id \
-  --context baseDomain=yourdomain.com
-```
-### Or deploy everything (provide all parameters and context):
-```sh
-cdk deploy --all \
-  --parameters AIStudio-AuthStack-Dev:GoogleClientId=your-dev-client-id \
-  --parameters AIStudio-AuthStack-Prod:GoogleClientId=your-prod-client-id \
-  --context baseDomain=yourdomain.com
-```
-
-### Subdomain Pattern
-- **Dev:** Amplify will use `dev.<yourdomain>`
-- **Prod:** Amplify will use `prod.<yourdomain>`
-- **Apex/root domain:** If you want your root domain (e.g., `yourdomain.com`) to point to the Amplify app, set up a CNAME or ALIAS at your DNS provider pointing the apex to the prod subdomain (`prod.<yourdomain>`). See your DNS provider's documentation for apex/ALIAS/CNAME support.
-- **Note:** The domain is always parameterized. There are no hardcoded domains in the codebase.
-
-## 6. Stack Outputs
-After deployment, find resource outputs (Cognito, S3, RDS, Amplify) in the CloudFormation console or CLI output.
-
-## 7. Environment Variables
-Update your application's `.env.local` with the outputs and any required AWS resource references.
-
-## 8. Troubleshooting
-- Ensure your AWS credentials are correct and have sufficient permissions.
-- If you see errors about missing secrets, create them in AWS Secrets Manager as described above.
-- For IAM changes, CDK may prompt for approval—review and approve as needed.
-- If you see errors about missing parameters, provide the required Google client ID(s) and base domain as shown above.
-- If you see errors about domains not containing subdomains, ensure you are not using the apex/root domain and that your base domain is correct.
-- If you see an error about missing context variable `baseDomain`, add `--context baseDomain=yourdomain.com` to your command.
-
-## 9. Clean Up
-To remove all resources (dev only):
-```sh
-cdk destroy --all --context baseDomain=yourdomain.com
-```
-
-See `OPERATIONS.md` (in this directory) for ongoing management and monitoring.
-
-## 10. Configure SSR Compute Role
-AWS Amplify WEB_COMPUTE requires an SSR Compute role for runtime AWS access:
-
-1. The CDK automatically creates this role during deployment
-2. Check the stack outputs for `SSRComputeRoleArn`
-3. Verify in Amplify Console → App settings → IAM roles that the SSR Compute role is attached
-4. Without this role, you'll get "Could not load credentials from any providers" errors
-
-## 11. NextAuth v5 Environment Variables
-After deploying the stacks, you must set these environment variables in AWS Amplify console:
-
-### Critical for Authentication:
-- `AUTH_URL` - Must match your deployment URL:
-  - Dev: `https://dev.<yourdomain>`
-  - Prod: `https://prod.<yourdomain>`
-- `AUTH_SECRET` - Generate with `openssl rand -base64 32`
-- `AUTH_COGNITO_CLIENT_ID` - From Auth stack outputs
-- `AUTH_COGNITO_ISSUER` - Format: `https://cognito-idp.<region>.amazonaws.com/<user-pool-id>`
-
-### Other Required Variables:
-These are output by the CDK stacks and must be set in Amplify:
-- `NEXT_PUBLIC_COGNITO_USER_POOL_ID`
-- `NEXT_PUBLIC_COGNITO_CLIENT_ID`
-- `NEXT_PUBLIC_COGNITO_DOMAIN`
-- `NEXT_PUBLIC_AWS_REGION`
-- `RDS_RESOURCE_ARN`
-- `RDS_SECRET_ARN`
-- `SQL_LOGGING` - Set to `false` for production
-
-## 12. Getting Stack Outputs
-
-To get the required values from your CDK deployment:
+Validate CDK configuration before deployment:
 
 ```bash
-# List all stacks
-aws cloudformation list-stacks
+cdk synth --context baseDomain=aistudio.psd401.ai
+```
 
-# Get specific stack outputs
+Review synthesized CloudFormation templates in `cdk.out/`.
+
+---
+
+## Environment Variables
+
+### ECS Task Environment Variables
+
+The ECS tasks automatically receive environment variables from:
+
+1. **Stack Outputs** (via CloudFormation exports):
+   - Cognito User Pool ID and Client ID
+   - RDS cluster ARN and secret ARN
+   - S3 bucket names
+   - SQS queue URLs
+   - DynamoDB table names
+
+2. **AWS Secrets Manager** (injected at runtime):
+   - `AUTH_SECRET` - NextAuth session encryption key
+   - `INTERNAL_API_SECRET` - Internal API authentication
+
+3. **Hardcoded Configuration** (in `ecs-service.ts`):
+   - AWS region
+   - Database name
+   - Queue URLs from stack exports
+   - Public Cognito configuration
+
+### Required Secrets in AWS Secrets Manager
+
+Before deployment, create these secrets:
+
+```bash
+# Dev environment - NextAuth secret
+aws secretsmanager create-secret \
+  --name aistudio-dev-auth-secret \
+  --secret-string "$(openssl rand -base64 32)" \
+  --description "NextAuth secret for dev environment"
+
+# Prod environment - NextAuth secret
+aws secretsmanager create-secret \
+  --name aistudio-prod-auth-secret \
+  --secret-string "$(openssl rand -base64 32)" \
+  --description "NextAuth secret for prod environment"
+```
+
+**Note:** The `INTERNAL_API_SECRET` is automatically generated by the FrontendStack during deployment.
+
+---
+
+## Stack Deployment
+
+### Deployment Order
+
+Stacks have dependencies and should be deployed in this order:
+
+1. **DatabaseStack** - Creates Aurora Serverless v2 cluster and VPC
+2. **AuthStack** - Creates Cognito User Pool and identity provider
+3. **StorageStack** - Creates S3 buckets for documents
+4. **ProcessingStack** - Creates SQS queues and Lambda functions
+5. **DocumentProcessingStack** - Creates document processing pipeline
+6. **FrontendStack-ECS** - Creates ECS Fargate service with ALB
+7. **SchedulerStack** - Creates scheduled task execution (depends on Frontend)
+8. **MonitoringStack** - Creates CloudWatch dashboards and alarms
+
+### Deploy All Development Stacks
+
+```bash
+cd infra
+
+cdk deploy \
+  AIStudio-DatabaseStack-Dev \
+  AIStudio-AuthStack-Dev \
+  AIStudio-StorageStack-Dev \
+  AIStudio-ProcessingStack-Dev \
+  AIStudio-DocumentProcessingStack-Dev \
+  AIStudio-FrontendStack-ECS-Dev \
+  AIStudio-SchedulerStack-Dev \
+  AIStudio-MonitoringStack-Dev \
+  --parameters AIStudio-AuthStack-Dev:GoogleClientId=YOUR_DEV_CLIENT_ID \
+  --context baseDomain=aistudio.psd401.ai
+```
+
+### Deploy All Production Stacks
+
+```bash
+cd infra
+
+cdk deploy \
+  AIStudio-DatabaseStack-Prod \
+  AIStudio-AuthStack-Prod \
+  AIStudio-StorageStack-Prod \
+  AIStudio-ProcessingStack-Prod \
+  AIStudio-DocumentProcessingStack-Prod \
+  AIStudio-FrontendStack-ECS-Prod \
+  AIStudio-SchedulerStack-Prod \
+  AIStudio-MonitoringStack-Prod \
+  --parameters AIStudio-AuthStack-Prod:GoogleClientId=YOUR_PROD_CLIENT_ID \
+  --context baseDomain=aistudio.psd401.ai
+```
+
+### Deploy All Stacks at Once
+
+```bash
+cd infra
+
+cdk deploy --all \
+  --parameters AIStudio-AuthStack-Dev:GoogleClientId=YOUR_DEV_CLIENT_ID \
+  --parameters AIStudio-AuthStack-Prod:GoogleClientId=YOUR_PROD_CLIENT_ID \
+  --context baseDomain=aistudio.psd401.ai
+```
+
+### Deploy Individual Stack
+
+For incremental updates after initial deployment:
+
+```bash
+# Deploy only the Frontend stack after UI changes
+cdk deploy AIStudio-FrontendStack-ECS-Dev --context baseDomain=aistudio.psd401.ai
+
+# Deploy only the Database stack for schema changes
+cdk deploy AIStudio-DatabaseStack-Dev
+```
+
+**Deployment time:** ~3-5 minutes per stack (vs 15-20 minutes for all stacks)
+
+---
+
+## DNS and Certificate Configuration
+
+### Domain Structure
+
+- **Dev environment:** `dev.aistudio.psd401.ai`
+- **Prod environment:** `aistudio.psd401.ai` (apex/root domain)
+
+### Automatic Configuration
+
+The `FrontendStack-ECS` automatically:
+1. Looks up your Route 53 hosted zone (e.g., `psd401.ai`)
+2. Creates an SSL certificate via AWS Certificate Manager
+3. Validates the certificate using DNS (automatic)
+4. Creates an A record pointing to the Application Load Balancer
+5. Configures ALB with HTTPS listener (port 443)
+6. Redirects HTTP (port 80) to HTTPS
+
+### Manual DNS Setup (if needed)
+
+If deploying to a subdomain not managed by Route 53:
+
+1. Find your ALB DNS name:
+   ```bash
+   aws cloudformation describe-stacks \
+     --stack-name AIStudio-FrontendStack-ECS-Dev \
+     --query 'Stacks[0].Outputs[?OutputKey==`LoadBalancerDnsName`].OutputValue' \
+     --output text
+   ```
+
+2. Create a CNAME record at your DNS provider:
+   ```
+   Type: CNAME
+   Name: dev.aistudio (or your subdomain)
+   Value: [ALB DNS name from step 1]
+   TTL: 300
+   ```
+
+### SSL Certificate Validation
+
+Certificate validation happens automatically via DNS. Monitor progress:
+
+```bash
+# Check certificate status
+aws acm list-certificates --region us-east-1 \
+  --query 'CertificateSummaryList[?DomainName==`dev.aistudio.psd401.ai`]'
+```
+
+---
+
+## Database Initialization
+
+### ⚠️ CRITICAL: Database Safety
+
+The database initialization Lambda runs automatically on first deployment. It:
+- Checks if database is empty
+- Runs initial schema files (001-005) for new databases
+- Runs migration files (010+) for existing databases
+- Records migrations in `migration_log` table
+
+### Pre-Deployment Checklist
+
+Before deploying database changes, complete this checklist:
+
+- [ ] Reviewed all SQL files in `/infra/database/schema/`
+- [ ] Verified database is backed up (production only)
+- [ ] Confirmed HTTP endpoint is enabled on RDS cluster
+- [ ] Tested migration SQL with MCP tools (if applicable)
+- [ ] Reviewed `MIGRATION_FILES` array in `db-init-handler.ts`
+
+### Before Deployment Safety Checks
+
+**ALWAYS verify before deploying:**
+
+1. **Check database initialization mode:**
+   ```bash
+   # Review the db-init-handler to ensure two-mode system is active
+   cat infra/database/lambda/db-init-handler.ts | grep -A5 "checkIfDatabaseEmpty"
+   ```
+
+2. **Verify Aurora HTTP endpoint is enabled:**
+   ```bash
+   # Check if HTTP endpoint is enabled
+   aws rds describe-db-clusters \
+     --db-cluster-identifier [your-cluster-id] \
+     --query 'DBClusters[0].EnableHttpEndpoint'
+   ```
+
+   If `false`, enable via AWS Console:
+   - Navigate to RDS > Databases > [your cluster]
+   - Click **Modify**
+   - Under **Additional configuration**, enable **Data API**
+   - Click **Continue** and **Modify cluster**
+
+3. **Verify SQL files match database structure:**
+   - Use MCP tools to inspect current database schema
+   - Compare with files in `/infra/database/schema/`
+   - Files 001-005 should ONLY run on empty databases
+   - Migration files (010+) must be additive only (no destructive operations)
+
+4. **Test migration SQL locally (recommended):**
+   ```bash
+   # Use MCP tools to validate SQL before deployment
+   mcp__awslabs-postgres-mcp-server__run_query --sql "SELECT * FROM migration_log ORDER BY executed_at DESC LIMIT 5"
+
+   # Test new migration SQL (dry run)
+   # Replace with your actual migration SQL
+   mcp__awslabs-postgres-mcp-server__run_query --sql "BEGIN; [your migration SQL]; ROLLBACK;"
+   ```
+   - After deployment, verify in `migration_log` table
+   - Check that all expected migrations executed successfully
+
+### Migration Process
+
+**For new installations:**
+- Initial setup files (001-005) create tables
+- Migration files (010+) are skipped
+
+**For existing databases:**
+- Initial setup files (001-005) are skipped
+- Only new migration files run
+- Migrations are tracked in `migration_log` table
+
+### Database Recovery
+
+If database corruption occurs:
+
+1. **Stop all deployments immediately**
+2. **Restore from snapshot:**
+   ```bash
+   aws rds restore-db-cluster-from-snapshot \
+     --db-cluster-identifier aistudio-dev-restored \
+     --snapshot-identifier [snapshot-id]
+   ```
+3. **Manually enable HTTP endpoint** on restored cluster (AWS Console)
+4. **Verify ALL SQL files** match restored database structure
+5. **Only then attempt redeployment**
+
+---
+
+## Post-Deployment Verification
+
+### 1. Verify Stack Outputs
+
+```bash
+# Database Stack
 aws cloudformation describe-stacks \
   --stack-name AIStudio-DatabaseStack-Dev \
   --query 'Stacks[0].Outputs'
 
+# Auth Stack
 aws cloudformation describe-stacks \
   --stack-name AIStudio-AuthStack-Dev \
   --query 'Stacks[0].Outputs'
 
+# Frontend Stack
 aws cloudformation describe-stacks \
-  --stack-name AIStudio-StorageStack-Dev \
-  --query 'Stacks[0].Outputs'
-
-aws cloudformation describe-stacks \
-  --stack-name AIStudio-ProcessingStack-Dev \
+  --stack-name AIStudio-FrontendStack-ECS-Dev \
   --query 'Stacks[0].Outputs'
 ```
 
-### Key Outputs to Look For:
-- **DatabaseStack**: `ClusterArn`, `DbSecretArn`
-- **AuthStack**: `UserPoolId`, `UserPoolClientId`, `CognitoDomain`
-- **StorageStack**: `DocumentsBucketName`
-- **ProcessingStack**: `FileProcessingQueueUrl`, `URLProcessorFunctionName`, `JobStatusTableName`
-
-## 13. Post-Deployment Verification
-
-After deploying all stacks, verify the file processing infrastructure:
-
-1. **Check Lambda Functions**:
-   ```bash
-   aws lambda list-functions --query "Functions[?contains(FunctionName, 'FileProcessor') || contains(FunctionName, 'URLProcessor')].FunctionName"
-   ```
-
-2. **Check SQS Queue**:
-   ```bash
-   aws sqs list-queues --query "QueueUrls[?contains(@, 'file-processing')]"
-   ```
-
-3. **Test File Processing** (after setting environment variables):
-   - Upload a test document through the Admin Repository interface
-   - Check CloudWatch logs for the FileProcessor Lambda
-   - Verify chunks are created in the database
-
-4. **Monitor Processing**:
-   - CloudWatch Logs: Check Lambda execution logs
-   - SQS Console: Monitor queue depth and DLQ
-   - DynamoDB Console: Check job status entries
-
-## 14. CRITICAL: Database Initialization and Migration Safety
-
-**⚠️ EXTREME CAUTION REQUIRED ⚠️**
-
-### The Catastrophic Database Incident (July 2025)
-We experienced a catastrophic database corruption when the db-init Lambda ran SQL files that didn't match the actual database structure. The Lambda:
-- Dropped and recreated tables, causing complete data loss
-- Modified column definitions, removing critical fields
-- Ran destructive operations on a production database
-
-**NEVER deploy without verifying:**
-1. The HTTP endpoint is enabled on Aurora cluster (or Lambda will fail)
-2. ALL SQL schema files EXACTLY match the current database structure
-3. The db-init-handler.ts correctly distinguishes between fresh installs and existing databases
-
-### Before ANY CDK Deployment:
-1. **Check database initialization mode**:
-   ```bash
-   # Review the db-init-handler.ts to ensure it's using the two-mode system
-   cat infra/database/lambda/db-init-handler.ts | grep -A5 "checkIfDatabaseEmpty"
-   ```
-
-2. **Verify SQL files won't destroy data**:
-   - NEVER trust the SQL files in `/infra/database/schema/`
-   - Use MCP tools or direct database inspection to verify structure
-   - The files 001-005 should ONLY run on empty databases
-   - Migration files (010+) must be additive only
-
-3. **Enable Aurora HTTP endpoint** before deployment:
-   ```bash
-   # Check if HTTP endpoint is enabled
-   aws rds describe-db-clusters --db-cluster-identifier your-cluster-id \
-     --query 'DBClusters[0].EnableHttpEndpoint'
-   
-   # If false, enable it via AWS Console (CLI often fails)
-   ```
-
-### Safe Database Migration Process:
-1. **For existing databases**: Only migration files (010+) should run
-2. **For new installations**: Initial setup files (001-005) run first
-3. **Migration tracking**: All migrations are recorded in `migration_log` table
-4. **Rollback plan**: Always have a recent snapshot before deployment
-
-### If Database Gets Corrupted:
-1. Stop all deployments immediately
-2. Restore from snapshot (keep CDK stack intact)
-3. Manually enable HTTP endpoint on restored cluster
-4. Verify ALL SQL files match restored database EXACTLY
-5. Only then attempt deployment
-
-## 15. Stack Architecture
-
-### SSM Parameter Store Integration
-The CDK infrastructure uses SSM Parameter Store for cross-stack dependencies, enabling independent deployment of individual stacks. This improves development velocity and reduces deployment costs.
-
-**SSM Parameter Naming Convention:**
-```
-/aistudio/{environment}/{resource-name}
-```
-
-**Current Parameters:**
-- `/aistudio/dev/db-cluster-arn` - Aurora cluster ARN
-- `/aistudio/dev/db-secret-arn` - Database secret ARN  
-- `/aistudio/dev/documents-bucket-name` - S3 bucket name
-- `/aistudio/prod/db-cluster-arn` - Aurora cluster ARN (prod)
-- `/aistudio/prod/db-secret-arn` - Database secret ARN (prod)
-- `/aistudio/prod/documents-bucket-name` - S3 bucket name (prod)
-
-### Independent Stack Deployment
-With SSM parameters, stacks can be deployed independently:
+### 2. Check ECS Service Health
 
 ```bash
-# Deploy only the FrontendStack after making UI changes
-npx cdk deploy AIStudio-FrontendStack-Dev
+# List ECS services
+aws ecs list-services --cluster aistudio-dev
 
-# Deploy only the DatabaseStack for schema changes
-npx cdk deploy AIStudio-DatabaseStack-Dev
+# Describe service
+aws ecs describe-services \
+  --cluster aistudio-dev \
+  --services aistudio-dev
 
-# Deploy only AuthStack for Cognito changes
-npx cdk deploy AIStudio-AuthStack-Dev \
-  --parameters AIStudio-AuthStack-Dev:GoogleClientId=YOUR_GOOGLE_CLIENT_ID
+# Check running tasks
+aws ecs list-tasks --cluster aistudio-dev --service-name aistudio-dev
 ```
 
-Deployment time: ~3-5 minutes per stack (vs 15-20 minutes for all stacks)
+### 3. View Container Logs
 
-## 16. First Administrator Setup
-After deploying the application, the first user who signs up needs to be granted administrator privileges:
+```bash
+# Tail ECS logs
+aws logs tail /ecs/aistudio-dev --follow
 
-1. **Sign up as the first user** through the web interface
-2. **Connect to your RDS database** using AWS Query Editor or a PostgreSQL client
-3. **Find your user ID** by running:
+# Filter for errors
+aws logs tail /ecs/aistudio-dev --follow --filter-pattern "ERROR"
+```
+
+### 4. Test Application Endpoints
+
+```bash
+# Health check
+curl https://dev.aistudio.psd401.ai/api/healthz
+
+# Should return: {"status":"healthy"}
+```
+
+### 5. Verify File Processing
+
+1. Upload a test document through Admin Repository interface
+2. Check CloudWatch logs for FileProcessor Lambda
+3. Verify chunks created in database:
    ```sql
-   SELECT id, email, cognito_sub FROM users WHERE email = 'your-email@example.com';
-   ```
-4. **Check if admin role exists**:
-   ```sql
-   SELECT id FROM roles WHERE name = 'administrator';
-   ```
-   If it doesn't exist, create it:
-   ```sql
-   INSERT INTO roles (name, description) VALUES ('administrator', 'Administrator role with full access');
-   ```
-5. **Assign the admin role** to your user:
-   ```sql
-   INSERT INTO user_roles (user_id, role_id) 
-   SELECT u.id, r.id 
-   FROM users u, roles r 
-   WHERE u.email = 'your-email@example.com' AND r.name = 'administrator';
+   SELECT COUNT(*) FROM document_chunks WHERE document_id = [test-doc-id];
    ```
 
-Alternatively, you can use the RDS Query Editor in AWS Console:
-1. Navigate to RDS → Query Editor
-2. Connect using your cluster ARN and secret ARN
-3. Select the `aistudio` database
-4. Run the SQL commands above
+### 6. Monitor Processing Queues
+
+```bash
+# Check SQS queue depth
+aws sqs get-queue-attributes \
+  --queue-url [queue-url] \
+  --attribute-names ApproximateNumberOfMessages ApproximateNumberOfMessagesNotVisible
+```
+
+---
+
+## First Administrator Setup
+
+After deploying, the first user needs administrator privileges:
+
+### 1. Sign Up Through Web Interface
+
+Visit your deployment URL and sign up with Google OAuth.
+
+### 2. Connect to Database
+
+Use AWS RDS Query Editor or PostgreSQL client:
+
+```bash
+# Option 1: AWS Console RDS Query Editor
+# Navigate to: RDS > Query Editor
+# Connect using cluster ARN and secret ARN
+
+# Option 2: psql via bastion host
+psql -h [cluster-endpoint] -U postgres -d aistudio
+```
+
+### 3. Find Your User ID
+
+```sql
+SELECT id, email, cognito_sub
+FROM users
+WHERE email = 'your-email@example.com';
+```
+
+### 4. Create Administrator Role (if needed)
+
+```sql
+-- Check if admin role exists
+SELECT id FROM roles WHERE name = 'administrator';
+
+-- Create if missing
+INSERT INTO roles (name, description)
+VALUES ('administrator', 'Administrator role with full access');
+```
+
+### 5. Assign Admin Role
+
+```sql
+INSERT INTO user_roles (user_id, role_id)
+SELECT u.id, r.id
+FROM users u, roles r
+WHERE u.email = 'your-email@example.com'
+  AND r.name = 'administrator';
+```
+
+### 6. Verify Assignment
+
+```sql
+SELECT u.email, r.name
+FROM users u
+JOIN user_roles ur ON u.id = ur.user_id
+JOIN roles r ON ur.role_id = r.id
+WHERE u.email = 'your-email@example.com';
+```
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+#### 1. ECS Tasks Not Starting
+
+**Symptoms:** Service shows desired count but no running tasks
+
+**Solutions:**
+```bash
+# Check task failures
+aws ecs describe-tasks \
+  --cluster aistudio-dev \
+  --tasks [task-arn]
+
+# Common causes:
+# - Image pull errors (check ECR permissions)
+# - Secrets Manager access denied (check task execution role)
+# - Health check failures (check /api/healthz endpoint)
+```
+
+#### 2. Database Connection Errors
+
+**Symptoms:** Application logs show "Could not connect to database"
+
+**Solutions:**
+- Verify RDS HTTP endpoint is enabled
+- Check RDS security group allows traffic from ECS security group
+- Verify `RDS_RESOURCE_ARN` and `RDS_SECRET_ARN` environment variables
+- Confirm database secret exists in Secrets Manager
+
+#### 3. Authentication Errors
+
+**Symptoms:** "Could not load credentials" or "Invalid JWT token"
+
+**Solutions:**
+- Verify `AUTH_SECRET` exists in Secrets Manager
+- Check `AUTH_URL` matches deployment domain (e.g., `https://dev.aistudio.psd401.ai`)
+- Confirm Cognito callback URLs include deployment domain
+- Verify Google OAuth redirect URIs match Cognito domain
+
+#### 4. SSL Certificate Not Validating
+
+**Symptoms:** Certificate stuck in "Pending validation"
+
+**Solutions:**
+```bash
+# Check DNS records
+dig dev.aistudio.psd401.ai
+
+# Verify Route 53 hosted zone
+aws route53 list-hosted-zones
+
+# Check certificate validation records
+aws acm describe-certificate --certificate-arn [cert-arn]
+```
+
+#### 5. Docker Build Failures
+
+**Symptoms:** "Error building Docker image" during deployment
+
+**Solutions:**
+- Ensure Docker daemon is running
+- Check disk space: `df -h`
+- Verify Dockerfile.graviton exists in project root
+- Clear Docker cache: `docker system prune -a`
+
+#### 6. Stack Deployment Errors
+
+**Symptoms:** CDK deploy fails with parameter errors
+
+**Solutions:**
+- Verify all required parameters are provided
+- Check `baseDomain` context variable is set
+- Ensure Google Client ID parameter is provided for AuthStack
+- Confirm all required secrets exist in Secrets Manager
+
+### Getting Help
+
+For detailed logs and metrics:
+
+1. **CloudWatch Logs:**
+   - ECS tasks: `/ecs/aistudio-[env]`
+   - Lambda functions: `/aws/lambda/[function-name]`
+
+2. **CloudWatch Dashboards:**
+   - Navigate to: CloudWatch > Dashboards > AIStudio-Consolidated-[Environment]
+
+3. **X-Ray Traces:**
+   - Navigate to: X-Ray > Traces
+   - Filter by service name: `aistudio-[env]`
+
+---
+
+## Clean Up
+
+### Remove All Resources
+
+**Development environment:**
+```bash
+cd infra
+
+# Destroy all dev stacks
+cdk destroy --all \
+  --context baseDomain=aistudio.psd401.ai
+```
+
+**Specific stack:**
+```bash
+# Destroy only frontend stack
+cdk destroy AIStudio-FrontendStack-ECS-Dev --context baseDomain=aistudio.psd401.ai
+```
+
+### Manual Cleanup (if needed)
+
+Some resources may require manual deletion:
+
+1. **ECR Images:**
+   ```bash
+   # List images
+   aws ecr list-images --repository-name aistudio-dev
+
+   # Delete repository (including all images)
+   aws ecr delete-repository --repository-name aistudio-dev --force
+   ```
+
+2. **RDS Snapshots:**
+   ```bash
+   # List snapshots
+   aws rds describe-db-cluster-snapshots \
+     --query 'DBClusterSnapshots[?contains(DBClusterIdentifier, `aistudio-dev`)]'
+
+   # Delete snapshot
+   aws rds delete-db-cluster-snapshot --db-cluster-snapshot-identifier [snapshot-id]
+   ```
+
+3. **CloudWatch Logs:**
+   ```bash
+   # Delete log group
+   aws logs delete-log-group --log-group-name /ecs/aistudio-dev
+   ```
+
+### Cost Considerations
+
+After destroying stacks, verify no resources remain:
+
+```bash
+# Check for running ECS tasks
+aws ecs list-tasks --cluster aistudio-dev
+
+# Check for active RDS clusters
+aws rds describe-db-clusters --query 'DBClusters[?contains(DBClusterIdentifier, `aistudio`)]'
+
+# Check for undeleted S3 buckets
+aws s3 ls | grep aistudio
+```
+
+---
+
+## Additional Resources
+
+- **Architecture Documentation:** [ARCHITECTURE.md](./ARCHITECTURE.md)
+- **Operations Guide:** [OPERATIONS.md](./operations/OPERATIONS.md)
+- **CDK Best Practices:** [AWS CDK Guide](https://docs.aws.amazon.com/cdk/latest/guide/)
+- **ECS Deployment Guide:** [AWS ECS Documentation](https://docs.aws.amazon.com/ecs/)
+- **Next.js Deployment:** [Next.js Deployment Docs](https://nextjs.org/docs/deployment)
+
+---
+
+**Last Updated:** January 2025
+**Architecture Version:** ECS Fargate with HTTP/2 Streaming

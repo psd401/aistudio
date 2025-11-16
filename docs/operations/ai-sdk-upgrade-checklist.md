@@ -192,7 +192,7 @@ Test critical streaming flows:
 ```bash
 # From /infra directory
 cd infra
-npx cdk deploy AIStudio-FrontendStack-Staging
+npx cdk deploy AIStudio-FrontendStack-ECS-Dev
 ```
 
 **Test in staging environment:**
@@ -346,7 +346,7 @@ npm install
 
 ```bash
 npm run build
-cd infra && npx cdk deploy AIStudio-FrontendStack-Prod
+cd infra && npx cdk deploy AIStudio-FrontendStack-ECS-Prod
 ```
 
 ### 4. Verify Rollback
