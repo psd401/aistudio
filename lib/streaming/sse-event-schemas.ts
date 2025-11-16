@@ -10,7 +10,7 @@
  * - Incorrect field types
  * - Field name mismatches (e.g., textDelta vs delta)
  *
- * @see https://github.com/psd401/aistudio.psd401.ai/issues/365
+ * @see https://github.com/psd401/aistudio/issues/365
  * @see /lib/streaming/sse-event-types.ts
  */
 
@@ -468,7 +468,7 @@ export function generateValidationErrorMessage(result: ValidationResult): string
 
   if (result.error.issues.length > 0) {
     message += '\n\nIssues:'
-    result.error.issues.forEach(issue => {
+    for (const issue of result.error.issues) {
       const path = issue.path.length > 0 ? issue.path.join('.') : 'root'
       message += `\n  - ${path}: ${issue.message}`
       if (issue.expected) {
@@ -477,7 +477,7 @@ export function generateValidationErrorMessage(result: ValidationResult): string
       if (issue.received) {
         message += ` (received: ${issue.received})`
       }
-    })
+    }
   }
 
   if (result.error.hint) {

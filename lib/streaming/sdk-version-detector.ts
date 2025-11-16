@@ -5,11 +5,12 @@
  * and version-specific behavior. This helps prevent breaking changes when
  * upgrading dependencies.
  *
- * @see https://github.com/psd401/aistudio.psd401.ai/issues/366
+ * @see https://github.com/psd401/aistudio/issues/366
  */
 
-import { readFileSync } from 'fs';
-import { join } from 'path';
+/* eslint-disable security/detect-non-literal-fs-filename -- reads package.json from known paths, not user input */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createLogger } from '@/lib/logger';
 
 const log = createLogger({ module: 'sdk-version-detector' });
@@ -130,7 +131,7 @@ export class SDKVersionDetector {
 
       if (aiVersion) {
         // Remove version range specifiers (^, ~, >=, etc.)
-        const cleanVersion = aiVersion.replace(/^[\^~>=<]+/, '');
+        const cleanVersion = aiVersion.replace(/^[<=>^~]+/, '');
 
         // Validate the cleaned version looks like a semver version
         if (!/^\d+\.\d+\.\d+/.test(cleanVersion)) {
@@ -170,8 +171,9 @@ export class SDKVersionDetector {
     version: string,
     source: SDKVersionInfo['detected']
   ): SDKVersionInfo {
-    // Match semver format: major.minor.patch[-prerelease]
-    const match = version.match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/);
+    // Match semver format: major.minor.patch[-prerelease] - ReDoS-safe with quantifier limits
+    // eslint-disable-next-line security/detect-unsafe-regex
+    const match = version.match(/^(\d{1,10})\.(\d{1,10})\.(\d{1,10})(?:-([\d.A-Za-z-]{1,50}))?$/);
 
     if (!match) {
       throw new Error(`Invalid version format: ${version}`);
@@ -179,9 +181,9 @@ export class SDKVersionDetector {
 
     return {
       version,
-      major: parseInt(match[1], 10),
-      minor: parseInt(match[2], 10),
-      patch: parseInt(match[3], 10),
+      major: Number.parseInt(match[1], 10),
+      minor: Number.parseInt(match[2], 10),
+      patch: Number.parseInt(match[3], 10),
       prerelease: match[4],
       detected: source,
     };

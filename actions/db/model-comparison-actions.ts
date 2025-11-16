@@ -4,7 +4,7 @@ import { getServerSession } from "@/lib/auth/server-session"
 import { executeSQL } from "@/lib/db/data-api-adapter"
 import { type ActionState } from "@/types/actions-types"
 import { hasToolAccess } from "@/utils/roles"
-import { handleError, createSuccess, ErrorFactories } from "@/lib/error-utils"
+import { handleError } from "@/lib/error-utils"
 import {
   createLogger,
   generateRequestId,

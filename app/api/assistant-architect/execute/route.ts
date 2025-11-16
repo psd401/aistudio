@@ -20,6 +20,8 @@ export const maxDuration = 900;
 const MAX_INPUT_SIZE_BYTES = 100000; // 100KB max input size
 const MAX_INPUT_FIELDS = 50; // Max 50 input fields
 const MAX_PROMPT_CHAIN_LENGTH = 20; // Max 20 prompts per execution
+const MAX_PROMPT_CONTENT_SIZE = 10000000; // 10MB max prompt content size (allows large context)
+const MAX_VARIABLE_REPLACEMENTS = 50; // Max 50 variable placeholders per prompt (realistic upper bound)
 
 // Request validation schema
 const ExecuteRequestSchema = z.object({
@@ -262,7 +264,7 @@ export async function POST(req: Request) {
     };
 
     try {
-      const streamResponse = await executePromptChain(prompts, inputs, context, requestId, log);
+      const streamResponse = await executePromptChain(prompts as ChainPrompt[], inputs, context, requestId, log);
 
       // 9. Update execution status to completed on stream completion
       // This is done in the onFinish callback of the last prompt
@@ -467,10 +469,10 @@ async function executePromptChain(
         const sourcePrompts: number[] = [];
 
         // Extract which variables were substituted
-        Object.entries(inputMapping).forEach(([varName, mappedPath]) => {
+        for (const [varName, mappedPath] of Object.entries(inputMapping)) {
           const promptMatch = mappedPath.match(/^prompt_(\d+)\.output$/);
           if (promptMatch) {
-            const sourcePromptId = parseInt(promptMatch[1], 10);
+            const sourcePromptId = Number.parseInt(promptMatch[1], 10);
             sourcePrompts.push(sourcePromptId);
             const value = context.previousOutputs.get(sourcePromptId);
             if (value) {
@@ -479,7 +481,7 @@ async function executePromptChain(
           } else if (varName in inputs) {
             substitutedVars[varName] = String(inputs[varName]).substring(0, 100);
           }
-        });
+        }
 
         await storeExecutionEvent(context.executionId, 'variable-substitution', {
           promptId: prompt.id,
@@ -747,12 +749,14 @@ async function executePromptChain(
 }
 
 /**
- * Substitute {{variable}} placeholders in prompt content
+ * Substitute variable placeholders in prompt content
  *
- * Supports:
- * - Direct input mapping: {{userInput}} -> inputs.userInput
- * - Mapped variables: {{topic}} with mapping {"topic": "userInput.subject"}
- * - Previous outputs: {{previousAnalysis}} with mapping {"previousAnalysis": "prompt_1.output"}
+ * Supports both ${variable} and {{variable}} syntax:
+ * - Direct input mapping: ${userInput} or {{userInput}} -> inputs.userInput
+ * - Mapped variables: ${topic} with mapping {"topic": "userInput.subject"}
+ * - Previous outputs: ${previousAnalysis} with mapping {"previousAnalysis": "prompt_1.output"}
+ *
+ * Security: Validates content size and placeholder count to prevent DoS attacks
  */
 function substituteVariables(
   content: string,
@@ -760,7 +764,29 @@ function substituteVariables(
   previousOutputs: Map<number, string>,
   mapping: Record<string, string>
 ): string {
-  return content.replace(/\{\{(\w+)\}\}/g, (match, varName) => {
+  // Validate content size before processing to prevent resource exhaustion
+  if (content.length > MAX_PROMPT_CONTENT_SIZE) {
+    throw ErrorFactories.validationFailed([{
+      field: 'content',
+      message: `Prompt content exceeds maximum size of ${MAX_PROMPT_CONTENT_SIZE} characters`
+    }]);
+  }
+
+  // Count variable placeholders to prevent DoS via excessive replacements
+  const placeholderMatches = content.match(/\${(\w+)}|{{(\w+)}}/g);
+  const placeholderCount = placeholderMatches ? placeholderMatches.length : 0;
+
+  if (placeholderCount > MAX_VARIABLE_REPLACEMENTS) {
+    throw ErrorFactories.validationFailed([{
+      field: 'content',
+      message: `Too many variable placeholders (${placeholderCount}, maximum ${MAX_VARIABLE_REPLACEMENTS})`
+    }]);
+  }
+
+  // Match both ${variable} and {{variable}} patterns
+  return content.replace(/\${(\w+)}|{{(\w+)}}/g, (match, dollarVar, braceVar) => {
+    const varName = dollarVar || braceVar;
+
     // 1. Check if there's an input mapping for this variable
     if (mapping[varName]) {
       const mappedPath = mapping[varName];
@@ -768,7 +794,7 @@ function substituteVariables(
       // Handle prompt output references: "prompt_X.output"
       const promptMatch = mappedPath.match(/^prompt_(\d+)\.output$/);
       if (promptMatch) {
-        const promptId = parseInt(promptMatch[1], 10);
+        const promptId = Number.parseInt(promptMatch[1], 10);
         const output = previousOutputs.get(promptId);
         if (output) {
           return output;

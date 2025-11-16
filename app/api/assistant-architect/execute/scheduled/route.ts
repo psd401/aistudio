@@ -9,6 +9,7 @@ import { createRepositoryTools } from '@/lib/tools/repository-tools';
 import type { StreamRequest } from '@/lib/streaming/types';
 import type { UIMessage } from 'ai';
 import jwt from 'jsonwebtoken';
+import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
 
 // Allow up to 15 minutes for long scheduled executions
 export const maxDuration = 900;
@@ -17,7 +18,7 @@ export const maxDuration = 900;
 const MAX_INPUT_SIZE_BYTES = 100000; // 100KB max input size
 const MAX_PROMPT_CHAIN_LENGTH = 20; // Max 20 prompts per execution
 const MAX_RESPONSE_SIZE_BYTES = 10485760; // 10MB max response size
-const MAX_ACCUMULATED_CONTEXT_MESSAGES = parseInt(
+const MAX_ACCUMULATED_CONTEXT_MESSAGES = Number.parseInt(
   process.env.MAX_CONTEXT_MESSAGES || '10',
   10
 ); // Keep last 10 messages (5 user/assistant exchanges) - configurable via env
@@ -63,14 +64,15 @@ interface PromptExecutionContext {
 
 /**
  * Internal authentication - validates JWT token from schedule-executor Lambda
+ * Returns the decoded payload if valid, null otherwise
  */
-function validateInternalRequest(req: NextRequest): boolean {
+function validateInternalRequest(req: NextRequest): { scheduleId: string; executionId: string } | null {
   const log = createLogger({ operation: 'validateInternalRequest' });
 
   const authHeader = req.headers.get('authorization');
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
     log.warn('Missing or invalid authorization header');
-    return false;
+    return null;
   }
 
   const token = authHeader.replace('Bearer ', '');
@@ -78,24 +80,75 @@ function validateInternalRequest(req: NextRequest): boolean {
 
   if (!internalSecret) {
     log.error('INTERNAL_API_SECRET not configured');
-    return false;
+    return null;
   }
 
   try {
     // Verify JWT with algorithm restriction and claim validation to prevent:
     // - Algorithm confusion attacks (by specifying algorithms: ['HS256'])
     // - Timing attacks (by validating claims in jwt.verify options)
-    jwt.verify(token, internalSecret, {
+    const decoded = jwt.verify(token, internalSecret, {
       algorithms: ['HS256'],
       issuer: 'schedule-executor',
       audience: 'assistant-architect-api'
-    });
+    }) as { scheduleId: string; executionId: string };
 
-    log.info('Internal request validated successfully');
-    return true;
+    log.info('Internal request validated successfully', {
+      scheduleId: decoded.scheduleId,
+      executionId: decoded.executionId
+    });
+    return decoded;
   } catch (error) {
     log.warn('JWT verification failed', { error: error instanceof Error ? error.message : String(error) });
-    return false;
+    return null;
+  }
+}
+
+/**
+ * Send notification to SQS queue for email delivery
+ */
+async function sendNotificationToQueue(
+  executionResultId: number,
+  userId: number,
+  scheduleName: string,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const notificationQueueUrl = process.env.NOTIFICATION_QUEUE_URL;
+
+  if (!notificationQueueUrl) {
+    log.warn('NOTIFICATION_QUEUE_URL not configured - skipping notification');
+    return;
+  }
+
+  try {
+    const sqsClient = new SQSClient({ region: process.env.AWS_REGION || 'us-east-1' });
+
+    const message = {
+      executionResultId,
+      userId,
+      notificationType: 'email',
+      scheduleName
+    };
+
+    const command = new SendMessageCommand({
+      QueueUrl: notificationQueueUrl,
+      MessageBody: JSON.stringify(message)
+    });
+
+    await sqsClient.send(command);
+
+    log.info('Notification queued successfully', {
+      executionResultId,
+      userId,
+      scheduleName
+    });
+  } catch (error) {
+    log.error('Failed to queue notification', {
+      error: error instanceof Error ? error.message : String(error),
+      executionResultId,
+      userId
+    });
+    // Don't throw - notification failure shouldn't fail the execution
   }
 }
 
@@ -113,8 +166,9 @@ export async function POST(req: NextRequest) {
   log.info('POST /api/assistant-architect/execute/scheduled - Processing scheduled execution');
 
   try {
-    // 1. Validate internal authentication
-    if (!validateInternalRequest(req)) {
+    // 1. Validate internal authentication and extract JWT payload
+    const jwtPayload = validateInternalRequest(req);
+    if (!jwtPayload) {
       log.warn('Unauthorized internal request');
       timer({ status: 'error', reason: 'unauthorized' });
       return new Response(
@@ -125,6 +179,9 @@ export async function POST(req: NextRequest) {
         }
       );
     }
+
+    const executionResultId = Number(jwtPayload.executionId);
+    log.info('Extracted execution result ID from JWT', { executionResultId });
 
     // 2. Parse and validate request
     const body = await req.json();
@@ -210,17 +267,23 @@ export async function POST(req: NextRequest) {
       id: number;
       name: string;
       content: string;
-      system_context: string | null;
-      model_id: number | null;
+      systemContext: string | null;
+      modelId: number | null;
       position: number;
-      input_mapping: string | null;
-      repository_ids: string | null;
-      enabled_tools: string | null;
-      timeout_seconds: number | null;
+      inputMapping: string | null;
+      repositoryIds: string | null;
+      enabledTools: string | null;
+      timeoutSeconds: number | null;
     }>(
       `SELECT
-        id, name, content, system_context, model_id, position,
-        input_mapping, repository_ids, enabled_tools, timeout_seconds
+        id, name, content,
+        system_context AS "systemContext",
+        model_id AS "modelId",
+        position,
+        input_mapping AS "inputMapping",
+        repository_ids AS "repositoryIds",
+        enabled_tools AS "enabledTools",
+        timeout_seconds AS "timeoutSeconds"
        FROM chain_prompts
        WHERE assistant_architect_id = :toolId
        ORDER BY position`,
@@ -260,13 +323,13 @@ export async function POST(req: NextRequest) {
       id: Number(p.id),
       name: String(p.name),
       content: String(p.content),
-      systemContext: p.system_context ? String(p.system_context) : null,
-      modelId: p.model_id ? Number(p.model_id) : null,
+      systemContext: p.systemContext ? String(p.systemContext) : null,
+      modelId: p.modelId ? Number(p.modelId) : null,
       position: Number(p.position),
-      inputMapping: safeParseJson<Record<string, string>>(p.input_mapping, 'input_mapping'),
-      repositoryIds: safeParseJson<number[]>(p.repository_ids, 'repository_ids'),
-      enabledTools: safeParseJson<string[]>(p.enabled_tools, 'enabled_tools'),
-      timeoutSeconds: p.timeout_seconds ? Number(p.timeout_seconds) : null
+      inputMapping: safeParseJson<Record<string, string>>(p.inputMapping, 'input_mapping'),
+      repositoryIds: safeParseJson<number[]>(p.repositoryIds, 'repository_ids'),
+      enabledTools: safeParseJson<string[]>(p.enabledTools, 'enabled_tools'),
+      timeoutSeconds: p.timeoutSeconds ? Number(p.timeoutSeconds) : null
     }));
 
     // Validate prompt chain length
@@ -331,24 +394,83 @@ export async function POST(req: NextRequest) {
     };
 
     try {
+      // Capture start time for duration calculation
+      const executionStartTime = Date.now();
+
       // Execute chain and collect complete response
       await executePromptChainServerSide(prompts, inputs, context, requestId, log);
+
+      // Calculate execution duration
+      const executionDurationMs = Date.now() - executionStartTime;
 
       // Update execution status to completed
       await executeSQL(
         `UPDATE tool_executions
-         SET status = 'completed',
+         SET status = 'completed'::execution_status,
              completed_at = NOW()
          WHERE id = :executionId`,
         [{ name: 'executionId', value: { longValue: executionId } }]
       );
+
+      // Query prompt_results to get the final AI output
+      // Note: RDS Data API returns camelCase (outputData) not snake_case (output_data)
+      const promptResultsQuery = await executeSQL<{ outputData: string }>(
+        `SELECT output_data AS "outputData"
+         FROM prompt_results
+         WHERE execution_id = :executionId
+         ORDER BY id DESC
+         LIMIT 1`,
+        [{ name: 'executionId', value: { longValue: executionId } }]
+      );
+
+      const resultData = promptResultsQuery && promptResultsQuery.length > 0 && promptResultsQuery[0].outputData
+        ? { output: promptResultsQuery[0].outputData, executionId, toolId }
+        : { output: 'No output generated', executionId, toolId };
+
+      log.info('Retrieved prompt results', {
+        executionId,
+        hasOutput: !!promptResultsQuery && promptResultsQuery.length > 0,
+        hasOutputData: !!promptResultsQuery?.[0]?.outputData,
+        outputLength: promptResultsQuery?.[0]?.outputData?.length || 0
+      });
+
+      // Update execution_results for UI/notification with result data and duration
+      await executeSQL(
+        `UPDATE execution_results
+         SET status = 'success',
+             executed_at = NOW(),
+             result_data = :resultData::jsonb,
+             execution_duration_ms = :durationMs
+         WHERE id = :executionResultId`,
+        [
+          { name: 'executionResultId', value: { longValue: executionResultId } },
+          { name: 'resultData', value: { stringValue: JSON.stringify(resultData) } },
+          { name: 'durationMs', value: { longValue: executionDurationMs } }
+        ]
+      );
+
+      // Get schedule name for notification
+      const scheduleQuery = await executeSQL<{ name: string }>(
+        `SELECT name FROM scheduled_executions WHERE id = :scheduleId LIMIT 1`,
+        [{ name: 'scheduleId', value: { longValue: scheduleId } }]
+      );
+
+      const scheduleName = scheduleQuery && scheduleQuery.length > 0
+        ? scheduleQuery[0].name
+        : 'Scheduled Execution';
+
+      // Send notification to SQS queue
+      await sendNotificationToQueue(executionResultId, userId, scheduleName, log);
 
       timer({ status: 'success' });
       log.info('Scheduled execution completed successfully', {
         executionId,
         toolId,
         scheduleId,
-        promptCount: prompts.length
+        promptCount: prompts.length,
+        durationMs: executionDurationMs,
+        executionResultId,
+        scheduleName
       });
 
       return new Response(
@@ -373,25 +495,38 @@ export async function POST(req: NextRequest) {
       );
 
     } catch (executionError) {
+      const errorMessage = executionError instanceof Error ? executionError.message : String(executionError);
+
       // Update execution status to failed
       await executeSQL(
         `UPDATE tool_executions
-         SET status = 'failed',
+         SET status = 'failed'::execution_status,
              error_message = :errorMessage,
              completed_at = NOW()
          WHERE id = :executionId`,
         [
           { name: 'executionId', value: { longValue: executionId } },
-          { name: 'errorMessage', value: {
-            stringValue: executionError instanceof Error ? executionError.message : String(executionError)
-          }}
+          { name: 'errorMessage', value: { stringValue: errorMessage }}
+        ]
+      );
+
+      // Update execution_results for UI/notification using direct ID
+      await executeSQL(
+        `UPDATE execution_results
+         SET status = 'failed',
+             error_message = :errorMessage,
+             executed_at = NOW()
+         WHERE id = :executionResultId`,
+        [
+          { name: 'executionResultId', value: { longValue: executionResultId } },
+          { name: 'errorMessage', value: { stringValue: errorMessage }}
         ]
       );
 
       // Return sanitized error response instead of re-throwing
       timer({ status: 'error' });
       log.error('Execution failed', {
-        error: executionError instanceof Error ? executionError.message : String(executionError),
+        error: errorMessage,
         executionId
       });
 
@@ -658,13 +793,13 @@ async function executePromptChainServerSide(
 
               // Validate response content
               const hasValidContent = text && text.length > 0;
-              const resultStatus = hasValidContent ? 'completed' : 'completed_with_warning';
+              const resultStatus = hasValidContent ? 'completed' : 'completed';
 
               if (!hasValidContent) {
                 log.warn('No text content from prompt execution', {
                   promptId: prompt.id,
                   finishReason,
-                  willMarkAsWarning: true
+                  note: 'Marked as completed but with warning in logs'
                 });
               }
 
@@ -678,7 +813,7 @@ async function executePromptChainServerSide(
                   status, started_at, completed_at, execution_time_ms
                 ) VALUES (
                   :executionId, :promptId, :inputData::jsonb, :outputData,
-                  :status, :startedAt, :completedAt, :executionTimeMs
+                  :status::execution_status, :startedAt::timestamp, :completedAt::timestamp, :executionTimeMs
                 )`,
                 [
                   { name: 'executionId', value: { longValue: context.executionId } },
@@ -742,16 +877,6 @@ async function executePromptChainServerSide(
               if (promptTimeoutId) clearTimeout(promptTimeoutId);
               finishPromiseReject(saveError instanceof Error ? saveError : new Error(String(saveError)));
               promiseResolved = true;
-            } finally {
-              // Safety net: if promise wasn't resolved/rejected (edge case), reject it
-              if (!promiseResolved) {
-                if (promptTimeoutId) clearTimeout(promptTimeoutId);
-                log.error('onFinish callback did not resolve promise properly', {
-                  promptId: prompt.id,
-                  executionId: context.executionId
-                });
-                finishPromiseReject(new Error('onFinish callback did not complete properly'));
-              }
             }
           }
         }
@@ -790,7 +915,7 @@ async function executePromptChainServerSide(
           status, error_message, started_at, completed_at
         ) VALUES (
           :executionId, :promptId, :inputData::jsonb, :outputData,
-          'failed', :errorMessage, NOW(), NOW()
+          'failed'::execution_status, :errorMessage, NOW(), NOW()
         )`,
         [
           { name: 'executionId', value: { longValue: context.executionId } },
@@ -826,7 +951,7 @@ function substituteVariables(
   mapping: Record<string, string>,
   currentPromptId?: number
 ): string {
-  return content.replace(/\{\{(\w+)\}\}/g, (match, varName) => {
+  return content.replace(/{{(\w+)}}/g, (match, varName) => {
     // 1. Check if there's an input mapping for this variable
     if (mapping[varName]) {
       const mappedPath = mapping[varName];
@@ -834,7 +959,7 @@ function substituteVariables(
       // Handle prompt output references: "prompt_X.output"
       const promptMatch = mappedPath.match(/^prompt_(\d+)\.output$/);
       if (promptMatch) {
-        const promptId = parseInt(promptMatch[1], 10);
+        const promptId = Number.parseInt(promptMatch[1], 10);
 
         // Validate prompt execution order - referenced prompt must have already executed
         if (!previousOutputs.has(promptId)) {

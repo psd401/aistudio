@@ -33,12 +33,14 @@ export function sanitizeTextForDatabase(text: string): string {
   }
 
   // Remove null bytes (0x00) - PostgreSQL cannot store these in text fields
-  let sanitized = text.replace(/\x00/g, '');
+  // eslint-disable-next-line no-control-regex
+  let sanitized = text.replace(/\u0000/g, '');
 
   // Remove other problematic control characters while preserving meaningful whitespace
   // Removes: 0x00-0x08, 0x0B-0x0C, 0x0E-0x1F, 0x7F (DEL)
   // Preserves: 0x09 (tab), 0x0A (newline), 0x0D (carriage return)
-  sanitized = sanitized.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '');
+  // eslint-disable-next-line no-control-regex
+  sanitized = sanitized.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
 
   // Normalize Unicode to canonical form (NFC) for consistent storage
   // This ensures characters like é are stored consistently
@@ -82,13 +84,15 @@ export function validateTextEncoding(text: string): {
   }
 
   // Check for null bytes
-  if (/\x00/.test(text)) {
+  // eslint-disable-next-line no-control-regex
+  if (/\u0000/.test(text)) {
     hasNullBytes = true;
     issues.push('Contains null bytes (0x00)');
   }
 
   // Check for other problematic control characters
-  if (/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/.test(text)) {
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(text)) {
     hasControlChars = true;
     issues.push('Contains problematic control characters');
   }
@@ -137,16 +141,20 @@ export function sanitizeTextWithMetrics(text: string): {
   const originalLength = text.length;
 
   // Count null bytes before removal
-  const nullBytesRemoved = (text.match(/\x00/g) || []).length;
+  // eslint-disable-next-line no-control-regex
+  const nullBytesRemoved = (text.match(/\u0000/g) || []).length;
 
   // Remove null bytes
-  let sanitized = text.replace(/\x00/g, '');
+  // eslint-disable-next-line no-control-regex
+  let sanitized = text.replace(/\u0000/g, '');
 
   // Count control characters before removal
-  const controlCharsRemoved = (sanitized.match(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g) || []).length;
+  // eslint-disable-next-line no-control-regex
+  const controlCharsRemoved = (sanitized.match(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g) || []).length;
 
   // Remove other problematic control characters
-  sanitized = sanitized.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '');
+  // eslint-disable-next-line no-control-regex
+  sanitized = sanitized.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '');
 
   // Normalize Unicode
   sanitized = sanitized.normalize('NFC');

@@ -44,6 +44,8 @@ export async function createProviderModel(provider: string, modelId: string): Pr
       return await createBedrockModel(modelId);
     case 'azure':
       return await createAzureModel(modelId);
+    case 'latimer':
+      return await createLatimerModel(modelId);
     default:
       log.error(`Unsupported provider: ${provider}`);
       throw ErrorFactories.validationFailed([
@@ -167,17 +169,32 @@ async function createAzureModel(modelId: string): Promise<LanguageModel> {
 }
 
 /**
+ * Latimer AI Provider - OpenAI-compatible API
+ * Delegates to LatimerAdapter to avoid code duplication
+ */
+async function createLatimerModel(modelId: string): Promise<LanguageModel> {
+  try {
+    log.debug(`Creating Latimer model: ${modelId}`);
+    const adapter = await getProviderAdapter('latimer');
+    return await adapter.createModel(modelId);
+  } catch (error) {
+    log.error('Failed to create Latimer model', { modelId, error });
+    throw error;
+  }
+}
+
+/**
  * Helper to validate if a provider is supported
  */
 export function isSupportedProvider(provider: string): boolean {
-  return ['openai', 'google', 'amazon-bedrock', 'azure'].includes(provider);
+  return ['openai', 'google', 'amazon-bedrock', 'azure', 'latimer'].includes(provider);
 }
 
 /**
  * Get list of supported providers
  */
 export function getSupportedProviders(): string[] {
-  return ['openai', 'google', 'amazon-bedrock', 'azure'];
+  return ['openai', 'google', 'amazon-bedrock', 'azure', 'latimer'];
 }
 
 /**

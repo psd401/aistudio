@@ -2,8 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import { Construct } from 'constructs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
-import { OptimizedBucket } from './constructs/storage/optimized-bucket';
-import { DataClassification, DataClassificationRule } from './constructs/storage/data-classification';
+import { DataClassification } from './constructs/storage/data-classification';
 import { StorageLensConfig } from './constructs/storage/storage-lens';
 import { CostMonitor } from './constructs/storage/cost-monitor';
 
@@ -42,27 +41,6 @@ export class StorageStack extends cdk.Stack {
         },
       ],
     });
-
-    // Define classification rules for different data types
-    const classificationRules: DataClassificationRule[] = [
-      {
-        pattern: 'user-uploads/*',
-        classification: DataClassification.INTERNAL,
-        enableReplication: props.enableReplication ?? (props.environment === 'prod'),
-        description: 'User-uploaded documents and files',
-      },
-      {
-        pattern: 'logs/*',
-        classification: DataClassification.INTERNAL,
-        description: 'Application logs',
-      },
-      {
-        pattern: 'backups/*',
-        classification: DataClassification.CONFIDENTIAL,
-        enableReplication: true,
-        description: 'System backups',
-      },
-    ];
 
     // Create S3 bucket for document storage
     // NOTE: Using direct s3.Bucket instead of OptimizedBucket to preserve CloudFormation logical ID

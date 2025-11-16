@@ -26,7 +26,7 @@ export async function DELETE(
     const { id } = resolvedParams
 
     // Delete the navigation item
-    const itemId = parseInt(id, 10);
+    const itemId = Number.parseInt(id, 10);
     log.debug("Deleting navigation item", { itemId });
     await deleteNavigationItem(itemId)
 

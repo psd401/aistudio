@@ -1,6 +1,6 @@
 import * as cdk from "aws-cdk-lib"
 import { Construct } from "constructs"
-import { BaseStack, BaseStackProps } from "./constructs/base/base-stack"
+import { IEnvironmentConfig } from "./constructs/config/environment-config"
 import {
   ManagedSecret,
   SecretType,
@@ -9,6 +9,12 @@ import {
 import { SecretCacheLayer } from "./constructs/compute/secret-cache-layer"
 import * as sns from "aws-cdk-lib/aws-sns"
 import * as subscriptions from "aws-cdk-lib/aws-sns-subscriptions"
+
+export interface SecretsManagerStackProps extends cdk.StackProps {
+  environment: "dev" | "staging" | "prod"
+  config: IEnvironmentConfig
+  alertEmail?: string
+}
 
 /**
  * Secrets Manager Stack
@@ -28,22 +34,28 @@ import * as subscriptions from "aws-cdk-lib/aws-sns-subscriptions"
  *
  * @example
  * ```typescript
- * new SecretsManagerStack(app, 'SecretsManagerStack', {
- *   deploymentEnvironment: 'prod',
- *   config: EnvironmentConfig.get('prod')
+ * new SecretsManagerStack(app, 'AIStudio-SecretsManagerStack-Dev', {
+ *   environment: 'dev',
+ *   config: EnvironmentConfig.get('dev')
  * })
  * ```
  */
-export class SecretsManagerStack extends BaseStack {
-  public secretCacheLayer!: SecretCacheLayer
-  public complianceAuditor!: ComplianceAuditor
-  public alertTopic!: sns.Topic
+export class SecretsManagerStack extends cdk.Stack {
+  public secretCacheLayer: SecretCacheLayer
+  public complianceAuditor: ComplianceAuditor
+  public alertTopic: sns.Topic
 
-  protected defineResources(props: BaseStackProps): void {
+  constructor(scope: Construct, id: string, props: SecretsManagerStackProps) {
+    super(scope, id, props)
+
+    // Apply standard tags
+    cdk.Tags.of(this).add('Environment', props.environment)
+    cdk.Tags.of(this).add('ManagedBy', 'cdk')
+    cdk.Tags.of(this).add('Project', 'AIStudio')
     // Create SNS topic for alerts
     this.alertTopic = new sns.Topic(this, "SecretAlertTopic", {
-      displayName: `${this.projectName} Secrets Manager Alerts - ${this.deploymentEnvironment}`,
-      topicName: `${this.projectName}-${this.deploymentEnvironment}-secrets-alerts`,
+      displayName: `AIStudio Secrets Manager Alerts - ${props.environment}`,
+      topicName: `AIStudio-${props.environment}-secrets-alerts`,
     })
 
     // Add email subscription if alertEmail is provided
@@ -55,64 +67,24 @@ export class SecretsManagerStack extends BaseStack {
 
     // Create Secret Cache Lambda Layer
     this.secretCacheLayer = new SecretCacheLayer(this, "SecretCacheLayer", {
-      description: `Secret cache layer for ${this.deploymentEnvironment} environment`,
-      layerName: `${this.projectName}-${this.deploymentEnvironment}-secret-cache`,
+      description: `Secret cache layer for ${props.environment} environment`,
+      layerName: `AIStudio-${props.environment}-secret-cache`,
     })
 
     // Create Compliance Auditor
     this.complianceAuditor = new ComplianceAuditor(this, "ComplianceAuditor", {
       config: props.config,
-      deploymentEnvironment: this.deploymentEnvironment,
-      projectName: this.projectName,
+      deploymentEnvironment: props.environment,
+      projectName: "AIStudio",
       alertTopic: this.alertTopic,
-      maxSecretAge: this.deploymentEnvironment === "prod" ? 60 : 90,
+      maxSecretAge: props.environment === "prod" ? 60 : 90,
     })
 
-    // Add stack outputs
-    this.addStackOutputs()
-  }
-
-  /**
-   * Add CloudFormation outputs for easy reference
-   */
-  private addStackOutputs(): void {
-    // SecretCacheLayer construct already creates its own output with exportName
-
-
+    // Add CloudFormation outputs
     new cdk.CfnOutput(this, "AlertTopicArn", {
       value: this.alertTopic.topicArn,
       description: "SNS topic for secrets alerts",
       exportName: `${this.stackName}-AlertTopicArn`,
-    })
-  }
-
-  /**
-   * Helper method to create a new managed secret
-   * Can be called by other stacks or constructs
-   */
-  public createSecret(
-    id: string,
-    secretName: string,
-    secretType: SecretType,
-    options?: {
-      description?: string
-      rotationEnabled?: boolean
-      rotationSchedule?: cdk.Duration
-      replicateToRegions?: string[]
-      tags?: { [key: string]: string }
-    }
-  ): ManagedSecret {
-    return new ManagedSecret(this, id, {
-      secretName,
-      secretType,
-      description: options?.description,
-      config: this.config,
-      deploymentEnvironment: this.deploymentEnvironment,
-      projectName: this.projectName,
-      rotationEnabled: options?.rotationEnabled,
-      rotationSchedule: options?.rotationSchedule,
-      replicateToRegions: options?.replicateToRegions,
-      tags: options?.tags,
     })
   }
 }

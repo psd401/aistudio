@@ -231,7 +231,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Sanitize file name to prevent path traversal
-    const sanitizedFileName = file.name.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    const sanitizedFileName = file.name.replace(/[^\w.-]/g, '_');
     
     
     // Upload file to AWS S3

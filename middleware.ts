@@ -1,6 +1,5 @@
 import { authMiddleware } from "@/auth";
 import { NextResponse } from "next/server";
-import type { NextRequest } from "next/server";
 
 // Public paths that don't require authentication
 const PUBLIC_PATHS = [
@@ -12,6 +11,7 @@ const PUBLIC_PATHS = [
   "/api/healthz", // Lightweight health check for ECS/Docker
   "/api/ping",
   "/api/auth/federated-signout",
+  "/api/assistant-architect/execute/scheduled", // Internal JWT auth for scheduled executions
   "/auth/error",
 ];
 

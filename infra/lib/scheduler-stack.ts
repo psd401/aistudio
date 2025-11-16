@@ -6,7 +6,9 @@ import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as path from 'path';
+import { VPCProvider, EnvironmentConfig } from './constructs';
 
 export interface SchedulerStackProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
@@ -35,6 +37,19 @@ export class SchedulerStack extends cdk.Stack {
         this, `/aistudio/${props.environment}/db-secret-arn`
       );
 
+    // Get environment configuration for VPC
+    const config = EnvironmentConfig.get(props.environment);
+
+    // Use shared VPC for Lambda (required to reach internal ECS endpoint)
+    const vpc = VPCProvider.getOrCreate(this, props.environment, config);
+
+    // Create security group for Lambda
+    const lambdaSg = new ec2.SecurityGroup(this, 'ScheduleExecutorSecurityGroup', {
+      vpc,
+      description: 'Security group for schedule executor Lambda',
+      allowAllOutbound: true, // Required for Lambda to reach ECS ALB and AWS APIs
+    });
+
     // Dead Letter Queue for failed schedule executions
     this.deadLetterQueue = new sqs.Queue(this, 'ScheduleExecutionDLQ', {
       queueName: `aistudio-${props.environment}-schedule-execution-dlq`,
@@ -48,23 +63,6 @@ export class SchedulerStack extends cdk.Stack {
       removalPolicy: props.environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
-    // ============================================================================
-    // Internal API Secret for JWT Authentication (Lambda <-> ECS)
-    // ============================================================================
-    const internalApiSecret = new secretsmanager.Secret(this, 'InternalApiSecret', {
-      secretName: `aistudio-${props.environment}-internal-api-secret`,
-      description: `Internal API authentication secret for schedule executor Lambda to ECS communication (${props.environment})`,
-      generateSecretString: {
-        secretStringTemplate: JSON.stringify({}),
-        generateStringKey: 'INTERNAL_API_SECRET',
-        excludePunctuation: true,
-        passwordLength: 32,
-      },
-      removalPolicy: props.environment === 'prod'
-        ? cdk.RemovalPolicy.RETAIN
-        : cdk.RemovalPolicy.DESTROY,
-    });
-
     // Lambda function for executing scheduled tasks
     // PowerTuning Result (2025-10-24): 2048MB → 512MB (75% reduction)
     this.scheduleExecutorFunction = new lambda.Function(this, 'ScheduleExecutor', {
@@ -74,6 +72,12 @@ export class SchedulerStack extends cdk.Stack {
       functionName: `aistudio-${props.environment}-schedule-executor`,
       timeout: cdk.Duration.minutes(15), // Full Lambda timeout for long-running Assistant Architect executions
       memorySize: 512, // Optimized via PowerTuning from 2GB
+      // VPC configuration (required to reach internal ECS endpoint)
+      vpc,
+      vpcSubnets: {
+        subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS, // Private-Application subnets
+      },
+      securityGroups: [lambdaSg],
       environment: {
         NODE_OPTIONS: '--enable-source-maps',
         DATABASE_RESOURCE_ARN: databaseResourceArn,
@@ -81,11 +85,9 @@ export class SchedulerStack extends cdk.Stack {
         DATABASE_NAME: 'aistudio',
         ENVIRONMENT: props.environment,
         DLQ_URL: this.deadLetterQueue.queueUrl,
-        // NEW: ECS endpoint parameter name (Lambda reads actual value from SSM at runtime)
-        // This avoids circular dependency: SchedulerStack doesn't depend on FrontendStack-ECS
+        // SSM parameter names - Lambda reads actual values at runtime
         ECS_INTERNAL_ENDPOINT_PARAM: `/aistudio/${props.environment}/ecs-internal-endpoint`,
-        // NEW: Internal API secret for JWT signing
-        INTERNAL_API_SECRET: internalApiSecret.secretValueFromJson('INTERNAL_API_SECRET').unsafeUnwrap(),
+        INTERNAL_API_SECRET_ARN_PARAM: `/aistudio/${props.environment}/internal-api-secret-arn`,
       },
       logGroup: scheduleExecutorLogGroup,
       // Concurrency limits to prevent overwhelming the system
@@ -109,6 +111,33 @@ export class SchedulerStack extends cdk.Stack {
     // Legacy: Grant EventBridge Scheduler permission to invoke the Lambda function via role (kept for backward compatibility)
     this.scheduleExecutorFunction.grantInvoke(this.schedulerExecutionRole);
 
+    // Add scheduler execution role ARN to Lambda environment
+    // This is required for the Lambda to create/update/delete EventBridge schedules
+    this.scheduleExecutorFunction.addEnvironment(
+      'SCHEDULER_EXECUTION_ROLE_ARN',
+      this.schedulerExecutionRole.roleArn
+    );
+
+    // Allow Lambda to reach ECS ALB on port 80
+    // Get ALB security group from SSM (stored by FrontendStackEcs)
+    const albSecurityGroupId = ssm.StringParameter.valueForStringParameter(
+      this,
+      `/aistudio/${props.environment}/alb-security-group-id`
+    );
+
+    const albSecurityGroup = ec2.SecurityGroup.fromSecurityGroupId(
+      this,
+      'AlbSecurityGroup',
+      albSecurityGroupId
+    );
+
+    // Allow Lambda SG to connect to ALB on port 80
+    albSecurityGroup.addIngressRule(
+      lambdaSg,
+      ec2.Port.tcp(80),
+      'Allow schedule executor Lambda to reach ALB'
+    );
+
     // IAM Role for the Lambda function
     this.scheduleExecutorRole = this.scheduleExecutorFunction.role as iam.Role;
 
@@ -126,7 +155,11 @@ export class SchedulerStack extends cdk.Stack {
 
     const secretsManagerPolicy = new iam.PolicyStatement({
       actions: ['secretsmanager:GetSecretValue'],
-      resources: [databaseSecretArn],
+      resources: [
+        databaseSecretArn,
+        // Allow reading internal API secret (ARN read from SSM at runtime)
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:aistudio-${props.environment}-internal-api-secret-*`,
+      ],
     });
 
     this.scheduleExecutorFunction.addToRolePolicy(rdsDataApiPolicy);
@@ -160,7 +193,7 @@ export class SchedulerStack extends cdk.Stack {
     });
     this.scheduleExecutorFunction.addToRolePolicy(passRolePolicy);
 
-    // Grant access to AI provider configurations and ECS endpoint (SSM Parameter Store)
+    // Grant access to AI provider configurations, ECS endpoint, and internal API secret ARN (SSM Parameter Store)
     const ssmParameterPolicy = new iam.PolicyStatement({
       actions: [
         'ssm:GetParameter',
@@ -175,6 +208,8 @@ export class SchedulerStack extends cdk.Stack {
         `arn:aws:ssm:${this.region}:${this.account}:parameter/aistudio/${props.environment}/bedrock/*`,
         // Grant access to ECS internal endpoint (created by FrontendStack-ECS)
         `arn:aws:ssm:${this.region}:${this.account}:parameter/aistudio/${props.environment}/ecs-internal-endpoint`,
+        // Grant access to internal API secret ARN (created by FrontendStack-ECS)
+        `arn:aws:ssm:${this.region}:${this.account}:parameter/aistudio/${props.environment}/internal-api-secret-arn`,
       ],
     });
     this.scheduleExecutorFunction.addToRolePolicy(ssmParameterPolicy);
@@ -218,13 +253,6 @@ export class SchedulerStack extends cdk.Stack {
       description: 'ARN of the EventBridge Scheduler execution role',
     });
 
-    // Store internal API secret ARN in SSM for FrontendStack to read (avoids circular dependency)
-    new ssm.StringParameter(this, 'InternalApiSecretArnParam', {
-      parameterName: `/aistudio/${props.environment}/internal-api-secret-arn`,
-      stringValue: internalApiSecret.secretArn,
-      description: 'Internal API secret ARN for scheduled execution authentication',
-    });
-
     // Outputs
     new cdk.CfnOutput(this, 'ScheduleExecutorFunctionNameOutput', {
       value: this.scheduleExecutorFunction.functionName,
@@ -254,12 +282,6 @@ export class SchedulerStack extends cdk.Stack {
       value: this.deadLetterQueue.queueArn,
       description: 'ARN of the schedule execution dead letter queue',
       exportName: `${props.environment}-ScheduleExecutionDLQArn`,
-    });
-
-    new cdk.CfnOutput(this, 'InternalApiSecretArn', {
-      value: internalApiSecret.secretArn,
-      description: 'Internal API secret ARN for scheduled execution authentication',
-      exportName: `${props.environment}-InternalApiSecretArn`,
     });
   }
 }

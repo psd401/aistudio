@@ -149,7 +149,7 @@ export const authConfig: NextAuthConfig = {
 
       // Check if this is a long-running operation by examining request context
       // TODO: Replace with AsyncLocalStorage for better request-scoped context
-      const isLongRunningOperation = (typeof global !== 'undefined' && (global as any).__POLLING_CONTEXT__)
+      const isLongRunningOperation = (typeof global !== 'undefined' && (global as { __POLLING_CONTEXT__?: boolean }).__POLLING_CONTEXT__)
 
       const shouldRefresh = shouldRefreshToken(token, {
         isLongRunningOperation,
@@ -309,7 +309,7 @@ export const authConfig: NextAuthConfig = {
   session: {
     strategy: "jwt",
     // Session max age in seconds (default: 24 hours)
-    maxAge: process.env.SESSION_MAX_AGE ? parseInt(process.env.SESSION_MAX_AGE) : 24 * 60 * 60,
+    maxAge: process.env.SESSION_MAX_AGE ? Number.parseInt(process.env.SESSION_MAX_AGE) : 24 * 60 * 60,
   },
   cookies: {
     sessionToken: {

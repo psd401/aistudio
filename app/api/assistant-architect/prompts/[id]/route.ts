@@ -24,8 +24,8 @@ export async function GET(req: NextRequest, { params }: { params: Promise<{ id: 
     const promptId = resolvedParams.id
 
     // Parse promptId to integer
-    const promptIdInt = parseInt(promptId, 10)
-    if (isNaN(promptIdInt)) {
+    const promptIdInt = Number.parseInt(promptId, 10)
+    if (Number.isNaN(promptIdInt)) {
       log.warn("Invalid prompt ID", { promptId });
       timer({ status: "error", reason: "invalid_id" });
       return new NextResponse("Invalid prompt ID", { status: 400, headers: { "X-Request-Id": requestId } })

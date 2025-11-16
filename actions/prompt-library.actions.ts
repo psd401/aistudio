@@ -3,6 +3,7 @@
 import { getServerSession } from "@/lib/auth/server-session"
 import { executeSQL } from "@/lib/db/data-api-adapter"
 import { transformSnakeToCamel } from "@/lib/db/field-mapper"
+import { SqlParameter } from "@aws-sdk/client-rds-data"
 import { type ActionState } from "@/types/actions-types"
 import {
   handleError,
@@ -34,8 +35,7 @@ import {
 import type {
   Prompt,
   PromptListItem,
-  PromptListResult,
-  PromptTag
+  PromptListResult
 } from "@/lib/prompt-library/types"
 
 /**
@@ -131,7 +131,7 @@ export async function createPrompt(
         `SELECT t.name
          FROM prompt_tags t
          JOIN prompt_library_tags plt ON t.id = plt.tag_id
-         WHERE plt.prompt_id = :promptId`,
+         WHERE plt.prompt_id = :promptId::uuid`,
         [{ name: "promptId", value: { stringValue: prompt.id } }]
       )
       prompt.tags = tagResults.map(t => t.name)
@@ -250,7 +250,7 @@ export async function getPrompt(id: string): Promise<ActionState<Prompt>> {
         promptKeys: Object.keys(prompt),
         promptTypes: Object.entries(prompt).map(([k, v]) => `${k}: ${typeof v}`)
       })
-      throw new Error("Failed to serialize prompt data for Next.js")
+      throw ErrorFactories.sysInternalError("Failed to serialize prompt data for Next.js")
     }
 
     timer({ status: "success" })
@@ -296,7 +296,7 @@ export async function listPrompts(
 
     // Build query conditions
     const conditions = ["p.deleted_at IS NULL"]
-    const parameters: Array<{ name: string; value: any }> = []
+    const parameters: SqlParameter[] = []
 
     // Visibility filter
     if (validated.visibility === 'private') {
@@ -319,12 +319,12 @@ export async function listPrompts(
           SELECT 1 FROM prompt_library_tags plt
           JOIN prompt_tags t ON plt.tag_id = t.id
           WHERE plt.prompt_id = p.id
-          AND t.name = ANY(:tags)
+          AND t.name IN (SELECT value FROM json_array_elements_text(:tags::json))
         )
       `)
       parameters.push({
         name: "tags",
-        value: { arrayValue: { stringValues: validated.tags } }
+        value: { stringValue: JSON.stringify(validated.tags) }
       })
     }
 
@@ -469,7 +469,7 @@ export async function updatePrompt(
 
     // Build update fields
     const fields: string[] = []
-    const parameters: Array<{ name: string; value: any }> = [
+    const parameters: SqlParameter[] = [
       { name: "id", value: { stringValue: id } }
     ]
 
@@ -523,7 +523,7 @@ export async function updatePrompt(
       // No changes requested, fetch and return current prompt
       const getResult = await getPrompt(id)
       if (!getResult.isSuccess) {
-        throw new Error("Failed to fetch prompt")
+        throw ErrorFactories.dbQueryFailed("Failed to fetch prompt")
       }
       return createSuccess(getResult.data, "No changes to update")
     }
@@ -554,7 +554,7 @@ export async function updatePrompt(
     // Fetch updated prompt with tags
     const getResult = await getPrompt(id)
     if (!getResult.isSuccess) {
-      throw new Error("Failed to fetch updated prompt")
+      throw ErrorFactories.dbQueryFailed("Failed to fetch updated prompt")
     }
 
     timer({ status: "success" })
@@ -638,40 +638,51 @@ async function assignTagsToPrompt(
 
   const trimmedNames = tagNames.map(t => t.trim())
 
-  // Batch insert tags if they don't exist using unnest
+  // Batch insert tags if they don't exist using JSON
+  // RDS Data API doesn't support array parameters, so we use JSON instead
   await executeSQL(
     `INSERT INTO prompt_tags (name)
-     SELECT unnest(:names::text[])
+     SELECT value FROM json_array_elements_text(:names::json)
      ON CONFLICT (name) DO NOTHING`,
     [
       {
         name: "names",
-        value: { arrayValue: { stringValues: trimmedNames } }
+        value: { stringValue: JSON.stringify(trimmedNames) }
       }
     ]
   )
 
-  // Get tag IDs
-  const tagResults = await executeSQL<{ id: number }>(
-    `SELECT id FROM prompt_tags WHERE name = ANY(:names)`,
+  // Get tag IDs using JSON array
+  const tagResults = await executeSQL<{ id: number; name: string }>(
+    `SELECT id, name FROM prompt_tags WHERE name IN (SELECT value FROM json_array_elements_text(:names::json))`,
     [
       {
         name: "names",
-        value: { arrayValue: { stringValues: trimmedNames } }
+        value: { stringValue: JSON.stringify(trimmedNames) }
       }
     ]
   )
 
-  // Batch insert associations using unnest
+  // Validate that tags were created or found
+  if (tagResults.length === 0) {
+    log.error("No tags were created or found", { tagNames: trimmedNames })
+    throw ErrorFactories.dbQueryFailed(
+      "INSERT/SELECT prompt_tags",
+      new Error("Failed to create or retrieve tags"),
+      { details: { tagNames: trimmedNames } }
+    )
+  }
+
+  // Batch insert associations using JSON array
   await executeSQL(
     `INSERT INTO prompt_library_tags (prompt_id, tag_id)
-     SELECT :promptId, unnest(:tagIds::bigint[])
+     SELECT :promptId::uuid, value::bigint FROM json_array_elements_text(:tagIds::json)
      ON CONFLICT DO NOTHING`,
     [
       { name: "promptId", value: { stringValue: promptId } },
       {
         name: "tagIds",
-        value: { arrayValue: { longValues: tagResults.map(t => t.id) } }
+        value: { stringValue: JSON.stringify(tagResults.map(t => t.id)) }
       }
     ]
   )

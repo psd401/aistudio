@@ -71,19 +71,22 @@ export async function POST(req: NextRequest) {
     });
     
   } catch (error) {
-    log.error('Failed to confirm upload', error);
+    // Safe error logging to avoid circular reference issues
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorName = error instanceof Error ? error.name : 'Unknown';
+    log.error(`Failed to confirm upload ${errorMessage}`, { name: errorName });
     timer({ status: 'error' });
-    
+
     if (error instanceof z.ZodError) {
       return NextResponse.json(
-        { 
+        {
           error: 'Invalid request data',
           details: error.issues.map((e) => `${e.path.join('.')}: ${e.message}`)
         },
         { status: 400 }
       );
     }
-    
+
     return NextResponse.json(
       { error: 'Failed to confirm upload' },
       { status: 500 }

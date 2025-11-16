@@ -1,6 +1,7 @@
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
 import { SchedulerClient, CreateScheduleCommand, UpdateScheduleCommand, DeleteScheduleCommand } from '@aws-sdk/client-scheduler';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { Context as LambdaContext } from 'aws-lambda';
 import * as jwt from 'jsonwebtoken';
 
@@ -88,7 +89,7 @@ function safeParseInt(value: any, fieldName: string = 'value'): number {
   }
 
   const parsed = parseInt(stringValue, 10);
-  if (isNaN(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
+  if (Number.isNaN(parsed) || !Number.isInteger(parsed) || parsed <= 0) {
     throw new Error(`Invalid ${fieldName}: must be a positive integer`);
   }
 
@@ -134,6 +135,7 @@ function sanitizeForLogging(data: any): any {
 const rdsClient = new RDSDataClient({});
 const schedulerClient = new SchedulerClient({});
 const ssmClient = new SSMClient({});
+const secretsClient = new SecretsManagerClient({});
 
 // Environment variables with startup validation
 const requiredEnvVars = {
@@ -142,7 +144,7 @@ const requiredEnvVars = {
   DATABASE_NAME: process.env.DATABASE_NAME,
   ENVIRONMENT: process.env.ENVIRONMENT,
   ECS_INTERNAL_ENDPOINT_PARAM: process.env.ECS_INTERNAL_ENDPOINT_PARAM, // SSM parameter name
-  INTERNAL_API_SECRET: process.env.INTERNAL_API_SECRET
+  INTERNAL_API_SECRET_ARN_PARAM: process.env.INTERNAL_API_SECRET_ARN_PARAM // SSM parameter name
 };
 
 const optionalEnvVars = {
@@ -237,6 +239,71 @@ async function getEcsEndpoint(parameterName: string, requestId: string): Promise
       parameterName
     });
     throw new Error(`Failed to retrieve ECS endpoint from SSM: ${errorMessage}`);
+  }
+}
+
+/**
+ * Get internal API secret from Secrets Manager
+ * Secret ARN is read from SSM parameter, then secret value is fetched
+ * Cached for Lambda container lifetime to reduce API calls
+ */
+let cachedInternalApiSecret: string | null = null;
+
+async function getInternalApiSecret(ssmParamName: string, requestId: string): Promise<string> {
+  const log = createLogger({ requestId, operation: 'getInternalApiSecret' });
+
+  // Return cached value if available
+  if (cachedInternalApiSecret) {
+    log.debug('Using cached internal API secret');
+    return cachedInternalApiSecret;
+  }
+
+  try {
+    log.info('Fetching secret ARN from SSM', { parameterName: ssmParamName });
+
+    // Step 1: Get secret ARN from SSM
+    const ssmCommand = new GetParameterCommand({
+      Name: ssmParamName,
+      WithDecryption: false
+    });
+
+    const ssmResponse = await ssmClient.send(ssmCommand);
+
+    if (!ssmResponse.Parameter?.Value) {
+      throw new Error(`SSM parameter ${ssmParamName} has no value`);
+    }
+
+    const secretArn = ssmResponse.Parameter.Value;
+    log.info('Retrieved secret ARN from SSM', { secretArn });
+
+    // Step 2: Get secret value from Secrets Manager
+    const secretCommand = new GetSecretValueCommand({
+      SecretId: secretArn
+    });
+
+    const secretResponse = await secretsClient.send(secretCommand);
+
+    if (!secretResponse.SecretString) {
+      throw new Error(`Secret ${secretArn} has no SecretString value`);
+    }
+
+    // Parse the secret JSON and extract INTERNAL_API_SECRET field
+    const secretData = JSON.parse(secretResponse.SecretString);
+    if (!secretData.INTERNAL_API_SECRET) {
+      throw new Error(`Secret ${secretArn} missing INTERNAL_API_SECRET field`);
+    }
+
+    cachedInternalApiSecret = secretData.INTERNAL_API_SECRET;
+    log.info('Internal API secret retrieved successfully');
+
+    return cachedInternalApiSecret as string;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    log.error('Failed to get internal API secret', {
+      error: errorMessage,
+      parameterName: ssmParamName
+    });
+    throw new Error(`Failed to retrieve internal API secret: ${errorMessage}`);
   }
 }
 
@@ -439,14 +506,16 @@ async function executeAssistantArchitectForSchedule(scheduledExecution: any, exe
     throw new Error('Failed to retrieve ECS endpoint from SSM Parameter Store');
   }
 
-  // Get internal API secret for JWT generation
-  const internalApiSecret = process.env.INTERNAL_API_SECRET;
-  if (!internalApiSecret) {
-    throw new Error('INTERNAL_API_SECRET environment variable not configured');
+  // Get internal API secret for JWT generation (from Secrets Manager via SSM)
+  const secretArnParamName = requiredEnvVars.INTERNAL_API_SECRET_ARN_PARAM;
+  if (!secretArnParamName) {
+    throw new Error('INTERNAL_API_SECRET_ARN_PARAM environment variable not configured');
   }
 
+  const internalApiSecret = await getInternalApiSecret(secretArnParamName, requestId);
+
   // Generate short-lived JWT token for authentication
-  
+
   const token = jwt.sign(
     {
       iss: 'schedule-executor',

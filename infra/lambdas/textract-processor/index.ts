@@ -139,7 +139,7 @@ function chunkText(text: string, maxChunkSize: number = 2000): Array<{
   
   const lines = text.split('\n');
   let currentChunk = '';
-  let chunkIndex = 0;
+  const chunkIndex = 0;
   
   for (const line of lines) {
     if ((currentChunk + line).length > maxChunkSize && currentChunk.length > 0) {

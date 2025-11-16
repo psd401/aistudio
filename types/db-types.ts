@@ -168,7 +168,7 @@ export type SelectChainPrompt = {
   systemContext: string | null;
   modelId: number | null;
   position: number;
-  inputMapping: any | null;
+  inputMapping: Record<string, unknown> | null;
   parallelGroup: number | null;
   timeoutSeconds: number | null;
   repositoryIds: number[] | null;
@@ -181,7 +181,7 @@ export type SelectToolExecution = {
   id: number;
   assistantArchitectId: number;
   userId: number;
-  inputData: any;
+  inputData: Record<string, unknown>;
   status: string;
   errorMessage: string | null;
   startedAt: Date | null;
@@ -213,7 +213,7 @@ export type InsertToolInputField = {
   name: string;
   label: string;
   fieldType: string;
-  options?: any;
+  options?: ToolInputFieldOptions | { label: string; value: string }[];
   position?: number;
 }
 
@@ -225,7 +225,7 @@ export type InsertChainPrompt = {
   systemContext?: string;
   modelId?: number;
   position?: number;
-  inputMapping?: any;
+  inputMapping?: Record<string, string> | null;
   parallelGroup?: number;
   timeoutSeconds?: number;
   repositoryIds?: number[];
@@ -236,7 +236,7 @@ export type InsertToolExecution = {
   id?: number;
   assistantArchitectId: number;
   userId: number;
-  inputData: any;
+  inputData: Record<string, unknown>;
   status?: string;
   errorMessage?: string;
   startedAt?: Date;
@@ -722,4 +722,87 @@ export type InsertPromptUsageEvent = {
   userId: number;
   eventType: 'view' | 'use' | 'share';
   conversationId?: string;
+}
+
+// =====================================================
+// SCHEDULE MANAGEMENT TYPES
+// =====================================================
+
+// Schedule Config interface for JSONB field
+export interface ScheduleConfig {
+  frequency: 'daily' | 'weekly' | 'monthly' | 'custom';
+  time?: string;
+  timezone?: string;
+  cron?: string;
+  [key: string]: unknown;
+}
+
+// Scheduled Executions
+export type SelectScheduledExecution = {
+  id: number;
+  userId: number;
+  assistantArchitectId: number;
+  name: string;
+  scheduleConfig: ScheduleConfig;
+  inputData: Record<string, string>;
+  active: boolean;
+  createdAt: Date;
+  updatedAt: Date;
+  updatedBy: string | null;
+}
+
+export type InsertScheduledExecution = {
+  id?: number;
+  userId: number;
+  assistantArchitectId: number;
+  name: string;
+  scheduleConfig: ScheduleConfig;
+  inputData: Record<string, string>;
+  active?: boolean;
+  updatedBy?: string;
+}
+
+// Execution Results
+export type SelectExecutionResult = {
+  id: number;
+  scheduledExecutionId: number;
+  resultData: Record<string, unknown>;
+  status: 'success' | 'failed' | 'running';
+  executedAt: Date;
+  executionDurationMs: number | null;
+  errorMessage: string | null;
+}
+
+export type InsertExecutionResult = {
+  id?: number;
+  scheduledExecutionId: number;
+  resultData: Record<string, unknown>;
+  status: 'success' | 'failed' | 'running';
+  executedAt?: Date;
+  executionDurationMs?: number;
+  errorMessage?: string;
+}
+
+// User Notifications
+export type SelectUserNotification = {
+  id: number;
+  userId: number;
+  executionResultId: number;
+  type: 'email' | 'in_app';
+  status: 'sent' | 'delivered' | 'read' | 'failed';
+  deliveryAttempts: number;
+  lastAttemptAt: Date | null;
+  failureReason: string | null;
+  createdAt: Date;
+}
+
+export type InsertUserNotification = {
+  id?: number;
+  userId: number;
+  executionResultId: number;
+  type: 'email' | 'in_app';
+  status?: 'sent' | 'delivered' | 'read' | 'failed';
+  deliveryAttempts?: number;
+  lastAttemptAt?: Date;
+  failureReason?: string;
 }

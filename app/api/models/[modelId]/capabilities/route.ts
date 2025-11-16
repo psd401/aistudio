@@ -22,7 +22,7 @@ export async function GET(
     const modelId = decodeURIComponent(resolvedParams.modelId)
     
     // Validate modelId format to prevent injection attacks
-    if (!modelId || typeof modelId !== 'string' || !/^[a-zA-Z0-9\-_.]+$/.test(modelId)) {
+    if (!modelId || typeof modelId !== 'string' || !/^[\w.-]+$/.test(modelId)) {
       log.warn('Invalid modelId format', { modelId })
       return NextResponse.json({ error: 'Invalid model ID format' }, { status: 400 })
     }

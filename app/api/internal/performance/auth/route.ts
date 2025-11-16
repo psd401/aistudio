@@ -69,7 +69,7 @@ export async function GET(request: NextRequest) {
     });
 
     switch (format) {
-      case 'detailed':
+      case 'detailed': {
         const detailedMetrics = {
           summary: authPerformanceMonitor.getPerformanceSummary(),
           metrics: authPerformanceMonitor.getMetrics(),
@@ -84,8 +84,9 @@ export async function GET(request: NextRequest) {
             'Content-Type': 'application/json'
           }
         });
+      }
 
-      case 'alerts':
+      case 'alerts': {
         const alerts = authPerformanceMonitor.getAlerts(50);
         return Response.json({ alerts, count: alerts.length }, {
           headers: {
@@ -93,8 +94,9 @@ export async function GET(request: NextRequest) {
             'Content-Type': 'application/json'
           }
         });
+      }
 
-      default: // 'summary'
+      default: { // 'summary'
         const summary = authPerformanceMonitor.getPerformanceSummary();
         return Response.json(summary, {
           headers: {
@@ -102,6 +104,7 @@ export async function GET(request: NextRequest) {
             'Content-Type': 'application/json'
           }
         });
+      }
     }
 
   } catch (error) {

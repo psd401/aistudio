@@ -64,7 +64,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
     };
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   async remove(_attachment: PendingAttachment): Promise<void> {
     // Cleanup if needed (e.g., revoke object URLs if you created any)
   }
@@ -72,11 +72,11 @@ export class VisionImageAdapter implements AttachmentAdapter {
   private async fileToBase64DataURL(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onload = () => {
+      reader.addEventListener('load', () => {
         // FileReader result is already a data URL
         resolve(reader.result as string);
-      };
-      reader.onerror = reject;
+      });
+      reader.addEventListener('error', () => reject(reader.error));
       reader.readAsDataURL(file);
     });
   }
@@ -107,7 +107,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
 
   private sanitizeFileName(name: string): string {
     // Remove dangerous characters and limit length
-    return name.replace(/[^a-zA-Z0-9.-]/g, '_').substring(0, 255);
+    return name.replace(/[^\d.A-Za-z-]/g, '_').substring(0, 255);
   }
 }
 
@@ -171,7 +171,7 @@ export class PDFAttachmentAdapter implements AttachmentAdapter {
     };
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   async remove(_attachment: PendingAttachment): Promise<void> {
     // Cleanup if needed
   }
@@ -179,13 +179,15 @@ export class PDFAttachmentAdapter implements AttachmentAdapter {
   private async fileToBase64(file: File): Promise<string> {
     const arrayBuffer = await file.arrayBuffer();
     const bytes = new Uint8Array(arrayBuffer);
-    
+
     // For large files, we need to process in chunks to avoid stack overflow
     let binary = '';
     const chunkSize = 0x8000; // 32KB chunks
     for (let i = 0; i < bytes.length; i += chunkSize) {
       const chunk = bytes.subarray(i, i + chunkSize);
-      binary += String.fromCharCode.apply(null, Array.from(chunk));
+      for (const byte of chunk) {
+        binary += String.fromCharCode(byte);
+      }
     }
     return btoa(binary);
   }
@@ -207,7 +209,7 @@ export class PDFAttachmentAdapter implements AttachmentAdapter {
 
   private sanitizeFileName(name: string): string {
     // Remove dangerous characters and limit length
-    return name.replace(/[^a-zA-Z0-9.-]/g, '_').substring(0, 255);
+    return name.replace(/[^\d.A-Za-z-]/g, '_').substring(0, 255);
   }
 
   // Optional: Extract text from PDF using a library like pdf.js

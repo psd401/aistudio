@@ -20,7 +20,7 @@
     "@ai-sdk/azure": "^2.0.20",
     "@ai-sdk/google": "^2.0.8",
     "@ai-sdk/openai": "^2.0.20",
-    "ai": "^5.0.23"
+    "ai": "^5.0.52"
   },
   "devDependencies": {
     "@types/node": "^20.0.0",

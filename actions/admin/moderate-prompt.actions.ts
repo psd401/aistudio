@@ -39,7 +39,7 @@ type ModerationStatus = typeof ALLOWED_STATUSES[number]
  * UUID validation helper
  */
 function isValidUUID(uuid: string): boolean {
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+  const uuidRegex = /^[\da-f]{8}-[\da-f]{4}-[1-5][\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i
   return uuidRegex.test(uuid)
 }
 
@@ -202,8 +202,8 @@ export async function moderatePrompt(
     }
 
     // Convert string to number for INTEGER column (moderated_by is INTEGER in database)
-    const userIdNum = parseInt(userId, 10)
-    if (isNaN(userIdNum) || userIdNum <= 0) {
+    const userIdNum = Number.parseInt(userId, 10)
+    if (Number.isNaN(userIdNum) || userIdNum <= 0) {
       log.error("Invalid user ID format", { userId })
       throw ErrorFactories.sysInternalError("Invalid user ID format")
     }
@@ -294,8 +294,8 @@ export async function bulkModeratePrompts(
     }
 
     // Convert string to number for INTEGER column (moderated_by is INTEGER in database)
-    const userIdNum = parseInt(userId, 10)
-    if (isNaN(userIdNum) || userIdNum <= 0) {
+    const userIdNum = Number.parseInt(userId, 10)
+    if (Number.isNaN(userIdNum) || userIdNum <= 0) {
       log.error("Invalid user ID format", { userId })
       throw ErrorFactories.sysInternalError("Invalid user ID format")
     }

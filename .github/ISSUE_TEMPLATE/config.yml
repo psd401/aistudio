@@ -1,14 +1,14 @@
 blank_issues_enabled: false
 contact_links:
   - name: 💬 Ask a Question
-    url: https://github.com/psd401/aistudio.psd401.ai/discussions/new?category=q-a
+    url: https://github.com/psd401/aistudio/discussions/new?category=q-a
     about: Ask questions and get help from the community
   - name: 💡 Share an Idea
-    url: https://github.com/psd401/aistudio.psd401.ai/discussions/new?category=ideas
+    url: https://github.com/psd401/aistudio/discussions/new?category=ideas
     about: Share ideas for future consideration
   - name: 📖 Documentation
     url: https://psd401.ai/aistudio
     about: Read our comprehensive documentation
   - name: 🚨 Security Policy
-    url: https://github.com/psd401/aistudio.psd401.ai/security/policy
+    url: https://github.com/psd401/aistudio/security/policy
     about: Review our security disclosure policy

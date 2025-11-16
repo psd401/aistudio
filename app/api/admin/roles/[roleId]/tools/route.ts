@@ -25,7 +25,7 @@ export async function GET(
     
     const { roleId } = await params
     log.debug("Fetching tools for role", { roleId });
-    const tools = await getRoleTools(parseInt(roleId, 10))
+    const tools = await getRoleTools(Number.parseInt(roleId, 10))
     
     log.info("Role tools fetched successfully", { roleId, toolCount: tools.length });
     timer({ status: "success", count: tools.length });

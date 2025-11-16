@@ -1,6 +1,8 @@
 import { getModelCapabilities } from '@/lib/ai/provider-factory';
 import { createLogger, generateRequestId } from '@/lib/logger';
 import { ErrorFactories } from '@/lib/error-utils';
+import { executeSQL } from '@/lib/db/data-api-adapter';
+import { getServerSession } from '@/lib/auth/server-session';
 
 export const runtime = 'nodejs';
 
@@ -11,9 +13,21 @@ export const runtime = 'nodejs';
 export async function POST(req: Request) {
   const requestId = generateRequestId();
   const log = createLogger({ requestId, route: 'api.models.capabilities' });
-  
+
   log.info('POST /api/models/capabilities - Getting model capabilities');
-  
+
+  // Authenticate request
+  const session = await getServerSession();
+  if (!session) {
+    log.warn('Unauthorized access attempt');
+    return Response.json(
+      { error: 'Unauthorized', message: 'Authentication required' },
+      { status: 401, headers: { 'X-Request-Id': requestId } }
+    );
+  }
+
+  log.debug('User authenticated', { userId: session.sub });
+
   try {
     const body = await req.json();
     
@@ -31,11 +45,18 @@ export async function POST(req: Request) {
       ]);
     }
 
-    // Validate provider is from known set
-    const VALID_PROVIDERS = ['openai', 'amazon-bedrock', 'google', 'azure'];
-    if (!VALID_PROVIDERS.includes(body.provider.toLowerCase())) {
+    // Validate provider exists in database - this makes the system future-proof
+    // Any provider added to the database will automatically be valid
+    const providers = await executeSQL<{ provider: string }>('SELECT DISTINCT provider FROM ai_models WHERE active = true');
+    const validProviders = providers.map((p) => p.provider.toLowerCase());
+
+    if (!validProviders.includes(body.provider.toLowerCase())) {
+      log.warn('Invalid provider requested', {
+        requestedProvider: body.provider,
+        userId: session.sub
+      });
       throw ErrorFactories.validationFailed([
-        { field: 'provider', message: `Provider must be one of: ${VALID_PROVIDERS.join(', ')}` }
+        { field: 'provider', message: 'Invalid provider specified' }
       ]);
     }
     
@@ -58,7 +79,7 @@ export async function POST(req: Request) {
     return Response.json(capabilities, {
       headers: {
         'X-Request-Id': requestId,
-        'Cache-Control': 'public, max-age=3600' // Cache for 1 hour
+        'Cache-Control': 'private, max-age=300' // Private cache, 5 minutes
       }
     });
     

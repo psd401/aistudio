@@ -50,7 +50,7 @@ const useAttachmentSrc = () => {
     useShallow((a): { file?: File; src?: string } => {
       if (a.type !== "image") return {};
       if (a.file) return { file: a.file };
-      const src = a.content?.filter((c) => c.type === "image")[0]?.image;
+      const src = a.content?.find((c) => c.type === "image")?.image;
       if (!src) return {};
       return { src };
     }),
@@ -67,7 +67,6 @@ const AttachmentPreview: FC<AttachmentPreviewProps> = ({ src }) => {
   const [isLoaded, setIsLoaded] = useState(false);
 
   return (
-    // eslint-disable-next-line @next/next/no-img-element
     <img
       src={src}
       style={{
@@ -183,9 +182,10 @@ const AttachmentUI: FC<AttachmentUIProps> = ({ processingAttachments }) => {
         return "Document";
       case "file":
         return "File";
-      default:
+      default: {
         const _exhaustiveCheck: never = type;
         throw new Error(`Unknown attachment type: ${_exhaustiveCheck}`);
+      }
     }
   });
   return (

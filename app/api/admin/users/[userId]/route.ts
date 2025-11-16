@@ -37,7 +37,7 @@ export async function DELETE(
 
     // Delete the user via Data API
     log.debug("Deleting user", { targetUserId });
-    const deletedUser = await deleteUser(parseInt(targetUserId));
+    const deletedUser = await deleteUser(Number.parseInt(targetUserId));
 
     if (!deletedUser) {
       log.warn("User not found", { targetUserId });

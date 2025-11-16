@@ -184,8 +184,15 @@ export class UnifiedStreamingService {
               try {
                 await request.callbacks.onFinish(data);
               } catch (error) {
-                log.error('Critical: Failed to save assistant message', { 
-                  error,
+                // Safely extract error details to avoid circular reference issues
+                const errorDetails = error instanceof Error ? {
+                  name: error.name,
+                  message: error.message,
+                  stack: error.stack
+                } : String(error);
+
+                log.error('Critical: Failed to save assistant message', {
+                  error: errorDetails,
                   conversationId: request.conversationId,
                   userId: request.userId
                 });

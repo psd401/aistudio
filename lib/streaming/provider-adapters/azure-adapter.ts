@@ -62,7 +62,7 @@ export class AzureAdapter extends BaseProviderAdapter {
   /**
    * Get list of tools supported by Azure OpenAI models
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   getSupportedTools(_modelId: string): string[] {
     // Azure OpenAI tool support depends on deployment configuration
     // For now, return empty

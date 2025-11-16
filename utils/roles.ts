@@ -215,7 +215,7 @@ export async function getHighestUserRole(userId: string): Promise<string | null>
     log.debug("Getting highest user role", { userId });
     
     const userRoles = await getUserRoles(userId);
-    if (!userRoles.length) {
+    if (userRoles.length === 0) {
       log.info("User has no roles", { userId });
       timer({ status: "success", result: "no_roles" });
       return null;
@@ -252,7 +252,7 @@ export async function getHighestUserRole(userId: string): Promise<string | null>
   }
 }
 
-export async function syncUserRole(userId: string, role: string): Promise<void> {
+export async function syncUserRole(_userId: string, _role: string): Promise<void> {
   // This is now handled by the database directly
   // Role sync happens through user_roles table
   throw new Error("syncUserRole is deprecated - use user_roles table directly");

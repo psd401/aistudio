@@ -2,7 +2,6 @@ import * as cdk from "aws-cdk-lib"
 import * as ec2 from "aws-cdk-lib/aws-ec2"
 import * as logs from "aws-cdk-lib/aws-logs"
 import * as s3 from "aws-cdk-lib/aws-s3"
-import * as cloudwatch from "aws-cdk-lib/aws-cloudwatch"
 import { Construct } from "constructs"
 import { IEnvironmentConfig } from "../config/environment-config"
 
@@ -432,8 +431,6 @@ export class SharedVPC extends Construct {
    * Dashboard shows aggregated metrics across all NAT gateways and endpoints.
    */
   private addVpcMetrics(environment: string): void {
-    const isProd = this.isProduction(environment)
-
     // Custom CloudWatch dashboard for VPC metrics removed
     // Metrics now exported to consolidated dashboards via MonitoringStack
     // VPC/NAT Gateway metrics available for consolidation

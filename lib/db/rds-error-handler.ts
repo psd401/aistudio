@@ -89,7 +89,7 @@ export function isRetryableError(error: unknown): boolean {
       /network/i,
       /timeout/i,
       /connection/i,
-      /ECONNRESET/i,
+      /econnreset/i,
       /socket hang up/i
     ]
     

@@ -36,7 +36,7 @@ export async function GET(request: NextRequest) {
 
     // Get query parameters
     const url = new URL(request.url)
-    const limit = Math.min(parseInt(url.searchParams.get('limit') || '20'), 50)
+    const limit = Math.min(Number.parseInt(url.searchParams.get('limit') || '20'), 50)
     const status = url.searchParams.get('status') // 'success' | 'failed' | 'running' | null for all
 
     // Build SQL query with optional status filter

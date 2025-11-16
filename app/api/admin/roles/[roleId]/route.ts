@@ -26,7 +26,7 @@ export async function PUT(
     const { roleId } = await params
     const body = await request.json()
     log.debug("Updating role", { roleId, updates: body });
-    const role = await updateRole(parseInt(roleId), body)
+    const role = await updateRole(Number.parseInt(roleId), body)
     
     log.info("Role updated successfully", { roleId });
     timer({ status: "success" });
@@ -62,7 +62,7 @@ export async function DELETE(
     
     const { roleId } = await params
     log.debug("Deleting role", { roleId });
-    const role = await deleteRole(parseInt(roleId))
+    const role = await deleteRole(Number.parseInt(roleId))
     
     log.info("Role deleted successfully", { roleId });
     timer({ status: "success" });

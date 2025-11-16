@@ -17,7 +17,7 @@ export async function POST(
   const log = createLogger({ requestId, route: "api.admin.models.replace" });
   
   const { id } = await params;
-  const targetModelId = parseInt(id);
+  const targetModelId = Number.parseInt(id);
   log.info("POST /api/admin/models/[id]/replace - Starting model replacement", { targetModelId });
   
   // Read request body as text first for error logging
@@ -65,7 +65,7 @@ export async function POST(
     });
     
     // Validate IDs
-    if (!targetModelId || isNaN(targetModelId)) {
+    if (!targetModelId || Number.isNaN(targetModelId)) {
       log.warn("Invalid target model ID", { targetModelId: id });
       timer({ status: "error", reason: "invalid_target_id" });
       return NextResponse.json(
@@ -74,7 +74,7 @@ export async function POST(
       );
     }
     
-    if (!replacementModelId || isNaN(replacementModelId)) {
+    if (!replacementModelId || Number.isNaN(replacementModelId)) {
       log.warn("Invalid replacement model ID", { replacementModelId });
       timer({ status: "error", reason: "invalid_replacement_id" });
       return NextResponse.json(

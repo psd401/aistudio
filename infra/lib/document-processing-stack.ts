@@ -225,7 +225,7 @@ export class DocumentProcessingStack extends cdk.Stack {
         ...(props.rdsSecretArn && { DATABASE_SECRET_ARN: props.rdsSecretArn }),
         DATABASE_NAME: 'aistudio',
       },
-      deadLetterQueueEnabled: true,
+      deadLetterQueue: this.processingDLQ,
       retryAttempts: 2,
     });
 
@@ -248,7 +248,7 @@ export class DocumentProcessingStack extends cdk.Stack {
         ...(props.rdsSecretArn && { DATABASE_SECRET_ARN: props.rdsSecretArn }),
         DATABASE_NAME: 'aistudio',
       },
-      deadLetterQueueEnabled: true,
+      deadLetterQueue: this.processingDLQ,
       retryAttempts: 1, // Fewer retries for expensive operations
     });
 
@@ -272,24 +272,7 @@ export class DocumentProcessingStack extends cdk.Stack {
     // Note: S3 event notifications removed - Documents v2 uses direct job processing
     // via sendToProcessingQueue() instead of S3-triggered processing
 
-    // CloudWatch Alarms for monitoring
-    const processingErrors = this.standardProcessor.metricErrors({
-      statistic: 'Sum',
-      period: cdk.Duration.minutes(5),
-    });
-
-    const highMemoryErrors = this.highMemoryProcessor.metricErrors({
-      statistic: 'Sum',
-      period: cdk.Duration.minutes(5),
-    });
-
-    const dlqMessages = this.processingDLQ.metric('ApproximateNumberOfVisibleMessages', {
-      statistic: 'Maximum',
-      period: cdk.Duration.minutes(5),
-    });
-
     // CloudWatch Dashboard removed - metrics now exported to consolidated dashboards via MonitoringStack
-    // Metrics available: processingErrors, highMemoryErrors, dlqMessages
 
     // Stack outputs
     new cdk.CfnOutput(this, 'DocumentJobsTableName', {

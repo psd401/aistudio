@@ -429,10 +429,10 @@ This might be because:
 
   private sanitizeFileName(name: string): string {
     // Remove dangerous characters and limit length
-    return name.replace(/[^a-zA-Z0-9.-]/g, '_').substring(0, 255);
+    return name.replace(/[^\d.A-Za-z-]/g, '_').substring(0, 255);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   async remove(_attachment: PendingAttachment): Promise<void> {
     // Cleanup if needed
   }
@@ -517,7 +517,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
     };
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   async remove(_attachment: PendingAttachment): Promise<void> {
     // Cleanup if needed (e.g., revoke object URLs if you created any)
   }
@@ -525,11 +525,11 @@ export class VisionImageAdapter implements AttachmentAdapter {
   private async fileToBase64DataURL(file: File): Promise<string> {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
-      reader.onload = () => {
+      reader.addEventListener('load', () => {
         // FileReader result is already a data URL
         resolve(reader.result as string);
-      };
-      reader.onerror = reject;
+      });
+      reader.addEventListener('error', () => reject(reader.error));
       reader.readAsDataURL(file);
     });
   }
@@ -560,7 +560,7 @@ export class VisionImageAdapter implements AttachmentAdapter {
 
   private sanitizeFileName(name: string): string {
     // Remove dangerous characters and limit length
-    return name.replace(/[^a-zA-Z0-9.-]/g, '_').substring(0, 255);
+    return name.replace(/[^\d.A-Za-z-]/g, '_').substring(0, 255);
   }
 }
 

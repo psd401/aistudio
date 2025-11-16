@@ -46,11 +46,11 @@ export async function createGithubIssueAction({ title, description }: CreateGith
     }
     
     log.info("Calling GitHub API to create issue", {
-      repo: "psd401/aistudio.psd401.ai",
+      repo: "psd401/aistudio",
       titlePreview: title.substring(0, 50)
     })
-    
-    const res = await fetch("https://api.github.com/repos/psd401/aistudio.psd401.ai/issues", {
+
+    const res = await fetch("https://api.github.com/repos/psd401/aistudio/issues", {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${token}`,

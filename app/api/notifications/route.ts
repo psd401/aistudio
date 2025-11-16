@@ -36,8 +36,8 @@ export async function GET(request: NextRequest) {
 
     // Get query parameters
     const url = new URL(request.url)
-    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 100)
-    const offset = Math.max(parseInt(url.searchParams.get('offset') || '0'), 0)
+    const limit = Math.min(Number.parseInt(url.searchParams.get('limit') || '50'), 100)
+    const offset = Math.max(Number.parseInt(url.searchParams.get('offset') || '0'), 0)
     const type = url.searchParams.get('type') // 'email' | 'in_app' | null for all
 
     // Build SQL query with optional type filter

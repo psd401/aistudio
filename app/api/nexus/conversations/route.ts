@@ -52,8 +52,8 @@ export async function GET(req: Request) {
     
     // Parse query parameters
     const url = new URL(req.url);
-    const limit = parseInt(url.searchParams.get('limit') || '20');
-    const offset = parseInt(url.searchParams.get('offset') || '0');
+    const limit = Number.parseInt(url.searchParams.get('limit') || '20');
+    const offset = Number.parseInt(url.searchParams.get('offset') || '0');
     const includeArchived = url.searchParams.get('includeArchived') === 'true';
     
     // Query conversations 
@@ -85,7 +85,7 @@ export async function GET(req: Request) {
     `;
     
     const countResult = await executeSQL(countQuery, [userId]);
-    const total = parseInt((countResult[0].total as string) || '0');
+    const total = Number.parseInt((countResult[0].total as string) || '0');
     
     timer({ status: 'success' });
     log.info('Conversations retrieved', {

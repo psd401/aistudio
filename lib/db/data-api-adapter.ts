@@ -1,11 +1,10 @@
-import { 
-  RDSDataClient, 
-  ExecuteStatementCommand, 
+import {
+  RDSDataClient,
+  ExecuteStatementCommand,
   ExecuteStatementCommandOutput,
   BeginTransactionCommand,
   CommitTransactionCommand,
   RollbackTransactionCommand,
-  Field,
   SqlParameter,
   ArrayValue
 } from "@aws-sdk/client-rds-data";
@@ -21,7 +20,7 @@ type DataApiParameter = SqlParameter;
 
 // Custom types for our formatted results
 export interface FormattedRow {
-  [columnName: string]: string | number | boolean | null | Uint8Array | ArrayValue;
+  [columnName: string]: string | number | boolean | null | Uint8Array | ArrayValue | string[] | number[] | boolean[];
 }
 
 // Helper function to create SQL parameters with proper types
@@ -128,13 +127,13 @@ function formatDataApiResponse(response: DataApiResponse): FormattedRow[] {
   
   return response.records.map((record) => {
     const row: FormattedRow = {};
-    record.forEach((field: Field, index) => {
+    for (const [index, field] of record.entries()) {
       const columnName = columns[index];
       // Transform snake_case to camelCase for the property name
       const camelCaseColumnName = snakeToCamel(columnName);
       
       // Extract the actual value from the field object
-      let value: string | number | boolean | null | Uint8Array | ArrayValue;
+      let value: string | number | boolean | null | Uint8Array | ArrayValue | string[] | number[] | boolean[];
       if ('isNull' in field && field.isNull) {
         value = null;
       } else if ('stringValue' in field) {
@@ -148,12 +147,24 @@ function formatDataApiResponse(response: DataApiResponse): FormattedRow[] {
       } else if ('blobValue' in field) {
         value = field.blobValue!;
       } else if ('arrayValue' in field) {
-        value = field.arrayValue!;
+        // Extract array values properly - RDS Data API returns ArrayValue objects
+        const arrayValue = field.arrayValue!;
+        if (arrayValue.stringValues) {
+          value = arrayValue.stringValues;
+        } else if (arrayValue.longValues) {
+          value = arrayValue.longValues;
+        } else if (arrayValue.doubleValues) {
+          value = arrayValue.doubleValues;
+        } else if (arrayValue.booleanValues) {
+          value = arrayValue.booleanValues;
+        } else {
+          value = [];
+        }
       } else {
         value = null;
       }
       row[camelCaseColumnName] = value;
-    });
+    }
     return row;
   });
 }
@@ -1308,8 +1319,8 @@ export async function assignToolToRole(roleId: string, toolId: string) {
   `;
   
   const checkParams = [
-    { name: 'roleId', value: { longValue: parseInt(roleId, 10) } },
-    { name: 'toolId', value: { longValue: parseInt(toolId, 10) } }
+    { name: 'roleId', value: { longValue: Number.parseInt(roleId, 10) } },
+    { name: 'toolId', value: { longValue: Number.parseInt(toolId, 10) } }
   ];
   
   const existing = await executeSQL(checkSql, checkParams);
@@ -1326,8 +1337,8 @@ export async function assignToolToRole(roleId: string, toolId: string) {
   `;
   
   const insertParams = [
-    { name: 'roleId', value: { longValue: parseInt(roleId, 10) } },
-    { name: 'toolId', value: { longValue: parseInt(toolId, 10) } }
+    { name: 'roleId', value: { longValue: Number.parseInt(roleId, 10) } },
+    { name: 'toolId', value: { longValue: Number.parseInt(toolId, 10) } }
   ];
   
   const result = await executeSQL(insertSql, insertParams);
@@ -1345,8 +1356,8 @@ export async function removeToolFromRole(roleId: string, toolId: string) {
   `;
   
   const parameters = [
-    { name: 'roleId', value: { longValue: parseInt(roleId, 10) } },
-    { name: 'toolId', value: { longValue: parseInt(toolId, 10) } }
+    { name: 'roleId', value: { longValue: Number.parseInt(roleId, 10) } },
+    { name: 'toolId', value: { longValue: Number.parseInt(toolId, 10) } }
   ];
   
   const result = await executeSQL(sql, parameters);

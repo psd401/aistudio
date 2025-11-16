@@ -47,7 +47,7 @@ export async function POST(req: Request) {
     // Validate model IDs are valid strings/numbers
     const isValidModelId = (id: unknown): id is string | number => {
       return (typeof id === 'string' && id.trim().length > 0) || 
-             (typeof id === 'number' && !isNaN(id) && id > 0);
+             (typeof id === 'number' && !Number.isNaN(id) && id > 0);
     };
 
     if (!isValidModelId(model1Id) || !isValidModelId(model2Id)) {

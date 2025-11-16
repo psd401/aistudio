@@ -203,7 +203,7 @@ function ScheduleCardComponent({ schedule, onDelete, onToggle, onRefresh }: Sche
       const utcDate = new Date(schedule.lastExecution.executedAt)
 
       // Verify it's a valid date
-      if (isNaN(utcDate.getTime())) {
+      if (Number.isNaN(utcDate.getTime())) {
         return `${schedule.lastExecution.status} - Invalid date`
       }
 

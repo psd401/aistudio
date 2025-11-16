@@ -108,7 +108,7 @@ Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAccessAnal
 
 // Secrets Manager Stack - centralized secrets management
 const devSecretsManagerStack = new SecretsManagerStack(app, 'AIStudio-SecretsManagerStack-Dev', {
-  deploymentEnvironment: 'dev',
+  environment: 'dev',
   config: EnvironmentConfig.get('dev'),
   alertEmail,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
@@ -167,6 +167,7 @@ const devSchedulerStack = new SchedulerStack(app, 'AIStudio-SchedulerStack-Dev',
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 devSchedulerStack.addDependency(devDbStack);
+// Note: FrontendStack-ECS dependency added below (after FrontendStack is created)
 cdk.Tags.of(devSchedulerStack).add('Environment', 'Dev');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devSchedulerStack).add(key, value));
 
@@ -208,7 +209,7 @@ Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodPermissio
 
 // Secrets Manager Stack - centralized secrets management
 const prodSecretsManagerStack = new SecretsManagerStack(app, 'AIStudio-SecretsManagerStack-Prod', {
-  deploymentEnvironment: 'prod',
+  environment: 'prod',
   config: EnvironmentConfig.get('prod'),
   alertEmail,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
@@ -267,6 +268,7 @@ const prodSchedulerStack = new SchedulerStack(app, 'AIStudio-SchedulerStack-Prod
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 prodSchedulerStack.addDependency(prodDbStack);
+// Note: FrontendStack-ECS dependency added below (after FrontendStack is created)
 cdk.Tags.of(prodSchedulerStack).add('Environment', 'Prod');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodSchedulerStack).add(key, value));
 
@@ -313,9 +315,11 @@ if (baseDomain) {
   devFrontendStack.addDependency(devDbStack); // Need VPC from DB stack
   devFrontendStack.addDependency(devStorageStack); // Need bucket name
   devFrontendStack.addDependency(devAuthStack); // Need auth secret ARN export
-  devFrontendStack.addDependency(devSchedulerStack); // Need internal API secret ARN from SSM (no CloudFormation dependency)
   cdk.Tags.of(devFrontendStack).add('Environment', 'Dev');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devFrontendStack).add(key, value));
+
+  // SchedulerStack depends on FrontendStack-ECS to read SSM parameters (ECS security group ID, internal endpoint)
+  devSchedulerStack.addDependency(devFrontendStack);
 
   const prodFrontendStack = new FrontendStackEcs(app, 'AIStudio-FrontendStack-ECS-Prod', {
     environment: 'prod',
@@ -329,9 +333,11 @@ if (baseDomain) {
   prodFrontendStack.addDependency(prodDbStack); // Need VPC from DB stack
   prodFrontendStack.addDependency(prodStorageStack); // Need bucket name
   prodFrontendStack.addDependency(prodAuthStack); // Need auth secret ARN export
-  prodFrontendStack.addDependency(prodSchedulerStack); // Need internal API secret ARN from SSM (no CloudFormation dependency)
   cdk.Tags.of(prodFrontendStack).add('Environment', 'Prod');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodFrontendStack).add(key, value));
+
+  // SchedulerStack depends on FrontendStack-ECS to read SSM parameters (ECS security group ID, internal endpoint)
+  prodSchedulerStack.addDependency(prodFrontendStack);
 
   // To deploy, use:
   // cdk deploy AIStudio-FrontendStack-ECS-Dev --context baseDomain=yourdomain.com

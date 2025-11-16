@@ -72,7 +72,7 @@ const INITIAL_SETUP_FILES = [
 
 export async function handler(event: CustomResourceEvent): Promise<any> {
   console.log('Database initialization event:', JSON.stringify(event, null, 2));
-  console.log('Handler version: 2025-07-31-v8 - Added required icon field');
+  console.log('Handler version: 2025-10-26-v9 - Latimer AI migration 040');
   
   // SAFETY CHECK: Log what mode we're in
   console.log(`🔍 Checking database state for safety...`);
@@ -208,6 +208,9 @@ async function ensureMigrationTable(
 
 /**
  * Check if a specific migration has already been run
+ *
+ * Security Note: String concatenation is safe here because migrationFile
+ * comes from the hardcoded MIGRATION_FILES array, not user input.
  */
 async function checkMigrationRun(
   clusterArn: string,
@@ -220,11 +223,11 @@ async function checkMigrationRun(
       clusterArn,
       secretArn,
       database,
-      `SELECT COUNT(*) FROM migration_log 
-       WHERE description = '${migrationFile}' 
+      `SELECT COUNT(*) FROM migration_log
+       WHERE description = '${migrationFile}'
        AND status = 'completed'`
     );
-    
+
     const count = result.records?.[0]?.[0]?.longValue || 0;
     return count > 0;
   } catch (error) {
@@ -235,6 +238,11 @@ async function checkMigrationRun(
 
 /**
  * Record a migration execution (success or failure)
+ *
+ * Security Note: String concatenation is safe here because:
+ * - migrationFile comes from hardcoded MIGRATION_FILES array
+ * - errorMessage is from caught exceptions, not user input
+ * - Lambda has no external input vectors
  */
 async function recordMigration(
   clusterArn: string,
@@ -251,17 +259,15 @@ async function recordMigration(
     database,
     `SELECT COALESCE(MAX(step_number), 0) + 1 as next_step FROM migration_log`
   );
-  
+
   const nextStep = maxStepResult.records?.[0]?.[0]?.longValue || 1;
-  
   const status = success ? 'completed' : 'failed';
-  const errorPart = errorMessage ? `, error_message = '${errorMessage.replace(/'/g, "''")}'` : '';
-  
+
   await executeSql(
     clusterArn,
     secretArn,
     database,
-    `INSERT INTO migration_log (step_number, description, sql_executed, status${errorMessage ? ', error_message' : ''}) 
+    `INSERT INTO migration_log (step_number, description, sql_executed, status${errorMessage ? ', error_message' : ''})
      VALUES (${nextStep}, '${migrationFile}', 'Migration file executed', '${status}'${errorMessage ? `, '${errorMessage.replace(/'/g, "''")}'` : ''})`
   );
 }

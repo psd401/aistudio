@@ -193,7 +193,7 @@ export async function POST(request: Request) {
       description: body.description,
       capabilities: validatedCapabilities || undefined,
       allowedRoles: validatedAllowedRoles || undefined,
-      maxTokens: body.maxTokens ? parseInt(body.maxTokens) : undefined,
+      maxTokens: body.maxTokens ? Number.parseInt(body.maxTokens) : undefined,
       isActive: body.active ?? true,
       chatEnabled: body.chatEnabled ?? false,
       // Pricing fields
@@ -266,7 +266,7 @@ export async function PUT(request: Request) {
     
     // Convert maxTokens to number if present
     if (updates.maxTokens !== undefined) {
-      updates.maxTokens = updates.maxTokens ? parseInt(updates.maxTokens) : null;
+      updates.maxTokens = updates.maxTokens ? Number.parseInt(updates.maxTokens) : null;
     }
 
     // Handle JSONB fields - stringify if they're objects
@@ -334,7 +334,7 @@ export async function DELETE(request: Request) {
       );
     }
 
-    const model = await deleteAIModel(parseInt(id));
+    const model = await deleteAIModel(Number.parseInt(id));
 
     log.info("Model deleted successfully", { modelId: id });
     timer({ status: "success" });

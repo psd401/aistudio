@@ -4,21 +4,18 @@ import { getServerSession } from "@/lib/auth/server-session"
 import { executeSQL, executeTransaction } from "@/lib/db/data-api-adapter"
 import { type ActionState } from "@/types/actions-types"
 import { hasToolAccess } from "@/utils/roles"
-import { 
+import {
   handleError,
-  createError,
   ErrorFactories,
   createSuccess
 } from "@/lib/error-utils"
 import {
   createLogger,
   generateRequestId,
-  startTimer,
-  sanitizeForLogging
+  startTimer
 } from "@/lib/logger"
 import { revalidatePath } from "next/cache"
 import { uploadDocument, deleteDocument } from "@/lib/aws/s3-client"
-import { createJobAction } from "@/actions/db/jobs-actions"
 import { queueFileForProcessing, processUrl } from "@/lib/services/file-processing-service"
 import { canModifyRepository, getUserIdFromSession } from "./repository-permissions"
 
@@ -28,7 +25,7 @@ export interface RepositoryItem {
   type: 'document' | 'url' | 'text'
   name: string
   source: string
-  metadata: Record<string, any>
+  metadata: Record<string, unknown>
   processingStatus: string
   processingError: string | null
   createdAt: Date
@@ -40,7 +37,7 @@ export interface RepositoryItemChunk {
   itemId: number
   content: string
   embeddingVector: number[] | null
-  metadata: Record<string, any>
+  metadata: Record<string, unknown>
   chunkIndex: number
   tokens: number | null
   createdAt: Date
@@ -84,7 +81,7 @@ export interface AddDocumentWithPresignedUrlInput {
 function sanitizeFilename(filename: string): string {
   // Remove any directory components and special characters
   return filename
-    .replace(/[^a-zA-Z0-9.-]/g, '_') // Replace special chars with underscore
+    .replace(/[^\d.A-Za-z-]/g, '_') // Replace special chars with underscore
     .replace(/\.{2,}/g, '.') // Replace multiple dots with single dot
     .replace(/^\.+|\.+$/g, '') // Remove leading/trailing dots
     .slice(0, 255); // Limit length
@@ -701,9 +698,9 @@ export async function removeRepositoryItem(
     })
     
     timer({ status: "success", itemId })
-    
+
     revalidatePath(`/repositories/${item.repositoryId}`)
-    return createSuccess(undefined as any, "Item removed successfully")
+    return createSuccess(undefined as void, "Item removed successfully")
   } catch (error) {
     timer({ status: "error" })
     
@@ -961,10 +958,10 @@ export async function updateItemProcessingStatus(
     )
 
     log.info("Processing status updated successfully", { itemId, status })
-    
+
     timer({ status: "success", itemId })
-    
-    return createSuccess(undefined as any, "Status updated successfully")
+
+    return createSuccess(undefined as void, "Status updated successfully")
   } catch (error) {
     timer({ status: "error" })
     
@@ -1038,12 +1035,12 @@ export async function getDocumentDownloadUrl(
 
     // Extract file extension from the original S3 key or metadata
     let filename = item.name
-    const metadata = item.metadata as any
-    
+    const metadata = item.metadata as Record<string, unknown> | null
+
     // Try to get extension from original filename or S3 key
     let extension = ''
-    
-    if (metadata?.originalFileName) {
+
+    if (metadata && typeof metadata === 'object' && 'originalFileName' in metadata && typeof metadata.originalFileName === 'string') {
       // Use the original filename's extension
       extension = metadata.originalFileName.split('.').pop() || ''
     } else {

@@ -11,8 +11,8 @@
  * They are excluded from CI and should be run manually when needed.
  *
  * @see https://sdk.vercel.ai/docs
- * @see https://github.com/psd401/aistudio.psd401.ai/issues/364
- * @see https://github.com/psd401/aistudio.psd401.ai/issues/366
+ * @see https://github.com/psd401/aistudio/issues/364
+ * @see https://github.com/psd401/aistudio/issues/366
  */
 
 import { streamText } from 'ai';

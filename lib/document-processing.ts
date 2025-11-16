@@ -4,8 +4,6 @@
 // don't support them. Dynamic `import()` happens at runtime in the Node
 // context of our API route, so it won't break the build.
 
-// Note: We keep the type imports (if they exist) purely for IDE support.
-import type pdfParseType from 'pdf-parse';
 import logger from "@/lib/logger"
 import { sanitizeTextWithMetrics } from "@/lib/utils/text-sanitizer"
 
@@ -25,7 +23,7 @@ export async function extractTextFromPDF(buffer: Buffer): Promise<{ text: string
     // exists in `index.js`.  We jump directly to the core implementation
     // found in `lib/pdf-parse.js`, which exports the same function without
     // side-effects that attempt to read test files.
-    const pdfParse = (await import('pdf-parse/lib/pdf-parse.js')).default as typeof pdfParseType;
+    const pdfParse = (await import('pdf-parse/lib/pdf-parse.js')).default;
     const pdfData = await pdfParse(buffer);
 
     // Sanitize the extracted text to remove null bytes and invalid UTF-8 sequences
@@ -161,7 +159,7 @@ export function chunkText(text: string, maxChunkSize: number = 1000): string[] {
 
     // If paragraph itself exceeds chunk size, split it into sentences
     if (paragraph.length > maxChunkSize) {
-      const sentences = paragraph.match(/[^.!?]+[.!?]+/g) || [paragraph];
+      const sentences = paragraph.match(/[^!.?]+[!.?]+/g) || [paragraph];
       for (const sentence of sentences) {
         if (currentChunk.length + sentence.length > maxChunkSize && currentChunk.length > 0) {
           chunks.push(currentChunk.trim());

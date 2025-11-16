@@ -334,7 +334,7 @@ export class OfficeProcessor implements DocumentProcessor {
     if (content.html) {
       try {
         // Simple HTML to Markdown conversion
-        let markdown = content.html
+        const markdown = content.html
           .replace(/<h([1-6])[^>]*>/g, (match: string, level: string) => '#'.repeat(parseInt(level)) + ' ')
           .replace(/<\/h[1-6]>/g, '\n\n')
           .replace(/<p[^>]*>/g, '')

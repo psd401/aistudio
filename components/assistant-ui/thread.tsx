@@ -231,6 +231,7 @@ const Composer: FC<ComposerProps> = ({ processingAttachments }) => {
           placeholder="Send a message..."
           className="bg-muted border-border dark:border-muted-foreground/15 focus:outline-primary placeholder:text-muted-foreground max-h-[calc(50dvh)] min-h-16 w-full resize-none rounded-t-2xl border-x border-t px-4 pb-3 pt-2 text-base outline-none"
           rows={1}
+          // eslint-disable-next-line jsx-a11y/no-autofocus -- Intentional: message input is primary interaction
           autoFocus
           aria-label="Message input"
         />
@@ -426,6 +427,7 @@ const EditComposer: FC = () => {
       <ComposerPrimitive.Root className="bg-muted max-w-7/8 ml-auto flex w-full flex-col rounded-xl">
         <ComposerPrimitive.Input
           className="text-foreground flex min-h-[60px] w-full resize-none bg-transparent p-4 outline-none"
+          // eslint-disable-next-line jsx-a11y/no-autofocus -- Intentional: edit mode expects immediate focus
           autoFocus
         />
 

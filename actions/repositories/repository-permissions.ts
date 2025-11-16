@@ -1,3 +1,4 @@
+/* eslint-disable logging/require-request-id, logging/require-logger-in-server-actions */
 "use server"
 
 import { executeSQL } from "@/lib/db/data-api-adapter"

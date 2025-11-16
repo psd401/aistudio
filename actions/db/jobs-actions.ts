@@ -44,8 +44,8 @@ export async function createJobAction(
     }
 
     // Convert userId to number if it's a string
-    const userIdNum = typeof job.userId === 'string' ? parseInt(job.userId, 10) : job.userId;
-    if (isNaN(userIdNum)) {
+    const userIdNum = typeof job.userId === 'string' ? Number.parseInt(job.userId, 10) : job.userId;
+    if (Number.isNaN(userIdNum)) {
       log.warn("Invalid userId provided", { userId: job.userId })
       return { isSuccess: false, message: "Invalid userId provided." };
     }
@@ -112,8 +112,8 @@ export async function getJobAction(id: string): Promise<ActionState<SelectJob>> 
     
     log.debug("User authenticated", { userId: session.sub })
     
-    const idNum = parseInt(id, 10);
-    if (isNaN(idNum)) {
+    const idNum = Number.parseInt(id, 10);
+    if (Number.isNaN(idNum)) {
       log.warn("Invalid job ID provided", { jobId: id })
       return { isSuccess: false, message: "Invalid job ID" };
     }
@@ -167,8 +167,8 @@ export async function getUserJobsAction(userId: string): Promise<ActionState<Sel
     
     log.debug("User authenticated", { userId: session.sub })
     
-    const userIdNum = parseInt(userId, 10);
-    if (isNaN(userIdNum)) {
+    const userIdNum = Number.parseInt(userId, 10);
+    if (Number.isNaN(userIdNum)) {
       log.warn("Invalid user ID provided", { userId })
       return { isSuccess: false, message: "Invalid user ID" };
     }
@@ -221,8 +221,8 @@ export async function updateJobAction(
     
     log.debug("User authenticated", { userId: session.sub })
     
-    const idNum = parseInt(id, 10);
-    if (isNaN(idNum)) {
+    const idNum = Number.parseInt(id, 10);
+    if (Number.isNaN(idNum)) {
       log.warn("Invalid job ID provided", { jobId: id })
       return { isSuccess: false, message: "Invalid job ID" };
     }
@@ -238,7 +238,7 @@ export async function updateJobAction(
 
     const setClauses = Object.entries(data)
       .filter(([key, _]) => ALLOWED_COLUMNS[key]) // Only allow whitelisted columns
-      .map(([key, value]) => {
+      .map(([key, _value]) => {
         const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
         if (dbKey === 'status') {
           return `${dbKey} = :${key}::job_status`;
@@ -313,8 +313,8 @@ export async function deleteJobAction(id: string): Promise<ActionState<void>> {
     
     log.debug("User authenticated", { userId: session.sub })
     
-    const idNum = parseInt(id, 10);
-    if (isNaN(idNum)) {
+    const idNum = Number.parseInt(id, 10);
+    if (Number.isNaN(idNum)) {
       log.warn("Invalid job ID provided", { jobId: id })
       return { isSuccess: false, message: "Invalid job ID" };
     }

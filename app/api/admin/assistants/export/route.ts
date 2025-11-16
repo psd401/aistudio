@@ -61,7 +61,7 @@ export async function POST(request: NextRequest) {
     const exportData = createExportFile(assistants)
 
     // Generate filename with timestamp
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, -5)
+    const timestamp = new Date().toISOString().replace(/[.:]/g, '-').slice(0, -5)
     const filename = `assistants-export-${timestamp}.json`
 
     // Return JSON file as download

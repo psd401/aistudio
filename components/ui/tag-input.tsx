@@ -68,6 +68,14 @@ export function TagInput({
     <div
       className={`flex min-h-[40px] w-full flex-wrap gap-1.5 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background focus-within:ring-2 focus-within:ring-ring focus-within:ring-offset-2 ${disabled ? "cursor-not-allowed opacity-50" : ""} ${className}`}
       onClick={() => inputRef.current?.focus()}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          inputRef.current?.focus()
+        }
+      }}
+      role="button"
+      tabIndex={0}
     >
       {value.map((tag, index) => (
         <Badge

@@ -49,7 +49,7 @@ export function shouldRefreshToken(
   // Use stored token lifetime from JWT creation, with fallback
   const tokenWithLifetime = token as JWT & { tokenLifetimeMs?: number }
   const tokenLifetime = tokenWithLifetime.tokenLifetimeMs ||
-    (parseInt(process.env.COGNITO_ACCESS_TOKEN_LIFETIME_SECONDS || "3600") * 1000)
+    (Number.parseInt(process.env.COGNITO_ACCESS_TOKEN_LIFETIME_SECONDS || "3600") * 1000)
 
   // Adaptive refresh threshold based on operation type
   let refreshThresholdPercent = 0.25; // Default 25%

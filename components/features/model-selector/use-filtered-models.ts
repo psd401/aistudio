@@ -132,16 +132,16 @@ export function useFilteredModels({
 
     // Group models by provider
     const groupedModels: Record<string, FilteredModel[]> = {}
-    filteredModels.forEach(model => {
+    for (const model of filteredModels) {
       const provider = model.provider || 'Other'
       if (!groupedModels[provider]) {
         groupedModels[provider] = []
       }
       groupedModels[provider].push(model)
-    })
+    }
 
     // Sort models within each group
-    Object.keys(groupedModels).forEach(provider => {
+    for (const provider of Object.keys(groupedModels)) {
       groupedModels[provider].sort((a, b) => {
         // Accessible models first
         if (a.isAccessible !== b.isAccessible) {
@@ -150,7 +150,7 @@ export function useFilteredModels({
         // Then by name
         return a.name.localeCompare(b.name)
       })
-    })
+    }
 
     const totalCount = filteredModels.length
     const accessibleCount = filteredModels.filter(m => m.isAccessible).length

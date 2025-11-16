@@ -5,8 +5,8 @@ This guide covers local development, coding standards, and testing for this proj
 ## Local Setup
 1. Clone the repository:
    ```sh
-   git clone git@github.com:psd401/aistudio.psd401.ai.git
-   cd aistudio.psd401.ai
+   git clone git@github.com:psd401/aistudio.git
+   cd aistudio
    ```
 2. Install dependencies:
    ```sh
