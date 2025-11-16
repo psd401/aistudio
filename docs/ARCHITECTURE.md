@@ -4,6 +4,14 @@
 
 AI Studio is a Next.js 15+ enterprise application built with modern cloud-native architecture principles. It provides AI-powered tools with role-based access control, featuring multiple LLM providers, document processing, and knowledge management capabilities.
 
+> **📊 Visual Diagrams**: See `/docs/diagrams/` for comprehensive architectural diagrams including:
+> - [CDK Stack Dependencies](./diagrams/01-cdk-stack-dependencies.md)
+> - [VPC Network Topology](./diagrams/02-vpc-network-topology.md)
+> - [AWS Service Architecture](./diagrams/03-aws-service-architecture.md)
+> - [Database ERD](./diagrams/04-database-erd.md)
+> - [Authentication Flow](./diagrams/05-authentication-flow.md)
+> - [Request Flow Diagrams](./diagrams/06-request-flow-diagrams.md)
+
 ## Technology Stack
 
 ### Core Framework
