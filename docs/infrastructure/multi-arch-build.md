@@ -21,7 +21,7 @@ The default deployment uses `ecs.ContainerImage.fromAsset()` which automatically
 
 ```bash
 cd infra
-npx cdk deploy AIStudio-FrontendStack-Dev
+npx cdk deploy AIStudio-FrontendStack-ECS-Dev
 ```
 
 ### 2. Manual Multi-Architecture Build
