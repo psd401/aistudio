@@ -151,6 +151,19 @@ For complex diagrams that require draw.io:
 - Export as PNG/SVG for embedding
 - Keep `.drawio` files for future edits
 
+## Maintenance
+
+**Review Schedule**: Quarterly or after major architectural changes
+
+**Update Checklist**:
+- [ ] Database ERD matches latest schema (use MCP tools to verify)
+- [ ] CDK stack dependencies reflect current deployment order
+- [ ] VPC diagram shows all current security groups and endpoints
+- [ ] Request flow diagrams match current API routes
+- [ ] Service architecture reflects actual AWS resources deployed
+
+**Last Review**: November 2025
+
 ## Contributing
 
 When adding new diagrams:

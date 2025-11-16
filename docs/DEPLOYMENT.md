@@ -309,6 +309,16 @@ The database initialization Lambda runs automatically on first deployment. It:
 - Runs migration files (010+) for existing databases
 - Records migrations in `migration_log` table
 
+### Pre-Deployment Checklist
+
+Before deploying database changes, complete this checklist:
+
+- [ ] Reviewed all SQL files in `/infra/database/schema/`
+- [ ] Verified database is backed up (production only)
+- [ ] Confirmed HTTP endpoint is enabled on RDS cluster
+- [ ] Tested migration SQL with MCP tools (if applicable)
+- [ ] Reviewed `MIGRATION_FILES` array in `db-init-handler.ts`
+
 ### Before Deployment Safety Checks
 
 **ALWAYS verify before deploying:**
@@ -338,6 +348,18 @@ The database initialization Lambda runs automatically on first deployment. It:
    - Compare with files in `/infra/database/schema/`
    - Files 001-005 should ONLY run on empty databases
    - Migration files (010+) must be additive only (no destructive operations)
+
+4. **Test migration SQL locally (recommended):**
+   ```bash
+   # Use MCP tools to validate SQL before deployment
+   mcp__awslabs-postgres-mcp-server__run_query --sql "SELECT * FROM migration_log ORDER BY executed_at DESC LIMIT 5"
+
+   # Test new migration SQL (dry run)
+   # Replace with your actual migration SQL
+   mcp__awslabs-postgres-mcp-server__run_query --sql "BEGIN; [your migration SQL]; ROLLBACK;"
+   ```
+   - After deployment, verify in `migration_log` table
+   - Check that all expected migrations executed successfully
 
 ### Migration Process
 
