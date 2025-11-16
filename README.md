@@ -1,10 +1,20 @@
 # AI Studio
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Built with Next.js](https://img.shields.io/badge/Built%20with-Next.js%2015-black)](https://nextjs.org/)
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/psd401/aistudio/releases)
+
 > **Bring frontier AI to K-12 education—securely, affordably, and responsibly.**
 
 AI Studio is an open-source platform that provides K-12 educators and students with access to cutting-edge generative AI models at **90% lower cost** than individual licenses. Built with privacy-first architecture and deployed within district infrastructure, it democratizes access to AI tools that were previously cost-prohibitive for schools.
 
-**Live demo**: [psd401.ai/aistudio](https://psd401.ai/aistudio)
+## 🎬 See It In Action
+
+**Learn more**: [https://psd401.ai/aistudio](https://psd401.ai/aistudio)
+
+AI Studio is a **self-hosted platform** deployed within your district infrastructure for security and compliance. Screenshots and feature overview available on our project page.
+
+**Ready to deploy?** See the complete [Deployment Guide](./docs/DEPLOYMENT.md)
 
 ## 🎯 Why AI Studio?
 
