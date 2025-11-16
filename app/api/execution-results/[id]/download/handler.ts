@@ -14,7 +14,9 @@ function sanitizeMarkdownContent(content: string): string {
 
   return content
     // Remove null bytes first
-    .replace(/\x00/g, '')
+    // eslint-disable-next-line no-control-regex
+    .replace(/\u0000/g, '')
+    // eslint-disable-next-line no-control-regex
     .replace(/\u0000/g, '')
     .replace(/\0/g, '')
     // Remove dangerous HTML/XML elements
@@ -27,7 +29,7 @@ function sanitizeMarkdownContent(content: string): string {
     .replace(/\[([^\]]*)]\(data:[^)]*\)/gi, '[$1](#)') // Sanitize markdown links with data:
     // Additional protections
     .replace(/eval\s*\(/gi, 'eval (') // Break eval calls
-    .replace(/Function\s*\(/gi, 'Function (') // Break Function constructor
+    .replace(/function\s*\(/gi, 'Function (') // Break Function constructor
 }
 
 // Enhanced input validation for execution result ID
@@ -38,11 +40,11 @@ function validateExecutionResultId(id: string): number {
   }
 
   // Check for injection attempts
-  if (/[^\d]/.test(id)) {
+  if (/\D/.test(id)) {
     throw ErrorFactories.invalidInput("id", id, "must contain only digits")
   }
 
-  const numericId = parseInt(id, 10)
+  const numericId = Number.parseInt(id, 10)
   if (!Number.isInteger(numericId) || numericId <= 0 || numericId > Number.MAX_SAFE_INTEGER) {
     throw ErrorFactories.invalidInput("id", id, "must be a positive integer")
   }
@@ -346,7 +348,9 @@ function generateSafeFilename(scheduleName: string): string {
   return scheduleName
     .toLowerCase()
     // Remove null bytes (multiple representations)
-    .replace(/\x00/g, '') // Actual null byte
+    // eslint-disable-next-line no-control-regex
+    .replace(/\u0000/g, '') // Actual null byte
+    // eslint-disable-next-line no-control-regex
     .replace(/\u0000/g, '') // Unicode null
     .replace(/\0/g, '') // Null character
     // Remove path traversal patterns
@@ -354,7 +358,7 @@ function generateSafeFilename(scheduleName: string): string {
     .replace(/\//g, '') // Remove forward slash
     .replace(/\\/g, '') // Remove backslash
     // Remove other special characters
-    .replace(/[^a-z0-9\s-]/g, '') // Remove special characters
+    .replace(/[^\d\sa-z-]/g, '') // Remove special characters
     .replace(/\s+/g, '-') // Replace spaces with hyphens
     .replace(/-+/g, '-') // Collapse multiple hyphens
     .replace(/^-|-$/g, '') // Remove leading/trailing hyphens

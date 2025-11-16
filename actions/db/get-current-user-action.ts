@@ -242,13 +242,12 @@ export async function getCurrentUserAction(): Promise<
     )
 
     const validRoles = roles.filter((role): role is NonNullable<typeof role> => role !== null)
-    
+
     // Log success and performance
-    const endTimer = timer
-    endTimer({ 
+    timer({
       status: "success",
       userId: user.id,
-      roleCount: validRoles.length 
+      roleCount: validRoles.length
     })
     
     log.info("Action completed successfully", {
@@ -264,8 +263,7 @@ export async function getCurrentUserAction(): Promise<
     
   } catch (error) {
     // Log failure and performance
-    const endTimer = timer
-    endTimer({ status: "error" })
+    timer({ status: "error" })
 
     // Check for specific AWS token expiration errors
     const isTokenExpiredError = error instanceof Error && (

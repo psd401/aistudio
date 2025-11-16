@@ -256,8 +256,8 @@ export async function DELETE(request: Request) {
       )
     }
 
-    const assistantId = parseInt(id, 10)
-    if (isNaN(assistantId)) {
+    const assistantId = Number.parseInt(id, 10)
+    if (Number.isNaN(assistantId)) {
       log.warn("Invalid assistant ID format", { id });
       timer({ status: "error", reason: "invalid_id" });
       return NextResponse.json(

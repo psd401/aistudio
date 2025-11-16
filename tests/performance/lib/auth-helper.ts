@@ -51,7 +51,7 @@ export async function getAuthToken(): Promise<string | undefined> {
  * Only supports local testing without authentication.
  */
 async function authenticateTestUser(
-  credentials: AuthCredentials
+  _credentials: AuthCredentials
 ): Promise<string> {
   const env = getTestEnvironment();
 

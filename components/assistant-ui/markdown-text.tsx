@@ -93,27 +93,34 @@ const defaultComponents = memoizeMarkdownComponents({
     />
   ),
   h1: ({ className, ...props }) => (
+    // eslint-disable-next-line jsx-a11y/heading-has-content -- Markdown-rendered component: content guaranteed by parser
     <h1 className={cn("mb-8 scroll-m-20 text-4xl font-extrabold tracking-tight last:mb-0", className)} {...props} />
   ),
   h2: ({ className, ...props }) => (
+    // eslint-disable-next-line jsx-a11y/heading-has-content -- Markdown-rendered component: content guaranteed by parser
     <h2 className={cn("mb-4 mt-8 scroll-m-20 text-3xl font-semibold tracking-tight first:mt-0 last:mb-0", className)} {...props} />
   ),
   h3: ({ className, ...props }) => (
+    // eslint-disable-next-line jsx-a11y/heading-has-content -- Markdown-rendered component: content guaranteed by parser
     <h3 className={cn("mb-4 mt-6 scroll-m-20 text-2xl font-semibold tracking-tight first:mt-0 last:mb-0", className)} {...props} />
   ),
   h4: ({ className, ...props }) => (
+    // eslint-disable-next-line jsx-a11y/heading-has-content -- Markdown-rendered component: content guaranteed by parser
     <h4 className={cn("mb-4 mt-6 scroll-m-20 text-xl font-semibold tracking-tight first:mt-0 last:mb-0", className)} {...props} />
   ),
   h5: ({ className, ...props }) => (
+    // eslint-disable-next-line jsx-a11y/heading-has-content -- Markdown-rendered component: content guaranteed by parser
     <h5 className={cn("my-4 text-lg font-semibold first:mt-0 last:mb-0", className)} {...props} />
   ),
   h6: ({ className, ...props }) => (
+    // eslint-disable-next-line jsx-a11y/heading-has-content -- Markdown-rendered component: content guaranteed by parser
     <h6 className={cn("my-4 font-semibold first:mt-0 last:mb-0", className)} {...props} />
   ),
   p: ({ className, ...props }) => (
     <p className={cn("mb-5 mt-5 leading-7 first:mt-0 last:mb-0", className)} {...props} />
   ),
   a: ({ className, ...props }) => (
+    // eslint-disable-next-line jsx-a11y/anchor-has-content -- Markdown-rendered component: content guaranteed by parser
     <a className={cn("text-primary font-medium underline underline-offset-4", className)} {...props} />
   ),
   blockquote: ({ className, ...props }) => (

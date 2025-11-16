@@ -1,6 +1,6 @@
 import { createLogger, generateRequestId } from '@/lib/logger';
 import { executeSQL, type DatabaseRow, type ParameterValue } from './db-helpers';
-import { createHash } from 'crypto';
+import { createHash } from 'node:crypto';
 
 const log = createLogger({ module: 'response-cache-service' });
 

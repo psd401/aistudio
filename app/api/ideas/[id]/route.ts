@@ -35,7 +35,7 @@ export async function PATCH(
     const { id } = resolvedParams;
 
     const updateFields: string[] = [];
-    const params: SqlParameter[] = [{ name: 'id', value: { longValue: parseInt(id) } }];
+    const params: SqlParameter[] = [{ name: 'id', value: { longValue: Number.parseInt(id) } }];
 
     if (body.title) {
       updateFields.push('title = :title');
@@ -107,7 +107,7 @@ export async function DELETE(
   try {
     const resolvedParams = await context.params;
     const { id } = resolvedParams;
-    const ideaId = parseInt(id);
+    const ideaId = Number.parseInt(id);
     
     // Use transaction to ensure atomic deletion
     const deleteStatements = [

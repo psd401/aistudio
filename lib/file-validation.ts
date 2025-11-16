@@ -22,7 +22,7 @@ export type AllowedMimeType = typeof ALLOWED_MIME_TYPES[number]
  */
 export async function getMaxFileSize(): Promise<number> {
   const maxSizeMB = await getSetting('MAX_FILE_SIZE_MB') || process.env.MAX_FILE_SIZE_MB || '25'
-  return parseInt(maxSizeMB, 10) * 1024 * 1024
+  return Number.parseInt(maxSizeMB, 10) * 1024 * 1024
 }
 
 /**
@@ -84,7 +84,7 @@ export function formatFileSize(bytes: number): string {
   const sizes = ['Bytes', 'KB', 'MB', 'GB']
   const i = Math.floor(Math.log(bytes) / Math.log(k))
   
-  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+  return Number.parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
 }
 
 /**

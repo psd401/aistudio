@@ -233,7 +233,7 @@ async function getTelemetrySettings() {
     recordInputs: process.env.TELEMETRY_RECORD_INPUTS !== 'false', // Default true
     recordOutputs: process.env.TELEMETRY_RECORD_OUTPUTS !== 'false', // Default true
     recordUserContext: process.env.TELEMETRY_RECORD_USER_CONTEXT === 'true', // Default false
-    samplingRate: parseFloat(process.env.TELEMETRY_SAMPLING_RATE || '1.0')
+    samplingRate: Number.parseFloat(process.env.TELEMETRY_SAMPLING_RATE || '1.0')
   };
 }
 

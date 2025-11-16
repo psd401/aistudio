@@ -4,9 +4,9 @@ import { getServerSession } from "@/lib/auth/server-session"
 import { executeSQL } from "@/lib/db/data-api-adapter"
 import { type ActionState } from "@/types/actions-types"
 import { hasRole } from "@/utils/roles"
-import { 
+import type { SqlParameter } from "@aws-sdk/client-rds-data"
+import {
   handleError,
-  createError,
   ErrorFactories,
   createSuccess
 } from "@/lib/error-utils"
@@ -20,7 +20,6 @@ import { revalidatePath } from "next/cache"
 import { transformSnakeToCamel } from "@/lib/db/field-mapper"
 import type { Repository } from "@/actions/repositories/repository.actions"
 import type { RepositoryItem } from "@/actions/repositories/repository-items.actions"
-import { ErrorLevel } from "@/types/actions-types"
 
 export interface RepositoryWithOwner extends Repository {
   ownerEmail: string
@@ -103,7 +102,7 @@ export async function adminUpdateRepository(
     name?: string
     description?: string
     isPublic?: boolean
-    metadata?: Record<string, any>
+    metadata?: Record<string, unknown>
   }
 ): Promise<ActionState<Repository>> {
   const requestId = generateRequestId()
@@ -119,7 +118,7 @@ export async function adminUpdateRepository(
     await requireAdminSession(log)
 
     const updates: string[] = []
-    const params: any[] = [
+    const params: SqlParameter[] = [
       { name: "id", value: { longValue: input.id } }
     ]
 
@@ -177,7 +176,7 @@ export async function adminUpdateRepository(
     
     revalidatePath("/admin/repositories")
     revalidatePath(`/repositories/${input.id}`)
-    return createSuccess(result[0], "Repository updated successfully (admin)")
+    return createSuccess(transformSnakeToCamel<Repository>(result[0]), "Repository updated successfully (admin)")
   } catch (error) {
     timer({ status: "error" })
     
@@ -250,7 +249,7 @@ export async function adminDeleteRepository(
     
     revalidatePath("/admin/repositories")
     revalidatePath("/repositories")
-    return createSuccess(undefined as any, "Repository deleted successfully (admin)")
+    return createSuccess(undefined, "Repository deleted successfully (admin)")
   } catch (error) {
     timer({ status: "error" })
     
@@ -377,7 +376,7 @@ export async function adminRemoveRepositoryItem(
     
     revalidatePath(`/admin/repositories`)
     revalidatePath(`/repositories/${item.repositoryId}`)
-    return createSuccess(undefined as any, "Item removed successfully (admin)")
+    return createSuccess(undefined, "Item removed successfully (admin)")
   } catch (error) {
     timer({ status: "error" })
     

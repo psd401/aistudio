@@ -366,10 +366,11 @@ export async function POST(req: Request) {
 
     timer({ status: 'error' });
 
+    // Send only generic error message to client (full error logged above for server-side debugging)
     return new Response(
       JSON.stringify({
         error: 'Failed to process comparison request',
-        message: error instanceof Error ? error.message : String(error),
+        message: 'An error occurred while processing your comparison request. Please try again.',
         requestId
       }),
       {

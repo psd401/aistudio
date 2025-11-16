@@ -4,7 +4,6 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cloudwatch_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as sns_subscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
-import * as ssm from 'aws-cdk-lib/aws-ssm';
 import {
   ADOTInstrumentation,
   IntelligentAlerting,

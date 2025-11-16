@@ -106,9 +106,9 @@ export async function assertValidTestSetup(): Promise<void> {
 
   if (result.warnings.length > 0) {
     console.warn('\n⚠️  Setup Warnings:');
-    result.warnings.forEach(warning => {
+    for (const warning of result.warnings) {
       console.warn(`   ${warning}`);
-    });
+    }
     console.warn('');
   }
 

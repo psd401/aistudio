@@ -18,6 +18,6 @@ export function cn(...inputs: ClassValue[]) {
 export function generateToolIdentifier(name: string): string {
   return name
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/[^\da-z]+/g, '-')
     .replace(/^-+|-+$/g, '')
 }

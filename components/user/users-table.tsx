@@ -61,8 +61,9 @@ const UserForm = React.memo(function UserForm({
     <div className="space-y-4">
       <div className="grid grid-cols-2 gap-4">
         <div className="space-y-2">
-          <label className="text-sm font-medium">First Name</label>
+          <label htmlFor="user-firstName" className="text-sm font-medium">First Name</label>
           <Input
+            id="user-firstName"
             value={userData.firstName}
             onChange={handleFirstNameChange}
             required
@@ -70,8 +71,9 @@ const UserForm = React.memo(function UserForm({
         </div>
 
         <div className="space-y-2">
-          <label className="text-sm font-medium">Last Name</label>
+          <label htmlFor="user-lastName" className="text-sm font-medium">Last Name</label>
           <Input
+            id="user-lastName"
             value={userData.lastName}
             onChange={handleLastNameChange}
             required
@@ -80,8 +82,9 @@ const UserForm = React.memo(function UserForm({
       </div>
 
       <div className="space-y-2">
-        <label className="text-sm font-medium">Email</label>
+        <label htmlFor="user-email" className="text-sm font-medium">Email</label>
         <Input
+          id="user-email"
           type="email"
           value={userData.email}
           onChange={handleEmailChange}
@@ -90,7 +93,7 @@ const UserForm = React.memo(function UserForm({
       </div>
 
       <div className="space-y-2">
-        <label className="text-sm font-medium">Roles</label>
+        <div className="text-sm font-medium" aria-label="User roles">Roles</div>
         <div className="space-y-2 border rounded-md p-3">
           {['administrator', 'staff', 'student'].map((role) => (
             <div key={role} className="flex items-center space-x-2">

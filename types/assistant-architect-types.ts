@@ -66,7 +66,7 @@ export interface ToolExecutionInput {
 export interface PromptExecutionResult {
   promptId: string
   status: "pending" | "running" | "completed" | "failed"
-  input: Record<string, any>
+  input: Record<string, unknown>
   output?: string
   error?: string
   startTime: Date
@@ -123,7 +123,7 @@ export interface ChainPrompt {
 export interface JobPromptResult {
   promptId: string | number
   status: string
-  input: any
+  input: Record<string, unknown>
   output?: string
   error?: string
   startTime: string

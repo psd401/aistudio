@@ -10,9 +10,10 @@ const AMPLIFY_COOKIE_PREFIX = 'amplify';
  */
 export function getAuthCookiePatterns(): RegExp[] {
   const clientId = process.env.NEXT_PUBLIC_COGNITO_CLIENT_ID;
-  
+
   return [
     // Cognito specific cookies
+    // eslint-disable-next-line security/detect-non-literal-regexp -- clientId from environment variable, not user input
     new RegExp(`^${COOKIE_PREFIX}\\.${clientId}\\..+`),
     // Generic Cognito cookies
     new RegExp(`^${COOKIE_PREFIX}\\..+`),
@@ -36,7 +37,7 @@ export function clearAuthCookiesClient(): void {
   // Get all cookies
   const cookies = document.cookie.split(';');
   
-  cookies.forEach(cookie => {
+  for (const cookie of cookies) {
     const eqPos = cookie.indexOf('=');
     const name = eqPos > -1 ? cookie.substr(0, eqPos).trim() : cookie.trim();
     
@@ -53,15 +54,15 @@ export function clearAuthCookiesClient(): void {
       
       const paths = ['/', '/api', '/api/auth'];
       
-      domains.forEach(domain => {
-        paths.forEach(path => {
+      for (const domain of domains) {
+        for (const path of paths) {
           document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=${path};${domain ? ` domain=${domain};` : ''}`;
           // Also try with secure and sameSite flags
           document.cookie = `${name}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=${path};${domain ? ` domain=${domain};` : ''} secure; sameSite=lax;`;
-        });
-      });
+        }
+      }
     }
-  });
+  }
 }
 
 /**
@@ -90,12 +91,12 @@ export function getCookieClearingHeaders(): string[] {
   
   const paths = ['/', '/api', '/api/auth'];
   
-  cookieNames.forEach(name => {
-    paths.forEach(path => {
+  for (const name of cookieNames) {
+    for (const path of paths) {
       headers.push(`${name}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=${path}; httpOnly; secure; sameSite=lax`);
       headers.push(`${name}=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=${path}`);
-    });
-  });
+    }
+  }
   
   return headers;
 }

@@ -31,7 +31,7 @@ export function useModels() {
       const modelsData = result.data || result
       
       if (!Array.isArray(modelsData)) {
-        throw new Error("Invalid models data")
+        throw new TypeError("Invalid models data")
       }
       
       setModels(modelsData)

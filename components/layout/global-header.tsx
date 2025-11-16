@@ -376,9 +376,9 @@ function BugReportPopover() {
     // Console Errors (if any)
     if (consoleErrors.length > 0) {
       metadata.push('<br><br><strong>=== RECENT CONSOLE ERRORS ===</strong>')
-      consoleErrors.forEach((err, index) => {
+      for (const [index, err] of consoleErrors.entries()) {
         metadata.push(`Error ${index + 1}: ${err}`)
-      })
+      }
     }
     
     // Join with HTML line breaks for proper Freshservice formatting
@@ -421,8 +421,9 @@ function BugReportPopover() {
         ) : (
           <form onSubmit={handleSubmit} className="flex flex-col gap-4" onPaste={handlePaste}>
             <div>
-              <label className="block text-sm font-medium mb-1">Title</label>
+              <label htmlFor="feedback-title" className="block text-sm font-medium mb-1">Title</label>
               <Input
+                id="feedback-title"
                 value={title}
                 onChange={e => setTitle(e.target.value)}
                 required
@@ -431,8 +432,9 @@ function BugReportPopover() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium mb-1">Description</label>
+              <label htmlFor="feedback-description" className="block text-sm font-medium mb-1">Description</label>
               <Textarea
+                id="feedback-description"
                 value={description}
                 onChange={e => setDescription(e.target.value)}
                 required
@@ -440,10 +442,10 @@ function BugReportPopover() {
                 disabled={loading}
               />
             </div>
-            
+
             {/* Screenshot upload section */}
             <div>
-              <label className="block text-sm font-medium mb-1">Screenshot (optional)</label>
+              <div className="block text-sm font-medium mb-1" aria-label="Screenshot (optional)">Screenshot (optional)</div>
               <div className="space-y-2">
                 <Button
                   type="button"
@@ -467,7 +469,6 @@ function BugReportPopover() {
                 
                 {screenshotPreview && (
                   <div className="relative">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={screenshotPreview}
                       alt="Screenshot preview"

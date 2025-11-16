@@ -1,12 +1,12 @@
 "use server"
+import { SqlParameter } from "@aws-sdk/client-rds-data"
 
 import { getServerSession } from "@/lib/auth/server-session"
-import { executeSQL, executeTransaction } from "@/lib/db/data-api-adapter"
+import { executeSQL } from "@/lib/db/data-api-adapter"
 import { type ActionState } from "@/types/actions-types"
 import { hasToolAccess } from "@/utils/roles"
-import { 
+import {
   handleError,
-  createError,
   ErrorFactories,
   createSuccess
 } from "@/lib/error-utils"
@@ -26,7 +26,7 @@ export interface Repository {
   description: string | null
   ownerId: number
   isPublic: boolean
-  metadata: Record<string, any>
+  metadata: Record<string, unknown>
   createdAt: Date
   updatedAt: Date
   ownerName?: string
@@ -37,7 +37,7 @@ export interface CreateRepositoryInput {
   name: string
   description?: string
   isPublic?: boolean
-  metadata?: Record<string, any>
+  metadata?: Record<string, unknown>
 }
 
 export interface UpdateRepositoryInput {
@@ -45,7 +45,7 @@ export interface UpdateRepositoryInput {
   name?: string
   description?: string
   isPublic?: boolean
-  metadata?: Record<string, any>
+  metadata?: Record<string, unknown>
 }
 
 
@@ -105,14 +105,14 @@ export async function createRepository(
       name: result[0].name
     })
     
-    const endTimer = timer
-    endTimer({ status: "success", repositoryId: result[0].id })
+    
+    timer({ status: "success", repositoryId: result[0].id })
     
     revalidatePath("/repositories")
     return createSuccess(result[0], "Repository created successfully")
   } catch (error) {
-    const endTimer = timer
-    endTimer({ status: "error" })
+    
+    timer({ status: "error" })
     
     return handleError(error, "Failed to create repository. Please try again or contact support.", {
       context: "createRepository",
@@ -167,7 +167,7 @@ export async function updateRepository(
     }
 
     const updates: string[] = []
-    const params: any[] = [
+    const params: SqlParameter[] = [
       { name: "id", value: { longValue: input.id } }
     ]
 
@@ -221,15 +221,15 @@ export async function updateRepository(
       name: result[0].name
     })
     
-    const endTimer = timer
-    endTimer({ status: "success", repositoryId: result[0].id })
+    
+    timer({ status: "success", repositoryId: result[0].id })
     
     revalidatePath("/repositories")
     revalidatePath(`/repositories/${input.id}`)
     return createSuccess(result[0], "Repository updated successfully")
   } catch (error) {
-    const endTimer = timer
-    endTimer({ status: "error" })
+    
+    timer({ status: "error" })
     
     return handleError(error, "Failed to update repository. Please try again or contact support.", {
       context: "updateRepository",
@@ -321,14 +321,14 @@ export async function deleteRepository(
 
     log.info("Repository deleted successfully", { repositoryId: id })
     
-    const endTimer = timer
-    endTimer({ status: "success", repositoryId: id })
     
+    timer({ status: "success", repositoryId: id })
+
     revalidatePath("/repositories")
-    return createSuccess(undefined as any, "Repository deleted successfully")
+    return createSuccess(undefined as void, "Repository deleted successfully")
   } catch (error) {
-    const endTimer = timer
-    endTimer({ status: "error" })
+    
+    timer({ status: "error" })
     
     return handleError(error, "Failed to delete repository. Please try again or contact support.", {
       context: "deleteRepository",
@@ -379,13 +379,13 @@ export async function listRepositories(): Promise<ActionState<Repository[]>> {
       repositoryCount: repositories.length 
     })
     
-    const endTimer = timer
-    endTimer({ status: "success", count: repositories.length })
+    
+    timer({ status: "success", count: repositories.length })
     
     return createSuccess(repositories, "Repositories loaded successfully")
   } catch (error) {
-    const endTimer = timer
-    endTimer({ status: "error" })
+    
+    timer({ status: "error" })
     
     return handleError(error, "Failed to list repositories. Please try again or contact support.", {
       context: "listRepositories",
@@ -445,13 +445,13 @@ export async function getRepository(
       name: result[0].name
     })
     
-    const endTimer = timer
-    endTimer({ status: "success", repositoryId: id })
+    
+    timer({ status: "success", repositoryId: id })
     
     return createSuccess(result[0], "Repository loaded successfully")
   } catch (error) {
-    const endTimer = timer
-    endTimer({ status: "error" })
+    
+    timer({ status: "error" })
     
     return handleError(error, "Failed to get repository. Please try again or contact support.", {
       context: "getRepository",
@@ -464,7 +464,7 @@ export async function getRepository(
 
 export async function getRepositoryAccess(
   repositoryId: number
-): Promise<ActionState<any[]>> {
+): Promise<ActionState<Record<string, unknown>[]>> {
   const requestId = generateRequestId()
   const timer = startTimer("getRepositoryAccess")
   const log = createLogger({ requestId, action: "getRepositoryAccess" })
@@ -507,13 +507,13 @@ export async function getRepositoryAccess(
       accessCount: access.length
     })
     
-    const endTimer = timer
-    endTimer({ status: "success", count: access.length })
+    
+    timer({ status: "success", count: access.length })
     
     return createSuccess(access, "Access list loaded successfully")
   } catch (error) {
-    const endTimer = timer
-    endTimer({ status: "error" })
+    
+    timer({ status: "error" })
     
     return handleError(error, "Failed to get repository access. Please try again or contact support.", {
       context: "getRepositoryAccess",
@@ -558,7 +558,7 @@ export async function grantRepositoryAccess(
     )
 
     revalidatePath(`/repositories/${repositoryId}`)
-    return { isSuccess: true, message: "Access granted successfully", data: undefined as any }
+    return createSuccess(undefined as void, "Access granted successfully")
   } catch (error) {
     return handleError(error, "Failed to grant repository access")
   }
@@ -583,7 +583,7 @@ export async function revokeRepositoryAccess(
       [{ name: "id", value: { longValue: accessId } }]
     )
 
-    return { isSuccess: true, message: "Access revoked successfully", data: undefined as any }
+    return createSuccess(undefined as void, "Access revoked successfully")
   } catch (error) {
     return handleError(error, "Failed to revoke repository access")
   }
@@ -621,7 +621,14 @@ export async function getUserAccessibleRepositoriesAction(): Promise<ActionState
     const userId = userResult[0].id
 
     // Get repositories the user has access to
-    const repositories = await executeSQL<any>(
+    const repositories = await executeSQL<{
+      id: number
+      name: string
+      description: string
+      is_public: boolean
+      item_count: number
+      last_updated: string | null
+    }>(
       `WITH accessible_repos AS (
         SELECT DISTINCT r.id, r.name, r.description, r.is_public
         FROM knowledge_repositories r

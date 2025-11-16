@@ -142,12 +142,12 @@ export function validateMessages(messages: unknown[]): { isValid: boolean; error
     };
   }
   
-  messages.forEach((msg, index) => {
+  for (const [index, msg] of messages.entries()) {
     const msgErrors = validateMessage(msg);
-    msgErrors.forEach(error => {
+    for (const error of msgErrors) {
       errors.push(`Message ${index}: ${error}`);
-    });
-  });
+    }
+  }
   
   return {
     isValid: errors.length === 0,

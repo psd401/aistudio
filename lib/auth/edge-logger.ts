@@ -53,7 +53,7 @@ export function createEdgeLogger(context: LogContext): EdgeLogger {
         sanitized[key] = value.substring(0, 8) + '***'
       } else if (key === 'error' && typeof value === 'string') {
         // Sanitize error messages that might contain tokens
-        sanitized[key] = value.replace(/[a-zA-Z0-9+/=]{20,}/g, '[REDACTED_TOKEN]')
+        sanitized[key] = value.replace(/[\d+/=A-Za-z]{20,}/g, '[REDACTED_TOKEN]')
       } else {
         sanitized[key] = value
       }

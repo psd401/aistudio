@@ -13,7 +13,7 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner"
 import { createError } from "@/lib/error-utils"
 import { Settings } from "@/lib/settings-manager"
-import { Readable } from "stream"
+import { Readable } from "node:stream"
 
 // Cache S3 config to avoid repeated async calls
 let s3ConfigCache: { bucket: string | null; region: string | null } | null = null
@@ -322,7 +322,7 @@ export async function generateUploadPresignedUrl({
   const bucketName = config.bucket!
 
   const timestamp = Date.now()
-  const sanitizedFileName = fileName.replace(/[^a-zA-Z0-9_.-]/g, '_')
+  const sanitizedFileName = fileName.replace(/[^\w.-]/g, '_')
   const key = `${userId}/${timestamp}-${sanitizedFileName}`
 
   try {

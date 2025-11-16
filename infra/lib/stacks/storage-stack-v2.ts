@@ -1,7 +1,5 @@
 import * as s3 from "aws-cdk-lib/aws-s3"
-import * as ssm from "aws-cdk-lib/aws-ssm"
 import * as cdk from "aws-cdk-lib"
-import { Construct } from "constructs"
 import { BaseStack, BaseStackProps } from "../constructs/base/base-stack"
 
 export interface StorageStackV2Props extends BaseStackProps {

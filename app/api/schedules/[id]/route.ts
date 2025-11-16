@@ -55,7 +55,7 @@ export async function GET(request: NextRequest, { params }: RouteParams) {
       )
     }
 
-    const id = parseInt(scheduleId, 10)
+    const id = Number.parseInt(scheduleId, 10)
     if (id <= 0 || id > Number.MAX_SAFE_INTEGER) {
       log.warn("Schedule ID out of valid range")
       timer({ status: "error", reason: "invalid_id" })
@@ -144,7 +144,7 @@ export async function PUT(request: NextRequest, { params }: RouteParams) {
       )
     }
 
-    const id = parseInt(scheduleId, 10)
+    const id = Number.parseInt(scheduleId, 10)
     if (id <= 0 || id > Number.MAX_SAFE_INTEGER) {
       log.warn("Schedule ID out of valid range")
       timer({ status: "error", reason: "invalid_id" })
@@ -275,7 +275,7 @@ export async function DELETE(request: NextRequest, { params }: RouteParams) {
       )
     }
 
-    const id = parseInt(scheduleId, 10)
+    const id = Number.parseInt(scheduleId, 10)
     if (id <= 0 || id > Number.MAX_SAFE_INTEGER) {
       log.warn("Schedule ID out of valid range")
       timer({ status: "error", reason: "invalid_id" })

@@ -29,7 +29,6 @@ import {
 } from "@aws-sdk/client-secrets-manager"
 import {
   SSMClient,
-  GetParameterCommand,
   GetParametersByPathCommand,
 } from "@aws-sdk/client-ssm"
 import {

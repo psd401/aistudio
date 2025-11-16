@@ -16,8 +16,8 @@ import {
   FlexibleTimeWindowMode,
   ScheduleState
 } from "@aws-sdk/client-scheduler"
-import { SSMClient, GetParameterCommand } from "@aws-sdk/client-ssm"
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda"
+import type { SqlParameter } from "@aws-sdk/client-rds-data"
 
 // Types for Schedule Management
 export interface ScheduleConfig {
@@ -50,7 +50,7 @@ export interface CreateScheduleRequest {
   name: string
   assistantArchitectId: number
   scheduleConfig: ScheduleConfig
-  inputData: Record<string, any>
+  inputData: Record<string, unknown>
 }
 
 export interface Schedule {
@@ -59,7 +59,7 @@ export interface Schedule {
   userId: number
   assistantArchitectId: number
   scheduleConfig: ScheduleConfig
-  inputData: Record<string, any>
+  inputData: Record<string, unknown>
   active: boolean
   createdAt: string
   updatedAt: string
@@ -81,7 +81,7 @@ function sanitizeNumericId(value: unknown): number {
 
   // Strict validation with early exit
   if (!Number.isInteger(num) || !Number.isFinite(num) || num <= 0 || num > Number.MAX_SAFE_INTEGER) {
-    throw new Error('Invalid numeric ID')
+    throw ErrorFactories.validationFailed([{ field: 'id', message: 'Invalid numeric ID', value }])
   }
 
   // Create a completely new clean value to break taint flow
@@ -97,21 +97,10 @@ const MAX_INPUT_DATA_SIZE = 10485760
 
 // Initialize AWS clients
 const schedulerClient = new SchedulerClient({ region: process.env.AWS_REGION || 'us-east-1' })
-const ssmClient = new SSMClient({ region: process.env.AWS_REGION || 'us-east-1' })
 const lambdaClient = new LambdaClient({ region: process.env.AWS_REGION || 'us-east-1' })
 
-// Configuration caching
-const configCache = new Map<string, { config: { targetArn: string; roleArn: string }; timestamp: number }>()
-const CACHE_TTL = 5 * 60 * 1000 // 5 minutes
-
-// Error classification for better handling
-enum ScheduleErrorType {
-  VALIDATION_ERROR = 'validation',
-  AWS_CREDENTIALS = 'credentials',
-  SSM_PARAMETER = 'ssm_parameter',
-  EVENTBRIDGE_API = 'eventbridge_api',
-  DATABASE_ERROR = 'database'
-}
+// NOTE: Configuration caching removed as it was not being used
+// If needed in future for performance optimization, restore from git history
 
 /**
  * Gets the deployment environment for AWS service configuration
@@ -126,7 +115,7 @@ function getEnvironment(): string {
   // Validate environment value against allowlist
   const allowedEnvironments = ['dev', 'prod']
   if (!allowedEnvironments.includes(env)) {
-    throw new Error(`Invalid environment: ${env}. Must be one of: ${allowedEnvironments.join(', ')}`)
+    throw ErrorFactories.sysConfigurationError(`Invalid environment: ${env}. Must be one of: ${allowedEnvironments.join(', ')}`)
   }
 
   return env
@@ -135,50 +124,18 @@ function getEnvironment(): string {
 /**
  * Fetches EventBridge configuration from SSM Parameter Store with caching
  */
-async function getEventBridgeConfig(): Promise<{ targetArn: string; roleArn: string }> {
-  const environment = getEnvironment()
-  const cacheKey = `eventbridge-config-${environment}`
-  const cached = configCache.get(cacheKey)
-
-  // Return cached config if still valid
-  if (cached && (Date.now() - cached.timestamp) < CACHE_TTL) {
-    return cached.config
-  }
-
-  try {
-    const [targetArnParam, roleArnParam] = await Promise.all([
-      ssmClient.send(new GetParameterCommand({
-        Name: `/aistudio/${environment}/schedule-executor-function-arn`,
-        WithDecryption: true
-      })),
-      ssmClient.send(new GetParameterCommand({
-        Name: `/aistudio/${environment}/scheduler-execution-role-arn`,
-        WithDecryption: true
-      }))
-    ])
-
-    const targetArn = targetArnParam.Parameter?.Value
-    const roleArn = roleArnParam.Parameter?.Value
-
-    if (!targetArn || !roleArn) {
-      throw new Error('EventBridge configuration parameters not found in SSM')
-    }
-
-    const config = { targetArn, roleArn }
-
-    // Cache the configuration
-    configCache.set(cacheKey, { config, timestamp: Date.now() })
-
-    return config
-  } catch (error) {
-    throw new Error(`Failed to fetch EventBridge configuration from SSM: ${error instanceof Error ? error.message : 'Unknown error'}`)
-  }
-}
-
 /**
  * Invokes the schedule-executor Lambda function to manage EventBridge schedules
  */
-async function invokeScheduleManager(action: ScheduleLambdaPayload['action'], payload: any, requestId?: string): Promise<ScheduleLambdaResponse> {
+interface InvokeScheduleManagerPayload {
+  scheduleId: number
+  name?: string
+  scheduleConfig?: ScheduleConfig
+  inputData?: Record<string, unknown>
+  active?: boolean
+}
+
+async function invokeScheduleManager(action: ScheduleLambdaPayload['action'], payload: InvokeScheduleManagerPayload, requestId?: string): Promise<ScheduleLambdaResponse> {
   const log = createLogger({ operation: 'invokeScheduleManager', action, requestId })
   const environment = getEnvironment()
   const functionName = `aistudio-${environment}-schedule-executor`
@@ -187,6 +144,9 @@ async function invokeScheduleManager(action: ScheduleLambdaPayload['action'], pa
   let lambdaPayload: ScheduleLambdaPayload = { action, scheduledExecutionId: payload.scheduleId }
 
   if (action === 'create') {
+    if (!payload.scheduleConfig) {
+      throw ErrorFactories.validationFailed([{ field: 'scheduleConfig', message: 'scheduleConfig is required for create action' }])
+    }
     const cronExpression = convertToCronExpression(payload.scheduleConfig)
     lambdaPayload = {
       action,
@@ -195,6 +155,9 @@ async function invokeScheduleManager(action: ScheduleLambdaPayload['action'], pa
       timezone: payload.scheduleConfig.timezone || 'UTC'
     }
   } else if (action === 'update') {
+    if (!payload.scheduleConfig) {
+      throw ErrorFactories.validationFailed([{ field: 'scheduleConfig', message: 'scheduleConfig is required for update action' }])
+    }
     const cronExpression = convertToCronExpression(payload.scheduleConfig)
     lambdaPayload = {
       action,
@@ -246,7 +209,7 @@ async function invokeScheduleManager(action: ScheduleLambdaPayload['action'], pa
     return result
   }
 
-  throw new Error('No response from Lambda function')
+  throw ErrorFactories.externalServiceError('No response from Lambda function')
 }
 
 /**
@@ -274,7 +237,7 @@ function validateAndSanitizeName(name: string): { isValid: boolean; sanitizedNam
 /**
  * Validates input data size and structure
  */
-function validateInputData(inputData: Record<string, any>): { isValid: boolean; errors: string[] } {
+function validateInputData(inputData: Record<string, unknown>): { isValid: boolean; errors: string[] } {
   const errors: string[] = []
 
   try {
@@ -282,7 +245,7 @@ function validateInputData(inputData: Record<string, any>): { isValid: boolean; 
     if (serializedData.length > MAX_INPUT_DATA_SIZE) {
       errors.push(`Input data exceeds maximum size limit of ${MAX_INPUT_DATA_SIZE / 1000}KB`)
     }
-  } catch (error) {
+  } catch {
     errors.push('Input data is not serializable to JSON')
   }
 
@@ -301,7 +264,7 @@ function validateScheduleConfig(config: ScheduleConfig): { isValid: boolean; err
   }
 
   // Validate time format (HH:MM)
-  const timeRegex = /^([01]?[0-9]|2[0-3]):[0-5][0-9]$/
+  const timeRegex = /^([01]?\d|2[0-3]):[0-5]\d$/
   if (!timeRegex.test(config.time)) {
     errors.push('Invalid time format. Must be HH:MM (24-hour format)')
   }
@@ -329,7 +292,8 @@ function validateScheduleConfig(config: ScheduleConfig): { isValid: boolean; err
       const trimmedCron = config.cron.trim()
 
       // First, ensure the cron string only contains allowed characters
-      if (!/^[0-9\*\-\/,\s]+$/.test(trimmedCron)) {
+      // eslint-disable-next-line no-useless-escape
+      if (!/^[\d\s*,/\-]+$/.test(trimmedCron)) {
         errors.push('Cron expression contains invalid characters')
       } else {
         const cronFields = trimmedCron.split(/\s+/)
@@ -341,28 +305,28 @@ function validateScheduleConfig(config: ScheduleConfig): { isValid: boolean; err
           // Validate each field individually to prevent bypass attempts
           const [minute, hour, day, month, dayOfWeek] = cronFields
 
-          // Validate minute field (0-59)
-          if (!/^(\*|([0-5]?\d)(-([0-5]?\d))?(\/\d+)?)$/.test(minute)) {
+          // Validate minute field (0-59) - ReDoS-safe pattern
+          if (!/^\*$|^[0-5]?\d$|^[0-5]?\d-[0-5]?\d$|^[0-5]?\d\/\d+$|^\*\/\d+$/.test(minute)) {
             errors.push('Invalid minute field in cron expression')
           }
 
-          // Validate hour field (0-23)
-          if (!/^(\*|([01]?\d|2[0-3])(-([01]?\d|2[0-3]))?(\/\d+)?)$/.test(hour)) {
+          // Validate hour field (0-23) - ReDoS-safe pattern
+          if (!/^\*$|^(?:[01]?\d|2[0-3])$|^(?:[01]?\d|2[0-3])-(?:[01]?\d|2[0-3])$|^(?:[01]?\d|2[0-3])\/\d+$|^\*\/\d+$/.test(hour)) {
             errors.push('Invalid hour field in cron expression')
           }
 
-          // Validate day field (1-31)
-          if (!/^(\*|([12]?\d|3[01])(-([12]?\d|3[01]))?(\/\d+)?)$/.test(day)) {
+          // Validate day field (1-31) - ReDoS-safe pattern
+          if (!/^\*$|^(?:[12]?\d|3[01])$|^(?:[12]?\d|3[01])-(?:[12]?\d|3[01])$|^(?:[12]?\d|3[01])\/\d+$|^\*\/\d+$/.test(day)) {
             errors.push('Invalid day field in cron expression')
           }
 
-          // Validate month field (1-12)
-          if (!/^(\*|([1-9]|1[0-2])(-([1-9]|1[0-2]))?(\/\d+)?)$/.test(month)) {
+          // Validate month field (1-12) - ReDoS-safe pattern
+          if (!/^\*$|^(?:[1-9]|1[0-2])$|^(?:[1-9]|1[0-2])-(?:[1-9]|1[0-2])$|^(?:[1-9]|1[0-2])\/\d+$|^\*\/\d+$/.test(month)) {
             errors.push('Invalid month field in cron expression')
           }
 
-          // Validate day-of-week field (0-6)
-          if (!/^(\*|([0-6])(-([0-6]))?(\/\d+)?)$/.test(dayOfWeek)) {
+          // Validate day-of-week field (0-6) - ReDoS-safe pattern
+          if (!/^\*$|^[0-6]$|^[0-6]-[0-6]$|^[0-6]\/\d+$|^\*\/\d+$/.test(dayOfWeek)) {
             errors.push('Invalid day-of-week field in cron expression')
           }
         }
@@ -380,7 +344,7 @@ function validateScheduleConfig(config: ScheduleConfig): { isValid: boolean; err
  * Converts schedule configuration to cron expression for EventBridge
  */
 function convertToCronExpression(scheduleConfig: ScheduleConfig): string {
-  const { frequency, time, timezone = 'UTC', daysOfWeek, dayOfMonth, cron } = scheduleConfig
+  const { frequency, time, daysOfWeek, dayOfMonth, cron } = scheduleConfig
 
   if (frequency === 'custom' && cron) {
     return cron
@@ -392,33 +356,35 @@ function convertToCronExpression(scheduleConfig: ScheduleConfig): string {
     case 'daily':
       return `${minutes} ${hours} * * ? *`
 
-    case 'weekly':
+    case 'weekly': {
       if (!daysOfWeek || daysOfWeek.length === 0) {
-        throw new Error('Days of week required for weekly schedules')
+        throw ErrorFactories.validationFailed([{ field: 'daysOfWeek', message: 'Days of week required for weekly schedules' }])
       }
       // Convert from 0=Sunday to 1=Sunday for cron
       const cronDays = daysOfWeek.map(day => day === 0 ? 7 : day).join(',')
       return `${minutes} ${hours} ? * ${cronDays} *`
+    }
 
-    case 'monthly':
+    case 'monthly': {
       const day = dayOfMonth || 1
       return `${minutes} ${hours} ${day} * ? *`
+    }
 
     default:
-      throw new Error(`Unsupported frequency: ${frequency}`)
+      throw ErrorFactories.validationFailed([{ field: 'frequency', message: `Unsupported frequency: ${frequency}`, value: frequency }])
   }
 }
 
 /**
  * Creates an EventBridge schedule
  */
-async function createEventBridgeSchedule(
+async function _createEventBridgeSchedule(
   scheduleId: number,
   name: string,
   scheduleConfig: ScheduleConfig,
   targetArn: string,
   roleArn: string,
-  inputData: any
+  _inputData: Record<string, unknown>
 ): Promise<string> {
   const log = createLogger({ operation: 'createEventBridgeSchedule' })
 
@@ -426,13 +392,13 @@ async function createEventBridgeSchedule(
     // SECURITY FIX: Validate schedule configuration before cron conversion
     const validationResult = validateScheduleConfig(scheduleConfig)
     if (!validationResult.isValid) {
-      throw new Error(`Invalid schedule configuration: ${validationResult.errors.join(', ')}`)
+      throw ErrorFactories.validationFailed([{ field: 'scheduleConfig', message: `Invalid schedule configuration: ${validationResult.errors.join(', ')}` }])
     }
 
     // SECURITY FIX: Validate and sanitize name input (AWS schedule name limit: 64 chars)
     const sanitizedName = name?.toString().trim().substring(0, 50) || ""
     if (!sanitizedName || sanitizedName.length === 0) {
-      throw new Error('Schedule name is required and cannot be empty')
+      throw ErrorFactories.validationFailed([{ field: 'name', message: 'Schedule name is required and cannot be empty', value: name }])
     }
 
     // SECURITY FIX: Validate environment and scheduleId are safe for interpolation
@@ -444,7 +410,7 @@ async function createEventBridgeSchedule(
 
     // Validate schedule name length (AWS limit is 64 characters)
     if (scheduleName.length > 64) {
-      throw new Error(`Schedule name too long: ${scheduleName.length} chars (max: 64)`)
+      throw ErrorFactories.validationFailed([{ field: 'name', message: `Schedule name too long: ${scheduleName.length} chars (max: 64)`, value: scheduleName }])
     }
 
     log.info('Creating EventBridge schedule', {
@@ -491,13 +457,13 @@ async function createEventBridgeSchedule(
 /**
  * Updates an EventBridge schedule
  */
-async function updateEventBridgeSchedule(
+async function _updateEventBridgeSchedule(
   scheduleId: number,
   name: string,
   scheduleConfig: ScheduleConfig,
   targetArn: string,
   roleArn: string,
-  inputData: any,
+  _inputData: Record<string, unknown>,
   active: boolean
 ): Promise<void> {
   const log = createLogger({ operation: 'updateEventBridgeSchedule' })
@@ -506,13 +472,13 @@ async function updateEventBridgeSchedule(
     // SECURITY FIX: Validate schedule configuration before cron conversion
     const validationResult = validateScheduleConfig(scheduleConfig)
     if (!validationResult.isValid) {
-      throw new Error(`Invalid schedule configuration: ${validationResult.errors.join(', ')}`)
+      throw ErrorFactories.validationFailed([{ field: 'scheduleConfig', message: `Invalid schedule configuration: ${validationResult.errors.join(', ')}` }])
     }
 
     // SECURITY FIX: Validate and sanitize name input
     const sanitizedName = name?.toString().trim().substring(0, 50) || ""
     if (!sanitizedName || sanitizedName.length === 0) {
-      throw new Error('Schedule name is required and cannot be empty')
+      throw ErrorFactories.validationFailed([{ field: 'name', message: 'Schedule name is required and cannot be empty', value: name }])
     }
 
     // SECURITY FIX: Validate environment and scheduleId are safe for interpolation
@@ -524,7 +490,7 @@ async function updateEventBridgeSchedule(
 
     // Validate schedule name length
     if (scheduleName.length > 64) {
-      throw new Error(`Schedule name too long: ${scheduleName.length} chars (max: 64)`)
+      throw ErrorFactories.validationFailed([{ field: 'name', message: `Schedule name too long: ${scheduleName.length} chars (max: 64)`, value: scheduleName }])
     }
 
     log.info('Updating EventBridge schedule', {
@@ -568,7 +534,7 @@ async function updateEventBridgeSchedule(
 /**
  * Deletes an EventBridge schedule
  */
-async function deleteEventBridgeSchedule(scheduleId: number): Promise<void> {
+async function _deleteEventBridgeSchedule(scheduleId: number): Promise<void> {
   const log = createLogger({ operation: 'deleteEventBridgeSchedule' })
 
   try {
@@ -649,7 +615,7 @@ export async function createScheduleAction(params: CreateScheduleRequest): Promi
       assistantArchitectId,
       type: typeof assistantArchitectId,
       value: assistantArchitectId,
-      isNaN: isNaN(Number(assistantArchitectId))
+      isNaN: Number.isNaN(Number(assistantArchitectId))
     })
     let cleanArchitectId: number
     try {
@@ -660,7 +626,7 @@ export async function createScheduleAction(params: CreateScheduleRequest): Promi
         assistantArchitectId,
         type: typeof assistantArchitectId,
         converted: Number(assistantArchitectId),
-        isNaN: isNaN(Number(assistantArchitectId)),
+        isNaN: Number.isNaN(Number(assistantArchitectId)),
         isInteger: Number.isInteger(Number(assistantArchitectId)),
         error: sanitizeForLogging(error)
       })
@@ -844,7 +810,7 @@ export async function getSchedulesAction(): Promise<ActionState<Schedule[]>> {
     const userId = userResult[0].id
 
     // Get schedules with last execution info
-    const result = await executeSQL<any>(`
+    const result = await executeSQL<Record<string, unknown>>(`
       SELECT
         se.id,
         se.name,
@@ -871,11 +837,23 @@ export async function getSchedulesAction(): Promise<ActionState<Schedule[]>> {
 
     // Transform results
     const schedules: Schedule[] = result.map(row => {
-      const transformed = transformSnakeToCamel<any>(row)
+      const transformed = transformSnakeToCamel<{
+        id: number
+        userId: number
+        assistantArchitectId: number
+        name: string
+        scheduleConfig: ScheduleConfig | string
+        inputData: Record<string, string> | string
+        active: boolean
+        createdAt: string
+        updatedAt: string
+        lastExecutedAt: string | null
+        lastExecutionStatus: string | null
+      }>(row)
 
       // Parse JSONB fields
       let scheduleConfig: ScheduleConfig
-      let inputData: Record<string, any>
+      let inputData: Record<string, unknown>
 
       try {
         scheduleConfig = typeof transformed.scheduleConfig === 'string'
@@ -909,7 +887,7 @@ export async function getSchedulesAction(): Promise<ActionState<Schedule[]>> {
       if (transformed.lastExecutedAt && transformed.lastExecutionStatus) {
         schedule.lastExecution = {
           executedAt: transformed.lastExecutedAt ? new Date(transformed.lastExecutedAt + ' UTC').toISOString() : '',
-          status: transformed.lastExecutionStatus
+          status: (transformed.lastExecutionStatus as 'success' | 'failed')
         }
       }
 
@@ -969,7 +947,7 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
     const userId = userResult[0].id
 
     // Check if schedule exists and user owns it
-    const existingResult = await executeSQL<any>(`
+    const existingResult = await executeSQL<Record<string, unknown>>(`
       SELECT id, name, user_id, assistant_architect_id, schedule_config, input_data, active, created_at, updated_at
       FROM scheduled_executions
       WHERE id = :id AND user_id = :userId
@@ -987,7 +965,7 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
 
     // Build update query dynamically
     const updates: string[] = []
-    const parameters: any[] = [
+    const parameters: SqlParameter[] = [
       createParameter('id', id),
       createParameter('userId', userId),
       createParameter('updatedBy', session.sub)
@@ -1084,7 +1062,17 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
     updates.push('updated_at = NOW()', 'updated_by = :updatedBy')
 
     // Execute update
-    const updateResult = await executeSQL<any>(`
+    const updateResult = await executeSQL<{
+      id: number
+      name: string
+      user_id: number
+      assistant_architect_id: number
+      schedule_config: ScheduleConfig | string
+      input_data: Record<string, string> | string
+      active: boolean
+      created_at: Date
+      updated_at: Date
+    }>(`
       UPDATE scheduled_executions
       SET ${updates.join(', ')}
       WHERE id = :id AND user_id = :userId
@@ -1096,10 +1084,20 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
     }
 
     // Transform and return updated schedule
-    const updated = transformSnakeToCamel<any>(updateResult[0])
+    const updated = transformSnakeToCamel<{
+      id: number
+      name: string
+      userId: number
+      assistantArchitectId: number
+      scheduleConfig: ScheduleConfig | string
+      inputData: Record<string, string> | string
+      active: boolean
+      createdAt: Date
+      updatedAt: Date
+    }>(updateResult[0])
 
     let scheduleConfig: ScheduleConfig
-    let inputData: Record<string, any>
+    let inputData: Record<string, unknown>
 
     try {
       scheduleConfig = typeof updated.scheduleConfig === 'string'
@@ -1125,8 +1123,8 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
       scheduleConfig,
       inputData,
       active: updated.active,
-      createdAt: updated.createdAt,
-      updatedAt: updated.updatedAt
+      createdAt: updated.createdAt.toISOString(),
+      updatedAt: updated.updatedAt.toISOString()
     }
 
     // Try to update EventBridge schedule if schedule-related fields changed
@@ -1309,7 +1307,19 @@ export async function getScheduleAction(id: number): Promise<ActionState<Schedul
     const userId = userResult[0].id
 
     // Get schedule with last execution info
-    const result = await executeSQL<any>(`
+    const result = await executeSQL<{
+      id: number
+      name: string
+      user_id: number
+      assistant_architect_id: number
+      schedule_config: ScheduleConfig | string
+      input_data: Record<string, string> | string
+      active: boolean
+      created_at: Date
+      updated_at: Date
+      last_executed_at: Date | null
+      last_execution_status: string | null
+    }>(`
       SELECT
         se.id,
         se.name,
@@ -1343,11 +1353,23 @@ export async function getScheduleAction(id: number): Promise<ActionState<Schedul
 
     // Transform result
     const row = result[0]
-    const transformed = transformSnakeToCamel<any>(row)
+    const transformed = transformSnakeToCamel<{
+      id: number
+      name: string
+      userId: number
+      assistantArchitectId: number
+      scheduleConfig: ScheduleConfig | string
+      inputData: Record<string, string> | string
+      active: boolean
+      createdAt: Date
+      updatedAt: Date
+      lastExecutedAt: Date | null
+      lastExecutionStatus: string | null
+    }>(row)
 
     // Parse JSONB fields
     let scheduleConfig: ScheduleConfig
-    let inputData: Record<string, any>
+    let inputData: Record<string, unknown>
 
     try {
       scheduleConfig = typeof transformed.scheduleConfig === 'string'
@@ -1373,15 +1395,15 @@ export async function getScheduleAction(id: number): Promise<ActionState<Schedul
       scheduleConfig,
       inputData,
       active: transformed.active,
-      createdAt: transformed.createdAt,
-      updatedAt: transformed.updatedAt
+      createdAt: transformed.createdAt.toISOString(),
+      updatedAt: transformed.updatedAt.toISOString()
     }
 
     // Add last execution info if available
     if (transformed.lastExecutedAt && transformed.lastExecutionStatus) {
       schedule.lastExecution = {
         executedAt: transformed.lastExecutedAt ? new Date(transformed.lastExecutedAt + ' UTC').toISOString() : '',
-        status: transformed.lastExecutionStatus
+        status: (transformed.lastExecutionStatus as 'success' | 'failed')
       }
     }
 

@@ -31,8 +31,9 @@ export async function executeSQL<T extends DatabaseRow = DatabaseRow>(
       name: `param${index + 1}`,
       value: convertToRdsValue(value)
     };
-    
+
     // Update SQL to use named parameters
+    // eslint-disable-next-line security/detect-non-literal-regexp -- index is a number, not user input
     sql = sql.replace(new RegExp(`\\$${index + 1}`, 'g'), `:param${index + 1}`);
     
     return param;
@@ -94,8 +95,9 @@ export async function executeSQLTransaction<T extends DatabaseRow = DatabaseRow>
         name: `param${index + 1}`,
         value: convertToRdsValue(value)
       };
-      
+
       // Update SQL to use named parameters
+      // eslint-disable-next-line security/detect-non-literal-regexp -- index is a number, not user input
       sql = sql.replace(new RegExp(`\\$${index + 1}`, 'g'), `:param${index + 1}`);
       
       return param;

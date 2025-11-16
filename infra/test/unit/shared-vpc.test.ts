@@ -376,7 +376,7 @@ describe("SharedVPC Construct", () => {
       const config = EnvironmentConfig.get("dev")
 
       // Act
-      const vpc = new SharedVPC(stack, "TestVPC", {
+      new SharedVPC(stack, "TestVPC", {
         environment: "dev",
         config,
       })

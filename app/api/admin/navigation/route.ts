@@ -195,33 +195,29 @@ export async function PATCH(request: Request) {
       )
     }
 
-    try {
-      const updatedItem = await updateNavigationItem(Number(body.id), { position: body.position })
+    const updatedItem = await updateNavigationItem(Number(body.id), { position: body.position })
 
 
-      if (!updatedItem) {
-        log.warn("Navigation item not found", { itemId: body.id });
-        timer({ status: "error", reason: "not_found" });
-        return NextResponse.json(
-          { isSuccess: false, message: "Item not found" },
-          { status: 404, headers: { "X-Request-Id": requestId } }
-        )
-      }
-
-      log.info("Position updated successfully", { itemId: body.id });
-      timer({ status: "success" });
-      
+    if (!updatedItem) {
+      log.warn("Navigation item not found", { itemId: body.id });
+      timer({ status: "error", reason: "not_found" });
       return NextResponse.json(
-        {
-          isSuccess: true,
-          message: "Position updated successfully",
-          data: updatedItem
-        },
-        { headers: { "X-Request-Id": requestId } }
+        { isSuccess: false, message: "Item not found" },
+        { status: 404, headers: { "X-Request-Id": requestId } }
       )
-    } catch (error) {
-      throw error
     }
+
+    log.info("Position updated successfully", { itemId: body.id });
+    timer({ status: "success" });
+
+    return NextResponse.json(
+      {
+        isSuccess: true,
+        message: "Position updated successfully",
+        data: updatedItem
+      },
+      { headers: { "X-Request-Id": requestId } }
+    )
   } catch (error) {
     timer({ status: "error" });
     log.error("Error updating position", error);

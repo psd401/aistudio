@@ -337,14 +337,14 @@ export class ConversationStateManager {
       
       // Process capability usage
       const capabilityCount = new Map<string, number>();
-      capabilityResult.forEach((row) => {
+      for (const row of capabilityResult) {
         const capabilities = (row.capabilities as Record<string, boolean>) || {};
-        Object.keys(capabilities).forEach(cap => {
+        for (const cap of Object.keys(capabilities)) {
           if (capabilities[cap]) {
             capabilityCount.set(cap, (capabilityCount.get(cap) || 0) + 1);
           }
-        });
-      });
+        }
+      }
       
       const mostUsedCapabilities = Array.from(capabilityCount.entries())
         .sort(([,a], [,b]) => b - a)

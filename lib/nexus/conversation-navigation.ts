@@ -13,7 +13,7 @@ const log = createLogger({ moduleName: 'conversation-navigation' })
  */
 export function validateConversationId(conversationId: string | null | undefined): conversationId is string {
   if (!conversationId) return false
-  return /^[a-zA-Z0-9-_]{1,50}$/.test(conversationId)
+  return /^[\w-]{1,50}$/.test(conversationId)
 }
 
 /**

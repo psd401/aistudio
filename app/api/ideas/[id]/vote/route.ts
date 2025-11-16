@@ -32,9 +32,9 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
   try {
     const resolvedParams = await params;
     const { id } = resolvedParams;
-    const ideaId = parseInt(id);
+    const ideaId = Number.parseInt(id);
     
-    if (isNaN(ideaId)) {
+    if (Number.isNaN(ideaId)) {
       log.warn("Invalid idea ID", { id });
       timer({ status: "error", reason: "invalid_id" });
       return new NextResponse('Invalid idea ID', { status: 400, headers: { "X-Request-Id": requestId } });

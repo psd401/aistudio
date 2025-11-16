@@ -159,7 +159,7 @@ export function chunkText(text: string, maxChunkSize: number = 1000): string[] {
 
     // If paragraph itself exceeds chunk size, split it into sentences
     if (paragraph.length > maxChunkSize) {
-      const sentences = paragraph.match(/[^.!?]+[.!?]+/g) || [paragraph];
+      const sentences = paragraph.match(/[^!.?]+[!.?]+/g) || [paragraph];
       for (const sentence of sentences) {
         if (currentChunk.length + sentence.length > maxChunkSize && currentChunk.length > 0) {
           chunks.push(currentChunk.trim());

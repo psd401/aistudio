@@ -12,7 +12,7 @@ export async function GET(
   const log = createLogger({ requestId, route: "api.admin.models.references" });
   
   const { id } = await params;
-  const modelId = parseInt(id);
+  const modelId = Number.parseInt(id);
   log.info("GET /api/admin/models/[id]/references - Checking model references", { modelId });
   
   try {
@@ -24,7 +24,7 @@ export async function GET(
       return authError;
     }
     
-    if (!modelId || isNaN(modelId)) {
+    if (!modelId || Number.isNaN(modelId)) {
       log.warn("Invalid model ID provided", { modelId: id });
       timer({ status: "error", reason: "invalid_id" });
       return NextResponse.json(

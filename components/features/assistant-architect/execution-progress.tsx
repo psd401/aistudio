@@ -20,7 +20,7 @@ interface ExecutionProgressProps {
  * @returns Sanitized name or 'Invalid prompt name' if invalid
  */
 function sanitizePromptName(name: string): string {
-  const SAFE_NAME_REGEX = /^[a-zA-Z0-9\s\-_.,()]+$/
+  const SAFE_NAME_REGEX = /^[\s\w(),.-]+$/
   return SAFE_NAME_REGEX.test(name) ? name : 'Invalid prompt name'
 }
 

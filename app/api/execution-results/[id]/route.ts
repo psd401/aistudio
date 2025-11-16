@@ -32,7 +32,7 @@ async function getHandler(
     log.info("Fetching execution result", { resultId: sanitizeForLogging(id) })
 
     // Validate ID parameter
-    const resultId = parseInt(id, 10)
+    const resultId = Number.parseInt(id, 10)
     if (!Number.isInteger(resultId) || resultId <= 0) {
       throw ErrorFactories.invalidInput("id", id, "must be a positive integer")
     }
@@ -186,7 +186,7 @@ async function deleteHandler(
     log.info("Deleting execution result", { resultId: sanitizeForLogging(id) })
 
     // Validate ID parameter
-    const resultId = parseInt(id, 10)
+    const resultId = Number.parseInt(id, 10)
     if (!Number.isInteger(resultId) || resultId <= 0) {
       throw ErrorFactories.invalidInput("id", id, "must be a positive integer")
     }

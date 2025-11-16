@@ -3,6 +3,7 @@
 import { getServerSession } from "@/lib/auth/server-session"
 import { executeSQL } from "@/lib/db/data-api-adapter"
 import { transformSnakeToCamel } from "@/lib/db/field-mapper"
+import { SqlParameter } from "@aws-sdk/client-rds-data"
 import { type ActionState } from "@/types/actions-types"
 import {
   handleError,
@@ -34,8 +35,7 @@ import {
 import type {
   Prompt,
   PromptListItem,
-  PromptListResult,
-  PromptTag
+  PromptListResult
 } from "@/lib/prompt-library/types"
 
 /**
@@ -250,7 +250,7 @@ export async function getPrompt(id: string): Promise<ActionState<Prompt>> {
         promptKeys: Object.keys(prompt),
         promptTypes: Object.entries(prompt).map(([k, v]) => `${k}: ${typeof v}`)
       })
-      throw new Error("Failed to serialize prompt data for Next.js")
+      throw ErrorFactories.sysInternalError("Failed to serialize prompt data for Next.js")
     }
 
     timer({ status: "success" })
@@ -296,7 +296,7 @@ export async function listPrompts(
 
     // Build query conditions
     const conditions = ["p.deleted_at IS NULL"]
-    const parameters: Array<{ name: string; value: any }> = []
+    const parameters: SqlParameter[] = []
 
     // Visibility filter
     if (validated.visibility === 'private') {
@@ -469,7 +469,7 @@ export async function updatePrompt(
 
     // Build update fields
     const fields: string[] = []
-    const parameters: Array<{ name: string; value: any }> = [
+    const parameters: SqlParameter[] = [
       { name: "id", value: { stringValue: id } }
     ]
 
@@ -523,7 +523,7 @@ export async function updatePrompt(
       // No changes requested, fetch and return current prompt
       const getResult = await getPrompt(id)
       if (!getResult.isSuccess) {
-        throw new Error("Failed to fetch prompt")
+        throw ErrorFactories.dbQueryFailed("Failed to fetch prompt")
       }
       return createSuccess(getResult.data, "No changes to update")
     }
@@ -554,7 +554,7 @@ export async function updatePrompt(
     // Fetch updated prompt with tags
     const getResult = await getPrompt(id)
     if (!getResult.isSuccess) {
-      throw new Error("Failed to fetch updated prompt")
+      throw ErrorFactories.dbQueryFailed("Failed to fetch updated prompt")
     }
 
     timer({ status: "success" })

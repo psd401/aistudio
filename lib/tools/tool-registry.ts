@@ -85,11 +85,12 @@ const TOOL_REGISTRY: Record<string, ToolConfig> = {
 export async function getModelCapabilities(modelId: string): Promise<ModelCapabilities | null> {
   // Server-side only guard
   if (typeof window !== 'undefined') {
-    throw new Error('getModelCapabilities can only be called server-side. Use client-tool-registry for client-side usage.')
+    throw new TypeError('getModelCapabilities can only be called server-side. Use client-tool-registry for client-side usage.')
   }
   try {
     // Validate modelId format before database query
-    if (!modelId || typeof modelId !== 'string' || !/^[a-zA-Z0-9\-_.]+$/.test(modelId)) {
+    // eslint-disable-next-line no-useless-escape
+    if (!modelId || typeof modelId !== 'string' || !/^[\w.\-]+$/.test(modelId)) {
       return null
     }
     
@@ -127,7 +128,7 @@ export async function getModelCapabilities(modelId: string): Promise<ModelCapabi
 export async function getAvailableToolsForModel(modelId: string): Promise<ToolConfig[]> {
   // Server-side only guard
   if (typeof window !== 'undefined') {
-    throw new Error('getAvailableToolsForModel can only be called server-side. Use client-tool-registry for client-side usage.')
+    throw new TypeError('getAvailableToolsForModel can only be called server-side. Use client-tool-registry for client-side usage.')
   }
   const capabilities = await getModelCapabilities(modelId)
   if (!capabilities) {
@@ -187,7 +188,7 @@ export async function isToolAvailableForModel(
 ): Promise<boolean> {
   // Server-side only guard
   if (typeof window !== 'undefined') {
-    throw new Error('isToolAvailableForModel can only be called server-side. Use client-tool-registry for client-side usage.')
+    throw new TypeError('isToolAvailableForModel can only be called server-side. Use client-tool-registry for client-side usage.')
   }
   const availableTools = await getAvailableToolsForModel(modelId)
   return availableTools.some(tool => tool.name === toolName)

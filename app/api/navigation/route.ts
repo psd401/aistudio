@@ -130,7 +130,7 @@ export async function GET() {
       for (const item of navItems) {
         if (item.toolId) {
           const toolId = Number(item.toolId);
-          if (!isNaN(toolId)) {
+          if (!Number.isNaN(toolId)) {
             toolIdsToLookup.add(toolId);
           }
         }
@@ -190,7 +190,7 @@ export async function GET() {
         // Check if item requires tool access
         if (shouldInclude && item.toolId) {
           const toolId = Number(item.toolId);
-          if (isNaN(toolId)) {
+          if (Number.isNaN(toolId)) {
             log.warn("Invalid tool ID for navigation item", {
               itemId: item.id,
               label: item.label,

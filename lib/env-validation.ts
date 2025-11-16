@@ -96,7 +96,7 @@ export function requireValidEnv(): void {
   // Console warnings in development (logger not available in Edge Runtime)
   if (process.env.NODE_ENV === 'development' && warnings.length > 0) {
     console.warn('Environment validation warnings:');
-    warnings.forEach(warning => console.warn(`  - ${warning}`));
+    for (const warning of warnings) console.warn(`  - ${warning}`);
   }
 }
 

@@ -1,3 +1,4 @@
+/* eslint-disable security/detect-non-literal-regexp -- library code with controlled inputs */
 import { streamText, experimental_generateImage } from 'ai';
 import { createLogger } from '../utils/logger';
 import type { ProviderCapabilities, StreamConfig, StreamingCallbacks } from '../types';
@@ -119,7 +120,7 @@ export abstract class BaseProviderAdapter {
       const generateOptions: Record<string, unknown> = {
         model: config.model,
         prompt: config.prompt,
-        ...(config.size && { size: config.size }),
+        ...((config.size?.length ?? 0) > 0 && { size: config.size }),
         ...(config.providerOptions && { providerOptions: config.providerOptions })
       };
       

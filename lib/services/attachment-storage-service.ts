@@ -176,8 +176,7 @@ export async function processMessagesWithAttachments(
   const lightweightMessages: UIMessage[] = [];
   const attachmentReferences: AttachmentMetadata[] = [];
   
-  for (let msgIndex = 0; msgIndex < messages.length; msgIndex++) {
-    const message = messages[msgIndex];
+  for (const message of messages) {
     const messageId = generateUUID();
     
     if (Array.isArray(message.parts)) {
@@ -287,5 +286,5 @@ export async function reconstructMessagesWithAttachments(
 }
 
 function sanitizeFileName(name: string): string {
-  return name.replace(/[^a-zA-Z0-9.-]/g, '_').substring(0, 255);
+  return name.replace(/[^\d.A-Za-z-]/g, '_').substring(0, 255);
 }

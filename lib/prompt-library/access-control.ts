@@ -19,7 +19,7 @@ export async function canAccessPromptLibrary(userId?: number): Promise<boolean> 
 /**
  * Check if user can moderate prompts (admin only)
  */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+ 
 export async function canModeratePrompts(_userId: number): Promise<boolean> {
   // Use role-based access control (matches pattern used throughout codebase)
   // Note: hasRole checks the current session, userId parameter kept for API compatibility
@@ -106,8 +106,8 @@ export async function canUpdatePrompt(
   const sessionUserId = Number(userId)
 
   // Validate conversions succeeded
-  const promptUserIdIsValid = !isNaN(promptUserId) && isFinite(promptUserId)
-  const sessionUserIdIsValid = !isNaN(sessionUserId) && isFinite(sessionUserId)
+  const promptUserIdIsValid = !Number.isNaN(promptUserId) && Number.isFinite(promptUserId)
+  const sessionUserIdIsValid = !Number.isNaN(sessionUserId) && Number.isFinite(sessionUserId)
 
   // Comprehensive debug logging
   log.info("Permission check comparison", {
@@ -213,7 +213,7 @@ export async function getUserIdFromSession(cognitoSub: string): Promise<number> 
   log.info("User ID found", {
     userId,
     userIdType,
-    isValidNumber: !isNaN(Number(userId)) && isFinite(Number(userId))
+    isValidNumber: !Number.isNaN(Number(userId)) && Number.isFinite(Number(userId))
   })
 
   return userId

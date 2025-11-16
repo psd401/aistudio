@@ -264,7 +264,7 @@ export async function POST(req: Request) {
     };
 
     try {
-      const streamResponse = await executePromptChain(prompts, inputs, context, requestId, log);
+      const streamResponse = await executePromptChain(prompts as ChainPrompt[], inputs, context, requestId, log);
 
       // 9. Update execution status to completed on stream completion
       // This is done in the onFinish callback of the last prompt
@@ -469,10 +469,10 @@ async function executePromptChain(
         const sourcePrompts: number[] = [];
 
         // Extract which variables were substituted
-        Object.entries(inputMapping).forEach(([varName, mappedPath]) => {
+        for (const [varName, mappedPath] of Object.entries(inputMapping)) {
           const promptMatch = mappedPath.match(/^prompt_(\d+)\.output$/);
           if (promptMatch) {
-            const sourcePromptId = parseInt(promptMatch[1], 10);
+            const sourcePromptId = Number.parseInt(promptMatch[1], 10);
             sourcePrompts.push(sourcePromptId);
             const value = context.previousOutputs.get(sourcePromptId);
             if (value) {
@@ -481,7 +481,7 @@ async function executePromptChain(
           } else if (varName in inputs) {
             substitutedVars[varName] = String(inputs[varName]).substring(0, 100);
           }
-        });
+        }
 
         await storeExecutionEvent(context.executionId, 'variable-substitution', {
           promptId: prompt.id,
@@ -773,7 +773,7 @@ function substituteVariables(
   }
 
   // Count variable placeholders to prevent DoS via excessive replacements
-  const placeholderMatches = content.match(/\$\{(\w+)\}|\{\{(\w+)\}\}/g);
+  const placeholderMatches = content.match(/\${(\w+)}|{{(\w+)}}/g);
   const placeholderCount = placeholderMatches ? placeholderMatches.length : 0;
 
   if (placeholderCount > MAX_VARIABLE_REPLACEMENTS) {
@@ -784,7 +784,7 @@ function substituteVariables(
   }
 
   // Match both ${variable} and {{variable}} patterns
-  return content.replace(/\$\{(\w+)\}|\{\{(\w+)\}\}/g, (match, dollarVar, braceVar) => {
+  return content.replace(/\${(\w+)}|{{(\w+)}}/g, (match, dollarVar, braceVar) => {
     const varName = dollarVar || braceVar;
 
     // 1. Check if there's an input mapping for this variable
@@ -794,7 +794,7 @@ function substituteVariables(
       // Handle prompt output references: "prompt_X.output"
       const promptMatch = mappedPath.match(/^prompt_(\d+)\.output$/);
       if (promptMatch) {
-        const promptId = parseInt(promptMatch[1], 10);
+        const promptId = Number.parseInt(promptMatch[1], 10);
         const output = previousOutputs.get(promptId);
         if (output) {
           return output;

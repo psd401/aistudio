@@ -47,7 +47,7 @@ export async function GET(req: NextRequest) {
       FROM jobs
       WHERE id = :jobId AND user_id = :userId
     `, [
-      { name: 'jobId', value: { longValue: parseInt(jobId, 10) } },
+      { name: 'jobId', value: { longValue: Number.parseInt(jobId, 10) } },
       { name: 'userId', value: { longValue: currentUser.data.user.id } }
     ]);
 
@@ -55,7 +55,7 @@ export async function GET(req: NextRequest) {
 
     if (!job) {
       // To handle potential replication lag, we can check if the job exists at all
-      const anyJobResult = await executeSQL('SELECT status FROM jobs WHERE id = :jobId', [{ name: 'jobId', value: { longValue: parseInt(jobId, 10) } }]);
+      const anyJobResult = await executeSQL('SELECT status FROM jobs WHERE id = :jobId', [{ name: 'jobId', value: { longValue: Number.parseInt(jobId, 10) } }]);
       if (anyJobResult[0]) {
         log.info("Job found with replication lag", { jobId, status: anyJobResult[0].status });
         timer({ status: "success", jobStatus: anyJobResult[0].status });

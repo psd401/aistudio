@@ -494,13 +494,13 @@ const Flow = React.forwardRef<FlowHandle, {
     const horizontalSpacing = 300;
     const verticalSpacing = 150;
     
-    positions.forEach((position, rowIndex) => {
+    for (const [rowIndex, position] of positions.entries()) {
       const promptsAtPosition = promptsByPosition[position];
       const rowY = (rowIndex + 1) * verticalSpacing;
       
       // For parallel nodes (more than one at the same position)
       // arrange them horizontally
-      promptsAtPosition.forEach((prompt, colIndex) => {
+      for (const [colIndex, prompt] of promptsAtPosition.entries()) {
         const centerOffset = ((promptsAtPosition.length - 1) * horizontalSpacing) / 2;
         const xPos = 250 + (colIndex * horizontalSpacing) - centerOffset;
         
@@ -521,22 +521,22 @@ const Flow = React.forwardRef<FlowHandle, {
             onDelete
           }
         });
-      });
-    });
+      }
+    }
 
     // Create edges based on positions and execution flow
     const newEdges: Edge[] = [];
     
     // First, connect start node to all position 0 prompts
     if (promptsByPosition[0]) {
-      promptsByPosition[0].forEach(prompt => {
+      for (const prompt of promptsByPosition[0]) {
         newEdges.push({
           id: `e-start-${String(prompt.id)}`,
           source: 'start',
           target: String(prompt.id),
           type: 'smoothstep'
         });
-      });
+      }
     }
     
     // Then connect each prompt to the next position's prompts
@@ -551,42 +551,42 @@ const Flow = React.forwardRef<FlowHandle, {
       // connect the current to each of the next (branching)
       if (currentPrompts.length === 1 && nextPrompts.length > 1) {
         const sourceId = String(currentPrompts[0].id);
-        nextPrompts.forEach(targetPrompt => {
+        for (const targetPrompt of nextPrompts) {
           newEdges.push({
             id: `e-${sourceId}-${String(targetPrompt.id)}`,
             source: sourceId,
             target: String(targetPrompt.id),
             type: 'smoothstep'
           });
-        });
+        }
       }
       // If there are multiple prompts at current position and one at next position,
       // connect each current to the next (merging)
       else if (currentPrompts.length > 1 && nextPrompts.length === 1) {
         const targetId = String(nextPrompts[0].id);
-        currentPrompts.forEach(sourcePrompt => {
+        for (const sourcePrompt of currentPrompts) {
           newEdges.push({
             id: `e-${String(sourcePrompt.id)}-${targetId}`,
             source: String(sourcePrompt.id),
             target: targetId,
             type: 'smoothstep'
           });
-        });
+        }
       }
       // Otherwise, connect each current to each next
       else {
         // Default behavior: connect each node to all nodes in the next position
         // This is a simplification - you might want to improve this logic
-        currentPrompts.forEach(sourcePrompt => {
-          nextPrompts.forEach(targetPrompt => {
+        for (const sourcePrompt of currentPrompts) {
+          for (const targetPrompt of nextPrompts) {
             newEdges.push({
               id: `e-${String(sourcePrompt.id)}-${String(targetPrompt.id)}`,
               source: String(sourcePrompt.id),
               target: String(targetPrompt.id),
               type: 'smoothstep'
             });
-          });
-        });
+          }
+        }
       }
     }
 
@@ -642,7 +642,7 @@ function estimateTokens(text: string): number {
 function slugify(str: string): string {
   return str
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/[^\da-z]+/g, '-')
     .replace(/(^-|-$)+/g, '');
 }
 
@@ -672,7 +672,7 @@ function VariableInsertDropdown({ variables, editorRef }: { variables: string[],
         Insert variable
       </option>
       {variables.map(v => (
-        <option key={v} value={`$\u007b${v}\u007d`}>{`$\u007b${v}\u007d`}</option>
+        <option key={v} value={`$\u007B${v}\u007D`}>{`$\u007B${v}\u007D`}</option>
       ))}
     </select>
   );
@@ -728,7 +728,7 @@ export function PromptsPageClient({ assistantId, prompts: initialPrompts, models
           name: promptName,
           content: promptContent,
           systemContext: systemContext || undefined,
-          modelId: parseInt(modelId as string),
+          modelId: Number.parseInt(modelId as string),
           position: typeof prompts.length === 'number' ? prompts.length : 0,
           repositoryIds: useExternalKnowledge ? selectedRepositoryIds : [],
           enabledTools: enabledTools,
@@ -779,7 +779,7 @@ export function PromptsPageClient({ assistantId, prompts: initialPrompts, models
         name: promptName,
         content: promptContent,
         systemContext: systemContext || undefined,
-        modelId: parseInt(modelId),
+        modelId: Number.parseInt(modelId),
         repositoryIds: useExternalKnowledge && selectedRepositoryIds.length > 0
           ? selectedRepositoryIds.filter(id => id !== undefined && id !== null)
           : [], // Send empty array to clear repositories, not undefined
@@ -823,7 +823,7 @@ export function PromptsPageClient({ assistantId, prompts: initialPrompts, models
         toast.success("Prompt deleted successfully")
         
         // Remove the deleted prompt from our local state
-        const promptIdInt = parseInt(promptId, 10);
+        const promptIdInt = Number.parseInt(promptId, 10);
         setPrompts(current => current.filter(p => p.id !== promptIdInt))
         
         // Update the graph with the latest execution order
@@ -961,7 +961,7 @@ export function PromptsPageClient({ assistantId, prompts: initialPrompts, models
                 />
               </div>
               <ToolSelectionSection
-                selectedModelId={modelId && !isNaN(parseInt(modelId)) ? parseInt(modelId) : null}
+                selectedModelId={modelId && !Number.isNaN(Number.parseInt(modelId)) ? Number.parseInt(modelId) : null}
                 enabledTools={enabledTools}
                 onToolsChange={setEnabledTools}
                 models={models}
@@ -1106,7 +1106,7 @@ export function PromptsPageClient({ assistantId, prompts: initialPrompts, models
                   />
                 </div>
                 <ToolSelectionSection
-                  selectedModelId={modelId && !isNaN(parseInt(modelId)) ? parseInt(modelId) : null}
+                  selectedModelId={modelId && !Number.isNaN(Number.parseInt(modelId)) ? Number.parseInt(modelId) : null}
                   enabledTools={enabledTools}
                   onToolsChange={setEnabledTools}
                   models={models}

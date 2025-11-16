@@ -67,7 +67,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
    * Get list of tools supported by a specific model
    * Override in subclasses to report model-specific tool capabilities
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+   
   getSupportedTools(_modelId: string): string[] {
     // Base implementation returns empty - providers override this
     return [];
@@ -307,6 +307,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
   protected matchesPattern(modelId: string, patterns: string[]): boolean {
     return patterns.some(pattern => {
       if (pattern.includes('*')) {
+        // eslint-disable-next-line security/detect-non-literal-regexp -- pattern from admin config, not user input
         const regex = new RegExp(pattern.replace(/\*/g, '.*'), 'i');
         return regex.test(modelId);
       }

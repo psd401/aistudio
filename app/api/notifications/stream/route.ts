@@ -27,10 +27,10 @@ const cleanupStaleConnections = () => {
       .sort((a, b) => a[1].lastCleanup - b[1].lastCleanup)
 
     const toRemove = entries.slice(0, entries.length - MAX_TOTAL_CONNECTIONS)
-    toRemove.forEach(([userId]) => {
+    for (const [userId] of toRemove) {
       activeConnections.delete(userId)
       cleaned++
-    })
+    }
   }
 
   if (cleaned > 0) {
