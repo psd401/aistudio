@@ -90,33 +90,45 @@ This directory contains comprehensive architectural diagrams for the AI Studio a
 
 ## Feature-Specific Diagrams
 
-### 07. Assistant Architect Execution *(Coming Soon)*
+### [07. Assistant Architect Execution](./07-assistant-architect-execution.md)
 **Multi-prompt chain execution with knowledge and tools**
 
-- Prompt chain configuration
-- Variable substitution flow
-- Tool integration (web search, code interpreter)
-- Result aggregation
+- Complete execution flow with SSE streaming
+- Variable substitution engine with pattern matching
+- Knowledge injection via vector search
+- Tool integration and function calling
+- Error handling and partial result preservation
+- Resource limits and DoS protection
+
+**Use this when**: Understanding Assistant Architect workflows, debugging chain executions, implementing new features
 
 ---
 
-### 08. Document Processing Pipeline *(Coming Soon)*
+### [08. Document Processing Pipeline](./08-document-processing-pipeline.md)
 **Upload → S3 → Lambda → Textract → Embedding → PostgreSQL**
 
-- Async processing flow
-- Textract OCR integration
-- Embedding generation
-- Vector search with pgvector
+- Async processing via SQS + Lambda
+- Multi-format support (PDF, DOCX, TXT, URLs)
+- OCR via AWS Textract for scanned documents
+- Text chunking and sanitization
+- Vector embedding generation (Bedrock Titan)
+- pgvector similarity search
+
+**Use this when**: Implementing document features, troubleshooting processing failures, optimizing costs
 
 ---
 
-### 09. Streaming Architecture *(Coming Soon)*
+### [09. Streaming Architecture](./09-streaming-architecture.md)
 **Server-Sent Events (SSE) for real-time AI responses**
 
-- HTTP/2 streaming via ECS Fargate
-- ALB configuration for long-running connections
-- Client-side streaming with `useChat` hook
-- Error handling and reconnection logic
+- HTTP/2 streaming via ECS Fargate + ALB
+- Unified streaming service with provider adapters
+- Circuit breaker pattern for reliability
+- Adaptive timeouts based on model capabilities
+- Client-side error handling and reconnection
+- Provider-specific optimizations (Responses API, thinking modes)
+
+**Use this when**: Understanding streaming implementation, debugging connection issues, adding new AI providers
 
 ---
 
@@ -159,6 +171,6 @@ When adding new diagrams:
 ---
 
 **Last Updated**: November 2025
-**Total Diagrams**: 6 (of 10+ planned)
+**Total Diagrams**: 9 (complete)
 **Format**: Mermaid.js (text-based, version-controlled)
-**Lines of Documentation**: 5,000+
+**Lines of Documentation**: 10,000+
