@@ -81,14 +81,14 @@ git push origin dev
 
 ### Step 4: Deploy to AWS
 
-The application is automatically deployed via AWS Amplify when changes are merged to the `dev` or `main` branches.
+The application is automatically built and deployed via ECS Fargate when changes are merged to the `dev` or `main` branches (requires manual CDK deployment).
 
-**For manual ECS deployment:**
+**Manual ECS deployment:**
 
 ```bash
-# Deploy ECS service stack
+# Deploy Frontend stack (includes ECS Fargate service)
 cd infra
-npx cdk deploy AIStudio-ECSServiceStack-Dev
+npx cdk deploy AIStudio-FrontendStack-Dev
 
 # Or deploy all stacks
 npx cdk deploy --all

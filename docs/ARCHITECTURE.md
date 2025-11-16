@@ -35,10 +35,11 @@ AI Studio is a Next.js 15+ enterprise application built with modern cloud-native
 
 ### Infrastructure
 - **IaC**: AWS CDK (TypeScript)
-- **Hosting**: AWS Amplify with SSR compute (WEB_COMPUTE)
+- **Hosting**: AWS ECS Fargate with Application Load Balancer
+- **Container**: Next.js 15 SSR on Fargate with auto-scaling
 - **Storage**: S3 with lifecycle policies
-- **Monitoring**: CloudWatch with structured logging
-- **Network**: VPC with public/private subnets
+- **Monitoring**: CloudWatch with structured logging + ADOT
+- **Network**: VPC with public/private/isolated subnets
 
 ## System Architecture
 
@@ -233,12 +234,18 @@ All resources defined in AWS CDK:
 ```
 /infra/
 ├── lib/
-│   ├── auth-stack.ts       # Cognito configuration
-│   ├── database-stack.ts   # Aurora Serverless
-│   ├── frontend-stack.ts   # Amplify hosting
-│   └── storage-stack.ts    # S3 buckets
+│   ├── stacks/
+│   │   ├── auth-stack.ts         # Cognito configuration
+│   │   ├── database-stack.ts     # Aurora Serverless v2
+│   │   ├── frontend-stack.ts     # ECS Fargate + ALB
+│   │   └── storage-stack.ts      # S3 buckets
+│   └── constructs/
+│       ├── security/             # IAM, service roles
+│       ├── network/              # VPC patterns
+│       ├── compute/              # Lambda, ECS
+│       └── monitoring/           # CloudWatch, ADOT
 └── database/
-    └── schema/              # SQL migrations
+    └── schema/                   # SQL migrations
 ```
 
 ### Environment Strategy

@@ -5,19 +5,20 @@ A modern, production-ready template for building internal enterprise application
 - 🔒 Authentication with [AWS Cognito](https://aws.amazon.com/cognito/) + NextAuth v5
 - 🗄️ Database with [AWS RDS Aurora Serverless v2](https://aws.amazon.com/rds/aurora/) (PostgreSQL)
 - 🎨 UI with [Shadcn](https://ui.shadcn.com)
-- 🚀 Deployment with [AWS Amplify](https://aws.amazon.com/amplify)
+ - 🚀 Deployment with [AWS ECS Fargate](https://aws.amazon.com/fargate/) + Application Load Balancer
 - 🏗️ Infrastructure as Code with [AWS CDK](https://aws.amazon.com/cdk/)
 
 ## AWS Architecture
 
 This project provisions all core infrastructure using AWS CDK, following the AWS Well-Architected Framework and best practices for cost tracking and security:
 
-- **Networking:** Isolated VPC with public and private subnets
+- **Networking:** Shared VPC with public, private, and isolated subnets + VPC endpoints
 - **Database:** Aurora Serverless v2 PostgreSQL with RDS Data API and Secrets Manager
 - **Authentication:** Amazon Cognito with Google federated login + NextAuth v5
 - **Storage:** Private S3 bucket for document storage (SSE, versioning, lifecycle)
-- **Frontend Hosting:** AWS Amplify with SSR support (WEB_COMPUTE platform)
-- **Tagging:** All resources are tagged for cost allocation (Environment, Project, Owner)
+- **Frontend Hosting:** ECS Fargate containers with Application Load Balancer and auto-scaling
+- **Monitoring:** CloudWatch dashboards with ADOT (AWS Distro for OpenTelemetry)
+- **Tagging:** All resources tagged for cost allocation (Environment, Project, Owner, ManagedBy)
 
 ## Features
 
@@ -57,11 +58,10 @@ This project provisions all core infrastructure using AWS CDK, following the AWS
    cp .env.example .env.local
    ```
 
-4. Set up your local database (if using local PostgreSQL):
-   ```bash
-   npm run db:generate
-   npm run db:push
-   ```
+4. **Note on Database Setup**:
+   - The project uses AWS RDS Data API (no local database needed for development)
+   - Configure `.env.local` with your AWS RDS cluster ARN and secret ARN
+   - See `/docs/DEPLOYMENT.md` for complete infrastructure setup
 
 5. Run the development server:
    ```bash
@@ -89,13 +89,15 @@ npm test -- path/to/test.test.ts
 
 ## Database Management
 
-The project uses AWS RDS Data API for new features and migrations. Legacy code may still use Drizzle ORM.
+The project uses AWS RDS Data API for all database operations (no ORM).
 
-- Generate migrations: `npm run db:generate`
-- Push schema changes: `npm run db:push`
-- Open Drizzle Studio: `npm run db:studio`
+- **Schema**: SQL migration files in `/infra/database/schema/`
+- **Migrations**: Managed by Lambda function during CDK deployment
+- **Development**: Use MCP tools for database queries:
+  - `mcp__awslabs-postgres-mcp-server__get_table_schema` - Inspect tables
+  - `mcp__awslabs-postgres-mcp-server__run_query` - Execute SQL
 
-For production, all database operations go through the RDS Data API using the `executeSQL` function from `/lib/db/data-api-adapter.ts`.
+All database operations use the `executeSQL` function from `/lib/db/data-api-adapter.ts` with parameterized queries.
 
 ## Deployment
 
