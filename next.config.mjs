@@ -1,7 +1,7 @@
 /** @type {import('next').NextConfig} */
 
 const nextConfig = {
-  output: 'standalone', // Required for AWS Amplify hosting
+  output: 'standalone', // Required for ECS Fargate deployment
   images: {
     remotePatterns: [
       // Add specific trusted domains for user avatars
@@ -21,8 +21,8 @@ const nextConfig = {
       bodySizeLimit: '100mb', // Match the file upload limit from settings
     },
   },
-  // Don't embed environment variables at build time for Amplify WEB_COMPUTE
-  // They will be available at runtime from the Lambda environment
+  // Don't embed environment variables at build time
+  // They will be available at runtime from the ECS container environment
   // webpack: (config, { buildId, dev, isServer, defaultLoaders, webpack }) => {
   //   // Add rule for wasm files
   //   config.resolve.extensions.push('.wasm');
