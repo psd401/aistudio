@@ -62,7 +62,7 @@ npx cdk deploy --all --profile prod --require-approval never
 npx cdk deploy AIStudio-DatabaseStack-Dev
 
 # Deploy with hotswap for faster development
-npx cdk deploy AIStudio-FrontendStack-Dev --hotswap
+npx cdk deploy AIStudio-FrontendStack-ECS-Dev --hotswap
 ```
 
 ## 📊 Cost Optimization

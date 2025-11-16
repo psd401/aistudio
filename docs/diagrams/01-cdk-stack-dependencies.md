@@ -123,7 +123,7 @@ npx cdk deploy AIStudio-DatabaseStack-Dev AIStudio-AuthStack-Dev AIStudio-Storag
 npx cdk deploy AIStudio-ProcessingStack-Dev AIStudio-DocumentProcessingStack-Dev
 
 # Step 3: Frontend (requires foundation + processing)
-npx cdk deploy AIStudio-FrontendStack-Dev
+npx cdk deploy AIStudio-FrontendStack-ECS-Dev
 
 # Step 4: Monitoring (after all services deployed)
 npx cdk deploy AIStudio-MonitoringStack-Dev AIStudio-SchedulerStack-Dev
@@ -132,7 +132,7 @@ npx cdk deploy AIStudio-MonitoringStack-Dev AIStudio-SchedulerStack-Dev
 ### Deploy Single Stack (For Incremental Updates)
 ```bash
 # Frontend only (for UI changes)
-npx cdk deploy AIStudio-FrontendStack-Dev
+npx cdk deploy AIStudio-FrontendStack-ECS-Dev
 
 # Database only (for schema changes)
 npx cdk deploy AIStudio-DatabaseStack-Dev
