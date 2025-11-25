@@ -31,6 +31,18 @@ jest.mock('@/lib/utils/uuid', () => ({
 // eslint-disable-next-line import/first
 import { HybridDocumentAdapter } from '../enhanced-attachment-adapters';
 
+// Polyfill File.arrayBuffer() for Jest environment
+if (typeof File !== 'undefined' && !File.prototype.arrayBuffer) {
+  File.prototype.arrayBuffer = async function() {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as ArrayBuffer);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsArrayBuffer(this);
+    });
+  };
+}
+
 describe('HybridDocumentAdapter', () => {
   let adapter: HybridDocumentAdapter;
 
@@ -40,9 +52,9 @@ describe('HybridDocumentAdapter', () => {
 
   describe('validateFileType', () => {
     // Helper to access private method for testing
-    const validateFileType = (file: File) => {
+    const validateFileType = async (file: File) => {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return (adapter as any).validateFileType(file);
+      return await (adapter as any).validateFileType(file);
     };
 
     describe('CSV files', () => {
@@ -122,8 +134,7 @@ describe('HybridDocumentAdapter', () => {
     });
 
     describe('PDF files (magic bytes)', () => {
-      // TODO: Debug why this test fails in CI but logic works in production
-      it.skip('should accept PDF files with correct magic bytes', async () => {
+      it('should accept PDF files with correct magic bytes', async () => {
         // %PDF magic bytes: 0x25 0x50 0x44 0x46
         // Need at least 8 bytes for validation
         const pdfHeader = new Uint8Array([
@@ -147,8 +158,7 @@ describe('HybridDocumentAdapter', () => {
     });
 
     describe('Office files (magic bytes)', () => {
-      // TODO: Debug why this test fails in CI but logic works in production
-      it.skip('should accept DOCX files with ZIP magic bytes', async () => {
+      it('should accept DOCX files with ZIP magic bytes', async () => {
         // ZIP magic bytes (Office 2007+): 0x50 0x4B 0x03 0x04
         // Need at least 8 bytes for validation
         const zipHeader = new Uint8Array([
