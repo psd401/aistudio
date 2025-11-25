@@ -1,7 +1,6 @@
 'use client'
 
-import { AssistantRuntimeProvider, type AttachmentAdapter, WebSpeechSynthesisAdapter } from '@assistant-ui/react'
-import { useChatRuntime, AssistantChatTransport } from '@assistant-ui/react-ai-sdk'
+import { AssistantRuntimeProvider, useLocalRuntime, type AttachmentAdapter, type ChatModelAdapter, WebSpeechSynthesisAdapter } from '@assistant-ui/react'
 import { Thread } from '@/components/assistant-ui/thread'
 import { useSession } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
@@ -10,7 +9,6 @@ import { NexusShell } from './_components/layout/nexus-shell'
 import { ErrorBoundary } from './_components/error-boundary'
 import { ConversationPanel } from './_components/conversation-panel'
 import { PromptAutoLoader } from './_components/prompt-auto-loader'
-import { ConversationAutoLoader } from './_components/conversation-auto-loader'
 import { useConversationContext, createNexusHistoryAdapter } from '@/lib/nexus/history-adapter'
 import { MultiProviderToolUIs } from './_components/tools/multi-provider-tools'
 import { useModelsWithPersistence } from '@/lib/hooks/use-models'
@@ -79,22 +77,67 @@ function ConversationRuntimeProvider({
     return response
   }, [onConversationIdChange])
 
-  // Use official useChatRuntime from @assistant-ui/react-ai-sdk
-  // This natively understands AI SDK's streaming format
-  const runtime = useChatRuntime({
-    transport: new AssistantChatTransport({
-      api: '/api/nexus/chat',
-      fetch: customFetch,
-      body: () => selectedModel ? {
-        modelId: selectedModel.modelId,
-        provider: selectedModel.provider,
-        enabledTools: enabledToolsRef.current,
-        conversationId: conversationIdRef.current || undefined
-      } : {}
-    }),
+  // Create streaming adapter for AI SDK
+  const streamingAdapter = useMemo<ChatModelAdapter>(() => ({
+    async *run({ messages, abortSignal }) {
+      const response = await customFetch('/api/nexus/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messages,
+          modelId: selectedModel?.modelId,
+          provider: selectedModel?.provider,
+          enabledTools: enabledToolsRef.current,
+          conversationId: conversationIdRef.current || undefined
+        }),
+        signal: abortSignal
+      })
+
+      if (!response.ok) {
+        throw new Error(`Chat request failed: ${response.status}`)
+      }
+
+      const reader = response.body?.getReader()
+      if (!reader) throw new Error('No response body')
+
+      const decoder = new TextDecoder()
+      let buffer = ''
+      let accumulatedText = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+
+        buffer += decoder.decode(value, { stream: true })
+        const lines = buffer.split('\n')
+        buffer = lines.pop() || ''
+
+        for (const line of lines) {
+          if (line.startsWith('0:')) {
+            const json = line.slice(2)
+            const parsed = JSON.parse(json)
+            if (parsed.type === 'text-delta') {
+              accumulatedText += parsed.textDelta
+              yield {
+                content: [{ type: 'text', text: accumulatedText }]
+              }
+            } else if (parsed.type === 'finish') {
+              yield {
+                content: [{ type: 'text', text: accumulatedText }],
+                status: { type: 'complete', reason: parsed.finishReason || 'unknown' }
+              }
+            }
+          }
+        }
+      }
+    }
+  }), [selectedModel, customFetch])
+
+  // Use useLocalRuntime with streaming adapter - this AUTOMATICALLY calls historyAdapter.load()
+  const runtime = useLocalRuntime(streamingAdapter, {
     adapters: {
       attachments: attachmentAdapter,
-      history: historyAdapter,
+      history: historyAdapter,  // Auto-invoked by useLocalRuntime
       speech: new WebSpeechSynthesisAdapter(),
     }
   })
@@ -273,9 +316,6 @@ function NexusPageContent() {
 
               {/* Auto-load prompts from Prompt Library */}
               <PromptAutoLoader />
-
-              {/* Auto-load conversation history when navigating to existing conversation */}
-              <ConversationAutoLoader />
 
               <div className="flex h-full flex-col">
                 <Thread processingAttachments={processingAttachments} conversationId={conversationId} />
