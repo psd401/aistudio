@@ -10,6 +10,7 @@ import { NexusShell } from './_components/layout/nexus-shell'
 import { ErrorBoundary } from './_components/error-boundary'
 import { ConversationPanel } from './_components/conversation-panel'
 import { PromptAutoLoader } from './_components/prompt-auto-loader'
+import { ConversationAutoLoader } from './_components/conversation-auto-loader'
 import { useConversationContext, createNexusHistoryAdapter } from '@/lib/nexus/history-adapter'
 import { MultiProviderToolUIs } from './_components/tools/multi-provider-tools'
 import { useModelsWithPersistence } from '@/lib/hooks/use-models'
@@ -272,6 +273,9 @@ function NexusPageContent() {
 
               {/* Auto-load prompts from Prompt Library */}
               <PromptAutoLoader />
+
+              {/* Auto-load conversation history when navigating to existing conversation */}
+              <ConversationAutoLoader />
 
               <div className="flex h-full flex-col">
                 <Thread processingAttachments={processingAttachments} conversationId={conversationId} />
