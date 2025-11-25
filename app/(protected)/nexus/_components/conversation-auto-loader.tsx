@@ -21,6 +21,7 @@ type MessageData = {
 // Helper to create ExportedMessageRepository from API messages
 // Reuses pattern from history-adapter.ts
 const createExportedMessageRepository = (messages: MessageData[]) => ({
+  headId: messages.length > 0 ? messages[messages.length - 1].id : null,
   messages: messages.map((msg, index) => {
     // Ensure content is in the correct format for assistant-ui
     let content: Array<{ type: 'text'; text: string }> = []
