@@ -59,12 +59,24 @@ const createExportedMessageRepository = (messages: MessageData[]) => ({
 export function ConversationAutoLoader() {
   const searchParams = useSearchParams()
   const router = useRouter()
+
+  // Log component mount
+  log.info('ConversationAutoLoader component mounted')
+
   const runtime = useThreadRuntime()
+
+  log.info('ConversationAutoLoader got runtime', {
+    hasRuntime: !!runtime
+  })
 
   // Track which conversations we've already processed to prevent duplicate loads
   const processedConversationsRef = useRef<Set<string>>(new Set())
 
   const conversationId = searchParams.get('id')
+
+  log.info('ConversationAutoLoader read conversation ID from URL', {
+    conversationId
+  })
 
   useEffect(() => {
     async function loadConversation() {
