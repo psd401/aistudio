@@ -384,28 +384,47 @@ This might be because:
 
   private async validateFileType(file: File): Promise<boolean> {
     try {
+      const ext = file.name.split('.').pop()?.toLowerCase();
+
+      // Text-based formats don't have magic bytes - validate by extension and MIME type
+      const textBasedFormats = ['csv', 'txt', 'md', 'json', 'xml', 'yaml', 'yml'];
+      if (textBasedFormats.includes(ext || '')) {
+        // Validate MIME type for text-based files
+        const validTextMimeTypes = [
+          'text/csv',
+          'text/plain',
+          'text/markdown',
+          'application/json',
+          'application/xml',
+          'text/xml',
+          'application/x-yaml',
+          'text/yaml'
+        ];
+        return validTextMimeTypes.includes(file.type) || file.type.startsWith('text/');
+      }
+
+      // For binary formats, check magic bytes
       const buffer = await file.arrayBuffer();
       const bytes = new Uint8Array(buffer).subarray(0, 8);
       const header = Array.from(bytes)
         .map(byte => byte.toString(16).padStart(2, '0'))
         .join('');
-      
-      // Check magic bytes for supported formats
+
+      // Check magic bytes for supported binary formats
       const magicBytes = {
         pdf: '25504446',      // %PDF
         office: '504b0304',   // ZIP-based format (Office 2007+)
         ole: 'd0cf11e0',      // OLE format (Office 97-2003)
       };
-      
+
       // Check PDF
       if (header.startsWith(magicBytes.pdf)) return true;
-      
+
       // Check Office formats
       if (header.startsWith(magicBytes.office) || header.startsWith(magicBytes.ole)) {
-        const ext = file.name.split('.').pop()?.toLowerCase();
         return ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt'].includes(ext || '');
       }
-      
+
       return false;
     } catch {
       return false;
