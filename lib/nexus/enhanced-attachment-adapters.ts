@@ -22,7 +22,22 @@ export interface AttachmentProcessingCallbacks {
  */
 export class HybridDocumentAdapter implements AttachmentAdapter {
   accept = "application/pdf,.docx,.xlsx,.pptx,.doc,.xls,.ppt,.txt,.md,.csv,.json,.xml,.yaml,.yml";
-  
+
+  // Supported text-based file extensions (files without magic bytes)
+  private static readonly TEXT_BASED_EXTENSIONS = ['csv', 'txt', 'md', 'json', 'xml', 'yaml', 'yml'] as const;
+
+  // Explicitly allowed MIME types for text-based files
+  private static readonly VALID_TEXT_MIME_TYPES = [
+    'text/csv',
+    'text/plain',
+    'text/markdown',
+    'application/json',
+    'application/xml',
+    'text/xml',
+    'application/x-yaml',
+    'text/yaml'
+  ] as const;
+
   private processedCache = new Map<string, CompleteAttachment>();
   private processingPromises = new Map<string, Promise<CompleteAttachment>>();
   private callbacks?: AttachmentProcessingCallbacks;
@@ -382,25 +397,38 @@ This might be because:
     return `${Math.round(duration / 60000)}m ${Math.round((duration % 60000) / 1000)}s`;
   }
 
+  /**
+   * Validates file type using extension and MIME type for text files,
+   * or magic bytes for binary formats.
+   * @param file - The file to validate
+   * @returns True if file type is supported, false otherwise
+   */
   private async validateFileType(file: File): Promise<boolean> {
     try {
       const ext = file.name.split('.').pop()?.toLowerCase();
 
+      log.debug('Validating file type', {
+        fileName: file.name,
+        extension: ext,
+        mimeType: file.type,
+        fileSize: file.size
+      });
+
       // Text-based formats don't have magic bytes - validate by extension and MIME type
-      const textBasedFormats = ['csv', 'txt', 'md', 'json', 'xml', 'yaml', 'yml'];
-      if (textBasedFormats.includes(ext || '')) {
-        // Validate MIME type for text-based files
-        const validTextMimeTypes = [
-          'text/csv',
-          'text/plain',
-          'text/markdown',
-          'application/json',
-          'application/xml',
-          'text/xml',
-          'application/x-yaml',
-          'text/yaml'
-        ];
-        return validTextMimeTypes.includes(file.type) || file.type.startsWith('text/');
+      if (HybridDocumentAdapter.TEXT_BASED_EXTENSIONS.includes(ext as never)) {
+        // Only allow explicitly validated MIME types for security
+        const isValid = HybridDocumentAdapter.VALID_TEXT_MIME_TYPES.includes(file.type as never);
+
+        if (!isValid) {
+          log.warn('Text file rejected: invalid MIME type', {
+            fileName: file.name,
+            extension: ext,
+            mimeType: file.type,
+            allowedTypes: HybridDocumentAdapter.VALID_TEXT_MIME_TYPES
+          });
+        }
+
+        return isValid;
       }
 
       // For binary formats, check magic bytes
@@ -409,6 +437,11 @@ This might be because:
       const header = Array.from(bytes)
         .map(byte => byte.toString(16).padStart(2, '0'))
         .join('');
+
+      log.debug('Checking magic bytes for binary file', {
+        fileName: file.name,
+        header: header.substring(0, 16)
+      });
 
       // Check magic bytes for supported binary formats
       const magicBytes = {
@@ -425,8 +458,20 @@ This might be because:
         return ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt'].includes(ext || '');
       }
 
+      log.warn('File validation failed: no matching format', {
+        fileName: file.name,
+        extension: ext,
+        mimeType: file.type,
+        headerPreview: header.substring(0, 16)
+      });
+
       return false;
-    } catch {
+    } catch (error) {
+      log.error('File type validation error', {
+        fileName: file.name,
+        fileType: file.type,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
       return false;
     }
   }
