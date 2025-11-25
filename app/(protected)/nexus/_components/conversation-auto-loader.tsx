@@ -140,13 +140,28 @@ export function ConversationAutoLoader() {
         // Convert messages using the same pattern as history-adapter.ts
         const repository = createExportedMessageRepository(messages)
 
-        // Import messages into the runtime
-        runtime.import(repository)
-
-        log.info('Conversation history imported successfully', {
+        log.info('Attempting to import messages', {
           conversationId,
-          messageCount: repository.messages.length
+          messageCount: repository.messages.length,
+          headId: repository.headId,
+          firstMessageId: repository.messages[0]?.message?.id
         })
+
+        // Import messages into the runtime
+        try {
+          runtime.import(repository)
+          log.info('Conversation history imported successfully', {
+            conversationId,
+            messageCount: repository.messages.length
+          })
+        } catch (importError) {
+          log.error('Failed to import messages into runtime', {
+            conversationId,
+            error: importError instanceof Error ? importError.message : String(importError),
+            repository
+          })
+          throw importError
+        }
 
       } catch (error) {
         log.error('Error loading conversation', {
