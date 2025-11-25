@@ -24,65 +24,34 @@ const log = createLogger({ moduleName: 'nexus-page' })
 interface ConversationRuntimeProviderProps {
   children: React.ReactNode
   conversationId: string | null
-  selectedModel: SelectAiModel | null
-  enabledTools: string[]
+  streamingAdapter: ChatModelAdapter | null
+  fallbackAdapter: ChatModelAdapter
   attachmentAdapter: AttachmentAdapter
-  onConversationIdChange?: (conversationId: string) => void
 }
 
 function ConversationRuntimeProvider({
   children,
   conversationId,
-  selectedModel,
-  enabledTools,
-  attachmentAdapter,
-  onConversationIdChange
+  streamingAdapter,
+  fallbackAdapter,
+  attachmentAdapter
 }: ConversationRuntimeProviderProps) {
   const historyAdapter = useMemo(
     () => createNexusHistoryAdapter(conversationId),
     [conversationId]
   )
 
-  // Use ref to prevent stale closure on enabledTools
-  const enabledToolsRef = useRef(enabledTools)
-  useEffect(() => {
-    enabledToolsRef.current = enabledTools
-  }, [enabledTools])
-
-  // Use ref for conversation ID to ensure synchronous updates
-  // This prevents race conditions when sending multiple messages quickly
-  const conversationIdRef = useRef(conversationId)
-  useEffect(() => {
-    conversationIdRef.current = conversationId
-  }, [conversationId])
-
-  // Create streaming adapter using existing working implementation
-  const streamingAdapter = useMemo<ChatModelAdapter>(() =>
-    createNexusStreamingAdapter({
-      apiUrl: '/api/nexus/chat',
-      bodyFn: () => ({
-        modelId: selectedModel?.modelId,
-        provider: selectedModel?.provider,
-        enabledTools: enabledToolsRef.current
-      }),
-      conversationId: conversationIdRef.current || undefined,
-      onConversationIdChange: (newId) => {
-        conversationIdRef.current = newId
-        if (onConversationIdChange) {
-          onConversationIdChange(newId)
-        }
-      }
-    }),
-  [selectedModel, onConversationIdChange])
-
   // Use useLocalRuntime with streaming adapter - this AUTOMATICALLY calls historyAdapter.load()
-  const runtime = useLocalRuntime(streamingAdapter, {
-    adapters: {
-      attachments: attachmentAdapter,
-      history: historyAdapter,  // Auto-invoked by useLocalRuntime
-      speech: new WebSpeechSynthesisAdapter(),
+  const runtime = useLocalRuntime(
+    streamingAdapter || fallbackAdapter,
+    {
+      adapters: {
+        attachments: attachmentAdapter,
+        history: historyAdapter,  // Auto-invoked by useLocalRuntime
+        speech: new WebSpeechSynthesisAdapter(),
+      }
     }
-  })
+  )
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -207,6 +176,46 @@ function NexusPageContent() {
     }
   }, [session, sessionStatus, router])
 
+  // Use ref for conversation ID in adapter
+  const conversationIdRef = useRef(conversationId)
+  useEffect(() => {
+    conversationIdRef.current = conversationId
+  }, [conversationId])
+
+  // Use ref for enabled tools
+  const enabledToolsRef = useRef(enabledTools)
+  useEffect(() => {
+    enabledToolsRef.current = enabledTools
+  }, [enabledTools])
+
+  // Create streaming adapter
+  const streamingAdapter = useMemo(() => {
+    if (!selectedModel) return null
+
+    return createNexusStreamingAdapter({
+      apiUrl: '/api/nexus/chat',
+      bodyFn: () => ({
+        modelId: selectedModel.modelId,
+        provider: selectedModel.provider,
+        enabledTools: enabledToolsRef.current
+      }),
+      conversationId: conversationIdRef.current || undefined,
+      onConversationIdChange: handleConversationIdChange
+    })
+  }, [selectedModel, handleConversationIdChange])
+
+  // Fallback adapter for when no model is selected
+  const fallbackAdapter = useMemo(() => ({
+    async run() {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: 'Please select a model to start chatting.'
+        }]
+      }
+    }
+  }), [])
+
   // Create attachment adapter with processing callbacks
   const attachmentAdapter = useMemo(() => {
     return createEnhancedNexusAttachmentAdapter({
@@ -216,7 +225,6 @@ function NexusPageContent() {
   }, [handleAttachmentProcessingStart, handleAttachmentProcessingComplete])
 
 
-  
   // Show loading state while checking authentication
   if (sessionStatus === 'loading') {
     return (
@@ -248,10 +256,9 @@ function NexusPageContent() {
           {selectedModel ? (
             <ConversationRuntimeProvider
               conversationId={conversationId}
-              selectedModel={selectedModel}
-              enabledTools={enabledTools}
+              streamingAdapter={streamingAdapter}
+              fallbackAdapter={fallbackAdapter}
               attachmentAdapter={attachmentAdapter}
-              onConversationIdChange={handleConversationIdChange}
             >
               {/* Register tool UI components for all providers */}
               <MultiProviderToolUIs />
