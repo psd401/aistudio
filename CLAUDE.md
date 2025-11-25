@@ -72,9 +72,9 @@ createProviderModel(provider: string, modelId: string): Promise<LanguageModel>
 
 ## 📚 Document Processing
 
-**Supported**: PDF, DOCX, TXT (via `/lib/document-processing.ts`)
+**Supported**: PDF, DOCX, XLSX, PPTX, TXT, MD, CSV, JSON, XML, YAML (via `/lib/document-processing.ts` and `/lib/nexus/enhanced-attachment-adapters.ts`)
 **Storage**: S3 with presigned URLs for large files
-**Limits**: 10MB default, configurable per deployment
+**Limits**: 500MB for Nexus attachments, 25MB for document processing (configurable per deployment)
 
 ## 🗄️ Database Operations
 

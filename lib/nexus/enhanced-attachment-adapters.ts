@@ -27,8 +27,12 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
   private static readonly TEXT_BASED_EXTENSIONS = ['csv', 'txt', 'md', 'json', 'xml', 'yaml', 'yml'] as const;
 
   // Explicitly allowed MIME types for text-based files
+  // Note: MIME types can be spoofed, but server-side processing provides
+  // additional validation. For text files, this dual-check (extension + MIME)
+  // provides reasonable security without the overhead of content inspection.
   private static readonly VALID_TEXT_MIME_TYPES = [
     'text/csv',
+    'application/csv',  // Some systems send CSV as application/csv
     'text/plain',
     'text/markdown',
     'application/json',
@@ -398,6 +402,29 @@ This might be because:
   }
 
   /**
+   * Type guard to check if extension is a supported text-based format
+   */
+  private static isTextBasedExtension(
+    ext: string | undefined
+  ): ext is typeof HybridDocumentAdapter.TEXT_BASED_EXTENSIONS[number] {
+    if (!ext) return false;
+    return HybridDocumentAdapter.TEXT_BASED_EXTENSIONS.includes(
+      ext as typeof HybridDocumentAdapter.TEXT_BASED_EXTENSIONS[number]
+    );
+  }
+
+  /**
+   * Type guard to check if MIME type is a supported text format
+   */
+  private static isValidTextMimeType(
+    mimeType: string
+  ): mimeType is typeof HybridDocumentAdapter.VALID_TEXT_MIME_TYPES[number] {
+    return HybridDocumentAdapter.VALID_TEXT_MIME_TYPES.includes(
+      mimeType as typeof HybridDocumentAdapter.VALID_TEXT_MIME_TYPES[number]
+    );
+  }
+
+  /**
    * Validates file type using extension and MIME type for text files,
    * or magic bytes for binary formats.
    * @param file - The file to validate
@@ -405,7 +432,21 @@ This might be because:
    */
   private async validateFileType(file: File): Promise<boolean> {
     try {
-      const ext = file.name.split('.').pop()?.toLowerCase();
+      // Validate file is not empty
+      if (file.size === 0) {
+        log.warn('File rejected: empty file', { fileName: file.name });
+        return false;
+      }
+
+      // Extract file extension and validate it exists
+      const ext = file.name.includes('.')
+        ? file.name.split('.').pop()?.toLowerCase()
+        : undefined;
+
+      if (!ext) {
+        log.warn('File rejected: no extension', { fileName: file.name });
+        return false;
+      }
 
       log.debug('Validating file type', {
         fileName: file.name,
@@ -415,9 +456,9 @@ This might be because:
       });
 
       // Text-based formats don't have magic bytes - validate by extension and MIME type
-      if (HybridDocumentAdapter.TEXT_BASED_EXTENSIONS.includes(ext as never)) {
+      if (HybridDocumentAdapter.isTextBasedExtension(ext)) {
         // Only allow explicitly validated MIME types for security
-        const isValid = HybridDocumentAdapter.VALID_TEXT_MIME_TYPES.includes(file.type as never);
+        const isValid = HybridDocumentAdapter.isValidTextMimeType(file.type);
 
         if (!isValid) {
           log.warn('Text file rejected: invalid MIME type', {
