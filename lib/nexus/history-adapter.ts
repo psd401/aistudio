@@ -176,8 +176,8 @@ export function createNexusHistoryAdapter(conversationId: string | null): Thread
           errorName: error instanceof Error ? error.name : 'Unknown'
         })
 
-        // Re-throw error to surface to UI instead of silently returning empty array
-        throw error
+        // Return empty array - framework expects this, not thrown errors
+        return { messages: [] }
       }
     },
 
@@ -337,8 +337,8 @@ export class ConversationLoader {
         errorName: error instanceof Error ? error.name : 'Unknown'
       })
 
-      // Re-throw error to surface to UI instead of silently returning empty array
-      throw error
+      // Return empty result - don't throw
+      return { messages: [], conversation: null }
     }
   }
 

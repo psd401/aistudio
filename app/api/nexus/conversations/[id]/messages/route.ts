@@ -41,12 +41,7 @@ export async function GET(
     const resolvedParams = await params
     conversationId = resolvedParams.id
 
-    log.info('GET /api/nexus/conversations/[id]/messages', {
-      conversationId,
-      hasRdsArn: !!process.env.RDS_RESOURCE_ARN,
-      hasSecretArn: !!process.env.RDS_SECRET_ARN,
-      hasRegion: !!process.env.AWS_REGION
-    })
+    log.info('GET /api/nexus/conversations/[id]/messages', { conversationId })
 
     // Authenticate user
     const session = await getServerSession()
@@ -245,15 +240,11 @@ export async function GET(
       JSON.stringify({
         error: errorMessage,
         code: errorCode,
-        requestId,
-        timestamp: new Date().toISOString()
+        requestId
       }),
       {
         status: statusCode,
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Request-ID': requestId
-        }
+        headers: { 'Content-Type': 'application/json' }
       }
     )
   }
