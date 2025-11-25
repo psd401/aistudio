@@ -10,6 +10,7 @@ import { ErrorBoundary } from './_components/error-boundary'
 import { ConversationPanel } from './_components/conversation-panel'
 import { PromptAutoLoader } from './_components/prompt-auto-loader'
 import { useConversationContext, createNexusHistoryAdapter } from '@/lib/nexus/history-adapter'
+import { createNexusStreamingAdapter } from '@/lib/nexus/nexus-streaming-adapter'
 import { MultiProviderToolUIs } from './_components/tools/multi-provider-tools'
 import { useModelsWithPersistence } from '@/lib/hooks/use-models'
 import { createEnhancedNexusAttachmentAdapter } from '@/lib/nexus/enhanced-attachment-adapters'
@@ -55,83 +56,24 @@ function ConversationRuntimeProvider({
     conversationIdRef.current = conversationId
   }, [conversationId])
 
-  // Custom fetch to intercept X-Conversation-Id header for conversation continuity
-  const customFetch = useCallback(async (input: RequestInfo | URL, init?: RequestInit) => {
-    const response = await fetch(input, init)
-
-    // Extract conversation ID from response header (new conversations only)
-    const newConversationId = response.headers.get('X-Conversation-Id')
-    if (newConversationId && newConversationId !== conversationIdRef.current) {
-      log.debug('Received new conversation ID from server', {
-        newConversationId,
-        currentConversationId: conversationIdRef.current
-      })
-      // Update ref immediately for synchronous access in next message
-      conversationIdRef.current = newConversationId
-      // Update parent state for URL and component updates
-      if (onConversationIdChange) {
-        onConversationIdChange(newConversationId)
-      }
-    }
-
-    return response
-  }, [onConversationIdChange])
-
-  // Create streaming adapter for AI SDK
-  const streamingAdapter = useMemo<ChatModelAdapter>(() => ({
-    async *run({ messages, abortSignal }) {
-      const response = await customFetch('/api/nexus/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          messages,
-          modelId: selectedModel?.modelId,
-          provider: selectedModel?.provider,
-          enabledTools: enabledToolsRef.current,
-          conversationId: conversationIdRef.current || undefined
-        }),
-        signal: abortSignal
-      })
-
-      if (!response.ok) {
-        throw new Error(`Chat request failed: ${response.status}`)
-      }
-
-      const reader = response.body?.getReader()
-      if (!reader) throw new Error('No response body')
-
-      const decoder = new TextDecoder()
-      let buffer = ''
-      let accumulatedText = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-
-        buffer += decoder.decode(value, { stream: true })
-        const lines = buffer.split('\n')
-        buffer = lines.pop() || ''
-
-        for (const line of lines) {
-          if (line.startsWith('0:')) {
-            const json = line.slice(2)
-            const parsed = JSON.parse(json)
-            if (parsed.type === 'text-delta') {
-              accumulatedText += parsed.textDelta
-              yield {
-                content: [{ type: 'text', text: accumulatedText }]
-              }
-            } else if (parsed.type === 'finish') {
-              yield {
-                content: [{ type: 'text', text: accumulatedText }],
-                status: { type: 'complete', reason: parsed.finishReason || 'unknown' }
-              }
-            }
-          }
+  // Create streaming adapter using existing working implementation
+  const streamingAdapter = useMemo<ChatModelAdapter>(() =>
+    createNexusStreamingAdapter({
+      apiUrl: '/api/nexus/chat',
+      bodyFn: () => ({
+        modelId: selectedModel?.modelId,
+        provider: selectedModel?.provider,
+        enabledTools: enabledToolsRef.current
+      }),
+      conversationId: conversationIdRef.current || undefined,
+      onConversationIdChange: (newId) => {
+        conversationIdRef.current = newId
+        if (onConversationIdChange) {
+          onConversationIdChange(newId)
         }
       }
-    }
-  }), [selectedModel, customFetch])
+    }),
+  [selectedModel, onConversationIdChange])
 
   // Use useLocalRuntime with streaming adapter - this AUTOMATICALLY calls historyAdapter.load()
   const runtime = useLocalRuntime(streamingAdapter, {
