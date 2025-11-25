@@ -40,13 +40,18 @@ export async function GET(
   try {
     const resolvedParams = await params
     conversationId = resolvedParams.id
-    
-    log.info('GET /api/nexus/conversations/[id]/messages', { conversationId })
-  
+
+    log.info('GET /api/nexus/conversations/[id]/messages', {
+      conversationId,
+      hasRdsArn: !!process.env.RDS_RESOURCE_ARN,
+      hasSecretArn: !!process.env.RDS_SECRET_ARN,
+      hasRegion: !!process.env.AWS_REGION
+    })
+
     // Authenticate user
     const session = await getServerSession()
     if (!session) {
-      log.warn('Unauthorized request')
+      log.warn('Unauthorized request', { conversationId })
       timer({ status: 'error', reason: 'unauthorized' })
       return new Response('Unauthorized', { status: 401 })
     }
@@ -81,32 +86,14 @@ export async function GET(
     const url = new URL(req.url)
     const limitParam = url.searchParams.get('limit') || '50'
     const offsetParam = url.searchParams.get('offset') || '0'
-    
+
     // Validate and bound limit parameter (1-1000)
     const parsedLimit = Number.parseInt(limitParam, 10)
     const limit = Math.min(Math.max(Number.isNaN(parsedLimit) ? 50 : parsedLimit, 1), 1000)
-    
+
     // Validate and bound offset parameter (0 or positive)
     const parsedOffset = Number.parseInt(offsetParam, 10)
     const offset = Math.max(Number.isNaN(parsedOffset) ? 0 : parsedOffset, 0)
-    
-    // Additional validation to prevent potential abuse
-    if (Number.isNaN(parsedLimit) || Number.isNaN(parsedOffset) || 
-        limitParam !== parsedLimit.toString() || 
-        offsetParam !== parsedOffset.toString()) {
-      log.warn('Invalid pagination parameters', { 
-        limitParam, 
-        offsetParam, 
-        conversationId 
-      })
-      return new Response(
-        JSON.stringify({ error: 'Invalid pagination parameters' }), 
-        { 
-          status: 400,
-          headers: { 'Content-Type': 'application/json' }
-        }
-      )
-    }
     
     // Query messages
     const query = `
@@ -258,11 +245,15 @@ export async function GET(
       JSON.stringify({
         error: errorMessage,
         code: errorCode,
-        requestId
+        requestId,
+        timestamp: new Date().toISOString()
       }),
       {
         status: statusCode,
-        headers: { 'Content-Type': 'application/json' }
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Request-ID': requestId
+        }
       }
     )
   }

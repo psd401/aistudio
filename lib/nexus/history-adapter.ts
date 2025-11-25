@@ -111,36 +111,73 @@ export function createNexusHistoryAdapter(conversationId: string | null): Thread
       try {
         log.debug('Loading conversation messages', { conversationId })
 
-        const response = await fetch(`/api/nexus/conversations/${conversationId}/messages`)
+        // Add timeout to prevent infinite spinner
+        const controller = new AbortController()
+        const timeoutId = setTimeout(() => controller.abort(), 15000) // 15s timeout
 
-        if (!response.ok) {
-          if (response.status === 404) {
-            log.warn('Conversation not found', { conversationId })
-            return { messages: [] }
+        try {
+          const response = await fetch(`/api/nexus/conversations/${conversationId}/messages`, {
+            signal: controller.signal
+          })
+          clearTimeout(timeoutId)
+
+          if (!response.ok) {
+            if (response.status === 404) {
+              log.warn('Conversation not found', { conversationId })
+              return { messages: [] }
+            }
+
+            // Parse error response for better debugging
+            let errorDetails = `HTTP ${response.status}`
+            try {
+              const errorData = await response.json()
+              errorDetails = errorData.error || errorDetails
+              log.error('API error response', {
+                conversationId,
+                status: response.status,
+                code: errorData.code,
+                requestId: errorData.requestId
+              })
+            } catch {
+              // Failed to parse error response
+            }
+
+            throw new Error(`Failed to load messages: ${errorDetails}`)
           }
-          throw new Error(`Failed to load messages: ${response.status}`)
+
+          const data = await response.json()
+          const { messages = [] } = data
+
+          // Convert messages using our helper function
+          const repository = createExportedMessageRepository(messages)
+
+          log.debug('Messages loaded successfully', {
+            conversationId,
+            messageCount: repository.messages.length
+          })
+
+          return repository
+
+        } catch (error) {
+          clearTimeout(timeoutId)
+
+          if (error instanceof Error && error.name === 'AbortError') {
+            log.error('Request timeout after 15s', { conversationId })
+            throw new Error('Request timed out while loading conversation. Please try again.')
+          }
+
+          throw error
         }
-
-        const data = await response.json()
-        const { messages = [] } = data
-
-        // Convert messages using our helper function
-        const repository = createExportedMessageRepository(messages)
-
-        log.debug('Messages loaded successfully', {
-          conversationId,
-          messageCount: repository.messages.length
-        })
-
-        return repository
 
       } catch (error) {
         log.error('Failed to load conversation messages', {
           conversationId,
-          error: error instanceof Error ? error.message : String(error)
+          error: error instanceof Error ? error.message : String(error),
+          errorName: error instanceof Error ? error.name : 'Unknown'
         })
 
-        return { messages: [] }
+        // Re-throw error to surface to UI instead of silently returning empty array
+        throw error
       }
     },
 
@@ -236,35 +273,72 @@ export class ConversationLoader {
   static async loadConversation(conversationId: string) {
     try {
       log.debug('Loading conversation messages', { conversationId })
-      
-      const response = await fetch(`/api/nexus/conversations/${conversationId}/messages`)
-      
-      if (!response.ok) {
-        if (response.status === 404) {
-          log.warn('Conversation not found', { conversationId })
-          return { messages: [], conversation: null }
+
+      // Add timeout to prevent hanging requests
+      const controller = new AbortController()
+      const timeoutId = setTimeout(() => controller.abort(), 15000) // 15s timeout
+
+      try {
+        const response = await fetch(`/api/nexus/conversations/${conversationId}/messages`, {
+          signal: controller.signal
+        })
+        clearTimeout(timeoutId)
+
+        if (!response.ok) {
+          if (response.status === 404) {
+            log.warn('Conversation not found', { conversationId })
+            return { messages: [], conversation: null }
+          }
+
+          // Parse error response for better debugging
+          let errorDetails = `HTTP ${response.status}`
+          try {
+            const errorData = await response.json()
+            errorDetails = errorData.error || errorDetails
+            log.error('API error response', {
+              conversationId,
+              status: response.status,
+              code: errorData.code,
+              requestId: errorData.requestId
+            })
+          } catch {
+            // Failed to parse error response
+          }
+
+          throw new Error(`Failed to load messages: ${errorDetails}`)
         }
-        throw new Error(`Failed to load messages: ${response.status}`)
+
+        const data = await response.json()
+        const { messages = [], conversation } = data
+
+        log.debug('Messages loaded successfully', {
+          conversationId,
+          messageCount: messages.length,
+          conversationTitle: conversation?.title
+        })
+
+        return { messages, conversation }
+
+      } catch (error) {
+        clearTimeout(timeoutId)
+
+        if (error instanceof Error && error.name === 'AbortError') {
+          log.error('Request timeout after 15s', { conversationId })
+          throw new Error('Request timed out while loading conversation. Please try again.')
+        }
+
+        throw error
       }
-      
-      const data = await response.json()
-      const { messages = [], conversation } = data
-      
-      log.debug('Messages loaded successfully', { 
-        conversationId,
-        messageCount: messages.length,
-        conversationTitle: conversation?.title
-      })
-      
-      return { messages, conversation }
-      
+
     } catch (error) {
       log.error('Failed to load conversation messages', {
         conversationId,
-        error: error instanceof Error ? error.message : String(error)
+        error: error instanceof Error ? error.message : String(error),
+        errorName: error instanceof Error ? error.name : 'Unknown'
       })
-      
-      return { messages: [], conversation: null }
+
+      // Re-throw error to surface to UI instead of silently returning empty array
+      throw error
     }
   }
 
