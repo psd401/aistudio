@@ -1,7 +1,7 @@
 'use client'
 
 import { AssistantRuntimeProvider, type AttachmentAdapter, WebSpeechSynthesisAdapter } from '@assistant-ui/react'
-import { useChatRuntime, AssistantChatTransport } from '@assistant-ui/react-ai-sdk'
+import { useChatRuntime, AssistantChatTransport, type UIMessage } from '@assistant-ui/react-ai-sdk'
 import { Thread } from '@/components/assistant-ui/thread'
 import { useSession } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
@@ -27,7 +27,7 @@ interface ConversationRuntimeProviderProps {
   selectedModel: SelectAiModel | null
   enabledTools: string[]
   attachmentAdapter: AttachmentAdapter
-  initialMessages?: any[]
+  initialMessages?: UIMessage[]
   onConversationIdChange?: (conversationId: string) => void
 }
 
@@ -82,8 +82,9 @@ function ConversationRuntimeProvider({
 
   // Use official useChatRuntime from @assistant-ui/react-ai-sdk
   // This natively understands AI SDK's streaming format
-  // Memoized to prevent recreation when conversationId changes (preserves streaming state)
-  const runtime = useMemo(() => useChatRuntime({
+  // Note: stableConversationId prevents ConversationInitializer remount,
+  // which preserves streaming state without needing useMemo here
+  const runtime = useChatRuntime({
     transport: new AssistantChatTransport({
       api: '/api/nexus/chat',
       fetch: customFetch,
@@ -100,14 +101,7 @@ function ConversationRuntimeProvider({
       speech: new WebSpeechSynthesisAdapter(),
     },
     messages: initialMessages
-  }), [
-    customFetch,
-    selectedModel?.modelId,
-    selectedModel?.provider,
-    attachmentAdapter,
-    historyAdapter,
-    initialMessages
-  ])
+  })
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -122,9 +116,9 @@ function ConversationInitializer({
   children
 }: {
   conversationId: string | null
-  children: (messages: any[]) => React.ReactNode
+  children: (messages: UIMessage[]) => React.ReactNode
 }) {
-  const [messages, setMessages] = useState<any[]>([])
+  const [messages, setMessages] = useState<UIMessage[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
