@@ -127,6 +127,9 @@ AI integration patterns using Vercel AI SDK v5, provider factory implementation,
 
 ### Feature Documentation
 
+#### [features/nexus-conversation-architecture.md](./features/nexus-conversation-architecture.md) ⭐ **CRITICAL**
+**Complete Nexus conversation system architecture** - Component hierarchy, state management (conversationId vs stableConversationId vs ref), message flows, runtime memoization, format conversions, common pitfalls, and troubleshooting. **Read this before modifying conversation code.**
+
 #### [features/navigation.md](./features/navigation.md)
 Dynamic navigation system with role-based menu items.
 
@@ -163,6 +166,7 @@ S3 lifecycle policies and cost optimization.
 4. Review [ENVIRONMENT_VARIABLES.md](./ENVIRONMENT_VARIABLES.md) for setup
 5. Follow [guides/TYPESCRIPT.md](./guides/TYPESCRIPT.md) for code standards
 6. Reference [guides/LOGGING.md](./guides/LOGGING.md) for logging patterns
+7. **Working on Nexus?** Read [features/nexus-conversation-architecture.md](./features/nexus-conversation-architecture.md) first
 
 ### For DevOps/Infrastructure
 1. Follow [DEPLOYMENT.md](./DEPLOYMENT.md) for initial deployment
