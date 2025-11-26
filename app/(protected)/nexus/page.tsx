@@ -1,6 +1,7 @@
 'use client'
 
-import { AssistantRuntimeProvider, useLocalRuntime, type AttachmentAdapter, type ChatModelAdapter, WebSpeechSynthesisAdapter } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, type AttachmentAdapter, WebSpeechSynthesisAdapter } from '@assistant-ui/react'
+import { useChatRuntime, AssistantChatTransport } from '@assistant-ui/react-ai-sdk'
 import { Thread } from '@/components/assistant-ui/thread'
 import { useSession } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
@@ -10,7 +11,6 @@ import { ErrorBoundary } from './_components/error-boundary'
 import { ConversationPanel } from './_components/conversation-panel'
 import { PromptAutoLoader } from './_components/prompt-auto-loader'
 import { useConversationContext, createNexusHistoryAdapter } from '@/lib/nexus/history-adapter'
-import { createNexusStreamingAdapter } from '@/lib/nexus/nexus-streaming-adapter'
 import { MultiProviderToolUIs } from './_components/tools/multi-provider-tools'
 import { useModelsWithPersistence } from '@/lib/hooks/use-models'
 import { createEnhancedNexusAttachmentAdapter } from '@/lib/nexus/enhanced-attachment-adapters'
@@ -24,40 +24,175 @@ const log = createLogger({ moduleName: 'nexus-page' })
 interface ConversationRuntimeProviderProps {
   children: React.ReactNode
   conversationId: string | null
-  streamingAdapter: ChatModelAdapter | null
-  fallbackAdapter: ChatModelAdapter
+  selectedModel: SelectAiModel | null
+  enabledTools: string[]
   attachmentAdapter: AttachmentAdapter
+  initialMessages?: any[]
+  onConversationIdChange?: (conversationId: string) => void
 }
 
 function ConversationRuntimeProvider({
   children,
   conversationId,
-  streamingAdapter,
-  fallbackAdapter,
-  attachmentAdapter
+  selectedModel,
+  enabledTools,
+  attachmentAdapter,
+  initialMessages = [],
+  onConversationIdChange
 }: ConversationRuntimeProviderProps) {
   const historyAdapter = useMemo(
     () => createNexusHistoryAdapter(conversationId),
     [conversationId]
   )
 
-  // Use useLocalRuntime with streaming adapter - this AUTOMATICALLY calls historyAdapter.load()
-  const runtime = useLocalRuntime(
-    streamingAdapter || fallbackAdapter,
-    {
-      adapters: {
-        attachments: attachmentAdapter,
-        history: historyAdapter,  // Auto-invoked by useLocalRuntime
-        speech: new WebSpeechSynthesisAdapter(),
+  // Use ref to prevent stale closure on enabledTools
+  const enabledToolsRef = useRef(enabledTools)
+  useEffect(() => {
+    enabledToolsRef.current = enabledTools
+  }, [enabledTools])
+
+  // Use ref for conversation ID to ensure synchronous updates
+  // This prevents race conditions when sending multiple messages quickly
+  const conversationIdRef = useRef(conversationId)
+  useEffect(() => {
+    conversationIdRef.current = conversationId
+  }, [conversationId])
+
+  // Custom fetch to intercept X-Conversation-Id header for conversation continuity
+  const customFetch = useCallback(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const response = await fetch(input, init)
+
+    // Extract conversation ID from response header (new conversations only)
+    const newConversationId = response.headers.get('X-Conversation-Id')
+    if (newConversationId && newConversationId !== conversationIdRef.current) {
+      log.debug('Received new conversation ID from server', {
+        newConversationId,
+        currentConversationId: conversationIdRef.current
+      })
+      // Update ref immediately for synchronous access in next message
+      conversationIdRef.current = newConversationId
+      // Update parent state for URL and component updates
+      if (onConversationIdChange) {
+        onConversationIdChange(newConversationId)
       }
     }
-  )
+
+    return response
+  }, [onConversationIdChange])
+
+  // Use official useChatRuntime from @assistant-ui/react-ai-sdk
+  // This natively understands AI SDK's streaming format
+  // Memoized to prevent recreation when conversationId changes (preserves streaming state)
+  const runtime = useMemo(() => useChatRuntime({
+    transport: new AssistantChatTransport({
+      api: '/api/nexus/chat',
+      fetch: customFetch,
+      body: () => selectedModel ? {
+        modelId: selectedModel.modelId,
+        provider: selectedModel.provider,
+        enabledTools: enabledToolsRef.current,
+        conversationId: conversationIdRef.current || undefined
+      } : {}
+    }),
+    adapters: {
+      attachments: attachmentAdapter,
+      history: historyAdapter,
+      speech: new WebSpeechSynthesisAdapter(),
+    },
+    messages: initialMessages
+  }), [
+    customFetch,
+    selectedModel?.modelId,
+    selectedModel?.provider,
+    attachmentAdapter,
+    historyAdapter,
+    initialMessages
+  ])
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
       {children}
     </AssistantRuntimeProvider>
   )
+}
+
+// Component to load conversation messages before creating runtime
+function ConversationInitializer({
+  conversationId,
+  children
+}: {
+  conversationId: string | null
+  children: (messages: any[]) => React.ReactNode
+}) {
+  const [messages, setMessages] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    if (!conversationId) {
+      setMessages([])
+      setLoading(false)
+      return
+    }
+
+    setLoading(true)
+    log.debug('ConversationInitializer loading messages', { conversationId })
+
+    fetch(`/api/nexus/conversations/${conversationId}/messages`)
+      .then(res => {
+        if (!res.ok) {
+          throw new Error(`Failed to load messages: ${res.status}`)
+        }
+        return res.json()
+      })
+      .then(data => {
+        const loadedMessages = data.messages || []
+        log.debug('Messages loaded from API', { count: loadedMessages.length })
+
+        // Convert to UIMessage format (required by useChatRuntime)
+        const threadMessages = loadedMessages.map((msg: {
+          id: string
+          role: 'user' | 'assistant' | 'system'
+          content?: Array<{ type: string; text?: string; [key: string]: unknown }> | string
+          createdAt?: string | Date
+        }) => ({
+          id: msg.id,
+          role: msg.role,
+          parts: Array.isArray(msg.content)
+            ? msg.content.map(part => ({
+                type: part.type as 'text',
+                text: part.text || ''
+              }))
+            : typeof msg.content === 'string'
+            ? [{ type: 'text' as const, text: msg.content }]
+            : [{ type: 'text' as const, text: '' }]
+        }))
+
+        setMessages(threadMessages)
+        setLoading(false)
+        log.debug('Messages converted and ready', { count: threadMessages.length })
+      })
+      .catch(error => {
+        log.error('Failed to load conversation', {
+          conversationId,
+          error: error instanceof Error ? error.message : String(error)
+        })
+        setMessages([])
+        setLoading(false)
+      })
+  }, [conversationId])
+
+  if (loading) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="text-center">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent mx-auto mb-4" />
+          <div className="text-lg text-muted-foreground">Loading conversation...</div>
+        </div>
+      </div>
+    )
+  }
+
+  return <>{children(messages)}</>
 }
 
 // Component that uses useSearchParams - must be wrapped in Suspense
@@ -96,6 +231,10 @@ function NexusPageContent() {
 
   // Conversation continuity state - initialize from validated URL parameter
   const [conversationId, setConversationId] = useState<string | null>(validatedConversationId)
+
+  // Stable conversation ID for ConversationInitializer - only set on initial load from URL
+  // This prevents remounting when ID is assigned during runtime
+  const [stableConversationId] = useState<string | null>(validatedConversationId)
 
 
   // Conversation context for history adapter
@@ -176,46 +315,6 @@ function NexusPageContent() {
     }
   }, [session, sessionStatus, router])
 
-  // Use ref for conversation ID in adapter
-  const conversationIdRef = useRef(conversationId)
-  useEffect(() => {
-    conversationIdRef.current = conversationId
-  }, [conversationId])
-
-  // Use ref for enabled tools
-  const enabledToolsRef = useRef(enabledTools)
-  useEffect(() => {
-    enabledToolsRef.current = enabledTools
-  }, [enabledTools])
-
-  // Create streaming adapter
-  const streamingAdapter = useMemo(() => {
-    if (!selectedModel) return null
-
-    return createNexusStreamingAdapter({
-      apiUrl: '/api/nexus/chat',
-      bodyFn: () => ({
-        modelId: selectedModel.modelId,
-        provider: selectedModel.provider,
-        enabledTools: enabledToolsRef.current
-      }),
-      conversationId: conversationIdRef.current || undefined,
-      onConversationIdChange: handleConversationIdChange
-    })
-  }, [selectedModel, handleConversationIdChange])
-
-  // Fallback adapter for when no model is selected
-  const fallbackAdapter = useMemo(() => ({
-    async run() {
-      return {
-        content: [{
-          type: 'text' as const,
-          text: 'Please select a model to start chatting.'
-        }]
-      }
-    }
-  }), [])
-
   // Create attachment adapter with processing callbacks
   const attachmentAdapter = useMemo(() => {
     return createEnhancedNexusAttachmentAdapter({
@@ -225,6 +324,7 @@ function NexusPageContent() {
   }, [handleAttachmentProcessingStart, handleAttachmentProcessingComplete])
 
 
+  
   // Show loading state while checking authentication
   if (sessionStatus === 'loading') {
     return (
@@ -254,25 +354,31 @@ function NexusPageContent() {
       >
         <div className="relative h-full">
           {selectedModel ? (
-            <ConversationRuntimeProvider
-              conversationId={conversationId}
-              streamingAdapter={streamingAdapter}
-              fallbackAdapter={fallbackAdapter}
-              attachmentAdapter={attachmentAdapter}
-            >
-              {/* Register tool UI components for all providers */}
-              <MultiProviderToolUIs />
+            <ConversationInitializer conversationId={stableConversationId}>
+              {(initialMessages) => (
+                <ConversationRuntimeProvider
+                  conversationId={conversationId}
+                  selectedModel={selectedModel}
+                  enabledTools={enabledTools}
+                  attachmentAdapter={attachmentAdapter}
+                  initialMessages={initialMessages}
+                  onConversationIdChange={handleConversationIdChange}
+                >
+                  {/* Register tool UI components for all providers */}
+                  <MultiProviderToolUIs />
 
-              {/* Auto-load prompts from Prompt Library */}
-              <PromptAutoLoader />
+                  {/* Auto-load prompts from Prompt Library */}
+                  <PromptAutoLoader />
 
-              <div className="flex h-full flex-col">
-                <Thread processingAttachments={processingAttachments} conversationId={conversationId} />
-              </div>
-              <ConversationPanel
-                selectedConversationId={conversationId}
-              />
-            </ConversationRuntimeProvider>
+                  <div className="flex h-full flex-col">
+                    <Thread processingAttachments={processingAttachments} conversationId={conversationId} />
+                  </div>
+                  <ConversationPanel
+                    selectedConversationId={conversationId}
+                  />
+                </ConversationRuntimeProvider>
+              )}
+            </ConversationInitializer>
           ) : (
             <div className="flex h-full items-center justify-center">
               <div className="text-center">

@@ -24,6 +24,7 @@ cd infra && npx cdk deploy AIStudio-FrontendStack-Dev     # Deploy single stack
 3. **Logging**: NEVER use `console.log/error`. Always use `@/lib/logger`. See patterns below.
 4. **Git Flow**: PRs target `dev` branch, never `main`. Write detailed commit messages.
 5. **Testing**: Add E2E tests for new features. Use Playwright MCP during development.
+6. **Nexus Conversations**: MUST read `/docs/features/nexus-conversation-architecture.md` before modifying conversation code. This system has broken multiple times - follow documented patterns exactly.
 
 ## 🏗️ Architecture
 
