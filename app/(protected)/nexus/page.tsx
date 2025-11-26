@@ -1,7 +1,8 @@
 'use client'
 
 import { AssistantRuntimeProvider, type AttachmentAdapter, WebSpeechSynthesisAdapter } from '@assistant-ui/react'
-import { useChatRuntime, AssistantChatTransport, type UIMessage } from '@assistant-ui/react-ai-sdk'
+import { useChatRuntime, AssistantChatTransport } from '@assistant-ui/react-ai-sdk'
+import { type UIMessage } from '@ai-sdk/react'
 import { Thread } from '@/components/assistant-ui/thread'
 import { useSession } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
