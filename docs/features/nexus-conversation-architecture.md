@@ -260,12 +260,12 @@ useEffect(() => {
 
 **4. ConversationRuntimeProvider receives initialMessages**
 ```typescript
-// Location: page.tsx:86-110
-const runtime = useMemo(() => useChatRuntime({
+// Location: page.tsx:87-104
+const runtime = useChatRuntime({
   transport: new AssistantChatTransport({ /* ... */ }),
   adapters: { /* ... */ },
   messages: initialMessages  // Pre-loaded messages
-}), [/* ... */])
+})
 ```
 
 **5. Thread displays conversation**
@@ -277,19 +277,19 @@ Streaming works normally
 
 ---
 
-## Runtime Creation and Memoization
+## Runtime Creation
 
-### Why Memoization is Critical
+### The Solution: stableConversationId Pattern
 
-**Problem:** `useChatRuntime` creates a new runtime instance on every render. When `conversationId` changes from `null` → `"uuid"`, the component re-renders and creates a new runtime, **losing streaming state**.
+**Problem:** When `conversationId` changes from `null` → `"uuid"`, the component re-renders. If `ConversationInitializer` remounts, it loses streaming state.
 
-**Solution:** Wrap `useChatRuntime` in `useMemo` with stable dependencies.
+**Solution:** Use `stableConversationId` to prevent `ConversationInitializer` from remounting.
 
 ### Implementation
 
 ```typescript
-// Location: page.tsx:86-110
-const runtime = useMemo(() => useChatRuntime({
+// Location: page.tsx:87-104
+const runtime = useChatRuntime({
   transport: new AssistantChatTransport({
     api: '/api/nexus/chat',
     fetch: customFetch,
@@ -306,23 +306,15 @@ const runtime = useMemo(() => useChatRuntime({
     speech: new WebSpeechSynthesisAdapter(),
   },
   messages: initialMessages
-}), [
-  customFetch,           // Stable (memoized with useCallback)
-  selectedModel?.modelId, // Only changes when model changes
-  selectedModel?.provider,
-  attachmentAdapter,     // Stable (memoized)
-  historyAdapter,        // Stable (created per conversationId)
-  initialMessages        // Only changes on initial load
-  // NOTE: conversationId is NOT a dependency!
-])
+})
 ```
 
 ### Key Points
 
-1. **conversationId accessed via ref**: `conversationIdRef.current` is read inside `body()` callback
-2. **No conversationId dependency**: Runtime doesn't recreate when ID changes
-3. **Stable dependencies**: Only recreates when model or adapters change
-4. **Pattern from Assistant Architect**: Same approach used in `/app/(protected)/assistant-architect/_components/assistant-architect-streaming.tsx:600-615`
+1. **No useMemo wrapper**: React hooks cannot be called inside callbacks (violates `react-hooks/rules-of-hooks`)
+2. **conversationId accessed via ref**: `conversationIdRef.current` is read inside `body()` callback
+3. **stableConversationId prevents remount**: The critical fix is using `stableConversationId` as the prop to `ConversationInitializer`, not memoizing the runtime
+4. **Runtime may recreate**: That's okay! The important part is that `ConversationInitializer` doesn't remount and lose the streaming state
 
 ---
 
@@ -342,6 +334,9 @@ const runtime = useMemo(() => useChatRuntime({
 
 **2. UIMessage Format (AI SDK)**
 ```typescript
+// Import from @ai-sdk/react (NOT @assistant-ui/react-ai-sdk)
+import { type UIMessage } from '@ai-sdk/react'
+
 {
   id: "msg_123",
   role: "user" | "assistant" | "system",
@@ -425,22 +420,25 @@ messages: exportedRepo.messages.map(item => {
 
 **Why:** When `conversationId` changes from `null` → `"uuid"`, React sees it as a prop change and remounts the component, losing streaming state.
 
-### ❌ Pitfall 2: Using conversationId in useMemo dependencies
+### ❌ Pitfall 2: Trying to use useMemo with useChatRuntime
 
 ```typescript
-// WRONG - runtime recreates when ID changes
+// WRONG - React hooks cannot be called inside callbacks
 const runtime = useMemo(() => useChatRuntime({
   // ...
-}), [conversationId])  // ← BAD
+}), [dependencies])  // ← ERROR: violates react-hooks/rules-of-hooks
 ```
 
 ```typescript
-// CORRECT - use ref in callback, not as dependency
-const runtime = useMemo(() => useChatRuntime({
+// CORRECT - call hook directly, use stableConversationId to prevent remount
+const runtime = useChatRuntime({
   body: () => ({
     conversationId: conversationIdRef.current  // ← Access via ref
   })
-}), [/* conversationId NOT here */])
+})
+
+// Use stableConversationId in parent to prevent remounting
+<ConversationInitializer conversationId={stableConversationId}>
 ```
 
 ### ❌ Pitfall 3: Wrong message format (content vs parts)
@@ -516,25 +514,29 @@ useEffect(() => {
    - Location: `page.tsx:357`
    - Should be: `<ConversationInitializer conversationId={stableConversationId}>`
 
-2. Is runtime memoized?
-   - Location: `page.tsx:86`
-   - Should start with: `const runtime = useMemo(() => useChatRuntime({`
+2. Is `stableConversationId` being used?
+   - Location: `page.tsx:237` (state declaration)
+   - Location: `page.tsx:357` (ConversationInitializer prop)
+   - Should be: `<ConversationInitializer conversationId={stableConversationId}>`
 
-3. Is `conversationId` in runtime dependencies?
-   - Location: `page.tsx:103-110`
-   - Should NOT include `conversationId`
+3. Is `conversationIdRef` used in runtime body?
+   - Location: `page.tsx:95`
+   - Should use ref: `conversationId: conversationIdRef.current`
 
 **Fix:**
 ```typescript
-// 1. Use stable ID for initializer
+// 1. Declare stable ID (set once, never changes)
+const [stableConversationId] = useState<string | null>(validatedConversationId)
+
+// 2. Use stable ID for initializer
 <ConversationInitializer conversationId={stableConversationId}>
 
-// 2. Memoize runtime
-const runtime = useMemo(() => useChatRuntime({
+// 3. Use ref in runtime body
+const runtime = useChatRuntime({
   body: () => ({
     conversationId: conversationIdRef.current  // Access via ref
   })
-}), [/* stable dependencies only */])
+})
 ```
 
 ### Issue: Messages don't load from database
@@ -661,15 +663,19 @@ After making changes to conversation handling, test ALL of these scenarios:
 ## Version History
 
 ### January 2025 - Stable Conversation ID Pattern
-- **Problem:** Component remounting on conversation ID assignment
-- **Solution:** Introduced `stableConversationId` to prevent remounting
+- **Problem:** Component remounting on conversation ID assignment, losing streaming state
+- **Solution:** Introduced `stableConversationId` to prevent `ConversationInitializer` remounting
+- **Key Insight:** The fix is preventing remounting, not memoizing the runtime
 - **Files Changed:** `page.tsx:237, 357`
 - **Breaking:** None (internal implementation only)
 
-### January 2025 - Runtime Memoization
-- **Problem:** Runtime recreating on conversationId changes
-- **Solution:** Wrapped `useChatRuntime` in `useMemo`
-- **Files Changed:** `page.tsx:86-110`
+### January 2025 - TypeScript and Lint Fixes
+- **Problem:** ESLint errors (`any` types, hooks in callbacks) and TypeScript compilation errors
+- **Solution:**
+  - Replaced `any` with `UIMessage` type
+  - Removed invalid `useMemo` wrapper (React hooks cannot be called in callbacks)
+  - Imported `UIMessage` from correct package (`@ai-sdk/react`)
+- **Files Changed:** `page.tsx:4-5, 30, 87-104, 119, 121`
 - **Breaking:** None
 
 ### January 2025 - UIMessage Format Fix
