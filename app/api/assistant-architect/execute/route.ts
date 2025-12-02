@@ -4,7 +4,7 @@ import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { getAssistantArchitectByIdAction } from '@/actions/db/assistant-architect-actions';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
-import { executeSQL } from '@/lib/db/data-api-adapter';
+import { executeSQL, checkUserRoleByCognitoSub } from '@/lib/db/data-api-adapter';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from '@/lib/assistant-architect/knowledge-retrieval';
 import { hasToolAccess } from '@/utils/roles';
@@ -161,16 +161,34 @@ export async function POST(req: Request) {
     const architect = architectResult.data;
 
     // SECURITY: Verify user has permission to execute this assistant architect
-    // Currently only the owner can execute their assistant architects
+    // Allow execution if:
+    // 1. User is the owner (can execute any of their own, regardless of status)
+    // 2. User is an admin (can execute any assistant)
+    // 3. The assistant is approved (any user with assistant-architect access can execute)
     const isOwner = architect.userId === userId;
+    const isAdmin = await checkUserRoleByCognitoSub(session.sub, 'administrator');
+    const isApproved = architect.status === 'approved';
 
-    if (!isOwner) {
-      // Only owners can execute their assistant architects
-      // TODO: Add assistant_architect_access table for sharing when implemented
+    // Determine access reason for logging
+    let accessReason: string | null = null;
+    if (isOwner) {
+      accessReason = 'owner';
+    } else if (isAdmin) {
+      accessReason = 'admin';
+    } else if (isApproved) {
+      accessReason = 'approved';
+    }
+
+    if (!accessReason) {
+      // No valid access path - deny execution
       log.warn('User does not have access to this assistant architect', {
         userId,
         toolId,
-        architectOwnerId: architect.userId
+        architectOwnerId: architect.userId,
+        status: architect.status,
+        isOwner,
+        isAdmin,
+        isApproved
       });
       return new Response(
         JSON.stringify({
@@ -181,6 +199,15 @@ export async function POST(req: Request) {
         { status: 403, headers: { 'Content-Type': 'application/json' } }
       );
     }
+
+    // Log successful authorization for audit trail
+    log.info('Authorization granted for assistant architect execution', {
+      userId,
+      toolId,
+      architectOwnerId: architect.userId,
+      status: architect.status,
+      accessReason
+    });
 
     const prompts = (architect.prompts || []).sort((a, b) => a.position - b.position);
 
