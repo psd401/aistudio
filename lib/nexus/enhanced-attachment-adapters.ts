@@ -22,7 +22,26 @@ export interface AttachmentProcessingCallbacks {
  */
 export class HybridDocumentAdapter implements AttachmentAdapter {
   accept = "application/pdf,.docx,.xlsx,.pptx,.doc,.xls,.ppt,.txt,.md,.csv,.json,.xml,.yaml,.yml";
-  
+
+  // Supported text-based file extensions (files without magic bytes)
+  private static readonly TEXT_BASED_EXTENSIONS = ['csv', 'txt', 'md', 'json', 'xml', 'yaml', 'yml'] as const;
+
+  // Explicitly allowed MIME types for text-based files
+  // Note: MIME types can be spoofed, but server-side processing provides
+  // additional validation. For text files, this dual-check (extension + MIME)
+  // provides reasonable security without the overhead of content inspection.
+  private static readonly VALID_TEXT_MIME_TYPES = [
+    'text/csv',
+    'application/csv',  // Some systems send CSV as application/csv
+    'text/plain',
+    'text/markdown',
+    'application/json',
+    'application/xml',
+    'text/xml',
+    'application/x-yaml',
+    'text/yaml'
+  ] as const;
+
   private processedCache = new Map<string, CompleteAttachment>();
   private processingPromises = new Map<string, Promise<CompleteAttachment>>();
   private callbacks?: AttachmentProcessingCallbacks;
@@ -382,32 +401,118 @@ This might be because:
     return `${Math.round(duration / 60000)}m ${Math.round((duration % 60000) / 1000)}s`;
   }
 
+  /**
+   * Type guard to check if extension is a supported text-based format
+   */
+  private static isTextBasedExtension(
+    ext: string | undefined
+  ): ext is typeof HybridDocumentAdapter.TEXT_BASED_EXTENSIONS[number] {
+    if (!ext) return false;
+    return HybridDocumentAdapter.TEXT_BASED_EXTENSIONS.includes(
+      ext as typeof HybridDocumentAdapter.TEXT_BASED_EXTENSIONS[number]
+    );
+  }
+
+  /**
+   * Type guard to check if MIME type is a supported text format
+   */
+  private static isValidTextMimeType(
+    mimeType: string
+  ): mimeType is typeof HybridDocumentAdapter.VALID_TEXT_MIME_TYPES[number] {
+    return HybridDocumentAdapter.VALID_TEXT_MIME_TYPES.includes(
+      mimeType as typeof HybridDocumentAdapter.VALID_TEXT_MIME_TYPES[number]
+    );
+  }
+
+  /**
+   * Validates file type using extension and MIME type for text files,
+   * or magic bytes for binary formats.
+   * @param file - The file to validate
+   * @returns True if file type is supported, false otherwise
+   */
   private async validateFileType(file: File): Promise<boolean> {
     try {
+      // Validate file is not empty
+      if (file.size === 0) {
+        log.warn('File rejected: empty file', { fileName: file.name });
+        return false;
+      }
+
+      // Extract file extension and validate it exists
+      const ext = file.name.includes('.')
+        ? file.name.split('.').pop()?.toLowerCase()
+        : undefined;
+
+      if (!ext) {
+        log.warn('File rejected: no extension', { fileName: file.name });
+        return false;
+      }
+
+      log.debug('Validating file type', {
+        fileName: file.name,
+        extension: ext,
+        mimeType: file.type,
+        fileSize: file.size
+      });
+
+      // Text-based formats don't have magic bytes - validate by extension and MIME type
+      if (HybridDocumentAdapter.isTextBasedExtension(ext)) {
+        // Only allow explicitly validated MIME types for security
+        const isValid = HybridDocumentAdapter.isValidTextMimeType(file.type);
+
+        if (!isValid) {
+          log.warn('Text file rejected: invalid MIME type', {
+            fileName: file.name,
+            extension: ext,
+            mimeType: file.type,
+            allowedTypes: HybridDocumentAdapter.VALID_TEXT_MIME_TYPES
+          });
+        }
+
+        return isValid;
+      }
+
+      // For binary formats, check magic bytes
       const buffer = await file.arrayBuffer();
       const bytes = new Uint8Array(buffer).subarray(0, 8);
       const header = Array.from(bytes)
         .map(byte => byte.toString(16).padStart(2, '0'))
         .join('');
-      
-      // Check magic bytes for supported formats
+
+      log.debug('Checking magic bytes for binary file', {
+        fileName: file.name,
+        header: header.substring(0, 16)
+      });
+
+      // Check magic bytes for supported binary formats
       const magicBytes = {
         pdf: '25504446',      // %PDF
         office: '504b0304',   // ZIP-based format (Office 2007+)
         ole: 'd0cf11e0',      // OLE format (Office 97-2003)
       };
-      
+
       // Check PDF
       if (header.startsWith(magicBytes.pdf)) return true;
-      
+
       // Check Office formats
       if (header.startsWith(magicBytes.office) || header.startsWith(magicBytes.ole)) {
-        const ext = file.name.split('.').pop()?.toLowerCase();
         return ['docx', 'doc', 'xlsx', 'xls', 'pptx', 'ppt'].includes(ext || '');
       }
-      
+
+      log.warn('File validation failed: no matching format', {
+        fileName: file.name,
+        extension: ext,
+        mimeType: file.type,
+        headerPreview: header.substring(0, 16)
+      });
+
       return false;
-    } catch {
+    } catch (error) {
+      log.error('File type validation error', {
+        fileName: file.name,
+        fileType: file.type,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
       return false;
     }
   }

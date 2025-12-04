@@ -24,6 +24,7 @@ cd infra && npx cdk deploy AIStudio-FrontendStack-Dev     # Deploy single stack
 3. **Logging**: NEVER use `console.log/error`. Always use `@/lib/logger`. See patterns below.
 4. **Git Flow**: PRs target `dev` branch, never `main`. Write detailed commit messages.
 5. **Testing**: Add E2E tests for new features. Use Playwright MCP during development.
+6. **Nexus Conversations**: MUST read `/docs/features/nexus-conversation-architecture.md` before modifying conversation code. This system has broken multiple times - follow documented patterns exactly.
 
 ## 🏗️ Architecture
 
@@ -72,9 +73,9 @@ createProviderModel(provider: string, modelId: string): Promise<LanguageModel>
 
 ## 📚 Document Processing
 
-**Supported**: PDF, DOCX, TXT (via `/lib/document-processing.ts`)
+**Supported**: PDF, DOCX, XLSX, PPTX, TXT, MD, CSV, JSON, XML, YAML (via `/lib/document-processing.ts` and `/lib/nexus/enhanced-attachment-adapters.ts`)
 **Storage**: S3 with presigned URLs for large files
-**Limits**: 10MB default, configurable per deployment
+**Limits**: 500MB for Nexus attachments, 25MB for document processing (configurable per deployment)
 
 ## 🗄️ Database Operations
 

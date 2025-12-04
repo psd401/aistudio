@@ -2,6 +2,7 @@
 
 import { AssistantRuntimeProvider, type AttachmentAdapter, WebSpeechSynthesisAdapter } from '@assistant-ui/react'
 import { useChatRuntime, AssistantChatTransport } from '@assistant-ui/react-ai-sdk'
+import { type UIMessage } from '@ai-sdk/react'
 import { Thread } from '@/components/assistant-ui/thread'
 import { useSession } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
@@ -27,6 +28,7 @@ interface ConversationRuntimeProviderProps {
   selectedModel: SelectAiModel | null
   enabledTools: string[]
   attachmentAdapter: AttachmentAdapter
+  initialMessages?: UIMessage[]
   onConversationIdChange?: (conversationId: string) => void
 }
 
@@ -36,6 +38,7 @@ function ConversationRuntimeProvider({
   selectedModel,
   enabledTools,
   attachmentAdapter,
+  initialMessages = [],
   onConversationIdChange
 }: ConversationRuntimeProviderProps) {
   const historyAdapter = useMemo(
@@ -80,6 +83,8 @@ function ConversationRuntimeProvider({
 
   // Use official useChatRuntime from @assistant-ui/react-ai-sdk
   // This natively understands AI SDK's streaming format
+  // Note: stableConversationId prevents ConversationInitializer remount,
+  // which preserves streaming state without needing useMemo here
   const runtime = useChatRuntime({
     transport: new AssistantChatTransport({
       api: '/api/nexus/chat',
@@ -95,7 +100,8 @@ function ConversationRuntimeProvider({
       attachments: attachmentAdapter,
       history: historyAdapter,
       speech: new WebSpeechSynthesisAdapter(),
-    }
+    },
+    messages: initialMessages
   })
 
   return (
@@ -103,6 +109,85 @@ function ConversationRuntimeProvider({
       {children}
     </AssistantRuntimeProvider>
   )
+}
+
+// Component to load conversation messages before creating runtime
+function ConversationInitializer({
+  conversationId,
+  children
+}: {
+  conversationId: string | null
+  children: (messages: UIMessage[]) => React.ReactNode
+}) {
+  const [messages, setMessages] = useState<UIMessage[]>([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    if (!conversationId) {
+      setMessages([])
+      setLoading(false)
+      return
+    }
+
+    setLoading(true)
+    log.debug('ConversationInitializer loading messages', { conversationId })
+
+    fetch(`/api/nexus/conversations/${conversationId}/messages`)
+      .then(res => {
+        if (!res.ok) {
+          throw new Error(`Failed to load messages: ${res.status}`)
+        }
+        return res.json()
+      })
+      .then(data => {
+        const loadedMessages = data.messages || []
+        log.debug('Messages loaded from API', { count: loadedMessages.length })
+
+        // Convert to UIMessage format (required by useChatRuntime)
+        const threadMessages = loadedMessages.map((msg: {
+          id: string
+          role: 'user' | 'assistant' | 'system'
+          content?: Array<{ type: string; text?: string; [key: string]: unknown }> | string
+          createdAt?: string | Date
+        }) => ({
+          id: msg.id,
+          role: msg.role,
+          parts: Array.isArray(msg.content)
+            ? msg.content.map(part => ({
+                type: part.type as 'text',
+                text: part.text || ''
+              }))
+            : typeof msg.content === 'string'
+            ? [{ type: 'text' as const, text: msg.content }]
+            : [{ type: 'text' as const, text: '' }]
+        }))
+
+        setMessages(threadMessages)
+        setLoading(false)
+        log.debug('Messages converted and ready', { count: threadMessages.length })
+      })
+      .catch(error => {
+        log.error('Failed to load conversation', {
+          conversationId,
+          error: error instanceof Error ? error.message : String(error)
+        })
+        setMessages([])
+        setLoading(false)
+      })
+  }, [conversationId])
+
+  if (loading) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="text-center">
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent mx-auto mb-4" />
+          <div className="text-lg text-muted-foreground">Loading conversation...</div>
+        </div>
+      </div>
+    )
+  }
+
+  return <>{children(messages)}</>
 }
 
 // Component that uses useSearchParams - must be wrapped in Suspense
@@ -141,6 +226,10 @@ function NexusPageContent() {
 
   // Conversation continuity state - initialize from validated URL parameter
   const [conversationId, setConversationId] = useState<string | null>(validatedConversationId)
+
+  // Stable conversation ID for ConversationInitializer - only set on initial load from URL
+  // This prevents remounting when ID is assigned during runtime
+  const [stableConversationId] = useState<string | null>(validatedConversationId)
 
 
   // Conversation context for history adapter
@@ -260,26 +349,31 @@ function NexusPageContent() {
       >
         <div className="relative h-full">
           {selectedModel ? (
-            <ConversationRuntimeProvider
-              conversationId={conversationId}
-              selectedModel={selectedModel}
-              enabledTools={enabledTools}
-              attachmentAdapter={attachmentAdapter}
-              onConversationIdChange={handleConversationIdChange}
-            >
-              {/* Register tool UI components for all providers */}
-              <MultiProviderToolUIs />
+            <ConversationInitializer conversationId={stableConversationId}>
+              {(initialMessages) => (
+                <ConversationRuntimeProvider
+                  conversationId={conversationId}
+                  selectedModel={selectedModel}
+                  enabledTools={enabledTools}
+                  attachmentAdapter={attachmentAdapter}
+                  initialMessages={initialMessages}
+                  onConversationIdChange={handleConversationIdChange}
+                >
+                  {/* Register tool UI components for all providers */}
+                  <MultiProviderToolUIs />
 
-              {/* Auto-load prompts from Prompt Library */}
-              <PromptAutoLoader />
+                  {/* Auto-load prompts from Prompt Library */}
+                  <PromptAutoLoader />
 
-              <div className="flex h-full flex-col">
-                <Thread processingAttachments={processingAttachments} conversationId={conversationId} />
-              </div>
-              <ConversationPanel
-                selectedConversationId={conversationId}
-              />
-            </ConversationRuntimeProvider>
+                  <div className="flex h-full flex-col">
+                    <Thread processingAttachments={processingAttachments} conversationId={conversationId} />
+                  </div>
+                  <ConversationPanel
+                    selectedConversationId={conversationId}
+                  />
+                </ConversationRuntimeProvider>
+              )}
+            </ConversationInitializer>
           ) : (
             <div className="flex h-full items-center justify-center">
               <div className="text-center">
