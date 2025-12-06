@@ -591,7 +591,7 @@ async function executePromptChainServerSide(
     executionId: context.executionId
   });
 
-  for (const [index, prompt] of prompts.entries()) {
+  for (const prompt of prompts) {
     const promptStartTime = Date.now();
     const promptTimer = startTimer(`prompt.${prompt.id}.execution`);
 
