@@ -47,7 +47,16 @@ interface ChainPrompt {
   content: string;
   systemContext: string | null;
   modelId: number | null;
+  /**
+   * Execution position - prompts execute sequentially by position (0, then 1, then 2...).
+   * Multiple prompts at the same position execute in parallel.
+   */
   position: number;
+  /**
+   * Parallel group identifier (reserved for future use).
+   * Currently, all prompts at the same position execute in parallel.
+   * In future: Could enable multiple parallel groups within same position.
+   */
   parallelGroup: number | null;
   inputMapping: Record<string, string> | null;
   repositoryIds: number[] | null;
@@ -453,14 +462,30 @@ async function executePromptChain(
       const failures = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[];
       if (failures.length > 0) {
         const firstError = failures[0].reason;
+        const failedPromptIds = failures.map((_, idx) => promptsAtPosition[idx]?.id).filter(Boolean);
+
         log.error('Parallel prompt execution failed', {
           position,
           failureCount: failures.length,
+          failedPromptIds,
           errors: failures.map(f => f.reason instanceof Error ? f.reason.message : String(f.reason))
         });
 
-        // Throw first error to stop execution
-        throw firstError;
+        // Wrap error in ErrorFactory for consistent error handling
+        throw ErrorFactories.sysInternalError(
+          `${failures.length} of ${promptsAtPosition.length} parallel prompt(s) failed at position ${position}: ${
+            firstError instanceof Error ? firstError.message : String(firstError)
+          }`,
+          {
+            details: {
+              position,
+              failureCount: failures.length,
+              totalPrompts: promptsAtPosition.length,
+              failedPromptIds
+            },
+            cause: firstError instanceof Error ? firstError : undefined
+          }
+        );
       }
 
       // Extract successful stream responses
@@ -704,8 +729,13 @@ async function executeSinglePromptWithCompletion(
     });
 
     // 6. Wrap streaming in Promise that resolves on completion
+    // Use Promise-based pattern to avoid race condition between stream creation and onFinish
     return new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined>((resolve, reject) => {
-      let streamResponseForReturn: Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined = undefined;
+      // Promise to track when stream response is ready
+      let resolveStreamResponse!: (value: Awaited<ReturnType<typeof unifiedStreamingService.stream>>) => void;
+      const streamResponsePromise = new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>>>(res => {
+        resolveStreamResponse = res;
+      });
 
       const streamRequest: StreamRequest = {
         messages,
@@ -818,9 +848,14 @@ async function executeSinglePromptWithCompletion(
                 });
               }
 
-              // CRITICAL: Resolve with stream response for last prompt, undefined for others
-              // This ensures we wait for onFinish completion before moving to next position
-              resolve(isLastPrompt ? streamResponseForReturn : undefined);
+              // CRITICAL: Wait for stream response to be ready, then resolve
+              // This ensures no race condition between stream assignment and onFinish
+              if (isLastPrompt) {
+                const streamResponse = await streamResponsePromise;
+                resolve(streamResponse);
+              } else {
+                resolve(undefined);
+              }
 
             } catch (saveError) {
               log.error('Failed to save prompt result', {
@@ -840,7 +875,8 @@ async function executeSinglePromptWithCompletion(
         }
       };
 
-      // 7. Execute prompt with streaming - await stream creation to prevent race condition
+      // 7. Start streaming and make response available to onFinish via Promise
+      // Use IIFE to handle async operations without making Promise executor async
       (async () => {
         try {
           const streamResponse = await unifiedStreamingService.stream(streamRequest);
@@ -851,11 +887,10 @@ async function executeSinglePromptWithCompletion(
             position: prompt.position
           });
 
-          // Store stream response for return (if last prompt)
-          // This assignment now happens BEFORE onFinish can fire
-          streamResponseForReturn = streamResponse;
+          // Resolve the stream response promise so onFinish can access it
+          resolveStreamResponse(streamResponse);
 
-          // DO NOT resolve here - wait for onFinish callback
+          // DO NOT resolve main promise here - wait for onFinish callback
           // onFinish will call resolve() when streaming completes
         } catch (error) {
           promptTimer({ status: 'error' });
