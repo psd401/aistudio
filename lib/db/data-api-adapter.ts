@@ -1032,11 +1032,26 @@ export async function replaceModelReferences(
         { name: 'targetId', value: { longValue: targetModelId } },
         { name: 'replacementId', value: { longValue: replacementModelId } }
       ];
-      const modelIds = await executeSQL(modelIdsSql, modelIdsParams, requestId);
-      const { targetModelId: targetModelIdStr, replacementModelId: replacementModelIdStr } = modelIds[0] || {};
+      // Execute lookup query and validate result
+      const modelIdResult = await executeSQL(modelIdsSql, modelIdsParams, requestId);
 
+      // Check if query returned any rows
+      if (!modelIdResult || modelIdResult.length === 0) {
+        log.error("Model ID lookup failed - no results returned", { targetModelId, replacementModelId });
+        throw ErrorFactories.dbRecordNotFound("ai_models", targetModelId);
+      }
+
+      // Extract model_id strings (executeSQL auto-transforms snake_case to camelCase)
+      const { targetModelId: targetModelIdStr, replacementModelId: replacementModelIdStr } = modelIdResult[0];
+
+      // Validate that both values are non-null
       if (!targetModelIdStr || !replacementModelIdStr) {
-        log.error("Model ID lookup failed - models may not exist", { targetModelId, replacementModelId });
+        log.error("Model ID lookup returned null values", {
+          targetModelId,
+          replacementModelId,
+          targetModelIdStr,
+          replacementModelIdStr
+        });
         throw ErrorFactories.dbRecordNotFound("ai_models", !targetModelIdStr ? targetModelId : replacementModelId);
       }
 
