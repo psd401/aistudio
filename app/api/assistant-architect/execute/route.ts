@@ -56,6 +56,9 @@ interface ChainPrompt {
    * Parallel group identifier (reserved for future use).
    * Currently, all prompts at the same position execute in parallel.
    * In future: Could enable multiple parallel groups within same position.
+   *
+   * TODO: Implement parallelGroup-based execution logic to support multiple
+   * parallel groups within same position (e.g., [pos=0, group=A], [pos=0, group=B])
    */
   parallelGroup: number | null;
   inputMapping: Record<string, string> | null;
@@ -732,9 +735,12 @@ async function executeSinglePromptWithCompletion(
     // Use Promise-based pattern to avoid race condition between stream creation and onFinish
     return new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined>((resolve, reject) => {
       // Promise to track when stream response is ready
+      // Must handle both resolve AND reject to prevent hanging if IIFE fails
       let resolveStreamResponse!: (value: Awaited<ReturnType<typeof unifiedStreamingService.stream>>) => void;
-      const streamResponsePromise = new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>>>(res => {
+      let rejectStreamResponse!: (error: Error) => void;
+      const streamResponsePromise = new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>>>((res, rej) => {
         resolveStreamResponse = res;
+        rejectStreamResponse = rej;
       });
 
       const streamRequest: StreamRequest = {
@@ -851,8 +857,17 @@ async function executeSinglePromptWithCompletion(
               // CRITICAL: Wait for stream response to be ready, then resolve
               // This ensures no race condition between stream assignment and onFinish
               if (isLastPrompt) {
-                const streamResponse = await streamResponsePromise;
-                resolve(streamResponse);
+                try {
+                  const streamResponse = await streamResponsePromise;
+                  resolve(streamResponse);
+                } catch (streamError) {
+                  // Stream creation failed, propagate error
+                  log.error('Stream response promise rejected', {
+                    error: streamError,
+                    promptId: prompt.id
+                  });
+                  reject(streamError);
+                }
               } else {
                 resolve(undefined);
               }
@@ -898,6 +913,8 @@ async function executeSinglePromptWithCompletion(
             error,
             promptId: prompt.id
           });
+          // CRITICAL: Reject streamResponsePromise to prevent onFinish from hanging
+          rejectStreamResponse(error as Error);
           reject(error);
         }
       })();
