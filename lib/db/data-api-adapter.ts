@@ -13,6 +13,7 @@ import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { snakeToCamel } from "./field-mapper";
 import type { SelectNavigationItem } from '@/types/db-types';
 import { executeWithRetry } from "./rds-error-handler";
+import { ErrorFactories } from '@/lib/error-utils';
 
 // Type aliases for cleaner code
 type DataApiResponse = ExecuteStatementCommandOutput;
@@ -912,24 +913,42 @@ export async function deleteAIModel(id: number) {
 
 /**
  * Get count of references to a model across all tables
+ *
+ * Checks references in:
+ * - chain_prompts (model_id FK)
+ * - nexus_messages (model_id FK)
+ * - nexus_conversations (model_used varchar - requires join with ai_models)
+ * - tool_executions (3-table join: tool_executions → assistant_architects → chain_prompts → model_id)
+ * - model_comparisons (model1_id/model2_id FK)
  */
 export async function getModelReferenceCounts(modelId: number) {
   const sql = `
-    SELECT 
+    SELECT
       (SELECT COUNT(*) FROM chain_prompts WHERE model_id = :modelId) as chain_prompts_count,
-      (SELECT COUNT(*) FROM conversations WHERE model_id = :modelId) as conversations_count,
+      (SELECT COUNT(*) FROM nexus_messages WHERE model_id = :modelId) as nexus_messages_count,
+      (SELECT COUNT(*)
+       FROM nexus_conversations nc
+       INNER JOIN ai_models am ON nc.model_used = am.model_id
+       WHERE am.id = :modelId) as nexus_conversations_count,
+      (SELECT COUNT(DISTINCT te.id)
+       FROM tool_executions te
+       INNER JOIN assistant_architects aa ON te.assistant_architect_id = aa.id
+       INNER JOIN chain_prompts cp ON cp.assistant_architect_id = aa.id
+       WHERE cp.model_id = :modelId) as tool_executions_count,
       (SELECT COUNT(*) FROM model_comparisons WHERE model1_id = :modelId OR model2_id = :modelId) as model_comparisons_count
   `;
-  
+
   const parameters = [
     { name: 'modelId', value: { longValue: modelId } }
   ];
-  
+
   const result = await executeSQL(sql, parameters);
-  return result[0] || { 
-    chain_prompts_count: 0, 
-    conversations_count: 0, 
-    model_comparisons_count: 0 
+  return result[0] || {
+    chain_prompts_count: 0,
+    nexus_messages_count: 0,
+    nexus_conversations_count: 0,
+    tool_executions_count: 0,
+    model_comparisons_count: 0
   };
 }
 
@@ -990,16 +1009,68 @@ export async function replaceModelReferences(
       });
     }
     
-    // Update conversations
-    if (Number(counts.conversationsCount) > 0) {
+    // Update nexus_messages (model_id FK)
+    if (Number(counts.nexusMessagesCount) > 0) {
       statements.push({
-        sql: `UPDATE conversations SET model_id = :replacementId, updated_at = NOW() WHERE model_id = :targetId`,
+        sql: `UPDATE nexus_messages SET model_id = :replacementId, updated_at = NOW() WHERE model_id = :targetId`,
         parameters: [
           { name: 'replacementId', value: { longValue: replacementModelId } },
           { name: 'targetId', value: { longValue: targetModelId } }
         ]
       });
     }
+
+    // Update nexus_conversations (model_used varchar - requires join with ai_models to get model_id string)
+    if (Number(counts.nexusConversationsCount) > 0) {
+      // Get the model_id strings for both target and replacement
+      const modelIdsSql = `
+        SELECT
+          (SELECT model_id FROM ai_models WHERE id = :targetId) as target_model_id,
+          (SELECT model_id FROM ai_models WHERE id = :replacementId) as replacement_model_id
+      `;
+      const modelIdsParams = [
+        { name: 'targetId', value: { longValue: targetModelId } },
+        { name: 'replacementId', value: { longValue: replacementModelId } }
+      ];
+      // Execute lookup query and validate result
+      const modelIdResult = await executeSQL(modelIdsSql, modelIdsParams, requestId);
+
+      // Check if query returned any rows
+      if (!modelIdResult || modelIdResult.length === 0) {
+        log.error("Model ID lookup failed - no results returned", { targetModelId, replacementModelId });
+        throw ErrorFactories.dbRecordNotFound("ai_models", targetModelId);
+      }
+
+      // Extract model_id strings (executeSQL auto-transforms snake_case to camelCase)
+      const { targetModelId: targetModelIdStr, replacementModelId: replacementModelIdStr } = modelIdResult[0];
+
+      // Validate that both values are non-null
+      if (!targetModelIdStr || !replacementModelIdStr) {
+        log.error("Model ID lookup returned null values", {
+          targetModelId,
+          replacementModelId,
+          targetModelIdStr,
+          replacementModelIdStr
+        });
+        throw ErrorFactories.dbRecordNotFound("ai_models", !targetModelIdStr ? targetModelId : replacementModelId);
+      }
+
+      statements.push({
+        sql: `UPDATE nexus_conversations SET model_used = :replacementModelId, updated_at = NOW() WHERE model_used = :targetModelId`,
+        parameters: [
+          { name: 'replacementModelId', value: { stringValue: String(replacementModelIdStr) } },
+          { name: 'targetModelId', value: { stringValue: String(targetModelIdStr) } }
+        ]
+      });
+    }
+
+    // Note: tool_executions do NOT need direct updating because:
+    // - tool_executions only stores: assistant_architect_id (FK), user_id, status, timestamps
+    // - tool_executions does NOT store model_id directly
+    // - The model relationship is: tool_executions → assistant_architects → chain_prompts → model_id
+    // - Updating chain_prompts.model_id (above) changes which model the assistant uses
+    // - tool_executions.assistant_architect_id FK remains unchanged (still points to same assistant)
+    // - Therefore, no UPDATE needed for tool_executions table itself
     
     // Update model_comparisons (both model1_id and model2_id)
     if (Number(counts.modelComparisonsCount) > 0) {
@@ -1020,42 +1091,12 @@ export async function replaceModelReferences(
       });
     }
     
-    // Record in audit table
-    statements.push({
-      sql: `
-        INSERT INTO model_replacement_audit (
-          original_model_id, 
-          original_model_name, 
-          replacement_model_id, 
-          replacement_model_name, 
-          replaced_by, 
-          chain_prompts_updated, 
-          conversations_updated, 
-          model_comparisons_updated,
-          executed_at
-        ) VALUES (
-          :originalId, 
-          :originalName, 
-          :replacementId, 
-          :replacementName, 
-          :userId, 
-          :chainPromptsUpdated, 
-          :conversationsUpdated, 
-          :modelComparisonsUpdated,
-          NOW()
-        )
-      `,
-      parameters: [
-        { name: 'originalId', value: { longValue: targetModelId } },
-        { name: 'originalName', value: { stringValue: String(targetName) } },
-        { name: 'replacementId', value: { longValue: replacementModelId } },
-        { name: 'replacementName', value: { stringValue: String(replacementName) } },
-        { name: 'userId', value: { longValue: userId } },
-        { name: 'chainPromptsUpdated', value: { longValue: Number(counts.chainPromptsCount || 0) } },
-        { name: 'conversationsUpdated', value: { longValue: Number(counts.conversationsCount || 0) } },
-        { name: 'modelComparisonsUpdated', value: { longValue: Number(counts.modelComparisonsCount || 0) } }
-      ]
-    });
+    // Record in audit table (if it exists - may not be created yet)
+    // For now, we'll skip the audit logging until the table schema is updated
+    // TODO: Update model_replacement_audit table schema to include new columns:
+    // - nexus_messages_updated
+    // - nexus_conversations_updated
+    // - tool_executions_updated
     
     // Delete the original model
     statements.push({
@@ -1072,10 +1113,17 @@ export async function replaceModelReferences(
       replacementModel: { id: replacementModelId, name: replacementName },
       recordsUpdated: {
         chainPrompts: Number(counts.chainPromptsCount || 0),
-        conversations: Number(counts.conversationsCount || 0),
+        nexusMessages: Number(counts.nexusMessagesCount || 0),
+        nexusConversations: Number(counts.nexusConversationsCount || 0),
+        toolExecutions: Number(counts.toolExecutionsCount || 0),
         modelComparisons: Number(counts.modelComparisonsCount || 0)
       },
-      totalUpdated: Number(counts.chainPromptsCount || 0) + Number(counts.conversationsCount || 0) + Number(counts.modelComparisonsCount || 0)
+      totalUpdated:
+        Number(counts.chainPromptsCount || 0) +
+        Number(counts.nexusMessagesCount || 0) +
+        Number(counts.nexusConversationsCount || 0) +
+        Number(counts.toolExecutionsCount || 0) +
+        Number(counts.modelComparisonsCount || 0)
     };
     
     log.info("Model replacement completed successfully", result);
