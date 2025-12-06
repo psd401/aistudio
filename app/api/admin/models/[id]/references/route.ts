@@ -34,20 +34,22 @@ export async function GET(
     }
     
     const counts = await getModelReferenceCounts(modelId);
-    
+
     // The data-api-adapter automatically converts snake_case to camelCase
-    const totalReferences = 
-      Number(counts.chainPromptsCount || 0) + 
-      Number(counts.conversationsCount || 0) + 
+    const totalReferences =
+      Number(counts.chainPromptsCount || 0) +
+      Number(counts.nexusMessagesCount || 0) +
+      Number(counts.nexusConversationsCount || 0) +
+      Number(counts.toolExecutionsCount || 0) +
       Number(counts.modelComparisonsCount || 0);
-    
-    log.info("Reference counts retrieved successfully", { 
-      modelId, 
+
+    log.info("Reference counts retrieved successfully", {
+      modelId,
       totalReferences,
-      counts 
+      counts
     });
     timer({ status: "success", totalReferences });
-    
+
     return NextResponse.json(
       {
         isSuccess: true,
@@ -58,7 +60,9 @@ export async function GET(
           totalReferences,
           counts: {
             chainPrompts: Number(counts.chainPromptsCount || 0),
-            conversations: Number(counts.conversationsCount || 0),
+            nexusMessages: Number(counts.nexusMessagesCount || 0),
+            nexusConversations: Number(counts.nexusConversationsCount || 0),
+            toolExecutions: Number(counts.toolExecutionsCount || 0),
             modelComparisons: Number(counts.modelComparisonsCount || 0)
           }
         }
