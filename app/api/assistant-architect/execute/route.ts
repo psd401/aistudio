@@ -431,7 +431,9 @@ async function executePromptChain(
 
     if (isParallel) {
       // Execute prompts at this position in parallel
-      const parallelPromises = promptsAtPosition.map(prompt =>
+      const isLastPosition = position === sortedPositions[sortedPositions.length - 1];
+
+      const parallelPromises = promptsAtPosition.map((prompt, idx) =>
         executeSinglePromptWithCompletion(
           prompt,
           inputs,
@@ -439,7 +441,8 @@ async function executePromptChain(
           requestId,
           log,
           prompts.length,
-          false // Not last prompt for streaming (only sequential last prompt streams)
+          // First prompt in last position gets stream response for UI
+          isLastPosition && idx === 0
         )
       );
 
@@ -837,9 +840,11 @@ async function executeSinglePromptWithCompletion(
         }
       };
 
-      // 7. Execute prompt with streaming - store response for last prompt
-      unifiedStreamingService.stream(streamRequest)
-        .then(streamResponse => {
+      // 7. Execute prompt with streaming - await stream creation to prevent race condition
+      (async () => {
+        try {
+          const streamResponse = await unifiedStreamingService.stream(streamRequest);
+
           log.info('Prompt stream started', {
             promptId: prompt.id,
             promptName: prompt.name,
@@ -847,18 +852,20 @@ async function executeSinglePromptWithCompletion(
           });
 
           // Store stream response for return (if last prompt)
+          // This assignment now happens BEFORE onFinish can fire
           streamResponseForReturn = streamResponse;
 
           // DO NOT resolve here - wait for onFinish callback
           // onFinish will call resolve() when streaming completes
-        })
-        .catch(error => {
+        } catch (error) {
+          promptTimer({ status: 'error' });
           log.error('Failed to start prompt stream', {
             error,
             promptId: prompt.id
           });
           reject(error);
-        });
+        }
+      })();
     });
 
   } catch (promptError) {
