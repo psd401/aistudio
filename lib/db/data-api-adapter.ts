@@ -13,6 +13,7 @@ import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { snakeToCamel } from "./field-mapper";
 import type { SelectNavigationItem } from '@/types/db-types';
 import { executeWithRetry } from "./rds-error-handler";
+import { ErrorFactories } from '@/lib/error-utils';
 
 // Type aliases for cleaner code
 type DataApiResponse = ExecuteStatementCommandOutput;
@@ -917,7 +918,7 @@ export async function deleteAIModel(id: number) {
  * - chain_prompts (model_id FK)
  * - nexus_messages (model_id FK)
  * - nexus_conversations (model_used varchar - requires join with ai_models)
- * - tool_executions via assistant_architects (2-table join)
+ * - tool_executions (3-table join: tool_executions → assistant_architects → chain_prompts → model_id)
  * - model_comparisons (model1_id/model2_id FK)
  */
 export async function getModelReferenceCounts(modelId: number) {
@@ -925,14 +926,15 @@ export async function getModelReferenceCounts(modelId: number) {
     SELECT
       (SELECT COUNT(*) FROM chain_prompts WHERE model_id = :modelId) as chain_prompts_count,
       (SELECT COUNT(*) FROM nexus_messages WHERE model_id = :modelId) as nexus_messages_count,
-      (SELECT COUNT(DISTINCT nc.id)
+      (SELECT COUNT(*)
        FROM nexus_conversations nc
        INNER JOIN ai_models am ON nc.model_used = am.model_id
        WHERE am.id = :modelId) as nexus_conversations_count,
-      (SELECT COUNT(DISTINCT te.id)
+      (SELECT COUNT(*)
        FROM tool_executions te
        INNER JOIN assistant_architects aa ON te.assistant_architect_id = aa.id
-       WHERE aa.model_id = :modelId) as tool_executions_count,
+       INNER JOIN chain_prompts cp ON cp.assistant_architect_id = aa.id
+       WHERE cp.model_id = :modelId) as tool_executions_count,
       (SELECT COUNT(*) FROM model_comparisons WHERE model1_id = :modelId OR model2_id = :modelId) as model_comparisons_count
   `;
 
@@ -1033,28 +1035,24 @@ export async function replaceModelReferences(
       const modelIds = await executeSQL(modelIdsSql, modelIdsParams, requestId);
       const { targetModelId: targetModelIdStr, replacementModelId: replacementModelIdStr } = modelIds[0] || {};
 
-      if (targetModelIdStr && replacementModelIdStr) {
-        statements.push({
-          sql: `UPDATE nexus_conversations SET model_used = :replacementModelId, updated_at = NOW() WHERE model_used = :targetModelId`,
-          parameters: [
-            { name: 'replacementModelId', value: { stringValue: String(replacementModelIdStr) } },
-            { name: 'targetModelId', value: { stringValue: String(targetModelIdStr) } }
-          ]
-        });
+      if (!targetModelIdStr || !replacementModelIdStr) {
+        log.error("Model ID lookup failed - models may not exist", { targetModelId, replacementModelId });
+        throw ErrorFactories.dbRecordNotFound("ai_models", !targetModelIdStr ? targetModelId : replacementModelId);
       }
-    }
 
-    // Note: tool_executions references are updated via assistant_architects.model_id
-    // We don't directly update tool_executions since it has FK to assistant_architects
-    if (Number(counts.toolExecutionsCount) > 0) {
       statements.push({
-        sql: `UPDATE assistant_architects SET model_id = :replacementId, updated_at = NOW() WHERE model_id = :targetId`,
+        sql: `UPDATE nexus_conversations SET model_used = :replacementModelId, updated_at = NOW() WHERE model_used = :targetModelId`,
         parameters: [
-          { name: 'replacementId', value: { longValue: replacementModelId } },
-          { name: 'targetId', value: { longValue: targetModelId } }
+          { name: 'replacementModelId', value: { stringValue: String(replacementModelIdStr) } },
+          { name: 'targetModelId', value: { stringValue: String(targetModelIdStr) } }
         ]
       });
     }
+
+    // Note: tool_executions references are updated via chain_prompts.model_id
+    // chain_prompts is linked to assistant_architects, and tool_executions uses those architects
+    // So we update chain_prompts which will be handled by the chain_prompts update above
+    // No separate update needed here since chain_prompts already updated
     
     // Update model_comparisons (both model1_id and model2_id)
     if (Number(counts.modelComparisonsCount) > 0) {
