@@ -416,7 +416,6 @@ async function executePromptChain(
   });
 
   let lastStreamResponse;
-  let isFirstPromptGroup = true;
 
   // Execute each position sequentially
   for (const position of sortedPositions) {
@@ -486,8 +485,6 @@ async function executePromptChain(
         lastStreamResponse = streamResponse;
       }
     }
-
-    isFirstPromptGroup = false;
   }
 
   if (!lastStreamResponse) {
