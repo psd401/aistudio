@@ -930,7 +930,7 @@ export async function getModelReferenceCounts(modelId: number) {
        FROM nexus_conversations nc
        INNER JOIN ai_models am ON nc.model_used = am.model_id
        WHERE am.id = :modelId) as nexus_conversations_count,
-      (SELECT COUNT(*)
+      (SELECT COUNT(DISTINCT te.id)
        FROM tool_executions te
        INNER JOIN assistant_architects aa ON te.assistant_architect_id = aa.id
        INNER JOIN chain_prompts cp ON cp.assistant_architect_id = aa.id
@@ -1049,10 +1049,13 @@ export async function replaceModelReferences(
       });
     }
 
-    // Note: tool_executions references are updated via chain_prompts.model_id
-    // chain_prompts is linked to assistant_architects, and tool_executions uses those architects
-    // So we update chain_prompts which will be handled by the chain_prompts update above
-    // No separate update needed here since chain_prompts already updated
+    // Note: tool_executions do NOT need direct updating because:
+    // - tool_executions only stores: assistant_architect_id (FK), user_id, status, timestamps
+    // - tool_executions does NOT store model_id directly
+    // - The model relationship is: tool_executions → assistant_architects → chain_prompts → model_id
+    // - Updating chain_prompts.model_id (above) changes which model the assistant uses
+    // - tool_executions.assistant_architect_id FK remains unchanged (still points to same assistant)
+    // - Therefore, no UPDATE needed for tool_executions table itself
     
     // Update model_comparisons (both model1_id and model2_id)
     if (Number(counts.modelComparisonsCount) > 0) {
