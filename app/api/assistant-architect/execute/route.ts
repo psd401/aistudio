@@ -48,6 +48,7 @@ interface ChainPrompt {
   systemContext: string | null;
   modelId: number | null;
   position: number;
+  parallelGroup: number | null;
   inputMapping: Record<string, string> | null;
   repositoryIds: number[] | null;
   enabledTools: string[] | null;
@@ -301,8 +302,13 @@ export async function POST(req: Request) {
         executionId,
         toolId,
         promptCount: prompts.length,
-        requestId
+        requestId,
+        hasStreamResponse: !!streamResponse
       });
+
+      if (!streamResponse) {
+        throw ErrorFactories.sysInternalError('No stream response generated from prompt execution');
+      }
 
       return streamResponse.result.toUIMessageStreamResponse({
         headers: {
@@ -369,8 +375,10 @@ export async function POST(req: Request) {
 }
 
 /**
- * Execute a chain of prompts sequentially with state management
- * Now includes event emission for fine-grained progress tracking
+ * Execute a chain of prompts with support for parallel and sequential execution
+ * - Prompts at same position execute in parallel using Promise.all()
+ * - Prompts at different positions execute sequentially (position 0, then 1, then 2, etc.)
+ * - Includes event emission for fine-grained progress tracking
  */
 async function executePromptChain(
   prompts: ChainPrompt[],
@@ -384,202 +392,321 @@ async function executePromptChain(
     executionId: context.executionId
   });
 
+  // Group prompts by position for parallel/sequential execution
+  const positionGroups = new Map<number, ChainPrompt[]>();
+  for (const prompt of prompts) {
+    const position = prompt.position;
+    if (!positionGroups.has(position)) {
+      positionGroups.set(position, []);
+    }
+    positionGroups.get(position)!.push(prompt);
+  }
+
+  // Sort positions to execute in order (0, 1, 2, ...)
+  const sortedPositions = Array.from(positionGroups.keys()).sort((a, b) => a - b);
+
+  log.info('Prompt execution plan', {
+    totalPrompts: prompts.length,
+    positions: sortedPositions.length,
+    positionDetails: sortedPositions.map(pos => ({
+      position: pos,
+      promptCount: positionGroups.get(pos)!.length,
+      prompts: positionGroups.get(pos)!.map(p => ({ id: p.id, name: p.name }))
+    }))
+  });
+
   let lastStreamResponse;
+  let isFirstPromptGroup = true;
 
-  for (const [index, prompt] of prompts.entries()) {
-    const isLastPrompt = index === prompts.length - 1;
-    const promptStartTime = Date.now();
-    const promptTimer = startTimer(`prompt.${prompt.id}.execution`);
+  // Execute each position sequentially
+  for (const position of sortedPositions) {
+    const promptsAtPosition = positionGroups.get(position)!;
+    const isParallel = promptsAtPosition.length > 1;
 
-    log.info('Executing prompt', {
-      promptId: prompt.id,
-      promptName: prompt.name,
-      position: prompt.position,
-      isLastPrompt,
-      executionId: context.executionId
+    log.info('Executing position group', {
+      position,
+      promptCount: promptsAtPosition.length,
+      isParallel,
+      prompts: promptsAtPosition.map(p => ({ id: p.id, name: p.name }))
     });
 
-    // Emit prompt-start event
-    await storeExecutionEvent(context.executionId, 'prompt-start', {
-      promptId: prompt.id,
-      promptName: prompt.name,
-      position: index + 1,
-      totalPrompts: prompts.length,
-      modelId: String(prompt.modelId || 'unknown'),
-      hasKnowledge: !!(prompt.repositoryIds && prompt.repositoryIds.length > 0),
-      hasTools: !!(prompt.enabledTools && prompt.enabledTools.length > 0)
-    });
+    if (isParallel) {
+      // Execute prompts at this position in parallel
+      const parallelPromises = promptsAtPosition.map(prompt =>
+        executeSinglePromptWithCompletion(
+          prompt,
+          inputs,
+          context,
+          requestId,
+          log,
+          prompts.length,
+          false // Not last prompt for streaming (only sequential last prompt streams)
+        )
+      );
 
-    try {
-      // Validate prompt has a model configured
-      if (!prompt.modelId) {
-        throw ErrorFactories.validationFailed([{
-          field: 'modelId',
-          message: `Prompt ${prompt.id} (${prompt.name}) has no model configured`
-        }], {
-          details: { promptId: prompt.id, promptName: prompt.name }
+      // Wait for ALL prompts at this position to complete
+      const results = await Promise.allSettled(parallelPromises);
+
+      // Check for failures
+      const failures = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[];
+      if (failures.length > 0) {
+        const firstError = failures[0].reason;
+        log.error('Parallel prompt execution failed', {
+          position,
+          failureCount: failures.length,
+          errors: failures.map(f => f.reason instanceof Error ? f.reason.message : String(f.reason))
         });
+
+        // Throw first error to stop execution
+        throw firstError;
       }
 
-      // 1. Inject repository context if configured
-      let repositoryContext = '';
-      if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
-        log.debug('Retrieving repository knowledge', {
-          promptId: prompt.id,
-          repositoryIds: prompt.repositoryIds
-        });
-
-        // Emit knowledge-retrieval-start event
-        await storeExecutionEvent(context.executionId, 'knowledge-retrieval-start', {
-          promptId: prompt.id,
-          repositories: prompt.repositoryIds,
-          searchType: 'hybrid'
-        });
-
-        const knowledgeChunks = await retrieveKnowledgeForPrompt(
-          prompt.content,
-          prompt.repositoryIds,
-          context.userCognitoSub,
-          context.assistantOwnerSub,
-          {
-            maxChunks: 10,
-            maxTokens: 4000,
-            similarityThreshold: 0.7,
-            searchType: 'hybrid',
-            vectorWeight: 0.8
-          },
-          requestId
-        );
-
-        if (knowledgeChunks.length > 0) {
-          repositoryContext = '\n\n' + formatKnowledgeContext(knowledgeChunks);
-          log.debug('Repository context retrieved', {
-            promptId: prompt.id,
-            chunkCount: knowledgeChunks.length
-          });
-
-          // Emit knowledge-retrieved event
-          // NOTE: Token estimation uses rough approximation (character count / 4)
-          // For precise token counts, consider using js-tiktoken encoder
-          const totalTokens = knowledgeChunks.reduce((sum, chunk) => sum + Math.ceil(chunk.content.length / 4), 0);
-
-          // Calculate average similarity score (safe due to length > 0 check above)
-          const avgRelevance = knowledgeChunks.reduce((sum, chunk) => sum + chunk.similarity, 0) / knowledgeChunks.length;
-
-          await storeExecutionEvent(context.executionId, 'knowledge-retrieved', {
-            promptId: prompt.id,
-            documentsFound: knowledgeChunks.length,
-            relevanceScore: avgRelevance,
-            tokens: totalTokens
-          });
-        }
+      // Extract successful stream responses
+      const successResults = results.filter(r => r.status === 'fulfilled') as PromiseFulfilledResult<typeof lastStreamResponse>[];
+      if (successResults.length > 0 && successResults[0].value) {
+        lastStreamResponse = successResults[0].value;
       }
 
-      // 2. Apply variable substitution
-      const inputMapping = (prompt.inputMapping || {}) as Record<string, string>;
-      const processedContent = substituteVariables(
-        prompt.content,
+    } else {
+      // Single prompt at this position - execute sequentially
+      const prompt = promptsAtPosition[0];
+      const isLastPrompt = position === sortedPositions[sortedPositions.length - 1] && promptsAtPosition.length === 1;
+
+      const streamResponse = await executeSinglePromptWithCompletion(
+        prompt,
         inputs,
-        context.previousOutputs,
-        inputMapping
+        context,
+        requestId,
+        log,
+        prompts.length,
+        isLastPrompt
       );
 
-      log.debug('Variables substituted', {
+      if (streamResponse) {
+        lastStreamResponse = streamResponse;
+      }
+    }
+
+    isFirstPromptGroup = false;
+  }
+
+  if (!lastStreamResponse) {
+    throw ErrorFactories.sysInternalError('No stream response generated', {
+      details: { promptCount: prompts.length, executionId: context.executionId }
+    });
+  }
+
+  return lastStreamResponse;
+}
+
+/**
+ * Execute a single prompt and wait for completion
+ * Returns Promise that resolves when streaming finishes (onFinish callback completes)
+ */
+async function executeSinglePromptWithCompletion(
+  prompt: ChainPrompt,
+  inputs: Record<string, unknown>,
+  context: PromptExecutionContext,
+  requestId: string,
+  log: ReturnType<typeof createLogger>,
+  totalPrompts: number,
+  isLastPrompt: boolean
+) {
+  const promptStartTime = Date.now();
+  const promptTimer = startTimer(`prompt.${prompt.id}.execution`);
+
+  log.info('Executing prompt', {
+    promptId: prompt.id,
+    promptName: prompt.name,
+    position: prompt.position,
+    isLastPrompt,
+    executionId: context.executionId
+  });
+
+  // Emit prompt-start event
+  await storeExecutionEvent(context.executionId, 'prompt-start', {
+    promptId: prompt.id,
+    promptName: prompt.name,
+    position: prompt.position,
+    totalPrompts,
+    modelId: String(prompt.modelId || 'unknown'),
+    hasKnowledge: !!(prompt.repositoryIds && prompt.repositoryIds.length > 0),
+    hasTools: !!(prompt.enabledTools && prompt.enabledTools.length > 0)
+  });
+
+  try {
+    // Validate prompt has a model configured
+    if (!prompt.modelId) {
+      throw ErrorFactories.validationFailed([{
+        field: 'modelId',
+        message: `Prompt ${prompt.id} (${prompt.name}) has no model configured`
+      }], {
+        details: { promptId: prompt.id, promptName: prompt.name }
+      });
+    }
+
+    // 1. Inject repository context if configured
+    let repositoryContext = '';
+    if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
+      log.debug('Retrieving repository knowledge', {
         promptId: prompt.id,
-        originalLength: prompt.content.length,
-        processedLength: processedContent.length
+        repositoryIds: prompt.repositoryIds
       });
 
-      // Emit variable-substitution event if variables were used
-      if (Object.keys(inputMapping).length > 0 || processedContent !== prompt.content) {
-        const substitutedVars: Record<string, string> = {};
-        const sourcePrompts: number[] = [];
+      // Emit knowledge-retrieval-start event
+      await storeExecutionEvent(context.executionId, 'knowledge-retrieval-start', {
+        promptId: prompt.id,
+        repositories: prompt.repositoryIds,
+        searchType: 'hybrid'
+      });
 
-        // Extract which variables were substituted
-        for (const [varName, mappedPath] of Object.entries(inputMapping)) {
-          const promptMatch = mappedPath.match(/^prompt_(\d+)\.output$/);
-          if (promptMatch) {
-            const sourcePromptId = Number.parseInt(promptMatch[1], 10);
-            sourcePrompts.push(sourcePromptId);
-            const value = context.previousOutputs.get(sourcePromptId);
-            if (value) {
-              substitutedVars[varName] = value.substring(0, 100); // Truncate for storage
-            }
-          } else if (varName in inputs) {
-            substitutedVars[varName] = String(inputs[varName]).substring(0, 100);
+      const knowledgeChunks = await retrieveKnowledgeForPrompt(
+        prompt.content,
+        prompt.repositoryIds,
+        context.userCognitoSub,
+        context.assistantOwnerSub,
+        {
+          maxChunks: 10,
+          maxTokens: 4000,
+          similarityThreshold: 0.7,
+          searchType: 'hybrid',
+          vectorWeight: 0.8
+        },
+        requestId
+      );
+
+      if (knowledgeChunks.length > 0) {
+        repositoryContext = '\n\n' + formatKnowledgeContext(knowledgeChunks);
+        log.debug('Repository context retrieved', {
+          promptId: prompt.id,
+          chunkCount: knowledgeChunks.length
+        });
+
+        // Emit knowledge-retrieved event
+        // NOTE: Token estimation uses rough approximation (character count / 4)
+        // For precise token counts, consider using js-tiktoken encoder
+        const totalTokens = knowledgeChunks.reduce((sum, chunk) => sum + Math.ceil(chunk.content.length / 4), 0);
+
+        // Calculate average similarity score (safe due to length > 0 check above)
+        const avgRelevance = knowledgeChunks.reduce((sum, chunk) => sum + chunk.similarity, 0) / knowledgeChunks.length;
+
+        await storeExecutionEvent(context.executionId, 'knowledge-retrieved', {
+          promptId: prompt.id,
+          documentsFound: knowledgeChunks.length,
+          relevanceScore: avgRelevance,
+          tokens: totalTokens
+        });
+      }
+    }
+
+    // 2. Apply variable substitution
+    const inputMapping = (prompt.inputMapping || {}) as Record<string, string>;
+    const processedContent = substituteVariables(
+      prompt.content,
+      inputs,
+      context.previousOutputs,
+      inputMapping
+    );
+
+    log.debug('Variables substituted', {
+      promptId: prompt.id,
+      originalLength: prompt.content.length,
+      processedLength: processedContent.length
+    });
+
+    // Emit variable-substitution event if variables were used
+    if (Object.keys(inputMapping).length > 0 || processedContent !== prompt.content) {
+      const substitutedVars: Record<string, string> = {};
+      const sourcePrompts: number[] = [];
+
+      // Extract which variables were substituted
+      for (const [varName, mappedPath] of Object.entries(inputMapping)) {
+        const promptMatch = mappedPath.match(/^prompt_(\d+)\.output$/);
+        if (promptMatch) {
+          const sourcePromptId = Number.parseInt(promptMatch[1], 10);
+          sourcePrompts.push(sourcePromptId);
+          const value = context.previousOutputs.get(sourcePromptId);
+          if (value) {
+            substitutedVars[varName] = value.substring(0, 100); // Truncate for storage
           }
+        } else if (varName in inputs) {
+          substitutedVars[varName] = String(inputs[varName]).substring(0, 100);
         }
-
-        await storeExecutionEvent(context.executionId, 'variable-substitution', {
-          promptId: prompt.id,
-          variables: substitutedVars,
-          sourcePrompts: Array.from(new Set(sourcePrompts))
-        });
       }
 
-      // 3. Build messages with accumulated context
-      const userMessage: UIMessage = {
-        id: `prompt-${prompt.id}-${Date.now()}`,
-        role: 'user',
-        parts: [{ type: 'text', text: processedContent + repositoryContext }]
-      };
-
-      const messages = [...context.accumulatedMessages, userMessage];
-
-      // 4. Get AI model configuration
-      // Note: RDS Data API adapter returns camelCase field names
-      const modelResult = await executeSQL<{ modelId: string; provider: string }>(
-        `SELECT model_id, provider FROM ai_models WHERE id = :modelId LIMIT 1`,
-        [{ name: 'modelId', value: { longValue: prompt.modelId } }]
-      );
-
-      if (!modelResult || modelResult.length === 0) {
-        throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
-          details: { promptId: prompt.id, modelId: prompt.modelId }
-        });
-      }
-
-      // Validate query results to ensure correct types
-      // Note: RDS Data API adapter transforms snake_case to camelCase
-      const modelData = modelResult[0];
-      if (!modelData?.modelId || !modelData?.provider) {
-        throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
-          details: { promptId: prompt.id, modelId: prompt.modelId, reason: 'Invalid model data' }
-        });
-      }
-
-      const modelId = String(modelData.modelId);
-      const provider = String(modelData.provider);
-
-      // 5. Prepare tools for this prompt
-      const enabledTools: string[] = [...(prompt.enabledTools || [])];
-      let promptTools = {};
-
-      // Create repository search tools if repositories are configured
-      if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
-        log.debug('Creating repository search tools', {
-          promptId: prompt.id,
-          repositoryIds: prompt.repositoryIds
-        });
-
-        const repoTools = createRepositoryTools({
-          repositoryIds: prompt.repositoryIds,
-          userCognitoSub: context.userCognitoSub,
-          assistantOwnerSub: context.assistantOwnerSub
-        });
-
-        // Merge repository tools
-        promptTools = { ...promptTools, ...repoTools };
-      }
-
-      log.debug('Tools configured for prompt', {
+      await storeExecutionEvent(context.executionId, 'variable-substitution', {
         promptId: prompt.id,
-        enabledTools,
-        toolCount: Object.keys(promptTools).length,
-        tools: Object.keys(promptTools)
+        variables: substitutedVars,
+        sourcePrompts: Array.from(new Set(sourcePrompts))
+      });
+    }
+
+    // 3. Build messages with accumulated context
+    const userMessage: UIMessage = {
+      id: `prompt-${prompt.id}-${Date.now()}`,
+      role: 'user',
+      parts: [{ type: 'text', text: processedContent + repositoryContext }]
+    };
+
+    const messages = [...context.accumulatedMessages, userMessage];
+
+    // 4. Get AI model configuration
+    // Note: RDS Data API adapter returns camelCase field names
+    const modelResult = await executeSQL<{ modelId: string; provider: string }>(
+      `SELECT model_id, provider FROM ai_models WHERE id = :modelId LIMIT 1`,
+      [{ name: 'modelId', value: { longValue: prompt.modelId } }]
+    );
+
+    if (!modelResult || modelResult.length === 0) {
+      throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
+        details: { promptId: prompt.id, modelId: prompt.modelId }
+      });
+    }
+
+    // Validate query results to ensure correct types
+    // Note: RDS Data API adapter transforms snake_case to camelCase
+    const modelData = modelResult[0];
+    if (!modelData?.modelId || !modelData?.provider) {
+      throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
+        details: { promptId: prompt.id, modelId: prompt.modelId, reason: 'Invalid model data' }
+      });
+    }
+
+    const modelId = String(modelData.modelId);
+    const provider = String(modelData.provider);
+
+    // 5. Prepare tools for this prompt
+    const enabledTools: string[] = [...(prompt.enabledTools || [])];
+    let promptTools = {};
+
+    // Create repository search tools if repositories are configured
+    if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
+      log.debug('Creating repository search tools', {
+        promptId: prompt.id,
+        repositoryIds: prompt.repositoryIds
       });
 
-      // 6. Create streaming request
+      const repoTools = createRepositoryTools({
+        repositoryIds: prompt.repositoryIds,
+        userCognitoSub: context.userCognitoSub,
+        assistantOwnerSub: context.assistantOwnerSub
+      });
+
+      // Merge repository tools
+      promptTools = { ...promptTools, ...repoTools };
+    }
+
+    log.debug('Tools configured for prompt', {
+      promptId: prompt.id,
+      enabledTools,
+      toolCount: Object.keys(promptTools).length,
+      tools: Object.keys(promptTools)
+    });
+
+    // 6. Wrap streaming in Promise that resolves on completion
+    return new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined>((resolve, reject) => {
+      let streamResponseForReturn: Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined = undefined;
+
       const streamRequest: StreamRequest = {
         messages,
         modelId: String(modelId),
@@ -687,9 +814,13 @@ async function executePromptChain(
 
                 log.info('Execution completed successfully', {
                   executionId: context.executionId,
-                  totalPrompts: prompts.length
+                  totalPrompts
                 });
               }
+
+              // CRITICAL: Resolve with stream response for last prompt, undefined for others
+              // This ensures we wait for onFinish completion before moving to next position
+              resolve(isLastPrompt ? streamResponseForReturn : undefined);
 
             } catch (saveError) {
               log.error('Failed to save prompt result', {
@@ -697,82 +828,93 @@ async function executePromptChain(
                 promptId: prompt.id,
                 executionId: context.executionId
               });
-              // Don't throw - let the stream complete, but log the error
+              // Reject promise on save error
+              reject(saveError);
             }
+          },
+          onError: (error) => {
+            promptTimer({ status: 'error' });
+            log.error('Prompt streaming error', { error, promptId: prompt.id });
+            reject(error);
           }
         }
       };
 
-      // 7. Execute prompt with streaming
-      lastStreamResponse = await unifiedStreamingService.stream(streamRequest);
+      // 7. Execute prompt with streaming - store response for last prompt
+      unifiedStreamingService.stream(streamRequest)
+        .then(streamResponse => {
+          log.info('Prompt stream started', {
+            promptId: prompt.id,
+            promptName: prompt.name,
+            position: prompt.position
+          });
 
-      log.info('Prompt streamed successfully', {
-        promptId: prompt.id,
-        promptName: prompt.name,
-        position: index + 1,
-        of: prompts.length
-      });
+          // Store stream response for return (if last prompt)
+          streamResponseForReturn = streamResponse;
 
-    } catch (promptError) {
-      promptTimer({ status: 'error' });
-
-      log.error('Prompt execution failed', {
-        error: promptError,
-        promptId: prompt.id,
-        promptName: prompt.name,
-        executionId: context.executionId
-      });
-
-      // Emit execution-error event for prompt failure
-      await storeExecutionEvent(context.executionId, 'execution-error', {
-        executionId: context.executionId,
-        error: promptError instanceof Error ? promptError.message : String(promptError),
-        promptId: prompt.id,
-        recoverable: false,
-        details: promptError instanceof Error ? promptError.stack : undefined
-      }).catch(err => log.error('Failed to store prompt error event', { error: err }));
-
-      // Save failed prompt result
-      await executeSQL(
-        `INSERT INTO prompt_results (
-          execution_id, prompt_id, input_data, output_data,
-          status, error_message, started_at, completed_at
-        ) VALUES (
-          :executionId, :promptId, :inputData::jsonb, :outputData,
-          'failed', :errorMessage, NOW(), NOW()
-        )`,
-        [
-          { name: 'executionId', value: { longValue: context.executionId } },
-          { name: 'promptId', value: { longValue: prompt.id } },
-          { name: 'inputData', value: { stringValue: JSON.stringify({ prompt: prompt.content }) } },
-          { name: 'outputData', value: { stringValue: '' } },
-          { name: 'errorMessage', value: {
-            stringValue: promptError instanceof Error ? promptError.message : String(promptError)
-          }}
-        ]
-      );
-
-      // For now, stop execution on first error
-      // Future enhancement: check prompt.stop_on_error field
-      throw ErrorFactories.sysInternalError(
-        `Prompt ${prompt.id} (${prompt.name}) failed: ${
-          promptError instanceof Error ? promptError.message : String(promptError)
-        }`,
-        {
-          details: { promptId: prompt.id, promptName: prompt.name },
-          cause: promptError instanceof Error ? promptError : undefined
-        }
-      );
-    }
-  }
-
-  if (!lastStreamResponse) {
-    throw ErrorFactories.sysInternalError('No stream response generated', {
-      details: { promptCount: prompts.length, executionId: context.executionId }
+          // DO NOT resolve here - wait for onFinish callback
+          // onFinish will call resolve() when streaming completes
+        })
+        .catch(error => {
+          log.error('Failed to start prompt stream', {
+            error,
+            promptId: prompt.id
+          });
+          reject(error);
+        });
     });
-  }
 
-  return lastStreamResponse;
+  } catch (promptError) {
+    promptTimer({ status: 'error' });
+
+    log.error('Prompt execution failed', {
+      error: promptError,
+      promptId: prompt.id,
+      promptName: prompt.name,
+      executionId: context.executionId
+    });
+
+    // Emit execution-error event for prompt failure
+    await storeExecutionEvent(context.executionId, 'execution-error', {
+      executionId: context.executionId,
+      error: promptError instanceof Error ? promptError.message : String(promptError),
+      promptId: prompt.id,
+      recoverable: false,
+      details: promptError instanceof Error ? promptError.stack : undefined
+    }).catch(err => log.error('Failed to store prompt error event', { error: err }));
+
+    // Save failed prompt result
+    await executeSQL(
+      `INSERT INTO prompt_results (
+        execution_id, prompt_id, input_data, output_data,
+        status, error_message, started_at, completed_at
+      ) VALUES (
+        :executionId, :promptId, :inputData::jsonb, :outputData,
+        'failed', :errorMessage, NOW(), NOW()
+      )`,
+      [
+        { name: 'executionId', value: { longValue: context.executionId } },
+        { name: 'promptId', value: { longValue: prompt.id } },
+        { name: 'inputData', value: { stringValue: JSON.stringify({ prompt: prompt.content }) } },
+        { name: 'outputData', value: { stringValue: '' } },
+        { name: 'errorMessage', value: {
+          stringValue: promptError instanceof Error ? promptError.message : String(promptError)
+        }}
+      ]
+    );
+
+    // For now, stop execution on first error
+    // Future enhancement: check prompt.stop_on_error field
+    throw ErrorFactories.sysInternalError(
+      `Prompt ${prompt.id} (${prompt.name}) failed: ${
+        promptError instanceof Error ? promptError.message : String(promptError)
+      }`,
+      {
+        details: { promptId: prompt.id, promptName: prompt.name },
+        cause: promptError instanceof Error ? promptError : undefined
+      }
+    );
+  }
 }
 
 /**
