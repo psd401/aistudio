@@ -894,7 +894,7 @@ async function executePromptChainServerSide(
       log.info('Prompt execution completed', {
         promptId: prompt.id,
         promptName: prompt.name,
-        position: index + 1,
+        position: prompt.position,
         of: prompts.length
       });
 

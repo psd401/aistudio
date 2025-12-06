@@ -442,6 +442,16 @@ async function executePromptChain(
     });
 
     if (isParallel) {
+      // Validate parallelGroup field usage
+      const uniqueGroups = new Set(promptsAtPosition.map(p => p.parallelGroup).filter(g => g !== null));
+      if (uniqueGroups.size > 1) {
+        log.warn('Multiple parallel groups at same position - not yet supported', {
+          position,
+          groups: Array.from(uniqueGroups),
+          promptIds: promptsAtPosition.map(p => p.id)
+        });
+      }
+
       // Execute prompts at this position in parallel
       const isLastPosition = position === sortedPositions[sortedPositions.length - 1];
 
@@ -471,14 +481,18 @@ async function executePromptChain(
           position,
           failureCount: failures.length,
           failedPromptIds,
-          errors: failures.map(f => f.reason instanceof Error ? f.reason.message : String(f.reason))
+          errors: failures.map(f => {
+            const errMsg = f.reason instanceof Error ? f.reason.message : String(f.reason);
+            return errMsg.length > 200 ? errMsg.substring(0, 197) + '...' : errMsg;
+          })
         });
 
         // Wrap error in ErrorFactory for consistent error handling
+        const firstErrorMsg = firstError instanceof Error ? firstError.message : String(firstError);
+        const truncatedMsg = firstErrorMsg.length > 200 ? firstErrorMsg.substring(0, 197) + '...' : firstErrorMsg;
+
         throw ErrorFactories.sysInternalError(
-          `${failures.length} of ${promptsAtPosition.length} parallel prompt(s) failed at position ${position}: ${
-            firstError instanceof Error ? firstError.message : String(firstError)
-          }`,
+          `${failures.length} of ${promptsAtPosition.length} parallel prompt(s) failed at position ${position}: ${truncatedMsg}`,
           {
             details: {
               position,
@@ -493,8 +507,25 @@ async function executePromptChain(
 
       // Extract successful stream responses
       const successResults = results.filter(r => r.status === 'fulfilled') as PromiseFulfilledResult<typeof lastStreamResponse>[];
-      if (successResults.length > 0 && successResults[0].value) {
-        lastStreamResponse = successResults[0].value;
+      // Find the result explicitly marked for UI streaming (isLastPosition && idx === 0)
+      // Only one parallel prompt gets isLastPrompt=true, so only one result has value !== undefined
+      const uiStreamResult = successResults.find(r => r.value !== undefined);
+      if (uiStreamResult?.value) {
+        lastStreamResponse = uiStreamResult.value;
+      }
+
+      // Verify UI stream was assigned for last position
+      if (isLastPosition && !lastStreamResponse) {
+        throw ErrorFactories.sysInternalError(
+          'Failed to assign UI stream response from last parallel group',
+          {
+            details: {
+              position,
+              successfulPrompts: successResults.length,
+              totalPrompts: promptsAtPosition.length
+            }
+          }
+        );
       }
 
     } else {
@@ -655,10 +686,23 @@ async function executeSinglePromptWithCompletion(
           sourcePrompts.push(sourcePromptId);
           const value = context.previousOutputs.get(sourcePromptId);
           if (value) {
-            substitutedVars[varName] = value.substring(0, 100); // Truncate for storage
+            substitutedVars[varName] = String(sanitizeForLogging(value)).substring(0, 500);
+            log.debug('Variable substituted from previous output', {
+              varName,
+              sourcePromptId,
+              fullLength: value.length,
+              truncated: value.length > 500
+            });
           }
         } else if (varName in inputs) {
-          substitutedVars[varName] = String(inputs[varName]).substring(0, 100);
+          const inputValue = String(inputs[varName]);
+          substitutedVars[varName] = String(sanitizeForLogging(inputValue)).substring(0, 500);
+          if (inputValue.length > 500) {
+            log.debug('Variable substituted from input (truncated)', {
+              varName,
+              fullLength: inputValue.length
+            });
+          }
         }
       }
 
@@ -917,7 +961,16 @@ async function executeSinglePromptWithCompletion(
           rejectStreamResponse(error as Error);
           reject(error);
         }
-      })();
+      })().catch(error => {
+        // Fallback for synchronous errors not caught by async try-catch
+        promptTimer({ status: 'error' });
+        log.error('Synchronous error in stream IIFE', {
+          error,
+          promptId: prompt.id
+        });
+        rejectStreamResponse(error as Error);
+        reject(error);
+      });
     });
 
   } catch (promptError) {
