@@ -78,16 +78,17 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 # Copy static files to the .next/static location
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-# Create Next.js cache directories with correct ownership
-# Required for Image Optimization in read-only filesystem (issue #509)
-# Next.js attempts to create /app/.next/cache/images at runtime, but the volume
-# is mounted with root ownership. Pre-creating with nextjs:nodejs ownership
-# allows the non-root user to write optimized images to cache.
-RUN mkdir -p .next/cache/images && \
-    chown -R nextjs:nodejs .next/cache && \
-    chmod 755 .next/cache/images
+# Copy entrypoint script for fixing volume permissions at runtime (issue #509)
+# ECS volumes mount as root-owned, so entrypoint fixes ownership before starting app
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
+# Set entrypoint to fix permissions, then exec to CMD
+# Must be set BEFORE USER directive so entrypoint runs as root
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
 # Switch to non-root user
+# Note: Entrypoint runs as root, then execs to CMD which runs as nextjs
 USER nextjs
 
 # Expose application port

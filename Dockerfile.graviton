@@ -83,7 +83,13 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
+# Copy entrypoint script for fixing volume permissions at runtime (issue #509)
+# ECS volumes mount as root-owned, so entrypoint fixes ownership before starting app
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
 # Switch to non-root user
+# Note: Entrypoint runs as root, then execs to CMD which runs as nextjs
 USER nextjs
 
 # Expose application port
@@ -93,8 +99,9 @@ EXPOSE 3000
 # Dockerfile HEALTHCHECK is redundant since ECS task definition overrides it
 # Removed to follow AWS best practice: single source of truth for health checks
 
-# Use tini as PID 1 for proper signal handling and graceful shutdown
-ENTRYPOINT ["/sbin/tini", "--"]
+# Use tini with entrypoint script for proper signal handling and volume permissions
+# Tini wraps entrypoint.sh to handle signals, entrypoint.sh fixes permissions and execs to CMD
+ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 
 # Start application
 # Node.js memory limit will be set via NODE_OPTIONS environment variable in ECS task definition

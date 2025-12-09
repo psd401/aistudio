@@ -27,18 +27,19 @@ docker build -f Dockerfile --platform="$PLATFORM" -t aistudio-test:latest . || {
   exit 1
 }
 
-# Test 1: Verify directory exists and has correct ownership
+# Test 1: Verify entrypoint script exists and is executable
 echo ""
-echo "Test 1: Checking directory existence and ownership..."
+echo "Test 1: Checking entrypoint script..."
 docker run --rm \
   --platform="$PLATFORM" \
   aistudio-test:latest \
-  sh -c 'ls -la /app/.next/cache && stat -c "%U:%G %a" /app/.next/cache/images' || {
-  echo "ERROR: Directory check failed"
+  sh -c 'ls -la /usr/local/bin/entrypoint.sh && file /usr/local/bin/entrypoint.sh' || {
+  echo "ERROR: Entrypoint script check failed"
   exit 1
 }
 
 # Test 2: Run container with readonly root filesystem and volume mount (simulates ECS)
+# The entrypoint script should create /app/.next/cache/images and fix ownership
 echo ""
 echo "Test 2: Testing with readonly filesystem and volume mount..."
 docker run --rm \
@@ -54,15 +55,15 @@ docker run --rm \
   -e AUTH_COGNITO_CLIENT_ID=test-client \
   -e AUTH_COGNITO_ISSUER=https://cognito.amazonaws.com/test \
   aistudio-test:latest \
-  sh -c 'ls -la /app/.next/cache && touch /app/.next/cache/images/test.txt && echo "SUCCESS: Image cache writable"' || {
+  sh -c 'ls -la /app/.next/cache && ls -la /app/.next/cache/images && touch /app/.next/cache/images/test.txt && echo "SUCCESS: Image cache writable"' || {
   echo "ERROR: Write test failed"
   exit 1
 }
 
-# Test 3: Verify permissions are 755
+# Test 3: Verify permissions are 755 (after entrypoint creates directory)
 echo ""
 echo "Test 3: Verifying directory permissions..."
-PERMS=$(docker run --rm --platform="$PLATFORM" aistudio-test:latest sh -c 'stat -c "%a" /app/.next/cache/images')
+PERMS=$(docker run --rm --platform="$PLATFORM" -v /tmp/nextjs-cache-test:/app/.next/cache aistudio-test:latest sh -c 'stat -c "%a" /app/.next/cache/images')
 if [ "$PERMS" = "755" ]; then
   echo "✓ Permissions correct: 755"
 else
@@ -70,10 +71,10 @@ else
   exit 1
 fi
 
-# Test 4: Verify ownership is nextjs:nodejs
+# Test 4: Verify ownership is nextjs:nodejs (after entrypoint fixes ownership)
 echo ""
 echo "Test 4: Verifying ownership..."
-OWNER=$(docker run --rm --platform="$PLATFORM" aistudio-test:latest sh -c 'stat -c "%U:%G" /app/.next/cache/images')
+OWNER=$(docker run --rm --platform="$PLATFORM" -v /tmp/nextjs-cache-test:/app/.next/cache aistudio-test:latest sh -c 'stat -c "%U:%G" /app/.next/cache/images')
 if [ "$OWNER" = "nextjs:nodejs" ]; then
   echo "✓ Ownership correct: nextjs:nodejs"
 else
