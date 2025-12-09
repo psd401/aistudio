@@ -88,8 +88,13 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
+# Set entrypoint to fix permissions, then exec to CMD
+# CRITICAL: Must be BEFORE USER directive so entrypoint runs as root to fix permissions
+# Note: ECS Fargate provides init process (initProcessEnabled: true), so no need for tini
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
 # Switch to non-root user
-# Note: Entrypoint runs as root, then execs to CMD which runs as nextjs
+# Note: ENTRYPOINT runs as root, then execs to CMD which runs as nextjs
 USER nextjs
 
 # Expose application port
@@ -98,10 +103,6 @@ EXPOSE 3000
 # Note: Health checks are defined in ECS task definition (ecs-service.ts)
 # Dockerfile HEALTHCHECK is redundant since ECS task definition overrides it
 # Removed to follow AWS best practice: single source of truth for health checks
-
-# Use tini with entrypoint script for proper signal handling and volume permissions
-# Tini wraps entrypoint.sh to handle signals, entrypoint.sh fixes permissions and execs to CMD
-ENTRYPOINT ["/sbin/tini", "--", "/usr/local/bin/entrypoint.sh"]
 
 # Start application
 # Node.js memory limit will be set via NODE_OPTIONS environment variable in ECS task definition

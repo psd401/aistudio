@@ -10,6 +10,9 @@
 
 set -e
 
+# Ensure cleanup runs even if tests fail
+trap 'rm -rf /tmp/nextjs-cache-test' EXIT
+
 echo "=== Docker Integration Test: Image Cache Permissions (#509) ==="
 
 # Detect platform for Docker build
@@ -60,14 +63,14 @@ docker run --rm \
   exit 1
 }
 
-# Test 3: Verify permissions are 755 (after entrypoint creates directory)
+# Test 3: Verify permissions are 750 (after entrypoint creates directory)
 echo ""
 echo "Test 3: Verifying directory permissions..."
 PERMS=$(docker run --rm --platform="$PLATFORM" -v /tmp/nextjs-cache-test:/app/.next/cache aistudio-test:latest sh -c 'stat -c "%a" /app/.next/cache/images')
-if [ "$PERMS" = "755" ]; then
-  echo "✓ Permissions correct: 755"
+if [ "$PERMS" = "750" ]; then
+  echo "✓ Permissions correct: 750 (owner+group only, more secure)"
 else
-  echo "ERROR: Incorrect permissions - Expected: 755, Got: $PERMS"
+  echo "ERROR: Incorrect permissions - Expected: 750, Got: $PERMS"
   exit 1
 fi
 
@@ -82,9 +85,7 @@ else
   exit 1
 fi
 
-# Cleanup
-rm -rf /tmp/nextjs-cache-test
-
 echo ""
 echo "=== All Tests Passed ✓ ==="
 echo "The container is ready for deployment to ECS."
+echo "(Cleanup handled by trap on exit)"
