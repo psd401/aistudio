@@ -1,7 +1,7 @@
 import { AppError, ErrorLevel } from "@/types/actions-types"
 import type { ActionState } from "@/types"
-import { 
-  ErrorCode, 
+import {
+  ErrorCode,
   TypedError,
   DatabaseError,
   AuthenticationError,
@@ -12,12 +12,13 @@ import {
   getUserMessage,
   ERROR_STATUS_CODES
 } from "@/types/error-types"
-import { 
-  createLogger, 
-  sanitizeForLogging, 
+import {
+  createLogger,
+  sanitizeForLogging,
   generateRequestId,
-  getLogContext 
+  getLogContext
 } from "@/lib/logger"
+import { AsyncLocalStorage } from "node:async_hooks"
 
 /**
  * Creates a structured AppError with standardized properties
@@ -347,12 +348,14 @@ function isRetryableError(code: ErrorCode): boolean {
   return retryableCodes.includes(code)
 }
 
-// CRITICAL: Recursion guard to prevent infinite error handling loops (stack overflow protection)
-let isHandlingError = false
+// CRITICAL: Request-scoped recursion guard to prevent infinite error handling loops
+// Uses AsyncLocalStorage for concurrency safety - each request gets its own flag
+const errorHandlingContext = new AsyncLocalStorage<{ isHandlingError: boolean }>()
 
 /**
  * Enhanced error handler with comprehensive logging and categorization
  * Protected against recursive error handling to prevent stack overflow
+ * Concurrency-safe using AsyncLocalStorage for per-request recursion tracking
  */
 export function handleError(
   error: unknown,
@@ -366,8 +369,14 @@ export function handleError(
     metadata?: Record<string, unknown>;
   } = {}
 ): ActionState<never> {
+  // Get or create request-scoped error handling context
+  let context = errorHandlingContext.getStore()
+
   // CRITICAL: Prevent recursive error handling (stack overflow protection)
-  if (isHandlingError) {
+  // Check if we're already handling an error in this request context
+  if (context?.isHandlingError) {
+    // Last-resort failsafe: Use console.error to avoid triggering our own error handling
+    // This is the only place where console.error is acceptable as it prevents infinite recursion
     // eslint-disable-next-line no-console
     console.error('Recursive error handling detected - preventing stack overflow:', error)
     return {
@@ -376,8 +385,17 @@ export function handleError(
     }
   }
 
+  // If no context exists, create one for this error handling invocation
+  if (!context) {
+    context = { isHandlingError: false }
+  }
+
+  // Mark that we're handling an error in this request context
+  context.isHandlingError = true
+
   try {
-    isHandlingError = true
+    // Run error handling within the AsyncLocalStorage context
+    return errorHandlingContext.run(context, () => {
 
     const {
       context = '',
@@ -494,20 +512,21 @@ export function handleError(
       }
     }
   
-    // Handle unknown error types
-    log.error("Unknown error occurred", {
-      error: sanitizeForLogging(error),
-      ...metadata
-    })
+      // Handle unknown error types
+      log.error("Unknown error occurred", {
+        error: sanitizeForLogging(error),
+        ...metadata
+      })
 
-    return {
-      isSuccess: false,
-      message: userMessage,
-      ...(includeErrorInResponse && { error })
-    }
+      return {
+        isSuccess: false,
+        message: userMessage,
+        ...(includeErrorInResponse && { error })
+      }
+    })
   } finally {
-    // CRITICAL: Always reset recursion guard
-    isHandlingError = false
+    // CRITICAL: Always reset recursion guard for this request context
+    context.isHandlingError = false
   }
 }
 

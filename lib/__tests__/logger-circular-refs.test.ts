@@ -92,14 +92,6 @@ describe('Logger Circular Reference Detection', () => {
   })
 
   describe('sanitizeForLogging - Depth Limiting', () => {
-    function createDeeplyNestedObject(depth: number): Record<string, unknown> {
-      let obj: Record<string, unknown> = { value: depth }
-      for (let i = depth - 1; i >= 0; i--) {
-        obj = { level: i, child: obj }
-      }
-      return obj
-    }
-
     it('should handle deeply nested objects within limit (10 levels)', () => {
       const deepObj = createDeeplyNestedObject(10)
 
@@ -290,6 +282,7 @@ describe('Logger Circular Reference Detection', () => {
   })
 })
 
+// Helper function for creating deeply nested test objects
 function createDeeplyNestedObject(depth: number): Record<string, unknown> {
   let obj: Record<string, unknown> = { value: depth }
   for (let i = depth - 1; i >= 0; i--) {

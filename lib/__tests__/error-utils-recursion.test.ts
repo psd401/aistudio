@@ -123,6 +123,27 @@ describe('Error Handler Recursion Prevention', () => {
         expect(result.isSuccess).toBe(false)
       })
     })
+
+    it('should handle concurrent errors from multiple requests without race conditions', async () => {
+      // Simulate 50 concurrent requests, each handling their own errors
+      const concurrentRequests = Array.from({ length: 50 }, (_, requestId) =>
+        Promise.resolve().then(() => {
+          const error = new Error(`Request ${requestId} error`)
+          return handleError(error, `Error in request ${requestId}`)
+        })
+      )
+
+      const results = await Promise.all(concurrentRequests)
+
+      expect(results).toHaveLength(50)
+      // All requests should get proper error messages, not "System error occurred"
+      results.forEach((result, index) => {
+        expect(result.isSuccess).toBe(false)
+        expect(result.message).toBe(`Error in request ${index}`)
+        // Should NOT have triggered recursion guard
+        expect(result.message).not.toBe('System error occurred')
+      })
+    })
   })
 
   describe('handleError - Edge Cases', () => {
