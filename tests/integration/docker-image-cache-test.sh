@@ -11,9 +11,29 @@
 set -e
 
 # Ensure cleanup runs even if tests fail
-trap 'rm -rf /tmp/nextjs-cache-test' EXIT
+cleanup() {
+  echo "Cleaning up test artifacts..."
+  docker rmi aistudio-test:latest 2>/dev/null || true
+  rm -rf /tmp/nextjs-cache-test
+}
+trap cleanup EXIT
 
 echo "=== Docker Integration Test: Image Cache Permissions (#509) ==="
+
+# Verify Docker is available
+if ! command -v docker &> /dev/null; then
+  echo "ERROR: Docker not found. Please install Docker to run this test."
+  echo "See: https://docs.docker.com/get-docker/"
+  exit 1
+fi
+
+# Verify Docker daemon is running
+if ! docker info &> /dev/null; then
+  echo "ERROR: Docker daemon not running. Please start Docker."
+  exit 1
+fi
+
+echo "✓ Docker is available and running"
 
 # Detect platform for Docker build
 PLATFORM="linux/amd64"
@@ -88,4 +108,5 @@ fi
 echo ""
 echo "=== All Tests Passed ✓ ==="
 echo "The container is ready for deployment to ECS."
-echo "(Cleanup handled by trap on exit)"
+echo ""
+echo "Note: Cleanup (image removal, temp files) happens automatically on exit."

@@ -61,8 +61,8 @@ FROM --platform=linux/arm64 node:22-alpine AS runner
 WORKDIR /app
 
 # Install runtime dependencies optimized for ARM64
-# curl for health checks, tini for proper signal handling
-RUN apk add --no-cache curl tini
+# curl for health checks (ECS provides init process via initProcessEnabled: true)
+RUN apk add --no-cache curl
 
 # Create non-root user for security
 RUN addgroup --system --gid 1001 nodejs && \
