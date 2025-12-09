@@ -369,33 +369,22 @@ export function handleError(
     metadata?: Record<string, unknown>;
   } = {}
 ): ActionState<never> {
-  // Get or create request-scoped error handling context
-  let context = errorHandlingContext.getStore()
-
   // CRITICAL: Prevent recursive error handling (stack overflow protection)
   // Check if we're already handling an error in this request context
-  if (context?.isHandlingError) {
-    // Last-resort failsafe: Use console.error to avoid triggering our own error handling
-    // This is the only place where console.error is acceptable as it prevents infinite recursion
-    // eslint-disable-next-line no-console
-    console.error('Recursive error handling detected - preventing stack overflow:', error)
+  if (errorHandlingContext.getStore()?.isHandlingError) {
+    // Last-resort failsafe: Use process.stderr.write to avoid triggering our own error handling
+    // This bypasses all logging infrastructure to prevent infinite recursion
+    // More reliable than console.error for CloudWatch integration
+    process.stderr.write(`[RECURSION GUARD] Recursive error handling detected: ${String(error)}\n`)
     return {
       isSuccess: false,
       message: "System error occurred"
     }
   }
 
-  // If no context exists, create one for this error handling invocation
-  if (!context) {
-    context = { isHandlingError: false }
-  }
-
-  // Mark that we're handling an error in this request context
-  context.isHandlingError = true
-
-  try {
-    // Run error handling within the AsyncLocalStorage context
-    return errorHandlingContext.run(context, () => {
+  // Establish new AsyncLocalStorage context with recursion guard flag set
+  // This ensures the flag is properly scoped to this error handling execution
+  return errorHandlingContext.run({ isHandlingError: true }, () => {
 
     const {
       context = '',
@@ -523,11 +512,7 @@ export function handleError(
         message: userMessage,
         ...(includeErrorInResponse && { error })
       }
-    })
-  } finally {
-    // CRITICAL: Always reset recursion guard for this request context
-    context.isHandlingError = false
-  }
+  })
 }
 
 /**
