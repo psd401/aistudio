@@ -1,20 +1,37 @@
-import { describe, it, expect, jest, beforeEach } from '@jest/globals'
+/**
+ * Unit tests for concurrent user creation UPSERT fix (Issue #508)
+ *
+ * NOTE: These tests are tightly coupled to implementation details due to the
+ * action's multi-step flow (session → DB lookup → UPSERT → role assignment).
+ *
+ * Future improvements (technical debt):
+ * - Extract SQL generation to testable functions (test queries directly)
+ * - Use integration tests with test database for full flow validation
+ * - Reduce mock complexity by testing at higher abstraction level
+ *
+ * For now, these tests validate the critical UPSERT behavior that fixes the
+ * production race condition (39% error rate under concurrent load).
+ */
 
-// Create mock functions
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockExecuteSQL = jest.fn<any>()
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGetUserByCognitoSub = jest.fn<any>()
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockCreateUser = jest.fn<any>()
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGetRoleByName = jest.fn<any>()
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockAssignRoleToUser = jest.fn<any>()
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGetUserRolesByCognitoSub = jest.fn<any>()
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGetServerSession = jest.fn<any>()
+import { describe, it, expect, jest, beforeEach } from '@jest/globals'
+import type {
+  executeSQL,
+  getUserByCognitoSub,
+  createUser,
+  getRoleByName,
+  assignRoleToUser,
+  getUserRolesByCognitoSub
+} from '@/lib/db/data-api-adapter'
+import type { getServerSession } from '@/lib/auth/server-session'
+
+// Create properly typed mock functions (no 'any' types per CLAUDE.md)
+const mockExecuteSQL = jest.fn<typeof executeSQL>()
+const mockGetUserByCognitoSub = jest.fn<typeof getUserByCognitoSub>()
+const mockCreateUser = jest.fn<typeof createUser>()
+const mockGetRoleByName = jest.fn<typeof getRoleByName>()
+const mockAssignRoleToUser = jest.fn<typeof assignRoleToUser>()
+const mockGetUserRolesByCognitoSub = jest.fn<typeof getUserRolesByCognitoSub>()
+const mockGetServerSession = jest.fn<typeof getServerSession>()
 
 // Mock all dependencies
 jest.mock('@/lib/auth/server-session', () => ({
@@ -67,7 +84,7 @@ describe('User Creation with UPSERT - Issue #508', () => {
       })
 
       // User doesn't exist yet (both cognito_sub and email lookups)
-      mockGetUserByCognitoSub.mockResolvedValue(null)
+      mockGetUserByCognitoSub.mockResolvedValue(undefined as never)
       mockExecuteSQL.mockResolvedValueOnce([])  // Empty result for email lookup
 
       // UPSERT creates new user
@@ -115,7 +132,7 @@ describe('User Creation with UPSERT - Issue #508', () => {
       })
 
       // First lookup: user doesn't exist
-      mockGetUserByCognitoSub.mockResolvedValue(null)
+      mockGetUserByCognitoSub.mockResolvedValue(undefined as never)
       mockExecuteSQL.mockResolvedValueOnce([])  // Empty email lookup
 
       // UPSERT handles conflict and returns existing user (created by concurrent request)
@@ -164,7 +181,7 @@ describe('User Creation with UPSERT - Issue #508', () => {
       })
 
       // User doesn't exist in first lookup (simulating edge case)
-      mockGetUserByCognitoSub.mockResolvedValue(null)
+      mockGetUserByCognitoSub.mockResolvedValue(undefined as never)
       mockExecuteSQL.mockResolvedValueOnce([])  // Empty email lookup
 
       // UPSERT updates email but preserves other fields
@@ -213,7 +230,7 @@ describe('User Creation with UPSERT - Issue #508', () => {
         familyName: 'User'
       })
 
-      mockGetUserByCognitoSub.mockResolvedValue(null)
+      mockGetUserByCognitoSub.mockResolvedValue(undefined as never)
       mockExecuteSQL.mockResolvedValueOnce([])  // Empty email lookup
 
       mockCreateUser.mockResolvedValue({
@@ -256,7 +273,7 @@ describe('User Creation with UPSERT - Issue #508', () => {
         familyName: 'Doe'
       })
 
-      mockGetUserByCognitoSub.mockResolvedValue(null)
+      mockGetUserByCognitoSub.mockResolvedValue(undefined as never)
       mockExecuteSQL.mockResolvedValueOnce([])  // Empty email lookup
 
       mockCreateUser.mockResolvedValue({
@@ -294,7 +311,7 @@ describe('User Creation with UPSERT - Issue #508', () => {
   describe('Error Handling', () => {
     it('should return error when session is missing', async () => {
       // Arrange
-      mockGetServerSession.mockResolvedValue(null)
+      mockGetServerSession.mockResolvedValue(null as never)
 
       // Act
       const result = await getCurrentUserAction()
