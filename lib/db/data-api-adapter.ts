@@ -454,6 +454,12 @@ export async function createUser(userData: UserData) {
   const query = `
     INSERT INTO users (cognito_sub, email, first_name, last_name, created_at, updated_at)
     VALUES (:cognitoSub, :email, :firstName, :lastName, NOW(), NOW())
+    ON CONFLICT (cognito_sub)
+    DO UPDATE SET
+      email = EXCLUDED.email,
+      first_name = COALESCE(EXCLUDED.first_name, users.first_name),
+      last_name = COALESCE(EXCLUDED.last_name, users.last_name),
+      updated_at = NOW()
     RETURNING id, cognito_sub, email, first_name, last_name, created_at, updated_at
   `;
 
@@ -463,7 +469,7 @@ export async function createUser(userData: UserData) {
     createParameter('firstName', userData.firstName),
     createParameter('lastName', userData.lastName)
   ];
-  
+
   const result = await executeSQL(query, parameters);
   return result[0];
 }

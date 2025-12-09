@@ -126,22 +126,23 @@ export async function getCurrentUserAction(): Promise<
       }
     }
 
-    // If user still doesn't exist, create them
+    // If user still doesn't exist, create them (UPSERT handles concurrent requests)
     if (!user) {
-      log.info("Creating new user", { 
+      log.info("Creating or updating user via UPSERT", {
         cognitoSub: userId,
         email: sanitizeForLogging(userEmail),
         givenName: userGivenName,
         familyName: userFamilyName
       })
-      
+
       // Extract username once for reuse
       const username = userEmail?.split("@")[0] || ""
-      
+
       // Use names from Cognito if available, otherwise fall back to username
       const firstName = userGivenName || username || "User"
       const lastName = userFamilyName || undefined
-      
+
+      // UPSERT: inserts if new, updates if concurrent request already created
       const newUserResult = await createUser({
         cognitoSub: userId,
         email: userEmail || `${userId}@cognito.local`,
@@ -150,38 +151,48 @@ export async function getCurrentUserAction(): Promise<
       })
       user = newUserResult as unknown as SelectUser
 
-      log.info("New user created", { 
+      log.info("User created or updated via UPSERT", {
         userId: user.id,
         firstName: user.firstName,
         lastName: user.lastName
       })
 
-      // Determine default role based on username pattern
-      const isNumericUsername = /^\d+$/.test(username)
-      const defaultRole = isNumericUsername ? "student" : "staff"
-      
-      log.info("Determining default role based on username", {
-        username,
-        isNumeric: isNumericUsername,
-        assignedRole: defaultRole
-      })
-      
-      // Assign determined role to new user
-      log.debug(`Assigning ${defaultRole} role to new user`)
-      const roleResult = await getRoleByName(defaultRole)
-      
-      if (roleResult.length > 0) {
-        const role = roleResult[0]
-        const roleId = role.id as number
-        await assignRoleToUser(user!.id, roleId)
-        log.info(`${defaultRole} role assigned to new user`, { 
-          userId: user.id, 
-          roleId,
-          roleName: defaultRole 
+      // Check if user already has roles (from concurrent request or existing user)
+      const existingRoles = await getUserRolesByCognitoSub(userId)
+
+      if (existingRoles.length === 0) {
+        // Only assign default role if user has no roles yet
+        const isNumericUsername = /^\d+$/.test(username)
+        const defaultRole = isNumericUsername ? "student" : "staff"
+
+        log.info("Determining default role based on username", {
+          username,
+          isNumeric: isNumericUsername,
+          assignedRole: defaultRole
         })
+
+        // Assign determined role to new user
+        log.debug(`Assigning ${defaultRole} role to new user`)
+        const roleResult = await getRoleByName(defaultRole)
+
+        if (roleResult.length > 0) {
+          const role = roleResult[0]
+          const roleId = role.id as number
+          await assignRoleToUser(user!.id, roleId)
+          log.info(`${defaultRole} role assigned to new user`, {
+            userId: user.id,
+            roleId,
+            roleName: defaultRole
+          })
+        } else {
+          log.warn(`${defaultRole} role not found in database - new user has no roles`, {
+            attemptedRole: defaultRole
+          })
+        }
       } else {
-        log.warn(`${defaultRole} role not found in database - new user has no roles`, {
-          attemptedRole: defaultRole
+        log.info("User already has roles, skipping default role assignment", {
+          userId: user.id,
+          existingRoleCount: existingRoles.length
         })
       }
     }
