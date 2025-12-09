@@ -78,6 +78,15 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 # Copy static files to the .next/static location
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
+# Create Next.js cache directories with correct ownership
+# Required for Image Optimization in read-only filesystem (issue #509)
+# Next.js attempts to create /app/.next/cache/images at runtime, but the volume
+# is mounted with root ownership. Pre-creating with nextjs:nodejs ownership
+# allows the non-root user to write optimized images to cache.
+RUN mkdir -p .next/cache/images && \
+    chown -R nextjs:nodejs .next/cache && \
+    chmod 755 .next/cache/images
+
 # Switch to non-root user
 USER nextjs
 
