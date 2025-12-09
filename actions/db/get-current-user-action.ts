@@ -149,6 +149,8 @@ export async function getCurrentUserAction(): Promise<
         firstName: firstName,
         lastName: lastName
       })
+      // Type assertion: createUser returns FormattedRow (camelCase with string dates)
+      // Convert to SelectUser (camelCase with Date objects) for consistency
       user = newUserResult as unknown as SelectUser
 
       log.info("User created or updated via UPSERT", {
@@ -157,42 +159,41 @@ export async function getCurrentUserAction(): Promise<
         lastName: user.lastName
       })
 
-      // Check if user already has roles (from concurrent request or existing user)
-      const existingRoles = await getUserRolesByCognitoSub(userId)
+      // Assign default role using UPSERT pattern (ON CONFLICT DO NOTHING)
+      // Concurrent requests will safely skip if role already assigned
+      const isNumericUsername = /^\d+$/.test(username)
+      const defaultRole = isNumericUsername ? "student" : "staff"
 
-      if (existingRoles.length === 0) {
-        // Only assign default role if user has no roles yet
-        const isNumericUsername = /^\d+$/.test(username)
-        const defaultRole = isNumericUsername ? "student" : "staff"
+      log.info("Assigning default role based on username (UPSERT)", {
+        username,
+        isNumeric: isNumericUsername,
+        assignedRole: defaultRole
+      })
 
-        log.info("Determining default role based on username", {
-          username,
-          isNumeric: isNumericUsername,
-          assignedRole: defaultRole
-        })
+      const roleResult = await getRoleByName(defaultRole)
 
-        // Assign determined role to new user
-        log.debug(`Assigning ${defaultRole} role to new user`)
-        const roleResult = await getRoleByName(defaultRole)
+      if (roleResult.length > 0) {
+        const role = roleResult[0]
+        const roleId = role.id as number
+        // UPSERT: If role already assigned by concurrent request, DO NOTHING
+        const assignmentResult = await assignRoleToUser(user!.id, roleId)
 
-        if (roleResult.length > 0) {
-          const role = roleResult[0]
-          const roleId = role.id as number
-          await assignRoleToUser(user!.id, roleId)
-          log.info(`${defaultRole} role assigned to new user`, {
+        if (assignmentResult && assignmentResult.length > 0) {
+          log.info(`${defaultRole} role assigned to user`, {
             userId: user.id,
             roleId,
             roleName: defaultRole
           })
         } else {
-          log.warn(`${defaultRole} role not found in database - new user has no roles`, {
-            attemptedRole: defaultRole
+          log.info(`${defaultRole} role already assigned (concurrent request)`, {
+            userId: user.id,
+            roleId,
+            roleName: defaultRole
           })
         }
       } else {
-        log.info("User already has roles, skipping default role assignment", {
-          userId: user.id,
-          existingRoleCount: existingRoles.length
+        log.warn(`${defaultRole} role not found in database - user has no default role`, {
+          attemptedRole: defaultRole
         })
       }
     }

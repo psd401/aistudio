@@ -1227,6 +1227,7 @@ export async function assignRoleToUser(userId: number, roleId: number) {
   const sql = `
     INSERT INTO user_roles (user_id, role_id, created_at, updated_at)
     VALUES (:userId, :roleId, NOW(), NOW())
+    ON CONFLICT (user_id, role_id) DO NOTHING
     RETURNING *
   `
   const parameters = [

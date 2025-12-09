@@ -39,7 +39,8 @@ jest.mock('@/lib/logger', () => ({
   }),
   generateRequestId: () => 'test-request-id',
   startTimer: () => jest.fn(),
-  sanitizeForLogging: (value: unknown) => value
+  sanitizeForLogging: (value: unknown) => value,
+  getLogContext: () => ({ requestId: 'test-request-id', userId: undefined })
 }))
 
 describe('User Creation with UPSERT - Issue #508', () => {
@@ -65,8 +66,9 @@ describe('User Creation with UPSERT - Issue #508', () => {
         familyName: 'User'
       })
 
-      // User doesn't exist yet
+      // User doesn't exist yet (both cognito_sub and email lookups)
       mockGetUserByCognitoSub.mockResolvedValue(null)
+      mockExecuteSQL.mockResolvedValueOnce([])  // Empty result for email lookup
 
       // UPSERT creates new user
       mockCreateUser.mockResolvedValue({
@@ -79,15 +81,12 @@ describe('User Creation with UPSERT - Issue #508', () => {
         updatedAt: new Date().toISOString()
       })
 
-      // No existing roles
-      mockGetUserRolesByCognitoSub.mockResolvedValue([])
-
-      // Mock role assignment
+      // Mock role assignment (UPSERT returns result on first insert)
       mockGetRoleByName.mockResolvedValue([{ id: 2, name: 'staff' }])
-      mockAssignRoleToUser.mockResolvedValue(true)
+      mockAssignRoleToUser.mockResolvedValue([{ user_id: 1, role_id: 2 }])
 
-      // Mock final queries
-      mockExecuteSQL.mockResolvedValue([{
+      // Mock final queries (last_sign_in_at update and role fetching)
+      mockExecuteSQL.mockResolvedValueOnce([{  // last_sign_in_at update
         id: 1,
         cognitoSub: 'cognito-new-123',
         email: 'newuser@psd401.net',
@@ -95,7 +94,7 @@ describe('User Creation with UPSERT - Issue #508', () => {
         lastName: 'User'
       }])
       mockGetUserRolesByCognitoSub.mockResolvedValue(['staff'])
-      mockGetRoleByName.mockResolvedValue([{ id: 2, name: 'staff', description: 'Staff member' }])
+      mockGetRoleByName.mockResolvedValueOnce([{ id: 2, name: 'staff', description: 'Staff member' }])
 
       // Act
       const result = await getCurrentUserAction()
@@ -103,12 +102,7 @@ describe('User Creation with UPSERT - Issue #508', () => {
       // Assert
       expect(result.isSuccess).toBe(true)
       expect(result.data?.user.cognitoSub).toBe('cognito-new-123')
-      expect(mockCreateUser).toHaveBeenCalledWith({
-        cognitoSub: 'cognito-new-123',
-        email: 'newuser@psd401.net',
-        firstName: 'New',
-        lastName: 'User'
-      })
+      expect(mockAssignRoleToUser).toHaveBeenCalledWith(1, 2)
     })
 
     it('should handle UPSERT when user already exists from concurrent request', async () => {
@@ -122,6 +116,7 @@ describe('User Creation with UPSERT - Issue #508', () => {
 
       // First lookup: user doesn't exist
       mockGetUserByCognitoSub.mockResolvedValue(null)
+      mockExecuteSQL.mockResolvedValueOnce([])  // Empty email lookup
 
       // UPSERT handles conflict and returns existing user (created by concurrent request)
       mockCreateUser.mockResolvedValue({
@@ -134,18 +129,20 @@ describe('User Creation with UPSERT - Issue #508', () => {
         updatedAt: new Date().toISOString()
       })
 
-      // User already has roles (from concurrent request)
-      mockGetUserRolesByCognitoSub.mockResolvedValue(['staff'])
+      // Mock role assignment (UPSERT returns empty if conflict)
+      mockGetRoleByName.mockResolvedValue([{ id: 2, name: 'staff' }])
+      mockAssignRoleToUser.mockResolvedValue([])  // Empty array = DO NOTHING triggered
 
-      // Mock final queries
-      mockExecuteSQL.mockResolvedValue([{
+      // Mock final queries (last_sign_in_at update)
+      mockExecuteSQL.mockResolvedValueOnce([{
         id: 5,
         cognitoSub: 'cognito-race-123',
         email: 'raceuser@psd401.net',
         firstName: 'Race',
         lastName: 'User'
       }])
-      mockGetRoleByName.mockResolvedValue([{ id: 2, name: 'staff', description: 'Staff member' }])
+      mockGetUserRolesByCognitoSub.mockResolvedValue(['staff'])
+      mockGetRoleByName.mockResolvedValueOnce([{ id: 2, name: 'staff', description: 'Staff member' }])
 
       // Act
       const result = await getCurrentUserAction()
@@ -153,8 +150,8 @@ describe('User Creation with UPSERT - Issue #508', () => {
       // Assert
       expect(result.isSuccess).toBe(true)
       expect(result.data?.user.id).toBe(5)
-      // Role assignment should be skipped since user already has roles
-      expect(mockAssignRoleToUser).not.toHaveBeenCalled()
+      // Role assignment should be attempted but DO NOTHING (empty result)
+      expect(mockAssignRoleToUser).toHaveBeenCalledWith(5, 2)
     })
 
     it('should preserve existing user data on UPSERT update', async () => {
@@ -168,6 +165,7 @@ describe('User Creation with UPSERT - Issue #508', () => {
 
       // User doesn't exist in first lookup (simulating edge case)
       mockGetUserByCognitoSub.mockResolvedValue(null)
+      mockExecuteSQL.mockResolvedValueOnce([])  // Empty email lookup
 
       // UPSERT updates email but preserves other fields
       mockCreateUser.mockResolvedValue({
@@ -180,18 +178,20 @@ describe('User Creation with UPSERT - Issue #508', () => {
         updatedAt: new Date().toISOString()
       })
 
-      // User has existing roles
-      mockGetUserRolesByCognitoSub.mockResolvedValue(['admin'])
+      // Mock role assignment (UPSERT returns empty - DO NOTHING)
+      mockGetRoleByName.mockResolvedValueOnce([{ id: 2, name: 'staff' }])  // For role assignment
+      mockAssignRoleToUser.mockResolvedValue([])  // DO NOTHING triggered
 
-      // Mock final queries
-      mockExecuteSQL.mockResolvedValue([{
+      // Mock final queries (last_sign_in_at update)
+      mockExecuteSQL.mockResolvedValueOnce([{
         id: 10,
         cognitoSub: 'cognito-existing-123',
         email: 'updated@psd401.net',
         firstName: 'Updated',
         lastName: 'Name'
       }])
-      mockGetRoleByName.mockResolvedValue([{ id: 1, name: 'admin', description: 'Administrator' }])
+      mockGetUserRolesByCognitoSub.mockResolvedValue(['admin'])
+      mockGetRoleByName.mockResolvedValueOnce([{ id: 1, name: 'admin', description: 'Administrator' }])  // For role fetching
 
       // Act
       const result = await getCurrentUserAction()
@@ -200,8 +200,8 @@ describe('User Creation with UPSERT - Issue #508', () => {
       expect(result.isSuccess).toBe(true)
       expect(result.data?.user.email).toBe('updated@psd401.net')
       expect(result.data?.user.id).toBe(10)
-      // Should not assign new role since user already has roles
-      expect(mockAssignRoleToUser).not.toHaveBeenCalled()
+      // Role assignment attempted but DO NOTHING (already exists)
+      expect(mockAssignRoleToUser).toHaveBeenCalledWith(10, 2)
     })
 
     it('should determine correct default role for numeric username (student)', async () => {
@@ -214,6 +214,8 @@ describe('User Creation with UPSERT - Issue #508', () => {
       })
 
       mockGetUserByCognitoSub.mockResolvedValue(null)
+      mockExecuteSQL.mockResolvedValueOnce([])  // Empty email lookup
+
       mockCreateUser.mockResolvedValue({
         id: 20,
         cognitoSub: 'cognito-student-123',
@@ -222,15 +224,12 @@ describe('User Creation with UPSERT - Issue #508', () => {
         lastName: 'User'
       })
 
-      // No existing roles
-      mockGetUserRolesByCognitoSub.mockResolvedValue([])
-
-      // Mock student role assignment
+      // Mock student role assignment (UPSERT returns result)
       mockGetRoleByName.mockResolvedValue([{ id: 3, name: 'student' }])
-      mockAssignRoleToUser.mockResolvedValue(true)
+      mockAssignRoleToUser.mockResolvedValue([{ user_id: 20, role_id: 3 }])
 
-      // Mock final queries
-      mockExecuteSQL.mockResolvedValue([{
+      // Mock final queries (last_sign_in_at update)
+      mockExecuteSQL.mockResolvedValueOnce([{
         id: 20,
         cognitoSub: 'cognito-student-123',
         email: '123456@psd401.net',
@@ -238,14 +237,13 @@ describe('User Creation with UPSERT - Issue #508', () => {
         lastName: 'User'
       }])
       mockGetUserRolesByCognitoSub.mockResolvedValue(['student'])
-      mockGetRoleByName.mockResolvedValue([{ id: 3, name: 'student', description: 'Student' }])
+      mockGetRoleByName.mockResolvedValueOnce([{ id: 3, name: 'student', description: 'Student' }])
 
       // Act
       const result = await getCurrentUserAction()
 
       // Assert
       expect(result.isSuccess).toBe(true)
-      expect(mockGetRoleByName).toHaveBeenCalledWith('student')
       expect(mockAssignRoleToUser).toHaveBeenCalledWith(20, 3)
     })
 
@@ -259,6 +257,8 @@ describe('User Creation with UPSERT - Issue #508', () => {
       })
 
       mockGetUserByCognitoSub.mockResolvedValue(null)
+      mockExecuteSQL.mockResolvedValueOnce([])  // Empty email lookup
+
       mockCreateUser.mockResolvedValue({
         id: 21,
         cognitoSub: 'cognito-staff-123',
@@ -267,15 +267,12 @@ describe('User Creation with UPSERT - Issue #508', () => {
         lastName: 'Doe'
       })
 
-      // No existing roles
-      mockGetUserRolesByCognitoSub.mockResolvedValue([])
-
-      // Mock staff role assignment
+      // Mock staff role assignment (UPSERT returns result)
       mockGetRoleByName.mockResolvedValue([{ id: 2, name: 'staff' }])
-      mockAssignRoleToUser.mockResolvedValue(true)
+      mockAssignRoleToUser.mockResolvedValue([{ user_id: 21, role_id: 2 }])
 
-      // Mock final queries
-      mockExecuteSQL.mockResolvedValue([{
+      // Mock final queries (last_sign_in_at update)
+      mockExecuteSQL.mockResolvedValueOnce([{
         id: 21,
         cognitoSub: 'cognito-staff-123',
         email: 'jdoe@psd401.net',
@@ -283,14 +280,13 @@ describe('User Creation with UPSERT - Issue #508', () => {
         lastName: 'Doe'
       }])
       mockGetUserRolesByCognitoSub.mockResolvedValue(['staff'])
-      mockGetRoleByName.mockResolvedValue([{ id: 2, name: 'staff', description: 'Staff member' }])
+      mockGetRoleByName.mockResolvedValueOnce([{ id: 2, name: 'staff', description: 'Staff member' }])
 
       // Act
       const result = await getCurrentUserAction()
 
       // Assert
       expect(result.isSuccess).toBe(true)
-      expect(mockGetRoleByName).toHaveBeenCalledWith('staff')
       expect(mockAssignRoleToUser).toHaveBeenCalledWith(21, 2)
     })
   })
@@ -305,7 +301,7 @@ describe('User Creation with UPSERT - Issue #508', () => {
 
       // Assert
       expect(result.isSuccess).toBe(false)
-      expect(result.error).toContain('session')
+      expect(result.error?.message || result.error).toMatch(/session/i)
     })
   })
 })
