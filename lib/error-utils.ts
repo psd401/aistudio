@@ -18,7 +18,6 @@ import {
   generateRequestId,
   getLogContext
 } from "@/lib/logger"
-import { AsyncLocalStorage } from "node:async_hooks"
 
 /**
  * Creates a structured AppError with standardized properties
@@ -348,14 +347,15 @@ function isRetryableError(code: ErrorCode): boolean {
   return retryableCodes.includes(code)
 }
 
-// CRITICAL: Request-scoped recursion guard to prevent infinite error handling loops
-// Uses AsyncLocalStorage for concurrency safety - each request gets its own flag
-const errorHandlingContext = new AsyncLocalStorage<{ isHandlingError: boolean }>()
+// CRITICAL: Module-level recursion guard to prevent infinite error handling loops
+// This is safe for synchronous code because Node.js is single-threaded
+// Synchronous code runs to completion without interruption
+let isHandlingError = false
 
 /**
  * Enhanced error handler with comprehensive logging and categorization
  * Protected against recursive error handling to prevent stack overflow
- * Concurrency-safe using AsyncLocalStorage for per-request recursion tracking
+ * Safe for synchronous code - Node.js single-threaded execution ensures atomicity
  */
 export function handleError(
   error: unknown,
@@ -370,8 +370,8 @@ export function handleError(
   } = {}
 ): ActionState<never> {
   // CRITICAL: Prevent recursive error handling (stack overflow protection)
-  // Check if we're already handling an error in this request context
-  if (errorHandlingContext.getStore()?.isHandlingError) {
+  // Module-level flag is safe because error handling is synchronous
+  if (isHandlingError) {
     // Last-resort failsafe: Use process.stderr.write to avoid triggering our own error handling
     // This bypasses all logging infrastructure to prevent infinite recursion
     // More reliable than console.error for CloudWatch integration
@@ -382,9 +382,10 @@ export function handleError(
     }
   }
 
-  // Establish new AsyncLocalStorage context with recursion guard flag set
-  // This ensures the flag is properly scoped to this error handling execution
-  return errorHandlingContext.run({ isHandlingError: true }, () => {
+  // Set flag before processing, clear in finally block to ensure reset
+  isHandlingError = true
+
+  try {
 
     const {
       context = '',
@@ -512,7 +513,10 @@ export function handleError(
         message: userMessage,
         ...(includeErrorInResponse && { error })
       }
-  })
+  } finally {
+    // CRITICAL: Always reset flag to allow future error handling
+    isHandlingError = false
+  }
 }
 
 /**
