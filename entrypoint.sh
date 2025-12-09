@@ -15,8 +15,8 @@ echo "[entrypoint] Setting correct ownership on /app/.next/cache volume..."
 # Ensure the cache directory exists and is owned by nextjs:nodejs
 # This handles the case where the volume mount is empty or root-owned
 if [ -d "/app/.next/cache" ]; then
-  # Log current state for debugging
-  echo "[entrypoint] Current ownership: $(stat -c '%U:%G %a' /app/.next/cache 2>/dev/null || echo 'unknown')"
+  # Log current state for debugging (Alpine BusyBox stat compatible)
+  echo "[entrypoint] Current ownership: $(ls -ld /app/.next/cache | awk '{print $3":"$4" "$1}' 2>/dev/null || echo 'unknown')"
 
   # Only fix ownership of the cache directory itself (non-recursive for performance)
   # Subdirectories will be created by nextjs user with correct ownership
@@ -48,7 +48,8 @@ if [ -d "/app/.next/cache" ]; then
 
   echo "[entrypoint] Permissions fixed: /app/.next/cache owned by nextjs:nodejs (750)"
 else
-  echo "[entrypoint] WARNING: /app/.next/cache directory not found - image caching disabled"
+  # Log warning to stderr for better observability in production CloudWatch logs
+  echo "[entrypoint] WARNING: /app/.next/cache directory not found - image caching disabled" >&2
   # Non-fatal: Container can still start, but image optimization will be disabled
 fi
 
