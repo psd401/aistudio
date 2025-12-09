@@ -61,8 +61,9 @@ FROM --platform=linux/arm64 node:22-alpine AS runner
 WORKDIR /app
 
 # Install runtime dependencies optimized for ARM64
-# curl for health checks (ECS provides init process via initProcessEnabled: true)
-RUN apk add --no-cache curl
+# curl for health checks, su-exec for user switching in entrypoint
+# (ECS provides init process via initProcessEnabled: true)
+RUN apk add --no-cache curl su-exec
 
 # Create non-root user for security
 RUN addgroup --system --gid 1001 nodejs && \
@@ -85,17 +86,19 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 # Copy entrypoint script for fixing volume permissions at runtime (issue #509)
 # ECS volumes mount as root-owned, so entrypoint fixes ownership before starting app
+# The entrypoint runs as root, fixes permissions, then switches to nextjs user via su-exec
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+RUN chmod 755 /usr/local/bin/entrypoint.sh
 
-# Set entrypoint to fix permissions, then exec to CMD
-# CRITICAL: Must be BEFORE USER directive so entrypoint runs as root to fix permissions
+# Set entrypoint to fix permissions, then exec to CMD as nextjs user
+# Entrypoint runs as root (no USER directive), then uses su-exec to switch to nextjs
 # Note: ECS Fargate provides init process (initProcessEnabled: true), so no need for tini
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
-# Switch to non-root user
-# Note: ENTRYPOINT runs as root, then execs to CMD which runs as nextjs
-USER nextjs
+# NOTE: We do NOT use USER directive here because:
+# 1. ENTRYPOINT needs to run as root to fix volume permissions (chown)
+# 2. Entrypoint script uses su-exec to switch to nextjs user before executing CMD
+# 3. Final application process (node server.js) runs as nextjs via su-exec
 
 # Expose application port
 EXPOSE 3000

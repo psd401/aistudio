@@ -57,8 +57,9 @@ RUN --mount=type=cache,target=/app/.next/cache \
 FROM node:22-alpine AS runner
 WORKDIR /app
 
-# Install curl for health checks (works with read-only filesystem and non-root users)
-RUN apk add --no-cache curl
+# Install curl for health checks and su-exec for user switching in entrypoint
+# su-exec is Alpine's lightweight alternative to gosu for switching users
+RUN apk add --no-cache curl su-exec
 
 # Create non-root user for security
 RUN addgroup --system --gid 1001 nodejs && \
@@ -80,16 +81,18 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
 # Copy entrypoint script for fixing volume permissions at runtime (issue #509)
 # ECS volumes mount as root-owned, so entrypoint fixes ownership before starting app
+# The entrypoint runs as root, fixes permissions, then switches to nextjs user via su-exec
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+RUN chmod 755 /usr/local/bin/entrypoint.sh
 
-# Set entrypoint to fix permissions, then exec to CMD
-# Must be set BEFORE USER directive so entrypoint runs as root
+# Set entrypoint to fix permissions, then exec to CMD as nextjs user
+# Entrypoint runs as root (no USER directive), then uses su-exec to switch to nextjs
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 
-# Switch to non-root user
-# Note: Entrypoint runs as root, then execs to CMD which runs as nextjs
-USER nextjs
+# NOTE: We do NOT use USER directive here because:
+# 1. ENTRYPOINT needs to run as root to fix volume permissions (chown)
+# 2. Entrypoint script uses su-exec to switch to nextjs user before executing CMD
+# 3. Final application process (node server.js) runs as nextjs via su-exec
 
 # Expose application port
 EXPOSE 3000

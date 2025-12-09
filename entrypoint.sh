@@ -54,7 +54,7 @@ else
 fi
 
 # Execute the container's original command as the nextjs user
-# The "exec" replaces this shell process with the target process,
-# ensuring proper signal handling (SIGTERM, SIGINT)
-echo "[entrypoint] Starting application: $@"
-exec "$@"
+# su-exec switches to nextjs user and execs the command, replacing this shell process
+# This ensures proper signal handling (SIGTERM, SIGINT) and runs app as non-root
+echo "[entrypoint] Starting application as nextjs user: $@"
+exec su-exec nextjs "$@"

@@ -117,8 +117,9 @@ else
 fi
 
 # Test 5: Verify entrypoint properly execs to Node.js (PID 1 verification)
+# and that Node.js runs as nextjs user (not root)
 echo ""
-echo "Test 5: Verifying PID 1 is node process (not shell)..."
+echo "Test 5: Verifying PID 1 is node process running as nextjs user..."
 
 # Start container in background for 5 seconds, check PID 1
 CONTAINER_ID=$(docker run -d --rm \
@@ -139,6 +140,9 @@ sleep 3
 # Check PID 1 process name
 PID1_CMD=$(docker exec "$CONTAINER_ID" ps -o pid,comm 2>/dev/null | awk '$1 == 1 {print $2}')
 
+# Check PID 1 user (should be nextjs, not root)
+PID1_USER=$(docker exec "$CONTAINER_ID" ps -o pid,user 2>/dev/null | awk '$1 == 1 {print $2}')
+
 # Stop container
 docker stop "$CONTAINER_ID" >/dev/null 2>&1 || true
 
@@ -147,6 +151,14 @@ if [ "$PID1_CMD" = "node" ]; then
 else
   echo "ERROR: PID 1 is not node process - Got: $PID1_CMD"
   echo "This indicates entrypoint is not properly exec'ing to CMD"
+  exit 1
+fi
+
+if [ "$PID1_USER" = "nextjs" ] || [ "$PID1_USER" = "1001" ]; then
+  echo "✓ Node.js running as nextjs user (su-exec working correctly)"
+else
+  echo "ERROR: Node.js not running as nextjs user - Got: $PID1_USER"
+  echo "This indicates su-exec is not switching users properly"
   exit 1
 fi
 
