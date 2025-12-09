@@ -9,7 +9,8 @@ import { nanoid } from "nanoid"
 import { AsyncLocalStorage } from "node:async_hooks"
 
 // Security: CodeQL-compliant log sanitization that breaks taint flow completely
-function sanitizeForLogger(data: unknown): unknown {
+// Enhanced with circular reference detection and depth limiting to prevent stack overflow
+function sanitizeForLogger(data: unknown, maxDepth = 10, seen = new WeakSet<object>()): unknown {
   if (data === null || data === undefined) {
     return data
   }
@@ -28,26 +29,47 @@ function sanitizeForLogger(data: unknown): unknown {
     return typeof data === "number" ? Number(data) : Boolean(data)
   }
 
+  // CRITICAL: Check depth limit BEFORE recursion to prevent stack overflow
+  if (maxDepth <= 0) {
+    return '[Max Depth Reached]'
+  }
+
   if (Array.isArray(data)) {
+    // CRITICAL: Circular reference detection for arrays
+    if (seen.has(data)) {
+      return '[Circular]'
+    }
+    seen.add(data)
     // Create a new array with sanitized elements
-    return data.map(item => sanitizeForLogger(item))
+    return data.map(item => sanitizeForLogger(item, maxDepth - 1, seen))
   }
 
   // Enhanced: Sanitize Error objects so message, name, and stack are safe
   if (typeof data === "object") {
+    // CRITICAL: Circular reference detection for objects
+    if (seen.has(data)) {
+      return '[Circular]'
+    }
+    seen.add(data)
+
     if (data instanceof Error) {
-      // Make a new plain object with sanitized message/name/stack and all custom props
+      // Make a new plain object with sanitized message/name/stack
+      // DON'T recurse into Error.cause to prevent infinite error chains
       const safeError: Record<string, unknown> = {}
-      safeError.name = sanitizeForLogger(data.name)
-      safeError.message = sanitizeForLogger(data.message)
-      safeError.stack = typeof data.stack === "string" ? sanitizeForLogger(data.stack) : ""
+      safeError.name = sanitizeForLogger(data.name, maxDepth - 1, seen)
+      safeError.message = sanitizeForLogger(data.message, maxDepth - 1, seen)
+      safeError.stack = typeof data.stack === "string" ? sanitizeForLogger(data.stack, maxDepth - 1, seen) : ""
       // Use Map to avoid any prototype pollution risks
       const customProps = new Map<string, unknown>()
       for (const key of Object.keys(data)) {
+        // Skip 'cause' property to prevent infinite error chains
+        if (key === 'cause') {
+          continue
+        }
         if (!(key in safeError)) {
           const safeKey = String(key).replace(/[^\w.-]/g, '_')
           if (safeKey && safeKey !== '__proto__' && safeKey !== 'constructor' && safeKey !== 'prototype') {
-            customProps.set(safeKey, sanitizeForLogger((data as unknown as Record<string, unknown>)[key]))
+            customProps.set(safeKey, sanitizeForLogger((data as unknown as Record<string, unknown>)[key], maxDepth - 1, seen))
           }
         }
       }
@@ -62,7 +84,7 @@ function sanitizeForLogger(data: unknown): unknown {
       for (const [key, value] of Object.entries(data)) {
         const cleanKey = String(key).replace(/[^\w.-]/g, '_')
         if (cleanKey && cleanKey !== '__proto__' && cleanKey !== 'constructor' && cleanKey !== 'prototype') {
-          propMap.set(cleanKey, sanitizeForLogger(value))
+          propMap.set(cleanKey, sanitizeForLogger(value, maxDepth - 1, seen))
         }
       }
       return Object.fromEntries(propMap)
@@ -110,8 +132,9 @@ const EMAIL_PATTERN = /\b[\dA-Za-z][\w%+.-]*@([\dA-Za-z][\d.A-Za-z-]*\.[A-Za-z]{
 
 /**
  * Filters sensitive data from log messages and metadata
+ * Enhanced with depth limiting and circular reference detection
  */
-function filterSensitiveData(data: unknown): unknown {
+function filterSensitiveData(data: unknown, maxDepth = 10, seen = new WeakSet<object>()): unknown {
   if (typeof data === "string") {
     let filtered = data
     // Filter out sensitive patterns
@@ -122,12 +145,28 @@ function filterSensitiveData(data: unknown): unknown {
     filtered = filtered.replace(EMAIL_PATTERN, "***@$1")
     return filtered
   }
-  
-  if (Array.isArray(data)) {
-    return data.map(filterSensitiveData)
+
+  // CRITICAL: Check depth limit to prevent stack overflow
+  if (maxDepth <= 0) {
+    return '[Max Depth Reached]'
   }
-  
+
+  if (Array.isArray(data)) {
+    // CRITICAL: Circular reference detection
+    if (seen.has(data)) {
+      return '[Circular]'
+    }
+    seen.add(data)
+    return data.map(item => filterSensitiveData(item, maxDepth - 1, seen))
+  }
+
   if (data && typeof data === "object") {
+    // CRITICAL: Circular reference detection
+    if (seen.has(data)) {
+      return '[Circular]'
+    }
+    seen.add(data)
+
     const propMap = new Map<string, unknown>()
     for (const [key, value] of Object.entries(data)) {
       const cleanKey = String(key).replace(/[^\w.-]/g, '_')
@@ -149,14 +188,14 @@ function filterSensitiveData(data: unknown): unknown {
           ? value.replace(EMAIL_PATTERN, "***@$1")
           : value
       } else {
-        filteredValue = filterSensitiveData(value)
+        filteredValue = filterSensitiveData(value, maxDepth - 1, seen)
       }
 
       propMap.set(cleanKey, filteredValue)
     }
     return Object.fromEntries(propMap)
   }
-  
+
   return data
 }
 

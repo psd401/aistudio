@@ -347,11 +347,15 @@ function isRetryableError(code: ErrorCode): boolean {
   return retryableCodes.includes(code)
 }
 
+// CRITICAL: Recursion guard to prevent infinite error handling loops (stack overflow protection)
+let isHandlingError = false
+
 /**
  * Enhanced error handler with comprehensive logging and categorization
+ * Protected against recursive error handling to prevent stack overflow
  */
 export function handleError(
-  error: unknown, 
+  error: unknown,
   userMessage = "An unexpected error occurred",
   logOptions: {
     context?: string;
@@ -362,131 +366,148 @@ export function handleError(
     metadata?: Record<string, unknown>;
   } = {}
 ): ActionState<never> {
-  const { 
-    context = '', 
-    requestId = getLogContext().requestId || generateRequestId(),
-    userId = getLogContext().userId,
-    includeErrorInResponse = process.env.NODE_ENV !== "production",
-    operation,
-    metadata
-  } = logOptions
-  
-  // Create a child logger with context
-  const log = createLogger({ 
-    requestId, 
-    userId, 
-    context,
-    operation 
-  })
-  
-  // Handle TypedError
-  if (error instanceof Error && "code" in error) {
-    const typedError = error as TypedError
-    
-    // Sanitize error details for logging
-    const sanitizedDetails = sanitizeForLogging({
-      code: typedError.code,
-      details: typedError.details,
-      statusCode: typedError.statusCode,
-      retryable: typedError.retryable,
-      service: typedError.service,
-      operation: typedError.operation,
-      ...metadata
-    })
-    
-    // Log based on error level
-    switch (typedError.level) {
-      case ErrorLevel.INFO:
-        log.info(sanitizeForLogging(typedError.technicalMessage || typedError.message) as string, sanitizedDetails as object)
-        break
-      case ErrorLevel.WARN:
-        log.warn(sanitizeForLogging(typedError.technicalMessage || typedError.message) as string, sanitizedDetails as object)
-        break
-      case ErrorLevel.ERROR:
-        log.error(sanitizeForLogging(typedError.technicalMessage || typedError.message) as string, {
-          ...(sanitizedDetails as object),
-          stack: typedError.stack
-        })
-        break
-      case ErrorLevel.FATAL:
-        log.error(sanitizeForLogging(`FATAL: ${typedError.technicalMessage || typedError.message}`) as string, {
-          ...(sanitizedDetails as object),
-          stack: typedError.stack
-        })
-        break
-    }
-    
-    // Return user-friendly message
+  // CRITICAL: Prevent recursive error handling (stack overflow protection)
+  if (isHandlingError) {
+    // eslint-disable-next-line no-console
+    console.error('Recursive error handling detected - preventing stack overflow:', error)
     return {
       isSuccess: false,
-      message: typedError.userMessage || userMessage,
-      ...(includeErrorInResponse && { 
-        error: {
-          code: typedError.code,
-          message: typedError.message,
-          details: sanitizedDetails
-        }
+      message: "System error occurred"
+    }
+  }
+
+  try {
+    isHandlingError = true
+
+    const {
+      context = '',
+      requestId = getLogContext().requestId || generateRequestId(),
+      userId = getLogContext().userId,
+      includeErrorInResponse = process.env.NODE_ENV !== "production",
+      operation,
+      metadata
+    } = logOptions
+
+    // Create a child logger with context
+    const log = createLogger({
+      requestId,
+      userId,
+      context,
+      operation
+    })
+
+    // Handle TypedError
+    if (error instanceof Error && "code" in error) {
+      const typedError = error as TypedError
+
+      // Sanitize error details for logging
+      const sanitizedDetails = sanitizeForLogging({
+        code: typedError.code,
+        details: typedError.details,
+        statusCode: typedError.statusCode,
+        retryable: typedError.retryable,
+        service: typedError.service,
+        operation: typedError.operation,
+        ...metadata
       })
+
+      // Log based on error level
+      switch (typedError.level) {
+        case ErrorLevel.INFO:
+          log.info(sanitizeForLogging(typedError.technicalMessage || typedError.message) as string, sanitizedDetails as object)
+          break
+        case ErrorLevel.WARN:
+          log.warn(sanitizeForLogging(typedError.technicalMessage || typedError.message) as string, sanitizedDetails as object)
+          break
+        case ErrorLevel.ERROR:
+          log.error(sanitizeForLogging(typedError.technicalMessage || typedError.message) as string, {
+            ...(sanitizedDetails as object),
+            stack: typedError.stack
+          })
+          break
+        case ErrorLevel.FATAL:
+          log.error(sanitizeForLogging(`FATAL: ${typedError.technicalMessage || typedError.message}`) as string, {
+            ...(sanitizedDetails as object),
+            stack: typedError.stack
+          })
+          break
+      }
+
+      // Return user-friendly message
+      return {
+        isSuccess: false,
+        message: typedError.userMessage || userMessage,
+        ...(includeErrorInResponse && {
+          error: {
+            code: typedError.code,
+            message: typedError.message,
+            details: sanitizedDetails
+          }
+        })
+      }
     }
-  }
+
+    // Handle AppError (legacy)
+    if (error instanceof Error && 'level' in error && (error as AppError).level) {
+      const appError = error as AppError
+
+      const sanitizedDetails = sanitizeForLogging({
+        details: appError.details,
+        ...metadata
+      })
+
+      // Sanitize the error message before logging to prevent log injection
+      switch (appError.level) {
+        case ErrorLevel.INFO:
+          log.info(sanitizeForLogging(appError.message) as string, sanitizedDetails as object)
+          break
+        case ErrorLevel.WARN:
+          log.warn(sanitizeForLogging(appError.message) as string, sanitizedDetails as object)
+          break
+        case ErrorLevel.ERROR:
+          log.error(sanitizeForLogging(appError.message) as string, { ...(sanitizedDetails as object), stack: appError.stack })
+          break
+        case ErrorLevel.FATAL:
+          log.error(`FATAL: ${sanitizeForLogging(appError.message) as string}`, { ...(sanitizedDetails as object), stack: appError.stack })
+          break
+      }
+
+      return {
+        isSuccess: false,
+        message: userMessage,
+        ...(includeErrorInResponse && { error: appError })
+      }
+    }
+
+    // Handle standard Error objects
+    if (error instanceof Error) {
+      log.error(sanitizeForLogging(error.message) as string, {
+        error: sanitizeForLogging(error),
+        stack: error.stack,
+        ...metadata
+      })
+
+      return {
+        isSuccess: false,
+        message: userMessage,
+        ...(includeErrorInResponse && { error })
+      }
+    }
   
-  // Handle AppError (legacy)
-  if (error instanceof Error && 'level' in error && (error as AppError).level) {
-    const appError = error as AppError
-    
-    const sanitizedDetails = sanitizeForLogging({
-      details: appError.details,
-      ...metadata
-    })
-    
-    // Sanitize the error message before logging to prevent log injection
-    switch (appError.level) {
-      case ErrorLevel.INFO:
-        log.info(sanitizeForLogging(appError.message) as string, sanitizedDetails as object)
-        break
-      case ErrorLevel.WARN:
-        log.warn(sanitizeForLogging(appError.message) as string, sanitizedDetails as object)
-        break
-      case ErrorLevel.ERROR:
-        log.error(sanitizeForLogging(appError.message) as string, { ...(sanitizedDetails as object), stack: appError.stack })
-        break
-      case ErrorLevel.FATAL:
-        log.error(`FATAL: ${sanitizeForLogging(appError.message) as string}`, { ...(sanitizedDetails as object), stack: appError.stack })
-        break
-    }
-    
-    return {
-      isSuccess: false,
-      message: userMessage,
-      ...(includeErrorInResponse && { error: appError })
-    }
-  }
-  
-  // Handle standard Error objects
-  if (error instanceof Error) {
-    log.error(sanitizeForLogging(error.message) as string, { 
+    // Handle unknown error types
+    log.error("Unknown error occurred", {
       error: sanitizeForLogging(error),
-      stack: error.stack,
       ...metadata
     })
-    
+
     return {
       isSuccess: false,
       message: userMessage,
       ...(includeErrorInResponse && { error })
     }
-  }
-  
-  // Handle unknown error types
-  log.error("Unknown error occurred", { 
-    error: sanitizeForLogging(error),
-    ...metadata 
-  })
-  
-  return {
-    isSuccess: false,
-    message: userMessage,
-    ...(includeErrorInResponse && { error })
+  } finally {
+    // CRITICAL: Always reset recursion guard
+    isHandlingError = false
   }
 }
 
