@@ -61,8 +61,9 @@ FROM --platform=linux/arm64 node:22-alpine AS runner
 WORKDIR /app
 
 # Install runtime dependencies optimized for ARM64
-# curl for health checks, tini for proper signal handling
-RUN apk add --no-cache curl tini
+# curl for health checks, su-exec for user switching in entrypoint
+# (ECS provides init process via initProcessEnabled: true)
+RUN apk add --no-cache curl su-exec
 
 # Create non-root user for security
 RUN addgroup --system --gid 1001 nodejs && \
@@ -83,8 +84,21 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/standalone ./
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
-# Switch to non-root user
-USER nextjs
+# Copy entrypoint script for fixing volume permissions at runtime (issue #509)
+# ECS volumes mount as root-owned, so entrypoint fixes ownership before starting app
+# The entrypoint runs as root, fixes permissions, then switches to nextjs user via su-exec
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 755 /usr/local/bin/entrypoint.sh
+
+# Set entrypoint to fix permissions, then exec to CMD as nextjs user
+# Entrypoint runs as root (no USER directive), then uses su-exec to switch to nextjs
+# Note: ECS Fargate provides init process (initProcessEnabled: true), so no need for tini
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# NOTE: We do NOT use USER directive here because:
+# 1. ENTRYPOINT needs to run as root to fix volume permissions (chown)
+# 2. Entrypoint script uses su-exec to switch to nextjs user before executing CMD
+# 3. Final application process (node server.js) runs as nextjs via su-exec
 
 # Expose application port
 EXPOSE 3000
@@ -92,9 +106,6 @@ EXPOSE 3000
 # Note: Health checks are defined in ECS task definition (ecs-service.ts)
 # Dockerfile HEALTHCHECK is redundant since ECS task definition overrides it
 # Removed to follow AWS best practice: single source of truth for health checks
-
-# Use tini as PID 1 for proper signal handling and graceful shutdown
-ENTRYPOINT ["/sbin/tini", "--"]
 
 # Start application
 # Node.js memory limit will be set via NODE_OPTIONS environment variable in ECS task definition
