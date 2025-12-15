@@ -13,13 +13,13 @@
     "cdk": "cdk"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.1.17",
+    "@tailwindcss/postcss": "^4.1.18",
     "@types/jest": "^30.0.0",
     "@types/node": "24.10.0",
     "@types/pdf-parse": "^1.1.5",
     "aws-cdk": "2.1031.2",
     "jest": "^30.2.0",
-    "ts-jest": "^29.4.5",
+    "ts-jest": "^29.4.6",
     "ts-node": "^10.9.2",
     "typescript": "~5.9.3"
   },
@@ -32,7 +32,7 @@
     "@aws-cdk/aws-route53": "^1.203.0",
     "@aws-cdk/aws-s3": "^1.203.0",
     "@aws-cdk/aws-secretsmanager": "^1.203.0",
-    "@aws-sdk/client-dynamodb": "^3.927.0",
+    "@aws-sdk/client-dynamodb": "^3.948.0",
     "@types/node-fetch": "^2.6.12",
     "aws-cdk-lib": "^2.223.0",
     "cheerio": "^1.1.2",
