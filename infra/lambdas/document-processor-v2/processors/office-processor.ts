@@ -376,10 +376,9 @@ export class OfficeProcessor implements DocumentProcessor {
             markdown += '| ' + headers.map(() => '---').join(' | ') + ' |\n';
             
             // Include all data rows for complete AI context
+            // Use array.map().join() for better performance with large datasets
             const dataRows = rows.slice(1);
-            dataRows.forEach((row: any[]) => {
-              markdown += '| ' + row.join(' | ') + ' |\n';
-            });
+            markdown += dataRows.map((row: any[]) => '| ' + row.join(' | ') + ' |\n').join('');
           }
         }
         
