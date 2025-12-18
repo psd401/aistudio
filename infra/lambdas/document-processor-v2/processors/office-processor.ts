@@ -375,15 +375,10 @@ export class OfficeProcessor implements DocumentProcessor {
             markdown += '| ' + headers.join(' | ') + ' |\n';
             markdown += '| ' + headers.map(() => '---').join(' | ') + ' |\n';
             
-            // Data rows (limit to first 50 rows to prevent huge markdown)
-            const dataRows = rows.slice(1, 51);
-            dataRows.forEach((row: any[]) => {
-              markdown += '| ' + row.join(' | ') + ' |\n';
-            });
-            
-            if (rows.length > 51) {
-              markdown += `\n*... and ${rows.length - 51} more rows*\n\n`;
-            }
+            // Include all data rows for complete AI context
+            // Use array.map().join() for better performance with large datasets
+            const dataRows = rows.slice(1);
+            markdown += dataRows.map((row: any[]) => '| ' + row.join(' | ') + ' |\n').join('');
           }
         }
         
