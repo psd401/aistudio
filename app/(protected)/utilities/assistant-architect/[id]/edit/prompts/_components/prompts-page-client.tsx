@@ -66,8 +66,9 @@ import { RepositoryBrowser } from "@/components/features/assistant-architect/rep
 import { ToolSelectionSection } from "@/components/features/assistant-architect/tool-selection-section"
 const MDXEditor = dynamic(() => import("@mdxeditor/editor").then(mod => mod.MDXEditor), { ssr: false })
 
-
-
+// Parallel group multiplier constant - supports up to 1000 nodes per position level
+// Used to encode position into parallel group ID: (position * MULTIPLIER + index)
+const PARALLEL_GROUP_MULTIPLIER = 1000;
 
 interface PromptsPageClientProps {
   assistantId: string
@@ -415,15 +416,15 @@ const Flow = React.forwardRef<FlowHandle, {
       if (!nodesByPosition.has(level)) {
         nodesByPosition.set(level, []);
       }
-      nodesByPosition.get(level)!.push(id);
+      const levelNodes = nodesByPosition.get(level);
+      if (levelNodes) {
+        levelNodes.push(id);
+      }
     }
 
     // Calculate parallel groups for nodes at the same position
     // Nodes at the same position are assigned unique parallel group IDs to distinguish them
     const nodeParallelGroups = new Map<string, number | null>();
-
-    // Use a larger multiplier to avoid collisions (support up to 1000 nodes per position)
-    const PARALLEL_GROUP_MULTIPLIER = 1000;
 
     for (const [position, nodeIds] of nodesByPosition.entries()) {
       if (nodeIds.length === 1) {
@@ -631,10 +632,7 @@ const Flow = React.forwardRef<FlowHandle, {
       // Multiple to multiple: use parallel groups if available to reconstruct precise edges
       else if (currentPrompts.length > 1 && nextPrompts.length > 1) {
         if (currentHasParallelGroups && nextHasParallelGroups) {
-          // Use parallel groups to match nodes
-          // This multiplier must match the one used in `calculateExecutionOrder`
-          const PARALLEL_GROUP_MULTIPLIER = 1000;
-
+          // Use parallel groups to match nodes (uses global PARALLEL_GROUP_MULTIPLIER constant)
           for (const sourcePrompt of currentPrompts) {
             // Use -1 for non-parallel nodes to avoid collisions
             const sourceGroupIndex = sourcePrompt.parallelGroup !== null ? (sourcePrompt.parallelGroup % PARALLEL_GROUP_MULTIPLIER) : -1;

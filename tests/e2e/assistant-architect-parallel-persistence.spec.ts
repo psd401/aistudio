@@ -12,6 +12,10 @@ import { test, expect } from '@playwright/test'
  * Related: Epic #523
  */
 
+// Test configuration constants
+const MIN_NODE_SPACING = 50; // px - minimum horizontal spacing between parallel nodes
+const Y_POSITION_TOLERANCE = 10; // px - tolerance for grouping nodes at same vertical position
+
 test.describe('Assistant Architect - Parallel Execution Persistence', () => {
   test.describe('Edge Persistence', () => {
     test('should persist edge connections when navigating away and back', async ({ page }) => {
@@ -330,14 +334,13 @@ test.describe('Assistant Architect - Parallel Execution Persistence', () => {
       expect(nodePositions.length).toBeGreaterThan(0)
 
       // Group nodes by Y coordinate (vertical position) with tolerance
-      const yTolerance = 10 // pixels
       const nodesByYPosition = new Map<number, { x: number; y: number }[]>()
 
       for (const pos of nodePositions) {
         // Find existing Y group or create new one
         let foundGroup = false
         for (const [yKey, group] of nodesByYPosition.entries()) {
-          if (Math.abs(yKey - pos.y) < yTolerance) {
+          if (Math.abs(yKey - pos.y) < Y_POSITION_TOLERANCE) {
             group.push(pos)
             foundGroup = true
             break
@@ -355,7 +358,7 @@ test.describe('Assistant Architect - Parallel Execution Persistence', () => {
           const xCoords = nodesAtSameY.map(n => n.x).sort((a, b) => a - b)
           for (let i = 1; i < xCoords.length; i++) {
             // Each node should have a different X coordinate
-            expect(Math.abs(xCoords[i] - xCoords[i-1])).toBeGreaterThan(50) // At least 50px apart
+            expect(Math.abs(xCoords[i] - xCoords[i-1])).toBeGreaterThan(MIN_NODE_SPACING)
           }
         }
       }
