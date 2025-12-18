@@ -419,23 +419,40 @@ const Flow = React.forwardRef<FlowHandle, {
     }
 
     // Calculate parallel groups for nodes at the same position
-    // Nodes with the same parent(s) share the same parallel group
+    // Nodes at the same position are assigned unique parallel group IDs to distinguish them
     const nodeParallelGroups = new Map<string, number | null>();
+
+    // Use a larger multiplier to avoid collisions (support up to 1000 nodes per position)
+    const PARALLEL_GROUP_MULTIPLIER = 1000;
 
     for (const [position, nodeIds] of nodesByPosition.entries()) {
       if (nodeIds.length === 1) {
         // Single node at this position - no parallel group needed
         nodeParallelGroups.set(nodeIds[0], null);
       } else {
-        // Multiple nodes at same position - assign parallel groups based on their incoming edges
-        // Nodes that share the same parent should be in different parallel groups (they branch from same source)
-        // This allows us to distinguish parallel branches when reconstructing edges
+        // Multiple nodes at same position - assign parallel groups to preserve edge structure
+        // We need to track the actual edge connections to reconstruct them correctly
 
-        // Create a unique group for each node based on its index among siblings
-        // This preserves the branching structure when we reconstruct edges
-        for (let i = 0; i < nodeIds.length; i++) {
-          // Use position * 100 + index to create unique group IDs across positions
-          nodeParallelGroups.set(nodeIds[i], position * 100 + i + 1);
+        // Sort nodes by their incoming edge sources to maintain consistent ordering
+        // This ensures that nodes with the same incoming edge pattern get consistent group IDs
+        const nodesWithEdgeInfo = nodeIds.map(nodeId => {
+          const incomingEdges = edges.filter(e => e.target === nodeId);
+          const sourceIds = incomingEdges.map(e => e.source).sort().join(',');
+          return { nodeId, sourceIds, edgeCount: incomingEdges.length };
+        });
+
+        // Sort by source pattern to ensure stability across saves
+        nodesWithEdgeInfo.sort((a, b) => {
+          if (a.sourceIds !== b.sourceIds) {
+            return a.sourceIds.localeCompare(b.sourceIds);
+          }
+          return a.nodeId.localeCompare(b.nodeId);
+        });
+
+        // Assign parallel groups based on sorted order
+        // Use position * MULTIPLIER + index to create unique group IDs across positions
+        for (let i = 0; i < nodesWithEdgeInfo.length; i++) {
+          nodeParallelGroups.set(nodesWithEdgeInfo[i].nodeId, position * PARALLEL_GROUP_MULTIPLIER + i);
         }
       }
     }
@@ -615,13 +632,16 @@ const Flow = React.forwardRef<FlowHandle, {
       else if (currentPrompts.length > 1 && nextPrompts.length > 1) {
         if (currentHasParallelGroups && nextHasParallelGroups) {
           // Use parallel groups to match nodes
-          // Group index (parallelGroup % 100) should match between positions for connected nodes
+          // This multiplier must match the one used in `calculateExecutionOrder`
+          const PARALLEL_GROUP_MULTIPLIER = 1000;
+
           for (const sourcePrompt of currentPrompts) {
-            const sourceGroupIndex = sourcePrompt.parallelGroup ? (sourcePrompt.parallelGroup % 100) : 0;
+            // Use -1 for non-parallel nodes to avoid collisions
+            const sourceGroupIndex = sourcePrompt.parallelGroup !== null ? (sourcePrompt.parallelGroup % PARALLEL_GROUP_MULTIPLIER) : -1;
             for (const targetPrompt of nextPrompts) {
-              const targetGroupIndex = targetPrompt.parallelGroup ? (targetPrompt.parallelGroup % 100) : 0;
-              // Connect nodes with matching group indices (same branch)
-              if (sourceGroupIndex === targetGroupIndex) {
+              const targetGroupIndex = targetPrompt.parallelGroup !== null ? (targetPrompt.parallelGroup % PARALLEL_GROUP_MULTIPLIER) : -1;
+              // Connect nodes with matching, valid group indices (same branch)
+              if (sourceGroupIndex !== -1 && sourceGroupIndex === targetGroupIndex) {
                 newEdges.push({
                   id: `e-${String(sourcePrompt.id)}-${String(targetPrompt.id)}`,
                   source: String(sourcePrompt.id),

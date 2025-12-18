@@ -138,6 +138,39 @@ test.describe('Assistant Architect - Parallel Execution Persistence', () => {
         return
       }
 
+      // Intercept network request to verify parallel group data is sent
+      let savedPositions: unknown[] = []
+      page.on('request', request => {
+        if (request.url().includes('setPromptPositions') || request.url().includes('assistant-architect')) {
+          const postData = request.postData()
+          if (postData) {
+            try {
+              const data = JSON.parse(postData)
+              if (data.positions || Array.isArray(data)) {
+                savedPositions = data.positions || data
+              }
+            } catch {
+              // Ignore parsing errors
+            }
+          }
+        }
+      })
+
+      // Trigger a save by making a small change (if controls available)
+      const saveButton = page.locator('button:has-text("Save"), [data-testid="save-button"]')
+      if (await saveButton.count() > 0) {
+        await saveButton.click()
+        await page.waitForTimeout(1000)
+
+        // Verify that saved positions include parallelGroup data
+        if (savedPositions.length > 0) {
+          const hasParallelGroups = savedPositions.some((pos: any) =>
+            'parallelGroup' in pos || 'parallel_group' in pos
+          )
+          expect(hasParallelGroups).toBeTruthy()
+        }
+      }
+
       // Verify nodes are rendered
       await expect(promptNodes.first()).toBeVisible()
     })
@@ -295,6 +328,37 @@ test.describe('Assistant Architect - Parallel Execution Persistence', () => {
 
       // Verify we got valid positions
       expect(nodePositions.length).toBeGreaterThan(0)
+
+      // Group nodes by Y coordinate (vertical position) with tolerance
+      const yTolerance = 10 // pixels
+      const nodesByYPosition = new Map<number, { x: number; y: number }[]>()
+
+      for (const pos of nodePositions) {
+        // Find existing Y group or create new one
+        let foundGroup = false
+        for (const [yKey, group] of nodesByYPosition.entries()) {
+          if (Math.abs(yKey - pos.y) < yTolerance) {
+            group.push(pos)
+            foundGroup = true
+            break
+          }
+        }
+        if (!foundGroup) {
+          nodesByYPosition.set(pos.y, [pos])
+        }
+      }
+
+      // Verify that nodes at the same Y position (parallel nodes) have different X coordinates
+      for (const [yPos, nodesAtSameY] of nodesByYPosition.entries()) {
+        if (nodesAtSameY.length > 1) {
+          // These are parallel nodes - verify they're arranged horizontally
+          const xCoords = nodesAtSameY.map(n => n.x).sort((a, b) => a - b)
+          for (let i = 1; i < xCoords.length; i++) {
+            // Each node should have a different X coordinate
+            expect(Math.abs(xCoords[i] - xCoords[i-1])).toBeGreaterThan(50) // At least 50px apart
+          }
+        }
+      }
     })
   })
 })

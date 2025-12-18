@@ -2265,17 +2265,22 @@ export async function setPromptPositionsAction(
       return { isSuccess: false, message: "Forbidden" }
     }
 
-    // Update positions and parallel_group for each prompt
-    for (const { id, position, parallelGroup } of positions) {
-      await executeSQL<never>(
-        `UPDATE chain_prompts SET position = :position, parallel_group = :parallelGroup WHERE id = :id`,
-        [
-          { name: 'position', value: { longValue: position } },
-          { name: 'parallelGroup', value: parallelGroup !== undefined && parallelGroup !== null ? { longValue: parallelGroup } : { isNull: true } },
-          { name: 'id', value: { longValue: Number.parseInt(id, 10) } }
-        ]
-      )
-    }
+    // Update positions and parallel_group for all prompts using a single batch operation
+    // Build VALUES clause for PostgreSQL UPDATE ... FROM syntax
+    const updateCases = positions.map(({ id, position, parallelGroup }) => {
+      const parallelGroupValue = parallelGroup !== undefined && parallelGroup !== null ? parallelGroup : null;
+      return `(${Number.parseInt(id, 10)}, ${position}, ${parallelGroupValue === null ? 'NULL' : parallelGroupValue})`;
+    }).join(', ');
+
+    // Execute single batched UPDATE using VALUES syntax
+    await executeSQL<never>(`
+      UPDATE chain_prompts AS cp
+      SET
+        position = v.position,
+        parallel_group = v.parallel_group
+      FROM (VALUES ${updateCases}) AS v(id, position, parallel_group)
+      WHERE cp.id = v.id
+    `, [])
 
     log.info("Prompt positions updated successfully", { toolId, count: positions.length })
     timer({ status: "success", toolId })
