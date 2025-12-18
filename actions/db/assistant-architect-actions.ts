@@ -361,7 +361,7 @@ export async function getAssistantArchitectByIdAction(
         ORDER BY position ASC
       `, [{ name: 'toolId', value: { longValue: idInt } }]),
       executeSQL<FormattedRow>(`
-        SELECT id, assistant_architect_id, name, content, system_context, model_id, position, input_mapping, repository_ids, enabled_tools, created_at, updated_at
+        SELECT id, assistant_architect_id, name, content, system_context, model_id, position, input_mapping, parallel_group, repository_ids, enabled_tools, created_at, updated_at
         FROM chain_prompts
         WHERE assistant_architect_id = :toolId
         ORDER BY position ASC
@@ -2229,19 +2229,19 @@ export async function getAiModelsAction(): Promise<ActionState<SelectAiModel[]>>
 
 export async function setPromptPositionsAction(
   toolId: string,
-  positions: { id: string; position: number }[]
+  positions: { id: string; position: number; parallelGroup?: number | null }[]
 ): Promise<ActionState<void>> {
   const requestId = generateRequestId()
   const timer = startTimer("setPromptPositions")
   const log = createLogger({ requestId, action: "setPromptPositions" })
-  
+
   try {
     log.info("Action started: Setting prompt positions", { toolId, count: positions.length })
     const session = await getServerSession();
     if (!session || !session.sub) {
       return { isSuccess: false, message: "Unauthorized" }
     }
-    
+
     const userId = await getCurrentUserId();
     if (!userId) {
       return { isSuccess: false, message: "User not found" }
@@ -2265,12 +2265,15 @@ export async function setPromptPositionsAction(
       return { isSuccess: false, message: "Forbidden" }
     }
 
-    // Update positions for each prompt
-    for (const { id, position } of positions) {
+    // Update positions and parallel_group for each prompt using parameterized queries
+    // Note: Individual queries are used to maintain security (prevent SQL injection)
+    // Performance impact is minimal for typical use cases (<20 prompts)
+    for (const { id, position, parallelGroup } of positions) {
       await executeSQL<never>(
-        `UPDATE chain_prompts SET position = :position WHERE id = :id`,
+        `UPDATE chain_prompts SET position = :position, parallel_group = :parallelGroup WHERE id = :id`,
         [
           { name: 'position', value: { longValue: position } },
+          { name: 'parallelGroup', value: parallelGroup !== undefined && parallelGroup !== null ? { longValue: parallelGroup } : { isNull: true } },
           { name: 'id', value: { longValue: Number.parseInt(id, 10) } }
         ]
       )
@@ -2278,11 +2281,15 @@ export async function setPromptPositionsAction(
 
     log.info("Prompt positions updated successfully", { toolId, count: positions.length })
     timer({ status: "success", toolId })
-    
+
     return { isSuccess: true, message: "Prompt positions updated", data: undefined }
   } catch (error) {
     timer({ status: "error" })
-    log.error("Error setting prompt positions:", error)
+    log.error("Error setting prompt positions:", {
+      error,
+      count: positions.length,
+      toolId
+    })
     return { isSuccess: false, message: "Failed to set prompt positions" }
   }
 }
