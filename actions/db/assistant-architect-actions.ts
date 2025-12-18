@@ -745,7 +745,7 @@ export async function addToolInputFieldAction(
     log.info("Action started: Adding tool input field", { architectId, fieldName: data.name })
     await executeSQL<never>(`
       INSERT INTO tool_input_fields (assistant_architect_id, name, label, field_type, position, options, created_at, updated_at)
-      VALUES (:toolId, :name, :label, :fieldType::field_type, :position, :options, NOW(), NOW())
+      VALUES (:toolId, :name, :label, :fieldType::field_type, :position, :options::jsonb, NOW(), NOW())
     `, [
       { name: 'toolId', value: { longValue: Number.parseInt(architectId, 10) } },
       { name: 'name', value: { stringValue: data.name } },
@@ -912,6 +912,9 @@ export async function updateInputFieldAction(
         const snakeKey = key === 'fieldType' ? 'field_type' : key === 'toolId' ? 'assistant_architect_id' : key;
         if (key === 'fieldType') {
           updateFields.push(`${snakeKey} = :param${paramIndex}::field_type`);
+        } else if (key === 'options') {
+          // Options is a JSONB column - must cast from text to jsonb
+          updateFields.push(`${snakeKey} = :param${paramIndex}::jsonb`);
         } else {
           updateFields.push(`${snakeKey} = :param${paramIndex}`);
         }
