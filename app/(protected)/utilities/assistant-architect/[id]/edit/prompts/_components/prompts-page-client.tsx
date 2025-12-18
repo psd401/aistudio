@@ -373,7 +373,7 @@ const Flow = React.forwardRef<FlowHandle, {
   }));
 
   // Calculate execution order based on graph structure
-  const calculateExecutionOrder = useCallback((): { id: string; position: number }[] => {
+  const calculateExecutionOrder = useCallback((): { id: string; position: number; parallelGroup: number | null }[] => {
     const nodes = reactFlowInstance.getNodes();
     const edges = reactFlowInstance.getEdges();
     const startNode = nodes.find(n => n.type === 'start');
@@ -382,7 +382,6 @@ const Flow = React.forwardRef<FlowHandle, {
     // Track nodes and their levels
     const nodeLevels = new Map<string, number>();
     const visited = new Set<string>();
-    
 
     // Helper function to get outgoing edges from a node
     const getOutgoingEdges = (nodeId: string) =>
@@ -392,16 +391,16 @@ const Flow = React.forwardRef<FlowHandle, {
     const queue = [{ id: 'start', level: -1 }]; // Start node at level -1 so first real nodes are at 0
     while (queue.length > 0) {
       const { id, level } = queue.shift()!;
-      
+
       if (visited.has(id)) {
         // If we've seen this node before, update its level to be the maximum
         nodeLevels.set(id, Math.max(level, nodeLevels.get(id) || 0));
         continue;
       }
-      
+
       visited.add(id);
       nodeLevels.set(id, level);
-      
+
       // Add all target nodes of outgoing edges to queue
       const outgoingEdges = getOutgoingEdges(id);
       for (const edge of outgoingEdges) {
@@ -409,11 +408,46 @@ const Flow = React.forwardRef<FlowHandle, {
       }
     }
 
-    // Build array of {id, position}
+    // Group nodes by position (level)
+    const nodesByPosition = new Map<number, string[]>();
+    for (const [id, level] of nodeLevels.entries()) {
+      if (id === 'start') continue;
+      if (!nodesByPosition.has(level)) {
+        nodesByPosition.set(level, []);
+      }
+      nodesByPosition.get(level)!.push(id);
+    }
+
+    // Calculate parallel groups for nodes at the same position
+    // Nodes with the same parent(s) share the same parallel group
+    const nodeParallelGroups = new Map<string, number | null>();
+
+    for (const [position, nodeIds] of nodesByPosition.entries()) {
+      if (nodeIds.length === 1) {
+        // Single node at this position - no parallel group needed
+        nodeParallelGroups.set(nodeIds[0], null);
+      } else {
+        // Multiple nodes at same position - assign parallel groups based on their incoming edges
+        // Nodes that share the same parent should be in different parallel groups (they branch from same source)
+        // This allows us to distinguish parallel branches when reconstructing edges
+
+        // Create a unique group for each node based on its index among siblings
+        // This preserves the branching structure when we reconstruct edges
+        for (let i = 0; i < nodeIds.length; i++) {
+          // Use position * 100 + index to create unique group IDs across positions
+          nodeParallelGroups.set(nodeIds[i], position * 100 + i + 1);
+        }
+      }
+    }
+
+    // Build array of {id, position, parallelGroup}
     const result = Array.from(nodeLevels.entries())
       .filter(([id]) => id !== 'start')
-      .map(([id, level]) => ({ id, position: level }));
-
+      .map(([id, level]) => ({
+        id,
+        position: level,
+        parallelGroup: nodeParallelGroups.get(id) ?? null
+      }));
 
     return result;
   }, [reactFlowInstance]);
@@ -524,9 +558,9 @@ const Flow = React.forwardRef<FlowHandle, {
       }
     }
 
-    // Create edges based on positions and execution flow
+    // Create edges based on positions, parallel groups, and execution flow
     const newEdges: Edge[] = [];
-    
+
     // First, connect start node to all position 0 prompts
     if (promptsByPosition[0]) {
       for (const prompt of promptsByPosition[0]) {
@@ -538,15 +572,19 @@ const Flow = React.forwardRef<FlowHandle, {
         });
       }
     }
-    
+
     // Then connect each prompt to the next position's prompts
     for (let i = 0; i < positions.length - 1; i++) {
       const currentPosition = positions[i];
       const nextPosition = positions[i + 1];
-      
+
       const currentPrompts = promptsByPosition[currentPosition];
       const nextPrompts = promptsByPosition[nextPosition];
-      
+
+      // Check if we have parallel group information to guide edge reconstruction
+      const currentHasParallelGroups = currentPrompts.some(p => p.parallelGroup !== null);
+      const nextHasParallelGroups = nextPrompts.some(p => p.parallelGroup !== null);
+
       // If there's one prompt at current position and multiple at next position,
       // connect the current to each of the next (branching)
       if (currentPrompts.length === 1 && nextPrompts.length > 1) {
@@ -573,10 +611,42 @@ const Flow = React.forwardRef<FlowHandle, {
           });
         }
       }
-      // Otherwise, connect each current to each next
+      // Multiple to multiple: use parallel groups if available to reconstruct precise edges
+      else if (currentPrompts.length > 1 && nextPrompts.length > 1) {
+        if (currentHasParallelGroups && nextHasParallelGroups) {
+          // Use parallel groups to match nodes
+          // Group index (parallelGroup % 100) should match between positions for connected nodes
+          for (const sourcePrompt of currentPrompts) {
+            const sourceGroupIndex = sourcePrompt.parallelGroup ? (sourcePrompt.parallelGroup % 100) : 0;
+            for (const targetPrompt of nextPrompts) {
+              const targetGroupIndex = targetPrompt.parallelGroup ? (targetPrompt.parallelGroup % 100) : 0;
+              // Connect nodes with matching group indices (same branch)
+              if (sourceGroupIndex === targetGroupIndex) {
+                newEdges.push({
+                  id: `e-${String(sourcePrompt.id)}-${String(targetPrompt.id)}`,
+                  source: String(sourcePrompt.id),
+                  target: String(targetPrompt.id),
+                  type: 'smoothstep'
+                });
+              }
+            }
+          }
+        } else {
+          // Fallback: connect each node to all nodes in the next position
+          for (const sourcePrompt of currentPrompts) {
+            for (const targetPrompt of nextPrompts) {
+              newEdges.push({
+                id: `e-${String(sourcePrompt.id)}-${String(targetPrompt.id)}`,
+                source: String(sourcePrompt.id),
+                target: String(targetPrompt.id),
+                type: 'smoothstep'
+              });
+            }
+          }
+        }
+      }
+      // One to one: simple connection
       else {
-        // Default behavior: connect each node to all nodes in the next position
-        // This is a simplification - you might want to improve this logic
         for (const sourcePrompt of currentPrompts) {
           for (const targetPrompt of nextPrompts) {
             newEdges.push({
