@@ -179,23 +179,27 @@ export type SelectChainPrompt = {
 
 export type SelectToolExecution = {
   id: number;
-  assistantArchitectId: number;
+  assistantArchitectId: number | null;
   userId: number;
   inputData: Record<string, unknown>;
   status: string;
   errorMessage: string | null;
-  startedAt: Date | null;
+  startedAt: Date;
   completedAt: Date | null;
 }
 
 export type SelectPromptResult = {
   id: number;
-  toolExecutionId: number;
-  chainPromptId: number;
-  result: string;
-  aiModelId: number | null;
-  createdAt: Date;
-  updatedAt: Date;
+  executionId: number | null;
+  promptId: number | null;
+  inputData: Record<string, unknown>;
+  outputData: string | null;
+  status: string;
+  errorMessage: string | null;
+  startedAt: Date;
+  completedAt: Date | null;
+  executionTimeMs: number | null;
+  userFeedback: string | null;
 }
 
 export type InsertAssistantArchitect = {
@@ -234,21 +238,27 @@ export type InsertChainPrompt = {
 
 export type InsertToolExecution = {
   id?: number;
-  assistantArchitectId: number;
+  assistantArchitectId?: number | null;
   userId: number;
   inputData: Record<string, unknown>;
   status?: string;
-  errorMessage?: string;
+  errorMessage?: string | null;
   startedAt?: Date;
-  completedAt?: Date;
+  completedAt?: Date | null;
 }
 
 export type InsertPromptResult = {
   id?: number;
-  toolExecutionId: number;
-  chainPromptId: number;
-  result: string;
-  aiModelId?: number;
+  executionId?: number | null;
+  promptId?: number | null;
+  inputData: Record<string, unknown>;
+  outputData?: string | null;
+  status?: string;
+  errorMessage?: string | null;
+  startedAt?: Date;
+  completedAt?: Date | null;
+  executionTimeMs?: number | null;
+  userFeedback?: string | null;
 }
 
 export type SelectTool = {

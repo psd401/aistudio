@@ -1535,7 +1535,7 @@ export async function createToolExecutionAction(
        VALUES (:toolId, :userId, :inputData, :status, NOW())
        RETURNING id`,
       [
-        { name: 'toolId', value: { longValue: execution.assistantArchitectId } },
+        { name: 'toolId', value: execution.assistantArchitectId !== null && execution.assistantArchitectId !== undefined ? { longValue: execution.assistantArchitectId } : { isNull: true } },
         { name: 'userId', value: { longValue: execution.userId } },
         { name: 'inputData', value: { stringValue: JSON.stringify(execution.inputData || {}) } },
         { name: 'status', value: { stringValue: 'pending' } }
@@ -2076,38 +2076,15 @@ export async function getExecutionResultsAction(
 
     // Get prompt results for this execution
     const promptResultsRaw = await executeSQL<FormattedRow>(`
-      SELECT id, execution_id, prompt_id, input_data, output_data, status, error_message, started_at, completed_at, execution_time_ms
+      SELECT id, execution_id, prompt_id, input_data, output_data, status, error_message, started_at, completed_at, execution_time_ms, user_feedback
       FROM prompt_results
       WHERE execution_id = :executionId
       ORDER BY started_at ASC
     `, [{ name: 'executionId', value: { longValue: Number.parseInt(executionId, 10) } }]);
-    
-    // Transform to match SelectPromptResult type - note: the DB schema has evolved
-    // but the type definition hasn't been updated to match
+
+    // Transform to match SelectPromptResult type (now updated to match DB schema)
     const promptResultsData = promptResultsRaw.map((result: FormattedRow) => {
-      const transformedResult = transformSnakeToCamel(result) as unknown as SelectPromptResult;
-      // Add additional fields from actual DB that aren't in the type definition
-      return {
-        ...transformedResult,
-        result: result.output_data || result.result || '',
-        aiModelId: null, // Not in current DB schema
-        // Additional fields from actual DB
-        inputData: result.input_data,
-        outputData: result.output_data,
-        status: result.status,
-        errorMessage: result.error_message,
-        startedAt: result.started_at,
-        completedAt: result.completed_at,
-        executionTimeMs: result.execution_time_ms
-      } as unknown as SelectPromptResult & {
-        inputData?: Record<string, unknown>;
-        outputData?: string;
-        status?: string;
-        errorMessage?: string;
-        startedAt?: Date;
-        completedAt?: Date;
-        executionTimeMs?: number;
-      };
+      return transformSnakeToCamel<SelectPromptResult>(result);
     });
 
     // Return data in the ExecutionResultDetails format
