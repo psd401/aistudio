@@ -14,18 +14,26 @@ import {
 } from "drizzle-orm/pg-core";
 import { repositoryItems } from "./repository-items";
 
-// Custom type for pgvector
-const vector = customType<{ data: number[]; driverData: string }>({
-  dataType() {
-    return "vector(1536)";
-  },
-  toDriver(value: number[]): string {
-    return `[${value.join(",")}]`;
-  },
-  fromDriver(value: string): number[] {
-    return JSON.parse(value);
-  },
-});
+// Custom type for pgvector with null handling
+const vector = customType<{ data: number[] | null; driverData: string | null }>(
+  {
+    dataType() {
+      return "vector(1536)";
+    },
+    toDriver(value: number[] | null): string | null {
+      if (value === null) {
+        return null;
+      }
+      return `[${value.join(",")}]`;
+    },
+    fromDriver(value: string | null): number[] | null {
+      if (value === null) {
+        return null;
+      }
+      return JSON.parse(value);
+    },
+  }
+);
 
 export const repositoryItemChunks = pgTable("repository_item_chunks", {
   id: serial("id").primaryKey(),

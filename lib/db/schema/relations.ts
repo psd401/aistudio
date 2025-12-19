@@ -21,6 +21,7 @@ import { roleTools } from "./tables/role-tools";
 
 // AI Models
 import { aiModels } from "./tables/ai-models";
+import { aiStreamingJobs } from "./tables/ai-streaming-jobs";
 
 // Assistant Architects
 import { assistantArchitects } from "./tables/assistant-architects";
@@ -49,6 +50,10 @@ import { nexusMcpConnections } from "./tables/nexus-mcp-connections";
 import { nexusMcpCapabilities } from "./tables/nexus-mcp-capabilities";
 import { nexusMcpAuditLogs } from "./tables/nexus-mcp-audit-logs";
 
+// Documents
+import { documents } from "./tables/documents";
+import { documentChunks } from "./tables/document-chunks";
+
 // Knowledge repositories
 import { knowledgeRepositories } from "./tables/knowledge-repositories";
 import { repositoryItems } from "./tables/repository-items";
@@ -63,6 +68,7 @@ import { promptLibraryTags } from "./tables/prompt-library-tags";
 import { promptUsageEvents } from "./tables/prompt-usage-events";
 
 // Scheduling
+import { jobs } from "./tables/jobs";
 import { scheduledExecutions } from "./tables/scheduled-executions";
 import { executionResults } from "./tables/execution-results";
 import { userNotifications } from "./tables/user-notifications";
@@ -97,11 +103,6 @@ export const usersRelations = relations(users, ({ one, many }) => ({
     references: [nexusUserPreferences.userId],
   }),
 }));
-
-// Import remaining tables needed for relations
-import { documents } from "./tables/documents";
-import { jobs } from "./tables/jobs";
-import { aiStreamingJobs } from "./tables/ai-streaming-jobs";
 
 export const rolesRelations = relations(roles, ({ many }) => ({
   userRoles: many(userRoles),
@@ -558,8 +559,6 @@ export const aiModelsRelations = relations(aiModels, ({ many }) => ({
 // ============================================
 // Document Relations
 // ============================================
-
-import { documentChunks } from "./tables/document-chunks";
 
 export const documentsRelations = relations(documents, ({ one, many }) => ({
   user: one(users, {
