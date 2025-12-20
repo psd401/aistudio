@@ -47,6 +47,15 @@ export async function getUserRoles(userId: number): Promise<string[]> {
  *
  * @param userId - The user database ID
  * @param roleNames - Array of role names to assign
+ * @returns Success indicator
+ *
+ * **Empty Roles Behavior:**
+ * - Passing empty array `[]` removes all roles from user
+ * - This is intentional - users can have zero roles (effectively no access)
+ * - System-level checks should prevent removing the last admin role
+ * - Role version is incremented to invalidate cached sessions
+ *
+ * @throws {DatabaseError} If any role names don't exist in database
  */
 export async function updateUserRoles(
   userId: number,
@@ -62,25 +71,29 @@ export async function updateUserRoles(
     await executeQuery(
       (db) =>
         db.transaction(async (tx) => {
-          // Get role IDs for the role names
-          const rolesData = await tx
-            .select({ id: roles.id, name: roles.name })
-            .from(roles)
-            .where(inArray(roles.name, roleNames));
+          // Get role IDs for the role names (skip if empty array)
+          let rolesData: Array<{ id: number; name: string }> = [];
 
-          if (rolesData.length !== roleNames.length) {
-            const foundNames = rolesData.map((r) => r.name);
-            const missingRoles = roleNames.filter(
-              (name) => !foundNames.includes(name)
-            );
-            log.error("Some roles not found", { missingRoles });
-            throw ErrorFactories.dbRecordNotFound(
-              "roles",
-              missingRoles.join(", "),
-              {
-                technicalMessage: `Roles not found: ${missingRoles.join(", ")}`,
-              }
-            );
+          if (roleNames.length > 0) {
+            rolesData = await tx
+              .select({ id: roles.id, name: roles.name })
+              .from(roles)
+              .where(inArray(roles.name, roleNames));
+
+            if (rolesData.length !== roleNames.length) {
+              const foundNames = rolesData.map((r) => r.name);
+              const missingRoles = roleNames.filter(
+                (name) => !foundNames.includes(name)
+              );
+              log.error("Some roles not found", { missingRoles });
+              throw ErrorFactories.dbRecordNotFound(
+                "roles",
+                missingRoles.join(", "),
+                {
+                  technicalMessage: `Roles not found: ${missingRoles.join(", ")}`,
+                }
+              );
+            }
           }
 
           // Delete existing roles

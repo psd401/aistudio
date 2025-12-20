@@ -185,6 +185,23 @@ export async function getUserIdByCognitoSub(
 
 /**
  * Create or update user (upsert on cognito_sub conflict)
+ *
+ * @param userData - User data to insert or update
+ * @returns Created or updated user record
+ *
+ * **Upsert Behavior:**
+ * - On INSERT: Creates new user with all provided fields
+ * - On CONFLICT (cognito_sub exists):
+ *   - email: Always updated to new value
+ *   - firstName/lastName: **Preserves existing values if new values are null**
+ *   - This prevents OAuth providers that don't return names from clearing existing data
+ *
+ * **Example:**
+ * ```typescript
+ * // User exists with firstName="John", lastName="Doe"
+ * await createUser({ cognitoSub: "sub123", email: "john@example.com", firstName: null, lastName: null })
+ * // Result: firstName="John", lastName="Doe" (preserved)
+ * ```
  */
 export async function createUser(userData: UserData) {
   const result = await executeQuery(
@@ -249,6 +266,16 @@ export async function updateUser(
 
 /**
  * Delete user by database ID
+ *
+ * **Hard Delete Behavior:**
+ * - Performs permanent deletion from database (NOT a soft delete)
+ * - Cascading deletes remove related records (user_roles, etc.) via foreign key constraints
+ * - This is intentional for GDPR compliance and data deletion requirements
+ * - Use with caution - this operation cannot be undone
+ * - For temporary deactivation, consider adding an `isActive` flag instead
+ *
+ * @param id - The user database ID
+ * @returns The deleted user record
  */
 export async function deleteUser(id: number) {
   const result = await executeQuery(

@@ -97,7 +97,8 @@ export async function getNavigationItems(activeOnly: boolean = false) {
 }
 
 /**
- * Get navigation items by navigation item ID
+ * Get navigation item by ID
+ * @throws {DatabaseError} If navigation item not found
  */
 export async function getNavigationItemById(id: number) {
   const result = await executeQuery(
@@ -122,6 +123,11 @@ export async function getNavigationItemById(id: number) {
         .limit(1),
     "getNavigationItemById"
   );
+
+  if (!result[0]) {
+    throw ErrorFactories.dbRecordNotFound("navigation_items", id);
+  }
+
   return result[0];
 }
 
