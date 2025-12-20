@@ -94,6 +94,12 @@ const ModelForm = React.memo(function ModelForm({
       setModelData({ ...modelData, inputCostPer1kTokens: null });
       return;
     }
+    // Validate entire string is a valid decimal number (prevents "0.00abc" type inputs)
+    const numericPattern = /^-?\d*\.?\d+$/;
+    if (!numericPattern.test(value)) {
+      // Silently reject invalid inputs (don't update state)
+      return;
+    }
     const parsed = Number.parseFloat(value);
     if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
       setModelData({ ...modelData, inputCostPer1kTokens: value });
@@ -107,6 +113,11 @@ const ModelForm = React.memo(function ModelForm({
       setModelData({ ...modelData, outputCostPer1kTokens: null });
       return;
     }
+    // Validate entire string is a valid decimal number
+    const numericPattern = /^-?\d*\.?\d+$/;
+    if (!numericPattern.test(value)) {
+      return;
+    }
     const parsed = Number.parseFloat(value);
     if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
       setModelData({ ...modelData, outputCostPer1kTokens: value });
@@ -118,6 +129,11 @@ const ModelForm = React.memo(function ModelForm({
     // Empty input sets null in database (not empty string)
     if (!value) {
       setModelData({ ...modelData, cachedInputCostPer1kTokens: null });
+      return;
+    }
+    // Validate entire string is a valid decimal number
+    const numericPattern = /^-?\d*\.?\d+$/;
+    if (!numericPattern.test(value)) {
       return;
     }
     const parsed = Number.parseFloat(value);
@@ -586,21 +602,6 @@ const capabilityOptions: MultiSelectOption[] = [
   { value: 'json_mode', label: 'JSON Mode', description: 'Structured JSON output' },
 ];
 
-/**
- * Format cost value for display
- * Cost fields are stored as strings (PostgreSQL numeric) to preserve precision
- * Available for future use in table columns or tooltips
- * @param cost - Cost value as string or null
- * @returns Formatted cost string with $ prefix
- */
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const _formatCost = (cost: string | null): string => {
-  if (!cost) return 'N/A';
-  const numericValue = Number.parseFloat(cost);
-  if (Number.isNaN(numericValue)) return 'N/A';
-  return `$${numericValue.toFixed(6)}`;
-};
-
 export const AiModelsTable = React.memo(function AiModelsTable({ 
   models, 
   onAddModel, 
@@ -986,9 +987,9 @@ export const AiModelsTable = React.memo(function AiModelsTable({
         ? JSON.stringify(modelData.capabilitiesList)
         : null,
       // allowedRoles is JSONB type - pass array directly, not as JSON string
-      allowedRoles: (modelData.allowedRoles.length > 0
+      allowedRoles: modelData.allowedRoles.length > 0
         ? modelData.allowedRoles
-        : null) as string[] | null,
+        : null,
       // Include all the new fields
       nexusCapabilities: Object.keys(modelData.nexusCapabilities).length > 0
         ? modelData.nexusCapabilities

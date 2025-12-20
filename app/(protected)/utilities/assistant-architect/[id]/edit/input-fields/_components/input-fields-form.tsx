@@ -145,8 +145,9 @@ export function InputFieldsForm({
 
       // Only include options for select/multi_select fields
       // Both create and update now use ToolInputFieldOptions format for consistency
+      // Filter out empty/whitespace-only values to prevent invalid data
       const optionsToSave: ToolInputFieldOptions | undefined = showOptions && options.length > 0
-        ? { values: options.map(opt => opt.value) }
+        ? { values: options.map(opt => opt.value).filter(v => v.trim()) }
         : undefined
 
       let result;
