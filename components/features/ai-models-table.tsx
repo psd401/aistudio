@@ -89,6 +89,7 @@ const ModelForm = React.memo(function ModelForm({
   // Note: Cost fields are stored as strings in DB for precision (PostgreSQL numeric type)
   const handleInputCostChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
+    // Empty input sets null in database (not empty string)
     if (!value) {
       setModelData({ ...modelData, inputCostPer1kTokens: null });
       return;
@@ -101,6 +102,7 @@ const ModelForm = React.memo(function ModelForm({
 
   const handleOutputCostChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
+    // Empty input sets null in database (not empty string)
     if (!value) {
       setModelData({ ...modelData, outputCostPer1kTokens: null });
       return;
@@ -113,6 +115,7 @@ const ModelForm = React.memo(function ModelForm({
 
   const handleCachedInputCostChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
+    // Empty input sets null in database (not empty string)
     if (!value) {
       setModelData({ ...modelData, cachedInputCostPer1kTokens: null });
       return;
@@ -583,6 +586,21 @@ const capabilityOptions: MultiSelectOption[] = [
   { value: 'json_mode', label: 'JSON Mode', description: 'Structured JSON output' },
 ];
 
+/**
+ * Format cost value for display
+ * Cost fields are stored as strings (PostgreSQL numeric) to preserve precision
+ * Available for future use in table columns or tooltips
+ * @param cost - Cost value as string or null
+ * @returns Formatted cost string with $ prefix
+ */
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const _formatCost = (cost: string | null): string => {
+  if (!cost) return 'N/A';
+  const numericValue = Number.parseFloat(cost);
+  if (Number.isNaN(numericValue)) return 'N/A';
+  return `$${numericValue.toFixed(6)}`;
+};
+
 export const AiModelsTable = React.memo(function AiModelsTable({ 
   models, 
   onAddModel, 
@@ -968,9 +986,9 @@ export const AiModelsTable = React.memo(function AiModelsTable({
         ? JSON.stringify(modelData.capabilitiesList)
         : null,
       // allowedRoles is JSONB type - pass array directly, not as JSON string
-      allowedRoles: modelData.allowedRoles.length > 0
+      allowedRoles: (modelData.allowedRoles.length > 0
         ? modelData.allowedRoles
-        : null,
+        : null) as string[] | null,
       // Include all the new fields
       nexusCapabilities: Object.keys(modelData.nexusCapabilities).length > 0
         ? modelData.nexusCapabilities
