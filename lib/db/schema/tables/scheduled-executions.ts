@@ -12,7 +12,7 @@ import {
   text,
   timestamp,
 } from "drizzle-orm/pg-core";
-import type { ScheduleConfig } from "@/types/db-types";
+import type { ScheduleConfig } from "@/lib/db/types/jsonb";
 import { users } from "./users";
 import { assistantArchitects } from "./assistant-architects";
 

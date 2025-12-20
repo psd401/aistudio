@@ -10,7 +10,7 @@ import {
   timestamp,
   varchar,
 } from "drizzle-orm/pg-core";
-import type { NexusUserSettings } from "@/types/db-types";
+import type { NexusUserSettings } from "@/lib/db/types/jsonb";
 import { users } from "./users";
 
 export const nexusUserPreferences = pgTable("nexus_user_preferences", {

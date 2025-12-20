@@ -12,7 +12,7 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
-import type { NexusFolderSettings } from "@/types/db-types";
+import type { NexusFolderSettings } from "@/lib/db/types/jsonb";
 import { users } from "./users";
 
 export const nexusFolders = pgTable("nexus_folders", {

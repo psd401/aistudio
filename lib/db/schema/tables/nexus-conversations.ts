@@ -12,7 +12,7 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
-import type { NexusConversationMetadata } from "@/types/db-types";
+import type { NexusConversationMetadata } from "@/lib/db/types/jsonb";
 import { users } from "./users";
 import { nexusFolders } from "./nexus-folders";
 

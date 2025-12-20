@@ -11,7 +11,7 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
-import type { NexusMcpSchema } from "@/types/db-types";
+import type { NexusMcpSchema } from "@/lib/db/types/jsonb";
 import { nexusMcpServers } from "./nexus-mcp-servers";
 
 export const nexusMcpCapabilities = pgTable("nexus_mcp_capabilities", {

@@ -13,7 +13,7 @@ import {
 } from "drizzle-orm/pg-core";
 import { fieldTypeEnum } from "../enums";
 import { assistantArchitects } from "./assistant-architects";
-import type { ToolInputFieldOptions } from "@/types/db-types";
+import type { ToolInputFieldOptions } from "@/lib/db/types/jsonb";
 
 export const toolInputFields = pgTable("tool_input_fields", {
   id: serial("id").primaryKey(),
