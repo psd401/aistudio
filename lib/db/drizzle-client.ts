@@ -26,10 +26,10 @@ import * as schema from "./schema";
 
 /**
  * RDS Data API client instance
- * Reuses existing configuration pattern from data-api-client.ts
+ * Uses server-side AWS_REGION (not NEXT_PUBLIC_AWS_REGION for security)
  */
 const rdsClient = new RDSDataClient({
-  region: process.env.NEXT_PUBLIC_AWS_REGION || process.env.AWS_REGION || "us-east-1",
+  region: process.env.AWS_REGION || "us-east-1",
 });
 
 // ============================================
@@ -43,13 +43,28 @@ const rdsClient = new RDSDataClient({
  * - RDS_DATABASE_NAME: Database name (default: 'aistudio')
  * - RDS_SECRET_ARN: AWS Secrets Manager ARN for database credentials
  * - RDS_RESOURCE_ARN: Aurora cluster ARN
+ *
+ * Validates required environment variables at module load time to fail fast
+ * with clear error messages rather than cryptic runtime failures.
  */
-export const db = drizzle(rdsClient, {
-  database: process.env.RDS_DATABASE_NAME || "aistudio",
-  secretArn: process.env.RDS_SECRET_ARN!,
-  resourceArn: process.env.RDS_RESOURCE_ARN!,
-  schema,
-});
+export const db = (() => {
+  const secretArn = process.env.RDS_SECRET_ARN;
+  const resourceArn = process.env.RDS_RESOURCE_ARN;
+
+  if (!secretArn || !resourceArn) {
+    throw new Error(
+      "Required environment variables RDS_SECRET_ARN and RDS_RESOURCE_ARN are not set. " +
+      "Database client cannot be initialized without these credentials."
+    );
+  }
+
+  return drizzle(rdsClient, {
+    database: process.env.RDS_DATABASE_NAME || "aistudio",
+    secretArn,
+    resourceArn,
+    schema,
+  });
+})();
 
 /**
  * Type alias for the Drizzle database instance
@@ -70,6 +85,8 @@ export interface QueryRetryOptions {
   maxDelay?: number;
   /** Multiplier for exponential backoff (default: 2) */
   backoffMultiplier?: number;
+  /** Maximum jitter in milliseconds to add to backoff delay (default: 100) */
+  jitterMax?: number;
 }
 
 const DEFAULT_QUERY_OPTIONS: Required<QueryRetryOptions> = {
@@ -77,6 +94,7 @@ const DEFAULT_QUERY_OPTIONS: Required<QueryRetryOptions> = {
   initialDelay: 100,
   maxDelay: 5000,
   backoffMultiplier: 2,
+  jitterMax: 100,
 };
 
 // ============================================
@@ -147,6 +165,7 @@ export async function executeQuery<T>(
         initialDelay: opts.initialDelay,
         maxDelay: opts.maxDelay,
         backoffMultiplier: opts.backoffMultiplier,
+        jitterMax: opts.jitterMax,
       },
       requestId
     );
@@ -157,10 +176,15 @@ export async function executeQuery<T>(
     return result;
   } catch (error) {
     timer({ status: "error" });
-    log.error("Query failed", {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorName = error instanceof Error ? error.name : "UnknownError";
+
+    log.error("Query failed after retries", {
       context,
-      error: error instanceof Error ? error.message : String(error),
+      error: errorMessage,
+      errorName,
       circuitState: getCircuitBreakerState().state,
+      requestId,
     });
     throw error;
   }
