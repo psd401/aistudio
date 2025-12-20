@@ -45,11 +45,15 @@ export interface NexusCapabilities {
 
 /**
  * AI provider-specific metadata
+ *
+ * Note: Uses snake_case to match external API responses (OpenAI, Anthropic, etc.)
+ * These fields are stored as-is in JSONB columns.
  */
 export interface ProviderMetadata {
   max_context_length?: number;
   supports_streaming?: boolean;
   supports_function_calling?: boolean;
+  /** Allow additional provider-specific fields */
   [key: string]: unknown;
 }
 
