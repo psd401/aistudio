@@ -249,6 +249,8 @@ export async function createNavigationItem(data: NavigationItemData) {
 
 /**
  * Update an existing navigation item
+ * Supports partial updates - only provided fields are updated
+ * No-op updates (no fields provided) return existing record without error
  */
 export async function updateNavigationItem(
   id: number,
@@ -268,10 +270,9 @@ export async function updateNavigationItem(
   if (data.position !== undefined) updateData.position = data.position;
   if (data.isActive !== undefined) updateData.isActive = data.isActive;
 
+  // No-op update: return existing record without error
   if (Object.keys(updateData).length === 0) {
-    throw ErrorFactories.validationFailed([], {
-      technicalMessage: "No fields provided to update navigation item",
-    });
+    return getNavigationItemById(id);
   }
 
   const result = await executeQuery(

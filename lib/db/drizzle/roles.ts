@@ -244,43 +244,26 @@ export async function getTools() {
 
 /**
  * Assign a tool to a role
- * Uses ON CONFLICT DO NOTHING for idempotency
+ * Idempotent operation - succeeds even if already assigned
  *
  * @param roleId - Role database ID
  * @param toolId - Tool database ID
+ * @returns Always true (conflict means already assigned)
  */
 export async function assignToolToRole(
   roleId: number,
   toolId: number
 ): Promise<boolean> {
-  // Check if already assigned
-  const existing = await executeQuery(
-    (db) =>
-      db
-        .select({ id: roleTools.id })
-        .from(roleTools)
-        .where(and(eq(roleTools.roleId, roleId), eq(roleTools.toolId, toolId)))
-        .limit(1),
-    "checkRoleToolExists"
-  );
-
-  if (existing.length > 0) {
-    return true; // Already assigned
-  }
-
-  const result = await executeQuery(
+  await executeQuery(
     (db) =>
       db
         .insert(roleTools)
-        .values({
-          roleId,
-          toolId,
-        })
-        .returning(),
+        .values({ roleId, toolId })
+        .onConflictDoNothing(),
     "assignToolToRole"
   );
 
-  return result.length > 0;
+  return true; // Success (including if already assigned)
 }
 
 /**

@@ -125,6 +125,13 @@ export async function getUserByEmail(email: string) {
 
 /**
  * Get user by Cognito sub (unique identifier from AWS Cognito)
+ *
+ * @returns User object or undefined if not found
+ *
+ * Note: Returns undefined (not throws) for "not found" case.
+ * This is intentional for authentication flows where users may not exist yet
+ * (e.g., first-time login, registration). Use getUserById() if you expect
+ * the user to exist and want to throw on not found.
  */
 export async function getUserByCognitoSub(cognitoSub: string) {
   const result = await executeQuery(
@@ -150,7 +157,12 @@ export async function getUserByCognitoSub(cognitoSub: string) {
 
 /**
  * Get user ID by Cognito sub
- * Returns string ID or null if not found
+ *
+ * @returns String representation of user ID or null if not found
+ *
+ * Note: Returns string (not number) for backward compatibility with existing
+ * RDS Data API implementation. Many consumers expect string type for this function.
+ * If you need numeric ID, use getUserByCognitoSub(sub)?.id instead.
  */
 export async function getUserIdByCognitoSub(
   cognitoSub: string
