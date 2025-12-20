@@ -13,6 +13,7 @@
 import { eq, and, asc } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { roles, roleTools, tools } from "@/lib/db/schema";
+import { ErrorFactories } from "@/lib/error-utils";
 
 // ============================================
 // Types
@@ -69,7 +70,7 @@ export async function getRoleByName(roleName: string) {
         .limit(1),
     "getRoleByName"
   );
-  return result;
+  return result[0];
 }
 
 /**
@@ -153,7 +154,9 @@ export async function updateRole(
   );
 
   if (result.length === 0) {
-    throw new Error("Role not found or is a system role");
+    throw ErrorFactories.dbRecordNotFound("roles", id, {
+      technicalMessage: "Role not found or is a system role (cannot update system roles)",
+    });
   }
 
   return result[0];
@@ -173,7 +176,9 @@ export async function deleteRole(id: number) {
   );
 
   if (result.length === 0) {
-    throw new Error("Role not found or is a system role");
+    throw ErrorFactories.dbRecordNotFound("roles", id, {
+      technicalMessage: "Role not found or is a system role (cannot delete system roles)",
+    });
   }
 
   return result[0];
@@ -245,6 +250,19 @@ export async function assignToolToRole(
   const roleIdNum = Number.parseInt(roleId, 10);
   const toolIdNum = Number.parseInt(toolId, 10);
 
+  // Validate parsed integers
+  if (Number.isNaN(roleIdNum) || Number.isNaN(toolIdNum)) {
+    throw ErrorFactories.validationFailed(
+      [
+        { field: "roleId", message: "Invalid role ID" },
+        { field: "toolId", message: "Invalid tool ID" },
+      ],
+      {
+        technicalMessage: `Invalid role or tool ID: roleId=${roleId}, toolId=${toolId}`,
+      }
+    );
+  }
+
   // Check if already assigned
   const existing = await executeQuery(
     (db) =>
@@ -292,6 +310,19 @@ export async function removeToolFromRole(
 ): Promise<boolean> {
   const roleIdNum = Number.parseInt(roleId, 10);
   const toolIdNum = Number.parseInt(toolId, 10);
+
+  // Validate parsed integers
+  if (Number.isNaN(roleIdNum) || Number.isNaN(toolIdNum)) {
+    throw ErrorFactories.validationFailed(
+      [
+        { field: "roleId", message: "Invalid role ID" },
+        { field: "toolId", message: "Invalid tool ID" },
+      ],
+      {
+        technicalMessage: `Invalid role or tool ID: roleId=${roleId}, toolId=${toolId}`,
+      }
+    );
+  }
 
   const result = await executeQuery(
     (db) =>

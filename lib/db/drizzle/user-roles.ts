@@ -10,10 +10,11 @@
  * @see https://orm.drizzle.team/docs/transactions
  */
 
-import { eq, inArray, sql } from "drizzle-orm";
+import { eq, inArray, and, sql } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { users, userRoles, roles } from "@/lib/db/schema";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
+import { ErrorFactories } from "@/lib/error-utils";
 
 // ============================================
 // User Role Query Operations
@@ -73,7 +74,13 @@ export async function updateUserRoles(
               (name) => !foundNames.includes(name)
             );
             log.error("Some roles not found", { missingRoles });
-            throw new Error(`Roles not found: ${missingRoles.join(", ")}`);
+            throw ErrorFactories.dbRecordNotFound(
+              "roles",
+              missingRoles.join(", "),
+              {
+                technicalMessage: `Roles not found: ${missingRoles.join(", ")}`,
+              }
+            );
           }
 
           // Delete existing roles
@@ -144,7 +151,7 @@ export async function addUserRole(
             .limit(1);
 
           if (roleResult.length === 0) {
-            throw new Error(`Role '${roleName}' not found`);
+            throw ErrorFactories.dbRecordNotFound("roles", roleName);
           }
 
           const roleId = roleResult[0].id;
@@ -207,7 +214,7 @@ export async function removeUserRole(
             .limit(1);
 
           if (roleResult.length === 0) {
-            throw new Error(`Role '${roleName}' not found`);
+            throw ErrorFactories.dbRecordNotFound("roles", roleName);
           }
 
           const roleId = roleResult[0].id;
@@ -216,7 +223,7 @@ export async function removeUserRole(
           await tx
             .delete(userRoles)
             .where(
-              sql`${userRoles.userId} = ${userId} AND ${userRoles.roleId} = ${roleId}`
+              and(eq(userRoles.userId, userId), eq(userRoles.roleId, roleId))
             );
 
           // Increment role_version for session cache invalidation

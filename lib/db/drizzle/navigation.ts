@@ -19,6 +19,7 @@ import {
   roles,
   users,
 } from "@/lib/db/schema";
+import { ErrorFactories } from "@/lib/error-utils";
 
 // ============================================
 // Types
@@ -236,7 +237,11 @@ export async function createNavigationItem(data: NavigationItemData) {
   );
 
   if (!result || result.length === 0) {
-    throw new Error("Failed to create navigation item");
+    throw ErrorFactories.dbQueryFailed(
+      "INSERT into navigation_items",
+      undefined,
+      { technicalMessage: "Failed to create navigation item" }
+    );
   }
 
   return result[0];
@@ -264,7 +269,9 @@ export async function updateNavigationItem(
   if (data.isActive !== undefined) updateData.isActive = data.isActive;
 
   if (Object.keys(updateData).length === 0) {
-    throw new Error("No fields to update");
+    throw ErrorFactories.validationFailed([], {
+      technicalMessage: "No fields provided to update navigation item",
+    });
   }
 
   const result = await executeQuery(
@@ -278,7 +285,7 @@ export async function updateNavigationItem(
   );
 
   if (!result || result.length === 0) {
-    throw new Error(`Navigation item with id ${id} not found or update failed`);
+    throw ErrorFactories.dbRecordNotFound("navigation_items", id);
   }
 
   return result[0];
