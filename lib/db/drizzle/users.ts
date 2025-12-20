@@ -20,6 +20,7 @@ import {
   tools,
 } from "@/lib/db/schema";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
+import { ErrorFactories } from "@/lib/error-utils";
 
 // ============================================
 // Types
@@ -62,6 +63,7 @@ export async function getUsers() {
 
 /**
  * Get user by database ID
+ * @throws {DatabaseError} If user not found
  */
 export async function getUserById(userId: number) {
   const result = await executeQuery(
@@ -82,11 +84,17 @@ export async function getUserById(userId: number) {
         .limit(1),
     "getUserById"
   );
+
+  if (!result[0]) {
+    throw ErrorFactories.dbRecordNotFound("users", userId);
+  }
+
   return result[0];
 }
 
 /**
  * Get user by email address
+ * @throws {DatabaseError} If user not found
  */
 export async function getUserByEmail(email: string) {
   const result = await executeQuery(
@@ -107,6 +115,11 @@ export async function getUserByEmail(email: string) {
         .limit(1),
     "getUserByEmail"
   );
+
+  if (!result[0]) {
+    throw ErrorFactories.dbRecordNotFound("users", email);
+  }
+
   return result[0];
 }
 

@@ -75,6 +75,7 @@ export async function getRoleByName(roleName: string) {
 
 /**
  * Get role by ID
+ * @throws {DatabaseError} If role not found
  */
 export async function getRoleById(roleId: number) {
   const result = await executeQuery(
@@ -93,6 +94,11 @@ export async function getRoleById(roleId: number) {
         .limit(1),
     "getRoleById"
   );
+
+  if (!result[0]) {
+    throw ErrorFactories.dbRecordNotFound("roles", roleId);
+  }
+
   return result[0];
 }
 
@@ -240,41 +246,20 @@ export async function getTools() {
  * Assign a tool to a role
  * Uses ON CONFLICT DO NOTHING for idempotency
  *
- * @param roleId - Role ID (string for backward compatibility, converted to number)
- * @param toolId - Tool ID (string for backward compatibility, converted to number)
+ * @param roleId - Role database ID
+ * @param toolId - Tool database ID
  */
 export async function assignToolToRole(
-  roleId: string,
-  toolId: string
+  roleId: number,
+  toolId: number
 ): Promise<boolean> {
-  const roleIdNum = Number.parseInt(roleId, 10);
-  const toolIdNum = Number.parseInt(toolId, 10);
-
-  // Validate parsed integers
-  if (Number.isNaN(roleIdNum) || Number.isNaN(toolIdNum)) {
-    throw ErrorFactories.validationFailed(
-      [
-        { field: "roleId", message: "Invalid role ID" },
-        { field: "toolId", message: "Invalid tool ID" },
-      ],
-      {
-        technicalMessage: `Invalid role or tool ID: roleId=${roleId}, toolId=${toolId}`,
-      }
-    );
-  }
-
   // Check if already assigned
   const existing = await executeQuery(
     (db) =>
       db
         .select({ id: roleTools.id })
         .from(roleTools)
-        .where(
-          and(
-            eq(roleTools.roleId, roleIdNum),
-            eq(roleTools.toolId, toolIdNum)
-          )
-        )
+        .where(and(eq(roleTools.roleId, roleId), eq(roleTools.toolId, toolId)))
         .limit(1),
     "checkRoleToolExists"
   );
@@ -288,8 +273,8 @@ export async function assignToolToRole(
       db
         .insert(roleTools)
         .values({
-          roleId: roleIdNum,
-          toolId: toolIdNum,
+          roleId,
+          toolId,
         })
         .returning(),
     "assignToolToRole"
@@ -301,39 +286,18 @@ export async function assignToolToRole(
 /**
  * Remove a tool from a role
  *
- * @param roleId - Role ID (string for backward compatibility, converted to number)
- * @param toolId - Tool ID (string for backward compatibility, converted to number)
+ * @param roleId - Role database ID
+ * @param toolId - Tool database ID
  */
 export async function removeToolFromRole(
-  roleId: string,
-  toolId: string
+  roleId: number,
+  toolId: number
 ): Promise<boolean> {
-  const roleIdNum = Number.parseInt(roleId, 10);
-  const toolIdNum = Number.parseInt(toolId, 10);
-
-  // Validate parsed integers
-  if (Number.isNaN(roleIdNum) || Number.isNaN(toolIdNum)) {
-    throw ErrorFactories.validationFailed(
-      [
-        { field: "roleId", message: "Invalid role ID" },
-        { field: "toolId", message: "Invalid tool ID" },
-      ],
-      {
-        technicalMessage: `Invalid role or tool ID: roleId=${roleId}, toolId=${toolId}`,
-      }
-    );
-  }
-
   const result = await executeQuery(
     (db) =>
       db
         .delete(roleTools)
-        .where(
-          and(
-            eq(roleTools.roleId, roleIdNum),
-            eq(roleTools.toolId, toolIdNum)
-          )
-        )
+        .where(and(eq(roleTools.roleId, roleId), eq(roleTools.toolId, toolId)))
         .returning(),
     "removeToolFromRole"
   );
