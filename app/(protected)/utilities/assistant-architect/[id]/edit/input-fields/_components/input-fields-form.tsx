@@ -144,16 +144,15 @@ export function InputFieldsForm({
       setIsLoading(true)
 
       // Only include options for select/multi_select fields
-      const hasOptions = showOptions && options.length > 0
+      // Both create and update now use ToolInputFieldOptions format for consistency
+      const optionsToSave: ToolInputFieldOptions | undefined = showOptions && options.length > 0
+        ? { values: options.map(opt => opt.value) }
+        : undefined
 
       let result;
 
       if (isEditing && editingField) {
-        // Update existing field - updateInputFieldAction expects ToolInputFieldOptions format
-        const optionsForUpdate: ToolInputFieldOptions | undefined = hasOptions
-          ? { values: options.map(opt => opt.value) }
-          : undefined
-
+        // Update existing field
         result = await updateInputFieldAction(
           String(editingField.id),
           {
@@ -161,7 +160,7 @@ export function InputFieldsForm({
             label: values.label as string,
             fieldType: values.fieldType as "short_text" | "long_text" | "select" | "multi_select" | "file_upload",
             position: values.position as number,
-            options: optionsForUpdate
+            options: optionsToSave
           }
         )
 
@@ -169,9 +168,7 @@ export function InputFieldsForm({
           clearEditingField()
         }
       } else {
-        // Create new field - addToolInputFieldAction expects { label, value }[] format
-        const optionsForCreate = hasOptions ? options : undefined
-
+        // Create new field
         result = await addToolInputFieldAction(
           assistantId,
           {
@@ -179,7 +176,7 @@ export function InputFieldsForm({
             label: values.label as string,
             type: values.fieldType as "short_text" | "long_text" | "select" | "multi_select" | "file_upload",
             position: values.position as number,
-            options: optionsForCreate
+            options: optionsToSave
           }
         )
       }
