@@ -92,17 +92,12 @@ export function InputFieldsForm({
   useEffect(() => {
     if (editingField) {
       let parsedOptions: { label: string; value: string }[] = [];
-      if (Array.isArray(editingField.options)) {
-        parsedOptions = editingField.options;
-      } else if (typeof editingField.options === "string") {
-        parsedOptions = editingField.options.split(",").map((opt) => ({
-          label: opt.trim(),
-          value: opt.trim(),
-        }));
-      } else if (editingField.options && typeof editingField.options === 'object') {
-        // Handle ToolInputFieldOptions object format
-        if (Array.isArray((editingField.options as ToolInputFieldOptions).values)) {
-          parsedOptions = (editingField.options as ToolInputFieldOptions).values!.map(val => ({
+      // editingField.options is ToolInputFieldOptions | null from Drizzle JSONB type
+      // ToolInputFieldOptions has values?: string[]
+      if (editingField.options && typeof editingField.options === 'object') {
+        const opts = editingField.options as ToolInputFieldOptions;
+        if (Array.isArray(opts.values)) {
+          parsedOptions = opts.values.map(val => ({
             label: val,
             value: val
           }));
@@ -147,14 +142,18 @@ export function InputFieldsForm({
   async function onSubmit(values: FormValues) {
     try {
       setIsLoading(true)
-      
+
       // Only include options for select/multi_select fields
-      const optionsToSave = showOptions ? options : undefined
-      
+      const hasOptions = showOptions && options.length > 0
+
       let result;
-      
+
       if (isEditing && editingField) {
-        // Update existing field
+        // Update existing field - updateInputFieldAction expects ToolInputFieldOptions format
+        const optionsForUpdate: ToolInputFieldOptions | undefined = hasOptions
+          ? { values: options.map(opt => opt.value) }
+          : undefined
+
         result = await updateInputFieldAction(
           String(editingField.id),
           {
@@ -162,15 +161,17 @@ export function InputFieldsForm({
             label: values.label as string,
             fieldType: values.fieldType as "short_text" | "long_text" | "select" | "multi_select" | "file_upload",
             position: values.position as number,
-            options: optionsToSave
+            options: optionsForUpdate
           }
         )
-        
+
         if (clearEditingField) {
           clearEditingField()
         }
       } else {
-        // Create new field
+        // Create new field - addToolInputFieldAction expects { label, value }[] format
+        const optionsForCreate = hasOptions ? options : undefined
+
         result = await addToolInputFieldAction(
           assistantId,
           {
@@ -178,7 +179,7 @@ export function InputFieldsForm({
             label: values.label as string,
             type: values.fieldType as "short_text" | "long_text" | "select" | "multi_select" | "file_upload",
             position: values.position as number,
-            options: optionsToSave
+            options: optionsForCreate
           }
         )
       }

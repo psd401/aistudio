@@ -86,6 +86,7 @@ const ModelForm = React.memo(function ModelForm({
     setModelData({ ...modelData, chatEnabled: checked });
 
   // Pricing field handlers with validation
+  // Note: Cost fields are stored as strings in DB for precision (PostgreSQL numeric type)
   const handleInputCostChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     if (!value) {
@@ -94,10 +95,10 @@ const ModelForm = React.memo(function ModelForm({
     }
     const parsed = Number.parseFloat(value);
     if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
-      setModelData({ ...modelData, inputCostPer1kTokens: parsed });
+      setModelData({ ...modelData, inputCostPer1kTokens: value });
     }
   };
-    
+
   const handleOutputCostChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     if (!value) {
@@ -106,10 +107,10 @@ const ModelForm = React.memo(function ModelForm({
     }
     const parsed = Number.parseFloat(value);
     if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
-      setModelData({ ...modelData, outputCostPer1kTokens: parsed });
+      setModelData({ ...modelData, outputCostPer1kTokens: value });
     }
   };
-    
+
   const handleCachedInputCostChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     if (!value) {
@@ -118,7 +119,7 @@ const ModelForm = React.memo(function ModelForm({
     }
     const parsed = Number.parseFloat(value);
     if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
-      setModelData({ ...modelData, cachedInputCostPer1kTokens: parsed });
+      setModelData({ ...modelData, cachedInputCostPer1kTokens: value });
     }
   };
 
@@ -510,10 +511,10 @@ type ModelFormData = {
   chatEnabled: boolean;
   allowedRoles: string[];
   capabilitiesList: string[];
-  // Pricing fields
-  inputCostPer1kTokens: number | null;
-  outputCostPer1kTokens: number | null;
-  cachedInputCostPer1kTokens: number | null;
+  // Pricing fields - stored as string in DB (PostgreSQL numeric) for precision
+  inputCostPer1kTokens: string | null;
+  outputCostPer1kTokens: string | null;
+  cachedInputCostPer1kTokens: string | null;
   // Performance fields
   averageLatencyMs: number | null;
   maxConcurrency: number | null;
@@ -753,19 +754,11 @@ export const AiModelsTable = React.memo(function AiModelsTable({
       }
     }
     
-    // Parse allowed roles if it's a JSON string
+    // allowedRoles is now string[] | null from Drizzle JSONB type
     let allowedRoles: string[] = [];
     if (model.allowedRoles) {
-      try {
-        const parsed = typeof model.allowedRoles === 'string' 
-          ? JSON.parse(model.allowedRoles) 
-          : model.allowedRoles;
-        if (Array.isArray(parsed)) {
-          allowedRoles = parsed;
-        }
-      } catch {
-        // If not valid JSON, treat as empty
-        allowedRoles = [];
+      if (Array.isArray(model.allowedRoles)) {
+        allowedRoles = model.allowedRoles;
       }
     }
     
@@ -967,21 +960,23 @@ export const AiModelsTable = React.memo(function AiModelsTable({
   });
 
   const handleSubmit = useCallback(() => {
-    // Convert arrays to JSON strings for database storage
+    // Prepare data for database storage
+    // Note: allowedRoles is JSONB (string[]), capabilities is text (JSON string)
     const dataToSubmit = {
       ...modelData,
-      capabilities: modelData.capabilitiesList.length > 0 
-        ? JSON.stringify(modelData.capabilitiesList) 
+      capabilities: modelData.capabilitiesList.length > 0
+        ? JSON.stringify(modelData.capabilitiesList)
         : null,
-      allowedRoles: modelData.allowedRoles.length > 0 
-        ? JSON.stringify(modelData.allowedRoles) 
+      // allowedRoles is JSONB type - pass array directly, not as JSON string
+      allowedRoles: modelData.allowedRoles.length > 0
+        ? modelData.allowedRoles
         : null,
       // Include all the new fields
-      nexusCapabilities: Object.keys(modelData.nexusCapabilities).length > 0 
-        ? modelData.nexusCapabilities 
+      nexusCapabilities: Object.keys(modelData.nexusCapabilities).length > 0
+        ? modelData.nexusCapabilities
         : null,
-      providerMetadata: Object.keys(modelData.providerMetadata).length > 0 
-        ? modelData.providerMetadata 
+      providerMetadata: Object.keys(modelData.providerMetadata).length > 0
+        ? modelData.providerMetadata
         : null
     };
     
