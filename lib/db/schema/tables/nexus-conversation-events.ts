@@ -4,7 +4,7 @@
  */
 
 import { jsonb, pgTable, timestamp, uuid, varchar } from "drizzle-orm/pg-core";
-import type { NexusConversationEventData } from "@/types/db-types";
+import type { NexusConversationEventData } from "@/lib/db/types/jsonb";
 import { nexusConversations } from "./nexus-conversations";
 
 export const nexusConversationEvents = pgTable("nexus_conversation_events", {

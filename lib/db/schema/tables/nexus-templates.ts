@@ -13,7 +13,7 @@ import {
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
-import type { NexusTemplateVariable } from "@/types/db-types";
+import type { NexusTemplateVariable } from "@/lib/db/types/jsonb";
 import { users } from "./users";
 
 export const nexusTemplates = pgTable("nexus_templates", {

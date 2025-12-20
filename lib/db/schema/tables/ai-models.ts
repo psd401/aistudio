@@ -13,7 +13,7 @@ import {
   text,
   timestamp,
 } from "drizzle-orm/pg-core";
-import type { NexusCapabilities, ProviderMetadata } from "@/types/db-types";
+import type { NexusCapabilities, ProviderMetadata } from "@/lib/db/types/jsonb";
 
 export const aiModels = pgTable("ai_models", {
   id: serial("id").primaryKey(),
