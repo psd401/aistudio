@@ -92,17 +92,12 @@ export function InputFieldsForm({
   useEffect(() => {
     if (editingField) {
       let parsedOptions: { label: string; value: string }[] = [];
-      if (Array.isArray(editingField.options)) {
-        parsedOptions = editingField.options;
-      } else if (typeof editingField.options === "string") {
-        parsedOptions = editingField.options.split(",").map((opt) => ({
-          label: opt.trim(),
-          value: opt.trim(),
-        }));
-      } else if (editingField.options && typeof editingField.options === 'object') {
-        // Handle ToolInputFieldOptions object format
-        if (Array.isArray((editingField.options as ToolInputFieldOptions).values)) {
-          parsedOptions = (editingField.options as ToolInputFieldOptions).values!.map(val => ({
+      // editingField.options is ToolInputFieldOptions | null from Drizzle JSONB type
+      // ToolInputFieldOptions has values?: string[]
+      if (editingField.options && typeof editingField.options === 'object') {
+        const opts = editingField.options as ToolInputFieldOptions;
+        if (Array.isArray(opts.values)) {
+          parsedOptions = opts.values.map(val => ({
             label: val,
             value: val
           }));
@@ -147,12 +142,16 @@ export function InputFieldsForm({
   async function onSubmit(values: FormValues) {
     try {
       setIsLoading(true)
-      
+
       // Only include options for select/multi_select fields
-      const optionsToSave = showOptions ? options : undefined
-      
+      // Both create and update now use ToolInputFieldOptions format for consistency
+      // Filter out empty/whitespace-only values to prevent invalid data
+      const optionsToSave: ToolInputFieldOptions | undefined = showOptions && options.length > 0
+        ? { values: options.map(opt => opt.value).filter(v => v.trim()) }
+        : undefined
+
       let result;
-      
+
       if (isEditing && editingField) {
         // Update existing field
         result = await updateInputFieldAction(
@@ -165,7 +164,7 @@ export function InputFieldsForm({
             options: optionsToSave
           }
         )
-        
+
         if (clearEditingField) {
           clearEditingField()
         }

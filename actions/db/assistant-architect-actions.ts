@@ -11,7 +11,8 @@ import {
   type SelectToolExecution,
   type SelectPromptResult,
   type SelectTool,
-  type SelectAiModel
+  type SelectAiModel,
+  type ToolInputFieldOptions
 } from "@/types/db-types"
 // CoreMessage import removed - AI completion now handled by Lambda workers
 import { transformSnakeToCamel } from '@/lib/db/field-mapper'
@@ -729,12 +730,12 @@ export async function deleteAssistantArchitectAction(
 
 export async function addToolInputFieldAction(
   architectId: string,
-  data: { 
-    name: string; 
+  data: {
+    name: string;
     label?: string;
     type: string;
     position?: number;
-    options?: { label: string; value: string }[];
+    options?: ToolInputFieldOptions;
   }
 ): Promise<ActionState<void>> {
   const requestId = generateRequestId()
