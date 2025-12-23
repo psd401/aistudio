@@ -8,6 +8,12 @@
  * They do NOT perform authorization checks. Authorization MUST be handled at the
  * API route or server action layer before calling these functions.
  *
+ * **Authorization Requirements**:
+ * - Verify user owns the job (job.userId matches session.userId)
+ * - Verify user has conversation access if conversationId is present
+ * - Use @/lib/auth/server-session helpers: getServerSession(), validateJobOwnership()
+ * - See app/api/nexus/chat/jobs/[jobId]/route.ts for reference implementation
+ *
  * Part of Epic #526 - RDS Data API to Drizzle ORM Migration
  * Issue #535 - Migrate Nexus Streaming Jobs to Drizzle ORM
  *
@@ -225,29 +231,54 @@ export function mapFromDatabaseStatus(
 // ============================================
 
 /**
+ * UUID validation regex (RFC 4122 compliant)
+ */
+const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+/**
+ * Validate if a string is a valid UUID
+ */
+function isValidUUID(value: string): boolean {
+  return UUID_REGEX.test(value);
+}
+
+/**
  * Transform a database row to StreamingJob format
  */
 function transformToStreamingJob(row: SelectAiStreamingJob): StreamingJob {
-  // Handle requestData parsing - might be string or object
+  // Handle requestData parsing - must be valid JSON
   let parsedRequestData: JobRequestData;
   if (typeof row.requestData === "string") {
     try {
       parsedRequestData = JSON.parse(row.requestData);
-    } catch {
-      parsedRequestData = { messages: [], modelId: "", provider: "" };
+      // Validate required fields exist
+      if (!parsedRequestData.messages || !parsedRequestData.provider) {
+        throw new Error("Invalid requestData structure");
+      }
+    } catch (error) {
+      const errorMessage =
+        error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Failed to parse requestData for job ${row.id}: ${errorMessage}`
+      );
     }
   } else {
     parsedRequestData = row.requestData as unknown as JobRequestData;
   }
 
-  // Handle responseData parsing - might be string or object or null
+  // Handle responseData parsing - optional field
   let parsedResponseData: JobResponseData | undefined;
   if (row.responseData) {
     if (typeof row.responseData === "string") {
       try {
         parsedResponseData = JSON.parse(row.responseData);
-      } catch {
-        parsedResponseData = undefined;
+      } catch (error) {
+        const errorMessage =
+          error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `Failed to parse responseData for job ${row.id}: ${errorMessage}`
+        );
       }
     } else {
       parsedResponseData = row.responseData as unknown as JobResponseData;
@@ -256,15 +287,12 @@ function transformToStreamingJob(row: SelectAiStreamingJob): StreamingJob {
 
   // Determine nexusConversationId - UUID-formatted conversation IDs are Nexus conversations
   const conversationId = row.conversationId;
-  const isUuid =
-    conversationId &&
-    conversationId.length === 36 &&
-    conversationId.includes("-");
+  const isUuid = conversationId ? isValidUUID(conversationId) : false;
 
   return {
     id: row.id,
     conversationId: row.conversationId,
-    nexusConversationId: isUuid ? conversationId : undefined,
+    nexusConversationId: isUuid && conversationId ? conversationId : undefined,
     userId: row.userId,
     modelId: row.modelId,
     status: mapFromDatabaseStatus(row.status as JobStatus, row.errorMessage),
@@ -651,6 +679,7 @@ export async function cleanupCompletedJobs(
         .where(
           and(
             eq(aiStreamingJobs.status, "completed"),
+            sql`${aiStreamingJobs.completedAt} IS NOT NULL`,
             lt(aiStreamingJobs.completedAt, cutoffDate)
           )
         )
@@ -679,6 +708,7 @@ export async function cleanupFailedJobs(
         .where(
           and(
             eq(aiStreamingJobs.status, "failed"),
+            sql`${aiStreamingJobs.completedAt} IS NOT NULL`,
             lt(aiStreamingJobs.completedAt, cutoffDate)
           )
         )

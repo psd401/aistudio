@@ -58,7 +58,8 @@ const MIGRATION_FILES = [
   '037-assistant-architect-events.sql',
   '039-prompt-library-schema.sql',
   '040-update-model-replacement-audit.sql',
-  '041-add-user-cascade-constraints.sql'
+  '041-add-user-cascade-constraints.sql',
+  '042-ai-streaming-jobs-pending-index.sql'
   // ADD NEW MIGRATIONS HERE - they will run once and be tracked
 ];
 
@@ -74,7 +75,7 @@ const INITIAL_SETUP_FILES = [
 
 export async function handler(event: CustomResourceEvent): Promise<any> {
   console.log('Database initialization event:', JSON.stringify(event, null, 2));
-  console.log('Handler version: 2025-12-23-v10 - User cascade constraints migration 041');
+  console.log('Handler version: 2025-12-23-v11 - AI streaming jobs pending index migration 042');
   
   // SAFETY CHECK: Log what mode we're in
   console.log(`🔍 Checking database state for safety...`);
