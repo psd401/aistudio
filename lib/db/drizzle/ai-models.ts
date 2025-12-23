@@ -21,7 +21,6 @@ import {
   modelReplacementAudit,
 } from "@/lib/db/schema";
 import { createLogger, generateRequestId } from "@/lib/logger";
-import { ErrorFactories } from "@/lib/error-utils";
 import type { NexusCapabilities, ProviderMetadata } from "@/lib/db/types/jsonb";
 
 // ============================================
