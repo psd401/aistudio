@@ -15,7 +15,7 @@ import { users } from "./users";
 
 export const nexusUserPreferences = pgTable("nexus_user_preferences", {
   userId: integer("user_id")
-    .references(() => users.id)
+    .references(() => users.id, { onDelete: "cascade" })
     .primaryKey(),
   expandedFolders: jsonb("expanded_folders").$type<string[]>().default([]),
   panelWidth: integer("panel_width").default(400),

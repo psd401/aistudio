@@ -20,7 +20,7 @@ export const nexusMcpConnections = pgTable("nexus_mcp_connections", {
     .references(() => nexusMcpServers.id)
     .notNull(),
   userId: integer("user_id")
-    .references(() => users.id)
+    .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
   status: varchar("status", { length: 50 }).notNull(),
   lastHealthCheck: timestamp("last_health_check"),

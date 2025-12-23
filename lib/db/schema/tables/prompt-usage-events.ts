@@ -21,7 +21,7 @@ export const promptUsageEvents = pgTable("prompt_usage_events", {
     .references(() => promptLibrary.id)
     .notNull(),
   userId: integer("user_id")
-    .references(() => users.id)
+    .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
   eventType: varchar("event_type", { length: 20 }).notNull(),
   conversationId: uuid("conversation_id").references(

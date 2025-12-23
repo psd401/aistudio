@@ -13,7 +13,7 @@ export const repositoryAccess = pgTable("repository_access", {
   repositoryId: integer("repository_id")
     .references(() => knowledgeRepositories.id)
     .notNull(),
-  userId: integer("user_id").references(() => users.id),
+  userId: integer("user_id").references(() => users.id, { onDelete: "cascade" }),
   roleId: integer("role_id").references(() => roles.id),
   createdAt: timestamp("created_at").defaultNow(),
 });

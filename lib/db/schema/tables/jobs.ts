@@ -16,7 +16,7 @@ import { users } from "./users";
 export const jobs = pgTable("jobs", {
   id: serial("id").primaryKey(),
   userId: integer("user_id")
-    .references(() => users.id)
+    .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
   status: jobStatusEnum("status").default("pending").notNull(),
   type: text("type").notNull(),

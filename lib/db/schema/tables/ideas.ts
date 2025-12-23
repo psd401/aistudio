@@ -23,5 +23,5 @@ export const ideas = pgTable("ideas", {
   completedAt: timestamp("completed_at"),
   completedBy: text("completed_by"),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
-  userId: integer("user_id").references(() => users.id),
+  userId: integer("user_id").references(() => users.id, { onDelete: "cascade" }),
 });

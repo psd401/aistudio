@@ -20,7 +20,7 @@ export const aiStreamingJobs = pgTable("ai_streaming_jobs", {
   id: uuid("id").defaultRandom().primaryKey(),
   conversationId: text("conversation_id"),
   userId: integer("user_id")
-    .references(() => users.id)
+    .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
   modelId: integer("model_id")
     .references(() => aiModels.id)

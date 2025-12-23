@@ -19,7 +19,7 @@ import { users } from "./users";
 export const nexusMcpAuditLogs = pgTable("nexus_mcp_audit_logs", {
   id: uuid("id").defaultRandom().primaryKey(),
   userId: integer("user_id")
-    .references(() => users.id)
+    .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
   serverId: uuid("server_id")
     .references(() => nexusMcpServers.id)

@@ -18,7 +18,7 @@ import { users } from "./users";
 
 export const nexusTemplates = pgTable("nexus_templates", {
   id: uuid("id").defaultRandom().primaryKey(),
-  userId: integer("user_id").references(() => users.id),
+  userId: integer("user_id").references(() => users.id, { onDelete: "cascade" }),
   name: varchar("name", { length: 255 }).notNull(),
   description: text("description"),
   prompt: text("prompt").notNull(),

@@ -18,7 +18,7 @@ import { nexusMessages } from "./nexus-messages";
 export const promptLibrary = pgTable("prompt_library", {
   id: uuid("id").defaultRandom().primaryKey(),
   userId: integer("user_id")
-    .references(() => users.id)
+    .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
   title: varchar("title", { length: 255 }).notNull(),
   content: text("content").notNull(),
@@ -27,7 +27,7 @@ export const promptLibrary = pgTable("prompt_library", {
   moderationStatus: varchar("moderation_status", { length: 20 })
     .default("pending")
     .notNull(),
-  moderatedBy: integer("moderated_by").references(() => users.id),
+  moderatedBy: integer("moderated_by").references(() => users.id, { onDelete: "set null" }),
   moderatedAt: timestamp("moderated_at"),
   moderationNotes: text("moderation_notes"),
   sourceMessageId: uuid("source_message_id").references(() => nexusMessages.id),

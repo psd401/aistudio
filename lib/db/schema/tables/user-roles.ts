@@ -9,7 +9,7 @@ import { roles } from "./roles";
 
 export const userRoles = pgTable("user_roles", {
   id: serial("id").primaryKey(),
-  userId: integer("user_id").references(() => users.id),
+  userId: integer("user_id").references(() => users.id, { onDelete: "cascade" }),
   roleId: integer("role_id").references(() => roles.id),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow(),

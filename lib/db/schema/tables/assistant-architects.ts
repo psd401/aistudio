@@ -24,5 +24,5 @@ export const assistantArchitects = pgTable("assistant_architects", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
   imagePath: text("image_path"),
-  userId: integer("user_id").references(() => users.id),
+  userId: integer("user_id").references(() => users.id, { onDelete: "cascade" }),
 });

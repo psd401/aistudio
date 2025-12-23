@@ -19,7 +19,7 @@ import { assistantArchitects } from "./assistant-architects";
 export const scheduledExecutions = pgTable("scheduled_executions", {
   id: serial("id").primaryKey(),
   userId: integer("user_id")
-    .references(() => users.id)
+    .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
   assistantArchitectId: integer("assistant_architect_id")
     .references(() => assistantArchitects.id)
