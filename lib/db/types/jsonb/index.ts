@@ -107,15 +107,21 @@ export interface NexusUserSettings {
 
 /**
  * Event data for conversation history
+ *
+ * Event types follow the pattern: "conversation_{action}"
+ * This matches the event_type column in nexus_conversation_events table
  */
 export interface NexusConversationEventData {
   eventType:
-    | "created"
-    | "updated"
-    | "archived"
-    | "shared"
-    | "moved"
-    | "deleted";
+    | "conversation_created"
+    | "conversation_updated"
+    | "conversation_archived"
+    | "conversation_unarchived"
+    | "conversation_pinned"
+    | "conversation_unpinned"
+    | "conversation_shared"
+    | "conversation_moved"
+    | "conversation_deleted";
   userId: number;
   changes?: Record<string, unknown>;
   timestamp: string;

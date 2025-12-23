@@ -145,7 +145,10 @@ export async function POST(req: Request) {
     }
 
     // Record creation event (non-blocking, errors are logged but don't fail creation)
-    // CloudWatch monitoring: Failures emit error-level logs with metric for alerting
+    // CloudWatch monitoring approach:
+    // 1. startTimer emits CloudWatch metrics via @/lib/logger (nexus.conversation.event.record)
+    // 2. ERROR-level logs are indexed for alerting via CloudWatch Logs metric filters
+    // 3. Failures are acceptable for audit trail - conversation creation succeeds regardless
     const eventTimer = startTimer('nexus.conversation.event.record');
     recordConversationEvent(
       conversation.id,
@@ -163,7 +166,6 @@ export async function POST(req: Request) {
       log.error('Failed to record conversation event', {
         conversationId: conversation.id,
         error: error instanceof Error ? error.message : String(error),
-        // CloudWatch metric filter pattern: "Failed to record conversation event"
       })
     });
 

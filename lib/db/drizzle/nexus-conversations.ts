@@ -24,7 +24,6 @@ import {
   nexusFolders,
   nexusConversationEvents,
 } from "@/lib/db/schema";
-import { createLogger, generateRequestId } from "@/lib/logger";
 import type {
   NexusConversationMetadata,
   NexusFolderSettings,
@@ -268,19 +267,19 @@ export async function createConversation(data: CreateConversationData) {
  * Record a conversation event
  *
  * @param conversationId - Conversation UUID
- * @param eventType - Event type (e.g., 'conversation_created', 'conversation_archived')
+ * @param eventType - Event type from NexusConversationEventData union
  * @param userId - User who triggered the event
  * @param additionalData - Additional event-specific data
  */
 export async function recordConversationEvent(
   conversationId: string,
-  eventType: string,
+  eventType: NexusConversationEventData['eventType'],
   userId: number,
   additionalData: Record<string, unknown> = {}
 ) {
   // Construct full event data matching NexusConversationEventData type
   const eventData: NexusConversationEventData = {
-    eventType: eventType as NexusConversationEventData['eventType'],
+    eventType,
     userId,
     timestamp: new Date().toISOString(),
     ...additionalData,
@@ -318,6 +317,12 @@ export async function updateConversation(
   }
 
   // Verify folder ownership if folderId is being changed
+  // Note: TOCTOU (Time-of-Check-Time-of-Use) race condition exists here - folder could be
+  // deleted between this check and the update. However, this is acceptable because:
+  // 1. The database has a foreign key constraint (nexus_conversations.folder_id references nexus_folders.id)
+  // 2. Low likelihood of race (requires precise timing)
+  // 3. Database will reject the update if folder is deleted, preventing data corruption
+  // Alternative: Use transaction or rely solely on FK constraint (no upfront validation)
   if (updates.folderId !== undefined && updates.folderId !== null) {
     const folder = await getFolderById(updates.folderId, userId);
     if (!folder) {
@@ -466,12 +471,49 @@ export async function createFolder(data: CreateFolderData) {
 /**
  * Update a folder
  * Verifies user ownership before update
+ * Validates input to prevent security issues
  */
 export async function updateFolder(
   folderId: string,
   userId: number,
   updates: UpdateFolderData
 ) {
+  // Validate name length if provided (database limit is 255 chars)
+  if (updates.name !== undefined && updates.name !== null) {
+    if (typeof updates.name !== 'string') {
+      throw new TypeError("name must be a string");
+    }
+    if (updates.name.trim() === "") {
+      throw new Error("name cannot be empty");
+    }
+    if (updates.name.length > 255) {
+      throw new Error("name cannot exceed 255 characters");
+    }
+  }
+
+  // Validate color format if provided (database limit is 7 chars for hex colors)
+  if (updates.color !== undefined && updates.color !== null) {
+    if (typeof updates.color !== 'string') {
+      throw new TypeError("color must be a string");
+    }
+    // Validate hex color format (#RRGGBB)
+    if (!/^#[\dA-Fa-f]{6}$/.test(updates.color)) {
+      throw new Error("color must be a valid hex color (e.g., #6B7280)");
+    }
+  }
+
+  // Verify parent folder ownership if parentId is being changed
+  if (updates.parentId !== undefined && updates.parentId !== null) {
+    const parentFolder = await getFolderById(updates.parentId, userId);
+    if (!parentFolder) {
+      throw new Error("Parent folder not found or access denied");
+    }
+    // Prevent circular reference (folder cannot be its own parent)
+    if (updates.parentId === folderId) {
+      throw new Error("Folder cannot be its own parent");
+    }
+  }
+
   const result = await executeQuery(
     (db) =>
       db
@@ -496,10 +538,8 @@ export async function updateFolder(
  * Uses transaction to prevent race condition between unlinking and deleting
  */
 export async function deleteFolder(folderId: string, userId: number) {
-  const requestId = generateRequestId();
-  const log = createLogger({ requestId, operation: "deleteFolder" });
-
   // Use transaction to atomically unlink conversations and delete folder
+  // executeQuery wrapper provides logging, metrics, and circuit breaker protection
   const result = await executeQuery(
     (db) =>
       db.transaction(async (tx) => {
@@ -513,8 +553,6 @@ export async function deleteFolder(folderId: string, userId: number) {
               eq(nexusConversations.userId, userId)
             )
           );
-
-        log.debug("Unlinked conversations from folder", { folderId, userId });
 
         // Then delete the folder
         const deleteResult = await tx
