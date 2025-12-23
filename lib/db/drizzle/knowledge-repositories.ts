@@ -21,7 +21,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, desc, or, sql, inArray } from "drizzle-orm";
+import { eq, and, desc, or, sql, inArray, isNotNull } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   knowledgeRepositories,
@@ -33,15 +33,11 @@ import {
 } from "@/lib/db/schema";
 import type {
   SelectKnowledgeRepository,
-  InsertKnowledgeRepository,
   SelectRepositoryItem,
-  InsertRepositoryItem,
   SelectRepositoryItemChunk,
-  InsertRepositoryItemChunk,
   SelectRepositoryAccess,
-  InsertRepositoryAccess,
 } from "@/lib/db/types";
-import { createLogger } from "@/lib/logger";
+import { createLogger, sanitizeForLogging } from "@/lib/logger";
 
 // ============================================
 // Types
@@ -200,6 +196,7 @@ export async function getAccessibleRepositoryIds(
   }
 
   // This query checks multiple access conditions
+  // Use explicit NULL checks for LEFT JOIN columns to avoid false positives
   const result = await executeQuery(
     (db) =>
       db
@@ -218,10 +215,13 @@ export async function getAccessibleRepositoryIds(
               eq(knowledgeRepositories.isPublic, true),
               // User owns the repository
               eq(knowledgeRepositories.ownerId, userId),
-              // Direct user access
-              eq(repositoryAccess.userId, userId),
-              // Role-based access
-              eq(userRoles.userId, userId)
+              // Direct user access (must check not null from LEFT JOIN)
+              and(
+                isNotNull(repositoryAccess.userId),
+                eq(repositoryAccess.userId, userId)
+              ),
+              // Role-based access (must check not null from LEFT JOIN)
+              and(isNotNull(userRoles.userId), eq(userRoles.userId, userId))
             )
           )
         ),
@@ -273,6 +273,7 @@ export async function getAccessibleRepositoriesByCognitoSub(
   }
 
   // Get all repositories with access check
+  // Use explicit NULL checks for LEFT JOIN columns to avoid false positives
   const result = await executeQuery(
     (db) =>
       db
@@ -295,8 +296,15 @@ export async function getAccessibleRepositoriesByCognitoSub(
               assistantOwnerId
                 ? eq(knowledgeRepositories.ownerId, assistantOwnerId)
                 : sql`false`,
-              userId ? eq(repositoryAccess.userId, userId) : sql`false`,
-              userId ? eq(userRoles.userId, userId) : sql`false`
+              userId
+                ? and(
+                    isNotNull(repositoryAccess.userId),
+                    eq(repositoryAccess.userId, userId)
+                  )
+                : sql`false`,
+              userId
+                ? and(isNotNull(userRoles.userId), eq(userRoles.userId, userId))
+                : sql`false`
             )
           )
         ),
@@ -340,7 +348,7 @@ export async function createRepository(
   );
 
   if (!result[0]) {
-    log.error("Failed to create repository", { data });
+    log.error("Failed to create repository", { data: sanitizeForLogging(data) });
     throw new Error("Failed to create repository");
   }
 
@@ -591,7 +599,7 @@ export async function createRepositoryItem(
   );
 
   if (!result[0]) {
-    log.error("Failed to create repository item", { data });
+    log.error("Failed to create repository item", { data: sanitizeForLogging(data) });
     throw new Error("Failed to create repository item");
   }
 
@@ -695,7 +703,7 @@ export async function createRepositoryItemChunk(
   );
 
   if (!result[0]) {
-    log.error("Failed to create repository item chunk", { data });
+    log.error("Failed to create repository item chunk", { data: sanitizeForLogging(data) });
     throw new Error("Failed to create repository item chunk");
   }
 

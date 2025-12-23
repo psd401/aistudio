@@ -19,16 +19,11 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, desc } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { documents, documentChunks } from "@/lib/db/schema";
-import type {
-  SelectDocument,
-  InsertDocument,
-  SelectDocumentChunk,
-  InsertDocumentChunk,
-} from "@/lib/db/types";
-import { createLogger } from "@/lib/logger";
+import type { SelectDocument, SelectDocumentChunk } from "@/lib/db/types";
+import { createLogger, sanitizeForLogging } from "@/lib/logger";
 
 // ============================================
 // Types
@@ -188,7 +183,7 @@ export async function createDocument(
   );
 
   if (!result[0]) {
-    log.error("Failed to create document", { data });
+    log.error("Failed to create document", { data: sanitizeForLogging(data) });
     throw new Error("Failed to create document");
   }
 
@@ -320,7 +315,7 @@ export async function createChunk(
   );
 
   if (!result[0]) {
-    log.error("Failed to create document chunk", { data });
+    log.error("Failed to create document chunk", { data: sanitizeForLogging(data) });
     throw new Error("Failed to create document chunk");
   }
 

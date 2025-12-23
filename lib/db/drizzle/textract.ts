@@ -15,16 +15,11 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { textractJobs, textractUsage } from "@/lib/db/schema";
-import type {
-  SelectTextractJob,
-  InsertTextractJob,
-  SelectTextractUsage,
-  InsertTextractUsage,
-} from "@/lib/db/types";
-import { createLogger } from "@/lib/logger";
+import type { SelectTextractJob, SelectTextractUsage } from "@/lib/db/types";
+import { createLogger, sanitizeForLogging } from "@/lib/logger";
 
 // ============================================
 // Types
@@ -142,7 +137,7 @@ export async function createTextractJob(
   );
 
   if (!result[0]) {
-    log.error("Failed to create Textract job", { data });
+    log.error("Failed to create Textract job", { data: sanitizeForLogging(data) });
     throw new Error("Failed to create Textract job");
   }
 
