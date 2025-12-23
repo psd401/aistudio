@@ -55,15 +55,6 @@ export async function PATCH(
       isPinned
     }))
 
-    // Verify user owns this conversation using Drizzle
-    const existing = await getConversationById(conversationId, userId)
-
-    if (!existing) {
-      log.warn('Conversation not found or access denied', { conversationId, userId })
-      timer({ status: 'error', reason: 'not_found' })
-      return new Response('Conversation not found', { status: 404 })
-    }
-
     // Build update object with provided fields only
     const updates: Record<string, unknown> = {}
     let fieldCount = 0
@@ -93,7 +84,7 @@ export async function PATCH(
       return Response.json({ message: 'No fields to update' })
     }
 
-    // Update using Drizzle ORM
+    // Update using Drizzle ORM (ownership is verified in updateConversation)
     const updatedConversation = await updateConversation(
       conversationId,
       userId,
@@ -101,9 +92,9 @@ export async function PATCH(
     )
 
     if (!updatedConversation) {
-      log.error('Update returned no result - possible race condition')
-      timer({ status: 'error', reason: 'update_failed' })
-      return new Response('Failed to update conversation', { status: 500 })
+      log.warn('Conversation not found or access denied', { conversationId, userId })
+      timer({ status: 'error', reason: 'not_found' })
+      return new Response('Conversation not found', { status: 404 })
     }
 
     timer({ status: 'success' })

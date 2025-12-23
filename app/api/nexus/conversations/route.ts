@@ -144,16 +144,22 @@ export async function POST(req: Request) {
       throw new Error('Failed to create conversation - no result returned');
     }
 
-    // Record creation event
-    await recordConversationEvent(
+    // Record creation event (non-blocking, errors are logged but don't fail creation)
+    recordConversationEvent(
       conversation.id,
       'conversation_created',
+      userId,
       {
         provider,
         modelId,
         title
       }
-    );
+    ).catch((error) => {
+      log.error('Failed to record conversation event', {
+        conversationId: conversation.id,
+        error: error instanceof Error ? error.message : String(error)
+      })
+    });
 
     timer({ status: 'success' });
     log.info('Conversation created', {

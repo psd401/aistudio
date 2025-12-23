@@ -32,6 +32,13 @@ import type {
 } from "@/lib/db/types/jsonb";
 
 // ============================================
+// Constants
+// ============================================
+
+/** Default pagination limit for conversation queries */
+export const DEFAULT_CONVERSATION_LIMIT = 20;
+
+// ============================================
 // Types
 // ============================================
 
@@ -104,7 +111,7 @@ export async function getConversations(
   userId: number,
   options: ConversationListOptions = {}
 ) {
-  const { limit = 20, offset = 0, includeArchived = false } = options;
+  const { limit = DEFAULT_CONVERSATION_LIMIT, offset = 0, includeArchived = false } = options;
 
   return executeQuery(
     (db) =>
@@ -136,6 +143,8 @@ export async function getConversations(
                 )
               )
         )
+        // Order by pinned first (using COALESCE to treat null as false)
+        // Then by most recent activity (last message or update time)
         .orderBy(
           desc(sql`COALESCE(${nexusConversations.isPinned}, false)`),
           desc(sql`COALESCE(${nexusConversations.lastMessageAt}, ${nexusConversations.updatedAt})`)
@@ -207,15 +216,28 @@ export async function getConversationById(
 
 /**
  * Create a new conversation
+ * Validates required fields before insertion
  */
 export async function createConversation(data: CreateConversationData) {
+  // Validate required fields
+  if (!data.userId || data.userId <= 0) {
+    throw new Error("userId is required and must be a positive integer");
+  }
+
+  if (!data.provider || data.provider.trim() === "") {
+    throw new Error("provider is required and cannot be empty");
+  }
+
+  // Use provided title or default, but trim whitespace
+  const title = (data.title || "New Conversation").trim() || "New Conversation";
+
   const result = await executeQuery(
     (db) =>
       db
         .insert(nexusConversations)
         .values({
           userId: data.userId,
-          title: data.title || "New Conversation",
+          title,
           provider: data.provider,
           modelUsed: data.modelId,
           messageCount: 0,
@@ -237,23 +259,25 @@ export async function createConversation(data: CreateConversationData) {
 }
 
 /**
- * Record a conversation creation event
+ * Record a conversation event
+ *
+ * @param conversationId - Conversation UUID
+ * @param eventType - Event type (e.g., 'conversation_created', 'conversation_archived')
+ * @param userId - User who triggered the event
+ * @param additionalData - Additional event-specific data
  */
 export async function recordConversationEvent(
   conversationId: string,
   eventType: string,
-  eventData: Omit<NexusConversationEventData, 'eventType' | 'userId' | 'timestamp'> & {
-    provider?: string;
-    modelId?: string;
-    title?: string;
-  }
+  userId: number,
+  additionalData: Record<string, unknown> = {}
 ) {
-  // Convert to NexusConversationEventData format
-  const fullEventData: NexusConversationEventData = {
+  // Construct full event data matching NexusConversationEventData type
+  const eventData: NexusConversationEventData = {
     eventType: eventType as NexusConversationEventData['eventType'],
-    userId: 0, // Will be overridden by the caller context if needed
+    userId,
     timestamp: new Date().toISOString(),
-    ...eventData,
+    ...additionalData,
   };
 
   return executeQuery(
@@ -261,7 +285,7 @@ export async function recordConversationEvent(
       db.insert(nexusConversationEvents).values({
         conversationId,
         eventType,
-        eventData: fullEventData,
+        eventData,
       }),
     "recordConversationEvent"
   );
