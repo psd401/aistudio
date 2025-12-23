@@ -26,6 +26,7 @@ import {
   modelReplacementAudit,
 } from "@/lib/db/schema";
 import { createLogger, generateRequestId } from "@/lib/logger";
+import { ErrorFactories } from "@/lib/error-utils";
 import type { NexusCapabilities, ProviderMetadata } from "@/lib/db/types/jsonb";
 
 // ============================================
@@ -202,12 +203,19 @@ export async function getModelsWithCapabilities(
 ) {
   // Whitelist of valid NexusCapabilities keys to prevent SQL injection
   const validKeys: Set<keyof NexusCapabilities> = new Set([
-    "supportsVision",
-    "supportsAudio",
-    "supportsStreaming",
-    "supportsToolUse",
-    "supportsCaching",
-    "supportsJSON",
+    "canvas",
+    "thinking",
+    "artifacts",
+    "grounding",
+    "reasoning",
+    "webSearch",
+    "computerUse",
+    "responsesAPI",
+    "codeExecution",
+    "promptCaching",
+    "contextCaching",
+    "workspaceTools",
+    "codeInterpreter",
   ]);
 
   // Build JSONB conditions for database-level filtering with validated keys
@@ -472,10 +480,10 @@ export async function replaceModelReferences(
         const replacementModel = replacementModelResult[0];
 
         if (!targetModel) {
-          throw new Error(`Target model with ID ${targetModelId} not found`);
+          throw ErrorFactories.dbRecordNotFound("ai_models", targetModelId);
         }
         if (!replacementModel) {
-          throw new Error(`Replacement model with ID ${replacementModelId} not found`);
+          throw ErrorFactories.dbRecordNotFound("ai_models", replacementModelId);
         }
         if (!replacementModel.active) {
           throw new Error("Replacement model is not active");
@@ -537,6 +545,9 @@ export async function replaceModelReferences(
         }
 
         // Record in audit table with generated ID
+        // Note: Using epoch-based ID because model_replacement_audit table doesn't have
+        // auto-increment (would require schema migration). Microsecond precision prevents
+        // collisions in practice since replacements are rare operations.
         await tx.insert(modelReplacementAudit).values({
           id: sql`(EXTRACT(EPOCH FROM NOW()) * 1000000)::bigint`,
           originalModelId: targetModelId,
