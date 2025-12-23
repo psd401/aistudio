@@ -125,11 +125,14 @@ export const MAX_MESSAGE_LIMIT = 1000;
 /**
  * Get messages for a conversation with pagination
  * Returns messages ordered by created_at ASC (oldest first)
+ *
+ * When includeModel=true, returns MessageWithModel[] with provider/model info
+ * When includeModel=false, returns SelectNexusMessage[] without model info
  */
 export async function getMessagesByConversation(
   conversationId: string,
   options: MessageQueryOptions = {}
-): Promise<MessageWithModel[]> {
+): Promise<MessageWithModel[] | SelectNexusMessage[]> {
   const {
     limit = DEFAULT_MESSAGE_LIMIT,
     offset = 0,
@@ -169,8 +172,8 @@ export async function getMessagesByConversation(
     ) as Promise<MessageWithModel[]>;
   }
 
-  // Simple query without JOIN
-  const results = await executeQuery(
+  // Simple query without JOIN - returns standard message format
+  return executeQuery(
     (db) =>
       db
         .select()
@@ -181,8 +184,6 @@ export async function getMessagesByConversation(
         .offset(offset),
     "getMessagesByConversation"
   );
-
-  return results as MessageWithModel[];
 }
 
 /**
@@ -285,41 +286,48 @@ export async function createMessage(
 
 /**
  * Create or update a message (upsert)
- * If messageId exists, updates the message; otherwise creates new
+ * Uses atomic database upsert to prevent race conditions
  */
 export async function upsertMessage(
   messageId: string,
   conversationId: string,
   data: Omit<CreateMessageData, "id" | "conversationId">
 ): Promise<SelectNexusMessage> {
-  // Check if message exists
-  const existing = await getMessageById(messageId);
+  const result = await executeQuery(
+    (db) =>
+      db
+        .insert(nexusMessages)
+        .values({
+          id: messageId,
+          conversationId,
+          role: data.role,
+          content: data.content || null,
+          parts: data.parts || null,
+          modelId: data.modelId || null,
+          reasoningContent: data.reasoningContent || null,
+          tokenUsage: data.tokenUsage || null,
+          finishReason: data.finishReason || null,
+          metadata: data.metadata || {},
+        })
+        .onConflictDoUpdate({
+          target: nexusMessages.id,
+          set: {
+            role: data.role,
+            content: data.content || null,
+            parts: data.parts || null,
+            modelId: data.modelId || null,
+            reasoningContent: data.reasoningContent || null,
+            tokenUsage: data.tokenUsage || null,
+            finishReason: data.finishReason || null,
+            metadata: data.metadata || {},
+            updatedAt: new Date(),
+          },
+        })
+        .returning(),
+    "upsertMessage"
+  );
 
-  if (existing) {
-    // Update existing message
-    const updated = await updateMessage(messageId, conversationId, {
-      content: data.content,
-      parts: data.parts,
-      modelId: data.modelId,
-      reasoningContent: data.reasoningContent,
-      tokenUsage: data.tokenUsage,
-      finishReason: data.finishReason,
-      metadata: data.metadata,
-    });
-
-    if (!updated) {
-      throw new Error("Failed to update message");
-    }
-
-    return updated;
-  }
-
-  // Create new message
-  return createMessage({
-    id: messageId,
-    conversationId,
-    ...data,
-  });
+  return result[0];
 }
 
 /**
@@ -467,8 +475,11 @@ export async function updateConversationStats(
 }
 
 /**
- * Create a message and update conversation stats in a transaction-like manner
- * This ensures stats stay in sync
+ * Create a message and update conversation stats sequentially
+ *
+ * Note: Not atomic - stats may be briefly out of sync if update fails.
+ * This is acceptable for the streaming use case where stats are frequently updated.
+ * If strict consistency is needed, wrap in db.transaction() at call site.
  */
 export async function createMessageWithStats(
   data: CreateMessageData
@@ -479,7 +490,11 @@ export async function createMessageWithStats(
 }
 
 /**
- * Upsert a message and update conversation stats
+ * Upsert a message and update conversation stats sequentially
+ *
+ * Note: Not atomic - stats may be briefly out of sync if update fails.
+ * This is acceptable for the streaming use case where stats are frequently updated.
+ * If strict consistency is needed, wrap in db.transaction() at call site.
  */
 export async function upsertMessageWithStats(
   messageId: string,
