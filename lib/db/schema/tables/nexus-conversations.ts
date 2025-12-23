@@ -19,7 +19,7 @@ import { nexusFolders } from "./nexus-folders";
 export const nexusConversations = pgTable("nexus_conversations", {
   id: uuid("id").defaultRandom().primaryKey(),
   userId: integer("user_id")
-    .references(() => users.id)
+    .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
   provider: varchar("provider", { length: 50 }).notNull(),
   externalId: varchar("external_id", { length: 255 }),

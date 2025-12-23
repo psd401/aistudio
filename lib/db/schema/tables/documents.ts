@@ -17,7 +17,7 @@ import { users } from "./users";
 export const documents = pgTable("documents", {
   id: serial("id").primaryKey(),
   userId: integer("user_id")
-    .references(() => users.id)
+    .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
   conversationId: integer("conversation_id"),
   name: text("name").notNull(),

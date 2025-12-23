@@ -13,7 +13,7 @@ export const ideaVotes = pgTable("idea_votes", {
     .references(() => ideas.id)
     .notNull(),
   userId: integer("user_id")
-    .references(() => users.id)
+    .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

@@ -23,7 +23,7 @@ export const modelReplacementAudit = pgTable("model_replacement_audit", {
     .references(() => aiModels.id)
     .notNull(),
   replacementModelName: text("replacement_model_name").notNull(),
-  replacedBy: integer("replaced_by").references(() => users.id),
+  replacedBy: integer("replaced_by").references(() => users.id, { onDelete: "set null" }),
   chainPromptsUpdated: integer("chain_prompts_updated").default(0),
   legacyConversationsUpdated: integer("legacy_conversations_updated").default(0),
   modelComparisonsUpdated: integer("model_comparisons_updated").default(0),

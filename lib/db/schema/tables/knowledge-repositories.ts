@@ -19,7 +19,7 @@ export const knowledgeRepositories = pgTable("knowledge_repositories", {
   name: text("name").notNull(),
   description: text("description"),
   ownerId: integer("owner_id")
-    .references(() => users.id)
+    .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
   isPublic: boolean("is_public").default(false),
   metadata: jsonb("metadata").$type<Record<string, unknown>>(),

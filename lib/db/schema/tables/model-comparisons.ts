@@ -17,8 +17,7 @@ import { aiModels } from "./ai-models";
 export const modelComparisons = pgTable("model_comparisons", {
   id: bigint("id", { mode: "number" }).primaryKey(),
   userId: integer("user_id")
-    .references(() => users.id)
-    .notNull(),
+    .references(() => users.id, { onDelete: "set null" }),
   prompt: text("prompt").notNull(),
   model1Id: integer("model1_id").references(() => aiModels.id),
   model2Id: integer("model2_id").references(() => aiModels.id),

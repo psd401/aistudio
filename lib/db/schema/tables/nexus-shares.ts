@@ -19,7 +19,7 @@ export const nexusShares = pgTable("nexus_shares", {
     .references(() => nexusConversations.id)
     .notNull(),
   sharedBy: integer("shared_by")
-    .references(() => users.id)
+    .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
   shareToken: varchar("share_token", { length: 255 }).notNull().unique(),
   expiresAt: timestamp("expires_at"),

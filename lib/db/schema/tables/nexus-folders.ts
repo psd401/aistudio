@@ -18,7 +18,7 @@ import { users } from "./users";
 export const nexusFolders = pgTable("nexus_folders", {
   id: uuid("id").defaultRandom().primaryKey(),
   userId: integer("user_id")
-    .references(() => users.id)
+    .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
   parentId: uuid("parent_id"),
   name: varchar("name", { length: 255 }).notNull(),

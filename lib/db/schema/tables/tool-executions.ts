@@ -18,7 +18,7 @@ import { assistantArchitects } from "./assistant-architects";
 export const toolExecutions = pgTable("tool_executions", {
   id: serial("id").primaryKey(),
   userId: integer("user_id")
-    .references(() => users.id)
+    .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
   inputData: jsonb("input_data").notNull().$type<Record<string, unknown>>(),
   status: executionStatusEnum("status").default("pending").notNull(),
