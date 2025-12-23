@@ -10,6 +10,18 @@
 -- - Reduce lock contention during FOR UPDATE SKIP LOCKED operations
 -- - Keep index size small by only indexing pending jobs
 -- - Support efficient FIFO processing (ORDER BY created_at ASC)
+--
+-- ROLLBACK PROCEDURE (if migration fails):
+-- If the index creation fails or needs to be removed:
+--   1. Connect to database: psql -h <rds-endpoint> -U <username> -d aistudio
+--   2. Check index state:
+--      SELECT indexname, indexdef FROM pg_indexes
+--      WHERE indexname = 'idx_ai_streaming_jobs_pending_created';
+--   3. Drop invalid index:
+--      DROP INDEX CONCURRENTLY IF EXISTS idx_ai_streaming_jobs_pending_created;
+--   4. Remove from migration_log:
+--      DELETE FROM migration_log WHERE migration_name = '042-ai-streaming-jobs-pending-index.sql';
+--   5. Re-run migration via CDK deploy
 
 -- Create composite partial index for pending jobs
 -- CONCURRENTLY allows creation without blocking writes

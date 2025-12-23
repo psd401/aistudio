@@ -25,6 +25,7 @@ import { executeQuery } from "@/lib/db/drizzle-client";
 import { aiStreamingJobs, aiModels } from "@/lib/db/schema";
 import type { SelectAiStreamingJob } from "@/lib/db/types";
 import type { UIMessage } from "ai";
+import { createLogger } from "@/lib/logger";
 
 // ============================================
 // Types
@@ -247,24 +248,40 @@ function isValidUUID(value: string): boolean {
  * Transform a database row to StreamingJob format
  */
 function transformToStreamingJob(row: SelectAiStreamingJob): StreamingJob {
-  // Handle requestData parsing - must be valid JSON
+  // Handle requestData parsing - must be valid JSON with proper structure
   let parsedRequestData: JobRequestData;
   if (typeof row.requestData === "string") {
     try {
       parsedRequestData = JSON.parse(row.requestData);
-      // Validate required fields exist
-      if (!parsedRequestData.messages || !parsedRequestData.provider) {
-        throw new Error("Invalid requestData structure");
-      }
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       throw new Error(
-        `Failed to parse requestData for job ${row.id}: ${errorMessage}`
+        `Failed to parse requestData JSON for job ${row.id}: ${errorMessage}`
       );
     }
   } else {
     parsedRequestData = row.requestData as unknown as JobRequestData;
+  }
+
+  // Validate requestData structure and types
+  if (!Array.isArray(parsedRequestData.messages)) {
+    throw new Error(
+      `Invalid requestData for job ${row.id}: messages must be an array`
+    );
+  }
+  if (typeof parsedRequestData.provider !== "string") {
+    throw new Error(
+      `Invalid requestData for job ${row.id}: provider must be a string`
+    );
+  }
+  if (
+    typeof parsedRequestData.modelId !== "string" ||
+    !parsedRequestData.modelId
+  ) {
+    throw new Error(
+      `Invalid requestData for job ${row.id}: modelId must be a non-empty string`
+    );
   }
 
   // Handle responseData parsing - optional field
@@ -387,10 +404,24 @@ export async function getPendingJobs(
   const clampedLimit = Math.min(Math.max(limit, 1), 100);
 
   // FOR UPDATE SKIP LOCKED requires raw SQL since Drizzle doesn't support it natively
+  // Use explicit column selection to ensure type safety
   const result = await executeQuery(
     (db) =>
       db.execute(
-        sql`SELECT * FROM ai_streaming_jobs
+        sql`SELECT
+              id,
+              conversation_id,
+              user_id,
+              model_id,
+              status,
+              request_data,
+              response_data,
+              partial_content,
+              error_message,
+              created_at,
+              completed_at,
+              message_persisted
+            FROM ai_streaming_jobs
             WHERE status = 'pending'
             ORDER BY created_at ASC
             LIMIT ${clampedLimit}
@@ -399,8 +430,8 @@ export async function getPendingJobs(
     "getPendingJobs"
   );
 
-  // Raw query returns rows as array
-  const rows = result.rows as SelectAiStreamingJob[];
+  // Cast rows to expected type - columns match SelectAiStreamingJob exactly
+  const rows = result.rows as unknown as SelectAiStreamingJob[];
   return rows.map(transformToStreamingJob);
 }
 
@@ -668,26 +699,45 @@ export async function deleteJob(jobId: string): Promise<{ id: string } | null> {
 export async function cleanupCompletedJobs(
   olderThanDays: number = 7
 ): Promise<number> {
+  const log = createLogger({
+    module: "ai-streaming-jobs",
+    operation: "cleanupCompletedJobs",
+  });
+
   const cutoffDate = new Date(
     Date.now() - olderThanDays * 24 * 60 * 60 * 1000
   );
 
-  const result = await executeQuery(
-    (db) =>
-      db
-        .delete(aiStreamingJobs)
-        .where(
-          and(
-            eq(aiStreamingJobs.status, "completed"),
-            sql`${aiStreamingJobs.completedAt} IS NOT NULL`,
-            lt(aiStreamingJobs.completedAt, cutoffDate)
-          )
-        )
-        .returning({ id: aiStreamingJobs.id }),
-    "cleanupCompletedJobs"
-  );
+  log.info("Starting cleanup of completed jobs", {
+    olderThanDays,
+    cutoffDate: cutoffDate.toISOString(),
+  });
 
-  return result.length;
+  try {
+    const result = await executeQuery(
+      (db) =>
+        db
+          .delete(aiStreamingJobs)
+          .where(
+            and(
+              eq(aiStreamingJobs.status, "completed"),
+              sql`${aiStreamingJobs.completedAt} IS NOT NULL`,
+              lt(aiStreamingJobs.completedAt, cutoffDate)
+            )
+          )
+          .returning({ id: aiStreamingJobs.id }),
+      "cleanupCompletedJobs"
+    );
+
+    log.info("Cleanup of completed jobs finished", {
+      deletedCount: result.length,
+    });
+
+    return result.length;
+  } catch (error) {
+    log.error("Failed to cleanup completed jobs", { error });
+    throw error;
+  }
 }
 
 /**
@@ -697,26 +747,43 @@ export async function cleanupCompletedJobs(
 export async function cleanupFailedJobs(
   olderThanDays: number = 3
 ): Promise<number> {
+  const log = createLogger({
+    module: "ai-streaming-jobs",
+    operation: "cleanupFailedJobs",
+  });
+
   const cutoffDate = new Date(
     Date.now() - olderThanDays * 24 * 60 * 60 * 1000
   );
 
-  const result = await executeQuery(
-    (db) =>
-      db
-        .delete(aiStreamingJobs)
-        .where(
-          and(
-            eq(aiStreamingJobs.status, "failed"),
-            sql`${aiStreamingJobs.completedAt} IS NOT NULL`,
-            lt(aiStreamingJobs.completedAt, cutoffDate)
-          )
-        )
-        .returning({ id: aiStreamingJobs.id }),
-    "cleanupFailedJobs"
-  );
+  log.info("Starting cleanup of failed jobs", {
+    olderThanDays,
+    cutoffDate: cutoffDate.toISOString(),
+  });
 
-  return result.length;
+  try {
+    const result = await executeQuery(
+      (db) =>
+        db
+          .delete(aiStreamingJobs)
+          .where(
+            and(
+              eq(aiStreamingJobs.status, "failed"),
+              sql`${aiStreamingJobs.completedAt} IS NOT NULL`,
+              lt(aiStreamingJobs.completedAt, cutoffDate)
+            )
+          )
+          .returning({ id: aiStreamingJobs.id }),
+      "cleanupFailedJobs"
+    );
+
+    log.info("Cleanup of failed jobs finished", { deletedCount: result.length });
+
+    return result.length;
+  } catch (error) {
+    log.error("Failed to cleanup failed jobs", { error });
+    throw error;
+  }
 }
 
 /**
@@ -726,28 +793,47 @@ export async function cleanupFailedJobs(
 export async function cleanupStaleRunningJobs(
   olderThanMinutes: number = 60
 ): Promise<number> {
+  const log = createLogger({
+    module: "ai-streaming-jobs",
+    operation: "cleanupStaleRunningJobs",
+  });
+
   const cutoffDate = new Date(Date.now() - olderThanMinutes * 60 * 1000);
 
-  const result = await executeQuery(
-    (db) =>
-      db
-        .update(aiStreamingJobs)
-        .set({
-          status: "failed",
-          errorMessage: "Job timed out - exceeded maximum run time",
-          completedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(aiStreamingJobs.status, "running"),
-            lt(aiStreamingJobs.createdAt, cutoffDate)
-          )
-        )
-        .returning({ id: aiStreamingJobs.id }),
-    "cleanupStaleRunningJobs"
-  );
+  log.info("Starting cleanup of stale running jobs", {
+    olderThanMinutes,
+    cutoffDate: cutoffDate.toISOString(),
+  });
 
-  return result.length;
+  try {
+    const result = await executeQuery(
+      (db) =>
+        db
+          .update(aiStreamingJobs)
+          .set({
+            status: "failed",
+            errorMessage: "Job timed out - exceeded maximum run time",
+            completedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(aiStreamingJobs.status, "running"),
+              lt(aiStreamingJobs.createdAt, cutoffDate)
+            )
+          )
+          .returning({ id: aiStreamingJobs.id }),
+      "cleanupStaleRunningJobs"
+    );
+
+    log.info("Cleanup of stale running jobs finished", {
+      markedFailedCount: result.length,
+    });
+
+    return result.length;
+  } catch (error) {
+    log.error("Failed to cleanup stale running jobs", { error });
+    throw error;
+  }
 }
 
 // ============================================
