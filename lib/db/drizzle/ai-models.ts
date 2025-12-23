@@ -6,8 +6,28 @@
  *
  * **IMPORTANT - Authorization**: These are infrastructure-layer data access functions.
  * They do NOT perform authorization checks. Authorization MUST be handled at the
- * server action layer before calling these functions. See server actions in
- * `/actions` for examples of proper authorization implementation.
+ * server action layer before calling these functions.
+ *
+ * **Expected Authorization Pattern** (implement in server actions):
+ * ```typescript
+ * // In /actions/ai-model.actions.ts
+ * export async function deleteAIModelAction(id: number): Promise<ActionState<void>> {
+ *   const session = await getServerSession();
+ *   if (!session) {
+ *     throw ErrorFactories.authNoSession();
+ *   }
+ *
+ *   // Check admin role
+ *   const isAdmin = await checkUserRole(session.user.id, "admin");
+ *   if (!isAdmin) {
+ *     throw ErrorFactories.authInsufficientPermissions();
+ *   }
+ *
+ *   // Now safe to call infrastructure layer
+ *   await deleteAIModel(id);
+ *   return createSuccess(undefined, "Model deleted");
+ * }
+ * ```
  *
  * Part of Epic #526 - RDS Data API to Drizzle ORM Migration
  * Issue #532 - Migrate AI Models & Configuration queries to Drizzle ORM
@@ -224,10 +244,16 @@ export async function getModelsWithCapabilities(
       // Only include valid keys that are set to true
       return value === true && validKeys.has(key as keyof NexusCapabilities);
     })
-    .map(([key]) =>
+    .map(([key]) => {
+      // Runtime assertion: Key must be alphanumeric for SQL safety
+      // This defends against whitelist compromise or extension errors
+      if (!/^[a-zA-Z]+$/.test(key)) {
+        throw new Error(`Invalid capability key format: ${key}`);
+      }
+
       // Use COALESCE to handle null/missing fields as false
-      sql`COALESCE((${aiModels.nexusCapabilities} ->> ${key})::boolean, false) = true`
-    );
+      return sql`COALESCE((${aiModels.nexusCapabilities} ->> ${key})::boolean, false) = true`;
+    });
 
   return executeQuery(
     (db) =>
@@ -335,49 +361,64 @@ export async function getModelReferenceCounts(modelId: number) {
 
   log.info("Getting model reference counts", { modelId });
 
-  // Execute all count queries in parallel
+  // Execute all count queries in parallel with individual error handling
+  // Use Promise.allSettled to get detailed error context if any query fails
+  const results = await Promise.allSettled([
+    executeQuery(
+      (db) =>
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(chainPrompts)
+          .where(eq(chainPrompts.modelId, modelId)),
+      "countChainPrompts"
+    ),
+    executeQuery(
+      (db) =>
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(nexusMessages)
+          .where(eq(nexusMessages.modelId, modelId)),
+      "countNexusMessages"
+    ),
+    executeQuery(
+      (db) =>
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(nexusConversations)
+          .where(
+            sql`${nexusConversations.modelUsed} = (SELECT model_id FROM ai_models WHERE id = ${modelId})`
+          ),
+      "countNexusConversations"
+    ),
+    executeQuery(
+      (db) =>
+        db
+          .select({ count: sql<number>`count(*)::int` })
+          .from(modelComparisons)
+          .where(
+            or(
+              eq(modelComparisons.model1Id, modelId),
+              eq(modelComparisons.model2Id, modelId)
+            )
+          ),
+      "countModelComparisons"
+    ),
+  ]);
+
+  // Check for failures and provide detailed error context
+  const labels = ["chainPrompts", "nexusMessages", "nexusConversations", "modelComparisons"];
+  const failedQueries = results
+    .map((result, index) => (result.status === "rejected" ? labels[index] : null))
+    .filter(Boolean);
+
+  if (failedQueries.length > 0) {
+    log.error("Count queries failed", { failedQueries, modelId });
+    throw new Error(`Failed to count references in: ${failedQueries.join(", ")}`);
+  }
+
+  // Extract successful results
   const [chainPromptsResult, nexusMessagesResult, nexusConversationsResult, modelComparisonsResult] =
-    await Promise.all([
-      executeQuery(
-        (db) =>
-          db
-            .select({ count: sql<number>`count(*)::int` })
-            .from(chainPrompts)
-            .where(eq(chainPrompts.modelId, modelId)),
-        "countChainPrompts"
-      ),
-      executeQuery(
-        (db) =>
-          db
-            .select({ count: sql<number>`count(*)::int` })
-            .from(nexusMessages)
-            .where(eq(nexusMessages.modelId, modelId)),
-        "countNexusMessages"
-      ),
-      executeQuery(
-        (db) =>
-          db
-            .select({ count: sql<number>`count(*)::int` })
-            .from(nexusConversations)
-            .where(
-              sql`${nexusConversations.modelUsed} = (SELECT model_id FROM ai_models WHERE id = ${modelId})`
-            ),
-        "countNexusConversations"
-      ),
-      executeQuery(
-        (db) =>
-          db
-            .select({ count: sql<number>`count(*)::int` })
-            .from(modelComparisons)
-            .where(
-              or(
-                eq(modelComparisons.model1Id, modelId),
-                eq(modelComparisons.model2Id, modelId)
-              )
-            ),
-        "countModelComparisons"
-      ),
-    ]);
+    results.map((r) => (r.status === "fulfilled" ? r.value : []));
 
   return {
     chainPromptsCount: chainPromptsResult[0]?.count ?? 0,
@@ -470,10 +511,11 @@ export async function replaceModelReferences(
           throw new Error("A model cannot replace itself");
         }
 
-        // Get both models within transaction
+        // Get both models within transaction with row-level locking
+        // Use FOR UPDATE to prevent concurrent modifications during validation
         const [targetModelResult, replacementModelResult] = await Promise.all([
-          tx.select().from(aiModels).where(eq(aiModels.id, targetModelId)).limit(1),
-          tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId)).limit(1),
+          tx.select().from(aiModels).where(eq(aiModels.id, targetModelId)).limit(1).for('update'),
+          tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId)).limit(1).for('update'),
         ]);
 
         const targetModel = targetModelResult[0];
@@ -545,9 +587,22 @@ export async function replaceModelReferences(
         }
 
         // Record in audit table with generated ID
-        // Note: Using epoch-based ID because model_replacement_audit table doesn't have
-        // auto-increment (would require schema migration). Microsecond precision prevents
-        // collisions in practice since replacements are rare operations.
+        // FIXME: COLLISION RISK - Epoch-based ID generation is dangerous
+        //
+        // Current approach: EXTRACT(EPOCH FROM NOW()) * 1000000 (microsecond precision)
+        //
+        // PROBLEMS:
+        // 1. Rapid succession replacements can collide (microseconds don't guarantee uniqueness)
+        // 2. Database clock skew across replicas
+        // 3. Not safe in distributed/high-throughput scenarios
+        //
+        // RECOMMENDED FIX: Database migration to add BIGSERIAL or use UUID
+        //
+        // Short-term: This is acceptable because model replacements are rare manual operations
+        // (typically < 1 per hour) and not called concurrently.
+        //
+        // TODO: Create migration to change model_replacement_audit.id to BIGSERIAL
+        // See: https://github.com/psd401/aistudio/issues/TBD
         await tx.insert(modelReplacementAudit).values({
           id: sql`(EXTRACT(EPOCH FROM NOW()) * 1000000)::bigint`,
           originalModelId: targetModelId,

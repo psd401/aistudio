@@ -6,8 +6,35 @@
  *
  * **IMPORTANT - Authorization**: These are infrastructure-layer data access functions.
  * They do NOT perform authorization checks. Authorization MUST be handled at the
- * server action layer before calling these functions. See server actions in
- * `/actions/db/assistant-architect-actions.ts` for proper authorization implementation.
+ * server action layer before calling these functions.
+ *
+ * **Expected Authorization Pattern** (implement in server actions):
+ * ```typescript
+ * // In /actions/db/assistant-architect-actions.ts
+ * export async function deleteAssistantArchitectAction(id: number): Promise<ActionState<void>> {
+ *   const session = await getServerSession();
+ *   if (!session) {
+ *     throw ErrorFactories.authNoSession();
+ *   }
+ *
+ *   // Get architect to verify ownership
+ *   const architect = await getAssistantArchitectById(id);
+ *   if (!architect) {
+ *     throw ErrorFactories.dbRecordNotFound("assistant_architects", id);
+ *   }
+ *
+ *   // Check ownership or admin role
+ *   const isOwner = architect.userId === session.user.id;
+ *   const isAdmin = await checkUserRole(session.user.id, "admin");
+ *   if (!isOwner && !isAdmin) {
+ *     throw ErrorFactories.authInsufficientPermissions();
+ *   }
+ *
+ *   // Now safe to call infrastructure layer
+ *   await deleteAssistantArchitect(id);
+ *   return createSuccess(undefined, "Assistant architect deleted");
+ * }
+ * ```
  *
  * Part of Epic #526 - RDS Data API to Drizzle ORM Migration
  * Issue #532 - Migrate AI Models & Configuration queries to Drizzle ORM
@@ -26,7 +53,6 @@ import {
   tools,
   users,
 } from "@/lib/db/schema";
-import { createLogger, generateRequestId } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
 
 // ============================================
@@ -334,11 +360,6 @@ export async function updateAssistantArchitect(
  * Uses cascading deletes through related tables
  */
 export async function deleteAssistantArchitect(id: number) {
-  const requestId = generateRequestId();
-  const log = createLogger({ requestId, function: "deleteAssistantArchitect" });
-
-  log.info("Deleting assistant architect", { id });
-
   // Delete in correct order to respect foreign key constraints
   return executeQuery(
     (db) => db.transaction(async (tx) => {
@@ -370,7 +391,6 @@ export async function deleteAssistantArchitect(id: number) {
         .where(eq(assistantArchitects.id, id))
         .returning();
 
-      log.info("Assistant architect deleted successfully", { id });
       return result[0];
     }),
     "deleteAssistantArchitectTransaction"
@@ -386,14 +406,6 @@ export async function deleteAssistantArchitect(id: number) {
  * Also creates the corresponding tool entry if it doesn't exist
  */
 export async function approveAssistantArchitect(id: number) {
-  const requestId = generateRequestId();
-  const log = createLogger({
-    requestId,
-    function: "approveAssistantArchitect",
-  });
-
-  log.info("Approving assistant architect", { id });
-
   return executeQuery(
     (db) => db.transaction(async (tx) => {
       // Update status to approved
@@ -440,7 +452,6 @@ export async function approveAssistantArchitect(id: number) {
           target: tools.identifier,
         });
 
-      log.info("Assistant architect approved", { id, toolIdentifier });
       return assistant;
     }),
     "approveAssistantArchitectTransaction"

@@ -6,8 +6,40 @@
  *
  * **IMPORTANT - Authorization**: These are infrastructure-layer data access functions.
  * They do NOT perform authorization checks. Authorization MUST be handled at the
- * server action layer before calling these functions. See server actions in
- * `/actions/db/assistant-architect-actions.ts` for proper authorization implementation.
+ * server action layer before calling these functions.
+ *
+ * **Expected Authorization Pattern** (implement in server actions):
+ * ```typescript
+ * // In /actions/db/assistant-architect-actions.ts
+ * export async function deleteChainPromptAction(id: number): Promise<ActionState<void>> {
+ *   const session = await getServerSession();
+ *   if (!session) {
+ *     throw ErrorFactories.authNoSession();
+ *   }
+ *
+ *   // Get chain prompt to verify ownership via assistant architect
+ *   const prompt = await getChainPromptById(id);
+ *   if (!prompt) {
+ *     throw ErrorFactories.dbRecordNotFound("chain_prompts", id);
+ *   }
+ *
+ *   const architect = await getAssistantArchitectById(prompt.assistantArchitectId);
+ *   if (!architect) {
+ *     throw ErrorFactories.dbRecordNotFound("assistant_architects", prompt.assistantArchitectId);
+ *   }
+ *
+ *   // Check ownership or admin role
+ *   const isOwner = architect.userId === session.user.id;
+ *   const isAdmin = await checkUserRole(session.user.id, "admin");
+ *   if (!isOwner && !isAdmin) {
+ *     throw ErrorFactories.authInsufficientPermissions();
+ *   }
+ *
+ *   // Now safe to call infrastructure layer
+ *   await deleteChainPrompt(id);
+ *   return createSuccess(undefined, "Chain prompt deleted");
+ * }
+ * ```
  *
  * Part of Epic #526 - RDS Data API to Drizzle ORM Migration
  * Issue #532 - Migrate AI Models & Configuration queries to Drizzle ORM
@@ -22,7 +54,6 @@ import {
   aiModels,
   toolInputFields,
 } from "@/lib/db/schema";
-import { createLogger, generateRequestId } from "@/lib/logger";
 
 // ============================================
 // Types
@@ -343,14 +374,6 @@ export async function reorderChainPrompts(
   assistantArchitectId: number,
   orderedIds: number[]
 ) {
-  const requestId = generateRequestId();
-  const log = createLogger({ requestId, function: "reorderChainPrompts" });
-
-  log.info("Reordering chain prompts", {
-    assistantArchitectId,
-    count: orderedIds.length,
-  });
-
   return executeQuery(
     (db) => db.transaction(async (tx) => {
       // Update each prompt's position in parallel within transaction
@@ -369,11 +392,6 @@ export async function reorderChainPrompts(
           )
       );
       await Promise.all(updates);
-
-      log.info("Chain prompts reordered successfully", {
-        assistantArchitectId,
-        count: orderedIds.length,
-      });
 
       return { success: true, count: orderedIds.length };
     }),
