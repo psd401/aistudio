@@ -4,6 +4,11 @@
  * Chain Prompts CRUD operations migrated from RDS Data API to Drizzle ORM.
  * All functions use executeQuery() wrapper with circuit breaker and retry logic.
  *
+ * **IMPORTANT - Authorization**: These are infrastructure-layer data access functions.
+ * They do NOT perform authorization checks. Authorization MUST be handled at the
+ * server action layer before calling these functions. See server actions in
+ * `/actions/db/assistant-architect-actions.ts` for proper authorization implementation.
+ *
  * Part of Epic #526 - RDS Data API to Drizzle ORM Migration
  * Issue #532 - Migrate AI Models & Configuration queries to Drizzle ORM
  *

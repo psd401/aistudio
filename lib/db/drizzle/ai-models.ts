@@ -4,6 +4,11 @@
  * AI model CRUD operations migrated from RDS Data API to Drizzle ORM.
  * All functions use executeQuery() wrapper with circuit breaker and retry logic.
  *
+ * **IMPORTANT - Authorization**: These are infrastructure-layer data access functions.
+ * They do NOT perform authorization checks. Authorization MUST be handled at the
+ * server action layer before calling these functions. See server actions in
+ * `/actions` for examples of proper authorization implementation.
+ *
  * Part of Epic #526 - RDS Data API to Drizzle ORM Migration
  * Issue #532 - Migrate AI Models & Configuration queries to Drizzle ORM
  *
@@ -195,10 +200,26 @@ export async function getAIModelsByProvider(provider: string) {
 export async function getModelsWithCapabilities(
   capabilities: Partial<NexusCapabilities>
 ) {
-  // Build JSONB conditions for database-level filtering
+  // Whitelist of valid NexusCapabilities keys to prevent SQL injection
+  const validKeys: Set<keyof NexusCapabilities> = new Set([
+    "supportsVision",
+    "supportsAudio",
+    "supportsStreaming",
+    "supportsToolUse",
+    "supportsCaching",
+    "supportsJSON",
+  ]);
+
+  // Build JSONB conditions for database-level filtering with validated keys
   const conditions = Object.entries(capabilities)
-    .filter(([, value]) => value === true)
-    .map(([key]) => sql`(${aiModels.nexusCapabilities} ->> ${key})::boolean`);
+    .filter(([key, value]) => {
+      // Only include valid keys that are set to true
+      return value === true && validKeys.has(key as keyof NexusCapabilities);
+    })
+    .map(([key]) =>
+      // Use COALESCE to handle null/missing fields as false
+      sql`COALESCE((${aiModels.nexusCapabilities} ->> ${key})::boolean, false) = true`
+    );
 
   return executeQuery(
     (db) =>
@@ -360,6 +381,13 @@ export async function getModelReferenceCounts(modelId: number) {
 
 /**
  * Validate if a model can be used as a replacement for another
+ *
+ * **WARNING**: This function is for pre-validation checks only (e.g., UI validation).
+ * DO NOT rely on this for transactional safety - validation is re-performed inside
+ * the replaceModelReferences() transaction to prevent race conditions.
+ *
+ * Between calling this function and executing the replacement, models could be
+ * modified or deleted by other processes.
  */
 export async function validateModelReplacement(
   targetModelId: number,

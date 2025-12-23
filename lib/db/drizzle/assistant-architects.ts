@@ -4,6 +4,11 @@
  * Assistant Architect CRUD operations migrated from RDS Data API to Drizzle ORM.
  * All functions use executeQuery() wrapper with circuit breaker and retry logic.
  *
+ * **IMPORTANT - Authorization**: These are infrastructure-layer data access functions.
+ * They do NOT perform authorization checks. Authorization MUST be handled at the
+ * server action layer before calling these functions. See server actions in
+ * `/actions/db/assistant-architect-actions.ts` for proper authorization implementation.
+ *
  * Part of Epic #526 - RDS Data API to Drizzle ORM Migration
  * Issue #532 - Migrate AI Models & Configuration queries to Drizzle ORM
  *
@@ -406,13 +411,22 @@ export async function approveAssistantArchitect(id: number) {
         throw ErrorFactories.dbRecordNotFound("assistant_architects", id);
       }
 
+      // Defensive check for name (should not be null per schema, but handle edge case)
+      if (!assistant.name) {
+        throw new Error(`Assistant architect ${id} has no name`);
+      }
+
       // Create tool entry if it doesn't already exist
-      // Use INSERT ... ON CONFLICT DO NOTHING pattern
+      // Use INSERT ... ON CONFLICT DO NOTHING to handle race conditions
+      // If another transaction creates the tool first, this silently succeeds
       const toolIdentifier = assistant.name
         .toLowerCase()
         .replace(/\s+/g, "-")
         .replace(/[^\da-z-]/g, "");
 
+      // Race condition safety: If concurrent approvals happen, onConflictDoNothing
+      // prevents duplicate key errors. Tool identifier is unique, so conflicts are
+      // handled gracefully without throwing errors.
       await tx
         .insert(tools)
         .values({
