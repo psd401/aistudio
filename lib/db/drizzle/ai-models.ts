@@ -191,33 +191,31 @@ export async function getAIModelsByProvider(provider: string) {
 
 /**
  * Get models with specific Nexus capabilities
- * Queries JSONB nexus_capabilities field for capability flags
+ * Queries JSONB nexus_capabilities field for capability flags at the database level
  */
 export async function getModelsWithCapabilities(
   capabilities: Partial<NexusCapabilities>
 ) {
+  // Build JSONB conditions for database-level filtering
+  const conditions = Object.entries(capabilities)
+    .filter(([, value]) => value === true)
+    .map(([key]) => sql`(${aiModels.nexusCapabilities} ->> ${key})::boolean`);
+
   return executeQuery(
-    (db) => {
-      // Build base query with common filters
-      return db
+    (db) =>
+      db
         .select()
         .from(aiModels)
-        .where(and(eq(aiModels.active, true), eq(aiModels.chatEnabled, true)))
-        .orderBy(aiModels.provider, aiModels.name);
-    },
+        .where(
+          and(
+            eq(aiModels.active, true),
+            eq(aiModels.chatEnabled, true),
+            ...conditions
+          )
+        )
+        .orderBy(aiModels.provider, aiModels.name),
     "getModelsWithCapabilities"
-  ).then((models) => {
-    // Filter models by requested capabilities
-    return models.filter((model) => {
-      if (!model.nexusCapabilities) return false;
-      return Object.entries(capabilities).every(([key, value]) => {
-        if (value === true) {
-          return (model.nexusCapabilities as NexusCapabilities)[key] === true;
-        }
-        return true;
-      });
-    });
-  });
+  );
 }
 
 // ============================================
@@ -429,35 +427,51 @@ export async function replaceModelReferences(
   });
 
   try {
-    // First validate the replacement
-    const validation = await validateModelReplacement(
-      targetModelId,
-      replacementModelId
-    );
-
-    if (!validation.valid) {
-      throw new Error(validation.reason);
-    }
-
-    // Get current counts for audit
-    const counts = await getModelReferenceCounts(targetModelId);
-
-    // Get model ID strings for nexus_conversations update
-    const [targetModel, replacementModel] = await Promise.all([
-      getAIModelById(targetModelId),
-      getAIModelById(replacementModelId),
-    ]);
-
-    if (!targetModel || !replacementModel) {
-      throw ErrorFactories.dbRecordNotFound("ai_models", targetModelId);
-    }
-
-    // Execute all updates using transactions
+    // Execute all validation and updates in a single transaction to prevent race conditions
     const result = await executeQuery(
-      async (db) => {
+      (db) => db.transaction(async (tx) => {
+        // Validate replacement within transaction
+        if (targetModelId === replacementModelId) {
+          throw new Error("A model cannot replace itself");
+        }
+
+        // Get both models within transaction
+        const [targetModelResult, replacementModelResult] = await Promise.all([
+          tx.select().from(aiModels).where(eq(aiModels.id, targetModelId)).limit(1),
+          tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId)).limit(1),
+        ]);
+
+        const targetModel = targetModelResult[0];
+        const replacementModel = replacementModelResult[0];
+
+        if (!targetModel) {
+          throw new Error(`Target model with ID ${targetModelId} not found`);
+        }
+        if (!replacementModel) {
+          throw new Error(`Replacement model with ID ${replacementModelId} not found`);
+        }
+        if (!replacementModel.active) {
+          throw new Error("Replacement model is not active");
+        }
+
+        // Get reference counts within transaction
+        const [chainPromptsResult, nexusMessagesResult, nexusConversationsResult, modelComparisonsResult] =
+          await Promise.all([
+            tx.select({ count: sql<number>`count(*)::int` }).from(chainPrompts).where(eq(chainPrompts.modelId, targetModelId)),
+            tx.select({ count: sql<number>`count(*)::int` }).from(nexusMessages).where(eq(nexusMessages.modelId, targetModelId)),
+            tx.select({ count: sql<number>`count(*)::int` }).from(nexusConversations).where(sql`${nexusConversations.modelUsed} = ${targetModel.modelId}`),
+            tx.select({ count: sql<number>`count(*)::int` }).from(modelComparisons).where(or(eq(modelComparisons.model1Id, targetModelId), eq(modelComparisons.model2Id, targetModelId))),
+          ]);
+
+        const counts = {
+          chainPromptsCount: chainPromptsResult[0]?.count ?? 0,
+          nexusMessagesCount: nexusMessagesResult[0]?.count ?? 0,
+          nexusConversationsCount: nexusConversationsResult[0]?.count ?? 0,
+          modelComparisonsCount: modelComparisonsResult[0]?.count ?? 0,
+        };
         // Update chain_prompts
         if (counts.chainPromptsCount > 0) {
-          await db
+          await tx
             .update(chainPrompts)
             .set({ modelId: replacementModelId, updatedAt: new Date() })
             .where(eq(chainPrompts.modelId, targetModelId));
@@ -465,7 +479,7 @@ export async function replaceModelReferences(
 
         // Update nexus_messages
         if (counts.nexusMessagesCount > 0) {
-          await db
+          await tx
             .update(nexusMessages)
             .set({ modelId: replacementModelId, updatedAt: new Date() })
             .where(eq(nexusMessages.modelId, targetModelId));
@@ -473,7 +487,7 @@ export async function replaceModelReferences(
 
         // Update nexus_conversations (uses model_id string, not FK)
         if (counts.nexusConversationsCount > 0) {
-          await db
+          await tx
             .update(nexusConversations)
             .set({
               modelUsed: replacementModel.modelId,
@@ -484,20 +498,20 @@ export async function replaceModelReferences(
 
         // Update model_comparisons (both columns)
         if (counts.modelComparisonsCount > 0) {
-          await db
+          await tx
             .update(modelComparisons)
             .set({ model1Id: replacementModelId, updatedAt: new Date() })
             .where(eq(modelComparisons.model1Id, targetModelId));
 
-          await db
+          await tx
             .update(modelComparisons)
             .set({ model2Id: replacementModelId, updatedAt: new Date() })
             .where(eq(modelComparisons.model2Id, targetModelId));
         }
 
-        // Record in audit table
-        await db.insert(modelReplacementAudit).values({
-          id: Date.now(), // Use timestamp as bigint ID
+        // Record in audit table with generated ID
+        await tx.insert(modelReplacementAudit).values({
+          id: sql`(EXTRACT(EPOCH FROM NOW()) * 1000000)::bigint`,
           originalModelId: targetModelId,
           originalModelName: targetModel.name,
           replacementModelId: replacementModelId,
@@ -510,7 +524,7 @@ export async function replaceModelReferences(
         });
 
         // Delete the original model
-        await db.delete(aiModels).where(eq(aiModels.id, targetModelId));
+        await tx.delete(aiModels).where(eq(aiModels.id, targetModelId));
 
         return {
           success: true,
@@ -531,7 +545,7 @@ export async function replaceModelReferences(
             counts.nexusConversationsCount +
             counts.modelComparisonsCount,
         };
-      },
+      }),
       "replaceModelReferencesTransaction"
     );
 

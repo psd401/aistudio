@@ -336,38 +336,38 @@ export async function deleteAssistantArchitect(id: number) {
 
   // Delete in correct order to respect foreign key constraints
   return executeQuery(
-    async (db) => {
+    (db) => db.transaction(async (tx) => {
       // 1. Delete prompt_results (references chain_prompts via prompt_id)
-      await db
+      await tx
         .delete(promptResults)
         .where(
           sql`${promptResults.promptId} IN (SELECT id FROM chain_prompts WHERE assistant_architect_id = ${id})`
         );
 
       // 2. Delete chain_prompts
-      await db
+      await tx
         .delete(chainPrompts)
         .where(eq(chainPrompts.assistantArchitectId, id));
 
       // 3. Delete tool_input_fields
-      await db
+      await tx
         .delete(toolInputFields)
         .where(eq(toolInputFields.assistantArchitectId, id));
 
       // 4. Delete tool_executions
-      await db
+      await tx
         .delete(toolExecutions)
         .where(eq(toolExecutions.assistantArchitectId, id));
 
       // 5. Finally delete the assistant architect itself
-      const result = await db
+      const result = await tx
         .delete(assistantArchitects)
         .where(eq(assistantArchitects.id, id))
         .returning();
 
       log.info("Assistant architect deleted successfully", { id });
       return result[0];
-    },
+    }),
     "deleteAssistantArchitectTransaction"
   );
 }
@@ -390,9 +390,9 @@ export async function approveAssistantArchitect(id: number) {
   log.info("Approving assistant architect", { id });
 
   return executeQuery(
-    async (db) => {
+    (db) => db.transaction(async (tx) => {
       // Update status to approved
-      const result = await db
+      const result = await tx
         .update(assistantArchitects)
         .set({
           status: "approved",
@@ -413,7 +413,7 @@ export async function approveAssistantArchitect(id: number) {
         .replace(/\s+/g, "-")
         .replace(/[^\da-z-]/g, "");
 
-      await db
+      await tx
         .insert(tools)
         .values({
           identifier: toolIdentifier,
@@ -423,12 +423,12 @@ export async function approveAssistantArchitect(id: number) {
           isActive: true,
         })
         .onConflictDoNothing({
-          target: tools.promptChainToolId,
+          target: tools.identifier,
         });
 
       log.info("Assistant architect approved", { id, toolIdentifier });
       return assistant;
-    },
+    }),
     "approveAssistantArchitectTransaction"
   );
 }

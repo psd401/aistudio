@@ -347,11 +347,10 @@ export async function reorderChainPrompts(
   });
 
   return executeQuery(
-    async (db) => {
-      // Update each prompt's position in a transaction
-      let position = 0;
-      for (const promptId of orderedIds) {
-        await db
+    (db) => db.transaction(async (tx) => {
+      // Update each prompt's position in parallel within transaction
+      const updates = orderedIds.map((promptId, position) =>
+        tx
           .update(chainPrompts)
           .set({
             position,
@@ -362,9 +361,9 @@ export async function reorderChainPrompts(
               eq(chainPrompts.id, promptId),
               eq(chainPrompts.assistantArchitectId, assistantArchitectId)
             )
-          );
-        position++;
-      }
+          )
+      );
+      await Promise.all(updates);
 
       log.info("Chain prompts reordered successfully", {
         assistantArchitectId,
@@ -372,7 +371,7 @@ export async function reorderChainPrompts(
       });
 
       return { success: true, count: orderedIds.length };
-    },
+    }),
     "reorderChainPromptsTransaction"
   );
 }
