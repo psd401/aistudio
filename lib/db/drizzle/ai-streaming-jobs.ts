@@ -26,6 +26,61 @@ import { aiStreamingJobs, aiModels } from "@/lib/db/schema";
 import type { SelectAiStreamingJob } from "@/lib/db/types";
 import type { UIMessage } from "ai";
 import { createLogger } from "@/lib/logger";
+import { ErrorFactories } from "@/lib/error-utils";
+
+// ============================================
+// Constants
+// ============================================
+
+/**
+ * Maximum number of pending jobs to return in a single query
+ * Prevents excessive memory usage and query timeouts
+ * Based on typical worker pool size (10-20 workers) with 5x headroom
+ */
+export const MAX_PENDING_JOBS_LIMIT = 100;
+
+/**
+ * Retention period for completed jobs (in days)
+ * Balance between audit trail availability and storage costs
+ * 7 days provides sufficient time for debugging while minimizing storage
+ */
+export const COMPLETED_JOBS_RETENTION_DAYS = 7;
+
+/**
+ * Retention period for failed jobs (in days)
+ * Shorter retention than completed jobs since failures are typically investigated quickly
+ * 3 days provides adequate time for debugging while reducing clutter
+ */
+export const FAILED_JOBS_RETENTION_DAYS = 3;
+
+/**
+ * Threshold for marking stale running jobs as failed (in minutes)
+ * Jobs stuck in "running" status beyond this threshold are assumed crashed
+ * 60 minutes accounts for longest reasonable AI streaming request (GPT-4 Pro with large context)
+ */
+export const STALE_JOB_THRESHOLD_MINUTES = 60;
+
+/**
+ * Maximum length for partial content field (characters)
+ * Prevents database bloat from extremely long streaming responses
+ * 100KB in UTF-8 (assuming ~1 byte per char on average)
+ */
+export const MAX_PARTIAL_CONTENT_LENGTH = 100000;
+
+/**
+ * Maximum length for error message field (characters)
+ * Prevents database bloat from verbose error stack traces
+ * 10KB in UTF-8 provides sufficient detail for debugging
+ */
+export const MAX_ERROR_MESSAGE_LENGTH = 10000;
+
+/**
+ * UUID validation regex (RFC 4122 compliant)
+ * Matches standard UUID format: xxxxxxxx-xxxx-Mxxx-Nxxx-xxxxxxxxxxxx
+ * Where M is version (1-5) and N is variant (8, 9, a, b)
+ */
+export const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 // ============================================
 // Types
@@ -166,6 +221,12 @@ export interface UpdateJobStatusData {
   status: JobStatus;
   partialContent?: string;
   errorMessage?: string;
+  /**
+   * Expected current status for optimistic locking
+   * When provided, update will only succeed if job is in this status
+   * Prevents race conditions when multiple processes update same job
+   */
+  expectedCurrentStatus?: JobStatus;
 }
 
 /**
@@ -228,21 +289,53 @@ export function mapFromDatabaseStatus(
 }
 
 // ============================================
-// Row Transformation Helpers
+// Validation Utilities
 // ============================================
 
 /**
- * UUID validation regex (RFC 4122 compliant)
+ * Validate if a string is a valid UUID (RFC 4122 compliant)
+ * Exported for reuse in service layer and other modules
+ *
+ * @param value - String to validate
+ * @returns true if valid UUID, false otherwise
+ *
+ * @example
+ * isValidUUID("550e8400-e29b-41d4-a716-446655440000") // true
+ * isValidUUID("not-a-uuid") // false
  */
-const UUID_REGEX =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-
-/**
- * Validate if a string is a valid UUID
- */
-function isValidUUID(value: string): boolean {
+export function isValidUUID(value: string): boolean {
   return UUID_REGEX.test(value);
 }
+
+/**
+ * Validate and truncate string to maximum length
+ * Used for partialContent and errorMessage fields
+ *
+ * @param value - String to validate
+ * @param maxLength - Maximum allowed length
+ * @param fieldName - Field name for error messages
+ * @returns Truncated string
+ */
+function validateStringLength(
+  value: string,
+  maxLength: number,
+  fieldName: string
+): string {
+  if (value.length > maxLength) {
+    const log = createLogger({ module: "ai-streaming-jobs" });
+    log.warn(`${fieldName} exceeds max length, truncating`, {
+      originalLength: value.length,
+      maxLength,
+      truncated: true,
+    });
+    return value.substring(0, maxLength);
+  }
+  return value;
+}
+
+// ============================================
+// Row Transformation Helpers
+// ============================================
 
 /**
  * Transform a database row to StreamingJob format
@@ -256,8 +349,14 @@ function transformToStreamingJob(row: SelectAiStreamingJob): StreamingJob {
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `Failed to parse requestData JSON for job ${row.id}: ${errorMessage}`
+      throw ErrorFactories.invalidFormat(
+        "requestData",
+        row.requestData,
+        "Valid JSON",
+        {
+          details: { jobId: row.id, parseError: errorMessage },
+          technicalMessage: `Failed to parse requestData JSON for job ${row.id}: ${errorMessage}`,
+        }
       );
     }
   } else {
@@ -266,21 +365,39 @@ function transformToStreamingJob(row: SelectAiStreamingJob): StreamingJob {
 
   // Validate requestData structure and types
   if (!Array.isArray(parsedRequestData.messages)) {
-    throw new Error(
-      `Invalid requestData for job ${row.id}: messages must be an array`
+    throw ErrorFactories.invalidInput(
+      "requestData.messages",
+      parsedRequestData.messages,
+      "must be an array",
+      {
+        details: { jobId: row.id },
+        technicalMessage: `Invalid requestData for job ${row.id}: messages must be an array`,
+      }
     );
   }
   if (typeof parsedRequestData.provider !== "string") {
-    throw new Error(
-      `Invalid requestData for job ${row.id}: provider must be a string`
+    throw ErrorFactories.invalidInput(
+      "requestData.provider",
+      parsedRequestData.provider,
+      "must be a string",
+      {
+        details: { jobId: row.id },
+        technicalMessage: `Invalid requestData for job ${row.id}: provider must be a string`,
+      }
     );
   }
   if (
     typeof parsedRequestData.modelId !== "string" ||
     !parsedRequestData.modelId
   ) {
-    throw new Error(
-      `Invalid requestData for job ${row.id}: modelId must be a non-empty string`
+    throw ErrorFactories.invalidInput(
+      "requestData.modelId",
+      parsedRequestData.modelId,
+      "must be a non-empty string",
+      {
+        details: { jobId: row.id },
+        technicalMessage: `Invalid requestData for job ${row.id}: modelId must be a non-empty string`,
+      }
     );
   }
 
@@ -293,8 +410,14 @@ function transformToStreamingJob(row: SelectAiStreamingJob): StreamingJob {
       } catch (error) {
         const errorMessage =
           error instanceof Error ? error.message : String(error);
-        throw new Error(
-          `Failed to parse responseData for job ${row.id}: ${errorMessage}`
+        throw ErrorFactories.invalidFormat(
+          "responseData",
+          row.responseData,
+          "Valid JSON",
+          {
+            details: { jobId: row.id, parseError: errorMessage },
+            technicalMessage: `Failed to parse responseData for job ${row.id}: ${errorMessage}`,
+          }
         );
       }
     } else {
@@ -401,10 +524,11 @@ export async function getConversationJobs(
 export async function getPendingJobs(
   limit: number = 10
 ): Promise<StreamingJob[]> {
-  const clampedLimit = Math.min(Math.max(limit, 1), 100);
+  const clampedLimit = Math.min(Math.max(limit, 1), MAX_PENDING_JOBS_LIMIT);
 
   // FOR UPDATE SKIP LOCKED requires raw SQL since Drizzle doesn't support it natively
   // Use explicit column selection to ensure type safety
+  // Use sql.raw with proper parameter binding to prevent SQL injection
   const result = await executeQuery(
     (db) =>
       db.execute(
@@ -424,7 +548,7 @@ export async function getPendingJobs(
             FROM ai_streaming_jobs
             WHERE status = 'pending'
             ORDER BY created_at ASC
-            LIMIT ${clampedLimit}
+            LIMIT ${sql.raw(clampedLimit.toString())}
             FOR UPDATE SKIP LOCKED`
       ),
     "getPendingJobs"
@@ -469,13 +593,13 @@ export async function getActiveJobsForUser(
 export async function createJob(data: CreateJobData): Promise<StreamingJob> {
   // Validate required fields
   if (!data.userId) {
-    throw new Error("userId is required");
+    throw ErrorFactories.missingRequiredField("userId");
   }
   if (!data.modelId) {
-    throw new Error("modelId is required");
+    throw ErrorFactories.missingRequiredField("modelId");
   }
   if (!data.requestData) {
-    throw new Error("requestData is required");
+    throw ErrorFactories.missingRequiredField("requestData");
   }
 
   // Cast requestData to the schema's expected type (Record<string, unknown>)
@@ -504,7 +628,22 @@ export async function createJob(data: CreateJobData): Promise<StreamingJob> {
 }
 
 /**
- * Update job status
+ * Update job status with optimistic locking support
+ *
+ * @param jobId - Job ID to update
+ * @param data - Update data including optional expectedCurrentStatus for optimistic locking
+ * @returns Updated job or null if not found / status mismatch
+ *
+ * @example
+ * // Without optimistic locking (legacy behavior)
+ * await updateJobStatus(jobId, { status: 'running' })
+ *
+ * @example
+ * // With optimistic locking (prevents race conditions)
+ * await updateJobStatus(jobId, {
+ *   status: 'running',
+ *   expectedCurrentStatus: 'pending'
+ * })
  */
 export async function updateJobStatus(
   jobId: string,
@@ -514,12 +653,21 @@ export async function updateJobStatus(
     status: data.status,
   };
 
+  // Validate and truncate string fields
   if (data.partialContent !== undefined) {
-    updateData.partialContent = data.partialContent;
+    updateData.partialContent = validateStringLength(
+      data.partialContent,
+      MAX_PARTIAL_CONTENT_LENGTH,
+      "partialContent"
+    );
   }
 
   if (data.errorMessage !== undefined) {
-    updateData.errorMessage = data.errorMessage;
+    updateData.errorMessage = validateStringLength(
+      data.errorMessage,
+      MAX_ERROR_MESSAGE_LENGTH,
+      "errorMessage"
+    );
   }
 
   // Set completedAt for terminal statuses
@@ -527,17 +675,32 @@ export async function updateJobStatus(
     updateData.completedAt = new Date();
   }
 
+  // Build WHERE clause with optimistic locking if expectedCurrentStatus provided
+  const whereConditions = [eq(aiStreamingJobs.id, jobId)];
+  if (data.expectedCurrentStatus !== undefined) {
+    whereConditions.push(eq(aiStreamingJobs.status, data.expectedCurrentStatus));
+  }
+
   const result = await executeQuery(
     (db) =>
       db
         .update(aiStreamingJobs)
         .set(updateData)
-        .where(eq(aiStreamingJobs.id, jobId))
+        .where(and(...whereConditions))
         .returning(),
     "updateJobStatus"
   );
 
   if (!result || result.length === 0) {
+    // If expectedCurrentStatus was provided and update failed, log potential race condition
+    if (data.expectedCurrentStatus !== undefined) {
+      const log = createLogger({ module: "ai-streaming-jobs" });
+      log.warn("Optimistic lock failed - job status may have changed", {
+        jobId,
+        expectedStatus: data.expectedCurrentStatus,
+        attemptedStatus: data.status,
+      });
+    }
     return null;
   }
 
@@ -596,13 +759,20 @@ export async function failJob(
   jobId: string,
   errorMessage: string
 ): Promise<StreamingJob | null> {
+  // Validate and truncate error message
+  const truncatedErrorMessage = validateStringLength(
+    errorMessage,
+    MAX_ERROR_MESSAGE_LENGTH,
+    "errorMessage"
+  );
+
   const result = await executeQuery(
     (db) =>
       db
         .update(aiStreamingJobs)
         .set({
           status: "failed",
-          errorMessage,
+          errorMessage: truncatedErrorMessage,
           completedAt: new Date(),
         })
         .where(eq(aiStreamingJobs.id, jobId))
@@ -697,7 +867,7 @@ export async function deleteJob(jobId: string): Promise<{ id: string } | null> {
  * Returns the number of jobs deleted
  */
 export async function cleanupCompletedJobs(
-  olderThanDays: number = 7
+  olderThanDays: number = COMPLETED_JOBS_RETENTION_DAYS
 ): Promise<number> {
   const log = createLogger({
     module: "ai-streaming-jobs",
@@ -745,7 +915,7 @@ export async function cleanupCompletedJobs(
  * Returns the number of jobs deleted
  */
 export async function cleanupFailedJobs(
-  olderThanDays: number = 3
+  olderThanDays: number = FAILED_JOBS_RETENTION_DAYS
 ): Promise<number> {
   const log = createLogger({
     module: "ai-streaming-jobs",
@@ -791,7 +961,7 @@ export async function cleanupFailedJobs(
  * Marks them as failed and returns count
  */
 export async function cleanupStaleRunningJobs(
-  olderThanMinutes: number = 60
+  olderThanMinutes: number = STALE_JOB_THRESHOLD_MINUTES
 ): Promise<number> {
   const log = createLogger({
     module: "ai-streaming-jobs",

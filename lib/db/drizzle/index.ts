@@ -262,6 +262,14 @@ export {
 // ============================================
 
 export {
+  // Constants
+  MAX_PENDING_JOBS_LIMIT,
+  COMPLETED_JOBS_RETENTION_DAYS,
+  FAILED_JOBS_RETENTION_DAYS,
+  STALE_JOB_THRESHOLD_MINUTES,
+  MAX_PARTIAL_CONTENT_LENGTH,
+  MAX_ERROR_MESSAGE_LENGTH,
+  UUID_REGEX,
   // Types
   type JobStatus,
   type UniversalPollingStatus,
@@ -272,6 +280,8 @@ export {
   type CreateJobData,
   type UpdateJobStatusData,
   type CompleteJobData,
+  // Validation utilities
+  isValidUUID,
   // Status mapping utilities
   mapToDatabaseStatus,
   mapFromDatabaseStatus,

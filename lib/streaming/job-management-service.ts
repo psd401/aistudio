@@ -15,6 +15,8 @@ import {
   // Types
   type StreamingJob,
   type UniversalPollingStatus,
+  // Validation utilities
+  isValidUUID,
   // Status utilities
   mapToDatabaseStatus,
   mapFromDatabaseStatus,
@@ -97,8 +99,7 @@ export class JobManagementService {
 
     // Determine conversation type
     const conversationIdStr = String(request.conversationId);
-    const isUuid =
-      conversationIdStr.length === 36 && conversationIdStr.includes("-");
+    const isUuid = isValidUUID(conversationIdStr);
     const isNexus = request.source === "nexus" || isUuid;
 
     log.info("Creating streaming job", {
