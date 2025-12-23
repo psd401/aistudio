@@ -149,7 +149,7 @@ export async function GET(
 
         if (existingAssistantMessages.length === 0) {
           // Save assistant response to nexus_messages as fallback
-          const responseData = job.responseData as Record<string, unknown>;
+          const responseData = job.responseData as unknown as Record<string, unknown>;
           const assistantText = (responseData?.text as string) || 'Response completed.';
           
           log.debug('Attempting API fallback save', {

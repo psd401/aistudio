@@ -256,3 +256,43 @@ export {
   createMessageWithStats,
   upsertMessageWithStats,
 } from "./nexus-messages";
+
+// ============================================
+// AI Streaming Jobs Operations
+// ============================================
+
+export {
+  // Types
+  type JobStatus,
+  type UniversalPollingStatus,
+  type JobRequestData,
+  type JobResponseData,
+  type JobProgressInfo,
+  type StreamingJob,
+  type CreateJobData,
+  type UpdateJobStatusData,
+  type CompleteJobData,
+  // Status mapping utilities
+  mapToDatabaseStatus,
+  mapFromDatabaseStatus,
+  // Query operations
+  getJob,
+  getUserJobs,
+  getConversationJobs,
+  getPendingJobs,
+  getActiveJobsForUser,
+  // CRUD operations
+  createJob,
+  updateJobStatus,
+  completeJob,
+  failJob,
+  cancelJob,
+  markMessagePersisted,
+  deleteJob,
+  // Cleanup operations
+  cleanupCompletedJobs,
+  cleanupFailedJobs,
+  cleanupStaleRunningJobs,
+  // Model operations
+  getOptimalPollingInterval,
+} from "./ai-streaming-jobs";
