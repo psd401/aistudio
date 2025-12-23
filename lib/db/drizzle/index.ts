@@ -103,3 +103,86 @@ export {
   removeToolFromRole,
   setRoleTools,
 } from "./roles";
+
+// ============================================
+// AI Model Operations
+// ============================================
+
+export {
+  // Types
+  type AIModelData,
+  type AIModelUpdateData,
+  // Query operations
+  getAIModels,
+  getAIModelById,
+  getAIModelByModelId,
+  getActiveAIModels,
+  getChatEnabledModels,
+  getAIModelsByProvider,
+  getModelsWithCapabilities,
+  // CRUD operations
+  createAIModel,
+  updateAIModel,
+  deleteAIModel,
+  setAIModelActive,
+  // Reference operations
+  getModelReferenceCounts,
+  validateModelReplacement,
+  replaceModelReferences,
+} from "./ai-models";
+
+// ============================================
+// Assistant Architect Operations
+// ============================================
+
+export {
+  // Types
+  type AssistantArchitectData,
+  type AssistantArchitectUpdateData,
+  type AssistantArchitectWithCreator,
+  type ToolStatus,
+  // Query operations
+  getAssistantArchitects,
+  getAssistantArchitectById,
+  getAssistantArchitectWithCreator,
+  getAssistantArchitectsByUserId,
+  getAssistantArchitectsByStatus,
+  getPendingAssistantArchitects,
+  // CRUD operations
+  createAssistantArchitect,
+  createAssistantArchitectByCognitoSub,
+  updateAssistantArchitect,
+  deleteAssistantArchitect,
+  // Status operations
+  approveAssistantArchitect,
+  rejectAssistantArchitect,
+  submitForApproval,
+} from "./assistant-architects";
+
+// ============================================
+// Chain Prompt Operations
+// ============================================
+
+export {
+  // Types
+  type ChainPromptData,
+  type ChainPromptUpdateData,
+  type ChainPromptWithModel,
+  type FieldType,
+  // Query operations
+  getChainPrompts,
+  getChainPromptById,
+  getChainPromptWithModel,
+  getChainPromptsWithModels,
+  getChainPromptsByModelId,
+  // CRUD operations
+  createChainPrompt,
+  updateChainPrompt,
+  deleteChainPrompt,
+  reorderChainPrompts,
+  // Tool input field operations
+  getToolInputFields,
+  createToolInputField,
+  updateToolInputField,
+  deleteToolInputField,
+} from "./chain-prompts";
