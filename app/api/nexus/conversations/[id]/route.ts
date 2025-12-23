@@ -3,7 +3,6 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action'
 import { NextRequest } from 'next/server'
 import {
-  getConversationById,
   updateConversation,
 } from '@/lib/db/drizzle/nexus-conversations'
 

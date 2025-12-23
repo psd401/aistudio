@@ -38,6 +38,12 @@ import type {
 /** Default pagination limit for conversation queries */
 export const DEFAULT_CONVERSATION_LIMIT = 20;
 
+/** Default folder color (gray-500) */
+export const DEFAULT_FOLDER_COLOR = "#6B7280";
+
+/** Default folder icon */
+export const DEFAULT_FOLDER_ICON = "folder";
+
 // ============================================
 // Types
 // ============================================
@@ -228,8 +234,8 @@ export async function createConversation(data: CreateConversationData) {
     throw new Error("provider is required and cannot be empty");
   }
 
-  // Use provided title or default, but trim whitespace
-  const title = (data.title || "New Conversation").trim() || "New Conversation";
+  // Use provided title or default (handles undefined, null, empty, or whitespace-only strings)
+  const title = data.title?.trim() || "New Conversation";
 
   const result = await executeQuery(
     (db) =>
@@ -294,12 +300,31 @@ export async function recordConversationEvent(
 /**
  * Update a conversation
  * Verifies user ownership before update
+ * Validates input to prevent security issues
  */
 export async function updateConversation(
   conversationId: string,
   userId: number,
   updates: UpdateConversationData
 ) {
+  // Validate title length if provided (database limit is 500 chars)
+  if (updates.title !== undefined && updates.title !== null) {
+    if (typeof updates.title !== 'string') {
+      throw new TypeError("title must be a string");
+    }
+    if (updates.title.length > 500) {
+      throw new Error("title cannot exceed 500 characters");
+    }
+  }
+
+  // Verify folder ownership if folderId is being changed
+  if (updates.folderId !== undefined && updates.folderId !== null) {
+    const folder = await getFolderById(updates.folderId, userId);
+    if (!folder) {
+      throw new Error("Folder not found or access denied");
+    }
+  }
+
   const result = await executeQuery(
     (db) =>
       db
@@ -427,8 +452,8 @@ export async function createFolder(data: CreateFolderData) {
           userId: data.userId,
           name: data.name,
           parentId: data.parentId,
-          color: data.color || "#6B7280",
-          icon: data.icon || "folder",
+          color: data.color || DEFAULT_FOLDER_COLOR,
+          icon: data.icon || DEFAULT_FOLDER_ICON,
           settings: data.settings || {},
         })
         .returning(),
@@ -468,45 +493,48 @@ export async function updateFolder(
 /**
  * Delete a folder
  * Verifies user ownership before delete
+ * Uses transaction to prevent race condition between unlinking and deleting
  */
 export async function deleteFolder(folderId: string, userId: number) {
   const requestId = generateRequestId();
   const log = createLogger({ requestId, operation: "deleteFolder" });
 
-  // First, unset the folder_id for any conversations in this folder
-  await executeQuery(
-    (db) =>
-      db
-        .update(nexusConversations)
-        .set({ folderId: null, updatedAt: new Date() })
-        .where(
-          and(
-            eq(nexusConversations.folderId, folderId),
-            eq(nexusConversations.userId, userId)
-          )
-        ),
-    "unlinkConversationsFromFolder"
-  );
-
-  log.debug("Unlinked conversations from folder", { folderId, userId });
-
-  // Then delete the folder
+  // Use transaction to atomically unlink conversations and delete folder
   const result = await executeQuery(
     (db) =>
-      db
-        .delete(nexusFolders)
-        .where(
-          and(eq(nexusFolders.id, folderId), eq(nexusFolders.userId, userId))
-        )
-        .returning({ id: nexusFolders.id }),
+      db.transaction(async (tx) => {
+        // First, unset the folder_id for any conversations in this folder
+        await tx
+          .update(nexusConversations)
+          .set({ folderId: null, updatedAt: new Date() })
+          .where(
+            and(
+              eq(nexusConversations.folderId, folderId),
+              eq(nexusConversations.userId, userId)
+            )
+          );
+
+        log.debug("Unlinked conversations from folder", { folderId, userId });
+
+        // Then delete the folder
+        const deleteResult = await tx
+          .delete(nexusFolders)
+          .where(
+            and(eq(nexusFolders.id, folderId), eq(nexusFolders.userId, userId))
+          )
+          .returning({ id: nexusFolders.id });
+
+        return deleteResult[0] || null;
+      }),
     "deleteFolder"
   );
 
-  return result[0] || null;
+  return result;
 }
 
 /**
  * Move conversations to a folder
+ * Uses batch update for efficiency instead of individual updates
  */
 export async function moveConversationsToFolder(
   conversationIds: string[],
@@ -517,11 +545,35 @@ export async function moveConversationsToFolder(
     return [];
   }
 
-  const results = await Promise.all(
-    conversationIds.map((id) =>
-      updateConversation(id, userId, { folderId })
-    )
+  // Verify folder ownership once if folderId is provided
+  if (folderId !== null) {
+    const folder = await getFolderById(folderId, userId);
+    if (!folder) {
+      throw new Error("Folder not found or access denied");
+    }
+  }
+
+  // Batch update all conversations in a single query
+  const results = await executeQuery(
+    (db) =>
+      db
+        .update(nexusConversations)
+        .set({
+          folderId,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            sql`${nexusConversations.id} = ANY(${conversationIds})`,
+            eq(nexusConversations.userId, userId)
+          )
+        )
+        .returning({
+          id: nexusConversations.id,
+          folderId: nexusConversations.folderId,
+        }),
+    "moveConversationsToFolder"
   );
 
-  return results.filter(Boolean);
+  return results;
 }
