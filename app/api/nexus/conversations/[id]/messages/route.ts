@@ -4,6 +4,7 @@ import { getCurrentUserAction } from '@/actions/db/get-current-user-action'
 import { NextRequest } from 'next/server'
 import {
   getMessagesByConversation,
+  getMessageCount,
   getConversationById,
   DEFAULT_MESSAGE_LIMIT,
   MAX_MESSAGE_LIMIT,
@@ -108,6 +109,9 @@ export async function GET(
       includeModel: false, // Model info not needed for UI display
     })
 
+    // Get total message count for pagination
+    const totalCount = await getMessageCount(conversationId)
+
     // Helper function to truncate content to prevent memory issues
     const MAX_CONTENT_LENGTH = 50000 // 50KB per content field
     const truncateContent = (content: string): string => {
@@ -186,7 +190,7 @@ export async function GET(
       pagination: {
         limit,
         offset,
-        total: messages.length
+        total: totalCount
       }
     })
 
