@@ -186,3 +186,73 @@ export {
   updateToolInputField,
   deleteToolInputField,
 } from "./chain-prompts";
+
+// ============================================
+// Nexus Conversations Operations
+// ============================================
+
+export {
+  // Constants
+  DEFAULT_CONVERSATION_LIMIT,
+  DEFAULT_FOLDER_COLOR,
+  DEFAULT_FOLDER_ICON,
+  // Types
+  type ConversationListItem,
+  type CreateConversationData,
+  type UpdateConversationData,
+  type ConversationListOptions,
+  type CreateFolderData,
+  type UpdateFolderData,
+  // Conversation query operations
+  getConversations,
+  getConversationCount,
+  getConversationById,
+  // Conversation CRUD operations
+  createConversation,
+  recordConversationEvent,
+  updateConversation,
+  archiveConversation,
+  unarchiveConversation,
+  deleteConversation,
+  // Folder query operations
+  getFolders,
+  getFolderById,
+  // Folder CRUD operations
+  createFolder,
+  updateFolder,
+  deleteFolder,
+  moveConversationsToFolder,
+} from "./nexus-conversations";
+
+// ============================================
+// Nexus Messages Operations
+// ============================================
+
+export {
+  // Constants
+  DEFAULT_MESSAGE_LIMIT,
+  MAX_MESSAGE_LIMIT,
+  // Types
+  type TokenUsage,
+  type MessagePart,
+  type CreateMessageData,
+  type UpdateMessageData,
+  type MessageWithModel,
+  type MessageQueryOptions,
+  // Query operations
+  getMessagesByConversation,
+  getMessageById,
+  getMessageCount,
+  getLastMessage,
+  // CRUD operations
+  createMessage,
+  upsertMessage,
+  batchCreateMessages,
+  updateMessage,
+  deleteMessage,
+  deleteConversationMessages,
+  // Stats operations
+  updateConversationStats,
+  createMessageWithStats,
+  upsertMessageWithStats,
+} from "./nexus-messages";
