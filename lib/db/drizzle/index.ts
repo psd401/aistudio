@@ -256,3 +256,53 @@ export {
   createMessageWithStats,
   upsertMessageWithStats,
 } from "./nexus-messages";
+
+// ============================================
+// AI Streaming Jobs Operations
+// ============================================
+
+export {
+  // Constants
+  MAX_PENDING_JOBS_LIMIT,
+  COMPLETED_JOBS_RETENTION_DAYS,
+  FAILED_JOBS_RETENTION_DAYS,
+  STALE_JOB_THRESHOLD_MINUTES,
+  MAX_PARTIAL_CONTENT_LENGTH,
+  MAX_ERROR_MESSAGE_LENGTH,
+  UUID_REGEX,
+  // Types
+  type JobStatus,
+  type UniversalPollingStatus,
+  type JobRequestData,
+  type JobResponseData,
+  type JobProgressInfo,
+  type StreamingJob,
+  type CreateJobData,
+  type UpdateJobStatusData,
+  type CompleteJobData,
+  // Validation utilities
+  isValidUUID,
+  // Status mapping utilities
+  mapToDatabaseStatus,
+  mapFromDatabaseStatus,
+  // Query operations
+  getJob,
+  getUserJobs,
+  getConversationJobs,
+  getPendingJobs,
+  getActiveJobsForUser,
+  // CRUD operations
+  createJob,
+  updateJobStatus,
+  completeJob,
+  failJob,
+  cancelJob,
+  markMessagePersisted,
+  deleteJob,
+  // Cleanup operations
+  cleanupCompletedJobs,
+  cleanupFailedJobs,
+  cleanupStaleRunningJobs,
+  // Model operations
+  getOptimalPollingInterval,
+} from "./ai-streaming-jobs";
