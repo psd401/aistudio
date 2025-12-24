@@ -15,6 +15,20 @@
  * - Check if repository is public (isPublic = true)
  * - Use @/lib/auth/server-session helpers
  *
+ * **Required Database Indexes** (for optimal access control query performance):
+ * ```sql
+ * -- Repository access queries use these indexes for efficient JOINs
+ * CREATE INDEX idx_repository_items_repository_id ON repository_items(repository_id);
+ * CREATE INDEX idx_repository_item_chunks_item_id ON repository_item_chunks(item_id);
+ * CREATE INDEX idx_repository_access_repository_id ON repository_access(repository_id);
+ * CREATE INDEX idx_repository_access_user_id ON repository_access(user_id);
+ * CREATE INDEX idx_repository_access_role_id ON repository_access(role_id);
+ * CREATE INDEX idx_user_roles_user_id ON user_roles(user_id);
+ * CREATE INDEX idx_user_roles_role_id ON user_roles(role_id);
+ * CREATE INDEX idx_knowledge_repositories_owner_id ON knowledge_repositories(owner_id);
+ * CREATE INDEX idx_knowledge_repositories_is_public ON knowledge_repositories(is_public) WHERE is_public = true;
+ * ```
+ *
  * Part of Epic #526 - RDS Data API to Drizzle ORM Migration
  * Issue #536 - Migrate Knowledge & Document queries to Drizzle ORM
  *
@@ -38,6 +52,16 @@ import type {
   SelectRepositoryAccess,
 } from "@/lib/db/types";
 import { createLogger, sanitizeForLogging } from "@/lib/logger";
+
+// ============================================
+// Constants
+// ============================================
+
+/**
+ * Maximum number of chunks that can be inserted in a single batch operation
+ * Prevents memory issues and database connection timeouts
+ */
+const MAX_BATCH_SIZE = 1000;
 
 // ============================================
 // Types
@@ -717,6 +741,16 @@ export async function batchInsertRepositoryItemChunks(
 
   if (chunks.length === 0) {
     return [];
+  }
+
+  if (chunks.length > MAX_BATCH_SIZE) {
+    log.error("Batch size exceeds maximum", {
+      requestedSize: chunks.length,
+      maxSize: MAX_BATCH_SIZE,
+    });
+    throw new Error(
+      `Batch insert size (${chunks.length}) exceeds maximum allowed (${MAX_BATCH_SIZE})`
+    );
   }
 
   log.debug("Batch inserting repository item chunks", { count: chunks.length });

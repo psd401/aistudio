@@ -13,6 +13,15 @@
  * - Verify user has conversation access if conversationId is present
  * - Use @/lib/auth/server-session helpers: getServerSession(), validateDocumentOwnership()
  *
+ * **Required Database Indexes** (for optimal query performance):
+ * ```sql
+ * -- Document queries use these indexes for efficient lookups and JOINs
+ * CREATE INDEX idx_documents_user_id ON documents(user_id);
+ * CREATE INDEX idx_documents_conversation_id ON documents(conversation_id);
+ * CREATE INDEX idx_document_chunks_document_id ON document_chunks(document_id);
+ * CREATE INDEX idx_document_chunks_chunk_index ON document_chunks(document_id, chunk_index);
+ * ```
+ *
  * Part of Epic #526 - RDS Data API to Drizzle ORM Migration
  * Issue #536 - Migrate Knowledge & Document queries to Drizzle ORM
  *
@@ -24,6 +33,16 @@ import { executeQuery } from "@/lib/db/drizzle-client";
 import { documents, documentChunks } from "@/lib/db/schema";
 import type { SelectDocument, SelectDocumentChunk } from "@/lib/db/types";
 import { createLogger, sanitizeForLogging } from "@/lib/logger";
+
+// ============================================
+// Constants
+// ============================================
+
+/**
+ * Maximum number of chunks that can be inserted in a single batch operation
+ * Prevents memory issues and database connection timeouts
+ */
+const MAX_BATCH_SIZE = 1000;
 
 // ============================================
 // Types
@@ -324,6 +343,16 @@ export async function batchInsertChunks(
 
   if (chunks.length === 0) {
     return [];
+  }
+
+  if (chunks.length > MAX_BATCH_SIZE) {
+    log.error("Batch size exceeds maximum", {
+      requestedSize: chunks.length,
+      maxSize: MAX_BATCH_SIZE,
+    });
+    throw new Error(
+      `Batch insert size (${chunks.length}) exceeds maximum allowed (${MAX_BATCH_SIZE})`
+    );
   }
 
   log.debug("Batch inserting document chunks", { count: chunks.length });
