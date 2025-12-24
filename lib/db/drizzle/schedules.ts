@@ -20,7 +20,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, desc, sql, inArray } from "drizzle-orm";
+import { eq, and, desc, sql } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   scheduledExecutions,

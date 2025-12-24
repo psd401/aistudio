@@ -36,7 +36,7 @@ export async function getUserIdByCognitoSubAsNumber(
 
   // Handle edge case: if conversion results in NaN
   if (Number.isNaN(userId)) {
-    throw new Error(
+    throw new TypeError(
       `Invalid user ID format from database: "${userIdString}" cannot be converted to number`
     );
   }
