@@ -19,7 +19,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, desc } from "drizzle-orm";
+import { eq, desc, asc } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { documents, documentChunks } from "@/lib/db/schema";
 import type { SelectDocument, SelectDocumentChunk } from "@/lib/db/types";
@@ -43,11 +43,16 @@ export interface DocumentMetadata {
 
 /**
  * Chunk metadata stored in JSONB column
+ *
+ * **Note on Embeddings**: For document chunks, vector embeddings are stored
+ * within this metadata JSONB field. This differs from repository item chunks,
+ * which use a dedicated pgvector column for better performance and indexing.
  */
 export interface ChunkMetadata {
   pageNumber?: number;
   chunkType?: "text" | "table" | "image";
   confidence?: number;
+  /** Vector embedding stored in metadata JSONB (not a dedicated vector column) */
   embedding?: number[];
   [key: string]: unknown;
 }
@@ -270,7 +275,7 @@ export async function getChunksByDocumentId(
         .select()
         .from(documentChunks)
         .where(eq(documentChunks.documentId, documentId))
-        .orderBy(documentChunks.chunkIndex),
+        .orderBy(asc(documentChunks.chunkIndex)),
     "getChunksByDocumentId"
   );
 
@@ -383,7 +388,7 @@ export async function getDocumentWithChunks(
         .from(documents)
         .leftJoin(documentChunks, eq(documentChunks.documentId, documents.id))
         .where(eq(documents.id, documentId))
-        .orderBy(documentChunks.chunkIndex),
+        .orderBy(asc(documentChunks.chunkIndex)),
     "getDocumentWithChunks"
   );
 

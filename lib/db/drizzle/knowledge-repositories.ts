@@ -97,12 +97,18 @@ export interface CreateRepositoryItemData {
 
 /**
  * Data for creating a repository item chunk
+ *
+ * **Note on Embeddings**: Repository item chunks store vector embeddings in a
+ * dedicated pgvector column (not JSONB). This enables efficient vector similarity
+ * search and proper indexing. This differs from document chunks which store
+ * embeddings in their metadata JSONB field.
  */
 export interface CreateChunkData {
   itemId: number;
   content: string;
   chunkIndex: number;
   metadata?: Record<string, unknown> | null;
+  /** Vector embedding stored in dedicated pgvector column for efficient similarity search */
   embedding?: number[] | null;
   tokens?: number | null;
 }
@@ -600,7 +606,7 @@ export async function createRepositoryItem(
 export async function updateRepositoryItemStatus(
   id: number,
   status: ProcessingStatus,
-  error?: string
+  error?: string | null
 ): Promise<SelectRepositoryItem | null> {
   const updateData: Record<string, unknown> = {
     processingStatus: status,
@@ -609,6 +615,9 @@ export async function updateRepositoryItemStatus(
 
   if (error !== undefined) {
     updateData.processingError = error;
+  } else if (status === "completed") {
+    // Clear error on successful completion
+    updateData.processingError = null;
   }
 
   const result = await executeQuery(
