@@ -23,7 +23,7 @@
 import { eq, and, desc } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { modelComparisons } from "@/lib/db/schema";
-import { getUserIdByCognitoSub as getUserIdStringByCognitoSub } from "./users";
+import { getUserIdByCognitoSubAsNumber } from "./utils";
 
 // ============================================
 // Types
@@ -133,14 +133,9 @@ export async function getComparisonsByUserId(
 
 /**
  * Get user ID by Cognito sub (number type for model comparison operations)
- * Wraps the users module getUserIdByCognitoSub and converts string to number
+ * Re-exported from utils for backward compatibility
  */
-export async function getUserIdByCognitoSub(
-  cognitoSub: string
-): Promise<number | null> {
-  const userIdString = await getUserIdStringByCognitoSub(cognitoSub);
-  return userIdString ? Number(userIdString) : null;
-}
+export const getUserIdByCognitoSub = getUserIdByCognitoSubAsNumber;
 
 // ============================================
 // CRUD Operations

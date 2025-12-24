@@ -28,7 +28,7 @@ import {
   assistantArchitects,
 } from "@/lib/db/schema";
 import { createLogger, sanitizeForLogging } from "@/lib/logger";
-import { getUserIdByCognitoSub as getUserIdStringByCognitoSub } from "./users";
+import { getUserIdByCognitoSubAsNumber } from "./utils";
 
 // Re-export ScheduleConfig from jsonb types (used in schema)
 import type { ScheduleConfig } from "@/lib/db/types/jsonb";
@@ -96,7 +96,8 @@ export interface CreateExecutionResultData {
 // ============================================
 
 /**
- * Get a schedule by ID
+ * Get a schedule by ID with last execution info
+ * Uses single LEFT JOIN query for better performance
  */
 export async function getScheduleById(
   id: number
@@ -115,8 +116,21 @@ export async function getScheduleById(
           createdAt: scheduledExecutions.createdAt,
           updatedAt: scheduledExecutions.updatedAt,
           updatedBy: scheduledExecutions.updatedBy,
+          lastExecutedAt: executionResults.executedAt,
+          lastExecutionStatus: executionResults.status,
         })
         .from(scheduledExecutions)
+        .leftJoin(
+          executionResults,
+          and(
+            eq(executionResults.scheduledExecutionId, scheduledExecutions.id),
+            sql`${executionResults.executedAt} = (
+              SELECT MAX(executed_at)
+              FROM execution_results
+              WHERE scheduled_execution_id = ${scheduledExecutions.id}
+            )`
+          )
+        )
         .where(eq(scheduledExecutions.id, id))
         .limit(1),
     "getScheduleById"
@@ -126,30 +140,12 @@ export async function getScheduleById(
     return null;
   }
 
-  // Get last execution
-  const execResult = await executeQuery(
-    (db) =>
-      db
-        .select({
-          executedAt: executionResults.executedAt,
-          status: executionResults.status,
-        })
-        .from(executionResults)
-        .where(eq(executionResults.scheduledExecutionId, id))
-        .orderBy(desc(executionResults.executedAt))
-        .limit(1),
-    "getScheduleLastExecution"
-  );
-
-  return {
-    ...result[0],
-    lastExecutedAt: execResult[0]?.executedAt ?? null,
-    lastExecutionStatus: execResult[0]?.status ?? null,
-  };
+  return result[0];
 }
 
 /**
  * Get schedules by user ID with last execution info
+ * Uses optimized LEFT JOIN with subquery to get latest execution per schedule
  */
 export async function getSchedulesByUserId(
   userId: number
@@ -168,70 +164,39 @@ export async function getSchedulesByUserId(
           createdAt: scheduledExecutions.createdAt,
           updatedAt: scheduledExecutions.updatedAt,
           updatedBy: scheduledExecutions.updatedBy,
+          lastExecutedAt: executionResults.executedAt,
+          lastExecutionStatus: executionResults.status,
         })
         .from(scheduledExecutions)
+        .leftJoin(
+          executionResults,
+          and(
+            eq(executionResults.scheduledExecutionId, scheduledExecutions.id),
+            sql`${executionResults.executedAt} = (
+              SELECT MAX(executed_at)
+              FROM execution_results
+              WHERE scheduled_execution_id = ${scheduledExecutions.id}
+            )`
+          )
+        )
         .where(eq(scheduledExecutions.userId, userId))
         .orderBy(desc(scheduledExecutions.createdAt)),
     "getSchedulesByUserId"
   );
 
-  // Get last executions for all schedules
-  const scheduleIds = schedules.map((s) => s.id);
-  if (scheduleIds.length === 0) {
-    return [];
-  }
-
-  // Use subquery to get latest execution for each schedule
-  const execResults = await executeQuery(
-    (db) =>
-      db
-        .select({
-          scheduledExecutionId: executionResults.scheduledExecutionId,
-          executedAt: executionResults.executedAt,
-          status: executionResults.status,
-        })
-        .from(executionResults)
-        .where(inArray(executionResults.scheduledExecutionId, scheduleIds))
-        .orderBy(desc(executionResults.executedAt)),
-    "getSchedulesLastExecutions"
-  );
-
-  // Build map of latest executions by schedule ID
-  const execMap = new Map<number, { executedAt: Date | null; status: string }>();
-  for (const exec of execResults) {
-    if (!execMap.has(exec.scheduledExecutionId)) {
-      execMap.set(exec.scheduledExecutionId, {
-        executedAt: exec.executedAt,
-        status: exec.status,
-      });
-    }
-  }
-
-  return schedules.map((schedule) => {
-    const lastExec = execMap.get(schedule.id);
-    return {
-      ...schedule,
-      lastExecutedAt: lastExec?.executedAt ?? null,
-      lastExecutionStatus: lastExec?.status ?? null,
-    };
-  });
+  return schedules;
 }
 
 
 /**
  * Get user ID by Cognito sub (number type for schedule operations)
- * Wraps the users module getUserIdByCognitoSub and converts string to number
+ * Re-exported from utils for backward compatibility
  */
-export async function getUserIdByCognitoSub(
-  cognitoSub: string
-): Promise<number | null> {
-  const userIdString = await getUserIdStringByCognitoSub(cognitoSub);
-  return userIdString ? Number(userIdString) : null;
-}
+export const getUserIdByCognitoSub = getUserIdByCognitoSubAsNumber;
 
 /**
- * Get schedule by ID for a specific user
- * Validates ownership
+ * Get schedule by ID for a specific user with last execution info
+ * Validates ownership. Uses single LEFT JOIN query for better performance
  */
 export async function getScheduleByIdForUser(
   id: number,
@@ -251,8 +216,21 @@ export async function getScheduleByIdForUser(
           createdAt: scheduledExecutions.createdAt,
           updatedAt: scheduledExecutions.updatedAt,
           updatedBy: scheduledExecutions.updatedBy,
+          lastExecutedAt: executionResults.executedAt,
+          lastExecutionStatus: executionResults.status,
         })
         .from(scheduledExecutions)
+        .leftJoin(
+          executionResults,
+          and(
+            eq(executionResults.scheduledExecutionId, scheduledExecutions.id),
+            sql`${executionResults.executedAt} = (
+              SELECT MAX(executed_at)
+              FROM execution_results
+              WHERE scheduled_execution_id = ${scheduledExecutions.id}
+            )`
+          )
+        )
         .where(
           and(eq(scheduledExecutions.id, id), eq(scheduledExecutions.userId, userId))
         )
@@ -264,26 +242,7 @@ export async function getScheduleByIdForUser(
     return null;
   }
 
-  // Get last execution
-  const execResult = await executeQuery(
-    (db) =>
-      db
-        .select({
-          executedAt: executionResults.executedAt,
-          status: executionResults.status,
-        })
-        .from(executionResults)
-        .where(eq(executionResults.scheduledExecutionId, id))
-        .orderBy(desc(executionResults.executedAt))
-        .limit(1),
-    "getScheduleLastExecution"
-  );
-
-  return {
-    ...result[0],
-    lastExecutedAt: execResult[0]?.executedAt ?? null,
-    lastExecutionStatus: execResult[0]?.status ?? null,
-  };
+  return result[0];
 }
 
 /**
@@ -353,7 +312,8 @@ export async function createSchedule(
 }
 
 /**
- * Update a schedule
+ * Update a schedule and return updated record with last execution info
+ * Uses optimized fetch after update for better performance
  */
 export async function updateSchedule(
   id: number,
@@ -394,7 +354,7 @@ export async function updateSchedule(
             eq(scheduledExecutions.userId, userId)
           )
         )
-        .returning(),
+        .returning({ id: scheduledExecutions.id }),
     "updateSchedule"
   );
 
@@ -402,26 +362,8 @@ export async function updateSchedule(
     return null;
   }
 
-  // Get last execution
-  const execResult = await executeQuery(
-    (db) =>
-      db
-        .select({
-          executedAt: executionResults.executedAt,
-          status: executionResults.status,
-        })
-        .from(executionResults)
-        .where(eq(executionResults.scheduledExecutionId, id))
-        .orderBy(desc(executionResults.executedAt))
-        .limit(1),
-    "getScheduleLastExecution"
-  );
-
-  return {
-    ...result[0],
-    lastExecutedAt: execResult[0]?.executedAt ?? null,
-    lastExecutionStatus: execResult[0]?.status ?? null,
-  };
+  // Fetch updated schedule with last execution using optimized single-query fetch
+  return getScheduleByIdForUser(id, userId);
 }
 
 /**
