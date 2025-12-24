@@ -19,6 +19,14 @@
  */
 
 // ============================================
+// Shared Utilities
+// ============================================
+
+export {
+  getUserIdByCognitoSubAsNumber,
+} from "./utils";
+
+// ============================================
 // User Operations
 // ============================================
 
@@ -402,3 +410,81 @@ export {
   estimateTextractCost,
   getTextractUsageWithCost,
 } from "./textract";
+
+// ============================================
+// Schedule Operations
+// ============================================
+
+export {
+  // Types
+  type ScheduleConfig,
+  type CreateScheduleData,
+  type UpdateScheduleData,
+  type ScheduleWithExecution,
+  type CreateExecutionResultData,
+  // Schedule query operations
+  getScheduleById,
+  getScheduleByIdForUser,
+  getSchedulesByUserId,
+  getUserIdByCognitoSub as getScheduleUserIdByCognitoSub,
+  checkAssistantArchitectOwnership,
+  // Schedule CRUD operations
+  createSchedule,
+  updateSchedule,
+  deleteSchedule,
+  // Execution result operations
+  createExecutionResult,
+  getExecutionHistory,
+  getExecutionHistoryCount,
+} from "./schedules";
+
+// ============================================
+// Prompt Library Operations
+// ============================================
+
+export {
+  // Types
+  type PromptVisibility,
+  type ModerationStatus,
+  type UsageEventType,
+  type CreatePromptData,
+  type UpdatePromptData,
+  type PromptListItem,
+  type PromptSearchOptions,
+  // Prompt query operations
+  getPromptById,
+  listPrompts,
+  getPendingPrompts,
+  // Prompt CRUD operations
+  createPrompt,
+  updatePrompt,
+  deletePrompt,
+  moderatePrompt,
+  incrementViewCount,
+  incrementUseCount,
+  // Tag operations
+  ensureTagsExist,
+  setPromptTags,
+  // Usage event operations
+  trackUsageEvent,
+  getPromptUsageStats,
+  usePromptAndCreateConversation,
+} from "./prompt-library";
+
+// ============================================
+// Model Comparison Operations
+// ============================================
+
+export {
+  // Types
+  type UpdateComparisonResultsData,
+  type ModelComparison,
+  // Query operations
+  getComparisonById,
+  getComparisonByIdForUser,
+  getComparisonsByUserId,
+  getUserIdByCognitoSub as getComparisonUserIdByCognitoSub,
+  // CRUD operations
+  updateComparisonResults,
+  deleteComparison,
+} from "./model-comparisons";
