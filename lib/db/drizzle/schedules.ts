@@ -20,15 +20,15 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, desc, sql } from "drizzle-orm";
+import { eq, and, desc, sql, inArray } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   scheduledExecutions,
   executionResults,
   assistantArchitects,
-  users,
 } from "@/lib/db/schema";
 import { createLogger, sanitizeForLogging } from "@/lib/logger";
+import { getUserIdByCognitoSub as getUserIdStringByCognitoSub } from "./users";
 
 // Re-export ScheduleConfig from jsonb types (used in schema)
 import type { ScheduleConfig } from "@/lib/db/types/jsonb";
@@ -191,9 +191,7 @@ export async function getSchedulesByUserId(
           status: executionResults.status,
         })
         .from(executionResults)
-        .where(
-          sql`${executionResults.scheduledExecutionId} IN (${sql.raw(scheduleIds.join(","))})`
-        )
+        .where(inArray(executionResults.scheduledExecutionId, scheduleIds))
         .orderBy(desc(executionResults.executedAt)),
     "getSchedulesLastExecutions"
   );
@@ -221,22 +219,14 @@ export async function getSchedulesByUserId(
 
 
 /**
- * Get user ID by Cognito sub
+ * Get user ID by Cognito sub (number type for schedule operations)
+ * Wraps the users module getUserIdByCognitoSub and converts string to number
  */
 export async function getUserIdByCognitoSub(
   cognitoSub: string
 ): Promise<number | null> {
-  const result = await executeQuery(
-    (db) =>
-      db
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.cognitoSub, cognitoSub))
-        .limit(1),
-    "getUserIdByCognitoSub"
-  );
-
-  return result[0]?.id ?? null;
+  const userIdString = await getUserIdStringByCognitoSub(cognitoSub);
+  return userIdString ? Number(userIdString) : null;
 }
 
 /**

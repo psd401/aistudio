@@ -22,7 +22,8 @@
 
 import { eq, and, desc } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
-import { modelComparisons, users } from "@/lib/db/schema";
+import { modelComparisons } from "@/lib/db/schema";
+import { getUserIdByCognitoSub as getUserIdStringByCognitoSub } from "./users";
 
 // ============================================
 // Types
@@ -131,22 +132,14 @@ export async function getComparisonsByUserId(
 }
 
 /**
- * Get user ID by Cognito sub
+ * Get user ID by Cognito sub (number type for model comparison operations)
+ * Wraps the users module getUserIdByCognitoSub and converts string to number
  */
 export async function getUserIdByCognitoSub(
   cognitoSub: string
 ): Promise<number | null> {
-  const result = await executeQuery(
-    (db) =>
-      db
-        .select({ id: users.id })
-        .from(users)
-        .where(eq(users.cognitoSub, cognitoSub))
-        .limit(1),
-    "getUserIdByCognitoSub"
-  );
-
-  return result[0]?.id ?? null;
+  const userIdString = await getUserIdStringByCognitoSub(cognitoSub);
+  return userIdString ? Number(userIdString) : null;
 }
 
 // ============================================

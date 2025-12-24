@@ -801,19 +801,21 @@ export async function getSchedulesAction(): Promise<ActionState<Schedule[]>> {
     // Get schedules with last execution info using Drizzle
     const drizzleSchedules = await getSchedulesByUserId(userId)
 
-    // Transform results to action Schedule format
-    const schedules: Schedule[] = drizzleSchedules.map(drizzleSchedule => {
-      const schedule: Schedule = {
-        id: drizzleSchedule.id,
-        name: drizzleSchedule.name,
-        userId: drizzleSchedule.userId,
-        assistantArchitectId: drizzleSchedule.assistantArchitectId,
-        scheduleConfig: drizzleSchedule.scheduleConfig as ScheduleConfig,
-        inputData: drizzleSchedule.inputData,
-        active: drizzleSchedule.active ?? true,
-        createdAt: drizzleSchedule.createdAt?.toISOString() ?? new Date().toISOString(),
-        updatedAt: drizzleSchedule.updatedAt.toISOString()
-      }
+    // Transform results to action Schedule format, filtering out invalid records
+    const schedules: Schedule[] = drizzleSchedules
+      .filter(drizzleSchedule => drizzleSchedule.createdAt !== null) // Filter out records with null createdAt
+      .map(drizzleSchedule => {
+        const schedule: Schedule = {
+          id: drizzleSchedule.id,
+          name: drizzleSchedule.name,
+          userId: drizzleSchedule.userId,
+          assistantArchitectId: drizzleSchedule.assistantArchitectId,
+          scheduleConfig: drizzleSchedule.scheduleConfig as ScheduleConfig,
+          inputData: drizzleSchedule.inputData,
+          active: drizzleSchedule.active ?? true,
+          createdAt: drizzleSchedule.createdAt!.toISOString(),
+          updatedAt: drizzleSchedule.updatedAt.toISOString()
+        }
 
       // Add last execution info if available
       if (drizzleSchedule.lastExecutedAt && drizzleSchedule.lastExecutionStatus) {
@@ -977,6 +979,11 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
       throw ErrorFactories.dbQueryFailed("UPDATE scheduled_executions", new Error("Failed to update schedule"))
     }
 
+    if (!updatedSchedule.createdAt) {
+      log.error("Updated schedule has null createdAt - data integrity issue", { scheduleId: id })
+      throw ErrorFactories.dbQueryFailed("UPDATE scheduled_executions", new Error("Invalid schedule record"))
+    }
+
     const schedule: Schedule = {
       id: updatedSchedule.id,
       name: updatedSchedule.name,
@@ -985,7 +992,7 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
       scheduleConfig: updatedSchedule.scheduleConfig as ScheduleConfig,
       inputData: updatedSchedule.inputData,
       active: updatedSchedule.active ?? true,
-      createdAt: updatedSchedule.createdAt?.toISOString() ?? new Date().toISOString(),
+      createdAt: updatedSchedule.createdAt.toISOString(),
       updatedAt: updatedSchedule.updatedAt.toISOString()
     }
 
@@ -1155,6 +1162,11 @@ export async function getScheduleAction(id: number): Promise<ActionState<Schedul
       throw ErrorFactories.authzResourceNotFound("schedule", id.toString())
     }
 
+    if (!drizzleSchedule.createdAt) {
+      log.error("Schedule has null createdAt - data integrity issue", { scheduleId: id })
+      throw ErrorFactories.dbQueryFailed("SELECT scheduled_executions", new Error("Invalid schedule record"))
+    }
+
     const schedule: Schedule = {
       id: drizzleSchedule.id,
       name: drizzleSchedule.name,
@@ -1163,7 +1175,7 @@ export async function getScheduleAction(id: number): Promise<ActionState<Schedul
       scheduleConfig: drizzleSchedule.scheduleConfig as ScheduleConfig,
       inputData: drizzleSchedule.inputData,
       active: drizzleSchedule.active ?? true,
-      createdAt: drizzleSchedule.createdAt?.toISOString() ?? new Date().toISOString(),
+      createdAt: drizzleSchedule.createdAt.toISOString(),
       updatedAt: drizzleSchedule.updatedAt.toISOString()
     }
 

@@ -624,35 +624,35 @@ export async function ensureTagsExist(
 
 /**
  * Set tags for a prompt (replaces existing)
+ * Uses transaction to ensure atomicity
  */
 export async function setPromptTags(
   promptId: string,
   tagNames: string[]
 ): Promise<void> {
-  // Delete existing tags
   await executeQuery(
     (db) =>
-      db
-        .delete(promptLibraryTags)
-        .where(eq(promptLibraryTags.promptId, promptId)),
-    "deletePromptTags"
-  );
+      db.transaction(async (tx) => {
+        // Delete existing tags
+        await tx
+          .delete(promptLibraryTags)
+          .where(eq(promptLibraryTags.promptId, promptId));
 
-  if (tagNames.length === 0) {
-    return;
-  }
+        if (tagNames.length === 0) {
+          return;
+        }
 
-  // Ensure tags exist and get IDs
-  const tagMap = await ensureTagsExist(tagNames);
+        // Ensure tags exist and get IDs
+        const tagMap = await ensureTagsExist(tagNames);
 
-  // Insert new associations
-  const values = Array.from(tagMap.values()).map((tagId) => ({
-    promptId,
-    tagId,
-  }));
+        // Insert new associations
+        const values = Array.from(tagMap.values()).map((tagId) => ({
+          promptId,
+          tagId,
+        }));
 
-  await executeQuery(
-    (db) => db.insert(promptLibraryTags).values(values).onConflictDoNothing(),
+        await tx.insert(promptLibraryTags).values(values).onConflictDoNothing();
+      }),
     "setPromptTags"
   );
 }

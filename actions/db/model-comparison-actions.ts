@@ -3,7 +3,7 @@
 import { getServerSession } from "@/lib/auth/server-session"
 import { type ActionState } from "@/types/actions-types"
 import { hasToolAccess } from "@/utils/roles"
-import { handleError } from "@/lib/error-utils"
+import { handleError, ErrorFactories } from "@/lib/error-utils"
 import {
   createLogger,
   generateRequestId,
@@ -46,7 +46,7 @@ export async function getModelComparisons(
     const session = await getServerSession()
     if (!session) {
       log.warn("Unauthorized model comparisons access attempt")
-      return { isSuccess: false, message: "Unauthorized" }
+      throw ErrorFactories.authNoSession()
     }
 
     log.debug("User authenticated", { userId: session.sub })
@@ -61,7 +61,7 @@ export async function getModelComparisons(
     const userId = await getComparisonUserIdByCognitoSub(session.sub)
     if (!userId) {
       log.error("User not found in database", { cognitoSub: session.sub })
-      return { isSuccess: false, message: "User not found" }
+      throw ErrorFactories.authzResourceNotFound("user", session.sub)
     }
 
     log.debug("Fetching model comparisons from database", { userId, limit, offset })
@@ -69,19 +69,21 @@ export async function getModelComparisons(
     // Get comparisons using Drizzle
     const drizzleComparisons = await getComparisonsByUserId(userId, limit, offset)
 
-    const formattedComparisons: ModelComparison[] = drizzleComparisons.map(row => ({
-      id: row.id,
-      prompt: row.prompt,
-      model1Name: row.model1Name ?? '',
-      model2Name: row.model2Name ?? '',
-      response1: row.response1,
-      response2: row.response2,
-      executionTimeMs1: row.executionTimeMs1,
-      executionTimeMs2: row.executionTimeMs2,
-      tokensUsed1: row.tokensUsed1,
-      tokensUsed2: row.tokensUsed2,
-      createdAt: row.createdAt ?? new Date()
-    }))
+    const formattedComparisons: ModelComparison[] = drizzleComparisons
+      .filter(row => row.createdAt !== null) // Filter out records with null createdAt
+      .map(row => ({
+        id: row.id,
+        prompt: row.prompt,
+        model1Name: row.model1Name ?? '',
+        model2Name: row.model2Name ?? '',
+        response1: row.response1,
+        response2: row.response2,
+        executionTimeMs1: row.executionTimeMs1,
+        executionTimeMs2: row.executionTimeMs2,
+        tokensUsed1: row.tokensUsed1,
+        tokensUsed2: row.tokensUsed2,
+        createdAt: row.createdAt!
+      }))
 
     log.info("Model comparisons retrieved successfully", { count: formattedComparisons.length })
     timer({ status: "success", count: formattedComparisons.length })
@@ -113,12 +115,12 @@ export async function getModelComparison(
     const session = await getServerSession()
     if (!session) {
       log.warn("Unauthorized model comparison access attempt")
-      return { isSuccess: false, message: "Unauthorized" }
+      throw ErrorFactories.authNoSession()
     }
 
     const hasAccess = await hasToolAccess("model-compare")
     if (!hasAccess) {
-      return { isSuccess: false, message: "Access denied" }
+      throw ErrorFactories.authzInsufficientPermissions("model-compare tool")
     }
 
     // Get user ID using Drizzle
@@ -136,6 +138,11 @@ export async function getModelComparison(
       return { isSuccess: false, message: "Comparison not found" }
     }
 
+    if (!drizzleComparison.createdAt) {
+      log.error("Comparison has null createdAt - data integrity issue", { comparisonId })
+      return { isSuccess: false, message: "Invalid comparison record" }
+    }
+
     const comparison: ModelComparison = {
       id: drizzleComparison.id,
       prompt: drizzleComparison.prompt,
@@ -147,7 +154,7 @@ export async function getModelComparison(
       executionTimeMs2: drizzleComparison.executionTimeMs2,
       tokensUsed1: drizzleComparison.tokensUsed1,
       tokensUsed2: drizzleComparison.tokensUsed2,
-      createdAt: drizzleComparison.createdAt ?? new Date()
+      createdAt: drizzleComparison.createdAt
     }
 
     log.info("Model comparison retrieved successfully", { comparisonId })
@@ -185,7 +192,7 @@ export async function deleteModelComparison(
 
     const hasAccess = await hasToolAccess("model-compare")
     if (!hasAccess) {
-      return { isSuccess: false, message: "Access denied" }
+      throw ErrorFactories.authzInsufficientPermissions("model-compare tool")
     }
 
     // Get user ID using Drizzle
@@ -241,7 +248,7 @@ export async function updateComparisonResults(
     const session = await getServerSession()
     if (!session) {
       log.warn("Unauthorized comparison update attempt")
-      return { isSuccess: false, message: "Unauthorized" }
+      throw ErrorFactories.authNoSession()
     }
 
     const hasAccess = await hasToolAccess("model-compare")
@@ -254,11 +261,11 @@ export async function updateComparisonResults(
     const userId = await getComparisonUserIdByCognitoSub(session.sub)
     if (!userId) {
       log.error("User not found in database", { cognitoSub: session.sub })
-      return { isSuccess: false, message: "User not found" }
+      throw ErrorFactories.authzResourceNotFound("user", session.sub)
     }
 
     // Update using Drizzle
-    await drizzleUpdateComparisonResults(request.comparisonId, userId, {
+    const updatedComparison = await drizzleUpdateComparisonResults(request.comparisonId, userId, {
       response1: request.response1,
       response2: request.response2,
       executionTimeMs1: request.executionTimeMs1,
@@ -266,6 +273,14 @@ export async function updateComparisonResults(
       tokensUsed1: request.tokensUsed1,
       tokensUsed2: request.tokensUsed2,
     })
+
+    if (!updatedComparison) {
+      log.error("Failed to update comparison - record not found or no permission", {
+        comparisonId: request.comparisonId,
+        userId
+      })
+      return { isSuccess: false, message: "Comparison not found or access denied" }
+    }
 
     log.info("Comparison results updated successfully", {
       comparisonId: request.comparisonId
