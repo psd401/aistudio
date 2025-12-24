@@ -21,8 +21,8 @@ import {
 export interface ModelComparison {
   id: number
   prompt: string
-  model1Name: string
-  model2Name: string
+  model1Name: string | null
+  model2Name: string | null
   response1: string | null
   response2: string | null
   executionTimeMs1: number | null
@@ -70,12 +70,21 @@ export async function getModelComparisons(
     const drizzleComparisons = await getComparisonsByUserId(userId, limit, offset)
 
     const formattedComparisons: ModelComparison[] = drizzleComparisons
-      .filter(row => row.createdAt !== null) // Filter out records with null createdAt
+      .filter(row => {
+        // Log and filter out records with null createdAt (data integrity issue)
+        if (row.createdAt === null) {
+          log.error("Comparison has null createdAt - data integrity issue", {
+            comparisonId: row.id
+          })
+          return false
+        }
+        return true
+      })
       .map(row => ({
         id: row.id,
         prompt: row.prompt,
-        model1Name: row.model1Name ?? '',
-        model2Name: row.model2Name ?? '',
+        model1Name: row.model1Name,
+        model2Name: row.model2Name,
         response1: row.response1,
         response2: row.response2,
         executionTimeMs1: row.executionTimeMs1,
@@ -146,8 +155,8 @@ export async function getModelComparison(
     const comparison: ModelComparison = {
       id: drizzleComparison.id,
       prompt: drizzleComparison.prompt,
-      model1Name: drizzleComparison.model1Name ?? '',
-      model2Name: drizzleComparison.model2Name ?? '',
+      model1Name: drizzleComparison.model1Name,
+      model2Name: drizzleComparison.model2Name,
       response1: drizzleComparison.response1,
       response2: drizzleComparison.response2,
       executionTimeMs1: drizzleComparison.executionTimeMs1,

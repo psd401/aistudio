@@ -642,8 +642,24 @@ export async function setPromptTags(
           return;
         }
 
-        // Ensure tags exist and get IDs
-        const tagMap = await ensureTagsExist(tagNames);
+        // Ensure tags exist and get IDs (inlined for transaction atomicity)
+        const trimmedNames = tagNames.map((t) => t.trim());
+
+        // Insert tags that don't exist (within transaction)
+        for (const name of trimmedNames) {
+          await tx
+            .insert(promptTags)
+            .values({ name })
+            .onConflictDoNothing({ target: promptTags.name });
+        }
+
+        // Get all tag IDs (within transaction)
+        const tagResult = await tx
+          .select({ id: promptTags.id, name: promptTags.name })
+          .from(promptTags)
+          .where(inArray(promptTags.name, trimmedNames));
+
+        const tagMap = new Map(tagResult.map((t) => [t.name, t.id]));
 
         // Insert new associations
         const values = Array.from(tagMap.values()).map((tagId) => ({

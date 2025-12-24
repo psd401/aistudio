@@ -803,7 +803,16 @@ export async function getSchedulesAction(): Promise<ActionState<Schedule[]>> {
 
     // Transform results to action Schedule format, filtering out invalid records
     const schedules: Schedule[] = drizzleSchedules
-      .filter(drizzleSchedule => drizzleSchedule.createdAt !== null) // Filter out records with null createdAt
+      .filter(drizzleSchedule => {
+        // Log and filter out records with null createdAt (data integrity issue)
+        if (drizzleSchedule.createdAt === null) {
+          log.error("Schedule has null createdAt - data integrity issue", {
+            scheduleId: drizzleSchedule.id
+          })
+          return false
+        }
+        return true
+      })
       .map(drizzleSchedule => {
         const schedule: Schedule = {
           id: drizzleSchedule.id,
