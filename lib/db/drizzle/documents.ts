@@ -162,9 +162,6 @@ export async function createDocument(
 ): Promise<SelectDocument> {
   const log = createLogger({ module: "drizzle-documents" });
 
-  // Cast metadata to the schema's expected type
-  const metadataForDb = data.metadata as Record<string, unknown> | null;
-
   const result = await executeQuery(
     (db) =>
       db
@@ -176,7 +173,7 @@ export async function createDocument(
           size: data.size,
           userId: data.userId,
           conversationId: data.conversationId ?? null,
-          metadata: metadataForDb,
+          metadata: data.metadata ?? null,
         })
         .returning(),
     "createDocument"
@@ -197,19 +194,11 @@ export async function updateDocument(
   id: number,
   data: UpdateDocumentData
 ): Promise<SelectDocument | null> {
-  const updateData: Record<string, unknown> = {};
-
-  if (data.name !== undefined) updateData.name = data.name;
-  if (data.type !== undefined) updateData.type = data.type;
-  if (data.url !== undefined) updateData.url = data.url;
-  if (data.size !== undefined) updateData.size = data.size;
-  if (data.conversationId !== undefined)
-    updateData.conversationId = data.conversationId;
-  if (data.metadata !== undefined)
-    updateData.metadata = data.metadata as Record<string, unknown> | null;
-
-  // Set updatedAt timestamp
-  updateData.updatedAt = new Date();
+  const updateData = {
+    ...data,
+    metadata: data.metadata ?? null,
+    updatedAt: new Date(),
+  };
 
   const result = await executeQuery(
     (db) =>
@@ -296,9 +285,6 @@ export async function createChunk(
 ): Promise<SelectDocumentChunk> {
   const log = createLogger({ module: "drizzle-documents" });
 
-  // Cast metadata to the schema's expected type
-  const metadataForDb = data.metadata as Record<string, unknown> | null;
-
   const result = await executeQuery(
     (db) =>
       db
@@ -308,7 +294,7 @@ export async function createChunk(
           content: data.content,
           chunkIndex: data.chunkIndex,
           pageNumber: data.pageNumber ?? null,
-          metadata: metadataForDb,
+          metadata: data.metadata ?? null,
         })
         .returning(),
     "createChunk"
@@ -343,7 +329,7 @@ export async function batchInsertChunks(
     content: chunk.content,
     chunkIndex: chunk.chunkIndex,
     pageNumber: chunk.pageNumber ?? null,
-    metadata: chunk.metadata as Record<string, unknown> | null,
+    metadata: chunk.metadata ?? null,
   }));
 
   const result = await executeQuery(
@@ -385,17 +371,33 @@ export async function deleteChunksByDocumentId(
 
 /**
  * Get a document with all its chunks
+ * Uses a single query with LEFT JOIN for optimal performance
  */
 export async function getDocumentWithChunks(
   documentId: number
 ): Promise<{ document: SelectDocument; chunks: SelectDocumentChunk[] } | null> {
-  const document = await getDocumentById(documentId);
+  const results = await executeQuery(
+    (db) =>
+      db
+        .select()
+        .from(documents)
+        .leftJoin(documentChunks, eq(documentChunks.documentId, documents.id))
+        .where(eq(documents.id, documentId))
+        .orderBy(documentChunks.chunkIndex),
+    "getDocumentWithChunks"
+  );
 
-  if (!document) {
+  if (results.length === 0) {
     return null;
   }
 
-  const chunks = await getChunksByDocumentId(documentId);
+  // Extract document from first row (same in all rows due to JOIN)
+  const document = results[0].documents;
+
+  // Aggregate chunks, filtering out NULL values from LEFT JOIN
+  const chunks = results
+    .map((r) => r.document_chunks)
+    .filter((chunk): chunk is SelectDocumentChunk => chunk !== null);
 
   return { document, chunks };
 }

@@ -15,7 +15,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, sql } from "drizzle-orm";
+import { eq, desc, sql } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { textractJobs, textractUsage } from "@/lib/db/schema";
 import type { SelectTextractJob, SelectTextractUsage } from "@/lib/db/types";
@@ -49,6 +49,16 @@ export interface UpdateTextractUsageData {
   month: string; // Format: YYYY-MM-DD (first day of month)
   pageCount: number;
 }
+
+// ============================================
+// Constants
+// ============================================
+
+/**
+ * AWS Textract pricing per page for text detection
+ * @see https://aws.amazon.com/textract/pricing/
+ */
+const TEXTRACT_COST_PER_PAGE = 0.0015;
 
 // ============================================
 // Textract Job Operations
@@ -197,7 +207,7 @@ export async function getAllTextractUsage(): Promise<SelectTextractUsage[]> {
       db
         .select()
         .from(textractUsage)
-        .orderBy(sql`${textractUsage.month} DESC`),
+        .orderBy(desc(textractUsage.month)),
     "getAllTextractUsage"
   );
 
@@ -216,9 +226,9 @@ export async function trackTextractUsage(
 ): Promise<SelectTextractUsage> {
   const log = createLogger({ module: "drizzle-textract" });
 
-  // Get first day of current month in YYYY-MM-DD format
+  // Get first day of current month in YYYY-MM-DD format (UTC)
   const now = new Date();
-  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+  const monthStart = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
   const month = monthStart.toISOString().split("T")[0];
 
   log.debug("Tracking Textract usage", { month, pageCount });
@@ -276,14 +286,12 @@ export async function getTotalTextractUsage(): Promise<number> {
 
 /**
  * Get estimated Textract cost based on page count
- * AWS Textract pricing: ~$0.0015 per page for text detection
  *
  * @param pageCount - Number of pages
  * @returns Estimated cost in USD
  */
 export function estimateTextractCost(pageCount: number): number {
-  const COST_PER_PAGE = 0.0015;
-  return pageCount * COST_PER_PAGE;
+  return pageCount * TEXTRACT_COST_PER_PAGE;
 }
 
 /**

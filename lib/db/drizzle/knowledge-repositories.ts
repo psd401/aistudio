@@ -244,33 +244,24 @@ export async function getAccessibleRepositoriesByCognitoSub(
     return [];
   }
 
-  // First get the user ID from cognito sub
-  const userResult = await executeQuery(
+  // Get user IDs from cognito subs in a single query
+  const cognitoSubs = assistantOwnerSub
+    ? [cognitoSub, assistantOwnerSub]
+    : [cognitoSub];
+
+  const userResults = await executeQuery(
     (db) =>
       db
-        .select({ id: users.id })
+        .select({ cognitoSub: users.cognitoSub, id: users.id })
         .from(users)
-        .where(eq(users.cognitoSub, cognitoSub))
-        .limit(1),
-    "getUserByCognitoSub"
+        .where(inArray(users.cognitoSub, cognitoSubs)),
+    "getUsersByCognitoSubs"
   );
 
-  const userId = userResult[0]?.id;
-
-  // If assistant owner is provided, also get their user ID
-  let assistantOwnerId: number | null = null;
-  if (assistantOwnerSub) {
-    const ownerResult = await executeQuery(
-      (db) =>
-        db
-          .select({ id: users.id })
-          .from(users)
-          .where(eq(users.cognitoSub, assistantOwnerSub))
-          .limit(1),
-      "getAssistantOwnerByCognitoSub"
-    );
-    assistantOwnerId = ownerResult[0]?.id ?? null;
-  }
+  const userId = userResults.find((u) => u.cognitoSub === cognitoSub)?.id;
+  const assistantOwnerId = assistantOwnerSub
+    ? userResults.find((u) => u.cognitoSub === assistantOwnerSub)?.id ?? null
+    : null;
 
   // Get all repositories with access check
   // Use explicit NULL checks for LEFT JOIN columns to avoid false positives
@@ -312,10 +303,11 @@ export async function getAccessibleRepositoriesByCognitoSub(
   );
 
   const accessibleIds = new Set(result.map((r) => r.id));
+  const repositoryMap = new Map(result.map((r) => [r.id, r.name]));
 
   return repositoryIds.map((id) => ({
     id,
-    name: result.find((r) => r.id === id)?.name ?? "",
+    name: repositoryMap.get(id) ?? "",
     isAccessible: accessibleIds.has(id),
   }));
 }
@@ -341,7 +333,7 @@ export async function createRepository(
           description: data.description ?? null,
           ownerId: data.ownerId,
           isPublic: data.isPublic ?? false,
-          metadata: data.metadata as Record<string, unknown> | null,
+          metadata: data.metadata ?? null,
         })
         .returning(),
     "createRepository"
@@ -362,15 +354,11 @@ export async function updateRepository(
   id: number,
   data: UpdateRepositoryData
 ): Promise<SelectKnowledgeRepository | null> {
-  const updateData: Record<string, unknown> = {
+  const updateData = {
+    ...data,
+    metadata: data.metadata ?? null,
     updatedAt: new Date(),
   };
-
-  if (data.name !== undefined) updateData.name = data.name;
-  if (data.description !== undefined) updateData.description = data.description;
-  if (data.isPublic !== undefined) updateData.isPublic = data.isPublic;
-  if (data.metadata !== undefined)
-    updateData.metadata = data.metadata as Record<string, unknown> | null;
 
   const result = await executeQuery(
     (db) =>
