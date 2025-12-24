@@ -16,7 +16,7 @@ import { knowledgeRepositories } from "./knowledge-repositories";
 export const repositoryItems = pgTable("repository_items", {
   id: serial("id").primaryKey(),
   repositoryId: integer("repository_id")
-    .references(() => knowledgeRepositories.id)
+    .references(() => knowledgeRepositories.id, { onDelete: "cascade" })
     .notNull(),
   type: text("type").notNull(),
   name: text("name").notNull(),

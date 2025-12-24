@@ -15,7 +15,9 @@ import { documents } from "./documents";
 
 export const documentChunks = pgTable("document_chunks", {
   id: serial("id").primaryKey(),
-  documentId: integer("document_id").references(() => documents.id),
+  documentId: integer("document_id")
+    .references(() => documents.id, { onDelete: "cascade" })
+    .notNull(),
   content: text("content").notNull(),
   embedding: jsonb("embedding").$type<number[]>(),
   metadata: jsonb("metadata").$type<Record<string, unknown>>(),

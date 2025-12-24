@@ -11,7 +11,6 @@ import {
   text,
   timestamp,
 } from "drizzle-orm/pg-core";
-import type { NexusConversationMetadata } from "@/lib/db/types/jsonb";
 import { users } from "./users";
 
 export const documents = pgTable("documents", {
@@ -24,7 +23,7 @@ export const documents = pgTable("documents", {
   type: text("type").notNull(),
   size: integer("size").notNull(),
   url: text("url").notNull(),
-  metadata: jsonb("metadata").$type<NexusConversationMetadata>(),
+  metadata: jsonb("metadata").$type<Record<string, unknown>>(),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });

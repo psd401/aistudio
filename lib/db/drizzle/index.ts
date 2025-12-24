@@ -306,3 +306,99 @@ export {
   // Model operations
   getOptimalPollingInterval,
 } from "./ai-streaming-jobs";
+
+// ============================================
+// Document Operations
+// ============================================
+
+export {
+  // Types
+  type DocumentMetadata,
+  type ChunkMetadata,
+  type CreateDocumentData,
+  type UpdateDocumentData,
+  type CreateChunkData,
+  // Query operations
+  getDocumentById,
+  getDocumentsByUserId,
+  getDocumentsByConversationId,
+  // Document CRUD operations
+  createDocument,
+  updateDocument,
+  linkDocumentToConversation,
+  deleteDocument,
+  // Chunk operations
+  getChunksByDocumentId,
+  createChunk,
+  batchInsertChunks,
+  deleteChunksByDocumentId,
+  // Combined operations
+  getDocumentWithChunks,
+} from "./documents";
+
+// ============================================
+// Knowledge Repository Operations
+// ============================================
+
+export {
+  // Types
+  type RepositoryMetadata,
+  type ProcessingStatus,
+  type CreateRepositoryData,
+  type UpdateRepositoryData,
+  type CreateRepositoryItemData,
+  type CreateChunkData as CreateRepositoryItemChunkData,
+  type RepositoryWithAccess,
+  // Repository query operations
+  getRepositoryById,
+  getRepositoriesByOwnerId,
+  getPublicRepositories,
+  getAccessibleRepositoryIds,
+  getAccessibleRepositoriesByCognitoSub,
+  // Repository CRUD operations
+  createRepository,
+  updateRepository,
+  deleteRepository,
+  // Repository access operations
+  grantUserAccess,
+  grantRoleAccess,
+  revokeUserAccess,
+  revokeRoleAccess,
+  getRepositoryAccessList,
+  // Repository item operations
+  getRepositoryItems,
+  getRepositoryItemById,
+  createRepositoryItem,
+  updateRepositoryItemStatus,
+  deleteRepositoryItem,
+  // Repository item chunk operations
+  getRepositoryItemChunks,
+  createRepositoryItemChunk,
+  batchInsertRepositoryItemChunks,
+  deleteRepositoryItemChunks,
+} from "./knowledge-repositories";
+
+// ============================================
+// Textract Operations
+// ============================================
+
+export {
+  // Types
+  type CreateTextractJobData,
+  type TextractJobMetadata,
+  type UpdateTextractUsageData,
+  // Job operations
+  getTextractJob,
+  getTextractJobMetadata,
+  getTextractJobsByItemId,
+  createTextractJob,
+  deleteTextractJob,
+  // Usage operations
+  getTextractUsage,
+  getAllTextractUsage,
+  trackTextractUsage,
+  getTotalTextractUsage,
+  // Cost utilities
+  estimateTextractCost,
+  getTextractUsageWithCost,
+} from "./textract";
