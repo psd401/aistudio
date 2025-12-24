@@ -35,7 +35,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, desc, or, sql, inArray, isNotNull, type SQL } from "drizzle-orm";
+import { eq, and, desc, or, inArray, isNotNull, type SQL } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   knowledgeRepositories,
