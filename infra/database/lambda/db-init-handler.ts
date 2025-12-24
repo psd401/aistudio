@@ -75,7 +75,7 @@ const INITIAL_SETUP_FILES = [
 
 export async function handler(event: CustomResourceEvent): Promise<any> {
   console.log('Database initialization event:', JSON.stringify(event, null, 2));
-  console.log('Handler version: 2025-12-23-v11 - AI streaming jobs pending index migration 042');
+  console.log('Handler version: 2025-12-24-v12 - Add CONCURRENTLY detection, fix migration 042');
   
   // SAFETY CHECK: Log what mode we're in
   console.log(`🔍 Checking database state for safety...`);
@@ -276,6 +276,48 @@ async function recordMigration(
 }
 
 /**
+ * Validate SQL statements for RDS Data API incompatibilities
+ *
+ * Detects patterns that cannot run properly through RDS Data API:
+ * - CREATE INDEX CONCURRENTLY (requires autocommit, multi-transaction)
+ * - DROP INDEX CONCURRENTLY
+ * - REINDEX CONCURRENTLY
+ *
+ * @throws Error if incompatible pattern detected
+ */
+function validateStatements(statements: string[], filename: string): void {
+  for (const statement of statements) {
+    // Check for CONCURRENTLY keyword (incompatible with RDS Data API)
+    if (/\bCONCURRENTLY\b/i.test(statement)) {
+      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.error('❌ RDS Data API Incompatibility Detected');
+      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.error(`File: ${filename}`);
+      console.error(`Statement: ${statement.substring(0, 150)}...`);
+      console.error('');
+      console.error('ISSUE: CONCURRENTLY operations cannot run through RDS Data API');
+      console.error('REASON: CONCURRENTLY requires autocommit mode and uses multiple');
+      console.error('        internal transactions, which is incompatible with Data API');
+      console.error('');
+      console.error('SOLUTION: Remove CONCURRENTLY keyword from the statement:');
+      console.error('  - Use: CREATE INDEX IF NOT EXISTS idx_name ON table (column);');
+      console.error('  - This will briefly lock writes but works with Data API');
+      console.error('');
+      console.error('FOR ZERO-DOWNTIME INDEX CREATION:');
+      console.error('  - Use psql directly during maintenance window');
+      console.error('  - Consider a separate maintenance script outside Lambda');
+      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+      throw new Error(
+        `Migration ${filename} contains CONCURRENTLY keyword which is incompatible ` +
+        `with RDS Data API. Use 'CREATE INDEX IF NOT EXISTS' instead. ` +
+        `For zero-downtime index creation on large tables, use psql directly.`
+      );
+    }
+  }
+}
+
+/**
  * Execute all statements in a SQL file
  */
 async function executeFileStatements(
@@ -286,7 +328,10 @@ async function executeFileStatements(
 ): Promise<void> {
   const sql = await getSqlContent(filename);
   const statements = splitSqlStatements(sql);
-  
+
+  // Validate statements before execution - detect incompatible patterns
+  validateStatements(statements, filename);
+
   for (const statement of statements) {
     if (statement.trim()) {
       try {
