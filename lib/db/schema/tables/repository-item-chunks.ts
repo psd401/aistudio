@@ -17,7 +17,7 @@ import { repositoryItems } from "./repository-items";
 export const repositoryItemChunks = pgTable("repository_item_chunks", {
   id: serial("id").primaryKey(),
   itemId: integer("item_id")
-    .references(() => repositoryItems.id)
+    .references(() => repositoryItems.id, { onDelete: "cascade" })
     .notNull(),
   content: text("content").notNull(),
   chunkIndex: integer("chunk_index").notNull(),

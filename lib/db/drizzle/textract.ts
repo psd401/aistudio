@@ -245,7 +245,7 @@ export async function trackTextractUsage(
         .onConflictDoUpdate({
           target: textractUsage.month,
           set: {
-            pageCount: sql`${textractUsage.pageCount} + ${pageCount}`,
+            pageCount: sql`${textractUsage.pageCount} + EXCLUDED.page_count`,
             updatedAt: new Date(),
           },
         })
