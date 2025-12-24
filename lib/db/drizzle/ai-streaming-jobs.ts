@@ -844,8 +844,9 @@ export async function markMessagePersisted(
 
 /**
  * Delete a job by ID
+ * @returns Number of jobs deleted (0 or 1)
  */
-export async function deleteJob(jobId: string): Promise<{ id: string } | null> {
+export async function deleteJob(jobId: string): Promise<number> {
   const result = await executeQuery(
     (db) =>
       db
@@ -855,7 +856,7 @@ export async function deleteJob(jobId: string): Promise<{ id: string } | null> {
     "deleteJob"
   );
 
-  return result[0] || null;
+  return result.length;
 }
 
 // ============================================

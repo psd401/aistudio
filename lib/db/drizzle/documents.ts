@@ -63,16 +63,14 @@ export interface DocumentMetadata {
 /**
  * Chunk metadata stored in JSONB column
  *
- * **Note on Embeddings**: For document chunks, vector embeddings are stored
- * within this metadata JSONB field. This differs from repository item chunks,
- * which use a dedicated pgvector column for better performance and indexing.
+ * **Note on Embeddings**: The document_chunks table has a separate `embedding`
+ * JSONB column at the root level (not in metadata), but it is currently unused.
+ * Repository item chunks use a dedicated pgvector column for active vector search.
  */
 export interface ChunkMetadata {
   pageNumber?: number;
   chunkType?: "text" | "table" | "image";
   confidence?: number;
-  /** Vector embedding stored in metadata JSONB (not a dedicated vector column) */
-  embedding?: number[];
   [key: string]: unknown;
 }
 
@@ -263,8 +261,9 @@ export async function linkDocumentToConversation(
 /**
  * Delete a document by ID
  * Note: Document chunks are automatically deleted via ON DELETE CASCADE
+ * @returns Number of documents deleted (0 or 1)
  */
-export async function deleteDocument(id: number): Promise<{ id: number } | null> {
+export async function deleteDocument(id: number): Promise<number> {
   const result = await executeQuery(
     (db) =>
       db
@@ -274,7 +273,7 @@ export async function deleteDocument(id: number): Promise<{ id: number } | null>
     "deleteDocument"
   );
 
-  return result[0] || null;
+  return result.length;
 }
 
 // ============================================

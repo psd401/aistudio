@@ -35,7 +35,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, desc, or, sql, inArray, isNotNull } from "drizzle-orm";
+import { eq, and, desc, or, sql, inArray, isNotNull, type SQL } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   knowledgeRepositories,
@@ -123,16 +123,16 @@ export interface CreateRepositoryItemData {
  * Data for creating a repository item chunk
  *
  * **Note on Embeddings**: Repository item chunks store vector embeddings in a
- * dedicated pgvector column (not JSONB). This enables efficient vector similarity
- * search and proper indexing. This differs from document chunks which store
- * embeddings in their metadata JSONB field.
+ * dedicated pgvector column for efficient vector similarity search and indexing.
+ * Document chunks have an unused embedding JSONB column (schema exists but not
+ * currently populated). Repository embeddings are actively used for RAG operations.
  */
 export interface CreateChunkData {
   itemId: number;
   content: string;
   chunkIndex: number;
   metadata?: Record<string, unknown> | null;
-  /** Vector embedding stored in dedicated pgvector column for efficient similarity search */
+  /** Vector embedding stored in dedicated pgvector column for semantic search */
   embedding?: number[] | null;
   tokens?: number | null;
 }
@@ -295,6 +295,16 @@ export async function getAccessibleRepositoriesByCognitoSub(
 
   // Get all repositories with access check
   // Use explicit NULL checks for LEFT JOIN columns to avoid false positives
+  // Build conditions array and filter out false/null/undefined values
+  const accessConditions = [
+    eq(knowledgeRepositories.isPublic, true),
+    userId && eq(knowledgeRepositories.ownerId, userId),
+    assistantOwnerId && eq(knowledgeRepositories.ownerId, assistantOwnerId),
+    userId &&
+      and(isNotNull(repositoryAccess.userId), eq(repositoryAccess.userId, userId)),
+    userId && and(isNotNull(userRoles.userId), eq(userRoles.userId, userId)),
+  ].filter((condition): condition is SQL<unknown> => Boolean(condition));
+
   const result = await executeQuery(
     (db) =>
       db
@@ -311,22 +321,7 @@ export async function getAccessibleRepositoriesByCognitoSub(
         .where(
           and(
             inArray(knowledgeRepositories.id, repositoryIds),
-            or(
-              eq(knowledgeRepositories.isPublic, true),
-              userId ? eq(knowledgeRepositories.ownerId, userId) : sql`false`,
-              assistantOwnerId
-                ? eq(knowledgeRepositories.ownerId, assistantOwnerId)
-                : sql`false`,
-              userId
-                ? and(
-                    isNotNull(repositoryAccess.userId),
-                    eq(repositoryAccess.userId, userId)
-                  )
-                : sql`false`,
-              userId
-                ? and(isNotNull(userRoles.userId), eq(userRoles.userId, userId))
-                : sql`false`
-            )
+            or(...accessConditions)
           )
         ),
     "getAccessibleRepositoriesByCognitoSub"
@@ -406,10 +401,9 @@ export async function updateRepository(
 /**
  * Delete a repository
  * Note: This will cascade delete repository items and chunks
+ * @returns Number of repositories deleted (0 or 1)
  */
-export async function deleteRepository(
-  id: number
-): Promise<{ id: number } | null> {
+export async function deleteRepository(id: number): Promise<number> {
   const result = await executeQuery(
     (db) =>
       db
@@ -419,7 +413,7 @@ export async function deleteRepository(
     "deleteRepository"
   );
 
-  return result[0] || null;
+  return result.length;
 }
 
 // ============================================
@@ -660,10 +654,9 @@ export async function updateRepositoryItemStatus(
 /**
  * Delete a repository item
  * Note: Chunks are automatically deleted via cascade
+ * @returns Number of items deleted (0 or 1)
  */
-export async function deleteRepositoryItem(
-  id: number
-): Promise<{ id: number } | null> {
+export async function deleteRepositoryItem(id: number): Promise<number> {
   const result = await executeQuery(
     (db) =>
       db
@@ -673,7 +666,7 @@ export async function deleteRepositoryItem(
     "deleteRepositoryItem"
   );
 
-  return result[0] || null;
+  return result.length;
 }
 
 // ============================================

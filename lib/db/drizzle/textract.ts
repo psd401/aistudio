@@ -157,10 +157,9 @@ export async function createTextractJob(
 /**
  * Delete a Textract job record
  * Called when job completes (success or failure) to clean up
+ * @returns Number of jobs deleted (0 or 1)
  */
-export async function deleteTextractJob(
-  jobId: string
-): Promise<{ jobId: string } | null> {
+export async function deleteTextractJob(jobId: string): Promise<number> {
   const result = await executeQuery(
     (db) =>
       db
@@ -170,7 +169,7 @@ export async function deleteTextractJob(
     "deleteTextractJob"
   );
 
-  return result[0] || null;
+  return result.length;
 }
 
 // ============================================
