@@ -9,7 +9,8 @@ import {
   setPromptTags,
   getTagsForPrompt,
   getPromptById,
-  incrementViewCount
+  incrementViewCount,
+  listPrompts as drizzleListPrompts
 } from "@/lib/db/drizzle"
 import { type ActionState } from "@/types/actions-types"
 import {
@@ -257,119 +258,45 @@ export async function listPrompts(
     // Validate params
     const validated = promptSearchSchema.parse(params)
 
-    // Build query conditions
-    const conditions = ["p.deleted_at IS NULL"]
-    const parameters: SqlParameter[] = []
-
-    // Visibility filter
-    if (validated.visibility === 'private') {
-      conditions.push("p.user_id = :userId")
-      parameters.push({ name: "userId", value: { longValue: userId } })
-    } else if (validated.visibility === 'public') {
-      conditions.push("p.visibility = 'public' AND p.moderation_status = 'approved'")
-    } else {
-      // Show user's own prompts OR approved public prompts
-      conditions.push(
-        "(p.user_id = :userId OR (p.visibility = 'public' AND p.moderation_status = 'approved'))"
-      )
-      parameters.push({ name: "userId", value: { longValue: userId } })
-    }
-
-    // Tag filter
-    if (validated.tags && validated.tags.length > 0) {
-      conditions.push(`
-        EXISTS (
-          SELECT 1 FROM prompt_library_tags plt
-          JOIN prompt_tags t ON plt.tag_id = t.id
-          WHERE plt.prompt_id = p.id
-          AND t.name IN (SELECT value FROM json_array_elements_text(:tags::json))
-        )
-      `)
-      parameters.push({
-        name: "tags",
-        value: { stringValue: JSON.stringify(validated.tags) }
-      })
-    }
-
-    // Search filter
-    if (validated.search) {
-      conditions.push(`
-        (p.title ILIKE :search
-         OR p.description ILIKE :search
-         OR p.content ILIKE :search)
-      `)
-      const searchPattern = `%${validated.search}%`
-      parameters.push({
-        name: "search",
-        value: { stringValue: searchPattern }
-      })
-    }
-
-    // User filter (for viewing specific user's prompts)
-    if (validated.userId) {
-      conditions.push("p.user_id = :filterUserId")
-      parameters.push({
-        name: "filterUserId",
-        value: { longValue: validated.userId }
-      })
-    }
-
-    // Sort order
-    let orderBy = "p.created_at DESC"
-    if (validated.sort === 'usage') {
-      orderBy = "p.use_count DESC, p.created_at DESC"
-    } else if (validated.sort === 'views') {
-      orderBy = "p.view_count DESC, p.created_at DESC"
-    }
-
-    // Calculate offset
+    // Calculate offset for pagination
     const offset = (validated.page - 1) * validated.limit
 
-    // Get total count
-    const countQuery = `
-      SELECT COUNT(*) as total
-      FROM prompt_library p
-      WHERE ${conditions.join(" AND ")}
-    `
-    const countResults = await executeSQL<{ total: number }>(
-      countQuery,
-      parameters
-    )
-    const total = countResults[0]?.total || 0
-
-    // Get prompts
-    const query = `
-      SELECT
-        p.id,
-        p.user_id,
-        p.title,
-        LEFT(p.content, 200) as preview,
-        p.description,
-        p.visibility,
-        p.moderation_status,
-        p.view_count,
-        p.use_count,
-        p.created_at,
-        p.updated_at,
-        array_agg(DISTINCT t.name) FILTER (WHERE t.id IS NOT NULL) as tags,
-        CONCAT(u.first_name, ' ', u.last_name) as owner_name
-      FROM prompt_library p
-      LEFT JOIN prompt_library_tags plt ON p.id = plt.prompt_id
-      LEFT JOIN prompt_tags t ON plt.tag_id = t.id
-      LEFT JOIN users u ON p.user_id = u.id
-      WHERE ${conditions.join(" AND ")}
-      GROUP BY p.id, u.first_name, u.last_name
-      ORDER BY ${orderBy}
-      LIMIT :limit OFFSET :offset
-    `
-
-    parameters.push(
-      { name: "limit", value: { longValue: validated.limit } },
-      { name: "offset", value: { longValue: offset } }
+    // Call Drizzle listPrompts with search options
+    const { prompts: drizzlePrompts, total } = await drizzleListPrompts(
+      {
+        visibility: validated.visibility,
+        tags: validated.tags,
+        search: validated.search,
+        filterUserId: validated.userId,
+        sort: validated.sort === 'created' ? 'recent' : validated.sort,
+        limit: validated.limit,
+        offset
+      },
+      userId
     )
 
-    const results = await executeSQL<PromptListItem>(query, parameters)
-    const prompts = results.map(r => transformSnakeToCamel<PromptListItem>(r))
+    // Convert dates to strings for PromptListItem type
+    const prompts: PromptListItem[] = drizzlePrompts.map(p => ({
+      id: p.id,
+      userId: p.userId,
+      title: p.title,
+      preview: p.preview,
+      description: p.description,
+      visibility: p.visibility as 'public' | 'private',
+      moderationStatus: p.moderationStatus as 'pending' | 'approved' | 'rejected',
+      moderatedBy: null,       // Not included in list view
+      moderatedAt: null,       // Not included in list view
+      moderationNotes: null,   // Not included in list view
+      sourceMessageId: null,   // Not included in list view
+      sourceConversationId: null, // Not included in list view
+      viewCount: p.viewCount,
+      useCount: p.useCount,
+      createdAt: p.createdAt.toISOString(),
+      updatedAt: p.updatedAt.toISOString(),
+      deletedAt: null,         // Excluded by query
+      tags: p.tags,
+      ownerName: p.ownerName ?? undefined
+    }))
 
     const hasMore = total > validated.page * validated.limit
 
