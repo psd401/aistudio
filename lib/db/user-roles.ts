@@ -36,6 +36,14 @@ export async function updateUserRoles(userId: number, roleNames: string[]): Prom
 
   try {
     // Get role IDs for the role names
+    // NOTE: This is a separate query outside the transaction. There's a potential
+    // race condition if roles are deleted between this lookup and the transaction below.
+    // However, this is acceptable because:
+    // 1. Roles (especially system roles) are rarely deleted
+    // 2. Foreign key constraints will catch deletions and fail the transaction
+    // 3. The error will be properly logged and returned to the caller
+    // 4. Moving this inside the transaction wouldn't prevent the race - roles could
+    //    still be deleted between lookup and insert within the same transaction
     const roleResult = await executeQuery(
       async (db) => {
         return db
