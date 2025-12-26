@@ -39,10 +39,15 @@ export default defineConfig({
   dialect: "postgresql",
   driver: "aws-data-api",
   schema: "./lib/db/schema/index.ts",
+  // Output to drizzle folder for staging - use prepare-migration.ts to format and copy to Lambda schema dir
   out: "./drizzle/migrations",
   dbCredentials: {
     database: process.env.RDS_DATABASE_NAME || "aistudio",
     resourceArn: getRequiredEnv("RDS_RESOURCE_ARN"),
     secretArn: getRequiredEnv("RDS_SECRET_ARN"),
   },
+  // Strict mode to ensure schema consistency
+  strict: true,
+  // Verbose output for debugging
+  verbose: true,
 });

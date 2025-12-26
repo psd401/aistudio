@@ -247,7 +247,7 @@ export async function getModelsWithCapabilities(
     .map(([key]) => {
       // Runtime assertion: Key must be alphanumeric for SQL safety
       // This defends against whitelist compromise or extension errors
-      if (!/^[a-zA-Z]+$/.test(key)) {
+      if (!/^[A-Za-z]+$/.test(key)) {
         throw new Error(`Invalid capability key format: ${key}`);
       }
 

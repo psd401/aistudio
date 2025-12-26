@@ -452,8 +452,8 @@ const Flow = React.forwardRef<FlowHandle, {
 
         // Assign parallel groups based on sorted order
         // Use position * MULTIPLIER + index to create unique group IDs across positions
-        for (let i = 0; i < nodesWithEdgeInfo.length; i++) {
-          nodeParallelGroups.set(nodesWithEdgeInfo[i].nodeId, position * PARALLEL_GROUP_MULTIPLIER + i);
+        for (const [i, element] of nodesWithEdgeInfo.entries()) {
+          nodeParallelGroups.set(element.nodeId, position * PARALLEL_GROUP_MULTIPLIER + i);
         }
       }
     }
