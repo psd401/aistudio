@@ -4,8 +4,13 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
 import { getServerSession } from "@/lib/auth/server-session"
 import { hasRole } from "@/utils/roles"
-import { executeSQL, createParameter, getUserIdByCognitoSub } from "@/lib/db/data-api-adapter"
-import { transformSnakeToCamel } from "@/lib/db/field-mapper"
+import { getUserIdByCognitoSub } from "@/lib/db/data-api-adapter"
+import {
+  getModerationQueue as drizzleGetModerationQueue,
+  moderatePrompt as drizzleModeratePrompt,
+  bulkModeratePrompts as drizzleBulkModeratePrompts,
+  getModerationStats as drizzleGetModerationStats
+} from "@/lib/db/drizzle"
 import type { ActionState } from "@/types/actions-types"
 
 export interface ModerationQueueItem {
@@ -88,70 +93,22 @@ export async function getModerationQueue(
       throw ErrorFactories.invalidInput('offset', offset, 'Must be non-negative')
     }
 
-    // Build the query - fix WHERE clause for 'all' status
-    // ONLY show public prompts in moderation queue (private prompts should never need moderation)
-    const whereClause = status === 'all'
-      ? 'WHERE p.visibility = \'public\' AND p.deleted_at IS NULL'
-      : 'WHERE p.visibility = \'public\' AND p.moderation_status = :status AND p.deleted_at IS NULL'
+    // Get queue via Drizzle
+    const { items: drizzleItems, total } = await drizzleGetModerationQueue({
+      status: status as "pending" | "approved" | "rejected" | "all",
+      limit,
+      offset
+    })
 
-    const query = `
-      SELECT
-        p.id,
-        p.user_id,
-        p.title,
-        p.content,
-        p.description,
-        p.visibility,
-        p.moderation_status,
-        p.created_at,
-        p.updated_at,
-        p.view_count,
-        p.use_count,
-        u.first_name as creator_first_name,
-        u.last_name as creator_last_name,
-        u.email as creator_email,
-        COALESCE(
-          ARRAY_AGG(DISTINCT pt.name) FILTER (WHERE pt.name IS NOT NULL),
-          ARRAY[]::VARCHAR[]
-        ) as tags
-      FROM prompt_library p
-      JOIN users u ON p.user_id = u.id
-      LEFT JOIN prompt_library_tags plt ON p.id = plt.prompt_id
-      LEFT JOIN prompt_tags pt ON plt.tag_id = pt.id
-      ${whereClause}
-      GROUP BY p.id, u.id, u.first_name, u.last_name, u.email
-      ORDER BY p.created_at DESC
-      LIMIT :limit OFFSET :offset
-    `
-
-    const countQuery = `
-      SELECT COUNT(*) as total
-      FROM prompt_library p
-      ${whereClause}
-    `
-
-    const queryParams = status === 'all'
-      ? [
-          createParameter('limit', limit),
-          createParameter('offset', offset)
-        ]
-      : [
-          createParameter('status', status),
-          createParameter('limit', limit),
-          createParameter('offset', offset)
-        ]
-
-    const countParams = status === 'all'
-      ? []
-      : [createParameter('status', status)]
-
-    const [itemsResult, countResult] = await Promise.all([
-      executeSQL(query, queryParams),
-      executeSQL(countQuery, countParams)
-    ])
-
-    const items = itemsResult.map((row: Record<string, unknown>) => transformSnakeToCamel<ModerationQueueItem>(row))
-    const total = Number(countResult[0]?.total || 0)
+    // Convert Date to string for response type
+    const items: ModerationQueueItem[] = drizzleItems.map(item => ({
+      ...item,
+      createdAt: item.createdAt.toISOString(),
+      updatedAt: item.updatedAt.toISOString(),
+      creatorFirstName: item.creatorFirstName ?? '',
+      creatorLastName: item.creatorLastName ?? '',
+      creatorEmail: item.creatorEmail ?? ''
+    }))
 
     timer({ status: "success" })
     log.info("Moderation queue fetched successfully", { count: items.length, total })
@@ -213,32 +170,16 @@ export async function moderatePrompt(
       throw ErrorFactories.invalidInput('promptId', promptId, 'Must be a valid UUID')
     }
 
-    const query = `
-      UPDATE prompt_library
-      SET
-        moderation_status = :status,
-        moderated_by = :moderatedBy,
-        moderated_at = CURRENT_TIMESTAMP,
-        moderation_notes = :notes,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id = :promptId::uuid
-      AND deleted_at IS NULL
-      RETURNING id
-    `
+    // Update via Drizzle
+    const success = await drizzleModeratePrompt(
+      promptId,
+      action.status,
+      userIdNum,
+      action.notes
+    )
 
-    const result = await executeSQL(query, [
-      createParameter('status', action.status),
-      createParameter('moderatedBy', userIdNum),
-      createParameter('notes', action.notes || ''),
-      createParameter('promptId', promptId)
-    ])
-
-    // Log the result for debugging
-    log.info("Update query result", { result, resultType: typeof result, resultLength: result?.length })
-
-    // Verify the update actually affected a row
-    if (!result || !Array.isArray(result) || result.length === 0) {
-      log.warn("Prompt not found or already deleted", { promptId, result })
+    if (!success) {
+      log.warn("Prompt not found or already deleted", { promptId })
       throw ErrorFactories.dbRecordNotFound('prompt_library', promptId)
     }
 
@@ -318,32 +259,15 @@ export async function bulkModeratePrompts(
       )
     }
 
-    // Build the IN clause for the query with UUID casting
-    const placeholders = promptIds.map((_, i) => `:id${i}::uuid`).join(', ')
-    const params = [
-      createParameter('status', action.status),
-      createParameter('moderatedBy', userIdNum),
-      createParameter('notes', action.notes || ''),
-      ...promptIds.map((id, i) => createParameter(`id${i}`, id))
-    ]
-
-    const query = `
-      UPDATE prompt_library
-      SET
-        moderation_status = :status,
-        moderated_by = :moderatedBy,
-        moderated_at = CURRENT_TIMESTAMP,
-        moderation_notes = :notes,
-        updated_at = CURRENT_TIMESTAMP
-      WHERE id IN (${placeholders})
-      AND deleted_at IS NULL
-      RETURNING id
-    `
-
-    const result = await executeSQL(query, params)
+    // Update via Drizzle
+    const actualCount = await drizzleBulkModeratePrompts(
+      promptIds,
+      action.status,
+      userIdNum,
+      action.notes
+    )
 
     // Verify at least some rows were updated
-    const actualCount = result.length
     if (actualCount === 0) {
       throw ErrorFactories.dbRecordNotFound('prompt_library', `bulk operation - no prompts found`)
     }
@@ -400,24 +324,8 @@ export async function getModerationStats(): Promise<ActionState<{
       throw ErrorFactories.authzAdminRequired("view moderation statistics")
     }
 
-    const query = `
-      SELECT
-        COUNT(*) FILTER (WHERE moderation_status = 'pending') as pending,
-        COUNT(*) FILTER (WHERE moderation_status = 'approved') as approved,
-        COUNT(*) FILTER (WHERE moderation_status = 'rejected') as rejected,
-        COUNT(*) FILTER (WHERE moderated_at >= CURRENT_DATE) as total_today
-      FROM prompt_library
-      WHERE visibility = 'public' AND deleted_at IS NULL
-    `
-
-    const result = await executeSQL(query, [])
-    const rawStats = result[0] as Record<string, unknown>
-    const stats = {
-      pending: Number(rawStats.pending || 0),
-      approved: Number(rawStats.approved || 0),
-      rejected: Number(rawStats.rejected || 0),
-      totalToday: Number(rawStats.total_today || 0)
-    }
+    // Get stats via Drizzle
+    const stats = await drizzleGetModerationStats()
 
     timer({ status: "success" })
     log.info("Stats fetched successfully", stats)

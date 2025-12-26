@@ -561,6 +561,9 @@ export {
   updatePrompt,
   deletePrompt,
   moderatePrompt,
+  getModerationQueue,
+  bulkModeratePrompts,
+  getModerationStats,
   incrementViewCount,
   incrementUseCount,
   // Tag operations
