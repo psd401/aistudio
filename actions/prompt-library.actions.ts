@@ -7,7 +7,9 @@ import { SqlParameter } from "@aws-sdk/client-rds-data"
 import {
   createPrompt as drizzleCreatePrompt,
   setPromptTags,
-  getTagsForPrompt
+  getTagsForPrompt,
+  getPromptById,
+  incrementViewCount
 } from "@/lib/db/drizzle"
 import { type ActionState } from "@/types/actions-types"
 import {
@@ -181,76 +183,37 @@ export async function getPrompt(id: string): Promise<ActionState<Prompt>> {
     }
 
     // Increment view count
-    await executeSQL(
-      `UPDATE prompt_library SET view_count = view_count + 1 WHERE id = :id::uuid`,
-      [{ name: "id", value: { stringValue: id } }]
-    )
+    await incrementViewCount(id)
     log.debug("View count incremented", { promptId: id })
 
-    // Fetch prompt data (explicitly select fields like listPrompts does)
-    const promptResults = await executeSQL<Omit<Prompt, 'tags'>>(
-      `SELECT
-        p.id,
-        p.user_id,
-        p.title,
-        p.content,
-        p.description,
-        p.visibility,
-        p.moderation_status,
-        p.moderated_by,
-        p.moderated_at,
-        p.moderation_notes,
-        p.source_message_id,
-        p.source_conversation_id,
-        p.view_count,
-        p.use_count,
-        p.created_at,
-        p.updated_at,
-        p.deleted_at,
-        CONCAT(u.first_name, ' ', u.last_name) as owner_name
-       FROM prompt_library p
-       LEFT JOIN users u ON p.user_id = u.id
-       WHERE p.id = :id::uuid AND p.deleted_at IS NULL`,
-      [{ name: "id", value: { stringValue: id } }]
-    )
+    // Fetch prompt with owner name and tags via Drizzle
+    const result = await getPromptById(id)
 
-    if (promptResults.length === 0) {
+    if (!result) {
       throw ErrorFactories.dbRecordNotFound("prompt_library", id)
     }
 
-    // Fetch tags separately to ensure simple JavaScript array
-    const tagResults = await executeSQL<{ name: string }>(
-      `SELECT t.name
-       FROM prompt_library_tags plt
-       JOIN prompt_tags t ON plt.tag_id = t.id
-       WHERE plt.prompt_id = :id::uuid`,
-      [{ name: "id", value: { stringValue: id } }]
-    )
-
-    // Transform and combine results with explicit type handling
-    const transformedPrompt = transformSnakeToCamel<Omit<Prompt, 'tags'>>(promptResults[0])
-
+    // Convert dates to strings for Prompt type
     const prompt: Prompt = {
-      ...transformedPrompt,
-      tags: tagResults.map(t => t.name), // Simple JavaScript array
-      // Explicitly ensure all dates are strings for Next.js serialization
-      createdAt: String(transformedPrompt.createdAt || ''),
-      updatedAt: String(transformedPrompt.updatedAt || ''),
-      moderatedAt: transformedPrompt.moderatedAt ? String(transformedPrompt.moderatedAt) : null,
-      deletedAt: transformedPrompt.deletedAt ? String(transformedPrompt.deletedAt) : null,
-    }
-
-    // Verify serialization before returning
-    try {
-      JSON.stringify(prompt)
-      log.info("Prompt serialization verified", { promptId: id })
-    } catch (serializationError) {
-      log.error("Prompt serialization failed", {
-        error: serializationError,
-        promptKeys: Object.keys(prompt),
-        promptTypes: Object.entries(prompt).map(([k, v]) => `${k}: ${typeof v}`)
-      })
-      throw ErrorFactories.sysInternalError("Failed to serialize prompt data for Next.js")
+      id: result.id,
+      userId: result.userId,
+      title: result.title,
+      content: result.content,
+      description: result.description,
+      visibility: result.visibility as 'public' | 'private',
+      moderationStatus: result.moderationStatus as 'pending' | 'approved' | 'rejected',
+      moderatedBy: result.moderatedBy,
+      moderatedAt: result.moderatedAt?.toISOString() ?? null,
+      moderationNotes: result.moderationNotes,
+      sourceMessageId: result.sourceMessageId,
+      sourceConversationId: result.sourceConversationId,
+      viewCount: result.viewCount,
+      useCount: result.useCount,
+      createdAt: result.createdAt.toISOString(),
+      updatedAt: result.updatedAt.toISOString(),
+      deletedAt: result.deletedAt?.toISOString() ?? null,
+      tags: result.tags,
+      ownerName: result.ownerName ?? undefined
     }
 
     timer({ status: "success" })
