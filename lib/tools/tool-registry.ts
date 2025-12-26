@@ -1,5 +1,5 @@
 import type { ToolSet } from 'ai'
-import { executeSQL } from '@/lib/db/data-api-adapter'
+import { getAIModelByModelId } from '@/lib/db/drizzle'
 
 // Note: Logger removed to avoid browser compatibility issues when imported client-side
 
@@ -93,30 +93,23 @@ export async function getModelCapabilities(modelId: string): Promise<ModelCapabi
     if (!modelId || typeof modelId !== 'string' || !/^[\w.\-]+$/.test(modelId)) {
       return null
     }
-    
-    const result = await executeSQL(
-      `SELECT nexus_capabilities 
-       FROM ai_models 
-       WHERE model_id = :modelId 
-       AND active = true 
-       LIMIT 1`,
-      [{ name: 'modelId', value: { stringValue: modelId } }]
-    )
-    
-    if (result.length === 0) {
+
+    const model = await getAIModelByModelId(modelId)
+
+    if (!model || !model.active) {
       return null
     }
-    
-    const capabilities = result[0].nexusCapabilities || result[0].nexus_capabilities
-    
+
+    const capabilities = model.nexusCapabilities
+
     // JSONB fields should come back as objects, but handle string case too
     if (typeof capabilities === 'string') {
       return JSON.parse(capabilities) as ModelCapabilities
     }
-    
+
     return capabilities as unknown as ModelCapabilities
   } catch {
-    // Return null on error - error details available through proper logging 
+    // Return null on error - error details available through proper logging
     // in calling functions (server actions, API routes) that have access to logger
     return null
   }
