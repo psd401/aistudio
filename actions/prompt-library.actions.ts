@@ -11,7 +11,8 @@ import {
   getPromptById,
   incrementViewCount,
   listPrompts as drizzleListPrompts,
-  updatePrompt as drizzleUpdatePrompt
+  updatePrompt as drizzleUpdatePrompt,
+  deletePrompt as drizzleDeletePrompt
 } from "@/lib/db/drizzle"
 import { type ActionState } from "@/types/actions-types"
 import {
@@ -443,13 +444,12 @@ export async function deletePrompt(id: string): Promise<ActionState<void>> {
       throw ErrorFactories.authzOwnerRequired("delete this prompt")
     }
 
-    // Soft delete
-    await executeSQL(
-      `UPDATE prompt_library
-       SET deleted_at = CURRENT_TIMESTAMP
-       WHERE id = :id::uuid AND deleted_at IS NULL`,
-      [{ name: "id", value: { stringValue: id } }]
-    )
+    // Soft delete via Drizzle
+    const deleted = await drizzleDeletePrompt(id)
+
+    if (!deleted) {
+      throw ErrorFactories.dbRecordNotFound("prompt_library", id)
+    }
 
     timer({ status: "success" })
     log.info("Prompt deleted successfully", { promptId: id })
