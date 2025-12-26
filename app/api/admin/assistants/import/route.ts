@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from "next/server"
 import { requireAdmin } from "@/lib/auth/admin-check"
 import { getServerSession } from "@/lib/auth/server-session"
-import { executeSQL } from "@/lib/db/data-api-adapter"
+import {
+  getUserIdByCognitoSubAsNumber,
+  createAssistantArchitect,
+  createChainPrompt,
+  createToolInputField,
+} from "@/lib/db/drizzle"
 import { validateImportFile, mapModelsForImport, type ExportFormat } from "@/lib/assistant-export-import"
-// UUID import removed - using auto-increment IDs
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 
 export async function POST(request: NextRequest) {
@@ -75,19 +79,14 @@ export async function POST(request: NextRequest) {
     log.info("Starting import", { assistantCount: importData.assistants.length })
 
     // Get user ID from Cognito sub
-    const userResult = await executeSQL(
-      "SELECT id FROM users WHERE cognito_sub = :sub LIMIT 1",
-      [{ name: 'sub', value: { stringValue: session.sub } }]
-    )
+    const userId = await getUserIdByCognitoSubAsNumber(session.sub)
 
-    if (!userResult || userResult.length === 0) {
+    if (!userId) {
       return NextResponse.json(
         { isSuccess: false, message: "User not found" },
         { status: 404 }
       )
     }
-
-    const userId = userResult[0].id // This is now an integer
 
     // Collect all unique model names for mapping
     const modelNames = new Set<string>()
@@ -105,29 +104,20 @@ export async function POST(request: NextRequest) {
     // Import each assistant
     for (const assistant of importData.assistants) {
       try {
-        // Insert assistant and get the generated ID
-        const assistantResult = await executeSQL(`
-          INSERT INTO assistant_architects (
-            name, description, status, image_path, 
-            is_parallel, timeout_seconds, user_id, created_at, updated_at
-          ) VALUES (
-            :name, :description, :status::tool_status, :imagePath,
-            :isParallel, :timeoutSeconds, :userId, NOW(), NOW()
-          )
-          RETURNING id
-        `, [
-          { name: 'name', value: { stringValue: assistant.name } },
-          { name: 'description', value: { stringValue: assistant.description || '' } },
-          { name: 'status', value: { stringValue: 'pending_approval' } }, // Always import as pending
-          { name: 'imagePath', value: assistant.image_path ? { stringValue: assistant.image_path } : { isNull: true } },
-          { name: 'isParallel', value: { booleanValue: assistant.is_parallel || false } },
-          { name: 'timeoutSeconds', value: assistant.timeout_seconds ? { longValue: assistant.timeout_seconds } : { isNull: true } },
-          { name: 'userId', value: { longValue: Number(userId) } }
-        ])
+        // Create assistant and get the generated ID
+        const createdAssistant = await createAssistantArchitect({
+          name: assistant.name,
+          description: assistant.description || '',
+          status: 'pending_approval', // Always import as pending
+          imagePath: assistant.image_path,
+          isParallel: assistant.is_parallel || false,
+          timeoutSeconds: assistant.timeout_seconds,
+          userId,
+        })
 
-        const assistantId = assistantResult[0].id
+        const assistantId = createdAssistant.id
 
-        // Insert prompts
+        // Create prompts
         for (const prompt of assistant.prompts) {
           const modelId = modelMap.get(prompt.model_name)
 
@@ -136,47 +126,29 @@ export async function POST(request: NextRequest) {
             continue
           }
 
-          await executeSQL(`
-            INSERT INTO chain_prompts (
-              assistant_architect_id, name, content, system_context, model_id,
-              position, parallel_group, input_mapping, timeout_seconds,
-              created_at, updated_at
-            ) VALUES (
-              :assistantId, :name, :content, :systemContext, :modelId,
-              :position, :parallelGroup, :inputMapping::jsonb, :timeoutSeconds,
-              NOW(), NOW()
-            )
-          `, [
-            { name: 'assistantId', value: { longValue: Number(assistantId) } },
-            { name: 'name', value: { stringValue: prompt.name } },
-            { name: 'content', value: { stringValue: prompt.content } },
-            { name: 'systemContext', value: prompt.system_context ? { stringValue: prompt.system_context } : { isNull: true } },
-            { name: 'modelId', value: { longValue: modelId } },
-            { name: 'position', value: { longValue: prompt.position } },
-            { name: 'parallelGroup', value: prompt.parallel_group ? { longValue: prompt.parallel_group } : { isNull: true } },
-            { name: 'inputMapping', value: prompt.input_mapping ? { stringValue: JSON.stringify(prompt.input_mapping) } : { stringValue: '{}' } },
-            { name: 'timeoutSeconds', value: prompt.timeout_seconds ? { longValue: prompt.timeout_seconds } : { isNull: true } }
-          ])
+          await createChainPrompt({
+            assistantArchitectId: assistantId,
+            name: prompt.name,
+            content: prompt.content,
+            systemContext: prompt.system_context,
+            modelId,
+            position: prompt.position,
+            parallelGroup: prompt.parallel_group,
+            inputMapping: prompt.input_mapping as Record<string, string> || null,
+            timeoutSeconds: prompt.timeout_seconds,
+          })
         }
 
-        // Insert input fields
+        // Create input fields
         for (const field of assistant.input_fields) {
-          await executeSQL(`
-            INSERT INTO tool_input_fields (
-              assistant_architect_id, name, label, field_type, position, options,
-              created_at, updated_at
-            ) VALUES (
-              :assistantId, :name, :label, :fieldType::field_type, 
-              :position, :options::jsonb, NOW(), NOW()
-            )
-          `, [
-            { name: 'assistantId', value: { longValue: Number(assistantId) } },
-            { name: 'name', value: { stringValue: field.name } },
-            { name: 'label', value: { stringValue: field.label } },
-            { name: 'fieldType', value: { stringValue: field.field_type } },
-            { name: 'position', value: { longValue: field.position } },
-            { name: 'options', value: field.options ? { stringValue: JSON.stringify(field.options) } : { stringValue: '{}' } }
-          ])
+          await createToolInputField({
+            assistantArchitectId: assistantId,
+            name: field.name,
+            label: field.label,
+            fieldType: field.field_type as "short_text" | "long_text" | "select" | "multi_select" | "file_upload",
+            position: field.position,
+            options: field.options || undefined,
+          })
         }
 
         importResults.push({
