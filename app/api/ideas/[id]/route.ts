@@ -1,9 +1,11 @@
 import { NextResponse, NextRequest } from 'next/server';
 import { getServerSession } from '@/lib/auth/server-session';
-import { executeSQL, executeTransaction } from '@/lib/db/data-api-adapter';
+import { executeSQL } from '@/lib/db/data-api-adapter';
+import { executeTransaction as drizzleTransaction, ideas, ideaVotes, ideaNotes } from '@/lib/db/drizzle-client';
 import { hasRole } from '@/utils/roles';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { SqlParameter } from '@aws-sdk/client-rds-data';
+import { eq } from 'drizzle-orm';
 export async function PATCH(
   request: NextRequest,
   context: { params: Promise<{ id: string }> }
@@ -108,25 +110,24 @@ export async function DELETE(
     const resolvedParams = await context.params;
     const { id } = resolvedParams;
     const ideaId = Number.parseInt(id);
-    
-    // Use transaction to ensure atomic deletion
-    const deleteStatements = [
-      {
-        sql: 'DELETE FROM idea_votes WHERE idea_id = :ideaId',
-        parameters: [{ name: 'ideaId', value: { longValue: ideaId } }]
+
+    // Use Drizzle transaction to ensure atomic deletion
+    await drizzleTransaction(
+      async (tx) => {
+        // Delete votes first (FK constraint)
+        await tx.delete(ideaVotes).where(eq(ideaVotes.ideaId, ideaId));
+
+        // Delete notes (FK constraint)
+        await tx.delete(ideaNotes).where(eq(ideaNotes.ideaId, ideaId));
+
+        // Finally delete the idea itself
+        await tx.delete(ideas).where(eq(ideas.id, ideaId));
+
+        return true;
       },
-      {
-        sql: 'DELETE FROM idea_notes WHERE idea_id = :ideaId',
-        parameters: [{ name: 'ideaId', value: { longValue: ideaId } }]
-      },
-      {
-        sql: 'DELETE FROM ideas WHERE id = :ideaId',
-        parameters: [{ name: 'ideaId', value: { longValue: ideaId } }]
-      }
-    ];
-    
-    await executeTransaction(deleteStatements);
-    
+      'deleteIdea'
+    );
+
     timer({ status: "success" });
     return new NextResponse(null, { status: 204 });
   } catch (error) {

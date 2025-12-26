@@ -1,7 +1,8 @@
 "use server"
 
 import { getServerSession } from "@/lib/auth/server-session"
-import { executeSQL, executeTransaction } from "@/lib/db/data-api-adapter"
+import { executeSQL } from "@/lib/db/data-api-adapter"
+import { executeTransaction as drizzleTransaction, promptUsageEvents, promptLibrary } from "@/lib/db/drizzle-client"
 import { transformSnakeToCamel } from "@/lib/db/field-mapper"
 import { type ActionState } from "@/types/actions-types"
 import {
@@ -25,6 +26,7 @@ import {
   type ModeratePromptInput
 } from "@/lib/prompt-library/validation"
 import type { PromptUsageEvent } from "@/lib/prompt-library/types"
+import { eq, sql } from "drizzle-orm"
 
 /**
  * Track prompt usage (creates a conversation from a prompt)
@@ -96,26 +98,28 @@ export async function usePrompt(
 
     const conversationId = conversationResults[0].id
 
-    // Track usage event and increment counter as batch transaction
+    // Track usage event and increment counter as Drizzle transaction
     // These are less critical and grouped together for atomicity
-    await executeTransaction([
-      {
-        sql: `INSERT INTO prompt_usage_events
-              (prompt_id, user_id, event_type, conversation_id)
-              VALUES (:promptId, :userId, 'use', :conversationId)`,
-        parameters: [
-          { name: "promptId", value: { stringValue: promptId } },
-          { name: "userId", value: { longValue: userId } },
-          { name: "conversationId", value: { stringValue: conversationId } }
-        ]
+    await drizzleTransaction(
+      async (tx) => {
+        // Insert usage event
+        await tx.insert(promptUsageEvents).values({
+          promptId,
+          userId,
+          eventType: 'use',
+          conversationId,
+        });
+
+        // Increment use count
+        await tx
+          .update(promptLibrary)
+          .set({ useCount: sql`${promptLibrary.useCount} + 1` })
+          .where(eq(promptLibrary.id, promptId));
+
+        return true;
       },
-      {
-        sql: `UPDATE prompt_library
-              SET use_count = use_count + 1
-              WHERE id = :promptId`,
-        parameters: [{ name: "promptId", value: { stringValue: promptId } }]
-      }
-    ])
+      'trackPromptUsage'
+    )
 
     timer({ status: "success" })
     log.info("Prompt used successfully", { promptId, conversationId })

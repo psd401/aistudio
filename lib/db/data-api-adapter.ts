@@ -13,7 +13,6 @@ import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { snakeToCamel } from "./field-mapper";
 import type { SelectNavigationItem } from '@/types/db-types';
 import { executeWithRetry } from "./rds-error-handler";
-import { ErrorFactories } from '@/lib/error-utils';
 
 // Type aliases for cleaner code
 type DataApiResponse = ExecuteStatementCommandOutput;
@@ -707,33 +706,10 @@ export async function getRoleByName(roleName: string) {
 }
 
 export async function updateUserRole(userId: number, newRoleName: string) {
-  const [role] = await getRoleByName(newRoleName);
-  if (!role) {
-    throw new Error(`Role '${newRoleName}' not found`);
-  }
-  
-  // Start a transaction to update user roles and increment role_version
-  const statements = [
-    {
-      sql: 'DELETE FROM user_roles WHERE user_id = :userId',
-      parameters: [createParameter('userId', userId)]
-    },
-    {
-      sql: 'INSERT INTO user_roles (user_id, role_id) VALUES (:userId, :roleId)',
-      parameters: [
-        createParameter('userId', userId),
-        createParameter('roleId', Number(role.id))
-      ]
-    },
-    {
-      // Increment role_version to invalidate cached sessions
-      sql: 'UPDATE users SET role_version = COALESCE(role_version, 0) + 1, updated_at = NOW() WHERE id = :userId',
-      parameters: [createParameter('userId', userId)]
-    }
-  ];
-  
-  await executeTransaction(statements);
-  return { success: true };
+  // Delegate to the Drizzle-based user-roles module
+  // This function is kept for backwards compatibility
+  const { updateUserRoles } = await import('./user-roles');
+  return updateUserRoles(userId, [newRoleName]);
 }
 
 export async function getRoles() {
@@ -961,190 +937,138 @@ export async function getModelReferenceCounts(modelId: number) {
 /**
  * Replace all references to a model with another model
  * This is done in a transaction to ensure atomicity
+ *
+ * Converted to Drizzle ORM transactions as part of Epic #526, Issue #538
  */
 export async function replaceModelReferences(
-  targetModelId: number, 
+  targetModelId: number,
   replacementModelId: number,
   userId: number
 ) {
   const requestId = generateRequestId();
   const timer = startTimer("replaceModelReferences");
   const log = createLogger({ requestId, operation: "replaceModelReferences" });
-  
-  log.info("Starting model replacement", { 
-    targetModelId, 
-    replacementModelId, 
-    userId 
+
+  log.info("Starting model replacement", {
+    targetModelId,
+    replacementModelId,
+    userId,
   });
-  
+
+  // Import Drizzle dependencies
+  const { executeQuery, executeTransaction: drizzleTransaction, aiModels, chainPrompts, nexusMessages, nexusConversations, modelComparisons } = await import('./drizzle-client');
+  const { eq, sql: drizzleSql } = await import('drizzle-orm');
+
   try {
     // First, get model names and counts outside the transaction
-    const modelNamesSql = `
-      SELECT 
-        (SELECT name FROM ai_models WHERE id = :targetId) as target_name,
-        (SELECT name FROM ai_models WHERE id = :replacementId) as replacement_name
-    `;
-    
-    const modelNamesParams = [
-      { name: 'targetId', value: { longValue: targetModelId } },
-      { name: 'replacementId', value: { longValue: replacementModelId } }
-    ];
-    
-    const modelNames = await executeSQL(modelNamesSql, modelNamesParams, requestId);
-    const { targetName, replacementName } = modelNames[0] || {};
-    
-    if (!targetName || !replacementName) {
+    const modelNamesResult = await executeQuery(
+      async (db) => {
+        return db
+          .select({ id: aiModels.id, name: aiModels.name, modelId: aiModels.modelId })
+          .from(aiModels)
+          .where(drizzleSql`${aiModels.id} IN (${targetModelId}, ${replacementModelId})`);
+      },
+      'getModelNames'
+    );
+
+    const targetModel = modelNamesResult.find(m => m.id === targetModelId);
+    const replacementModel = modelNamesResult.find(m => m.id === replacementModelId);
+
+    if (!targetModel || !replacementModel) {
       log.error("Invalid model IDs provided", { targetModelId, replacementModelId });
       throw new Error("Invalid model IDs provided");
     }
-    
+
     // Get current counts for audit
     const counts = await getModelReferenceCounts(targetModelId);
-    
-    // Prepare all statements for the transaction
-    const statements = [];
-    
-    // Update chain_prompts
-    if (Number(counts.chainPromptsCount) > 0) {
-      statements.push({
-        sql: `UPDATE chain_prompts SET model_id = :replacementId, updated_at = NOW() WHERE model_id = :targetId`,
-        parameters: [
-          { name: 'replacementId', value: { longValue: replacementModelId } },
-          { name: 'targetId', value: { longValue: targetModelId } }
-        ]
-      });
-    }
-    
-    // Update nexus_messages (model_id FK)
-    if (Number(counts.nexusMessagesCount) > 0) {
-      statements.push({
-        sql: `UPDATE nexus_messages SET model_id = :replacementId, updated_at = NOW() WHERE model_id = :targetId`,
-        parameters: [
-          { name: 'replacementId', value: { longValue: replacementModelId } },
-          { name: 'targetId', value: { longValue: targetModelId } }
-        ]
-      });
-    }
 
-    // Update nexus_conversations (model_used varchar - requires join with ai_models to get model_id string)
-    if (Number(counts.nexusConversationsCount) > 0) {
-      // Get the model_id strings for both target and replacement
-      const modelIdsSql = `
-        SELECT
-          (SELECT model_id FROM ai_models WHERE id = :targetId) as target_model_id,
-          (SELECT model_id FROM ai_models WHERE id = :replacementId) as replacement_model_id
-      `;
-      const modelIdsParams = [
-        { name: 'targetId', value: { longValue: targetModelId } },
-        { name: 'replacementId', value: { longValue: replacementModelId } }
-      ];
-      // Execute lookup query and validate result
-      const modelIdResult = await executeSQL(modelIdsSql, modelIdsParams, requestId);
+    // Execute Drizzle transaction for atomic model replacement
+    await drizzleTransaction(
+      async (tx) => {
+        // Update chain_prompts
+        if (Number(counts.chainPromptsCount) > 0) {
+          await tx
+            .update(chainPrompts)
+            .set({ modelId: replacementModelId, updatedAt: new Date() })
+            .where(eq(chainPrompts.modelId, targetModelId));
+        }
 
-      // Check if query returned any rows
-      if (!modelIdResult || modelIdResult.length === 0) {
-        log.error("Model ID lookup failed - no results returned", { targetModelId, replacementModelId });
-        throw ErrorFactories.dbRecordNotFound("ai_models", targetModelId);
-      }
+        // Update nexus_messages (model_id FK)
+        if (Number(counts.nexusMessagesCount) > 0) {
+          await tx
+            .update(nexusMessages)
+            .set({ modelId: replacementModelId, updatedAt: new Date() })
+            .where(eq(nexusMessages.modelId, targetModelId));
+        }
 
-      // Extract model_id strings (executeSQL auto-transforms snake_case to camelCase)
-      const { targetModelId: targetModelIdStr, replacementModelId: replacementModelIdStr } = modelIdResult[0];
+        // Update nexus_conversations (model_used varchar - uses model_id string not integer id)
+        if (Number(counts.nexusConversationsCount) > 0) {
+          await tx
+            .update(nexusConversations)
+            .set({ modelUsed: replacementModel.modelId, updatedAt: new Date() })
+            .where(eq(nexusConversations.modelUsed, targetModel.modelId));
+        }
 
-      // Validate that both values are non-null
-      if (!targetModelIdStr || !replacementModelIdStr) {
-        log.error("Model ID lookup returned null values", {
-          targetModelId,
-          replacementModelId,
-          targetModelIdStr,
-          replacementModelIdStr
-        });
-        throw ErrorFactories.dbRecordNotFound("ai_models", !targetModelIdStr ? targetModelId : replacementModelId);
-      }
+        // Note: tool_executions do NOT need direct updating because:
+        // - tool_executions only stores: assistant_architect_id (FK), user_id, status, timestamps
+        // - tool_executions does NOT store model_id directly
+        // - The model relationship is: tool_executions → assistant_architects → chain_prompts → model_id
+        // - Updating chain_prompts.model_id (above) changes which model the assistant uses
+        // - tool_executions.assistant_architect_id FK remains unchanged (still points to same assistant)
+        // - Therefore, no UPDATE needed for tool_executions table itself
 
-      statements.push({
-        sql: `UPDATE nexus_conversations SET model_used = :replacementModelId, updated_at = NOW() WHERE model_used = :targetModelId`,
-        parameters: [
-          { name: 'replacementModelId', value: { stringValue: String(replacementModelIdStr) } },
-          { name: 'targetModelId', value: { stringValue: String(targetModelIdStr) } }
-        ]
-      });
-    }
+        // Update model_comparisons (both model1_id and model2_id)
+        if (Number(counts.modelComparisonsCount) > 0) {
+          await tx
+            .update(modelComparisons)
+            .set({ model1Id: replacementModelId, updatedAt: new Date() })
+            .where(eq(modelComparisons.model1Id, targetModelId));
 
-    // Note: tool_executions do NOT need direct updating because:
-    // - tool_executions only stores: assistant_architect_id (FK), user_id, status, timestamps
-    // - tool_executions does NOT store model_id directly
-    // - The model relationship is: tool_executions → assistant_architects → chain_prompts → model_id
-    // - Updating chain_prompts.model_id (above) changes which model the assistant uses
-    // - tool_executions.assistant_architect_id FK remains unchanged (still points to same assistant)
-    // - Therefore, no UPDATE needed for tool_executions table itself
-    
-    // Update model_comparisons (both model1_id and model2_id)
-    if (Number(counts.modelComparisonsCount) > 0) {
-      statements.push({
-        sql: `UPDATE model_comparisons SET model1_id = :replacementId, updated_at = NOW() WHERE model1_id = :targetId`,
-        parameters: [
-          { name: 'replacementId', value: { longValue: replacementModelId } },
-          { name: 'targetId', value: { longValue: targetModelId } }
-        ]
-      });
-      
-      statements.push({
-        sql: `UPDATE model_comparisons SET model2_id = :replacementId, updated_at = NOW() WHERE model2_id = :targetId`,
-        parameters: [
-          { name: 'replacementId', value: { longValue: replacementModelId } },
-          { name: 'targetId', value: { longValue: targetModelId } }
-        ]
-      });
-    }
-    
-    // Record in audit table (if it exists - may not be created yet)
-    // For now, we'll skip the audit logging until the table schema is updated
-    // TODO: Update model_replacement_audit table schema to include new columns:
-    // - nexus_messages_updated
-    // - nexus_conversations_updated
-    // - tool_executions_updated
-    
-    // Delete the original model
-    statements.push({
-      sql: `DELETE FROM ai_models WHERE id = :targetId`,
-      parameters: [{ name: 'targetId', value: { longValue: targetModelId } }]
-    });
-    
-    // Execute all statements in a transaction
-    await executeTransaction(statements);
-    
+          await tx
+            .update(modelComparisons)
+            .set({ model2Id: replacementModelId, updatedAt: new Date() })
+            .where(eq(modelComparisons.model2Id, targetModelId));
+        }
+
+        // Delete the original model
+        await tx.delete(aiModels).where(eq(aiModels.id, targetModelId));
+
+        return true;
+      },
+      'replaceModelReferences'
+    );
+
     const result = {
       success: true,
-      targetModel: { id: targetModelId, name: targetName },
-      replacementModel: { id: replacementModelId, name: replacementName },
+      targetModel: { id: targetModelId, name: targetModel.name },
+      replacementModel: { id: replacementModelId, name: replacementModel.name },
       recordsUpdated: {
         chainPrompts: Number(counts.chainPromptsCount || 0),
         nexusMessages: Number(counts.nexusMessagesCount || 0),
         nexusConversations: Number(counts.nexusConversationsCount || 0),
         toolExecutions: Number(counts.toolExecutionsCount || 0),
-        modelComparisons: Number(counts.modelComparisonsCount || 0)
+        modelComparisons: Number(counts.modelComparisonsCount || 0),
       },
       totalUpdated:
         Number(counts.chainPromptsCount || 0) +
         Number(counts.nexusMessagesCount || 0) +
         Number(counts.nexusConversationsCount || 0) +
         Number(counts.toolExecutionsCount || 0) +
-        Number(counts.modelComparisonsCount || 0)
+        Number(counts.modelComparisonsCount || 0),
     };
-    
+
     log.info("Model replacement completed successfully", result);
     timer({ status: "success", recordsUpdated: result.totalUpdated });
-    
+
     return result;
-    
   } catch (error) {
-    log.error("Model replacement failed", { 
+    log.error("Model replacement failed", {
       error: error instanceof Error ? error.message : String(error),
       targetModelId,
-      replacementModelId 
+      replacementModelId,
     });
     timer({ status: "error" });
-    
+
     throw error;
   }
 }
