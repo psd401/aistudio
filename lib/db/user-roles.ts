@@ -72,6 +72,15 @@ export async function updateUserRoles(userId: number, roleNames: string[]): Prom
   log.info("Updating user roles", { userId, roleNames });
 
   try {
+    // Validate no duplicate role names to provide clear error message
+    // (unique constraint would fail inside transaction with less clear error)
+    const uniqueRoleNames = new Set(roleNames);
+    if (uniqueRoleNames.size !== roleNames.length) {
+      const duplicates = roleNames.filter((name, index) => roleNames.indexOf(name) !== index);
+      log.error("Duplicate role names provided", { duplicates });
+      throw new Error(`Duplicate role names: ${[...new Set(duplicates)].join(', ')}`);
+    }
+
     // Get role IDs for the role names
     // NOTE: This is a separate query outside the transaction. There's a potential
     // race condition if roles are deleted between this lookup and the transaction below.
