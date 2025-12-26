@@ -201,6 +201,7 @@ export {
   type GenericJobStatus,
   type GenericJob,
   type CreateGenericJobData,
+  type UpdateGenericJobData,
   // Query operations
   getGenericJobById,
   getGenericJobByIdForUser,
@@ -208,6 +209,7 @@ export {
   // CRUD operations
   createGenericJob,
   updateGenericJobStatus,
+  updateGenericJob,
   deleteGenericJob,
 } from "./jobs";
 

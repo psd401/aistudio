@@ -41,6 +41,14 @@ export interface CreateGenericJobData {
   error?: string;
 }
 
+export interface UpdateGenericJobData {
+  status?: GenericJobStatus;
+  type?: string;
+  input?: string;
+  output?: string | null;
+  error?: string | null;
+}
+
 // ============================================
 // Job Query Operations
 // ============================================
@@ -160,6 +168,41 @@ export async function updateGenericJobStatus(
         .where(eq(jobs.id, jobId))
         .returning(),
     "updateGenericJobStatus"
+  );
+
+  return result[0] || null;
+}
+
+/**
+ * Update job with flexible field updates
+ * Supports updating any combination of status, type, input, output, error
+ */
+export async function updateGenericJob(
+  jobId: number,
+  data: UpdateGenericJobData
+): Promise<GenericJob | null> {
+  // Filter out undefined values to only update provided fields
+  const updates: Record<string, unknown> = {};
+
+  if (data.status !== undefined) updates.status = data.status;
+  if (data.type !== undefined) updates.type = data.type;
+  if (data.input !== undefined) updates.input = data.input;
+  if (data.output !== undefined) updates.output = data.output;
+  if (data.error !== undefined) updates.error = data.error;
+
+  // Return early if no updates provided
+  if (Object.keys(updates).length === 0) {
+    return getGenericJobById(jobId);
+  }
+
+  const result = await executeQuery(
+    (db) =>
+      db
+        .update(jobs)
+        .set(updates)
+        .where(eq(jobs.id, jobId))
+        .returning(),
+    "updateGenericJob"
   );
 
   return result[0] || null;
