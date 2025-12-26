@@ -463,6 +463,7 @@ export {
   getRepositoriesByOwnerId,
   getPublicRepositories,
   getAllRepositoriesWithOwner,
+  getUserAccessibleRepositories,
   getAccessibleRepositoryIds,
   getAccessibleRepositoriesByCognitoSub,
   // Repository CRUD operations
@@ -474,6 +475,7 @@ export {
   grantRoleAccess,
   revokeUserAccess,
   revokeRoleAccess,
+  revokeAccessById,
   getRepositoryAccessList,
   // Repository item operations
   getRepositoryItems,
