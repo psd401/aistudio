@@ -208,6 +208,44 @@ export async function getPublicRepositories(): Promise<
 }
 
 /**
+ * Get all repositories with owner information and item count (admin function)
+ * Returns all repositories with owner email and count of items
+ */
+export async function getAllRepositoriesWithOwner(): Promise<
+  Array<
+    SelectKnowledgeRepository & {
+      ownerEmail: string | null;
+      itemCount: number;
+    }
+  >
+> {
+  const { sql } = await import("drizzle-orm");
+
+  const result = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: knowledgeRepositories.id,
+          name: knowledgeRepositories.name,
+          description: knowledgeRepositories.description,
+          ownerId: knowledgeRepositories.ownerId,
+          isPublic: knowledgeRepositories.isPublic,
+          metadata: knowledgeRepositories.metadata,
+          createdAt: knowledgeRepositories.createdAt,
+          updatedAt: knowledgeRepositories.updatedAt,
+          ownerEmail: users.email,
+          itemCount: sql<number>`(SELECT COUNT(*) FROM ${repositoryItems} WHERE ${repositoryItems.repositoryId} = ${knowledgeRepositories.id})`,
+        })
+        .from(knowledgeRepositories)
+        .leftJoin(users, eq(knowledgeRepositories.ownerId, users.id))
+        .orderBy(desc(knowledgeRepositories.createdAt)),
+    "getAllRepositoriesWithOwner"
+  );
+
+  return result;
+}
+
+/**
  * Check if user has access to specified repository IDs
  * Returns only the IDs that the user can access
  *
