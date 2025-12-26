@@ -193,6 +193,25 @@ export {
 } from "./assistant-architect-events";
 
 // ============================================
+// Generic Jobs Operations (PDF processing, etc.)
+// ============================================
+
+export {
+  // Types
+  type GenericJobStatus,
+  type GenericJob,
+  type CreateGenericJobData,
+  // Query operations
+  getGenericJobById,
+  getGenericJobByIdForUser,
+  getGenericJobsByUserId,
+  // CRUD operations
+  createGenericJob,
+  updateGenericJobStatus,
+  deleteGenericJob,
+} from "./jobs";
+
+// ============================================
 // AI Model Operations
 // ============================================
 

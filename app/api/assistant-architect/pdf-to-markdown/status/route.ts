@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getServerSession } from '@/lib/auth/server-session'
-import { executeSQL } from '@/lib/db/data-api-adapter'
+import { getGenericJobById, getGenericJobByIdForUser } from '@/lib/db/drizzle'
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action'
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 
@@ -42,24 +42,22 @@ export async function GET(req: NextRequest) {
   log.debug("Checking job status", { userId: currentUser.data.user.id, jobId });
 
   try {
-    const jobResult = await executeSQL(`
-      SELECT id, user_id, type, status, input, output, error, created_at, updated_at
-      FROM jobs
-      WHERE id = :jobId AND user_id = :userId
-    `, [
-      { name: 'jobId', value: { longValue: Number.parseInt(jobId, 10) } },
-      { name: 'userId', value: { longValue: currentUser.data.user.id } }
-    ]);
+    const jobIdNum = Number.parseInt(jobId, 10);
+    if (Number.isNaN(jobIdNum)) {
+      log.warn("Invalid job ID format", { jobId });
+      timer({ status: "error", reason: "invalid_job_id" });
+      return new NextResponse(JSON.stringify({ error: 'Invalid job ID' }), { status: 400, headers });
+    }
 
-    const job = jobResult[0];
+    const job = await getGenericJobByIdForUser(jobIdNum, currentUser.data.user.id);
 
     if (!job) {
       // To handle potential replication lag, we can check if the job exists at all
-      const anyJobResult = await executeSQL('SELECT status FROM jobs WHERE id = :jobId', [{ name: 'jobId', value: { longValue: Number.parseInt(jobId, 10) } }]);
-      if (anyJobResult[0]) {
-        log.info("Job found with replication lag", { jobId, status: anyJobResult[0].status });
-        timer({ status: "success", jobStatus: anyJobResult[0].status });
-        return new NextResponse(JSON.stringify({ jobId, status: anyJobResult[0].status || 'processing' }), { status: 200, headers });
+      const anyJob = await getGenericJobById(jobIdNum);
+      if (anyJob) {
+        log.info("Job found with replication lag", { jobId, status: anyJob.status });
+        timer({ status: "success", jobStatus: anyJob.status });
+        return new NextResponse(JSON.stringify({ jobId: jobIdNum, status: anyJob.status }), { status: 200, headers });
       }
       log.warn("Job not found", { jobId });
       timer({ status: "error", reason: "job_not_found" });
@@ -78,15 +76,15 @@ export async function GET(req: NextRequest) {
     }
 
     let result: JobResult = {
-      jobId: job.id as number,
-      status: job.status as string,
-      createdAt: job.created_at as string,
-      updatedAt: job.updated_at as string
+      jobId: job.id,
+      status: job.status,
+      createdAt: job.createdAt.toISOString(),
+      updatedAt: job.updatedAt.toISOString()
     };
 
     if (job.status === 'completed' && job.output) {
       try {
-        const output = JSON.parse(job.output as string);
+        const output = JSON.parse(job.output);
         result = { ...result, ...output };
       } catch (e) {
         log.error('Failed to parse job output', e);
@@ -94,7 +92,7 @@ export async function GET(req: NextRequest) {
         return new NextResponse(JSON.stringify({ error: 'Failed to parse job result' }), { status: 500, headers });
       }
     } else if (job.status === 'failed') {
-      result.error = (job.error as string) || 'Processing failed';
+      result.error = job.error || 'Processing failed';
     }
 
     log.info("Job status retrieved", { jobId, status: result.status });
