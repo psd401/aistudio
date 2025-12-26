@@ -18,6 +18,7 @@
     "@types/node": "24.10.0",
     "@types/pdf-parse": "^1.1.5",
     "aws-cdk": "2.1031.2",
+    "baseline-browser-mapping": "^2.9.11",
     "jest": "^30.2.0",
     "ts-jest": "^29.4.5",
     "ts-node": "^10.9.2",

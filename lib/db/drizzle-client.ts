@@ -220,6 +220,19 @@ export interface TransactionOptions {
  * Transactions are automatically rolled back on error. This is the recommended
  * way to perform multi-statement operations that must succeed or fail atomically.
  *
+ * **IMPORTANT - Side Effect Warning:**
+ * The retry mechanism will re-execute the ENTIRE transaction function on transient
+ * failures. Transaction functions MUST be idempotent and should ONLY perform database
+ * operations. Do NOT include side effects that could be duplicated on retry:
+ * - ❌ Sending emails or notifications
+ * - ❌ Calling external APIs
+ * - ❌ Writing to S3 or other external storage
+ * - ❌ Publishing messages to queues
+ * - ✅ Only database operations via the transaction context (tx)
+ *
+ * If you need to perform side effects, do them AFTER the transaction completes
+ * successfully, not inside the transaction function.
+ *
  * @param transactionFn - Function that performs operations within the transaction
  * @param context - Descriptive name for the operation (used in logging)
  * @param options - Optional retry and transaction configuration
@@ -248,6 +261,9 @@ export interface TransactionOptions {
  *   },
  *   "updateUserRoles"
  * );
+ *
+ * // Side effects AFTER transaction succeeds
+ * await sendNotificationEmail(userId, "Roles updated");
  * ```
  */
 export async function executeTransaction<T>(
