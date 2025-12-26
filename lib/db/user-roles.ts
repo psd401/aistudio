@@ -4,6 +4,21 @@ import { eq, inArray, sql, and } from 'drizzle-orm';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
 /**
+ * Helper: Convert Error to plain object for safe logging
+ * Defensive serialization to prevent logger issues with Error instances
+ */
+function errorToObject(err: unknown): unknown {
+  if (err instanceof Error) {
+    return {
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+    };
+  }
+  return err;
+}
+
+/**
  * Helper: Get role ID by name
  * @throws Error if role not found
  */
@@ -121,17 +136,6 @@ export async function updateUserRoles(userId: number, roleNames: string[]): Prom
 
     return { success: true };
   } catch (error) {
-    // Defensive: convert Error to plain object before passing to logger
-    function errorToObject(err: unknown) {
-      if (err instanceof Error) {
-        return {
-          name: err.name,
-          message: err.message,
-          stack: err.stack,
-        };
-      }
-      return err;
-    }
     log.error("Failed to update user roles", {
       error: errorToObject(error),
       userId,
@@ -178,17 +182,6 @@ export async function addUserRole(userId: number, roleName: string): Promise<{ s
     log.info("Role added to user", { userId, roleName });
     return { success: true };
   } catch (error) {
-    // Defensive: convert Error to plain object before passing to logger
-    function errorToObject(err: unknown) {
-      if (err instanceof Error) {
-        return {
-          name: err.name,
-          message: err.message,
-          stack: err.stack,
-        };
-      }
-      return err;
-    }
     log.error("Failed to add role to user", {
       error: errorToObject(error),
       userId,
@@ -233,17 +226,6 @@ export async function removeUserRole(userId: number, roleName: string): Promise<
     log.info("Role removed from user", { userId, roleName });
     return { success: true };
   } catch (error) {
-    // Defensive: convert Error to plain object before passing to logger
-    function errorToObject(err: unknown) {
-      if (err instanceof Error) {
-        return {
-          name: err.name,
-          message: err.message,
-          stack: err.stack,
-        };
-      }
-      return err;
-    }
     log.error("Failed to remove role from user", {
       error: errorToObject(error),
       userId,

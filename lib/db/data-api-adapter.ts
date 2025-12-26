@@ -984,48 +984,33 @@ export async function replaceModelReferences(
       throw new Error("Invalid model IDs provided");
     }
 
-    // Get current counts for audit (outside transaction)
+    // Get current counts for audit logging (outside transaction)
     // NOTE: This executes 5 separate queries via getModelReferenceCounts().
-    // The counts are used purely for:
-    // 1. Audit logging before deletion
-    // 2. Conditional logic to skip empty UPDATE operations (performance optimization)
-    //
-    // These counts don't need to be inside the transaction because:
-    // - They're informational only (logged but not validated)
-    // - The conditional checks (if count > 0) are optimizations, not correctness requirements
-    // - Even if counts change between this query and the transaction, the UPDATE/DELETE
-    //   operations will still work correctly (updating 0 or N rows as appropriate)
-    //
-    // Trade-off: Accepts slightly stale counts for better transaction performance
-    // (shorter transaction duration = less lock contention).
+    // The counts are used purely for audit logging before deletion.
+    // They're informational only (logged but not validated for correctness).
     const counts = await getModelReferenceCounts(targetModelId);
 
     // Execute Drizzle transaction for atomic model replacement
     await drizzleTransaction(
       async (tx) => {
         // Update chain_prompts
-        if (Number(counts.chainPromptsCount) > 0) {
-          await tx
-            .update(chainPrompts)
-            .set({ modelId: replacementModelId, updatedAt: new Date() })
-            .where(eq(chainPrompts.modelId, targetModelId));
-        }
+        // Note: No conditional guard needed - Postgres handles zero-row updates efficiently
+        await tx
+          .update(chainPrompts)
+          .set({ modelId: replacementModelId, updatedAt: new Date() })
+          .where(eq(chainPrompts.modelId, targetModelId));
 
         // Update nexus_messages (model_id FK)
-        if (Number(counts.nexusMessagesCount) > 0) {
-          await tx
-            .update(nexusMessages)
-            .set({ modelId: replacementModelId, updatedAt: new Date() })
-            .where(eq(nexusMessages.modelId, targetModelId));
-        }
+        await tx
+          .update(nexusMessages)
+          .set({ modelId: replacementModelId, updatedAt: new Date() })
+          .where(eq(nexusMessages.modelId, targetModelId));
 
         // Update nexus_conversations (model_used varchar - uses model_id string not integer id)
-        if (Number(counts.nexusConversationsCount) > 0) {
-          await tx
-            .update(nexusConversations)
-            .set({ modelUsed: replacementModel.modelId, updatedAt: new Date() })
-            .where(eq(nexusConversations.modelUsed, targetModel.modelId));
-        }
+        await tx
+          .update(nexusConversations)
+          .set({ modelUsed: replacementModel.modelId, updatedAt: new Date() })
+          .where(eq(nexusConversations.modelUsed, targetModel.modelId));
 
         // Note: tool_executions do NOT need direct updating because:
         // - tool_executions only stores: assistant_architect_id (FK), user_id, status, timestamps
@@ -1036,17 +1021,15 @@ export async function replaceModelReferences(
         // - Therefore, no UPDATE needed for tool_executions table itself
 
         // Update model_comparisons (both model1_id and model2_id)
-        if (Number(counts.modelComparisonsCount) > 0) {
-          await tx
-            .update(modelComparisons)
-            .set({ model1Id: replacementModelId, updatedAt: new Date() })
-            .where(eq(modelComparisons.model1Id, targetModelId));
+        await tx
+          .update(modelComparisons)
+          .set({ model1Id: replacementModelId, updatedAt: new Date() })
+          .where(eq(modelComparisons.model1Id, targetModelId));
 
-          await tx
-            .update(modelComparisons)
-            .set({ model2Id: replacementModelId, updatedAt: new Date() })
-            .where(eq(modelComparisons.model2Id, targetModelId));
-        }
+        await tx
+          .update(modelComparisons)
+          .set({ model2Id: replacementModelId, updatedAt: new Date() })
+          .where(eq(modelComparisons.model2Id, targetModelId));
 
         // Delete the original model
         await tx.delete(aiModels).where(eq(aiModels.id, targetModelId));
