@@ -4,6 +4,28 @@ import { eq, inArray, sql, and } from 'drizzle-orm';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
 /**
+ * Helper: Get role ID by name
+ * @throws Error if role not found
+ */
+async function getRoleIdByName(roleName: string): Promise<number> {
+  const result = await executeQuery(
+    async (db) => {
+      return db
+        .select({ id: roles.id })
+        .from(roles)
+        .where(eq(roles.name, roleName));
+    },
+    'getRoleByName'
+  );
+
+  if (result.length === 0) {
+    throw new Error(`Role '${roleName}' not found`);
+  }
+
+  return result[0].id;
+}
+
+/**
  * Get all roles assigned to a user
  */
 export async function getUserRoles(userId: number): Promise<string[]> {
@@ -127,22 +149,8 @@ export async function addUserRole(userId: number, roleName: string): Promise<{ s
   const log = createLogger({ function: "addUserRole" });
 
   try {
-    // Get role ID
-    const roleResult = await executeQuery(
-      async (db) => {
-        return db
-          .select({ id: roles.id })
-          .from(roles)
-          .where(eq(roles.name, roleName));
-      },
-      'getRoleByName'
-    );
-
-    if (roleResult.length === 0) {
-      throw new Error(`Role '${roleName}' not found`);
-    }
-
-    const roleId = roleResult[0].id;
+    // Get role ID using shared helper
+    const roleId = await getRoleIdByName(roleName);
 
     // Execute transaction to add role and update version atomically
     await executeTransaction(
@@ -197,22 +205,8 @@ export async function removeUserRole(userId: number, roleName: string): Promise<
   const log = createLogger({ function: "removeUserRole" });
 
   try {
-    // Get role ID
-    const roleResult = await executeQuery(
-      async (db) => {
-        return db
-          .select({ id: roles.id })
-          .from(roles)
-          .where(eq(roles.name, roleName));
-      },
-      'getRoleByName'
-    );
-
-    if (roleResult.length === 0) {
-      throw new Error(`Role '${roleName}' not found`);
-    }
-
-    const roleId = roleResult[0].id;
+    // Get role ID using shared helper
+    const roleId = await getRoleIdByName(roleName);
 
     // Execute transaction to remove role and update version atomically
     await executeTransaction(
