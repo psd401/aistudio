@@ -984,7 +984,20 @@ export async function replaceModelReferences(
       throw new Error("Invalid model IDs provided");
     }
 
-    // Get current counts for audit
+    // Get current counts for audit (outside transaction)
+    // NOTE: This executes 5 separate queries via getModelReferenceCounts().
+    // The counts are used purely for:
+    // 1. Audit logging before deletion
+    // 2. Conditional logic to skip empty UPDATE operations (performance optimization)
+    //
+    // These counts don't need to be inside the transaction because:
+    // - They're informational only (logged but not validated)
+    // - The conditional checks (if count > 0) are optimizations, not correctness requirements
+    // - Even if counts change between this query and the transaction, the UPDATE/DELETE
+    //   operations will still work correctly (updating 0 or N rows as appropriate)
+    //
+    // Trade-off: Accepts slightly stale counts for better transaction performance
+    // (shorter transaction duration = less lock contention).
     const counts = await getModelReferenceCounts(targetModelId);
 
     // Execute Drizzle transaction for atomic model replacement

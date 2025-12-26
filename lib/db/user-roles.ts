@@ -170,8 +170,19 @@ export async function addUserRole(userId: number, roleName: string): Promise<{ s
     log.info("Role added to user", { userId, roleName });
     return { success: true };
   } catch (error) {
+    // Defensive: convert Error to plain object before passing to logger
+    function errorToObject(err: unknown) {
+      if (err instanceof Error) {
+        return {
+          name: err.name,
+          message: err.message,
+          stack: err.stack,
+        };
+      }
+      return err;
+    }
     log.error("Failed to add role to user", {
-      error: error instanceof Error ? error.message : "Unknown error",
+      error: errorToObject(error),
       userId,
       roleName,
     });
@@ -228,8 +239,19 @@ export async function removeUserRole(userId: number, roleName: string): Promise<
     log.info("Role removed from user", { userId, roleName });
     return { success: true };
   } catch (error) {
+    // Defensive: convert Error to plain object before passing to logger
+    function errorToObject(err: unknown) {
+      if (err instanceof Error) {
+        return {
+          name: err.name,
+          message: err.message,
+          stack: err.stack,
+        };
+      }
+      return err;
+    }
     log.error("Failed to remove role from user", {
-      error: error instanceof Error ? error.message : "Unknown error",
+      error: errorToObject(error),
       userId,
       roleName,
     });
