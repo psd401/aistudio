@@ -190,7 +190,7 @@ Tracking the RDS Data API to Drizzle ORM migration progress for AI Studio.
 
 **Solution**: Wrapped entire transaction in retry block, not individual statements
 
-**PR**: #XXX
+**Resolved**: Issue #529 - Circuit breaker implementation
 
 ---
 
@@ -200,7 +200,7 @@ Tracking the RDS Data API to Drizzle ORM migration progress for AI Studio.
 
 **Solution**: Created `/lib/db/types/jsonb/` with typed interfaces and `.$type<T>()` annotation
 
-**PR**: #XXX
+**Resolved**: Issue #530 - Type unification strategy
 
 ---
 
@@ -210,7 +210,7 @@ Tracking the RDS Data API to Drizzle ORM migration progress for AI Studio.
 
 **Solution**: Added circuit breaker with longer initial timeout, graceful degradation
 
-**PR**: #529
+**Resolved**: Issue #529 - Drizzle client wrapper
 
 ---
 
@@ -220,7 +220,7 @@ Tracking the RDS Data API to Drizzle ORM migration progress for AI Studio.
 
 **Solution**: Created `migration:prepare` script to rename and validate
 
-**PR**: #569
+**Resolved**: PR #569 - Drizzle-kit integration
 
 ---
 

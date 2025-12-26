@@ -290,5 +290,5 @@ mcp__awslabs_postgres-mcp-server__get_table_schema
 
 ---
 
-*Last Updated: 2025-12-26*
+*Last Updated: 2025-01-15*
 *Related: Issue #539, Epic #526*
