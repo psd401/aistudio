@@ -201,7 +201,7 @@ If a migration fails or needs to be reverted:
 
 3. Remove from migration_log:
    ```sql
-   DELETE FROM migration_log WHERE description = '043-add-user-preferences.sql';
+   DELETE FROM migration_log WHERE description = '043-add-user-preferences-table.sql';
    ```
 
 4. Remove from MIGRATION_FILES array

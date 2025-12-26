@@ -47,10 +47,10 @@ const INCOMPATIBLE_PATTERNS = [
     fix: "Use CREATE OR REPLACE FUNCTION with single-quoted body instead",
   },
   {
-    pattern: /\bbegin\s*;/gi,
+    pattern: /\b(begin|commit|rollback)\s*;/gi,
     message:
       "Transaction control statements are incompatible - Lambda manages transactions",
-    fix: "Remove BEGIN/COMMIT statements, Lambda wraps migrations in transactions",
+    fix: "Remove BEGIN/COMMIT/ROLLBACK statements, Lambda wraps migrations in transactions",
   },
 ];
 
@@ -165,7 +165,7 @@ function findLatestDrizzleMigration(): string | null {
 /**
  * Main execution
  */
-async function main(): Promise<void> {
+function main(): void {
   const description = process.argv[2];
 
   if (!description) {
@@ -296,7 +296,9 @@ async function main(): Promise<void> {
   console.log("");
 }
 
-main().catch((error) => {
+try {
+  main();
+} catch (error) {
   console.error("Fatal error:", error);
   process.exit(1);
-});
+}

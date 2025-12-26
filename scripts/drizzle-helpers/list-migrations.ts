@@ -91,7 +91,7 @@ function formatSize(bytes: number): string {
 /**
  * Main execution
  */
-async function main(): Promise<void> {
+function main(): void {
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
   console.log("📋 Migration Files List");
   console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
@@ -138,7 +138,9 @@ async function main(): Promise<void> {
   console.log("");
 }
 
-main().catch((error) => {
+try {
+  main();
+} catch (error) {
   console.error("Fatal error:", error);
   process.exit(1);
-});
+}

@@ -78,7 +78,7 @@ function generateMigrationTemplate(
 /**
  * Main execution
  */
-async function main(): Promise<void> {
+function main(): void {
   const description = process.argv[2];
 
   if (!description) {
@@ -150,7 +150,9 @@ async function main(): Promise<void> {
   console.log("");
 }
 
-main().catch((error) => {
+try {
+  main();
+} catch (error) {
   console.error("Fatal error:", error);
   process.exit(1);
-});
+}
