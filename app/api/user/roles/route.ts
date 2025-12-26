@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
-import { getUserRolesByCognitoSub } from "@/lib/db/data-api-adapter"
+import { getUserRolesByCognitoSub } from "@/lib/db/drizzle"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 
 export async function GET() {

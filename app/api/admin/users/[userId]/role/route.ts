@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { updateUserRole } from '@/lib/db/data-api-adapter';
+import { updateUserRole } from '@/lib/db/drizzle';
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { validateRequest, updateUserRoleSchema } from '@/lib/validations/api-schemas';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';

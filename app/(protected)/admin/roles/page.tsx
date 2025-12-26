@@ -1,7 +1,7 @@
 import { Suspense } from "react"
 import { RolesTable } from "./_components/roles-table"
 import { requireRole } from "@/lib/auth/role-helpers"
-import { getRoles, getTools } from "@/lib/db/data-api-adapter"
+import { getRoles, getTools } from "@/lib/db/drizzle"
 
 interface Role {
   id: string | number;

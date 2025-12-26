@@ -1,11 +1,11 @@
 "use server"
 
-import { 
-  getNavigationItems, 
-  createNavigationItem, 
-  updateNavigationItem, 
+import {
+  getNavigationItems,
+  createNavigationItem,
+  updateNavigationItem,
   deleteNavigationItem
-} from "@/lib/db/data-api-adapter"
+} from "@/lib/db/drizzle"
 import { ActionState } from "@/types"
 import type { InsertNavigationItem, SelectNavigationItem } from "@/types/db-types"
 import { getServerSession } from "@/lib/auth/server-session"
@@ -148,7 +148,7 @@ export async function updateNavigationItemAction(
       icon: string;
       link: string;
       description: string;
-      type: string;
+      type: "link" | "section" | "page";
       parentId: number;
       toolId: number;
       requiresRole: string;
@@ -160,7 +160,7 @@ export async function updateNavigationItemAction(
     if (data.icon !== undefined) updateData.icon = data.icon
     if (data.link !== undefined && data.link !== null) updateData.link = data.link
     if (data.description !== undefined && data.description !== null) updateData.description = data.description
-    if (data.type !== undefined) updateData.type = data.type
+    if (data.type !== undefined && (data.type === "link" || data.type === "section" || data.type === "page")) updateData.type = data.type
     if (data.parentId !== undefined && data.parentId !== null) updateData.parentId = data.parentId
     if (data.toolId !== undefined && data.toolId !== null) updateData.toolId = data.toolId
     if (data.requiresRole !== undefined && data.requiresRole !== null) updateData.requiresRole = data.requiresRole

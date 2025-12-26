@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getAIModels, createAIModel, updateAIModel, deleteAIModel, getRoles } from '@/lib/db/data-api-adapter';
+import { getAIModels, createAIModel, updateAIModel, deleteAIModel, getRoles } from '@/lib/db/drizzle';
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
@@ -7,14 +7,14 @@ import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
  * Validate and sanitize allowedRoles field
  * @param allowedRoles - The roles to validate (can be string or array)
  * @param log - Logger instance for warnings
- * @returns Validated JSON string of roles or null
+ * @returns Validated array of role names or null (Drizzle handles serialization)
  */
 async function validateAllowedRoles(
-  allowedRoles: unknown, 
+  allowedRoles: unknown,
   log: ReturnType<typeof createLogger>
-): Promise<string | null> {
+): Promise<string[] | null> {
   if (!allowedRoles) return null;
-  
+
   try {
     // Parse if string
     let roles: unknown;
@@ -29,36 +29,36 @@ async function validateAllowedRoles(
     } else {
       roles = allowedRoles;
     }
-    
+
     // Validate it's an array of strings
     if (!Array.isArray(roles)) {
       log.warn('Invalid allowedRoles format - not an array', { allowedRoles });
       return null;
     }
-    
+
     const validRoles = roles.filter(r => typeof r === 'string' && r.trim().length > 0);
-    
+
     if (validRoles.length === 0) {
       return null;
     }
-    
+
     // Validate against existing roles in the system
     const existingRoles = await getRoles();
     const existingRoleNames = existingRoles.map(r => r.name);
     const filteredRoles = validRoles.filter(r => existingRoleNames.includes(r));
-    
+
     if (filteredRoles.length !== validRoles.length) {
       const invalidRoles = validRoles.filter(r => !existingRoleNames.includes(r));
-      log.warn('Some roles do not exist in the system', { 
+      log.warn('Some roles do not exist in the system', {
         invalidRoles,
-        validRoles: filteredRoles 
+        validRoles: filteredRoles
       });
     }
-    
-    // Return validated roles as JSON string
-    return filteredRoles.length > 0 ? JSON.stringify(filteredRoles) : null;
+
+    // Return validated roles as array - Drizzle handles serialization
+    return filteredRoles.length > 0 ? filteredRoles : null;
   } catch (error) {
-    log.warn('Failed to validate allowedRoles', { 
+    log.warn('Failed to validate allowedRoles', {
       allowedRoles,
       error: error instanceof Error ? error.message : 'Unknown error'
     });

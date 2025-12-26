@@ -87,6 +87,7 @@ export {
   // Role assignment operations
   setNavigationItemRoles,
   getNavigationItemRoles,
+  getAllNavigationItemRoles,
 } from "./navigation";
 
 // ============================================
@@ -106,6 +107,7 @@ export {
   deleteRole,
   // Tool operations
   getTools,
+  getToolsByIds,
   getRoleTools,
   assignToolToRole,
   removeToolFromRole,

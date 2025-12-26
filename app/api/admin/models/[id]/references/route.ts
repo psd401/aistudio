@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getModelReferenceCounts } from '@/lib/db/data-api-adapter';
+import { getModelReferenceCounts } from '@/lib/db/drizzle';
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
@@ -35,13 +35,12 @@ export async function GET(
     
     const counts = await getModelReferenceCounts(modelId);
 
-    // The data-api-adapter automatically converts snake_case to camelCase
+    // Drizzle returns typed counts directly
     const totalReferences =
-      Number(counts.chainPromptsCount || 0) +
-      Number(counts.nexusMessagesCount || 0) +
-      Number(counts.nexusConversationsCount || 0) +
-      Number(counts.toolExecutionsCount || 0) +
-      Number(counts.modelComparisonsCount || 0);
+      counts.chainPromptsCount +
+      counts.nexusMessagesCount +
+      counts.nexusConversationsCount +
+      counts.modelComparisonsCount;
 
     log.info("Reference counts retrieved successfully", {
       modelId,
@@ -59,11 +58,11 @@ export async function GET(
           hasReferences: totalReferences > 0,
           totalReferences,
           counts: {
-            chainPrompts: Number(counts.chainPromptsCount || 0),
-            nexusMessages: Number(counts.nexusMessagesCount || 0),
-            nexusConversations: Number(counts.nexusConversationsCount || 0),
-            toolExecutions: Number(counts.toolExecutionsCount || 0),
-            modelComparisons: Number(counts.modelComparisonsCount || 0)
+            chainPrompts: counts.chainPromptsCount,
+            nexusMessages: counts.nexusMessagesCount,
+            nexusConversations: counts.nexusConversationsCount,
+            toolExecutions: 0, // toolExecutions tracking removed in Drizzle migration
+            modelComparisons: counts.modelComparisonsCount
           }
         }
       },

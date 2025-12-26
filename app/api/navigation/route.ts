@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
-import { getNavigationItems as getNavigationItemsViaDataAPI, executeSQL } from "@/lib/db/data-api-adapter"
+import { getNavigationItems, getAllNavigationItemRoles, getToolsByIds } from "@/lib/db/drizzle"
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger'
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
 import { hasToolAccess } from "@/utils/roles";
@@ -95,36 +95,22 @@ export async function GET() {
     }
     
     try {
-      const navItems = await getNavigationItemsViaDataAPI();
-      
+      const navItems = await getNavigationItems(true); // Get active items only
+
       // Get current user's roles
       const userResult = await getCurrentUserAction();
-      const userRoles = userResult.isSuccess && userResult.data 
+      const userRoles = userResult.isSuccess && userResult.data
         ? userResult.data.roles.map(r => r.name)
         : [];
-      
-      log.debug("User roles for navigation filtering", { 
+
+      log.debug("User roles for navigation filtering", {
         userId: session.sub,
-        roles: userRoles 
+        roles: userRoles
       });
 
       // Get navigation item roles from the junction table
-      const navItemRolesQuery = await executeSQL(
-        'SELECT navigation_item_id, role_name FROM navigation_item_roles'
-      );
-      
-      // Create a map of navigation item IDs to their required roles
-      const navItemRolesMap = new Map<number, string[]>();
-      for (const row of navItemRolesQuery) {
-        const itemId = row.navigation_item_id as number;
-        const roleName = row.role_name as string;
-        
-        if (!navItemRolesMap.has(itemId)) {
-          navItemRolesMap.set(itemId, []);
-        }
-        navItemRolesMap.get(itemId)?.push(roleName);
-      }
-      
+      const navItemRolesMap = await getAllNavigationItemRoles();
+
       // Collect all tool IDs that need to be looked up
       const toolIdsToLookup = new Set<number>();
       for (const item of navItems) {
@@ -135,26 +121,11 @@ export async function GET() {
           }
         }
       }
-      
-      // Batch fetch all tool identifiers in a single query
-      const toolsMap = new Map<number, string>();
-      if (toolIdsToLookup.size > 0) {
-        const toolIds = Array.from(toolIdsToLookup);
-        const placeholders = toolIds.map((_, index) => `:id${index}`).join(', ');
-        const params = toolIds.map((id, index) => ({
-          name: `id${index}`,
-          value: { longValue: id }
-        }));
-        
-        const toolsQuery = await executeSQL(
-          `SELECT id, identifier FROM tools WHERE id IN (${placeholders})`,
-          params
-        );
-        
-        for (const tool of toolsQuery) {
-          toolsMap.set(tool.id as number, tool.identifier as string);
-        }
-      }
+
+      // Batch fetch all tool identifiers using Drizzle
+      const toolsMap = toolIdsToLookup.size > 0
+        ? await getToolsByIds(Array.from(toolIdsToLookup))
+        : new Map<number, string>();
 
       // Filter navigation items based on user permissions
       const filteredNavItems = [];

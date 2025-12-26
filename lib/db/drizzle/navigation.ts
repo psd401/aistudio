@@ -368,3 +368,32 @@ export async function getNavigationItemRoles(
   );
   return result.map((r) => r.roleName);
 }
+
+/**
+ * Get all navigation item roles
+ * Returns a map of navigation item IDs to their required roles
+ */
+export async function getAllNavigationItemRoles(): Promise<
+  Map<number, string[]>
+> {
+  const result = await executeQuery(
+    (db) =>
+      db
+        .select({
+          navigationItemId: navigationItemRoles.navigationItemId,
+          roleName: navigationItemRoles.roleName,
+        })
+        .from(navigationItemRoles),
+    "getAllNavigationItemRoles"
+  );
+
+  const rolesMap = new Map<number, string[]>();
+  for (const row of result) {
+    const itemId = row.navigationItemId;
+    if (!rolesMap.has(itemId)) {
+      rolesMap.set(itemId, []);
+    }
+    rolesMap.get(itemId)?.push(row.roleName);
+  }
+  return rolesMap;
+}

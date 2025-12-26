@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { requireAdmin } from "@/lib/auth/admin-check"
-import { getNavigationItems, createNavigationItem, updateNavigationItem } from "@/lib/db/data-api-adapter"
+import { getNavigationItems, createNavigationItem, updateNavigationItem } from "@/lib/db/drizzle"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 
 export async function GET() {

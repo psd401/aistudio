@@ -1,12 +1,12 @@
 "use server"
 
-import { 
-  checkUserRole, 
-  hasToolAccess as dbHasToolAccess, 
+import {
+  checkUserRole,
+  hasToolAccess as dbHasToolAccess,
   getUserTools as dbGetUserTools,
   getUserIdByCognitoSub,
   getUserRolesByCognitoSub as dbGetUserRolesByCognitoSub
-} from "@/lib/db/data-api-adapter";
+} from "@/lib/db/drizzle";
 import { getServerSession } from "@/lib/auth/server-session";
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import type { Role } from '@/types';

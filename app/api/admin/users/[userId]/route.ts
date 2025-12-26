@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { deleteUser } from '@/lib/db/data-api-adapter';
+import { deleteUser } from '@/lib/db/drizzle';
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
