@@ -1,9 +1,6 @@
 "use server"
 
 import { getServerSession } from "@/lib/auth/server-session"
-import { executeSQL } from "@/lib/db/data-api-adapter"
-import { transformSnakeToCamel } from "@/lib/db/field-mapper"
-import { SqlParameter } from "@aws-sdk/client-rds-data"
 import {
   createPrompt as drizzleCreatePrompt,
   setPromptTags,
@@ -468,98 +465,6 @@ export async function deletePrompt(id: string): Promise<ActionState<void>> {
       metadata: { promptId: id }
     })
   }
-}
-
-/**
- * Helper: Assign tags to a prompt
- */
-async function assignTagsToPrompt(
-  promptId: string,
-  tagNames: string[],
-  log: ReturnType<typeof createLogger>
-): Promise<void> {
-  if (tagNames.length === 0) return
-
-  const trimmedNames = tagNames.map(t => t.trim())
-
-  // Batch insert tags if they don't exist using JSON
-  // RDS Data API doesn't support array parameters, so we use JSON instead
-  await executeSQL(
-    `INSERT INTO prompt_tags (name)
-     SELECT value FROM json_array_elements_text(:names::json)
-     ON CONFLICT (name) DO NOTHING`,
-    [
-      {
-        name: "names",
-        value: { stringValue: JSON.stringify(trimmedNames) }
-      }
-    ]
-  )
-
-  // Get tag IDs using JSON array
-  const tagResults = await executeSQL<{ id: number; name: string }>(
-    `SELECT id, name FROM prompt_tags WHERE name IN (SELECT value FROM json_array_elements_text(:names::json))`,
-    [
-      {
-        name: "names",
-        value: { stringValue: JSON.stringify(trimmedNames) }
-      }
-    ]
-  )
-
-  // Validate that tags were created or found
-  if (tagResults.length === 0) {
-    log.error("No tags were created or found", { tagNames: trimmedNames })
-    throw ErrorFactories.dbQueryFailed(
-      "INSERT/SELECT prompt_tags",
-      new Error("Failed to create or retrieve tags"),
-      { details: { tagNames: trimmedNames } }
-    )
-  }
-
-  // Batch insert associations using JSON array
-  await executeSQL(
-    `INSERT INTO prompt_library_tags (prompt_id, tag_id)
-     SELECT :promptId::uuid, value::bigint FROM json_array_elements_text(:tagIds::json)
-     ON CONFLICT DO NOTHING`,
-    [
-      { name: "promptId", value: { stringValue: promptId } },
-      {
-        name: "tagIds",
-        value: { stringValue: JSON.stringify(tagResults.map(t => t.id)) }
-      }
-    ]
-  )
-
-  log.debug("Tags assigned to prompt", {
-    promptId,
-    tagCount: tagResults.length
-  })
-}
-
-/**
- * Helper: Update tags for a prompt
- */
-async function updateTagsForPrompt(
-  promptId: string,
-  tagNames: string[],
-  log: ReturnType<typeof createLogger>
-): Promise<void> {
-  // Remove existing tags
-  await executeSQL(
-    `DELETE FROM prompt_library_tags WHERE prompt_id = :promptId::uuid`,
-    [{ name: "promptId", value: { stringValue: promptId } }]
-  )
-
-  // Assign new tags
-  if (tagNames.length > 0) {
-    await assignTagsToPrompt(promptId, tagNames, log)
-  }
-
-  log.debug("Tags updated for prompt", {
-    promptId,
-    tagCount: tagNames.length
-  })
 }
 
 /**
