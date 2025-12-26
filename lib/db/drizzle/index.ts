@@ -115,6 +115,71 @@ export {
 } from "./roles";
 
 // ============================================
+// Notification Operations
+// ============================================
+
+export {
+  getUserNotifications,
+  markNotificationAsRead,
+  markAllNotificationsAsRead,
+  getNotificationById,
+} from "./notifications";
+
+// ============================================
+// Execution Results Operations
+// ============================================
+
+export {
+  getRecentExecutionResults,
+  getExecutionResultById,
+  getExecutionResultForDownload,
+  deleteExecutionResult,
+} from "./execution-results";
+
+// ============================================
+// Ideas Operations
+// ============================================
+
+export {
+  // Types
+  type IdeaListItem,
+  type CreateIdeaData,
+  // Query operations
+  getIdeas,
+  getUserVotedIdeaIds,
+  getIdeaById,
+  // CRUD operations
+  createIdea,
+  updateIdea,
+  updateIdeaStatus,
+  // Vote operations
+  addVote,
+  removeVote,
+  hasUserVoted,
+  // Note operations
+  getIdeaNotes,
+  addNote,
+  deleteNote,
+} from "./ideas";
+
+// ============================================
+// Settings Operations
+// ============================================
+
+export {
+  // Types
+  type SettingData,
+  type CreateSettingData,
+  // Query operations
+  getSettings,
+  getSettingValue,
+  getSettingActualValue,
+  // CRUD operations
+  upsertSetting,
+  deleteSetting,
+} from "./settings";
+
+// ============================================
 // AI Model Operations
 // ============================================
 
