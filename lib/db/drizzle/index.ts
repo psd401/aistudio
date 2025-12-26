@@ -180,6 +180,19 @@ export {
 } from "./settings";
 
 // ============================================
+// Assistant Architect Events Operations
+// ============================================
+
+export {
+  // Types
+  type ExecutionEvent,
+  // Event operations
+  storeExecutionEvent,
+  getExecutionEvents,
+  getExecutionEventsByType,
+} from "./assistant-architect-events";
+
+// ============================================
 // AI Model Operations
 // ============================================
 
