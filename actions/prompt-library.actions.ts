@@ -10,7 +10,8 @@ import {
   getTagsForPrompt,
   getPromptById,
   incrementViewCount,
-  listPrompts as drizzleListPrompts
+  listPrompts as drizzleListPrompts,
+  updatePrompt as drizzleUpdatePrompt
 } from "@/lib/db/drizzle"
 import { type ActionState } from "@/types/actions-types"
 import {
@@ -357,59 +358,13 @@ export async function updatePrompt(
     // Validate input
     const validated = updatePromptSchema.parse(input)
 
-    // Build update fields
-    const fields: string[] = []
-    const parameters: SqlParameter[] = [
-      { name: "id", value: { stringValue: id } }
-    ]
+    // Check if any updates requested
+    const hasFieldUpdates = validated.title !== undefined ||
+                           validated.content !== undefined ||
+                           validated.description !== undefined ||
+                           validated.visibility !== undefined
 
-    if (validated.title !== undefined) {
-      fields.push("title = :title")
-      parameters.push({ name: "title", value: { stringValue: validated.title } })
-    }
-
-    if (validated.content !== undefined) {
-      fields.push("content = :content")
-      parameters.push({
-        name: "content",
-        value: { stringValue: validated.content }
-      })
-    }
-
-    if (validated.description !== undefined) {
-      fields.push("description = :description")
-      parameters.push({
-        name: "description",
-        value: validated.description
-          ? { stringValue: validated.description }
-          : { isNull: true }
-      })
-    }
-
-    if (validated.visibility !== undefined) {
-      fields.push("visibility = :visibility")
-      parameters.push({
-        name: "visibility",
-        value: { stringValue: validated.visibility }
-      })
-
-      // Reset moderation status based on visibility
-      if (validated.visibility === 'public') {
-        // Public prompts need moderation
-        fields.push("moderation_status = 'pending'")
-        fields.push("moderated_by = NULL")
-        fields.push("moderated_at = NULL")
-        fields.push("moderation_notes = NULL")
-      } else if (validated.visibility === 'private') {
-        // Private prompts are auto-approved
-        fields.push("moderation_status = 'approved'")
-        fields.push("moderated_by = NULL")
-        fields.push("moderated_at = NULL")
-        fields.push("moderation_notes = NULL")
-      }
-    }
-
-    if (fields.length === 0 && !validated.tags) {
+    if (!hasFieldUpdates && !validated.tags) {
       // No changes requested, fetch and return current prompt
       const getResult = await getPrompt(id)
       if (!getResult.isSuccess) {
@@ -418,27 +373,24 @@ export async function updatePrompt(
       return createSuccess(getResult.data, "No changes to update")
     }
 
-    // Update prompt
-    if (fields.length > 0) {
-      fields.push("updated_at = CURRENT_TIMESTAMP")
+    // Update prompt via Drizzle (handles visibility→moderation_status logic)
+    if (hasFieldUpdates) {
+      const result = await drizzleUpdatePrompt(id, {
+        title: validated.title,
+        content: validated.content,
+        description: validated.description,
+        visibility: validated.visibility
+      })
 
-      const updateQuery = `
-        UPDATE prompt_library
-        SET ${fields.join(", ")}
-        WHERE id = :id::uuid AND deleted_at IS NULL
-        RETURNING *
-      `
-
-      const results = await executeSQL<Prompt>(updateQuery, parameters)
-
-      if (results.length === 0) {
+      if (!result) {
         throw ErrorFactories.dbRecordNotFound("prompt_library", id)
       }
     }
 
     // Handle tag updates
     if (validated.tags !== undefined) {
-      await updateTagsForPrompt(id, validated.tags, log)
+      await setPromptTags(id, validated.tags)
+      log.debug("Tags updated for prompt", { promptId: id, tagCount: validated.tags.length })
     }
 
     // Fetch updated prompt with tags
