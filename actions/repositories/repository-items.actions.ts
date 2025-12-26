@@ -1,7 +1,8 @@
 "use server"
 
 import { getServerSession } from "@/lib/auth/server-session"
-import { executeSQL, executeTransaction } from "@/lib/db/data-api-adapter"
+import { executeSQL } from "@/lib/db/data-api-adapter"
+import { executeTransaction as drizzleTransaction, repositoryItems, repositoryItemChunks } from "@/lib/db/drizzle-client"
 import { type ActionState } from "@/types/actions-types"
 import { hasToolAccess } from "@/utils/roles"
 import {
@@ -545,44 +546,45 @@ export async function addTextItem(
       throw ErrorFactories.authzOwnerRequired("add items to repository")
     }
 
-    // Start a transaction to add both the item and its chunk
-    log.info("Creating text item with transaction", {
+    // Start a transaction to add both the item and its chunk atomically
+    log.info("Creating text item with Drizzle transaction", {
       repositoryId: input.repository_id,
       contentLength: input.content.length
     })
-    
-    const transactionResults = await executeTransaction<{ id: number }>([
-      {
-        sql: `INSERT INTO repository_items (repository_id, type, name, source, metadata, processing_status)
-              VALUES (:repository_id, 'text', :name, :source, :metadata::jsonb, 'completed')
-              RETURNING id`,
-        parameters: [
-          { name: "repository_id", value: { longValue: input.repository_id } },
-          { name: "name", value: { stringValue: input.name } },
-          { name: "source", value: { stringValue: input.content } },
-          { name: "metadata", value: { stringValue: JSON.stringify({
-            length: input.content.length
-          }) } }
-        ]
-      }
-    ])
 
-    const itemId = transactionResults[0][0].id
-    log.debug("Text item created", { itemId })
+    const itemId = await drizzleTransaction(
+      async (tx) => {
+        // Step 1: Insert the repository item
+        const [newItem] = await tx
+          .insert(repositoryItems)
+          .values({
+            repositoryId: input.repository_id,
+            type: 'text',
+            name: input.name,
+            source: input.content,
+            metadata: { length: input.content.length },
+            processingStatus: 'completed',
+          })
+          .returning({ id: repositoryItems.id });
 
-    // Add the chunk in a second transaction call
-    log.debug("Adding text chunk", { itemId, chunkIndex: 0 })
-    await executeTransaction([
-      {
-        sql: `INSERT INTO repository_item_chunks (item_id, content, chunk_index, metadata)
-              VALUES (:item_id, :content, 0, :metadata::jsonb)`,
-        parameters: [
-          { name: "item_id", value: { longValue: itemId } },
-          { name: "content", value: { stringValue: input.content } },
-          { name: "metadata", value: { stringValue: JSON.stringify({}) } }
-        ]
-      }
-    ])
+        log.debug("Text item created", { itemId: newItem.id });
+
+        // Step 2: Add the chunk in the same transaction
+        await tx
+          .insert(repositoryItemChunks)
+          .values({
+            itemId: newItem.id,
+            content: input.content,
+            chunkIndex: 0,
+            metadata: {},
+          });
+
+        log.debug("Text chunk added", { itemId: newItem.id, chunkIndex: 0 });
+
+        return newItem.id;
+      },
+      'addTextItem'
+    )
 
     // Fetch the created item
     log.debug("Fetching created text item", { itemId })

@@ -79,6 +79,12 @@ function convertToRdsValue(value: ParameterValue): Field {
 
 /**
  * Execute multiple SQL statements in a transaction with simple parameter passing
+ *
+ * NOTE: This function uses the legacy raw SQL Data API transaction executor,
+ * not the Drizzle ORM transaction wrapper. This is intentional as it provides
+ * a simplified interface for raw SQL transactions in the Nexus streaming system.
+ *
+ * For new code using Drizzle ORM, use executeTransaction from drizzle-client.ts instead.
  */
 export async function executeSQLTransaction<T extends DatabaseRow = DatabaseRow>(
   statements: Array<{ sql: string; params?: ParameterValue[] }>
@@ -88,7 +94,7 @@ export async function executeSQLTransaction<T extends DatabaseRow = DatabaseRow>
     if (!params || params.length === 0) {
       return { sql };
     }
-    
+
     // Convert simple params to RDS Data API format
     const rdsParams: SqlParameter[] = params.map((value, index) => {
       const param: SqlParameter = {
@@ -99,13 +105,13 @@ export async function executeSQLTransaction<T extends DatabaseRow = DatabaseRow>
       // Update SQL to use named parameters
       // eslint-disable-next-line security/detect-non-literal-regexp -- index is a number, not user input
       sql = sql.replace(new RegExp(`\\$${index + 1}`, 'g'), `:param${index + 1}`);
-      
+
       return param;
     });
-    
+
     return { sql, parameters: rdsParams };
   });
-  
+
   return executeTransaction<T>(rdsStatements);
 }
 

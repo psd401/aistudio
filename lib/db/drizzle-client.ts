@@ -191,6 +191,145 @@ export async function executeQuery<T>(
 }
 
 // ============================================
+// Transaction Execution with Circuit Breaker
+// ============================================
+
+/**
+ * Transaction options for configuring isolation level and access mode
+ */
+export interface TransactionOptions {
+  /** Transaction isolation level (default: undefined - use database default) */
+  isolationLevel?:
+    | "read uncommitted"
+    | "read committed"
+    | "repeatable read"
+    | "serializable";
+  /** Access mode for the transaction */
+  accessMode?: "read only" | "read write";
+  /** Whether to use deferrable mode (only valid with serializable + read only) */
+  deferrable?: boolean;
+}
+
+/**
+ * Execute a Drizzle transaction with circuit breaker and retry logic
+ *
+ * Wraps Drizzle transactions with the existing circuit breaker pattern from
+ * rds-error-handler.ts, providing automatic retry for transient failures
+ * and circuit breaker protection for sustained outages.
+ *
+ * Transactions are automatically rolled back on error. This is the recommended
+ * way to perform multi-statement operations that must succeed or fail atomically.
+ *
+ * **IMPORTANT - Side Effect Warning:**
+ * The retry mechanism will re-execute the ENTIRE transaction function on transient
+ * failures. Transaction functions MUST be idempotent and should ONLY perform database
+ * operations. Do NOT include side effects that could be duplicated on retry:
+ * - ❌ Sending emails or notifications
+ * - ❌ Calling external APIs
+ * - ❌ Writing to S3 or other external storage
+ * - ❌ Publishing messages to queues
+ * - ✅ Only database operations via the transaction context (tx)
+ *
+ * If you need to perform side effects, do them AFTER the transaction completes
+ * successfully, not inside the transaction function.
+ *
+ * @param transactionFn - Function that performs operations within the transaction
+ * @param context - Descriptive name for the operation (used in logging)
+ * @param options - Optional retry and transaction configuration
+ * @returns Promise resolving to the transaction result
+ * @throws Error if circuit breaker is open, all retries exhausted, or transaction fails
+ *
+ * @example
+ * ```typescript
+ * // Multi-table update with automatic rollback on failure
+ * const result = await executeTransaction(
+ *   async (tx) => {
+ *     // Delete old roles
+ *     await tx.delete(userRoles).where(eq(userRoles.userId, userId));
+ *
+ *     // Insert new roles
+ *     await tx.insert(userRoles).values(
+ *       roleIds.map(roleId => ({ userId, roleId }))
+ *     );
+ *
+ *     // Update version for optimistic locking
+ *     await tx.update(users)
+ *       .set({ roleVersion: sql`${users.roleVersion} + 1` })
+ *       .where(eq(users.id, userId));
+ *
+ *     return true;
+ *   },
+ *   "updateUserRoles"
+ * );
+ *
+ * // Side effects AFTER transaction succeeds
+ * await sendNotificationEmail(userId, "Roles updated");
+ * ```
+ */
+export async function executeTransaction<T>(
+  transactionFn: (
+    tx: Parameters<Parameters<typeof db.transaction>[0]>[0]
+  ) => Promise<T>,
+  context: string,
+  options?: QueryRetryOptions & TransactionOptions
+): Promise<T> {
+  const requestId = generateRequestId();
+  const timer = startTimer(`drizzle_tx_${context}`);
+  const log = createLogger({
+    requestId,
+    context: "drizzle-client",
+    operation: `tx_${context}`,
+  });
+
+  const opts = { ...DEFAULT_QUERY_OPTIONS, ...options };
+
+  log.debug("Starting Drizzle transaction", {
+    context,
+    maxRetries: opts.maxRetries,
+    isolationLevel: opts.isolationLevel,
+  });
+
+  try {
+    const result = await executeWithRetry(
+      async () => {
+        return await db.transaction(transactionFn, {
+          isolationLevel: opts.isolationLevel,
+          accessMode: opts.accessMode,
+          deferrable: opts.deferrable,
+        });
+      },
+      context,
+      {
+        maxRetries: opts.maxRetries,
+        initialDelay: opts.initialDelay,
+        maxDelay: opts.maxDelay,
+        backoffMultiplier: opts.backoffMultiplier,
+        jitterMax: opts.jitterMax,
+      },
+      requestId
+    );
+
+    timer({ status: "success" });
+    log.debug("Transaction completed successfully", { context });
+
+    return result;
+  } catch (error) {
+    timer({ status: "error" });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorName = error instanceof Error ? error.name : "UnknownError";
+
+    log.error("Transaction failed after retries", {
+      context,
+      error: errorMessage,
+      errorName,
+      circuitState: getCircuitBreakerState().state,
+      requestId,
+    });
+    throw error;
+  }
+}
+
+// ============================================
 // Circuit Breaker Status Utilities
 // ============================================
 
