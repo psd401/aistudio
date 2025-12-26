@@ -4,6 +4,11 @@ import { getServerSession } from "@/lib/auth/server-session"
 import { executeSQL } from "@/lib/db/data-api-adapter"
 import { transformSnakeToCamel } from "@/lib/db/field-mapper"
 import { SqlParameter } from "@aws-sdk/client-rds-data"
+import {
+  createPrompt as drizzleCreatePrompt,
+  setPromptTags,
+  getTagsForPrompt
+} from "@/lib/db/drizzle"
 import { type ActionState } from "@/types/actions-types"
 import {
   handleError,
@@ -81,59 +86,54 @@ export async function createPrompt(
       tagCount: validated.tags?.length || 0
     })
 
-    // Create prompt with moderation_status based on visibility
-    // Private prompts are auto-approved, public prompts need moderation
-    const moderationStatus = validated.visibility === 'private' ? 'approved' : 'pending'
+    // Create prompt via Drizzle (moderation_status handled automatically)
+    const result = await drizzleCreatePrompt({
+      userId,
+      title: validated.title,
+      content: validated.content,
+      description: validated.description,
+      visibility: validated.visibility,
+      sourceMessageId: validated.sourceMessageId,
+      sourceConversationId: validated.sourceConversationId
+    })
 
-    const results = await executeSQL<Prompt>(
-      `INSERT INTO prompt_library
-       (user_id, title, content, description, visibility, moderation_status, source_message_id, source_conversation_id)
-       VALUES (:userId, :title, :content, :description, :visibility, :moderationStatus, :sourceMessageId::uuid, :sourceConversationId::uuid)
-       RETURNING *`,
-      [
-        { name: "userId", value: { longValue: userId } },
-        { name: "title", value: { stringValue: validated.title } },
-        { name: "content", value: { stringValue: validated.content } },
-        {
-          name: "description",
-          value: validated.description
-            ? { stringValue: validated.description }
-            : { isNull: true }
-        },
-        { name: "visibility", value: { stringValue: validated.visibility } },
-        { name: "moderationStatus", value: { stringValue: moderationStatus } },
-        {
-          name: "sourceMessageId",
-          value: validated.sourceMessageId
-            ? { stringValue: validated.sourceMessageId }
-            : { isNull: true }
-        },
-        {
-          name: "sourceConversationId",
-          value: validated.sourceConversationId
-            ? { stringValue: validated.sourceConversationId }
-            : { isNull: true }
-        }
-      ]
-    )
-
-    if (results.length === 0) {
-      throw ErrorFactories.sysInternalError("Failed to create prompt")
+    // Build prompt object with type conversion
+    // Note: result has incomplete type annotation but .returning() gives all fields
+    const resultWithAllFields = result as typeof result & {
+      moderatedBy: number | null
+      moderatedAt: Date | null
+      moderationNotes: string | null
+      sourceMessageId: string | null
+      sourceConversationId: string | null
+      deletedAt: Date | null
     }
 
-    const prompt = transformSnakeToCamel<Prompt>(results[0])
+    const prompt: Prompt = {
+      id: resultWithAllFields.id,
+      userId: resultWithAllFields.userId,
+      title: resultWithAllFields.title,
+      content: resultWithAllFields.content,
+      description: resultWithAllFields.description,
+      visibility: resultWithAllFields.visibility as 'public' | 'private',
+      moderationStatus: resultWithAllFields.moderationStatus as 'pending' | 'approved' | 'rejected',
+      moderatedBy: resultWithAllFields.moderatedBy,
+      moderatedAt: resultWithAllFields.moderatedAt?.toISOString() ?? null,
+      moderationNotes: resultWithAllFields.moderationNotes,
+      sourceMessageId: resultWithAllFields.sourceMessageId,
+      sourceConversationId: resultWithAllFields.sourceConversationId,
+      viewCount: resultWithAllFields.viewCount,
+      useCount: resultWithAllFields.useCount,
+      createdAt: resultWithAllFields.createdAt.toISOString(),
+      updatedAt: resultWithAllFields.updatedAt.toISOString(),
+      deletedAt: resultWithAllFields.deletedAt?.toISOString() ?? null,
+      tags: []
+    }
 
     // Handle tags if provided
     if (validated.tags && validated.tags.length > 0) {
-      await assignTagsToPrompt(prompt.id, validated.tags, log)
+      await setPromptTags(prompt.id, validated.tags)
       // Fetch tags to include in response
-      const tagResults = await executeSQL<{ name: string }>(
-        `SELECT t.name
-         FROM prompt_tags t
-         JOIN prompt_library_tags plt ON t.id = plt.tag_id
-         WHERE plt.prompt_id = :promptId::uuid`,
-        [{ name: "promptId", value: { stringValue: prompt.id } }]
-      )
+      const tagResults = await getTagsForPrompt(prompt.id)
       prompt.tags = tagResults.map(t => t.name)
     }
 
