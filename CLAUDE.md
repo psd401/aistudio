@@ -79,7 +79,72 @@ createProviderModel(provider: string, modelId: string): Promise<LanguageModel>
 
 ## 🗄️ Database Operations
 
-**Always use MCP tools to verify structure**:
+**ORM**: Drizzle ORM with AWS RDS Data API driver
+
+**Always use Drizzle queries** - Import from `@/lib/db/drizzle` for type-safe operations:
+
+```typescript
+import { eq, and, desc } from "drizzle-orm";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
+import { users, userRoles, roles } from "@/lib/db/schema";
+
+// SELECT with type safety
+const user = await executeQuery(
+  (db) => db.select().from(users).where(eq(users.id, userId)).limit(1),
+  "getUserById"
+);
+
+// INSERT with returning
+const [newUser] = await executeQuery(
+  (db) => db.insert(users).values({ email, firstName }).returning(),
+  "createUser"
+);
+
+// UPDATE
+await executeQuery(
+  (db) => db.update(users).set({ firstName }).where(eq(users.id, userId)),
+  "updateUser"
+);
+
+// DELETE
+await executeQuery(
+  (db) => db.delete(users).where(eq(users.id, userId)),
+  "deleteUser"
+);
+```
+
+**Transactions** (automatic rollback on error):
+```typescript
+await executeTransaction(
+  async (tx) => {
+    await tx.delete(userRoles).where(eq(userRoles.userId, userId));
+    await tx.insert(userRoles).values(roleIds.map(id => ({ userId, roleId: id })));
+    // Side effects (emails, etc.) should be AFTER transaction, not inside
+  },
+  "updateUserRoles"
+);
+```
+
+**JSONB Columns** (type-safe via `.$type<T>()`):
+```typescript
+import type { UserSettings } from "@/lib/db/types/jsonb";
+
+// Schema definition
+settings: jsonb("settings").$type<UserSettings>(),
+
+// Query - TypeScript knows the shape
+user.settings.theme;  // "light" | "dark" | "system"
+```
+
+**Migrations** (see `/docs/database/drizzle-migration-guide.md`):
+```bash
+npm run drizzle:generate        # Generate from schema changes
+npm run migration:prepare       # Format for Lambda
+npm run migration:list          # List all migrations
+# Then add to MIGRATION_FILES in db-init-handler.ts
+```
+
+**MCP tools for schema verification**:
 ```bash
 mcp__awslabs_postgres-mcp-server__get_table_schema
 mcp__awslabs_postgres-mcp-server__run_query
@@ -90,19 +155,6 @@ mcp__awslabs_postgres-mcp-server__run_query
 - **Prod**: Min 2 ACU, Max 8 ACU, always-on for reliability
 - **Connection**: RDS Data API (no connection pooling needed)
 - **Backups**: Automated daily snapshots, 7-day retention (dev), 30-day (prod)
-
-**Data API Parameters**:
-- `stringValue`, `longValue`, `booleanValue`, `doubleValue`, `isNull`
-
-**Field Transformation** (DB returns snake_case, app uses camelCase):
-```typescript
-import { transformSnakeToCamel } from "@/lib/db/field-mapper"
-
-// Database returns: { user_id: 1, created_at: "2025-01-01" }
-// App expects: { userId: 1, createdAt: "2025-01-01" }
-const results = await executeSQL("SELECT user_id, created_at FROM users")
-const transformed = results.map(row => transformSnakeToCamel<UserType>(row))
-```
 
 ## 📝 Server Action Template
 
