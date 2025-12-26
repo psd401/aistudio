@@ -705,6 +705,11 @@ export async function getRoleByName(roleName: string) {
   return executeSQL(sql, parameters);
 }
 
+/**
+ * @deprecated Use updateUserRoles from './user-roles' instead
+ * This function is kept for backwards compatibility only and delegates to the Drizzle-based implementation.
+ * It will be removed in a future version as part of the full migration to Drizzle ORM (Epic #526).
+ */
 export async function updateUserRole(userId: number, newRoleName: string) {
   // Delegate to the Drizzle-based user-roles module
   // This function is kept for backwards compatibility
