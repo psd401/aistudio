@@ -27,7 +27,10 @@
     "drizzle:generate": "drizzle-kit generate",
     "drizzle:push": "drizzle-kit push",
     "drizzle:studio": "drizzle-kit studio",
-    "drizzle:check": "drizzle-kit check"
+    "drizzle:check": "drizzle-kit check",
+    "migration:prepare": "tsx scripts/drizzle-helpers/prepare-migration.ts",
+    "migration:create": "tsx scripts/drizzle-helpers/create-migration.ts",
+    "migration:list": "tsx scripts/drizzle-helpers/list-migrations.ts"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "^3.0.53",
