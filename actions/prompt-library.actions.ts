@@ -10,9 +10,11 @@ import {
   getTagsForPrompt,
   getPromptById,
   incrementViewCount,
+  incrementUseCount,
   listPrompts as drizzleListPrompts,
   updatePrompt as drizzleUpdatePrompt,
-  deletePrompt as drizzleDeletePrompt
+  deletePrompt as drizzleDeletePrompt,
+  trackUsageEvent
 } from "@/lib/db/drizzle"
 import { type ActionState } from "@/types/actions-types"
 import {
@@ -582,23 +584,9 @@ export async function trackPromptView(
 
     const userId = await getUserIdFromSession(session.sub)
 
-    // Increment view count
-    await executeSQL(
-      `UPDATE prompt_library
-       SET view_count = view_count + 1
-       WHERE id = :promptId::uuid AND deleted_at IS NULL`,
-      [{ name: "promptId", value: { stringValue: promptId } }]
-    )
-
-    // Create usage event
-    await executeSQL(
-      `INSERT INTO prompt_usage_events (prompt_id, user_id, event_type)
-       VALUES (:promptId::uuid, :userId, 'view')`,
-      [
-        { name: "promptId", value: { stringValue: promptId } },
-        { name: "userId", value: { longValue: userId } }
-      ]
-    )
+    // Increment view count and create usage event via Drizzle
+    await incrementViewCount(promptId)
+    await trackUsageEvent(promptId, userId, 'view')
 
     timer({ status: "success" })
     log.info("Prompt view tracked", { promptId, userId })
@@ -641,29 +629,9 @@ export async function trackPromptUse(
 
     const userId = await getUserIdFromSession(session.sub)
 
-    // Increment use count
-    await executeSQL(
-      `UPDATE prompt_library
-       SET use_count = use_count + 1
-       WHERE id = :promptId::uuid AND deleted_at IS NULL`,
-      [{ name: "promptId", value: { stringValue: promptId } }]
-    )
-
-    // Create usage event
-    await executeSQL(
-      `INSERT INTO prompt_usage_events (prompt_id, user_id, event_type, conversation_id)
-       VALUES (:promptId::uuid, :userId, 'use', :conversationId::uuid)`,
-      [
-        { name: "promptId", value: { stringValue: promptId } },
-        { name: "userId", value: { longValue: userId } },
-        {
-          name: "conversationId",
-          value: conversationId
-            ? { stringValue: conversationId }
-            : { isNull: true }
-        }
-      ]
-    )
+    // Increment use count and create usage event via Drizzle
+    await incrementUseCount(promptId)
+    await trackUsageEvent(promptId, userId, 'use', conversationId)
 
     timer({ status: "success" })
     log.info("Prompt use tracked", { promptId, userId, conversationId })
@@ -702,15 +670,8 @@ export async function trackPromptShare(
 
     const userId = await getUserIdFromSession(session.sub)
 
-    // Create usage event (no counter for shares, just events)
-    await executeSQL(
-      `INSERT INTO prompt_usage_events (prompt_id, user_id, event_type)
-       VALUES (:promptId::uuid, :userId, 'share')`,
-      [
-        { name: "promptId", value: { stringValue: promptId } },
-        { name: "userId", value: { longValue: userId } }
-      ]
-    )
+    // Create usage event via Drizzle (no counter for shares, just events)
+    await trackUsageEvent(promptId, userId, 'share')
 
     timer({ status: "success" })
     log.info("Prompt share tracked", { promptId, userId })
