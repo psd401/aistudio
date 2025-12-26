@@ -4,8 +4,8 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
 import { getServerSession } from "@/lib/auth/server-session"
 import { hasRole } from "@/utils/roles"
-import { getUserIdByCognitoSub } from "@/lib/db/data-api-adapter"
 import {
+  getUserIdByCognitoSub,
   getModerationQueue as drizzleGetModerationQueue,
   moderatePrompt as drizzleModeratePrompt,
   bulkModeratePrompts as drizzleBulkModeratePrompts,
