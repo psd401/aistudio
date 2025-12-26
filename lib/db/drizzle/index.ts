@@ -566,6 +566,10 @@ export {
   // Tag operations
   ensureTagsExist,
   setPromptTags,
+  getAllTags,
+  getPopularTags,
+  getTagsForPrompt,
+  searchTagsByName,
   // Usage event operations
   trackUsageEvent,
   getPromptUsageStats,

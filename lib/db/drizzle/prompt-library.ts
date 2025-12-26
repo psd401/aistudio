@@ -623,6 +623,135 @@ export async function ensureTagsExist(
 }
 
 /**
+ * Get all tags with usage count
+ * Returns tags ordered by usage count descending, then name ascending
+ */
+export async function getAllTags(): Promise<
+  Array<{ id: number; name: string; createdAt: Date; usageCount: number }>
+> {
+  const result = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: promptTags.id,
+          name: promptTags.name,
+          createdAt: promptTags.createdAt,
+          usageCount: sql<number>`COUNT(${promptLibraryTags.promptId})`,
+        })
+        .from(promptTags)
+        .leftJoin(
+          promptLibraryTags,
+          eq(promptTags.id, promptLibraryTags.tagId)
+        )
+        .groupBy(promptTags.id, promptTags.name, promptTags.createdAt)
+        .orderBy(
+          desc(sql<number>`COUNT(${promptLibraryTags.promptId})`),
+          promptTags.name
+        ),
+    "getAllTags"
+  );
+
+  return result;
+}
+
+/**
+ * Get popular tags (tags with at least one usage)
+ * Returns tags ordered by usage count descending
+ */
+export async function getPopularTags(
+  limit: number = 20
+): Promise<
+  Array<{ id: number; name: string; createdAt: Date; usageCount: number }>
+> {
+  const result = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: promptTags.id,
+          name: promptTags.name,
+          createdAt: promptTags.createdAt,
+          usageCount: sql<number>`COUNT(${promptLibraryTags.promptId})`,
+        })
+        .from(promptTags)
+        .innerJoin(
+          promptLibraryTags,
+          eq(promptTags.id, promptLibraryTags.tagId)
+        )
+        .innerJoin(
+          promptLibrary,
+          and(
+            eq(promptLibraryTags.promptId, promptLibrary.id),
+            sql`${promptLibrary.deletedAt} IS NULL`
+          )
+        )
+        .groupBy(promptTags.id, promptTags.name, promptTags.createdAt)
+        .having(sql`COUNT(${promptLibraryTags.promptId}) > 0`)
+        .orderBy(
+          desc(sql<number>`COUNT(${promptLibraryTags.promptId})`),
+          promptTags.name
+        )
+        .limit(limit),
+    "getPopularTags"
+  );
+
+  return result;
+}
+
+/**
+ * Get tags for a specific prompt
+ * Returns tags ordered by name ascending
+ */
+export async function getTagsForPrompt(
+  promptId: string
+): Promise<Array<{ id: number; name: string; createdAt: Date }>> {
+  const result = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: promptTags.id,
+          name: promptTags.name,
+          createdAt: promptTags.createdAt,
+        })
+        .from(promptTags)
+        .innerJoin(
+          promptLibraryTags,
+          eq(promptTags.id, promptLibraryTags.tagId)
+        )
+        .where(eq(promptLibraryTags.promptId, promptId))
+        .orderBy(promptTags.name),
+    "getTagsForPrompt"
+  );
+
+  return result;
+}
+
+/**
+ * Search tags by name (case-insensitive)
+ * Returns tags ordered by name ascending
+ */
+export async function searchTagsByName(
+  query: string,
+  limit: number = 10
+): Promise<Array<{ id: number; name: string; createdAt: Date }>> {
+  const result = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: promptTags.id,
+          name: promptTags.name,
+          createdAt: promptTags.createdAt,
+        })
+        .from(promptTags)
+        .where(ilike(promptTags.name, `%${query}%`))
+        .orderBy(promptTags.name)
+        .limit(limit),
+    "searchTagsByName"
+  );
+
+  return result;
+}
+
+/**
  * Set tags for a prompt (replaces existing)
  * Uses transaction to ensure atomicity
  */
