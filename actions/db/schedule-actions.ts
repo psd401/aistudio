@@ -976,7 +976,7 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
     }
 
     // Check if there's anything to update besides updatedBy
-    const hasUpdates = Object.keys(updateData).filter(k => k !== 'updatedBy').length > 0
+    const hasUpdates = Object.keys(updateData).some(k => k !== 'updatedBy')
     if (!hasUpdates) {
       throw ErrorFactories.validationFailed([{ field: 'general', message: 'No fields to update' }])
     }

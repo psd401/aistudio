@@ -15,56 +15,15 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import {
+  getAbsolutePath,
+  getNextMigrationNumber,
+  sanitizeForFilename,
+} from "./lib/migration-utils";
 
 // Constants
 const LAMBDA_SCHEMA_DIR = "./infra/database/schema";
-const DB_INIT_HANDLER_PATH = "./infra/database/lambda/db-init-handler.ts";
 
-/**
- * Get the next migration number based on existing migrations
- */
-function getNextMigrationNumber(): number {
-  const handlerContent = fs.readFileSync(DB_INIT_HANDLER_PATH, "utf-8");
-
-  // Extract MIGRATION_FILES array
-  const arrayMatch = handlerContent.match(
-    /const\s+MIGRATION_FILES\s*=\s*\[([\S\s]*?)];/
-  );
-  if (!arrayMatch) {
-    throw new Error(
-      `Could not find MIGRATION_FILES array in ${DB_INIT_HANDLER_PATH}`
-    );
-  }
-
-  // Extract all migration filenames
-  const filenames = arrayMatch[1].match(/'([^']+\.sql)'/g) || [];
-
-  // Find highest migration number
-  let maxNumber = 9; // Start at 009 so first migration is 010
-
-  for (const filename of filenames) {
-    const match = filename.match(/'(\d+)/);
-    if (match) {
-      const num = Number.parseInt(match[1], 10);
-      if (num > maxNumber) {
-        maxNumber = num;
-      }
-    }
-  }
-
-  return maxNumber + 1;
-}
-
-/**
- * Sanitize description for filename
- */
-function sanitizeForFilename(description: string): string {
-  return description
-    .toLowerCase()
-    .replace(/[^\da-z]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .substring(0, 50);
-}
 
 /**
  * Generate migration template content
@@ -150,7 +109,7 @@ async function main(): Promise<void> {
   console.log(`   Filename: ${filename}`);
 
   // Step 2: Check if file already exists
-  const filePath = path.join(LAMBDA_SCHEMA_DIR, filename);
+  const filePath = getAbsolutePath(path.join(LAMBDA_SCHEMA_DIR, filename));
   if (fs.existsSync(filePath)) {
     console.error("");
     console.error(`❌ Migration file already exists: ${filePath}`);
@@ -177,7 +136,7 @@ async function main(): Promise<void> {
   console.log("");
   console.log(`1. Add your SQL to the migration file: ${filePath}`);
   console.log("");
-  console.log(`2. Add to MIGRATION_FILES array in ${DB_INIT_HANDLER_PATH}:`);
+  console.log(`2. Add to MIGRATION_FILES array in ./infra/database/lambda/db-init-handler.ts:`);
   console.log("");
   console.log(`   const MIGRATION_FILES = [`);
   console.log(`     // ... existing migrations ...`);

@@ -15,6 +15,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { getAbsolutePath, getNextMigrationNumber } from "./lib/migration-utils";
 
 // Constants
 const LAMBDA_SCHEMA_DIR = "./infra/database/schema";
@@ -32,7 +33,8 @@ interface MigrationInfo {
  * Get all migrations from MIGRATION_FILES array
  */
 function getMigrations(): MigrationInfo[] {
-  const handlerContent = fs.readFileSync(DB_INIT_HANDLER_PATH, "utf-8");
+  const handlerPath = getAbsolutePath(DB_INIT_HANDLER_PATH);
+  const handlerContent = fs.readFileSync(handlerPath, "utf-8");
 
   // Extract MIGRATION_FILES array
   const arrayMatch = handlerContent.match(
@@ -53,7 +55,7 @@ function getMigrations(): MigrationInfo[] {
     const numberMatch = filename.match(/^(\d+)/);
     const number = numberMatch ? Number.parseInt(numberMatch[1], 10) : 0;
 
-    const filePath = path.join(LAMBDA_SCHEMA_DIR, filename);
+    const filePath = getAbsolutePath(path.join(LAMBDA_SCHEMA_DIR, filename));
     const exists = fs.existsSync(filePath);
 
     let size: number | undefined;
@@ -78,19 +80,6 @@ function getMigrations(): MigrationInfo[] {
 }
 
 /**
- * Get the next migration number
- */
-function getNextMigrationNumber(migrations: MigrationInfo[]): number {
-  let maxNumber = 9;
-  for (const m of migrations) {
-    if (m.number > maxNumber) {
-      maxNumber = m.number;
-    }
-  }
-  return maxNumber + 1;
-}
-
-/**
  * Format file size
  */
 function formatSize(bytes: number): string {
@@ -109,7 +98,7 @@ async function main(): Promise<void> {
   console.log("");
 
   const migrations = getMigrations();
-  const nextNumber = getNextMigrationNumber(migrations);
+  const nextNumber = getNextMigrationNumber();
 
   console.log(`Source: ${DB_INIT_HANDLER_PATH}`);
   console.log(`Schema dir: ${LAMBDA_SCHEMA_DIR}`);

@@ -21,11 +21,16 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import {
+  getAbsolutePath,
+  getNextMigrationNumber,
+  sanitizeForFilename,
+  validateNotEmpty,
+} from "./lib/migration-utils";
 
 // Constants
 const DRIZZLE_MIGRATIONS_DIR = "./drizzle/migrations";
 const LAMBDA_SCHEMA_DIR = "./infra/database/schema";
-const DB_INIT_HANDLER_PATH = "./infra/database/lambda/db-init-handler.ts";
 
 // RDS Data API incompatible patterns
 const INCOMPATIBLE_PATTERNS = [
@@ -56,43 +61,10 @@ interface ValidationError {
   fix: string;
 }
 
-/**
- * Get the next migration number based on existing migrations
- */
-function getNextMigrationNumber(): number {
-  const handlerContent = fs.readFileSync(DB_INIT_HANDLER_PATH, "utf-8");
-
-  // Extract MIGRATION_FILES array
-  const arrayMatch = handlerContent.match(
-    /const\s+MIGRATION_FILES\s*=\s*\[([\S\s]*?)];/
-  );
-  if (!arrayMatch) {
-    throw new Error(
-      `Could not find MIGRATION_FILES array in ${DB_INIT_HANDLER_PATH}`
-    );
-  }
-
-  // Extract all migration filenames
-  const filenames = arrayMatch[1].match(/'([^']+\.sql)'/g) || [];
-
-  // Find highest migration number
-  let maxNumber = 9; // Start at 009 so first migration is 010
-
-  for (const filename of filenames) {
-    const match = filename.match(/'(\d+)/);
-    if (match) {
-      const num = Number.parseInt(match[1], 10);
-      if (num > maxNumber) {
-        maxNumber = num;
-      }
-    }
-  }
-
-  return maxNumber + 1;
-}
 
 /**
  * Validate SQL for RDS Data API compatibility
+ * Fixed: Use matchAll() to avoid infinite loop with global regex
  */
 function validateSQL(sql: string): ValidationError[] {
   const errors: ValidationError[] = [];
@@ -111,10 +83,12 @@ function validateSQL(sql: string): ValidationError[] {
     .join("\n");
 
   for (const { pattern, message, fix } of INCOMPATIBLE_PATTERNS) {
-    let match;
-    while ((match = pattern.exec(sqlWithoutComments)) !== null) {
+    // Use matchAll() to avoid regex state issues with global flag
+    const matches = [...sqlWithoutComments.matchAll(pattern)];
+
+    for (const match of matches) {
       // Find line number
-      const beforeMatch = sqlWithoutComments.substring(0, match.index);
+      const beforeMatch = sqlWithoutComments.substring(0, match.index!);
       const lineNumber = (beforeMatch.match(/\n/g) || []).length + 1;
 
       errors.push({
@@ -187,16 +161,6 @@ function findLatestDrizzleMigration(): string | null {
   return sortedFiles[0].name;
 }
 
-/**
- * Sanitize description for filename
- */
-function sanitizeForFilename(description: string): string {
-  return description
-    .toLowerCase()
-    .replace(/[^\da-z]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .substring(0, 50);
-}
 
 /**
  * Main execution
@@ -239,8 +203,20 @@ async function main(): Promise<void> {
   console.log("");
   console.log("🔍 Step 2: Validating SQL for RDS Data API compatibility...");
 
-  const sourcePath = path.join(DRIZZLE_MIGRATIONS_DIR, latestMigration);
+  const sourcePath = getAbsolutePath(path.join(DRIZZLE_MIGRATIONS_DIR, latestMigration));
   const sql = fs.readFileSync(sourcePath, "utf-8");
+
+  // Validate SQL is not empty
+  try {
+    validateNotEmpty(sql);
+  } catch (error) {
+    console.error("");
+    console.error("❌", (error as Error).message);
+    console.error("");
+    console.error(`File: ${sourcePath}`);
+    console.error("");
+    process.exit(1);
+  }
 
   const errors = validateSQL(sql);
 
@@ -288,7 +264,7 @@ async function main(): Promise<void> {
   console.log("");
   console.log("📋 Step 5: Copying to Lambda schema directory...");
 
-  const destPath = path.join(LAMBDA_SCHEMA_DIR, newFilename);
+  const destPath = getAbsolutePath(path.join(LAMBDA_SCHEMA_DIR, newFilename));
   fs.writeFileSync(destPath, preparedSQL);
 
   console.log(`   ✅ Created: ${destPath}`);
@@ -303,7 +279,7 @@ async function main(): Promise<void> {
   console.log("");
   console.log(`1. Review the migration SQL at: ${destPath}`);
   console.log("");
-  console.log(`2. Add to MIGRATION_FILES array in ${DB_INIT_HANDLER_PATH}:`);
+  console.log(`2. Add to MIGRATION_FILES array in ./infra/database/lambda/db-init-handler.ts:`);
   console.log("");
   console.log(`   const MIGRATION_FILES = [`);
   console.log(`     // ... existing migrations ...`);

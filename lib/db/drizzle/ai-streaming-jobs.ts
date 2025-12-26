@@ -80,7 +80,7 @@ export const MAX_ERROR_MESSAGE_LENGTH = 10000;
  * Where M is version (1-5) and N is variant (8, 9, a, b)
  */
 export const UUID_REGEX =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  /^[\da-f]{8}-[\da-f]{4}-[1-5][\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i;
 
 // ============================================
 // Types
