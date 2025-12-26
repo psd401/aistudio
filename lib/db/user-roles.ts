@@ -1,6 +1,6 @@
 import { executeQuery, executeTransaction } from './drizzle-client';
 import { users, userRoles, roles } from './schema';
-import { eq, inArray, sql } from 'drizzle-orm';
+import { eq, inArray, sql, and } from 'drizzle-orm';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
 /**
@@ -201,7 +201,7 @@ export async function removeUserRole(userId: number, roleName: string): Promise<
         // Remove role assignment
         await tx
           .delete(userRoles)
-          .where(sql`${userRoles.userId} = ${userId} AND ${userRoles.roleId} = ${roleId}`);
+          .where(and(eq(userRoles.userId, userId), eq(userRoles.roleId, roleId)));
 
         // Increment role_version for optimistic locking
         await tx
