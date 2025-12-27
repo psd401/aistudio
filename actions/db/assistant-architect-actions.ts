@@ -1668,16 +1668,12 @@ export async function rejectAssistantArchitectAction(
     log.debug("User authenticated", { userId: session.sub })
 
     // Check if user is an administrator
-    const isAdmin = await checkUserRoleByCognitoSub(session.sub, "administrator")
+    const isAdmin = await hasRole("administrator");
     if (!isAdmin) {
       return { isSuccess: false, message: "Only administrators can reject tools" }
     }
 
-    await executeSQL<never>(`
-      UPDATE assistant_architects
-      SET status = 'rejected'::tool_status, updated_at = NOW()
-      WHERE id = :id
-    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
+    await drizzleRejectAssistantArchitect(Number.parseInt(id, 10));
 
     log.info("Assistant architect rejected successfully", { id })
     timer({ status: "success", id })
@@ -1830,45 +1826,36 @@ export async function submitAssistantArchitectForApprovalAction(
     
     log.debug("User authenticated", { userId: session.sub })
 
-    const toolResult = await executeSQL<FormattedRow>(`
-      SELECT id, name, description, user_id, status
-      FROM assistant_architects
-      WHERE id = :id
-    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
+    const idInt = Number.parseInt(id, 10);
 
-    if (!toolResult || toolResult.length === 0) {
+    const tool = await drizzleGetAssistantArchitectById(idInt);
+
+    if (!tool) {
       return { isSuccess: false, message: "Assistant not found" }
     }
 
-    const tool = toolResult[0];
-    const isAdmin = await checkUserRoleByCognitoSub(session.sub, "administrator")
-    const currentUserId = await getCurrentUserId();
-    if (!currentUserId) {
+    const isAdmin = await hasRole("administrator");
+    const currentUserResult = await getCurrentUserAction();
+    if (!currentUserResult.isSuccess || !currentUserResult.data) {
       return { isSuccess: false, message: "User not found" }
     }
-    if (tool.user_id !== currentUserId && !isAdmin) {
+    const currentUserId = currentUserResult.data.user.id;
+
+    if (tool.userId !== currentUserId && !isAdmin) {
       return { isSuccess: false, message: "Unauthorized" }
     }
 
     // Fetch input fields and prompts for this tool
     const [inputFields, prompts] = await Promise.all([
-      executeSQL<{ id: number }>(`
-        SELECT id FROM tool_input_fields WHERE assistant_architect_id = :id
-      `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]),
-      executeSQL<{ id: number }>(`
-        SELECT id FROM chain_prompts WHERE assistant_architect_id = :id
-      `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }])
+      getToolInputFields(idInt),
+      getChainPrompts(idInt)
     ]);
 
     if (!tool.name || !tool.description || inputFields.length === 0 || prompts.length === 0) {
       return { isSuccess: false, message: "Assistant is incomplete" }
     }
 
-    await executeSQL<never>(`
-      UPDATE assistant_architects
-      SET status = 'pending_approval'::tool_status, updated_at = NOW()
-      WHERE id = :id
-    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
+    await drizzleSubmitForApproval(idInt);
 
     log.info("Assistant architect submitted for approval", { id })
     timer({ status: "success", id })
