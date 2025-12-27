@@ -8,18 +8,15 @@ import {
   type InsertToolExecution,
   type SelectToolInputField,
   type SelectChainPrompt,
-  type SelectToolExecution,
-  type SelectPromptResult,
   type SelectTool,
   type SelectAiModel,
   type ToolInputFieldOptions
 } from "@/types/db-types"
 // CoreMessage import removed - AI completion now handled by Lambda workers
-import { parseRepositoryIds, serializeRepositoryIds } from "@/lib/utils/repository-utils"
+import { parseRepositoryIds } from "@/lib/utils/repository-utils"
 import { getAvailableToolsForModel, getAllTools } from "@/lib/tools/tool-registry"
 
 import { handleError, createSuccess, ErrorFactories, createError } from "@/lib/error-utils";
-import { generateToolIdentifier } from "@/lib/utils";
 import { ActionState, ErrorLevel } from "@/types";
 import { ExecutionResultDetails } from "@/types/assistant-architect-types";
 import {
@@ -59,7 +56,7 @@ import {
 } from "@/lib/db/drizzle";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { eq, and, inArray, desc } from "drizzle-orm";
-import { tools, navigationItems, toolInputFields, chainPrompts, roles, assistantArchitects, roleTools, userRoles, toolExecutions, promptResults, users } from "@/lib/db/schema";
+import { tools, navigationItems, toolInputFields, chainPrompts, assistantArchitects, roleTools, userRoles, toolExecutions, promptResults } from "@/lib/db/schema";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -77,51 +74,6 @@ function safeParseInt(value: string, fieldName: string): number {
     }]);
   }
   return parsed;
-}
-
-// Helper function to transform and parse prompt data consistently
-// TODO: Remove when all functions migrated - temporary generic version for unmigrated functions
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function transformPrompt(prompt: any): SelectChainPrompt {
-  // Handle both snake_case (from executeSQL) and camelCase (from Drizzle)
-  const repositoryIds = parseRepositoryIds(prompt.repository_ids || prompt.repositoryIds);
-
-  // Parse enabled_tools from JSONB array to string array
-  let enabledTools: string[] = [];
-  const tools = prompt.enabled_tools || prompt.enabledTools;
-  if (tools && typeof tools === 'string') {
-    try {
-      // Add length check to prevent DoS
-      if ((tools as string).length > 10000) {
-        enabledTools = [];
-      } else {
-        const parsed = JSON.parse(tools);
-        // Validate parsed data structure
-        enabledTools = Array.isArray(parsed) ? parsed : [];
-      }
-    } catch {
-      enabledTools = [];
-    }
-  } else if (Array.isArray(tools)) {
-    enabledTools = tools;
-  }
-
-  return {
-    id: prompt.id,
-    assistantArchitectId: prompt.assistant_architect_id || prompt.assistantArchitectId,
-    name: prompt.name,
-    content: prompt.content,
-    systemContext: prompt.system_context || prompt.systemContext,
-    modelId: prompt.model_id || prompt.modelId,
-    position: prompt.position,
-    parallelGroup: prompt.parallel_group || prompt.parallelGroup,
-    inputMapping: prompt.input_mapping || prompt.inputMapping,
-    timeoutSeconds: prompt.timeout_seconds || prompt.timeoutSeconds,
-    repositoryIds,
-    enabledTools,
-    createdAt: prompt.created_at || prompt.createdAt,
-    updatedAt: prompt.updated_at || prompt.updatedAt
-  };
 }
 
 // Helper function to map UI field types to database enum values
@@ -202,17 +154,6 @@ async function validateEnabledTools(
       message: `Error validating tools: ${error instanceof Error ? error.message : 'Unknown error'}`
     };
   }
-}
-
-
-
-// Helper function to get current user ID
-async function getCurrentUserId(): Promise<number | null> {
-  const currentUser = await getCurrentUserAction();
-  if (currentUser.isSuccess && currentUser.data) {
-    return currentUser.data.user.id;
-  }
-  return null;
 }
 
 // Input validation and sanitization function for Assistant Architect

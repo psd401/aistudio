@@ -32,7 +32,6 @@ import {
   type ModeratePromptInput
 } from "@/lib/prompt-library/validation"
 import type { PromptUsageEvent } from "@/lib/prompt-library/types"
-import { eq, sql } from "drizzle-orm"
 
 /**
  * Track prompt usage (creates a conversation from a prompt)

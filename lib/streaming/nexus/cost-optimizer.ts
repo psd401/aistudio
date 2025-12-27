@@ -1,27 +1,9 @@
 import { createLogger } from '@/lib/logger';
 import { executeSQL, type DatabaseRow } from './db-helpers';
-import { transformSnakeToCamel } from '@/lib/db/field-mapper';
 
 const log = createLogger({ module: 'cost-optimizer' });
 
 // Database row interfaces for cost optimization queries
-interface AIModelRow extends DatabaseRow {
-  provider: string;
-  model_id: string;
-  name: string;
-  description: string | null;
-  max_tokens: number | null;
-  input_cost_per_1k_tokens: number | null;
-  output_cost_per_1k_tokens: number | null;
-  cached_input_cost_per_1k_tokens: number | null;
-  average_latency_ms: number | null;
-  max_concurrency: number | null;
-  supports_batching: boolean | null;
-  nexus_capabilities: Record<string, unknown> | null;
-  provider_metadata: Record<string, unknown> | null;
-  allowed_roles: string[] | null;
-}
-
 interface CostModelRow extends DatabaseRow {
   input_cost_per_1k_tokens: number | null;
   output_cost_per_1k_tokens: number | null;
@@ -297,28 +279,28 @@ export class CostOptimizer {
     }
     
     try {
-      const result = await executeSQL<AIModelRow>(`
-        SELECT 
+      const result = await executeSQL<TransformedModel>(`
+        SELECT
           provider,
-          model_id,
+          model_id as "modelId",
           name,
           description,
-          max_tokens,
-          input_cost_per_1k_tokens,
-          output_cost_per_1k_tokens,
-          cached_input_cost_per_1k_tokens,
-          average_latency_ms,
-          max_concurrency,
-          supports_batching,
-          nexus_capabilities,
-          provider_metadata,
-          allowed_roles
-        FROM ai_models 
+          max_tokens as "maxTokens",
+          input_cost_per_1k_tokens as "inputCostPer1kTokens",
+          output_cost_per_1k_tokens as "outputCostPer1kTokens",
+          cached_input_cost_per_1k_tokens as "cachedInputCostPer1kTokens",
+          average_latency_ms as "averageLatencyMs",
+          max_concurrency as "maxConcurrency",
+          supports_batching as "supportsBatching",
+          nexus_capabilities as "nexusCapabilities",
+          provider_metadata as "providerMetadata",
+          allowed_roles as "allowedRoles"
+        FROM ai_models
         WHERE active = true AND chat_enabled = true
         ORDER BY provider, name
       `);
-      
-      const models = result.map((row) => transformSnakeToCamel<TransformedModel>(row));
+
+      const models = result;
       
       // Update cache
       this.modelCache.clear();

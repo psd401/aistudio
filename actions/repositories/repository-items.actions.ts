@@ -2,7 +2,7 @@
 
 import { getServerSession } from "@/lib/auth/server-session"
 import { executeTransaction as drizzleTransaction, executeQuery, repositoryItems, repositoryItemChunks } from "@/lib/db/drizzle-client"
-import { eq, and, like, sql, desc } from "drizzle-orm"
+import { eq, and, sql, desc } from "drizzle-orm"
 import {
   createRepositoryItem,
   getRepositoryItemById,

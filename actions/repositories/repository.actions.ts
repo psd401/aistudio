@@ -13,8 +13,6 @@ import {
   getRepositoryAccessList,
   grantUserAccess,
   grantRoleAccess,
-  revokeUserAccess,
-  revokeRoleAccess,
   revokeAccessById,
   getUserAccessibleRepositories
 } from "@/lib/db/drizzle"
@@ -543,7 +541,7 @@ export async function grantRepositoryAccess(
   repositoryId: number,
   userId: number | null,
   roleId: number | null,
-  accessLevel: 'read' | 'write' | 'admin'
+  _accessLevel: 'read' | 'write' | 'admin'
 ): Promise<ActionState<void>> {
   try {
     const session = await getServerSession()

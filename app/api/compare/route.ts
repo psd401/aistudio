@@ -13,15 +13,6 @@ import { mergeStreamsWithIdentifiers, asyncGeneratorToStream } from '@/lib/compa
 // Allow streaming responses up to 5 minutes
 export const maxDuration = 300;
 
-// Type definition for database model rows
-interface ModelRow {
-  id: number;
-  provider: string;
-  modelId: string;
-  name: string;
-  chatEnabled: boolean;
-}
-
 // Input validation schema for compare requests
 const CompareRequestSchema = z.object({
   prompt: z.string().min(1, 'Prompt is required').max(10000, 'Prompt too long'),

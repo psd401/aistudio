@@ -1,10 +1,11 @@
 import { notFound } from "next/navigation"
-import { executeSQL } from "@/lib/db/data-api-adapter"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { eq, inArray } from "drizzle-orm"
+import { navigationItems, assistantArchitects } from "@/lib/db/schema"
 import { Suspense } from "react"
 import Image from "next/image"
 import Link from "next/link"
 import logger from "@/lib/logger"
-import { extractRDSString, ensureRDSNumber, toReactKey, ensureRDSString } from "@/lib/type-helpers"
 import type { SelectAssistantArchitect } from "@/types/db-types"
 
 interface PageProps {
@@ -13,40 +14,37 @@ interface PageProps {
 
 export default async function PublicPage({ params }: PageProps) {
   const { pageId } = await params
-  
+
   try {
     // Construct the full link path from the pageId slug
     const pageLink = `/page/${pageId}`;
 
     // Fetch the page navigation item by link
-    const pageItemSql = 'SELECT * FROM navigation_items WHERE link = :pageLink AND type = :type::navigation_type';
-    const pageItemResult = await executeSQL(pageItemSql, [
-      { name: 'pageLink', value: { stringValue: pageLink } },
-      { name: 'type', value: { stringValue: 'page' } }
-    ]);
-    
-    const pageItem = pageItemResult[0];
+    const [pageItem] = await executeQuery(
+      (db) => db.select()
+        .from(navigationItems)
+        .where(eq(navigationItems.link, pageLink))
+        .limit(1),
+      "getPageByLink"
+    );
+
     if (!pageItem || pageItem.type !== "page") {
       notFound()
     }
 
   // Fetch all child links/tools of this page
-  const childItemsSql = `
-    SELECT * FROM navigation_items 
-    WHERE parent_id = :parentId 
-    AND type = 'link'::navigation_type 
-    AND is_active = true
-    ORDER BY position ASC
-  `;
-  const childItems = await executeSQL(childItemsSql, [
-    { name: 'parentId', value: { longValue: ensureRDSNumber(pageItem.id) } }
-  ]);
+  const childItems = await executeQuery(
+    (db) => db.select()
+      .from(navigationItems)
+      .where(eq(navigationItems.parentId, pageItem.id))
+      .orderBy(navigationItems.position),
+    "getChildNavigationItems"
+  );
 
   // Helper to extract toolId from a link like /tools/assistant-architect/{toolId}
-  function extractAssistantId(link: unknown): number | null {
-    const linkStr = extractRDSString(link)
-    if (!linkStr) return null
-    const match = linkStr.match(/\/tools\/assistant-architect\/(\d+)/)
+  function extractAssistantId(link: string | null): number | null {
+    if (!link) return null
+    const match = link.match(/\/tools\/assistant-architect\/(\d+)/)
     return match ? Number.parseInt(match[1], 10) : null
   }
 
@@ -57,23 +55,23 @@ export default async function PublicPage({ params }: PageProps) {
 
   let assistants: Record<number, SelectAssistantArchitect> = {}
   if (childAssistantIds.length > 0) {
-    // Build the IN clause for SQL with integer IDs
-    const placeholders = childAssistantIds.map((_, i) => `:id${i}`).join(', ');
-    const assistantsSql = `SELECT * FROM assistant_architects WHERE id IN (${placeholders})`;
-    const assistantParams = childAssistantIds.map((id, i) => ({
-      name: `id${i}`,
-      value: { longValue: id }
-    }));
-    
-    const assistantRows = await executeSQL(assistantsSql, assistantParams);
-    assistants = Object.fromEntries(assistantRows.map((a) => [ensureRDSNumber(a.id), a as unknown as SelectAssistantArchitect]))
+    const assistantRows = await executeQuery(
+      (db) => db.select()
+        .from(assistantArchitects)
+        .where(inArray(assistantArchitects.id, childAssistantIds)),
+      "getAssistantArchitectsByIds"
+    );
+
+    assistants = Object.fromEntries(
+      assistantRows.map((a) => [a.id, a as SelectAssistantArchitect])
+    )
   }
 
   return (
     <>
-      <h1 className="text-3xl font-bold mb-4">{ensureRDSString(pageItem.label)}</h1>
+      <h1 className="text-3xl font-bold mb-4">{pageItem.label}</h1>
       {pageItem.description && (
-        <p className="mb-6 text-muted-foreground">{ensureRDSString(pageItem.description)}</p>
+        <p className="mb-6 text-muted-foreground">{pageItem.description}</p>
       )}
       <Suspense fallback={<div>Loading tools...</div>}>
         {childItems.length === 0 ? (
@@ -83,10 +81,10 @@ export default async function PublicPage({ params }: PageProps) {
             {childItems.map((child) => {
               const assistantId = extractAssistantId(child.link)
               const assistant = assistantId ? assistants[assistantId] : null
-              const href = extractRDSString(child.link) || "#"
+              const href = child.link || "#"
               return (
                 <Link
-                  key={toReactKey(child.id)}
+                  key={child.id}
                   href={href}
                   className="block rounded-lg border bg-card shadow-sm hover:shadow-md transition p-6 group focus-visible:ring-2 focus-visible:ring-primary"
                 >
@@ -101,15 +99,15 @@ export default async function PublicPage({ params }: PageProps) {
                       />
                     ) : (
                       <span className="text-3xl text-muted-foreground block">
-                        <span className={`i-lucide:${extractRDSString(child.icon) || 'file'}`} />
+                        <span className={`i-lucide:${child.icon || 'file'}`} />
                       </span>
                     )}
                     <div className="ml-4">
                       <div className="font-semibold text-lg">
-                        {assistant ? ensureRDSString(assistant.name) : ensureRDSString(child.label)}
+                        {assistant ? assistant.name : child.label}
                       </div>
                       <div className="text-muted-foreground text-sm mt-1">
-                        {assistant ? extractRDSString(assistant.description) : extractRDSString(child.description)}
+                        {assistant ? assistant.description : child.description}
                       </div>
                     </div>
                   </div>
