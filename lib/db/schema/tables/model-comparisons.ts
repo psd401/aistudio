@@ -4,7 +4,7 @@
  */
 
 import {
-  bigint,
+  bigserial,
   integer,
   jsonb,
   pgTable,
@@ -15,7 +15,7 @@ import { users } from "./users";
 import { aiModels } from "./ai-models";
 
 export const modelComparisons = pgTable("model_comparisons", {
-  id: bigint("id", { mode: "number" }).primaryKey(),
+  id: bigserial("id", { mode: "number" }).primaryKey(),
   userId: integer("user_id")
     .references(() => users.id, { onDelete: "set null" }),
   prompt: text("prompt").notNull(),
