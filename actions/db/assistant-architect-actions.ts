@@ -948,42 +948,32 @@ export async function reorderInputFieldsAction(
     
     log.debug("User authenticated", { userId: session.sub })
 
-    // Get the tool to check permissions
-    const toolResult = await executeSQL<FormattedRow>(`
-      SELECT user_id
-      FROM assistant_architects
-      WHERE id = :toolId
-    `, [{ name: 'toolId', value: { longValue: Number.parseInt(toolId, 10) } }]);
+    const toolIdInt = Number.parseInt(toolId, 10);
 
-    if (!toolResult || toolResult.length === 0) {
+    // Get the tool to check permissions
+    const architect = await drizzleGetAssistantArchitectById(toolIdInt);
+
+    if (!architect) {
       return { isSuccess: false, message: "Tool not found" }
     }
 
-    const tool = toolResult[0];
-
     // Only tool creator or admin can reorder fields
-    const isAdmin = await checkUserRoleByCognitoSub(session.sub, "administrator")
-    const currentUserId = await getCurrentUserId();
-    if (!currentUserId) {
+    const isAdmin = await hasRole("administrator");
+    const currentUserResult = await getCurrentUserAction();
+    if (!currentUserResult.isSuccess || !currentUserResult.data) {
       return { isSuccess: false, message: "User not found" }
     }
-    if (!isAdmin && tool.user_id !== currentUserId) {
+    const currentUserId = currentUserResult.data.user.id;
+
+    if (!isAdmin && architect.userId !== currentUserId) {
       return { isSuccess: false, message: "Forbidden" }
     }
 
     // Update each field's position
     const updatedFields = await Promise.all(
       fieldOrders.map(async ({ id, position }) => {
-        const result = await executeSQL<FormattedRow>(`
-          UPDATE tool_input_fields
-          SET position = :position, updated_at = NOW()
-          WHERE id = :id
-          RETURNING id, assistant_architect_id, name, label, field_type, position, options, created_at, updated_at
-        `, [
-          { name: 'position', value: { longValue: position } },
-          { name: 'id', value: { longValue: Number.parseInt(id, 10) } }
-        ]);
-        return transformSnakeToCamel<SelectToolInputField>(result[0]);
+        const [field] = await updateToolInputField(Number.parseInt(id, 10), { position });
+        return field;
       })
     )
 
