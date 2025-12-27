@@ -223,7 +223,7 @@ export async function mapModelsForImport(modelNames: string[]): Promise<Map<stri
     if (lowerName.includes('gpt') || lowerName.includes('openai')) {
       mappedId = providerDefaults.get('openai')
     } else if (lowerName.includes('claude')) {
-      mappedId = providerDefaults.get('azure') || providerDefaults.get('amazon-bedrock')
+      mappedId = providerDefaults.get('anthropic') || providerDefaults.get('amazon-bedrock')
     } else if (lowerName.includes('gemini')) {
       mappedId = providerDefaults.get('google')
     }

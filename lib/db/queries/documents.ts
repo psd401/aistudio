@@ -145,11 +145,11 @@ export async function getDocumentsByConversationId({
 /**
  * Deletes a document by id
  */
-export async function deleteDocumentById({ id }: { id: string }): Promise<void> {
+export async function deleteDocumentById({ id }: { id: number }): Promise<void> {
   try {
     await executeQuery(
       (db) => db.delete(documents)
-        .where(eq(documents.id, Number.parseInt(id, 10))),
+        .where(eq(documents.id, id)),
       "deleteDocumentById"
     )
   } catch (error) {
@@ -170,7 +170,8 @@ export async function saveDocumentChunk(chunk: InsertDocumentChunk): Promise<Sel
           documentId: chunk.documentId,
           content: chunk.content,
           chunkIndex: chunk.chunkIndex,
-          metadata: chunk.metadata ?? null
+          metadata: chunk.metadata ?? null,
+          pageNumber: chunk.pageNumber ?? null
         })
         .returning({
           id: documentChunks.id,
@@ -236,6 +237,11 @@ export async function getDocumentChunksByDocumentId({
  */
 export async function batchInsertDocumentChunks(chunks: InsertDocumentChunk[]): Promise<SelectDocumentChunk[]> {
   try {
+    // Guard against empty array - Drizzle throws on empty .values()
+    if (chunks.length === 0) {
+      return [];
+    }
+
     // Drizzle supports true batch inserts with RETURNING
     const results = await executeQuery(
       (db) => db.insert(documentChunks)
@@ -244,7 +250,8 @@ export async function batchInsertDocumentChunks(chunks: InsertDocumentChunk[]): 
           documentId: chunk.documentId,
           content: chunk.content,
           chunkIndex: chunk.chunkIndex,
-          metadata: chunk.metadata ?? null
+          metadata: chunk.metadata ?? null,
+          pageNumber: chunk.pageNumber ?? null
         })))
         .returning({
           id: documentChunks.id,

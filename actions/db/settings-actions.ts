@@ -71,7 +71,7 @@ export async function getSettingsAction(): Promise<ActionState<Setting[]>> {
 
     log.info("Settings retrieved successfully", {
       settingCount: result.length,
-      secretCount: result.filter(s => s.isSecret).length
+      secretCount: result.filter(s => s.isSecret === true).length
     })
 
     timer({ status: "success", count: result.length })

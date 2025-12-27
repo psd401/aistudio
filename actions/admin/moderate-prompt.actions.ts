@@ -281,11 +281,11 @@ export async function bulkModeratePrompts(
     }
 
     timer({ status: "success" })
-    log.info("Bulk moderation completed", { count: promptIds.length, status: action.status })
+    log.info("Bulk moderation completed", { count: actualCount, status: action.status })
 
     return createSuccess(
-      { success: true, count: promptIds.length },
-      `Successfully ${action.status} ${promptIds.length} prompts`
+      { success: true, count: actualCount },
+      `Successfully ${action.status} ${actualCount} prompts`
     )
 
   } catch (error) {
