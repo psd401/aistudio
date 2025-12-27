@@ -2,14 +2,14 @@ import { NextResponse } from "next/server"
 import { requireAdmin } from "@/lib/auth/admin-check"
 import { getServerSession } from "@/lib/auth/server-session"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
-import { 
-  getAssistantArchitects, 
-  createAssistantArchitect, 
-  updateAssistantArchitect, 
+import {
+  getAssistantArchitects,
+  createAssistantArchitect,
+  updateAssistantArchitect,
   deleteAssistantArchitect,
   approveAssistantArchitect,
   rejectAssistantArchitect
-} from "@/lib/db/data-api-adapter"
+} from "@/lib/db/drizzle"
 
 export async function GET() {
   const requestId = generateRequestId();
