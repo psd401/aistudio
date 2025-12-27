@@ -4,7 +4,7 @@ import { getServerSession } from "@/lib/auth/server-session"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import {
   getAssistantArchitects,
-  createAssistantArchitect,
+  createAssistantArchitectByCognitoSub,
   updateAssistantArchitect,
   deleteAssistantArchitect,
   approveAssistantArchitect,
@@ -130,10 +130,10 @@ export async function POST(request: Request) {
     }
 
     // Otherwise, create new assistant
-    const assistant = await createAssistantArchitect({
+    const assistant = await createAssistantArchitectByCognitoSub({
       name: body.name,
       description: body.description,
-      userId: session.sub,
+      cognitoSub: session.sub,
       status: body.status || 'draft'
     })
 
