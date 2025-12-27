@@ -45,11 +45,14 @@ import {
   getUserById,
   createToolInputField,
   deleteToolInputField,
-  updateToolInputField
+  updateToolInputField,
+  createChainPrompt,
+  updateChainPrompt,
+  deleteChainPrompt
 } from "@/lib/db/drizzle";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { eq } from "drizzle-orm";
-import { tools, navigationItems, toolInputFields } from "@/lib/db/schema";
+import { tools, navigationItems, toolInputFields, chainPrompts } from "@/lib/db/schema";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -1039,20 +1042,17 @@ export async function addChainPromptAction(
       }
     }
 
-    await executeSQL<never>(`
-      INSERT INTO chain_prompts (assistant_architect_id, name, content, system_context, model_id, position, input_mapping, repository_ids, enabled_tools, created_at, updated_at)
-      VALUES (:toolId, :name, :content, :systemContext, :modelId, :position, :inputMapping::jsonb, :repositoryIds::jsonb, :enabledTools::jsonb, NOW(), NOW())
-    `, [
-      { name: 'toolId', value: { longValue: safeParseInt(architectId, 'architectId') } },
-      { name: 'name', value: { stringValue: data.name } },
-      { name: 'content', value: { stringValue: data.content } },
-      { name: 'systemContext', value: data.systemContext ? { stringValue: data.systemContext } : { isNull: true } },
-      { name: 'modelId', value: { longValue: data.modelId } },
-      { name: 'position', value: { longValue: data.position } },
-      { name: 'inputMapping', value: data.inputMapping ? { stringValue: JSON.stringify(data.inputMapping) } : { isNull: true } },
-      { name: 'repositoryIds', value: { stringValue: serializeRepositoryIds(data.repositoryIds) || '[]' } },
-      { name: 'enabledTools', value: { stringValue: JSON.stringify(data.enabledTools || []) } }
-    ]);
+    await createChainPrompt({
+      assistantArchitectId: safeParseInt(architectId, 'architectId'),
+      name: data.name,
+      content: data.content,
+      modelId: data.modelId,
+      position: data.position,
+      systemContext: data.systemContext,
+      inputMapping: data.inputMapping,
+      repositoryIds: data.repositoryIds ?? [],
+      enabledTools: data.enabledTools ?? []
+    });
 
     log.info("Chain prompt added successfully", { architectId })
     timer({ status: "success", architectId })
@@ -1088,42 +1088,36 @@ export async function updatePromptAction(
     
     log.debug("User authenticated", { userId: session.sub })
 
-    // Find the prompt using data API
-    const promptResult = await executeSQL<FormattedRow>(`
-      SELECT id, assistant_architect_id, name, content, system_context, model_id, position, input_mapping, parallel_group, timeout_seconds, repository_ids, enabled_tools, created_at, updated_at
-      FROM chain_prompts
-      WHERE id = :id
-    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
+    const idInt = Number.parseInt(id, 10);
 
-    if (!promptResult || promptResult.length === 0) {
+    // Find the prompt
+    const [prompt] = await executeQuery(
+      (db) =>
+        db
+          .select({
+            id: chainPrompts.id,
+            assistantArchitectId: chainPrompts.assistantArchitectId,
+            modelId: chainPrompts.modelId
+          })
+          .from(chainPrompts)
+          .where(eq(chainPrompts.id, idInt))
+          .limit(1),
+      "getChainPromptById"
+    );
+
+    if (!prompt || !prompt.assistantArchitectId) {
       return { isSuccess: false, message: "Prompt not found" }
     }
 
-    const prompt = promptResult[0];
-    
-    
-    // executeSQL converts snake_case to camelCase, so use assistantArchitectId
-    const assistantArchitectId = prompt.assistantArchitectId;
-    
-    if (!assistantArchitectId) {
-      return { isSuccess: false, message: "Invalid prompt - missing assistant architect reference" };
-    }
-
     // Get the tool to check permissions
-    const toolResult = await executeSQL<{ userId: number }>(`
-      SELECT user_id
-      FROM assistant_architects
-      WHERE id = :toolId
-    `, [{ name: 'toolId', value: { longValue: Number(assistantArchitectId) } }]);
+    const architect = await drizzleGetAssistantArchitectById(prompt.assistantArchitectId);
 
-    if (!toolResult || toolResult.length === 0) {
+    if (!architect) {
       return { isSuccess: false, message: "Tool not found" }
     }
 
-    const tool = toolResult[0];
-
     // Only tool creator or admin can update prompts
-    const isAdmin = await checkUserRoleByCognitoSub(session.sub, "administrator")
+    const isAdmin = await hasRole("administrator");
 
     // Get current user with proper error handling
     const currentUser = await getCurrentUserAction();
@@ -1133,10 +1127,10 @@ export async function updatePromptAction(
     }
 
     const currentUserId = currentUser.data.user.id;
-    if (!isAdmin && tool.userId !== currentUserId) {
+    if (!isAdmin && architect.userId !== currentUserId) {
       log.warn("Authorization failed - user doesn't own resource", {
         userId: currentUserId,
-        resourceOwnerId: tool.userId,
+        resourceOwnerId: architect.userId,
         isAdmin
       });
       throw ErrorFactories.authzToolAccessDenied("assistant_architect");
@@ -1166,116 +1160,44 @@ export async function updatePromptAction(
       }
     }
     
-    // Clean up data object - remove undefined or null for array fields
-    // But keep empty arrays so they can be saved to clear the field
-    if ('repositoryIds' in data) {
-      if (data.repositoryIds === undefined || data.repositoryIds === null) {
-        // Remove the key entirely if it's undefined or null
-        delete data.repositoryIds;
-      }
-      // Keep empty arrays - they should be saved as '[]' in the database
-    }
+    // Build update data matching ChainPromptUpdateData type
+    const updates: {
+      name?: string;
+      content?: string;
+      modelId?: number;
+      position?: number;
+      parallelGroup?: number | null;
+      inputMapping?: Record<string, string> | null;
+      timeoutSeconds?: number | null;
+      systemContext?: string | null;
+      repositoryIds?: number[];
+      enabledTools?: string[];
+    } = {};
 
-    if ('enabledTools' in data) {
-      if (data.enabledTools === undefined || data.enabledTools === null) {
-        // Remove the key entirely if it's undefined or null
-        delete data.enabledTools;
-      }
-      // Keep empty arrays - they should be saved as '[]' in the database
-    }
+    if (data.name !== undefined && data.name !== null) updates.name = data.name;
+    if (data.content !== undefined && data.content !== null) updates.content = data.content;
+    if (data.systemContext !== undefined) updates.systemContext = data.systemContext ?? null;
+    if (data.modelId !== undefined && data.modelId !== null) updates.modelId = data.modelId;
+    if (data.position !== undefined && data.position !== null) updates.position = data.position;
+    if (data.parallelGroup !== undefined) updates.parallelGroup = data.parallelGroup ?? null;
+    if (data.timeoutSeconds !== undefined) updates.timeoutSeconds = data.timeoutSeconds ?? null;
+    if (data.inputMapping !== undefined) updates.inputMapping = data.inputMapping ?? null;
+    if (data.repositoryIds !== undefined && data.repositoryIds !== null) updates.repositoryIds = data.repositoryIds;
+    if (data.enabledTools !== undefined && data.enabledTools !== null) updates.enabledTools = data.enabledTools;
 
-    // Build update query dynamically
-    const updateFields = [];
-    const parameters: SqlParameter[] = [];
-    let paramIndex = 0;
-    
-    
-    // Filter out undefined values before processing
-    const definedEntries = Object.entries(data).filter(([_, value]) => value !== undefined);
-    
-    for (const [key, value] of definedEntries) {
-        
-        const snakeKey = key === 'toolId' ? 'assistant_architect_id' :
-                        key === 'systemContext' ? 'system_context' :
-                        key === 'modelId' ? 'model_id' :
-                        key === 'inputMapping' ? 'input_mapping' :
-                        key === 'repositoryIds' ? 'repository_ids' :
-                        key === 'enabledTools' ? 'enabled_tools' : key;
-        
-        // Add JSONB cast for JSON columns
-        if (key === 'inputMapping' || key === 'repositoryIds' || key === 'enabledTools') {
-          updateFields.push(`${snakeKey} = :param${paramIndex}::jsonb`);
-        } else {
-          updateFields.push(`${snakeKey} = :param${paramIndex}`);
-        }
-        
-        let paramValue;
-        if (value === null) {
-          paramValue = { isNull: true };
-        } else if (typeof value === 'number') {
-          paramValue = { longValue: value };
-        } else if (typeof value === 'boolean') {
-          paramValue = { booleanValue: value };
-        } else if (typeof value === 'string') {
-          // Ensure string is not empty
-          paramValue = { stringValue: value || '' };
-        } else if (typeof value === 'object') {
-          // Special handling for arrays and objects
-          if (key === 'repositoryIds' && Array.isArray(value)) {
-            // Ensure all elements are numbers before serializing
-            const numericIds = value.every(item => typeof item === 'number') ? value as number[] : null
-            // Use the serialization utility for repository IDs
-            paramValue = { stringValue: serializeRepositoryIds(numericIds) || '[]' };
-          } else if (key === 'enabledTools' && Array.isArray(value)) {
-            // Validate array elements and prevent prototype pollution
-            const safeArray = value.filter(item => {
-              if (typeof item !== 'string') return false;
-              // Prevent dangerous patterns in tool names
-              const dangerousPatterns = ['__proto__', 'constructor', 'prototype'];
-              return !dangerousPatterns.some(pattern => item.includes(pattern));
-            });
-            const jsonString = JSON.stringify(safeArray);
-            if (jsonString.length > 10000) {
-              throw ErrorFactories.validationFailed([{ field: 'enabledTools', message: 'Enabled tools array too large', value: safeArray }]);
-            }
-            paramValue = { stringValue: jsonString };
-          } else if (Array.isArray(value)) {
-            // Always stringify arrays, even empty ones
-            // This ensures empty arrays are stored as '[]' not NULL
-            const cleanArray = value.filter(v => v !== undefined);
-            paramValue = { stringValue: JSON.stringify(cleanArray) };
-          } else {
-            // For non-array objects, stringify them
-            paramValue = { stringValue: JSON.stringify(value) };
-          }
-        } else {
-          paramValue = { stringValue: String(value) };
-        }
-        
-        const param = { name: `param${paramIndex}`, value: paramValue };
-        parameters.push(param);
-        paramIndex++;
-    }
-    
-    if (updateFields.length === 0) {
+    if (Object.keys(updates).length === 0) {
       return { isSuccess: false, message: "No fields to update" }
     }
 
-    // Add the id parameter at the end
-    parameters.push({ name: 'id', value: { longValue: Number.parseInt(id, 10) } });
-    
-
-    const sql = `UPDATE chain_prompts SET ${updateFields.join(', ')}, updated_at = NOW() WHERE id = :id RETURNING id, assistant_architect_id, name, content, system_context, model_id, position, input_mapping, parallel_group, timeout_seconds, repository_ids, enabled_tools, created_at, updated_at`;
-    
-    const updatedPromptResult = await executeSQL(sql, parameters);
+    const updatedPrompt = await updateChainPrompt(idInt, updates);
 
     log.info("Prompt updated successfully", { id })
     timer({ status: "success", id })
-    
+
     return {
       isSuccess: true,
       message: "Prompt updated successfully",
-      data: transformPrompt(updatedPromptResult[0])
+      data: updatedPrompt
     }
   } catch (error) {
     timer({ status: "error" })
