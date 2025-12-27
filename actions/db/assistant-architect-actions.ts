@@ -44,6 +44,9 @@ import {
   getChainPrompts,
   getUserById
 } from "@/lib/db/drizzle";
+import { executeQuery } from "@/lib/db/drizzle-client";
+import { eq } from "drizzle-orm";
+import { tools, navigationItems } from "@/lib/db/schema";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -473,105 +476,92 @@ export async function updateAssistantArchitectAction(
   const requestId = generateRequestId()
   const timer = startTimer("updateAssistantArchitect")
   const log = createLogger({ requestId, action: "updateAssistantArchitect" })
-  
+
   try {
-    log.info("Action started: Updating assistant architect", { id })
-    
+    log.info("Action started: Updating assistant architect via Drizzle", { id })
+
     const session = await getServerSession();
     if (!session || !session.sub) {
       log.warn("Unauthorized assistant architect update attempt")
       return { isSuccess: false, message: "Unauthorized" }
     }
-    
+
     log.debug("User authenticated", { userId: session.sub })
-    
-    // Get the current tool using data API
-    const currentToolResult = await executeSQL<FormattedRow>(`
-      SELECT id, name, description, status, image_path, user_id, created_at, updated_at
-      FROM assistant_architects
-      WHERE id = :id
-    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
-    
-    if (!currentToolResult || currentToolResult.length === 0) {
+
+    const idInt = Number.parseInt(id, 10);
+    if (Number.isNaN(idInt)) {
+      return { isSuccess: false, message: "Invalid ID" }
+    }
+
+    // Get the current tool via Drizzle
+    const currentTool = await drizzleGetAssistantArchitectById(idInt);
+
+    if (!currentTool) {
       return { isSuccess: false, message: "Assistant not found" }
     }
-    
-    const currentTool = currentToolResult[0];
-    const isAdmin = await checkUserRoleByCognitoSub(session.sub, "administrator")
-    
+
+    const isAdmin = await hasRole("administrator")
+
     // Get the current user's database ID
     const currentUser = await getCurrentUserAction();
     if (!currentUser.isSuccess || !currentUser.data) {
       return { isSuccess: false, message: "User not found" }
     }
-    
-    const isCreator = currentTool.user_id === currentUser.data.user.id
+
+    const isCreator = currentTool.userId === currentUser.data.user.id
     if (!isAdmin && !isCreator) {
       return { isSuccess: false, message: "Unauthorized" }
     }
-    
+
     // If the tool was approved and is being edited, set status to pending_approval and deactivate it in the tools table
     if (currentTool.status === "approved") {
       data.status = "pending_approval"
-      await executeSQL<never>(`
-        UPDATE tools 
-        SET is_active = false 
-        WHERE assistant_architect_id = :id
-      `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
+      await executeQuery(
+        (db) =>
+          db
+            .update(tools)
+            .set({ isActive: false })
+            .where(eq(tools.promptChainToolId, idInt)),
+        "deactivateApprovedTool"
+      );
     }
-    
-    // Build update query dynamically
-    const updateFields = [];
-    const parameters: SqlParameter[] = [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }];
-    let paramIndex = 0;
-    
-    for (const [key, value] of Object.entries(data)) {
-      if (value !== undefined) {
-        const snakeKey = key === 'imagePath' ? 'image_path' : key === 'userId' ? 'user_id' : key;
-        // Add type cast for status field
-        if (key === 'status') {
-          updateFields.push(`${snakeKey} = :param${paramIndex}::tool_status`);
-        } else {
-          updateFields.push(`${snakeKey} = :param${paramIndex}`);
-        }
-        
-        let paramValue: SqlParameter['value'];
-        if (value === null) {
-          paramValue = { isNull: true };
-        } else if (key === 'userId' && typeof value === 'number') {
-          paramValue = { longValue: value };
-        } else {
-          paramValue = { stringValue: String(value) };
-        }
-        
-        parameters.push({ 
-          name: `param${paramIndex}`, 
-          value: paramValue
-        });
-        paramIndex++;
-      }
-    }
-    
-    if (updateFields.length === 0) {
+
+    // Build update data object with only provided fields
+    const updateData: Partial<{
+      name: string;
+      description: string | null;
+      status: "draft" | "pending_approval" | "approved" | "rejected" | "disabled";
+      imagePath: string | null;
+      isParallel: boolean;
+      timeoutSeconds: number | null;
+    }> = {};
+
+    if (data.name !== undefined) updateData.name = data.name;
+    if (data.description !== undefined) updateData.description = data.description || null;
+    if (data.status !== undefined) updateData.status = data.status as "draft" | "pending_approval" | "approved" | "rejected" | "disabled";
+    if (data.imagePath !== undefined) updateData.imagePath = data.imagePath || null;
+    // Handle isParallel and timeoutSeconds if present in data
+    if ('isParallel' in data) updateData.isParallel = Boolean(data.isParallel);
+    if ('timeoutSeconds' in data) updateData.timeoutSeconds = data.timeoutSeconds as number | null;
+
+    if (Object.keys(updateData).length === 0) {
       return { isSuccess: false, message: "No fields to update" }
     }
-    
-    const updatedToolResult = await executeSQL<SelectAssistantArchitect>(`
-      UPDATE assistant_architects 
-      SET ${updateFields.join(', ')}, updated_at = NOW()
-      WHERE id = :id
-      RETURNING id, name, description, status, image_path, user_id, created_at, updated_at
-    `, parameters);
-    
-    const updatedToolRaw = updatedToolResult[0];
-    
+
+    // Update via Drizzle
+    const updatedTool = await drizzleUpdateAssistantArchitect(idInt, updateData);
+
+    if (!updatedTool) {
+      return { isSuccess: false, message: "Failed to update assistant" }
+    }
+
     log.info("Assistant architect updated successfully", { id })
     timer({ status: "success", id })
-    
+
     return {
       isSuccess: true,
       message: "Assistant updated successfully",
-      data: transformSnakeToCamel<SelectAssistantArchitect>(updatedToolRaw)
+      data: updatedTool
     }
   } catch (error) {
     timer({ status: "error" })
@@ -608,104 +598,97 @@ export async function deleteAssistantArchitectAction(
     }
     
     // Get assistant details to check ownership and status
-    const architectResult = await executeSQL<{ user_id: number, status: string }>(`
-      SELECT user_id, status
-      FROM assistant_architects
-      WHERE id = :id
-    `, [{ name: 'id', value: { longValue: idInt } }]);
-    
-    if (!architectResult || architectResult.length === 0) {
+    const architect = await drizzleGetAssistantArchitectById(idInt);
+
+    if (!architect) {
       log.warn("Assistant architect not found", { id })
       timer({ status: "error" })
       return { isSuccess: false, message: "Assistant not found" }
     }
-    
-    const architect = architectResult[0];
-    log.debug("Assistant architect retrieved", { 
+    log.debug("Assistant architect retrieved", {
       id,
       status: architect.status,
-      ownerId: architect.user_id 
+      ownerId: architect.userId
     })
-    
+
     // Check if the assistant can be deleted based on status
     if (architect.status !== 'draft' && architect.status !== 'rejected') {
-      log.warn("Attempted to delete non-deletable assistant", { 
+      log.warn("Attempted to delete non-deletable assistant", {
         id,
-        status: architect.status 
+        status: architect.status
       })
       timer({ status: "error" })
-      return { 
-        isSuccess: false, 
-        message: "Only draft or rejected assistants can be deleted" 
+      return {
+        isSuccess: false,
+        message: "Only draft or rejected assistants can be deleted"
       }
     }
-    
+
     // Get current user to check ownership
     const { getCurrentUserAction } = await import("@/actions/db/get-current-user-action");
     const currentUserResult = await getCurrentUserAction();
-    
+
     if (!currentUserResult.isSuccess || !currentUserResult.data) {
       log.error("Failed to get current user information")
       timer({ status: "error" })
       return { isSuccess: false, message: "Failed to verify user identity" }
     }
-    
+
     const currentUser = currentUserResult.data.user;
-    const isOwner = architect.user_id === currentUser.id;
+    const isOwner = architect.userId === currentUser.id;
     
-    // Check if user has user-management or role-management access (admin privileges)
-    const hasUserManagement = await hasToolAccess(session.sub, "user-management");
-    const hasRoleManagement = await hasToolAccess(session.sub, "role-management");
-    const isAdmin = hasUserManagement || hasRoleManagement;
-    
-    log.debug("Permission check", { 
+    // Check if user is an administrator
+    const isAdmin = await hasRole("administrator");
+
+    log.debug("Permission check", {
       userId: currentUser.id,
-      assistantOwnerId: architect.user_id,
+      assistantOwnerId: architect.userId,
       isOwner,
-      isAdmin,
-      hasUserManagement,
-      hasRoleManagement
+      isAdmin
     })
     
     // Check permissions: owner OR admin can delete
     if (!isOwner && !isAdmin) {
-      log.warn("Unauthorized deletion attempt", { 
+      log.warn("Unauthorized deletion attempt", {
         userId: currentUser.id,
         assistantId: id,
-        ownerId: architect.user_id 
+        ownerId: architect.userId
       })
       timer({ status: "error" })
-      return { 
-        isSuccess: false, 
-        message: "You can only delete your own assistants" 
+      return {
+        isSuccess: false,
+        message: "You can only delete your own assistants"
       }
     }
-    
+
     // Proceed with deletion
-    log.info("Deleting assistant architect", { 
+    log.info("Deleting assistant architect", {
       id,
       deletedBy: currentUser.id,
       isOwnerDeletion: isOwner,
-      isAdminDeletion: !isOwner && isAdmin,
-      hasUserManagement,
-      hasRoleManagement
+      isAdminDeletion: !isOwner && isAdmin
     })
     
     // Delete from tools table (using prompt_chain_tool_id which references assistant_architect)
-    await executeSQL<never>(`
-      DELETE FROM tools
-      WHERE prompt_chain_tool_id = :id
-    `, [{ name: 'id', value: { longValue: idInt } }]);
-    
+    await executeQuery(
+      (db) =>
+        db
+          .delete(tools)
+          .where(eq(tools.promptChainToolId, idInt)),
+      "deleteToolsByAssistantArchitect"
+    );
+
     // Delete from navigation_items
-    await executeSQL<never>(`
-      DELETE FROM navigation_items
-      WHERE link = :link
-    `, [{ name: 'link', value: { stringValue: `/tools/assistant-architect/${id}` } }]);
-    
+    await executeQuery(
+      (db) =>
+        db
+          .delete(navigationItems)
+          .where(eq(navigationItems.link, `/tools/assistant-architect/${id}`)),
+      "deleteNavigationItemByLink"
+    );
+
     // Use the deleteAssistantArchitect function which handles all the cascade deletes properly
-    const { deleteAssistantArchitect } = await import("@/lib/db/data-api-adapter");
-    await deleteAssistantArchitect(idInt);
+    await drizzleDeleteAssistantArchitect(idInt);
 
     log.info("Assistant architect deleted successfully", { 
       id,
