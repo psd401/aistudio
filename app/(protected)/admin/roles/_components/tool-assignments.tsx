@@ -13,16 +13,23 @@ import {
 import { useToast } from "@/components/ui/use-toast"
 
 interface Role {
-  id: string | number;
+  id: number;
   name: string;
-  description?: string;
+  description: string | null;
+  isSystem: boolean;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 interface Tool {
-  id: string | number;
+  id: number;
+  identifier: string;
   name: string;
-  description?: string;
-  isActive?: boolean;
+  description: string | null;
+  promptChainToolId: number | null;
+  isActive: boolean;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 interface ToolAssignmentsProps {

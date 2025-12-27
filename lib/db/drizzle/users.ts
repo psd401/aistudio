@@ -144,6 +144,7 @@ export async function getUserByCognitoSub(cognitoSub: string) {
           firstName: users.firstName,
           lastName: users.lastName,
           lastSignInAt: users.lastSignInAt,
+          roleVersion: users.roleVersion,
           createdAt: users.createdAt,
           updatedAt: users.updatedAt,
         })
@@ -243,6 +244,7 @@ export async function createUser(userData: UserData) {
 export async function updateUser(
   id: number,
   updates: Partial<{
+    cognitoSub: string;
     email: string;
     firstName: string;
     lastName: string;

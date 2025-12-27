@@ -1,10 +1,25 @@
 "use server"
-import { SqlParameter } from "@aws-sdk/client-rds-data"
 
 import { getServerSession } from "@/lib/auth/server-session"
-import { executeSQL } from "@/lib/db/data-api-adapter"
 import { type ActionState } from "@/types/actions-types"
 import { hasToolAccess } from "@/utils/roles"
+import { getUserIdFromSession, canModifyRepository } from "@/actions/repositories/repository-permissions"
+import {
+  createRepository as drizzleCreateRepository,
+  updateRepository as drizzleUpdateRepository,
+  deleteRepository as drizzleDeleteRepository,
+  getRepositoryById,
+  getRepositoriesByOwnerId,
+  getRepositoryItems,
+  getRepositoryAccessList,
+  grantUserAccess,
+  grantRoleAccess,
+  revokeAccessById,
+  getUserAccessibleRepositories
+} from "@/lib/db/drizzle"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { eq } from "drizzle-orm"
+import { repositoryAccess } from "@/lib/db/schema"
 import {
   handleError,
   ErrorFactories,
@@ -17,8 +32,6 @@ import {
   sanitizeForLogging
 } from "@/lib/logger"
 import { revalidatePath } from "next/cache"
-import { transformSnakeToCamel } from "@/lib/db/field-mapper"
-import { canModifyRepository, getUserIdFromSession } from "./repository-permissions"
 
 export interface Repository {
   id: number
@@ -86,30 +99,36 @@ export async function createRepository(
       isPublic: input.isPublic || false,
       ownerId: userId
     })
-    
-    const result = await executeSQL<Repository>(
-      `INSERT INTO knowledge_repositories (name, description, owner_id, is_public, metadata)
-       VALUES (:name, :description, :owner_id, :is_public, :metadata::jsonb)
-       RETURNING *`,
-      [
-        { name: "name", value: { stringValue: input.name } },
-        { name: "description", value: input.description ? { stringValue: input.description } : { isNull: true } },
-        { name: "owner_id", value: { longValue: userId } },
-        { name: "is_public", value: { booleanValue: input.isPublic || false } },
-        { name: "metadata", value: { stringValue: JSON.stringify(input.metadata || {}) } }
-      ]
-    )
+
+    const resultRaw = await drizzleCreateRepository({
+      name: input.name,
+      description: input.description ?? null,
+      ownerId: userId,
+      isPublic: input.isPublic ?? false,
+      metadata: input.metadata ?? null
+    })
+
+    // Convert to expected type
+    const result: Repository = {
+      id: resultRaw.id,
+      name: resultRaw.name,
+      description: resultRaw.description,
+      ownerId: resultRaw.ownerId,
+      isPublic: resultRaw.isPublic ?? false,
+      metadata: resultRaw.metadata ?? {},
+      createdAt: resultRaw.createdAt ?? new Date(),
+      updatedAt: resultRaw.updatedAt ?? new Date()
+    }
 
     log.info("Repository created successfully", {
-      repositoryId: result[0].id,
-      name: result[0].name
+      repositoryId: result.id,
+      name: result.name
     })
-    
-    
-    timer({ status: "success", repositoryId: result[0].id })
-    
+
+    timer({ status: "success", repositoryId: result.id })
+
     revalidatePath("/repositories")
-    return createSuccess(result[0], "Repository created successfully")
+    return createSuccess(result, "Repository created successfully")
   } catch (error) {
     
     timer({ status: "error" })
@@ -166,67 +185,64 @@ export async function updateRepository(
       throw ErrorFactories.authzOwnerRequired("modify repository")
     }
 
-    const updates: string[] = []
-    const params: SqlParameter[] = [
-      { name: "id", value: { longValue: input.id } }
-    ]
+    // Check if any fields provided
+    const hasUpdates =
+      input.name !== undefined ||
+      input.description !== undefined ||
+      input.isPublic !== undefined ||
+      input.metadata !== undefined
 
-    if (input.name !== undefined) {
-      updates.push("name = :name")
-      params.push({ name: "name", value: { stringValue: input.name } })
-    }
-
-    if (input.description !== undefined) {
-      updates.push("description = :description")
-      params.push({ name: "description", value: input.description ? { stringValue: input.description } : { isNull: true } })
-    }
-
-    if (input.isPublic !== undefined) {
-      updates.push("is_public = :is_public")
-      params.push({ name: "is_public", value: { booleanValue: input.isPublic } })
-    }
-
-    if (input.metadata !== undefined) {
-      updates.push("metadata = :metadata::jsonb")
-      params.push({ name: "metadata", value: { stringValue: JSON.stringify(input.metadata) } })
-    }
-
-    if (updates.length === 0) {
+    if (!hasUpdates) {
       log.warn("No fields provided for update")
       return createSuccess(null as unknown as Repository, "No changes to apply")
     }
 
-    updates.push("updated_at = CURRENT_TIMESTAMP")
-
     log.info("Updating repository in database", {
-      repositoryId: input.id,
-      fieldsUpdated: updates.length - 1
+      repositoryId: input.id
     })
 
-    const result = await executeSQL<Repository>(
-      `UPDATE knowledge_repositories 
-       SET ${updates.join(", ")}
-       WHERE id = :id
-       RETURNING *`,
-      params
-    )
+    // Build update data object with only provided fields
+    const updateData: {
+      name?: string;
+      description?: string | null;
+      isPublic?: boolean;
+      metadata?: Record<string, unknown> | null;
+    } = {}
 
-    if (result.length === 0) {
+    if (input.name !== undefined) updateData.name = input.name
+    if (input.description !== undefined) updateData.description = input.description ?? null
+    if (input.isPublic !== undefined) updateData.isPublic = input.isPublic
+    if (input.metadata !== undefined) updateData.metadata = input.metadata
+
+    const resultRaw = await drizzleUpdateRepository(input.id, updateData)
+
+    if (!resultRaw) {
       log.error("Repository not found for update", { repositoryId: input.id })
       throw ErrorFactories.dbRecordNotFound("knowledge_repositories", input.id)
     }
 
+    // Convert to expected type
+    const result: Repository = {
+      id: resultRaw.id,
+      name: resultRaw.name,
+      description: resultRaw.description,
+      ownerId: resultRaw.ownerId,
+      isPublic: resultRaw.isPublic ?? false,
+      metadata: resultRaw.metadata ?? {},
+      createdAt: resultRaw.createdAt ?? new Date(),
+      updatedAt: resultRaw.updatedAt ?? new Date()
+    }
+
     log.info("Repository updated successfully", {
-      repositoryId: result[0].id,
-      name: result[0].name
+      repositoryId: result.id,
+      name: result.name
     })
-    
-    
-    timer({ status: "success", repositoryId: result[0].id })
-    
+
+    timer({ status: "success", repositoryId: result.id })
+
     revalidatePath("/repositories")
     revalidatePath(`/repositories/${input.id}`)
-    return createSuccess(result[0], "Repository updated successfully")
+    return createSuccess(result, "Repository updated successfully")
   } catch (error) {
     
     timer({ status: "error" })
@@ -283,25 +299,24 @@ export async function deleteRepository(
 
     // First, get all document items to delete from S3
     log.debug("Fetching document items for deletion")
-    const items = await executeSQL<{ id: number; type: string; source: string }>(
-      `SELECT id, type, source FROM repository_items 
-       WHERE repository_id = :repository_id AND type = 'document'`,
-      [{ name: "repository_id", value: { longValue: id } }]
-    )
+    const items = await getRepositoryItems(id)
 
-    log.info("Found documents to delete from S3", { 
-      documentCount: items.length,
-      repositoryId: id 
+    // Filter for document types
+    const documents = items.filter(item => item.type === 'document')
+
+    log.info("Found documents to delete from S3", {
+      documentCount: documents.length,
+      repositoryId: id
     })
 
     // Delete all documents from S3 in parallel
-    if (items.length > 0) {
+    if (documents.length > 0) {
       const { deleteDocument } = await import("@/lib/aws/s3-client")
-      
-      const deletePromises = items.map(item =>
+
+      const deletePromises = documents.map(item =>
         deleteDocument(item.source).catch(error => {
           // Log error but continue with deletion
-          log.error("Failed to delete S3 file", { 
+          log.error("Failed to delete S3 file", {
             file: item.source,
             itemId: item.id,
             error: error instanceof Error ? error.message : "Unknown error"
@@ -314,10 +329,12 @@ export async function deleteRepository(
 
     // Now delete the repository (this will cascade delete all items and chunks)
     log.info("Deleting repository from database", { repositoryId: id })
-    await executeSQL(
-      `DELETE FROM knowledge_repositories WHERE id = :id`,
-      [{ name: "id", value: { longValue: id } }]
-    )
+    const deletedCount = await drizzleDeleteRepository(id)
+
+    if (deletedCount === 0) {
+      log.warn("Repository not found for deletion", { repositoryId: id })
+      throw ErrorFactories.dbRecordNotFound("knowledge_repositories", id)
+    }
 
     log.info("Repository deleted successfully", { repositoryId: id })
     
@@ -363,25 +380,33 @@ export async function listRepositories(): Promise<ActionState<Repository[]>> {
     }
 
     log.debug("Fetching repositories from database")
-    const repositories = await executeSQL<Repository>(
-      `SELECT 
-        r.*,
-        CONCAT(u.first_name, ' ', u.last_name) as owner_name,
-        COUNT(DISTINCT ri.id) as item_count
-       FROM knowledge_repositories r
-       LEFT JOIN users u ON r.owner_id = u.id
-       LEFT JOIN repository_items ri ON r.id = ri.repository_id
-       GROUP BY r.id, u.first_name, u.last_name
-       ORDER BY r.created_at DESC`
+    const userId = await getUserIdFromSession(session.sub)
+    const repositoriesRaw = await getRepositoriesByOwnerId(userId)
+
+    // Get item counts for each repository
+    const repositories: Repository[] = await Promise.all(
+      repositoriesRaw.map(async (repo) => {
+        const items = await getRepositoryItems(repo.id)
+        return {
+          id: repo.id,
+          name: repo.name,
+          description: repo.description,
+          ownerId: repo.ownerId,
+          isPublic: repo.isPublic ?? false,
+          metadata: repo.metadata ?? {},
+          createdAt: repo.createdAt ?? new Date(),
+          updatedAt: repo.updatedAt ?? new Date(),
+          itemCount: items.length
+        }
+      })
     )
 
-    log.info("Repositories fetched successfully", { 
-      repositoryCount: repositories.length 
+    log.info("Repositories fetched successfully", {
+      repositoryCount: repositories.length
     })
-    
-    
+
     timer({ status: "success", count: repositories.length })
-    
+
     return createSuccess(repositories, "Repositories loaded successfully")
   } catch (error) {
     
@@ -422,33 +447,36 @@ export async function getRepository(
     }
 
     log.debug("Fetching repository from database", { repositoryId: id })
-    const result = await executeSQL<Repository>(
-      `SELECT 
-        r.*,
-        CONCAT(u.first_name, ' ', u.last_name) as owner_name,
-        COUNT(DISTINCT ri.id) as item_count
-       FROM knowledge_repositories r
-       LEFT JOIN users u ON r.owner_id = u.id
-       LEFT JOIN repository_items ri ON r.id = ri.repository_id
-       WHERE r.id = :id
-       GROUP BY r.id, r.name, r.description, r.owner_id, r.is_public, r.metadata, r.created_at, r.updated_at, u.first_name, u.last_name`,
-      [{ name: "id", value: { longValue: id } }]
-    )
+    const resultRaw = await getRepositoryById(id)
 
-    if (result.length === 0) {
+    if (!resultRaw) {
       log.warn("Repository not found", { repositoryId: id })
       throw ErrorFactories.dbRecordNotFound("knowledge_repositories", id)
     }
 
+    // Get item count
+    const items = await getRepositoryItems(id)
+
+    const result: Repository = {
+      id: resultRaw.id,
+      name: resultRaw.name,
+      description: resultRaw.description,
+      ownerId: resultRaw.ownerId,
+      isPublic: resultRaw.isPublic ?? false,
+      metadata: resultRaw.metadata ?? {},
+      createdAt: resultRaw.createdAt ?? new Date(),
+      updatedAt: resultRaw.updatedAt ?? new Date(),
+      itemCount: items.length
+    }
+
     log.info("Repository fetched successfully", {
-      repositoryId: result[0].id,
-      name: result[0].name
+      repositoryId: result.id,
+      name: result.name
     })
-    
-    
+
     timer({ status: "success", repositoryId: id })
-    
-    return createSuccess(result[0], "Repository loaded successfully")
+
+    return createSuccess(result, "Repository loaded successfully")
   } catch (error) {
     
     timer({ status: "error" })
@@ -489,28 +517,16 @@ export async function getRepositoryAccess(
     }
 
     log.debug("Fetching repository access list from database", { repositoryId })
-    const access = await executeSQL(
-      `SELECT 
-        ra.*,
-        CONCAT(u.first_name, ' ', u.last_name) as user_name,
-        r.name as role_name
-       FROM repository_access ra
-       LEFT JOIN users u ON ra.user_id = u.id
-       LEFT JOIN roles r ON ra.role_id = r.id
-       WHERE ra.repository_id = :repository_id
-       ORDER BY ra.created_at DESC`,
-      [{ name: "repository_id", value: { longValue: repositoryId } }]
-    )
+    const access = await getRepositoryAccessList(repositoryId)
 
     log.info("Repository access list fetched successfully", {
       repositoryId,
       accessCount: access.length
     })
-    
-    
+
     timer({ status: "success", count: access.length })
-    
-    return createSuccess(access, "Access list loaded successfully")
+
+    return createSuccess(access as Record<string, unknown>[], "Access list loaded successfully")
   } catch (error) {
     
     timer({ status: "error" })
@@ -527,9 +543,11 @@ export async function getRepositoryAccess(
 export async function grantRepositoryAccess(
   repositoryId: number,
   userId: number | null,
-  roleId: number | null,
-  accessLevel: 'read' | 'write' | 'admin'
+  roleId: number | null
 ): Promise<ActionState<void>> {
+  const requestId = generateRequestId()
+  const log = createLogger({ requestId, action: "grantRepositoryAccess" })
+
   try {
     const session = await getServerSession()
     if (!session) {
@@ -541,21 +559,23 @@ export async function grantRepositoryAccess(
       return { isSuccess: false, message: "Access denied. You need knowledge repository access." }
     }
 
+    // Check if user owns this repository
+    const currentUserId = await getUserIdFromSession(session.sub)
+    const canModify = await canModifyRepository(repositoryId, currentUserId)
+    if (!canModify) {
+      log.warn("Grant access denied - not owner", { repositoryId, currentUserId })
+      return { isSuccess: false, message: "Only the repository owner can grant access" }
+    }
+
     if (!userId && !roleId) {
       return { isSuccess: false, message: "Must specify either user or role" }
     }
 
-    await executeSQL(
-      `INSERT INTO repository_access (repository_id, user_id, role_id, access_level)
-       VALUES (:repository_id, :user_id, :role_id, :access_level)
-       ON CONFLICT DO NOTHING`,
-      [
-        { name: "repository_id", value: { longValue: repositoryId } },
-        { name: "user_id", value: userId ? { longValue: userId } : { isNull: true } },
-        { name: "role_id", value: roleId ? { longValue: roleId } : { isNull: true } },
-        { name: "access_level", value: { stringValue: accessLevel } }
-      ]
-    )
+    if (userId) {
+      await grantUserAccess(repositoryId, userId)
+    } else if (roleId) {
+      await grantRoleAccess(repositoryId, roleId)
+    }
 
     revalidatePath(`/repositories/${repositoryId}`)
     return createSuccess(undefined as void, "Access granted successfully")
@@ -567,6 +587,9 @@ export async function grantRepositoryAccess(
 export async function revokeRepositoryAccess(
   accessId: number
 ): Promise<ActionState<void>> {
+  const requestId = generateRequestId()
+  const log = createLogger({ requestId, action: "revokeRepositoryAccess" })
+
   try {
     const session = await getServerSession()
     if (!session) {
@@ -578,10 +601,37 @@ export async function revokeRepositoryAccess(
       return { isSuccess: false, message: "Access denied. You need knowledge repository access." }
     }
 
-    await executeSQL(
-      `DELETE FROM repository_access WHERE id = :id`,
-      [{ name: "id", value: { longValue: accessId } }]
+    // Get the access record to find the repository and verify ownership
+    const accessRecord = await executeQuery(
+      (db) => db.select({
+        id: repositoryAccess.id,
+        repositoryId: repositoryAccess.repositoryId
+      })
+      .from(repositoryAccess)
+      .where(eq(repositoryAccess.id, accessId))
+      .limit(1),
+      "getAccessRecordForRevoke"
     )
+
+    if (accessRecord.length === 0) {
+      return { isSuccess: false, message: "Access record not found" }
+    }
+
+    const { repositoryId } = accessRecord[0]
+
+    // Verify the current user owns this repository
+    const currentUserId = await getUserIdFromSession(session.sub)
+    const canModify = await canModifyRepository(repositoryId, currentUserId)
+    if (!canModify) {
+      log.warn("Revoke access denied - not owner", { repositoryId, accessId, currentUserId })
+      return { isSuccess: false, message: "Only the repository owner can revoke access" }
+    }
+
+    const deletedCount = await revokeAccessById(accessId)
+
+    if (deletedCount === 0) {
+      return { isSuccess: false, message: "Access record not found" }
+    }
 
     return createSuccess(undefined as void, "Access revoked successfully")
   } catch (error) {
@@ -597,92 +647,54 @@ export async function getUserAccessibleRepositoriesAction(): Promise<ActionState
   itemCount: number
   lastUpdated: Date | null
 }>>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("getUserAccessibleRepositories")
+  const log = createLogger({ requestId, action: "getUserAccessibleRepositories" })
+
   try {
+    log.info("Action started: Getting user accessible repositories")
+
     const session = await getServerSession()
     if (!session) {
+      log.warn("Unauthorized")
       return { isSuccess: false, message: "Unauthorized" }
     }
 
     const hasAccess = await hasToolAccess("knowledge-repositories")
     if (!hasAccess) {
+      log.warn("Access denied - missing knowledge-repositories tool access")
       return { isSuccess: false, message: "Access denied. You need knowledge repository access." }
     }
 
-    // Get the user ID from the cognito_sub
-    const userResult = await executeSQL<{ id: number }>(
-      `SELECT id FROM users WHERE cognito_sub = :cognitoSub`,
-      [{ name: 'cognitoSub', value: { stringValue: session.sub } }]
-    )
-    
-    if (!userResult || userResult.length === 0) {
-      return { isSuccess: false, message: "User not found" }
-    }
-    
-    const userId = userResult[0].id
+    log.debug("Fetching accessible repositories via Drizzle", { cognitoSub: session.sub })
 
-    // Get repositories the user has access to
-    const repositories = await executeSQL<{
-      id: number
-      name: string
-      description: string
-      is_public: boolean
-      item_count: number
-      last_updated: string | null
-    }>(
-      `WITH accessible_repos AS (
-        SELECT DISTINCT r.id, r.name, r.description, r.is_public
-        FROM knowledge_repositories r
-        WHERE 
-          r.is_public = true
-          OR r.owner_id = :userId
-          OR EXISTS (
-            SELECT 1 FROM repository_access ra
-            WHERE ra.repository_id = r.id AND ra.user_id = :userId
-          )
-          OR EXISTS (
-            SELECT 1 FROM repository_access ra
-            JOIN user_roles ur ON ur.role_id = ra.role_id
-            WHERE ra.repository_id = r.id AND ur.user_id = :userId
-          )
-      )
-      SELECT 
-        ar.id,
-        ar.name,
-        ar.description,
-        ar.is_public,
-        COALESCE(COUNT(ri.id), 0) as item_count,
-        MAX(ri.updated_at) as last_updated
-      FROM accessible_repos ar
-      LEFT JOIN repository_items ri ON ar.id = ri.repository_id
-      GROUP BY ar.id, ar.name, ar.description, ar.is_public
-      ORDER BY ar.name ASC`,
-      [{ name: 'userId', value: { longValue: userId } }]
-    )
+    // Get accessible repositories via Drizzle
+    const repositoriesRaw = await getUserAccessibleRepositories(session.sub)
 
-    // Transform snake_case to camelCase using the standard field mapper
-    const transformedRepos = repositories.map(repo => {
-      const transformed = transformSnakeToCamel<{
-        id: number
-        name: string
-        description: string | null
-        isPublic: boolean
-        itemCount: number
-        lastUpdated: Date | null
-      }>(repo)
-      
-      // Ensure itemCount is a number
-      return {
-        ...transformed,
-        itemCount: Number(transformed.itemCount) || 0
-      }
+    // Convert nullable types to match return type
+    const repositories = repositoriesRaw.map(repo => ({
+      id: repo.id,
+      name: repo.name,
+      description: repo.description,
+      isPublic: repo.isPublic ?? false,
+      itemCount: repo.itemCount,
+      lastUpdated: repo.lastUpdated
+    }))
+
+    log.info("Accessible repositories fetched successfully", {
+      repositoryCount: repositories.length
     })
 
-    return { 
-      isSuccess: true, 
-      message: "Repositories loaded successfully", 
-      data: transformedRepos 
-    }
+    timer({ status: "success", count: repositories.length })
+
+    return createSuccess(repositories, "Repositories loaded successfully")
   } catch (error) {
-    return handleError(error, "Failed to load accessible repositories")
+    timer({ status: "error" })
+
+    return handleError(error, "Failed to load accessible repositories", {
+      context: "getUserAccessibleRepositories",
+      requestId,
+      operation: "getUserAccessibleRepositories"
+    })
   }
 }

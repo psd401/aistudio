@@ -4,6 +4,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+import { getJob } from '@/lib/db/drizzle';
 
 // Initialize S3 client
 const s3Client = new S3Client({
@@ -64,24 +65,19 @@ export async function GET(
     
     // 5. Verify job ownership (user can only access their own generated images)
     // Note: This could be optimized with caching if needed
-    const { executeSQL } = await import('@/lib/db/data-api-adapter');
-    const jobResult = await executeSQL(
-      `SELECT user_id FROM ai_streaming_jobs WHERE id = :job_id::uuid`,
-      [{ name: 'job_id', value: { stringValue: jobId } }]
-    );
-    
-    if (jobResult.length === 0) {
+    const job = await getJob(jobId);
+
+    if (!job) {
       log.warn('Job not found for image access', { jobId, s3Key, userId: currentUser.data.user.id });
       return new Response('Not Found', { status: 404 });
     }
-    
-    const jobUserId = jobResult[0].userId as number;
-    if (jobUserId !== currentUser.data.user.id) {
-      log.warn('Image access denied - wrong user', { 
+
+    if (job.userId !== currentUser.data.user.id) {
+      log.warn('Image access denied - wrong user', {
         jobId,
         s3Key,
-        jobUserId, 
-        requestUserId: currentUser.data.user.id 
+        jobUserId: job.userId,
+        requestUserId: currentUser.data.user.id
       });
       return new Response('Forbidden', { status: 403 });
     }

@@ -1,8 +1,12 @@
 "use server"
 
 import { getServerSession } from "@/lib/auth/server-session"
-import { executeSQL } from "@/lib/db/data-api-adapter"
-import { transformSnakeToCamel } from "@/lib/db/field-mapper"
+import {
+  getAllTags as drizzleGetAllTags,
+  getPopularTags as drizzleGetPopularTags,
+  getTagsForPrompt,
+  searchTagsByName,
+} from "@/lib/db/drizzle"
 import { type ActionState } from "@/types/actions-types"
 import {
   handleError,
@@ -48,25 +52,13 @@ export async function getAllTags(): Promise<ActionState<PromptTag[]>> {
     }
 
     // Get all tags with usage count
-    const results = await executeSQL<{
-      id: number
-      name: string
-      created_at: Date
-      usage_count: number
-    }>(
-      `SELECT
-         t.id,
-         t.name,
-         t.created_at,
-         COUNT(plt.prompt_id) as usage_count
-       FROM prompt_tags t
-       LEFT JOIN prompt_library_tags plt ON t.id = plt.tag_id
-       GROUP BY t.id, t.name, t.created_at
-       ORDER BY usage_count DESC, t.name ASC`,
-      []
-    )
+    const results = await drizzleGetAllTags()
 
-    const tags = results.map(r => transformSnakeToCamel<PromptTag>(r))
+    // Convert Date to string for PromptTag type
+    const tags = results.map(tag => ({
+      ...tag,
+      createdAt: tag.createdAt.toISOString()
+    }))
 
     timer({ status: "success" })
     log.info("Tags retrieved successfully", { count: tags.length })
@@ -117,29 +109,13 @@ export async function getPopularTags(
     }
 
     // Get popular tags
-    const results = await executeSQL<{
-      id: number
-      name: string
-      created_at: Date
-      usage_count: number
-    }>(
-      `SELECT
-         t.id,
-         t.name,
-         t.created_at,
-         COUNT(plt.prompt_id) as usage_count
-       FROM prompt_tags t
-       INNER JOIN prompt_library_tags plt ON t.id = plt.tag_id
-       INNER JOIN prompt_library p ON plt.prompt_id = p.id
-       WHERE p.deleted_at IS NULL
-       GROUP BY t.id, t.name, t.created_at
-       HAVING COUNT(plt.prompt_id) > 0
-       ORDER BY usage_count DESC, t.name ASC
-       LIMIT :limit`,
-      [{ name: "limit", value: { longValue: validatedLimit } }]
-    )
+    const results = await drizzleGetPopularTags(validatedLimit)
 
-    const tags = results.map(r => transformSnakeToCamel<PromptTag & { usageCount: number }>(r))
+    // Convert Date to string for PromptTag type
+    const tags = results.map(tag => ({
+      ...tag,
+      createdAt: tag.createdAt.toISOString()
+    }))
 
     timer({ status: "success" })
     log.info("Popular tags retrieved successfully", { count: tags.length })
@@ -187,20 +163,13 @@ export async function getPromptTags(
     }
 
     // Get tags for prompt
-    const results = await executeSQL<{
-      id: number
-      name: string
-      created_at: Date
-    }>(
-      `SELECT t.id, t.name, t.created_at
-       FROM prompt_tags t
-       INNER JOIN prompt_library_tags plt ON t.id = plt.tag_id
-       WHERE plt.prompt_id = :promptId
-       ORDER BY t.name ASC`,
-      [{ name: "promptId", value: { stringValue: promptId } }]
-    )
+    const results = await getTagsForPrompt(promptId)
 
-    const tags = results.map(r => transformSnakeToCamel<PromptTag>(r))
+    // Convert Date to string for PromptTag type
+    const tags = results.map(tag => ({
+      ...tag,
+      createdAt: tag.createdAt.toISOString()
+    }))
 
     timer({ status: "success" })
     log.info("Prompt tags retrieved successfully", {
@@ -254,23 +223,13 @@ export async function searchTags(
     }
 
     // Search tags
-    const results = await executeSQL<{
-      id: number
-      name: string
-      created_at: Date
-    }>(
-      `SELECT id, name, created_at
-       FROM prompt_tags
-       WHERE name ILIKE :query
-       ORDER BY name ASC
-       LIMIT :limit`,
-      [
-        { name: "query", value: { stringValue: `%${query}%` } },
-        { name: "limit", value: { longValue: validatedLimit } }
-      ]
-    )
+    const results = await searchTagsByName(query, validatedLimit)
 
-    const tags = results.map(r => transformSnakeToCamel<PromptTag>(r))
+    // Convert Date to string for PromptTag type
+    const tags = results.map(tag => ({
+      ...tag,
+      createdAt: tag.createdAt.toISOString()
+    }))
 
     timer({ status: "success" })
     log.info("Tag search completed", { count: tags.length })

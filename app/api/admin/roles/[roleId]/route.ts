@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { updateRole, deleteRole } from "@/lib/db/data-api-adapter"
+import { updateRole, deleteRole } from "@/lib/db/drizzle"
 import { requireAdmin } from "@/lib/auth/admin-check"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { getErrorMessage } from "@/types/errors"

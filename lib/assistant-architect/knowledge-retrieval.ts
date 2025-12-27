@@ -1,5 +1,6 @@
 import { vectorSearch, hybridSearch } from "@/lib/repositories/search-service"
-import { executeSQL } from "@/lib/db/data-api-adapter"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { sql } from "drizzle-orm"
 import { createLogger, generateRequestId } from "@/lib/logger"
 import { encodingForModel } from "js-tiktoken"
 
@@ -77,49 +78,56 @@ export async function retrieveKnowledgeForPrompt(
     return []
   }
 
+  // Normalize optional assistant owner sub to handle null/undefined/empty string consistently
+  const ownerSub = assistantOwnerSub || null
+
   try {
     // First, verify user has access to all specified repositories
-    // Since RDS Data API doesn't support array parameters directly, we'll use IN clause
-    const placeholders = repositoryIds.map((_, index) => `:repoId${index}`).join(', ')
-    const accessCheckQuery = `
-      SELECT DISTINCT r.id, r.name
-      FROM knowledge_repositories r
-      WHERE r.id IN (${placeholders})
-      AND (
-        r.is_public = true
-        OR r.owner_id = (SELECT id FROM users WHERE cognito_sub = :cognitoSub)
-        OR (:assistantOwnerSub IS NOT NULL 
-            AND r.owner_id = (SELECT id FROM users WHERE cognito_sub = :assistantOwnerSub))
-        OR EXISTS (
-          SELECT 1 FROM repository_access ra
-          JOIN users u ON u.id = ra.user_id
-          WHERE ra.repository_id = r.id AND u.cognito_sub = :cognitoSub
+    const accessibleRepos = await executeQuery(
+      (db) => db.execute(sql`
+        SELECT DISTINCT r.id, r.name
+        FROM knowledge_repositories r
+        WHERE r.id = ANY(${repositoryIds}::int[])
+        AND (
+          r.is_public = true
+          OR r.owner_id = (SELECT id FROM users WHERE cognito_sub = ${userCognitoSub})
+          OR (${ownerSub} IS NOT NULL
+              AND r.owner_id = (SELECT id FROM users WHERE cognito_sub = ${ownerSub}))
+          OR EXISTS (
+            SELECT 1 FROM repository_access ra
+            JOIN users u ON u.id = ra.user_id
+            WHERE ra.repository_id = r.id AND u.cognito_sub = ${userCognitoSub}
+          )
+          OR EXISTS (
+            SELECT 1 FROM repository_access ra
+            JOIN user_roles ur ON ur.role_id = ra.role_id
+            JOIN users u ON u.id = ur.user_id
+            WHERE ra.repository_id = r.id AND u.cognito_sub = ${userCognitoSub}
+          )
         )
-        OR EXISTS (
-          SELECT 1 FROM repository_access ra
-          JOIN user_roles ur ON ur.role_id = ra.role_id
-          JOIN users u ON u.id = ur.user_id
-          WHERE ra.repository_id = r.id AND u.cognito_sub = :cognitoSub
-        )
-      )
-    `
-    
-    const parameters = [
-      ...repositoryIds.map((id, index) => ({ 
-        name: `repoId${index}`, 
-        value: { longValue: id } 
-      })),
-      { name: 'cognitoSub', value: { stringValue: userCognitoSub } },
-      { name: 'assistantOwnerSub', value: assistantOwnerSub ? { stringValue: assistantOwnerSub } : { isNull: true } }
-    ]
-    
-    const accessibleRepos = await executeSQL<{ id: number; name: string }>(
-      accessCheckQuery,
-      parameters
+      `),
+      "getAccessibleRepositories"
     )
 
-    if (accessibleRepos.length !== repositoryIds.length) {
-      const accessibleIds = accessibleRepos.map(r => r.id)
+    // Runtime validation of query results
+    const repos: Array<{ id: number; name: string }> = []
+    for (const row of accessibleRepos.rows) {
+      // Validate row structure
+      if (typeof row === 'object' && row !== null && 'id' in row && 'name' in row) {
+        const id = row.id
+        const name = row.name
+        if (typeof id === 'number' && typeof name === 'string') {
+          repos.push({ id, name })
+        } else {
+          log.warn('Invalid row structure in repository query', { row })
+        }
+      } else {
+        log.warn('Invalid row in repository query results', { row })
+      }
+    }
+
+    if (repos.length !== repositoryIds.length) {
+      const accessibleIds = repos.map(r => r.id)
       const inaccessibleIds = repositoryIds.filter(id => !accessibleIds.includes(id))
       log.warn('User attempted to access repositories without permission', {
         userCognitoSub,
@@ -128,12 +136,12 @@ export async function retrieveKnowledgeForPrompt(
       // Continue with only accessible repositories
     }
 
-    if (accessibleRepos.length === 0) {
+    if (repos.length === 0) {
       return []
     }
 
     // Perform search across all accessible repositories
-    const searchPromises = accessibleRepos.map(async (repo) => {
+    const searchPromises = repos.map(async (repo) => {
       try {
         let results
         if (opts.searchType === "semantic") {

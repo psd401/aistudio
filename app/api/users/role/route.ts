@@ -1,5 +1,5 @@
 import { getServerSession } from '@/lib/auth/server-session';
-import { executeSQL, updateUserRole } from '@/lib/db/data-api-adapter';
+import { updateUserRole, getUserById } from '@/lib/db/drizzle';
 import { NextResponse } from 'next/server';
 import { hasRole } from '@/utils/roles';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
@@ -38,23 +38,21 @@ export async function POST(request: Request) {
     
     log.debug("Updating user role", { targetUserId, role });
 
-    // Update user role using RDS Data API
-    await updateUserRole(targetUserId, role);
-    
+    // Update user role using Drizzle
+    await updateUserRole(Number(targetUserId), role);
+
     // Get updated user info
-    const sql = 'SELECT id, cognito_sub, email, first_name, last_name FROM users WHERE id = :userId';
-    const params = [{ name: 'userId', value: { stringValue: targetUserId } }];
-    const result = await executeSQL(sql, params);
-    
-    if (!result || result.length === 0) {
+    const user = await getUserById(Number(targetUserId));
+
+    if (!user) {
       log.warn("User not found", { targetUserId });
       timer({ status: "error", reason: "user_not_found" });
       return new NextResponse('User not found', { status: 404, headers: { "X-Request-Id": requestId } });
     }
-    
+
     log.info("User role updated successfully", { targetUserId, role });
     timer({ status: "success" });
-    return NextResponse.json(result[0], { headers: { "X-Request-Id": requestId } });
+    return NextResponse.json(user, { headers: { "X-Request-Id": requestId } });
   } catch (error) {
     timer({ status: "error" });
     log.error('Error updating user role', error);

@@ -1,10 +1,16 @@
 "use server"
 
 import { getServerSession } from "@/lib/auth/server-session"
-import { executeSQL } from "@/lib/db/data-api-adapter"
 import { type ActionState } from "@/types/actions-types"
 import { hasRole } from "@/utils/roles"
-import type { SqlParameter } from "@aws-sdk/client-rds-data"
+import {
+  getAllRepositoriesWithOwner,
+  updateRepository,
+  deleteRepository,
+  getRepositoryItems,
+  getRepositoryItemById,
+  deleteRepositoryItem
+} from "@/lib/db/drizzle"
 import {
   handleError,
   ErrorFactories,
@@ -17,12 +23,11 @@ import {
   sanitizeForLogging
 } from "@/lib/logger"
 import { revalidatePath } from "next/cache"
-import { transformSnakeToCamel } from "@/lib/db/field-mapper"
 import type { Repository } from "@/actions/repositories/repository.actions"
 import type { RepositoryItem } from "@/actions/repositories/repository-items.actions"
 
 export interface RepositoryWithOwner extends Repository {
-  ownerEmail: string
+  ownerEmail: string | null
 }
 
 /**
@@ -63,25 +68,29 @@ export async function listAllRepositories(): Promise<ActionState<RepositoryWithO
     await requireAdminSession(log)
 
     log.debug("Fetching all repositories from database")
-    const repositories = await executeSQL<RepositoryWithOwner>(
-      `SELECT 
-        kr.*,
-        u.email as owner_email,
-        (SELECT COUNT(*) FROM repository_items WHERE repository_id = kr.id) as item_count
-       FROM knowledge_repositories kr
-       LEFT JOIN users u ON kr.owner_id = u.id
-       ORDER BY kr.created_at DESC`
-    )
+    const repositoriesRaw = await getAllRepositoriesWithOwner()
+
+    // Convert to expected type
+    const repositories: RepositoryWithOwner[] = repositoriesRaw.map(repo => ({
+      id: repo.id,
+      name: repo.name,
+      description: repo.description,
+      ownerId: repo.ownerId,
+      isPublic: repo.isPublic ?? false,
+      metadata: repo.metadata ?? {},
+      createdAt: repo.createdAt ?? new Date(),
+      updatedAt: repo.updatedAt ?? new Date(),
+      ownerEmail: repo.ownerEmail,
+      itemCount: repo.itemCount
+    }))
 
     log.info("All repositories fetched successfully", {
       repositoryCount: repositories.length
     })
-    
-    const transformed = repositories.map(repo => transformSnakeToCamel<RepositoryWithOwner>(repo))
-    
+
     timer({ status: "success", count: repositories.length })
-    
-    return createSuccess(transformed, "Repositories loaded successfully")
+
+    return createSuccess(repositories, "Repositories loaded successfully")
   } catch (error) {
     timer({ status: "error" })
     
@@ -117,66 +126,64 @@ export async function adminUpdateRepository(
     
     await requireAdminSession(log)
 
-    const updates: string[] = []
-    const params: SqlParameter[] = [
-      { name: "id", value: { longValue: input.id } }
-    ]
+    // Check if any fields provided
+    const hasUpdates =
+      input.name !== undefined ||
+      input.description !== undefined ||
+      input.isPublic !== undefined ||
+      input.metadata !== undefined
 
-    if (input.name !== undefined) {
-      updates.push("name = :name")
-      params.push({ name: "name", value: { stringValue: input.name } })
-    }
-
-    if (input.description !== undefined) {
-      updates.push("description = :description")
-      params.push({ name: "description", value: input.description ? { stringValue: input.description } : { isNull: true } })
-    }
-
-    if (input.isPublic !== undefined) {
-      updates.push("is_public = :is_public")
-      params.push({ name: "is_public", value: { booleanValue: input.isPublic } })
-    }
-
-    if (input.metadata !== undefined) {
-      updates.push("metadata = :metadata::jsonb")
-      params.push({ name: "metadata", value: { stringValue: JSON.stringify(input.metadata) } })
-    }
-
-    if (updates.length === 0) {
+    if (!hasUpdates) {
       log.warn("No fields provided for update")
       return { isSuccess: false, message: "No fields to update" }
     }
 
-    updates.push("updated_at = CURRENT_TIMESTAMP")
-
     log.info("Updating repository in database (admin)", {
-      repositoryId: input.id,
-      fieldsUpdated: updates.length - 1
+      repositoryId: input.id
     })
-    
-    const result = await executeSQL<Repository>(
-      `UPDATE knowledge_repositories 
-       SET ${updates.join(", ")}
-       WHERE id = :id
-       RETURNING *`,
-      params
-    )
 
-    if (result.length === 0) {
+    // Build update data object with only provided fields
+    const updateData: {
+      name?: string;
+      description?: string | null;
+      isPublic?: boolean;
+      metadata?: Record<string, unknown> | null;
+    } = {}
+
+    if (input.name !== undefined) updateData.name = input.name
+    if (input.description !== undefined) updateData.description = input.description ?? null
+    if (input.isPublic !== undefined) updateData.isPublic = input.isPublic
+    if (input.metadata !== undefined) updateData.metadata = input.metadata
+
+    const resultRaw = await updateRepository(input.id, updateData)
+
+    if (!resultRaw) {
       log.error("Repository not found for update", { repositoryId: input.id })
       throw ErrorFactories.dbRecordNotFound("knowledge_repositories", input.id)
     }
 
+    // Convert to expected type
+    const result: Repository = {
+      id: resultRaw.id,
+      name: resultRaw.name,
+      description: resultRaw.description,
+      ownerId: resultRaw.ownerId,
+      isPublic: resultRaw.isPublic ?? false,
+      metadata: resultRaw.metadata ?? {},
+      createdAt: resultRaw.createdAt ?? new Date(),
+      updatedAt: resultRaw.updatedAt ?? new Date()
+    }
+
     log.info("Repository updated successfully (admin)", {
-      repositoryId: result[0].id,
-      name: result[0].name
+      repositoryId: result.id,
+      name: result.name
     })
-    
-    timer({ status: "success", repositoryId: result[0].id })
-    
+
+    timer({ status: "success", repositoryId: result.id })
+
     revalidatePath("/admin/repositories")
     revalidatePath(`/repositories/${input.id}`)
-    return createSuccess(transformSnakeToCamel<Repository>(result[0]), "Repository updated successfully (admin)")
+    return createSuccess(result, "Repository updated successfully (admin)")
   } catch (error) {
     timer({ status: "error" })
     
@@ -206,23 +213,22 @@ export async function adminDeleteRepository(
 
     // First, get all document items to delete from S3
     log.debug("Fetching document items for S3 deletion")
-    const items = await executeSQL<{ id: number; type: string; source: string }>(
-      `SELECT id, type, source FROM repository_items 
-       WHERE repository_id = :repository_id AND type = 'document'`,
-      [{ name: "repository_id", value: { longValue: id } }]
-    )
-    
+    const items = await getRepositoryItems(id)
+
+    // Filter for document types
+    const documents = items.filter(item => item.type === 'document')
+
     log.info("Found documents to delete from S3", {
-      documentCount: items.length,
+      documentCount: documents.length,
       repositoryId: id
     })
 
     // Delete all documents from S3 in parallel
-    if (items.length > 0) {
+    if (documents.length > 0) {
       const { deleteDocument } = await import("@/lib/aws/s3-client")
-      
-      log.info("Deleting documents from S3", { count: items.length })
-      const deletePromises = items.map(item =>
+
+      log.info("Deleting documents from S3", { count: documents.length })
+      const deletePromises = documents.map(item =>
         deleteDocument(item.source).catch(error => {
           // Log error but continue with deletion
           log.error("Failed to delete S3 file", {
@@ -238,10 +244,12 @@ export async function adminDeleteRepository(
 
     // Now delete the repository (this will cascade delete all items and chunks)
     log.info("Deleting repository from database (admin)", { repositoryId: id })
-    await executeSQL(
-      `DELETE FROM knowledge_repositories WHERE id = :id`,
-      [{ name: "id", value: { longValue: id } }]
-    )
+    const deletedCount = await deleteRepository(id)
+
+    if (deletedCount === 0) {
+      log.warn("Repository not found for deletion", { repositoryId: id })
+      throw ErrorFactories.dbRecordNotFound("knowledge_repositories", id)
+    }
 
     log.info("Repository deleted successfully (admin)", { repositoryId: id })
     
@@ -278,20 +286,29 @@ export async function adminGetRepositoryItems(
     await requireAdminSession(log)
 
     log.debug("Fetching repository items from database (admin)", { repositoryId })
-    const items = await executeSQL<RepositoryItem>(
-      `SELECT * FROM repository_items 
-       WHERE repository_id = :repository_id
-       ORDER BY created_at DESC`,
-      [{ name: "repository_id", value: { longValue: repositoryId } }]
-    )
+    const itemsRaw = await getRepositoryItems(repositoryId)
+
+    // Convert to expected type
+    const items: RepositoryItem[] = itemsRaw.map(item => ({
+      id: item.id,
+      repositoryId: item.repositoryId,
+      type: item.type as 'document' | 'url' | 'text',
+      name: item.name,
+      source: item.source,
+      metadata: item.metadata ?? {},
+      processingStatus: item.processingStatus ?? 'pending',
+      processingError: item.processingError,
+      createdAt: item.createdAt ?? new Date(),
+      updatedAt: item.updatedAt ?? new Date()
+    }))
 
     log.info("Repository items fetched successfully (admin)", {
       repositoryId,
       itemCount: items.length
     })
-    
+
     timer({ status: "success", count: items.length })
-    
+
     return createSuccess(items, "Items loaded successfully")
   } catch (error) {
     timer({ status: "error" })
@@ -322,18 +339,14 @@ export async function adminRemoveRepositoryItem(
 
     // Get the item to check if it's a document (need to delete from S3)
     log.debug("Fetching item details", { itemId })
-    const items = await executeSQL<{ id: number; type: string; source: string; repositoryId: number }>(
-      `SELECT * FROM repository_items WHERE id = :id`,
-      [{ name: "id", value: { longValue: itemId } }]
-    )
+    const item = await getRepositoryItemById(itemId)
 
-    if (items.length === 0) {
+    if (!item) {
       log.warn("Item not found for removal", { itemId })
       throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
     }
 
-    const item = items[0]
-    log.debug("Item found", { 
+    log.debug("Item found", {
       itemId,
       itemType: item.type,
       repositoryId: item.repositoryId
@@ -345,7 +358,7 @@ export async function adminRemoveRepositoryItem(
         itemId,
         s3Key: item.source
       })
-      
+
       try {
         const { deleteDocument } = await import("@/lib/aws/s3-client")
         await deleteDocument(item.source)
@@ -362,10 +375,12 @@ export async function adminRemoveRepositoryItem(
 
     // Delete from database (cascades to chunks)
     log.info("Deleting item from database (admin)", { itemId })
-    await executeSQL(
-      `DELETE FROM repository_items WHERE id = :id`,
-      [{ name: "id", value: { longValue: itemId } }]
-    )
+    const deletedCount = await deleteRepositoryItem(itemId)
+
+    if (deletedCount === 0) {
+      log.warn("Item not found for deletion", { itemId })
+      throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
+    }
 
     log.info("Repository item removed successfully (admin)", {
       itemId,

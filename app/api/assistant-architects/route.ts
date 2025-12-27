@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { getAssistantArchitectsAction } from "@/actions/db/assistant-architect-actions"
 import { getServerSession } from "@/lib/auth/server-session"
-import { hasToolAccess } from "@/lib/db/data-api-adapter"
+import { hasToolAccess } from "@/lib/db/drizzle"
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
 export const dynamic = 'force-dynamic'

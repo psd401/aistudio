@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getUserRoles, updateUserRoles } from '@/lib/db/user-roles';
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
-import { executeSQL } from '@/lib/db/data-api-adapter';
+import { getRoles } from '@/lib/db/drizzle';
 
 /**
  * Get user's roles
@@ -109,9 +109,9 @@ export async function PUT(
     }
     
     // Fetch valid roles from database
-    const validRolesResult = await executeSQL('SELECT name FROM roles');
-    const validRoles = validRolesResult.map(row => row.name as string);
-    
+    const validRolesResult = await getRoles();
+    const validRoles = validRolesResult.map(role => role.name);
+
     log.debug("Valid roles fetched from database", { validRoles });
     
     // Validate role names against database roles

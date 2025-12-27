@@ -87,6 +87,7 @@ export {
   // Role assignment operations
   setNavigationItemRoles,
   getNavigationItemRoles,
+  getAllNavigationItemRoles,
 } from "./navigation";
 
 // ============================================
@@ -106,11 +107,111 @@ export {
   deleteRole,
   // Tool operations
   getTools,
+  getToolsByIds,
   getRoleTools,
   assignToolToRole,
   removeToolFromRole,
   setRoleTools,
 } from "./roles";
+
+// ============================================
+// Notification Operations
+// ============================================
+
+export {
+  getUserNotifications,
+  markNotificationAsRead,
+  markAllNotificationsAsRead,
+  getNotificationById,
+} from "./notifications";
+
+// ============================================
+// Execution Results Operations
+// ============================================
+
+export {
+  getRecentExecutionResults,
+  getExecutionResultById,
+  getExecutionResultForDownload,
+  deleteExecutionResult,
+} from "./execution-results";
+
+// ============================================
+// Ideas Operations
+// ============================================
+
+export {
+  // Types
+  type IdeaListItem,
+  type CreateIdeaData,
+  // Query operations
+  getIdeas,
+  getUserVotedIdeaIds,
+  getIdeaById,
+  // CRUD operations
+  createIdea,
+  updateIdea,
+  updateIdeaStatus,
+  // Vote operations
+  addVote,
+  removeVote,
+  hasUserVoted,
+  // Note operations
+  getIdeaNotes,
+  addNote,
+  deleteNote,
+} from "./ideas";
+
+// ============================================
+// Settings Operations
+// ============================================
+
+export {
+  // Types
+  type SettingData,
+  type CreateSettingData,
+  // Query operations
+  getSettings,
+  getSettingValue,
+  getSettingActualValue,
+  // CRUD operations
+  upsertSetting,
+  deleteSetting,
+} from "./settings";
+
+// ============================================
+// Assistant Architect Events Operations
+// ============================================
+
+export {
+  // Types
+  type ExecutionEvent,
+  // Event operations
+  storeExecutionEvent,
+  getExecutionEvents,
+  getExecutionEventsByType,
+} from "./assistant-architect-events";
+
+// ============================================
+// Generic Jobs Operations (PDF processing, etc.)
+// ============================================
+
+export {
+  // Types
+  type GenericJobStatus,
+  type GenericJob,
+  type CreateGenericJobData,
+  type UpdateGenericJobData,
+  // Query operations
+  getGenericJobById,
+  getGenericJobByIdForUser,
+  getGenericJobsByUserId,
+  // CRUD operations
+  createGenericJob,
+  updateGenericJobStatus,
+  updateGenericJob,
+  deleteGenericJob,
+} from "./jobs";
 
 // ============================================
 // AI Model Operations
@@ -361,6 +462,8 @@ export {
   getRepositoryById,
   getRepositoriesByOwnerId,
   getPublicRepositories,
+  getAllRepositoriesWithOwner,
+  getUserAccessibleRepositories,
   getAccessibleRepositoryIds,
   getAccessibleRepositoriesByCognitoSub,
   // Repository CRUD operations
@@ -372,6 +475,7 @@ export {
   grantRoleAccess,
   revokeUserAccess,
   revokeRoleAccess,
+  revokeAccessById,
   getRepositoryAccessList,
   // Repository item operations
   getRepositoryItems,
@@ -460,11 +564,18 @@ export {
   updatePrompt,
   deletePrompt,
   moderatePrompt,
+  getModerationQueue,
+  bulkModeratePrompts,
+  getModerationStats,
   incrementViewCount,
   incrementUseCount,
   // Tag operations
   ensureTagsExist,
   setPromptTags,
+  getAllTags,
+  getPopularTags,
+  getTagsForPrompt,
+  searchTagsByName,
   // Usage event operations
   trackUsageEvent,
   getPromptUsageStats,

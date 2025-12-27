@@ -3,7 +3,7 @@ import { NextRequest } from 'next/server'
 
 // Create simple mock functions
 const mockGetServerSession = jest.fn<() => Promise<{ sub?: string } | null>>()
-const mockExecuteSQL = jest.fn<(sql: string, parameters?: unknown[]) => Promise<Array<Record<string, unknown>>>>()
+const mockExecuteQuery = jest.fn<(callback: Function, operationName: string) => Promise<unknown>>()
 const mockCreateLogger = jest.fn<() => { info: jest.Mock; warn: jest.Mock; error: jest.Mock }>()
 const mockGenerateRequestId = jest.fn<() => string>()
 const mockStartTimer = jest.fn<(operation: string) => (metadata?: object) => void>()
@@ -18,8 +18,8 @@ const mockTimer = jest.fn()
 jest.mock('@/lib/auth/server-session', () => ({
   getServerSession: mockGetServerSession
 }))
-jest.mock('@/lib/db/data-api-adapter', () => ({
-  executeSQL: mockExecuteSQL
+jest.mock('@/lib/db/drizzle-client', () => ({
+  executeQuery: mockExecuteQuery
 }))
 jest.mock('@/lib/logger', () => ({
   createLogger: mockCreateLogger,
@@ -46,8 +46,11 @@ const mockLogger = {
 // Mock logger objects for testing
 
 // TODO: Fix Jest module caching issue for multi-test runs
+// TODO (Issue #541): Update test mocks to match Drizzle implementation
+// - Mock executeQuery callback instead of executeSQL parameters
+// - Update assertion expectations for Drizzle query builder
 // Individual tests work perfectly - run with: npm test -- -t "specific test name"
-describe.skip('Execution Results Download API', () => {
+describe.skip('Execution Results Download API [NEEDS UPDATE FOR DRIZZLE]', () => {
   beforeEach(() => {
     // Clear and setup mocks
     jest.clearAllMocks()
@@ -86,7 +89,7 @@ describe.skip('Execution Results Download API', () => {
       mockGetServerSession.mockResolvedValue(session)
 
       // Mock user lookup
-      mockExecuteSQL
+      mockExecuteQuery
         .mockResolvedValueOnce([{ id: 1 }]) // User exists
         .mockResolvedValueOnce([]) // No execution result found (access denied)
 
@@ -122,7 +125,7 @@ describe.skip('Execution Results Download API', () => {
         assistant_architect_name: 'Test Assistant'
       }
 
-      mockExecuteSQL
+      mockExecuteQuery
         .mockResolvedValueOnce([{ id: 1 }]) // User lookup
         .mockResolvedValueOnce([mockExecutionResult]) // Execution result
 
@@ -144,7 +147,7 @@ describe.skip('Execution Results Download API', () => {
     beforeEach(() => {
       const session = { sub: 'user-123' }
       mockGetServerSession.mockResolvedValue(session)
-      mockExecuteSQL.mockResolvedValueOnce([{ id: 1 }]) // User exists
+      mockExecuteQuery.mockResolvedValueOnce([{ id: 1 }]) // User exists
     })
 
     it('should return 400 for non-numeric ID', async () => {
@@ -209,7 +212,7 @@ describe.skip('Execution Results Download API', () => {
         assistant_architect_name: 'Test Assistant'
       }
 
-      mockExecuteSQL.mockResolvedValueOnce([mockExecutionResult])
+      mockExecuteQuery.mockResolvedValueOnce([mockExecutionResult])
 
       const request = new NextRequest('http://localhost:3000/api/execution-results/123/download')
       const params = Promise.resolve({ id: '123' })
@@ -226,7 +229,7 @@ describe.skip('Execution Results Download API', () => {
     beforeEach(() => {
       const session = { sub: 'user-123' }
       mockGetServerSession.mockResolvedValue(session)
-      mockExecuteSQL.mockResolvedValueOnce([{ id: 1 }]) // User exists
+      mockExecuteQuery.mockResolvedValueOnce([{ id: 1 }]) // User exists
     })
 
     it('should generate correct markdown for successful execution', async () => {
@@ -246,7 +249,7 @@ describe.skip('Execution Results Download API', () => {
         assistant_architect_name: 'Test Assistant'
       }
 
-      mockExecuteSQL.mockResolvedValueOnce([mockExecutionResult])
+      mockExecuteQuery.mockResolvedValueOnce([mockExecutionResult])
 
       const request = new NextRequest('http://localhost:3000/api/execution-results/123/download')
       const params = Promise.resolve({ id: '123' })
@@ -287,7 +290,7 @@ describe.skip('Execution Results Download API', () => {
         assistant_architect_name: 'Test Assistant'
       }
 
-      mockExecuteSQL.mockResolvedValueOnce([mockExecutionResult])
+      mockExecuteQuery.mockResolvedValueOnce([mockExecutionResult])
 
       const request = new NextRequest('http://localhost:3000/api/execution-results/124/download')
       const params = Promise.resolve({ id: '124' })
@@ -319,7 +322,7 @@ describe.skip('Execution Results Download API', () => {
         assistant_architect_name: 'Test Assistant'
       }
 
-      mockExecuteSQL.mockResolvedValueOnce([mockExecutionResult])
+      mockExecuteQuery.mockResolvedValueOnce([mockExecutionResult])
 
       const request = new NextRequest('http://localhost:3000/api/execution-results/125/download')
       const params = Promise.resolve({ id: '125' })
@@ -350,7 +353,7 @@ describe.skip('Execution Results Download API', () => {
         assistant_architect_name: 'Test Assistant'
       }
 
-      mockExecuteSQL.mockResolvedValueOnce([mockResult1])
+      mockExecuteQuery.mockResolvedValueOnce([mockResult1])
 
       const request1 = new NextRequest('http://localhost:3000/api/execution-results/126/download')
       const params1 = Promise.resolve({ id: '126' })
@@ -366,7 +369,7 @@ describe.skip('Execution Results Download API', () => {
     beforeEach(() => {
       const session = { sub: 'user-123' }
       mockGetServerSession.mockResolvedValue(session)
-      mockExecuteSQL.mockResolvedValueOnce([{ id: 1 }]) // User exists
+      mockExecuteQuery.mockResolvedValueOnce([{ id: 1 }]) // User exists
     })
 
     it('should generate correct filename with schedule name, date, and time', async () => {
@@ -386,7 +389,7 @@ describe.skip('Execution Results Download API', () => {
         assistant_architect_name: 'Test Assistant'
       }
 
-      mockExecuteSQL.mockResolvedValueOnce([mockExecutionResult])
+      mockExecuteQuery.mockResolvedValueOnce([mockExecutionResult])
 
       const request = new NextRequest('http://localhost:3000/api/execution-results/127/download')
       const params = Promise.resolve({ id: '127' })
@@ -417,7 +420,7 @@ describe.skip('Execution Results Download API', () => {
         assistant_architect_name: 'Test Assistant'
       }
 
-      mockExecuteSQL.mockResolvedValueOnce([mockExecutionResult])
+      mockExecuteQuery.mockResolvedValueOnce([mockExecutionResult])
 
       const request = new NextRequest('http://localhost:3000/api/execution-results/128/download')
       const params = Promise.resolve({ id: '128' })
@@ -435,7 +438,7 @@ describe.skip('Execution Results Download API', () => {
     beforeEach(() => {
       const session = { sub: 'user-123' }
       mockGetServerSession.mockResolvedValue(session)
-      mockExecuteSQL.mockResolvedValueOnce([{ id: 1 }]) // User exists
+      mockExecuteQuery.mockResolvedValueOnce([{ id: 1 }]) // User exists
     })
 
     it('should set correct Content-Type header', async () => {
@@ -455,7 +458,7 @@ describe.skip('Execution Results Download API', () => {
         assistant_architect_name: 'Test Assistant'
       }
 
-      mockExecuteSQL.mockResolvedValueOnce([mockExecutionResult])
+      mockExecuteQuery.mockResolvedValueOnce([mockExecutionResult])
 
       const request = new NextRequest('http://localhost:3000/api/execution-results/129/download')
       const params = Promise.resolve({ id: '129' })
@@ -484,7 +487,7 @@ describe.skip('Execution Results Download API', () => {
         assistant_architect_name: 'Test Assistant'
       }
 
-      mockExecuteSQL.mockResolvedValueOnce([mockExecutionResult])
+      mockExecuteQuery.mockResolvedValueOnce([mockExecutionResult])
 
       const request = new NextRequest('http://localhost:3000/api/execution-results/130/download')
       const params = Promise.resolve({ id: '130' })
@@ -514,7 +517,7 @@ describe.skip('Execution Results Download API', () => {
         assistant_architect_name: 'Test Assistant'
       }
 
-      mockExecuteSQL.mockResolvedValueOnce([mockExecutionResult])
+      mockExecuteQuery.mockResolvedValueOnce([mockExecutionResult])
 
       const request = new NextRequest('http://localhost:3000/api/execution-results/131/download')
       const params = Promise.resolve({ id: '131' })
@@ -537,7 +540,7 @@ describe.skip('Execution Results Download API', () => {
 
     it('should handle database connection errors', async () => {
       // Arrange
-      mockExecuteSQL.mockRejectedValue(new Error('Database connection failed'))
+      mockExecuteQuery.mockRejectedValue(new Error('Database connection failed'))
 
       const request = new NextRequest('http://localhost:3000/api/execution-results/132/download')
       const params = Promise.resolve({ id: '132' })
@@ -554,7 +557,7 @@ describe.skip('Execution Results Download API', () => {
 
     it('should handle invalid JSON in result data gracefully', async () => {
       // Arrange
-      mockExecuteSQL
+      mockExecuteQuery
         .mockResolvedValueOnce([{ id: 1 }]) // User exists
         .mockResolvedValueOnce([{
           id: 133,
@@ -587,7 +590,7 @@ describe.skip('Execution Results Download API', () => {
 
     it('should handle user not found in database', async () => {
       // Arrange
-      mockExecuteSQL.mockResolvedValueOnce([]) // User not found
+      mockExecuteQuery.mockResolvedValueOnce([]) // User not found
 
       const request = new NextRequest('http://localhost:3000/api/execution-results/134/download')
       const params = Promise.resolve({ id: '134' })
@@ -619,7 +622,7 @@ describe.skip('Execution Results Download API', () => {
     beforeEach(() => {
       const session = { sub: 'user-123' }
       mockGetServerSession.mockResolvedValue(session)
-      mockExecuteSQL.mockResolvedValueOnce([{ id: 1 }]) // User exists
+      mockExecuteQuery.mockResolvedValueOnce([{ id: 1 }]) // User exists
     })
 
     it('should log successful downloads with correct information', async () => {
@@ -639,7 +642,7 @@ describe.skip('Execution Results Download API', () => {
         assistant_architect_name: 'Test Assistant'
       }
 
-      mockExecuteSQL.mockResolvedValueOnce([mockExecutionResult])
+      mockExecuteQuery.mockResolvedValueOnce([mockExecutionResult])
 
       const request = new NextRequest('http://localhost:3000/api/execution-results/135/download')
       const params = Promise.resolve({ id: '135' })
@@ -681,7 +684,7 @@ describe.skip('Execution Results Download API', () => {
         assistant_architect_name: 'Test Assistant'
       }
 
-      mockExecuteSQL.mockResolvedValueOnce([mockExecutionResult])
+      mockExecuteQuery.mockResolvedValueOnce([mockExecutionResult])
 
       const request = new NextRequest('http://localhost:3000/api/execution-results/136/download')
       const params = Promise.resolve({ id: '136' })
@@ -697,7 +700,7 @@ describe.skip('Execution Results Download API', () => {
 
     it('should call timer with error status on failure', async () => {
       // Arrange
-      mockExecuteSQL.mockRejectedValue(new Error('Database error'))
+      mockExecuteQuery.mockRejectedValue(new Error('Database error'))
 
       const request = new NextRequest('http://localhost:3000/api/execution-results/137/download')
       const params = Promise.resolve({ id: '137' })

@@ -3,7 +3,11 @@ import { z } from 'zod';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
-import { executeSQL } from '@/lib/db/data-api-adapter';
+import { getAIModelById } from '@/lib/db/drizzle';
+import { executeQuery } from '@/lib/db/drizzle-client';
+import { eq, sql } from 'drizzle-orm';
+import { nexusConversations, nexusMessages } from '@/lib/db/schema';
+import type { MessagePart } from '@/lib/db/drizzle/nexus-messages';
 import { processMessagesWithAttachments } from '@/lib/services/attachment-storage-service';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import type { StreamRequest } from '@/lib/streaming/types';
@@ -137,16 +141,9 @@ export async function POST(req: Request) {
 
     // Check if this is an image generation model
     // Note: getModelConfig doesn't return nexus_capabilities, so we query it separately if needed
-    const nexusCapabilitiesResult = await executeSQL(
-      `SELECT nexus_capabilities FROM ai_models WHERE id = :id LIMIT 1`,
-      [{ name: 'id', value: { longValue: dbModelId } }]
-    );
+    const modelWithCapabilities = await getAIModelById(dbModelId);
 
-    const capabilities = nexusCapabilitiesResult.length > 0 && nexusCapabilitiesResult[0].nexus_capabilities
-      ? (typeof nexusCapabilitiesResult[0].nexus_capabilities === 'string'
-          ? JSON.parse(nexusCapabilitiesResult[0].nexus_capabilities)
-          : nexusCapabilitiesResult[0].nexus_capabilities)
-      : null;
+    const capabilities = modelWithCapabilities?.nexusCapabilities || null;
 
     const isImageGenerationModel = capabilities?.imageGeneration === true;
 
@@ -287,23 +284,22 @@ export async function POST(req: Request) {
       const sanitizedTitle = sanitizeTextForDatabase(conversationTitle);
 
       // Create new Nexus conversation with generated title
-      const createResult = await executeSQL(
-        `INSERT INTO nexus_conversations (
-          user_id, provider, model_used, title,
-          message_count, total_tokens, metadata,
-          created_at, updated_at
-        ) VALUES (
-          :userId, :provider, :modelId, :title,
-          0, 0, :metadata::jsonb,
-          NOW(), NOW()
-        ) RETURNING id`,
-        [
-          { name: 'userId', value: { longValue: userId } },
-          { name: 'provider', value: { stringValue: provider } },
-          { name: 'modelId', value: { stringValue: modelId } },
-          { name: 'title', value: { stringValue: sanitizedTitle } },
-          { name: 'metadata', value: { stringValue: JSON.stringify({ source: 'nexus', streaming: true }) } }
-        ]
+      const now = new Date();
+      const createResult = await executeQuery(
+        (db) => db.insert(nexusConversations)
+          .values({
+            userId,
+            provider,
+            modelUsed: modelId,
+            title: sanitizedTitle,
+            messageCount: 0,
+            totalTokens: 0,
+            metadata: { source: 'nexus', streaming: true } as Record<string, unknown>,
+            createdAt: now,
+            updatedAt: now
+          })
+          .returning({ id: nexusConversations.id }),
+        'createNexusConversation'
       );
 
       // Validate conversation creation result
@@ -392,32 +388,30 @@ export async function POST(req: Request) {
       // Note: userContent and serializableParts already contain sanitized text
       // Sanitization happens when extracting text from message parts above
 
-      await executeSQL(
-        `INSERT INTO nexus_messages (
-          conversation_id, role, content, parts,
-          model_id, metadata, created_at
-        ) VALUES (
-          :conversationId::uuid, :role, :content, :parts::jsonb,
-          :modelId, :metadata::jsonb, NOW()
-        )`,
-        [
-          { name: 'conversationId', value: { stringValue: conversationId } },
-          { name: 'role', value: { stringValue: 'user' } },
-          { name: 'content', value: { stringValue: userContent || '' } },
-          { name: 'parts', value: { stringValue: JSON.stringify(serializableParts) } },
-          { name: 'modelId', value: { longValue: dbModelId } },
-          { name: 'metadata', value: { stringValue: JSON.stringify({}) } }
-        ]
+      await executeQuery(
+        (db) => db.insert(nexusMessages)
+          .values({
+            conversationId,
+            role: 'user',
+            content: userContent || '',
+            parts: serializableParts as MessagePart[],
+            modelId: dbModelId,
+            metadata: {},
+            createdAt: new Date()
+          }),
+        'saveUserMessage'
       );
 
       // Update conversation's last_message_at and message_count
-      await executeSQL(
-        `UPDATE nexus_conversations
-         SET last_message_at = NOW(),
-             message_count = message_count + 1,
-             updated_at = NOW()
-         WHERE id = :conversationId::uuid`,
-        [{ name: 'conversationId', value: { stringValue: conversationId } }]
+      await executeQuery(
+        (db) => db.update(nexusConversations)
+          .set({
+            lastMessageAt: new Date(),
+            messageCount: sql`${nexusConversations.messageCount} + 1`,
+            updatedAt: new Date()
+          })
+          .where(eq(nexusConversations.id, conversationId)),
+        'updateConversationAfterUserMessage'
       );
 
       log.debug('User message saved to nexus_messages');
@@ -517,44 +511,39 @@ export async function POST(req: Request) {
             // Sanitize assistant content to remove null bytes and invalid UTF-8 sequences
             const sanitizedAssistantContent = sanitizeTextForDatabase(text);
 
-            await executeSQL(
-              `INSERT INTO nexus_messages (
-                conversation_id, role, content, parts,
-                model_id, token_usage, finish_reason, metadata,
-                created_at, updated_at
-              ) VALUES (
-                :conversationId::uuid, 'assistant', :content, :parts::jsonb,
-                :modelId, :tokenUsage::jsonb, :finishReason, '{}'::jsonb,
-                NOW(), NOW()
-              )`,
-              [
-                { name: 'conversationId', value: { stringValue: conversationId } },
-                { name: 'content', value: { stringValue: sanitizedAssistantContent } },
-                { name: 'parts', value: { stringValue: JSON.stringify([{ type: 'text', text: sanitizedAssistantContent }]) } },
-                { name: 'modelId', value: { longValue: dbModelId } },
-                { name: 'tokenUsage', value: {
-                  stringValue: JSON.stringify({
+            const now = new Date();
+            await executeQuery(
+              (db) => db.insert(nexusMessages)
+                .values({
+                  conversationId,
+                  role: 'assistant',
+                  content: sanitizedAssistantContent,
+                  parts: [{ type: 'text', text: sanitizedAssistantContent }] as MessagePart[],
+                  modelId: dbModelId,
+                  tokenUsage: {
                     promptTokens: usage?.promptTokens || 0,
                     completionTokens: usage?.completionTokens || 0,
                     totalTokens: usage?.totalTokens || 0
-                  })
-                }},
-                { name: 'finishReason', value: { stringValue: finishReason || 'stop' } }
-              ]
+                  },
+                  finishReason: finishReason || 'stop',
+                  metadata: {},
+                  createdAt: now,
+                  updatedAt: now
+                }),
+              'saveAssistantMessage'
             );
 
             // Update conversation statistics
-            await executeSQL(
-              `UPDATE nexus_conversations
-               SET message_count = message_count + 1,
-                   total_tokens = total_tokens + :totalTokens,
-                   last_message_at = NOW(),
-                   updated_at = NOW()
-               WHERE id = :conversationId::uuid`,
-              [
-                { name: 'conversationId', value: { stringValue: conversationId } },
-                { name: 'totalTokens', value: { longValue: usage?.totalTokens || 0 } }
-              ]
+            await executeQuery(
+              (db) => db.update(nexusConversations)
+                .set({
+                  messageCount: sql`${nexusConversations.messageCount} + 1`,
+                  totalTokens: sql`${nexusConversations.totalTokens} + ${usage?.totalTokens || 0}`,
+                  lastMessageAt: new Date(),
+                  updatedAt: new Date()
+                })
+                .where(eq(nexusConversations.id, conversationId)),
+              'updateConversationAfterAssistantMessage'
             );
 
             log.info('Assistant message saved successfully', {

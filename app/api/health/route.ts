@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { validateDataAPIConnection } from "@/lib/db/data-api-adapter"
+import { validateDatabaseConnection } from "@/lib/db/drizzle-client"
 import { getServerSession } from "@/lib/auth/server-session"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 /**
@@ -159,7 +159,7 @@ export async function GET() {
   // 3. Check database connectivity (skip if missing database config)
   if (process.env.RDS_RESOURCE_ARN && process.env.RDS_SECRET_ARN) {
     try {
-      const dbValidation = await validateDataAPIConnection()
+      const dbValidation = await validateDatabaseConnection()
       log.debug("Database check completed", { success: dbValidation.success });
       healthCheck.checks.database = {
         status: dbValidation.success ? "healthy" : "unhealthy",

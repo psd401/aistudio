@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { createRole, executeSQL } from "@/lib/db/data-api-adapter"
+import { createRole, getRoles } from "@/lib/db/drizzle"
 import { requireAdmin } from "@/lib/auth/admin-check"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 
@@ -20,7 +20,7 @@ export async function GET() {
     }
 
     // Get all roles
-    const result = await executeSQL('SELECT id, name FROM roles ORDER BY name')
+    const result = await getRoles()
 
     const roles = result.map((record) => ({
       id: String(record.id),

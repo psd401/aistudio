@@ -2,13 +2,13 @@
 
 import {
   getUserByCognitoSub,
+  getUserByEmail,
   createUser,
+  updateUser,
   getRoleByName,
   assignRoleToUser,
-  getUserRolesByCognitoSub,
-  executeSQL
-} from "@/lib/db/data-api-adapter"
-import { SqlParameter } from "@aws-sdk/client-rds-data"
+  getUserRolesByCognitoSub
+} from "@/lib/db/drizzle"
 import { getServerSession } from "@/lib/auth/server-session"
 import { ActionState } from "@/types"
 import { SelectUser } from "@/types/db-types"
@@ -81,48 +81,30 @@ export async function getCurrentUserAction(): Promise<
 
     // If not found by cognito_sub, check if user exists by email
     if (!user && userEmail) {
-      log.debug("User not found by Cognito sub, checking by email", { 
-        email: sanitizeForLogging(userEmail) 
+      log.debug("User not found by Cognito sub, checking by email", {
+        email: sanitizeForLogging(userEmail)
       })
-      
-      const query = `
-        SELECT id, cognito_sub, email, first_name, last_name,
-               last_sign_in_at, created_at, updated_at
-        FROM users
-        WHERE email = :email
-      `
-      const parameters = [
-        { name: "email", value: { stringValue: userEmail } }
-      ]
-      
-      const result = await executeSQL<SelectUser>(query, parameters)
-      
-      if (result.length > 0) {
-        // User exists with this email but different cognito_sub
-        // Update the cognito_sub to link to the new auth system
-        const existingUser = result[0]
-        
-        log.info("User found by email, updating Cognito sub", {
-          userId: existingUser.id,
-          oldCognitoSub: existingUser.cognitoSub,
-          newCognitoSub: userId
-        })
-        
-        const updateQuery = `
-          UPDATE users
-          SET cognito_sub = :cognitoSub, updated_at = NOW()
-          WHERE id = :userId
-          RETURNING id, cognito_sub, email, first_name, last_name, created_at, updated_at
-        `
-        const updateParams: SqlParameter[] = [
-          { name: "cognitoSub", value: { stringValue: userId } },
-          { name: "userId", value: { longValue: existingUser.id } }
-        ]
-        
-        const updateResult = await executeSQL<SelectUser>(updateQuery, updateParams)
-        user = updateResult[0]
-        
-        log.info("User Cognito sub updated successfully", { userId: user.id })
+
+      try {
+        const existingUser = await getUserByEmail(userEmail)
+
+        if (existingUser) {
+          // User exists with this email but different cognito_sub
+          // Update the cognito_sub to link to the new auth system
+          log.info("User found by email, updating Cognito sub", {
+            userId: existingUser.id,
+            oldCognitoSub: existingUser.cognitoSub,
+            newCognitoSub: userId
+          })
+
+          const updatedUser = await updateUser(existingUser.id, { cognitoSub: userId })
+          user = updatedUser as unknown as SelectUser
+
+          log.info("User Cognito sub updated successfully", { userId: user.id })
+        }
+      } catch {
+        // User not found by email - will create new user below
+        log.debug("No existing user found by email")
       }
     }
 
@@ -170,11 +152,10 @@ export async function getCurrentUserAction(): Promise<
         assignedRole: defaultRole
       })
 
-      const roleResult = await getRoleByName(defaultRole)
+      const role = await getRoleByName(defaultRole)
 
-      if (roleResult.length > 0) {
-        const role = roleResult[0]
-        const roleId = role.id as number
+      if (role) {
+        const roleId = role.id
         // UPSERT: If role already assigned by concurrent request, DO NOTHING
         const assignmentResult = await assignRoleToUser(user!.id, roleId)
 
@@ -192,7 +173,7 @@ export async function getCurrentUserAction(): Promise<
           })
         }
       } else {
-        log.warn(`${defaultRole} role not found in database - user has no default role`, {
+        log.warn("Default role not found in database - user has no default role", {
           attemptedRole: defaultRole
         })
       }
@@ -200,7 +181,7 @@ export async function getCurrentUserAction(): Promise<
 
     // Update last_sign_in_at and also update names if they're provided in session
     log.debug("Updating user information and last sign-in timestamp")
-    
+
     // Only log if we're updating names
     if (userGivenName || userFamilyName) {
       log.info("Updating user names from Cognito session", {
@@ -209,24 +190,16 @@ export async function getCurrentUserAction(): Promise<
         updatingLastName: !!userFamilyName
       })
     }
-    
-    // Use COALESCE to conditionally update names only if provided
-    const updateLastSignInQuery = `
-      UPDATE users
-      SET first_name = COALESCE(:firstName, first_name),
-          last_name = COALESCE(:lastName, last_name),
-          last_sign_in_at = NOW(), 
-          updated_at = NOW()
-      WHERE id = :userId
-      RETURNING id, cognito_sub, email, first_name, last_name, last_sign_in_at, created_at, updated_at
-    `
-    const updateLastSignInParams: SqlParameter[] = [
-      { name: "firstName", value: userGivenName ? { stringValue: userGivenName } : { isNull: true } },
-      { name: "lastName", value: userFamilyName ? { stringValue: userFamilyName } : { isNull: true } },
-      { name: "userId", value: { longValue: user.id } }
-    ]
-    const updateResult = await executeSQL<SelectUser>(updateLastSignInQuery, updateLastSignInParams)
-    user = updateResult[0]
+
+    // Build update payload conditionally
+    const updatePayload: { firstName?: string; lastName?: string; lastSignInAt: Date } = {
+      lastSignInAt: new Date()
+    }
+    if (userGivenName) updatePayload.firstName = userGivenName
+    if (userFamilyName) updatePayload.lastName = userFamilyName
+
+    const updatedUser = await updateUser(user.id, updatePayload)
+    user = updatedUser as unknown as SelectUser
 
     // Get user's roles
     log.debug("Fetching user roles")
@@ -240,13 +213,12 @@ export async function getCurrentUserAction(): Promise<
     
     const roles = await Promise.all(
       roleNames.map(async name => {
-        const roleResult = await getRoleByName(name)
-        if (roleResult.length > 0) {
-          const role = roleResult[0]
+        const role = await getRoleByName(name)
+        if (role) {
           return {
-            id: role.id as number,
-            name: role.name as string,
-            description: role.description as string | undefined
+            id: role.id,
+            name: role.name,
+            description: role.description ?? undefined
           }
         }
         return null

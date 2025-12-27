@@ -11,6 +11,7 @@
  */
 
 import { drizzle } from "drizzle-orm/aws-data-api/pg";
+import { sql } from "drizzle-orm";
 import { RDSDataClient } from "@aws-sdk/client-rds-data";
 import {
   executeWithRetry,
@@ -373,6 +374,77 @@ export function resetDatabaseCircuit() {
   });
   log.info("Manually resetting database circuit breaker");
   resetCircuitBreaker();
+}
+
+// ============================================
+// Database Connection Validation
+// ============================================
+
+/**
+ * Validate database connection by executing a simple query
+ *
+ * Used for health checks to verify:
+ * - Environment variables are configured
+ * - AWS credentials are valid
+ * - Database is accessible and responding
+ *
+ * @returns Object with success status and diagnostic information
+ */
+export async function validateDatabaseConnection(): Promise<{
+  success: boolean;
+  message: string;
+  config: {
+    region: string | undefined;
+    hasResourceArn: boolean;
+    hasSecretArn: boolean;
+    database: string;
+  };
+  error?: string;
+}> {
+  const log = createLogger({ context: "validateDatabaseConnection" });
+  const region =
+    process.env.AWS_REGION ||
+    process.env.AWS_DEFAULT_REGION ||
+    process.env.NEXT_PUBLIC_AWS_REGION ||
+    "us-east-1";
+
+  const config = {
+    region,
+    hasResourceArn: !!process.env.RDS_RESOURCE_ARN,
+    hasSecretArn: !!process.env.RDS_SECRET_ARN,
+    database: process.env.RDS_DATABASE_NAME || "aistudio",
+  };
+
+  try {
+    log.info("Validating database connection", { region, database: config.database });
+
+    // Execute simple query to test connectivity
+    const result = await executeQuery(
+      (database) => database.execute(sql`SELECT 1 as test`),
+      "validateConnection"
+    );
+
+    if (result && result.rows && result.rows.length > 0) {
+      log.info("Database connectivity test passed");
+      return {
+        success: true,
+        message: "Database connection validated successfully",
+        config,
+      };
+    }
+
+    throw new Error("Unexpected test query result");
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : "Unknown error";
+    log.error("Database validation failed", { error: errorMessage });
+
+    return {
+      success: false,
+      message: "Database connection validation failed",
+      config,
+      error: errorMessage,
+    };
+  }
 }
 
 // ============================================

@@ -98,7 +98,7 @@ export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFo
         value: value,
         description: setting.description,
         category: setting.category,
-        isSecret: setting.isSecret
+        isSecret: setting.isSecret ?? false
       })
     } else {
       form.reset({

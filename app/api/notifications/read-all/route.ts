@@ -2,7 +2,7 @@ import { NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
-import { executeSQL } from "@/lib/db/data-api-adapter"
+import { markAllNotificationsAsRead, getUserIdByCognitoSub } from "@/lib/db/drizzle"
 
 export async function PUT() {
   const requestId = generateRequestId()
@@ -20,33 +20,17 @@ export async function PUT() {
     }
 
     // Get user ID from database using cognito sub
-    const userResult = await executeSQL(`
-      SELECT id FROM users WHERE cognito_sub = :cognitoSub
-    `, [{ name: 'cognitoSub', value: { stringValue: session.sub } }])
+    const userIdString = await getUserIdByCognitoSub(session.sub)
 
-    if (!userResult || userResult.length === 0) {
+    if (!userIdString) {
       throw ErrorFactories.dbRecordNotFound("users", session.sub)
     }
 
-    const userId = Number(userResult[0].id)
+    const userId = Number(userIdString)
     log.info("Marking all notifications as read for user", { userId: sanitizeForLogging(userId) })
 
     // Update all unread notifications for the user
-    const sql = `
-      UPDATE user_notifications
-      SET
-        status = 'read',
-        last_attempt_at = NOW()
-      WHERE user_id = :user_id
-        AND status != 'read'
-      RETURNING id
-    `
-
-    const parameters = [
-      { name: 'user_id', value: { longValue: userId } }
-    ]
-
-    const results = await executeSQL(sql, parameters)
+    const results = await markAllNotificationsAsRead(userId)
     const updatedCount = results.length
 
     timer({ status: "success" })

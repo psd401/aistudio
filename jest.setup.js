@@ -1,3 +1,9 @@
+// Set required environment variables for Drizzle DB client initialization
+// These must be set BEFORE any imports to prevent initialization errors
+process.env.RDS_SECRET_ARN = 'test-secret-arn';
+process.env.RDS_RESOURCE_ARN = 'test-resource-arn';
+process.env.RDS_DATABASE_NAME = 'test-database';
+
 import '@testing-library/jest-dom';
 
 // Mock auth factory
@@ -499,4 +505,39 @@ jest.mock('@radix-ui/react-scroll-area', () => {
     ScrollAreaThumb: mockThumb, // Ensure both names point to same component
     Corner: mockCorner
   };
-}); 
+});
+
+// Mock Drizzle DB client to prevent actual database connections during tests
+jest.mock('@/lib/db/drizzle-client', () => {
+  const mockExecuteQuery = jest.fn(() => Promise.resolve([]));
+  const mockExecuteTransaction = jest.fn((callback) => callback({
+    select: jest.fn().mockReturnThis(),
+    from: jest.fn().mockReturnThis(),
+    where: jest.fn().mockReturnThis(),
+    insert: jest.fn().mockReturnThis(),
+    update: jest.fn().mockReturnThis(),
+    delete: jest.fn().mockReturnThis(),
+    values: jest.fn().mockReturnThis(),
+    set: jest.fn().mockReturnThis(),
+    returning: jest.fn(() => Promise.resolve([])),
+    execute: jest.fn(() => Promise.resolve([]))
+  }));
+
+  return {
+    executeQuery: mockExecuteQuery,
+    executeTransaction: mockExecuteTransaction,
+    validateDatabaseConnection: jest.fn(() => Promise.resolve(true)),
+    db: {
+      select: jest.fn().mockReturnThis(),
+      from: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      insert: jest.fn().mockReturnThis(),
+      update: jest.fn().mockReturnThis(),
+      delete: jest.fn().mockReturnThis(),
+      values: jest.fn().mockReturnThis(),
+      set: jest.fn().mockReturnThis(),
+      returning: jest.fn(() => Promise.resolve([])),
+      execute: jest.fn(() => Promise.resolve([]))
+    }
+  };
+});

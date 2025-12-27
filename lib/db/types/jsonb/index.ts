@@ -121,7 +121,9 @@ export interface NexusConversationEventData {
     | "conversation_unpinned"
     | "conversation_shared"
     | "conversation_moved"
-    | "conversation_deleted";
+    | "conversation_deleted"
+    | "conversation_forked"
+    | "conversation_created_from_fork";
   userId: number;
   changes?: Record<string, unknown>;
   timestamp: string;

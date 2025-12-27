@@ -1,7 +1,13 @@
 import { getServerSession } from '@/lib/auth/server-session';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
-import { executeSQL, executeSQLTransaction } from '@/lib/streaming/nexus/db-helpers';
-import { transformSnakeToCamel } from '@/lib/db/field-mapper';
+import {
+  getConversationById,
+  recordConversationEvent,
+  updateConversation,
+  getUserIdByCognitoSubAsNumber,
+} from '@/lib/db/drizzle';
+import { executeQuery } from '@/lib/db/drizzle-client';
+import { nexusConversations } from '@/lib/db/schema';
 
 
 interface ForkRequest {
@@ -37,36 +43,30 @@ export async function POST(
       return new Response('Unauthorized', { status: 401 });
     }
     
-    const userId = session.sub;
-    
+    const userCognitoSub = session.sub;
+
+    // Get numeric user ID
+    const userId = await getUserIdByCognitoSubAsNumber(userCognitoSub);
+    if (!userId) {
+      log.warn('User not found', { cognitoSub: userCognitoSub });
+      timer({ status: 'error', reason: 'user_not_found' });
+      return new Response('User not found', { status: 404 });
+    }
+
     // Parse request body
     const body: ForkRequest = await req.json();
-    
+
     // Get original conversation
-    const originalResult = await executeSQL(`
-      SELECT 
-        id,
-        user_id,
-        title,
-        provider,
-        model_used,
-        external_id,
-        cache_key,
-        metadata
-      FROM nexus_conversations
-      WHERE id = $1 AND user_id = $2
-    `, [originalConversationId, userId]);
-    
-    if (originalResult.length === 0) {
-      log.warn('Original conversation not found', { 
-        originalConversationId, 
-        userId 
+    const original = await getConversationById(originalConversationId, userId);
+
+    if (!original) {
+      log.warn('Original conversation not found', {
+        originalConversationId,
+        userId
       });
       timer({ status: 'error', reason: 'not_found' });
       return new Response('Conversation not found', { status: 404 });
     }
-    
-    const original = originalResult[0];
     
     // Create forked conversation
     const newTitle = body.newTitle || `${original.title} (Fork)`;
@@ -77,107 +77,73 @@ export async function POST(
       forkedAt: new Date().toISOString(),
       atMessageId: body.atMessageId
     };
-    
-    // Execute fork operation in a transaction to ensure atomicity
-    const results = await executeSQLTransaction([
-      // Create the forked conversation
-      {
-        sql: `
-          INSERT INTO nexus_conversations (
-            user_id,
-            title,
-            provider,
-            model_used,
-            external_id,
-            cache_key,
-            message_count,
-            total_tokens,
-            metadata,
-            created_at,
-            updated_at
-          ) VALUES (
-            $1, $2, $3, $4, $5, $6, 0, 0, $7, NOW(), NOW()
-          ) RETURNING 
-            id,
-            title,
-            provider,
-            model_used,
-            metadata,
-            created_at,
-            updated_at
-        `,
-        params: [
-          userId,
-          newTitle,
-          original.provider as string,
-          original.model_used as string,
-          null, // New external_id will be set on first message
-          null, // New cache_key will be generated
-          newMetadata as Record<string, unknown>
-        ]
-      }
-    ]);
-    
-    const forkedConversation = transformSnakeToCamel<{
-      id: string;
-      title: string;
-      provider: string;
-      modelUsed: string;
-      metadata: Record<string, unknown>;
-      createdAt: string;
-      updatedAt: string;
-    }>(results[0][0]);
-    
-    // Record fork events in a second transaction (after we have the new conversation ID)
-    await executeSQLTransaction([
-      {
-        sql: `
-          INSERT INTO nexus_conversation_events (
-            conversation_id,
-            event_type,
-            event_data,
-            created_at
-          ) VALUES 
-            ($1, $2, $3, NOW()),
-            ($4, $5, $6, NOW())
-        `,
-        params: [
-          originalConversationId,
-          'conversation_forked',
-          JSON.stringify({
-            forkedTo: forkedConversation.id,
-            atMessageId: body.atMessageId,
-            forkedBy: userId
-          }),
-          forkedConversation.id as string,
-          'conversation_created_from_fork',
-          JSON.stringify({
-            forkedFrom: originalConversationId,
-            atMessageId: body.atMessageId,
-            createdBy: userId
+
+    // Create the forked conversation using Drizzle
+    const [forkedConversation] = await executeQuery(
+      (db) =>
+        db
+          .insert(nexusConversations)
+          .values({
+            userId,
+            title: newTitle,
+            provider: original.provider,
+            modelUsed: original.modelUsed,
+            externalId: null, // New external_id will be set on first message
+            cacheKey: null, // New cache_key will be generated
+            messageCount: 0,
+            totalTokens: 0,
+            metadata: newMetadata,
           })
-        ]
-      }
+          .returning({
+            id: nexusConversations.id,
+            title: nexusConversations.title,
+            provider: nexusConversations.provider,
+            modelUsed: nexusConversations.modelUsed,
+            metadata: nexusConversations.metadata,
+            createdAt: nexusConversations.createdAt,
+            updatedAt: nexusConversations.updatedAt,
+          }),
+      "forkConversation"
+    );
+    
+    // Record fork events for both conversations
+    await Promise.all([
+      recordConversationEvent(
+        originalConversationId,
+        'conversation_forked',
+        userId,
+        {
+          forkedTo: forkedConversation.id,
+          atMessageId: body.atMessageId,
+          forkedBy: userId,
+        }
+      ),
+      recordConversationEvent(
+        forkedConversation.id,
+        'conversation_created_from_fork',
+        userId,
+        {
+          forkedFrom: originalConversationId,
+          atMessageId: body.atMessageId,
+          createdBy: userId,
+        }
+      ),
     ]);
     
     // If OpenAI with external_id, handle forking at provider level
-    if (original.provider === 'openai' && original.external_id && body.atMessageId) {
+    if (original.provider === 'openai' && original.externalId && body.atMessageId) {
       // Store the fork point for later use when continuing the conversation
-      await executeSQL(`
-        UPDATE nexus_conversations
-        SET metadata = jsonb_set(
-          COALESCE(metadata, '{}'::jsonb),
-          '{forkPoint}',
-          $1::jsonb
-        )
-        WHERE id = $2
-      `, [
-        JSON.stringify({
-          originalResponseId: original.external_id,
-          atMessageId: body.atMessageId
-        }),
-        forkedConversation.id
-      ]);
+      const updatedMetadata = {
+        ...forkedConversation.metadata,
+        forkPoint: {
+          originalResponseId: original.externalId,
+          atMessageId: body.atMessageId,
+        },
+      };
+
+      await updateConversation(forkedConversation.id, userId, {
+        metadata: updatedMetadata,
+      });
     }
     
     timer({ status: 'success' });
@@ -187,7 +153,7 @@ export async function POST(
       forkedConversationId: forkedConversation.id,
       provider: original.provider
     });
-    
+
     return Response.json({
       originalConversationId,
       forkedConversation,
@@ -195,7 +161,7 @@ export async function POST(
         atMessageId: body.atMessageId,
         timestamp: new Date().toISOString(),
         provider: original.provider,
-        supportsNativeFork: original.provider === 'openai' && !!original.external_id
+        supportsNativeFork: original.provider === 'openai' && !!original.externalId
       }
     });
     

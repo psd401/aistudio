@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
-import { executeSQL } from "@/lib/db/data-api-adapter"
+import { getUserByCognitoSub } from "@/lib/db/drizzle"
 
 /**
  * Force session refresh API
@@ -119,16 +119,13 @@ export async function GET() {
     // Check role_version from database and compare with session
     try {
       // Get the user's current role version from the database
-      const userQuery = await executeSQL(
-        'SELECT role_version FROM users WHERE cognito_sub = :sub',
-        [{ name: 'sub', value: { stringValue: session.sub } }]
-      )
-      
-      if (userQuery.length === 0) {
+      const user = await getUserByCognitoSub(session.sub)
+
+      if (!user) {
         log.warn("User not found in database", { sub: session.sub })
         timer({ status: "error", reason: "user_not_found" })
         return NextResponse.json(
-          { 
+          {
             isSuccess: false,
             needsRefresh: false,
             message: "User not found"
@@ -136,8 +133,8 @@ export async function GET() {
           { status: 404, headers: { "X-Request-Id": requestId } }
         )
       }
-      
-      const dbRoleVersion = userQuery[0].role_version as number || 0
+
+      const dbRoleVersion = user.roleVersion || 0
       const sessionRoleVersion = (session as { roleVersion?: number }).roleVersion || 0
       
       log.debug("Role version comparison", {

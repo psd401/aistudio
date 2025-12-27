@@ -1,5 +1,5 @@
-import { executeSQL as executeRawSQL, executeTransaction } from '@/lib/db/data-api-adapter';
-import type { SqlParameter, Field } from '@aws-sdk/client-rds-data';
+import { executeQuery, executeTransaction as executeQueryTransaction } from '@/lib/db/drizzle-client';
+import { sql } from 'drizzle-orm';
 
 /**
  * Database row types for common queries
@@ -15,119 +15,103 @@ export type ParameterValue = string | number | boolean | Date | Uint8Array | nul
 
 /**
  * Helper function to execute SQL with simple parameter passing
- * Wraps the AWS RDS Data API parameter format
+ * Uses Drizzle ORM with sql template tag
  */
 export async function executeSQL<T extends DatabaseRow = DatabaseRow>(
-  sql: string, 
+  sqlString: string,
   params?: ParameterValue[]
 ): Promise<T[]> {
-  if (!params || params.length === 0) {
-    return executeRawSQL<T>(sql);
-  }
-  
-  // Convert simple params to RDS Data API format
-  const rdsParams: SqlParameter[] = params.map((value, index) => {
-    const param: SqlParameter = {
-      name: `param${index + 1}`,
-      value: convertToRdsValue(value)
-    };
+  const result = await executeQuery(
+    (db) => {
+      if (!params || params.length === 0) {
+        return db.execute(sql.raw(sqlString));
+      }
 
-    // Update SQL to use named parameters
-    // eslint-disable-next-line security/detect-non-literal-regexp -- index is a number, not user input
-    sql = sql.replace(new RegExp(`\\$${index + 1}`, 'g'), `:param${index + 1}`);
-    
-    return param;
-  });
-  
-  return executeRawSQL<T>(sql, rdsParams);
-}
+      // Build sql template with interpolated parameters
+      // Replace $1, $2, etc with actual values
+      const parts: (string | unknown)[] = [];
+      let lastIndex = 0;
 
-/**
- * Convert a JavaScript value to RDS Data API format
- */
-function convertToRdsValue(value: ParameterValue): Field {
-  if (value === null || value === undefined) {
-    return { isNull: true };
-  }
-  
-  if (typeof value === 'string') {
-    return { stringValue: value };
-  }
-  
-  if (typeof value === 'number') {
-    if (Number.isInteger(value)) {
-      return { longValue: value };
-    }
-    return { doubleValue: value };
-  }
-  
-  if (typeof value === 'boolean') {
-    return { booleanValue: value };
-  }
-  
-  if (value instanceof Date) {
-    return { stringValue: value.toISOString() };
-  }
-  
-  if (value instanceof Uint8Array) {
-    return { blobValue: value };
-  }
-  
-  // For complex types, stringify as JSON
-  return { stringValue: JSON.stringify(value) };
+      // Find all $N placeholders and replace with parameters
+      for (let i = 1; i <= params.length; i++) {
+        const placeholder = `$${i}`;
+        const index = sqlString.indexOf(placeholder, lastIndex);
+
+        if (index !== -1) {
+          // Add the string part before the placeholder
+          parts.push(sqlString.substring(lastIndex, index));
+          // Add the parameter value
+          parts.push(params[i - 1]);
+          lastIndex = index + placeholder.length;
+        }
+      }
+
+      // Add remaining string
+      if (lastIndex < sqlString.length) {
+        parts.push(sqlString.substring(lastIndex));
+      }
+
+      // Build the sql template dynamically
+      const strings = parts.filter((_, i) => i % 2 === 0) as string[];
+      const values = parts.filter((_, i) => i % 2 === 1);
+
+      // Use sql template tag - strings must be TemplateStringsArray
+      return db.execute(sql(strings as unknown as TemplateStringsArray, ...values));
+    },
+    'executeSQL'
+  );
+
+  return result.rows as T[];
 }
 
 /**
  * Execute multiple SQL statements in a transaction with simple parameter passing
- *
- * NOTE: This function uses the legacy raw SQL Data API transaction executor,
- * not the Drizzle ORM transaction wrapper. This is intentional as it provides
- * a simplified interface for raw SQL transactions in the Nexus streaming system.
- *
- * For new code using Drizzle ORM, use executeTransaction from drizzle-client.ts instead.
+ * Uses Drizzle ORM transaction wrapper
  */
 export async function executeSQLTransaction<T extends DatabaseRow = DatabaseRow>(
   statements: Array<{ sql: string; params?: ParameterValue[] }>
 ): Promise<T[][]> {
-  // Convert simple params to RDS Data API format for each statement
-  const rdsStatements = statements.map(({ sql, params }) => {
-    if (!params || params.length === 0) {
-      return { sql };
-    }
+  return executeQueryTransaction(
+    async (tx) => {
+      const results: T[][] = [];
 
-    // Convert simple params to RDS Data API format
-    const rdsParams: SqlParameter[] = params.map((value, index) => {
-      const param: SqlParameter = {
-        name: `param${index + 1}`,
-        value: convertToRdsValue(value)
-      };
+      for (const { sql: sqlString, params } of statements) {
+        let result;
 
-      // Update SQL to use named parameters
-      // eslint-disable-next-line security/detect-non-literal-regexp -- index is a number, not user input
-      sql = sql.replace(new RegExp(`\\$${index + 1}`, 'g'), `:param${index + 1}`);
+        if (!params || params.length === 0) {
+          result = await tx.execute(sql.raw(sqlString));
+        } else {
+          // Build sql template with interpolated parameters
+          const parts: (string | unknown)[] = [];
+          let lastIndex = 0;
 
-      return param;
-    });
+          // Find all $N placeholders and replace with parameters
+          for (let i = 1; i <= params.length; i++) {
+            const placeholder = `$${i}`;
+            const index = sqlString.indexOf(placeholder, lastIndex);
 
-    return { sql, parameters: rdsParams };
-  });
+            if (index !== -1) {
+              parts.push(sqlString.substring(lastIndex, index));
+              parts.push(params[i - 1]);
+              lastIndex = index + placeholder.length;
+            }
+          }
 
-  return executeTransaction<T>(rdsStatements);
-}
+          if (lastIndex < sqlString.length) {
+            parts.push(sqlString.substring(lastIndex));
+          }
 
-/**
- * Extract a value from RDS Data API result field
- */
-export function extractValue(field: Field | null | undefined): unknown {
-  if (!field) return null;
-  
-  if (field.isNull) return null;
-  if (field.stringValue !== undefined) return field.stringValue;
-  if (field.longValue !== undefined) return field.longValue;
-  if (field.doubleValue !== undefined) return field.doubleValue;
-  if (field.booleanValue !== undefined) return field.booleanValue;
-  if (field.blobValue !== undefined) return field.blobValue;
-  if (field.arrayValue !== undefined) return field.arrayValue;
-  
-  return field;
+          const strings = parts.filter((_, i) => i % 2 === 0) as string[];
+          const values = parts.filter((_, i) => i % 2 === 1);
+
+          result = await tx.execute(sql(strings as unknown as TemplateStringsArray, ...values));
+        }
+
+        results.push(result.rows as T[]);
+      }
+
+      return results;
+    },
+    'executeSQLTransaction'
+  );
 }

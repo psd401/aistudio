@@ -2,7 +2,6 @@ import { LanguageModel } from 'ai';
 import { createProviderModelWithCapabilities } from '@/lib/ai/provider-factory';
 import { createLogger, generateRequestId, sanitizeForLogging } from '@/lib/logger';
 import { executeSQL, type DatabaseRow } from './db-helpers';
-import { transformSnakeToCamel } from '@/lib/db/field-mapper';
 import type { ProviderCapabilities } from '@/lib/streaming/types';
 
 const log = createLogger({ module: 'nexus-provider-factory' });
@@ -484,16 +483,31 @@ export class NexusProviderFactory {
    */
   private async getModelInfoFromDatabase(provider: string, modelId: string): Promise<DatabaseModelInfo | null> {
     try {
-      const result = await executeSQL(`
-        SELECT * FROM ai_models 
+      const result = await executeSQL<DatabaseModelInfo>(`
+        SELECT
+          provider,
+          model_id as "modelId",
+          name,
+          description,
+          max_tokens as "maxTokens",
+          input_cost_per_1k_tokens as "inputCostPer1kTokens",
+          output_cost_per_1k_tokens as "outputCostPer1kTokens",
+          cached_input_cost_per_1k_tokens as "cachedInputCostPer1kTokens",
+          average_latency_ms as "averageLatencyMs",
+          max_concurrency as "maxConcurrency",
+          supports_batching as "supportsBatching",
+          nexus_capabilities as "nexusCapabilities",
+          provider_metadata as "providerMetadata",
+          allowed_roles as "allowedRoles"
+        FROM ai_models
         WHERE provider = $1 AND model_id = $2 AND active = true
         LIMIT 1
       `, [provider, modelId]);
-      
+
       if (result.length > 0) {
-        return transformSnakeToCamel<DatabaseModelInfo>(result[0]);
+        return result[0];
       }
-      
+
       return null;
     } catch (error) {
       log.warn('Failed to get model info from database', {

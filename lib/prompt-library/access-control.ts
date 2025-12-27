@@ -2,7 +2,9 @@
  * Access control for Prompt Library
  */
 
-import { executeSQL } from "@/lib/db/data-api-adapter"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { sql, eq } from "drizzle-orm"
+import { users } from "@/lib/db/schema"
 import { hasToolAccess, hasRole } from "@/utils/roles"
 import { createLogger, generateRequestId } from "@/lib/logger"
 
@@ -33,31 +35,28 @@ export async function canReadPrompt(
   promptId: string,
   userId: number
 ): Promise<boolean> {
-  const results = await executeSQL<{
-    userId: number
-    visibility: string
-    moderationStatus: string
-    deletedAt: string | null
-  }>(
-    `SELECT user_id, visibility, moderation_status, deleted_at
-     FROM prompt_library
-     WHERE id = :promptId::uuid`,
-    [{ name: "promptId", value: { stringValue: promptId } }]
+  const results = await executeQuery(
+    (db) => db.execute(sql`
+      SELECT user_id, visibility, moderation_status, deleted_at
+      FROM prompt_library
+      WHERE id = ${promptId}::uuid
+    `),
+    "canReadPrompt"
   )
 
-  if (results.length === 0 || results[0].deletedAt) {
+  if (results.rows.length === 0 || (results.rows[0] as Record<string, unknown>).deleted_at) {
     return false
   }
 
-  const prompt = results[0]
+  const prompt = results.rows[0] as Record<string, unknown>
 
   // Owner can always read their own prompts - ensure numeric comparison
-  if (Number(prompt.userId) === Number(userId)) {
+  if (Number(prompt.user_id) === Number(userId)) {
     return true
   }
 
   // Public prompts must be approved to be visible to others
-  if (prompt.visibility === 'public' && prompt.moderationStatus === 'approved') {
+  if (prompt.visibility === 'public' && prompt.moderation_status === 'approved') {
     return true
   }
 
@@ -82,23 +81,29 @@ export async function canUpdatePrompt(
 
   log.info("Permission check started", { promptId, userId })
 
-  const results = await executeSQL<{ userId: number; deletedAt: string | null }>(
-    `SELECT user_id, deleted_at FROM prompt_library WHERE id = :promptId::uuid`,
-    [{ name: "promptId", value: { stringValue: promptId } }]
+  const results = await executeQuery(
+    (db) => db.execute(sql`
+      SELECT user_id, deleted_at
+      FROM prompt_library
+      WHERE id = ${promptId}::uuid
+    `),
+    "canUpdatePrompt"
   )
 
-  if (results.length === 0) {
+  if (results.rows.length === 0) {
     log.warn("Prompt not found", { promptId })
     return false
   }
 
-  if (results[0].deletedAt) {
-    log.warn("Prompt is deleted", { promptId, deletedAt: results[0].deletedAt })
+  const row = results.rows[0] as Record<string, unknown>
+
+  if (row.deleted_at) {
+    log.warn("Prompt is deleted", { promptId, deletedAt: row.deleted_at })
     return false
   }
 
-  // Get the raw database value (field is transformed from user_id to userId by data-api-adapter)
-  const dbUserId = results[0].userId
+  // Get the raw database value (snake_case from database)
+  const dbUserId = row.user_id
   const dbUserIdType = typeof dbUserId
 
   // Convert both to numbers with validation
@@ -168,19 +173,23 @@ export async function canDeletePrompt(
   promptId: string,
   userId: number
 ): Promise<boolean> {
-  const results = await executeSQL<{ userId: number; deletedAt: string | null }>(
-    `SELECT user_id, deleted_at FROM prompt_library WHERE id = :promptId::uuid`,
-    [{ name: "promptId", value: { stringValue: promptId } }]
+  const results = await executeQuery(
+    (db) => db.execute(sql`
+      SELECT user_id, deleted_at
+      FROM prompt_library
+      WHERE id = ${promptId}::uuid
+    `),
+    "canDeletePrompt"
   )
 
-  if (results.length === 0 || results[0].deletedAt) {
+  if (results.rows.length === 0 || (results.rows[0] as Record<string, unknown>).deleted_at) {
     return false
   }
 
-  const prompt = results[0]
+  const prompt = results.rows[0] as Record<string, unknown>
 
   // Owner can delete their own prompts - ensure numeric comparison
-  if (Number(prompt.userId) === Number(userId)) {
+  if (Number(prompt.user_id) === Number(userId)) {
     return true
   }
 
@@ -197,9 +206,12 @@ export async function getUserIdFromSession(cognitoSub: string): Promise<number> 
 
   log.info("Looking up user ID", { cognitoSubPrefix: cognitoSub.substring(0, 8) })
 
-  const results = await executeSQL<{ id: number }>(
-    `SELECT id FROM users WHERE cognito_sub = :cognitoSub`,
-    [{ name: "cognitoSub", value: { stringValue: cognitoSub } }]
+  const results = await executeQuery(
+    (db) => db.select({ id: users.id })
+      .from(users)
+      .where(eq(users.cognitoSub, cognitoSub))
+      .limit(1),
+    "getUserIdFromSession"
   )
 
   if (results.length === 0) {

@@ -1,10 +1,12 @@
 import { redirect, notFound } from "next/navigation"
 import { getServerSession } from "@/lib/auth/server-session"
-import { checkUserRoleByCognitoSub } from "@/lib/db/data-api-adapter"
+import { checkUserRoleByCognitoSub } from "@/lib/db/drizzle"
 import { getAssistantArchitectAction } from "@/actions/db/assistant-architect-actions"
 import { CreateLayout } from "../../../create/_components/create-layout"
 import { SubmitForm } from "./_components/submit-form"
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
+
+// Note: This is a Server Component (no "use server" needed)
 
 interface Props {
   params: Promise<{

@@ -288,7 +288,7 @@ export async function DELETE(request: NextRequest) {
     }
     
     // Delete the document from the database
-    await deleteDocumentById({ id: docId.toString() });
+    await deleteDocumentById({ id: docId });
     
     log.info("Document deleted successfully", { documentId: docId });
     timer({ status: "success" });

@@ -25,20 +25,23 @@ import { ToolAssignments } from "./tool-assignments"
 import { useToast } from "@/components/ui/use-toast"
 
 interface Role {
-  id: string | number;
+  id: number;
   name: string;
-  description?: string;
-  is_system?: boolean;
-  created_at?: string;
-  updated_at?: string;
+  description: string | null;
+  isSystem: boolean;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 interface Tool {
-  id: string;
-  name: string;
+  id: number;
   identifier: string;
-  description?: string;
+  name: string;
+  description: string | null;
+  promptChainToolId: number | null;
   isActive: boolean;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 interface RolesTableProps {
@@ -86,7 +89,7 @@ export function RolesTable({ roles, tools = [] }: RolesTableProps) {
   }, [])
 
   const handleDelete = useCallback(async (role: Role) => {
-    if (role.is_system) {
+    if (role.isSystem) {
       toast({
         title: "Error",
         description: "Cannot delete system roles",
@@ -140,9 +143,9 @@ export function RolesTable({ roles, tools = [] }: RolesTableProps) {
         header: ({ column }) => <SortableColumnHeader column={column} title="Description" />,
       },
       {
-        accessorKey: 'is_system',
+        accessorKey: 'isSystem',
         header: ({ column }) => <SortableColumnHeader column={column} title="System Role" />,
-        cell: ({ row }) => row.getValue('is_system') ? "Yes" : "No",
+        cell: ({ row }) => row.getValue('isSystem') ? "Yes" : "No",
       },
       {
         id: 'actions',
@@ -168,7 +171,7 @@ export function RolesTable({ roles, tools = [] }: RolesTableProps) {
             <Button
               variant="ghost"
               size="icon"
-              disabled={row.original.is_system}
+              disabled={row.original.isSystem}
               onClick={() => handleDelete(row.original)}
               className="text-destructive hover:text-destructive/90"
             >

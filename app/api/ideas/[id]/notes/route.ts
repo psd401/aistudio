@@ -1,6 +1,6 @@
 import { getServerSession } from '@/lib/auth/server-session';
 import { NextResponse } from 'next/server';
-import { executeSQL, FormattedRow } from '@/lib/db/data-api-adapter';
+import { getIdeaNotes, addNote, getUserIdByCognitoSub } from '@/lib/db/drizzle';
 import { hasRole } from '@/utils/roles';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -25,26 +25,25 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
       return new NextResponse('Invalid idea ID', { status: 400 });
     }
 
-    const sql = `
-      SELECT 
-        n.*,
-        COALESCE(
-          TRIM(CONCAT(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))),
-          u.email,
-          n.user_id::text
-        ) as creator_name
-      FROM idea_notes n
-      LEFT JOIN users u ON n.user_id = u.id
-      WHERE n.idea_id = :ideaId
-      ORDER BY n.created_at ASC
-    `;
-    const notes = await executeSQL<FormattedRow>(sql, [{ name: 'ideaId', value: { longValue: ideaId } }]);
+    const notes = await getIdeaNotes(ideaId);
 
-    return NextResponse.json(notes.map((note) => ({
-      ...note,
-      // creator_name is converted to creatorName by formatDataApiResponse
-      createdBy: note.creatorName || String(note.userId)
-    })));
+    return NextResponse.json(notes.map((note) => {
+      const creatorName =
+        note.creatorFirstName || note.creatorLastName
+          ? `${note.creatorFirstName || ""} ${note.creatorLastName || ""}`.trim()
+          : note.creatorEmail || (note.userId ? String(note.userId) : "Unknown");
+
+      return {
+        id: note.id,
+        ideaId: note.ideaId,
+        content: note.content,
+        createdAt: note.createdAt,
+        updatedAt: note.updatedAt,
+        userId: note.userId,
+        creatorName,
+        createdBy: creatorName,
+      };
+    }));
   } catch (error) {
     log.error('Error fetching notes:', error);
     return new NextResponse('Internal Server Error', { status: 500 });
@@ -82,51 +81,22 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       return new NextResponse('Missing content', { status: 400 });
     }
 
-    // First get the user's numeric ID from their cognito_sub
-    const userSql = 'SELECT id FROM users WHERE cognito_sub = :cognitoSub';
-    const userResult = await executeSQL(userSql, [{ name: 'cognitoSub', value: { stringValue: session.sub } }]);
-    
-    if (!userResult || userResult.length === 0) {
+    // Get the user's numeric ID from their cognito_sub
+    const userIdString = await getUserIdByCognitoSub(session.sub);
+
+    if (!userIdString) {
       return new NextResponse('User not found', { status: 404 });
     }
-    
-    const userId = userResult[0].id;
 
-    // First insert the note
-    const insertSql = `
-      INSERT INTO idea_notes (idea_id, content, user_id, created_at)
-      VALUES (:ideaId, :content, :userId, NOW())
-      RETURNING id
-    `;
-    const insertParams = [
-      { name: 'ideaId', value: { longValue: ideaId } },
-      { name: 'content', value: { stringValue: content } },
-      { name: 'userId', value: { longValue: Number(userId) } }
-    ];
-    const insertResult = await executeSQL(insertSql, insertParams);
-    const newNoteId = insertResult[0].id;
+    const userId = Number(userIdString);
 
-    // Then fetch it with the user name
-    const fetchSql = `
-      SELECT 
-        n.*,
-        COALESCE(
-          TRIM(CONCAT(COALESCE(u.first_name, ''), ' ', COALESCE(u.last_name, ''))),
-          u.email,
-          n.user_id::text
-        ) as creator_name
-      FROM idea_notes n
-      LEFT JOIN users u ON n.user_id = u.id
-      WHERE n.id = :noteId
-    `;
-    const fetchResult = await executeSQL(fetchSql, [{ name: 'noteId', value: { longValue: Number(newNoteId) } }]);
-    const newNote = fetchResult[0];
+    // Add the note
+    const newNote = await addNote(ideaId, userId, content);
 
-    // The data is already converted to camelCase by formatDataApiResponse
     timer({ status: "success" });
     return NextResponse.json({
       ...newNote,
-      createdBy: newNote.creatorName || String(newNote.userId)
+      createdBy: String(newNote.userId)
     });
   } catch (error) {
     timer({ status: "error" });

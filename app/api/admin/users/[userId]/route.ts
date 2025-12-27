@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { deleteUser } from '@/lib/db/data-api-adapter';
+import { deleteUser } from '@/lib/db/drizzle';
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
@@ -35,7 +35,7 @@ export async function DELETE(
       );
     }
 
-    // Delete the user via Data API
+    // Delete the user via Drizzle ORM
     log.debug("Deleting user", { targetUserId });
     const deletedUser = await deleteUser(Number.parseInt(targetUserId));
 

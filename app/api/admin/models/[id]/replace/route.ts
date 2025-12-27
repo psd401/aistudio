@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { 
-  replaceModelReferences, 
+import {
+  replaceModelReferences,
   validateModelReplacement,
-  getUserByCognitoSub 
-} from '@/lib/db/data-api-adapter';
+  getUserByCognitoSub
+} from '@/lib/db/drizzle';
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
 import { getServerSession } from '@/lib/auth/server-session';
@@ -103,14 +103,7 @@ export async function POST(
       );
     }
     
-    // Log any warnings
-    if (validation.warnings && validation.warnings.length > 0) {
-      log.warn("Model replacement has warnings", { 
-        warnings: validation.warnings,
-        targetModelId,
-        replacementModelId 
-      });
-    }
+    // Drizzle version doesn't return warnings - validation is pass/fail
     
     // Perform the replacement
     const result = await replaceModelReferences(
@@ -133,7 +126,7 @@ export async function POST(
         message: `Successfully replaced model "${result.targetModel.name}" with "${result.replacementModel.name}". Updated ${result.totalUpdated} records.`,
         data: {
           ...result,
-          warnings: validation.warnings || []
+          warnings: []  // Drizzle version doesn't track warnings
         }
       },
       { headers: { "X-Request-Id": requestId } }

@@ -31,10 +31,12 @@ const formSchema = z.object({
 })
 
 interface Role {
-  id: string | number;
+  id: number;
   name: string;
-  description?: string;
-  is_system?: boolean;
+  description: string | null;
+  isSystem: boolean;
+  createdAt: Date;
+  updatedAt: Date;
 }
 
 interface RoleFormProps {
@@ -51,7 +53,7 @@ export function RoleForm({ role, onClose }: RoleFormProps) {
     resolver: zodResolver(formSchema),
     defaultValues: {
       name: role?.name || "",
-      description: role?.description || ""
+      description: role?.description ?? ""
     }
   })
 

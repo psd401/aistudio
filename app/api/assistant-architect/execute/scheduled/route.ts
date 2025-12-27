@@ -2,7 +2,10 @@ import { z } from 'zod';
 import { NextRequest } from 'next/server';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
 import { ErrorFactories } from '@/lib/error-utils';
-import { executeSQL } from '@/lib/db/data-api-adapter';
+import { getUserById, getAssistantArchitectById, getChainPrompts, getAIModelById } from '@/lib/db/drizzle';
+import { executeQuery } from '@/lib/db/drizzle-client';
+import { eq, desc } from 'drizzle-orm';
+import { toolExecutions, promptResults, executionResults, scheduledExecutions } from '@/lib/db/schema';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from '@/lib/assistant-architect/knowledge-retrieval';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
@@ -217,13 +220,10 @@ export async function POST(req: NextRequest) {
     }));
 
     // 3. Get user's cognito_sub for context
-    const userResult = await executeSQL<{ cognito_sub: string }>(
-      `SELECT cognito_sub FROM users WHERE id = :userId LIMIT 1`,
-      [{ name: 'userId', value: { longValue: userId } }]
-    );
+    const user = await getUserById(userId);
 
-    if (!userResult || userResult.length === 0) {
-      log.error('User not found', { userId });
+    if (!user || !user.cognitoSub) {
+      log.error('User not found or missing cognito_sub', { userId });
       return new Response(
         JSON.stringify({
           error: 'User not found',
@@ -233,23 +233,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const userCognitoSub = String(userResult[0].cognito_sub);
+    const userCognitoSub = user.cognitoSub;
 
     // 4. Load assistant architect configuration with prompts
-    const architectResult = await executeSQL<{
-      id: number;
-      name: string;
-      description: string;
-      status: string;
-      user_id: number;
-    }>(
-      `SELECT id, name, description, status, user_id
-       FROM assistant_architects
-       WHERE id = :toolId LIMIT 1`,
-      [{ name: 'toolId', value: { longValue: toolId } }]
-    );
+    const architect = await getAssistantArchitectById(toolId);
 
-    if (!architectResult || architectResult.length === 0) {
+    if (!architect) {
       log.error('Assistant architect not found', { toolId });
       return new Response(
         JSON.stringify({
@@ -260,35 +249,8 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const architect = architectResult[0];
-
     // 5. Load prompts for this assistant architect
-    const promptsResult = await executeSQL<{
-      id: number;
-      name: string;
-      content: string;
-      systemContext: string | null;
-      modelId: number | null;
-      position: number;
-      inputMapping: string | null;
-      repositoryIds: string | null;
-      enabledTools: string | null;
-      timeoutSeconds: number | null;
-    }>(
-      `SELECT
-        id, name, content,
-        system_context AS "systemContext",
-        model_id AS "modelId",
-        position,
-        input_mapping AS "inputMapping",
-        repository_ids AS "repositoryIds",
-        enabled_tools AS "enabledTools",
-        timeout_seconds AS "timeoutSeconds"
-       FROM chain_prompts
-       WHERE assistant_architect_id = :toolId
-       ORDER BY position`,
-      [{ name: 'toolId', value: { longValue: toolId } }]
-    );
+    const promptsResult = await getChainPrompts(toolId);
 
     if (!promptsResult || promptsResult.length === 0) {
       log.error('No prompts configured for assistant architect', { toolId });
@@ -301,35 +263,17 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    // Safe JSON parsing helper
-    const safeParseJson = <T>(value: string | null, fieldName: string): T | null => {
-      if (!value) return null;
-      try {
-        return JSON.parse(String(value)) as T;
-      } catch (error) {
-        log.error('JSON parse error', {
-          fieldName,
-          error: error instanceof Error ? error.message : String(error),
-          value: value.substring(0, 100)
-        });
-        throw ErrorFactories.validationFailed([{
-          field: fieldName,
-          message: `Invalid JSON in ${fieldName}`
-        }]);
-      }
-    };
-
     const prompts: ChainPrompt[] = promptsResult.map(p => ({
-      id: Number(p.id),
-      name: String(p.name),
-      content: String(p.content),
-      systemContext: p.systemContext ? String(p.systemContext) : null,
-      modelId: p.modelId ? Number(p.modelId) : null,
-      position: Number(p.position),
-      inputMapping: safeParseJson<Record<string, string>>(p.inputMapping, 'input_mapping'),
-      repositoryIds: safeParseJson<number[]>(p.repositoryIds, 'repository_ids'),
-      enabledTools: safeParseJson<string[]>(p.enabledTools, 'enabled_tools'),
-      timeoutSeconds: p.timeoutSeconds ? Number(p.timeoutSeconds) : null
+      id: p.id,
+      name: p.name,
+      content: p.content,
+      systemContext: p.systemContext,
+      modelId: p.modelId,
+      position: p.position,
+      inputMapping: p.inputMapping as Record<string, string> | null,
+      repositoryIds: p.repositoryIds as number[] | null,
+      enabledTools: p.enabledTools as string[] | null,
+      timeoutSeconds: p.timeoutSeconds
     }));
 
     // Validate prompt chain length
@@ -354,19 +298,17 @@ export async function POST(req: NextRequest) {
     }));
 
     // 6. Create tool_execution record
-    const executionResult = await executeSQL<{ id: number }>(
-      `INSERT INTO tool_executions (
-        assistant_architect_id, user_id, input_data,
-        status, started_at
-      ) VALUES (
-        :toolId, :userId, :inputData::jsonb,
-        'running', NOW()
-      ) RETURNING id`,
-      [
-        { name: 'toolId', value: { longValue: toolId } },
-        { name: 'userId', value: { longValue: userId } },
-        { name: 'inputData', value: { stringValue: JSON.stringify(inputs) } }
-      ]
+    const executionResult = await executeQuery(
+      (db) => db.insert(toolExecutions)
+        .values({
+          assistantArchitectId: toolId,
+          userId,
+          inputData: inputs as Record<string, unknown>,
+          status: 'running',
+          startedAt: new Date()
+        })
+        .returning({ id: toolExecutions.id }),
+      'createToolExecution'
     );
 
     if (!executionResult || executionResult.length === 0 || !executionResult[0]?.id) {
@@ -389,7 +331,7 @@ export async function POST(req: NextRequest) {
       accumulatedMessages: [],
       executionId,
       userCognitoSub,
-      assistantOwnerSub: architect.user_id ? String(architect.user_id) : undefined,
+      assistantOwnerSub: architect.userId ? String(architect.userId) : undefined,
       userId
     };
 
@@ -404,23 +346,24 @@ export async function POST(req: NextRequest) {
       const executionDurationMs = Date.now() - executionStartTime;
 
       // Update execution status to completed
-      await executeSQL(
-        `UPDATE tool_executions
-         SET status = 'completed'::execution_status,
-             completed_at = NOW()
-         WHERE id = :executionId`,
-        [{ name: 'executionId', value: { longValue: executionId } }]
+      await executeQuery(
+        (db) => db.update(toolExecutions)
+          .set({
+            status: 'completed',
+            completedAt: new Date()
+          })
+          .where(eq(toolExecutions.id, executionId)),
+        'updateToolExecutionCompleted'
       );
 
       // Query prompt_results to get the final AI output
-      // Note: RDS Data API returns camelCase (outputData) not snake_case (output_data)
-      const promptResultsQuery = await executeSQL<{ outputData: string }>(
-        `SELECT output_data AS "outputData"
-         FROM prompt_results
-         WHERE execution_id = :executionId
-         ORDER BY id DESC
-         LIMIT 1`,
-        [{ name: 'executionId', value: { longValue: executionId } }]
+      const promptResultsQuery = await executeQuery(
+        (db) => db.select({ outputData: promptResults.outputData })
+          .from(promptResults)
+          .where(eq(promptResults.executionId, executionId))
+          .orderBy(desc(promptResults.id))
+          .limit(1),
+        'getLastPromptResult'
       );
 
       const resultData = promptResultsQuery && promptResultsQuery.length > 0 && promptResultsQuery[0].outputData
@@ -435,24 +378,25 @@ export async function POST(req: NextRequest) {
       });
 
       // Update execution_results for UI/notification with result data and duration
-      await executeSQL(
-        `UPDATE execution_results
-         SET status = 'success',
-             executed_at = NOW(),
-             result_data = :resultData::jsonb,
-             execution_duration_ms = :durationMs
-         WHERE id = :executionResultId`,
-        [
-          { name: 'executionResultId', value: { longValue: executionResultId } },
-          { name: 'resultData', value: { stringValue: JSON.stringify(resultData) } },
-          { name: 'durationMs', value: { longValue: executionDurationMs } }
-        ]
+      await executeQuery(
+        (db) => db.update(executionResults)
+          .set({
+            status: 'success',
+            executedAt: new Date(),
+            resultData: resultData as Record<string, unknown>,
+            executionDurationMs
+          })
+          .where(eq(executionResults.id, executionResultId)),
+        'updateExecutionResultSuccess'
       );
 
       // Get schedule name for notification
-      const scheduleQuery = await executeSQL<{ name: string }>(
-        `SELECT name FROM scheduled_executions WHERE id = :scheduleId LIMIT 1`,
-        [{ name: 'scheduleId', value: { longValue: scheduleId } }]
+      const scheduleQuery = await executeQuery(
+        (db) => db.select({ name: scheduledExecutions.name })
+          .from(scheduledExecutions)
+          .where(eq(scheduledExecutions.id, scheduleId))
+          .limit(1),
+        'getScheduleName'
       );
 
       const scheduleName = scheduleQuery && scheduleQuery.length > 0
@@ -498,29 +442,27 @@ export async function POST(req: NextRequest) {
       const errorMessage = executionError instanceof Error ? executionError.message : String(executionError);
 
       // Update execution status to failed
-      await executeSQL(
-        `UPDATE tool_executions
-         SET status = 'failed'::execution_status,
-             error_message = :errorMessage,
-             completed_at = NOW()
-         WHERE id = :executionId`,
-        [
-          { name: 'executionId', value: { longValue: executionId } },
-          { name: 'errorMessage', value: { stringValue: errorMessage }}
-        ]
+      await executeQuery(
+        (db) => db.update(toolExecutions)
+          .set({
+            status: 'failed',
+            errorMessage,
+            completedAt: new Date()
+          })
+          .where(eq(toolExecutions.id, executionId)),
+        'updateToolExecutionFailed'
       );
 
       // Update execution_results for UI/notification using direct ID
-      await executeSQL(
-        `UPDATE execution_results
-         SET status = 'failed',
-             error_message = :errorMessage,
-             executed_at = NOW()
-         WHERE id = :executionResultId`,
-        [
-          { name: 'executionResultId', value: { longValue: executionResultId } },
-          { name: 'errorMessage', value: { stringValue: errorMessage }}
-        ]
+      await executeQuery(
+        (db) => db.update(executionResults)
+          .set({
+            status: 'failed',
+            errorMessage,
+            executedAt: new Date()
+          })
+          .where(eq(executionResults.id, executionResultId)),
+        'updateExecutionResultFailed'
       );
 
       // Return sanitized error response instead of re-throwing
@@ -671,21 +613,15 @@ async function executePromptChainServerSide(
       const messages = [...context.accumulatedMessages, userMessage];
 
       // 4. Get AI model configuration
-      // Note: RDS Data API adapter returns camelCase field names
-      const modelResult = await executeSQL<{ modelId: string; provider: string }>(
-        `SELECT model_id, provider FROM ai_models WHERE id = :modelId LIMIT 1`,
-        [{ name: 'modelId', value: { longValue: prompt.modelId } }]
-      );
+      const modelData = await getAIModelById(prompt.modelId!);
 
-      if (!modelResult || modelResult.length === 0) {
+      if (!modelData) {
         throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
           details: { promptId: prompt.id, modelId: prompt.modelId }
         });
       }
 
-      // Note: RDS Data API adapter transforms snake_case to camelCase
-      const modelData = modelResult[0];
-      if (!modelData?.modelId || !modelData?.provider) {
+      if (!modelData.modelId || !modelData.provider) {
         throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
           details: { promptId: prompt.id, modelId: prompt.modelId, reason: 'Invalid model data' }
         });
@@ -807,28 +743,23 @@ async function executePromptChainServerSide(
               const completedAt = new Date();
               const startedAt = new Date(completedAt.getTime() - executionTimeMs);
 
-              await executeSQL(
-                `INSERT INTO prompt_results (
-                  execution_id, prompt_id, input_data, output_data,
-                  status, started_at, completed_at, execution_time_ms
-                ) VALUES (
-                  :executionId, :promptId, :inputData::jsonb, :outputData,
-                  :status::execution_status, :startedAt::timestamp, :completedAt::timestamp, :executionTimeMs
-                )`,
-                [
-                  { name: 'executionId', value: { longValue: context.executionId } },
-                  { name: 'promptId', value: { longValue: prompt.id } },
-                  { name: 'status', value: { stringValue: resultStatus } },
-                  { name: 'startedAt', value: { stringValue: startedAt.toISOString() } },
-                  { name: 'completedAt', value: { stringValue: completedAt.toISOString() } },
-                  { name: 'inputData', value: { stringValue: JSON.stringify({
-                    originalContent: prompt.content,
-                    processedContent,
-                    repositoryContext: repositoryContext ? 'included' : 'none'
-                  }) } },
-                  { name: 'outputData', value: { stringValue: text || '' } },
-                  { name: 'executionTimeMs', value: { longValue: executionTimeMs } }
-                ]
+              await executeQuery(
+                (db) => db.insert(promptResults)
+                  .values({
+                    executionId: context.executionId,
+                    promptId: prompt.id,
+                    inputData: {
+                      originalContent: prompt.content,
+                      processedContent,
+                      repositoryContext: repositoryContext ? 'included' : 'none'
+                    } as Record<string, unknown>,
+                    outputData: text || '',
+                    status: resultStatus as 'completed',
+                    startedAt,
+                    completedAt,
+                    executionTimeMs
+                  }),
+                'savePromptResult'
               );
 
               // Store output for next prompt's variable substitution
@@ -909,23 +840,20 @@ async function executePromptChainServerSide(
       });
 
       // Save failed prompt result
-      await executeSQL(
-        `INSERT INTO prompt_results (
-          execution_id, prompt_id, input_data, output_data,
-          status, error_message, started_at, completed_at
-        ) VALUES (
-          :executionId, :promptId, :inputData::jsonb, :outputData,
-          'failed'::execution_status, :errorMessage, NOW(), NOW()
-        )`,
-        [
-          { name: 'executionId', value: { longValue: context.executionId } },
-          { name: 'promptId', value: { longValue: prompt.id } },
-          { name: 'inputData', value: { stringValue: JSON.stringify({ prompt: prompt.content }) } },
-          { name: 'outputData', value: { stringValue: '' } },
-          { name: 'errorMessage', value: {
-            stringValue: promptError instanceof Error ? promptError.message : String(promptError)
-          }}
-        ]
+      const now = new Date();
+      await executeQuery(
+        (db) => db.insert(promptResults)
+          .values({
+            executionId: context.executionId,
+            promptId: prompt.id,
+            inputData: { prompt: prompt.content } as Record<string, unknown>,
+            outputData: '',
+            status: 'failed',
+            errorMessage: promptError instanceof Error ? promptError.message : String(promptError),
+            startedAt: now,
+            completedAt: now
+          }),
+        'saveFailedPromptResult'
       );
 
       throw ErrorFactories.sysInternalError(

@@ -1,5 +1,5 @@
 import { getServerSession } from '@/lib/auth/server-session';
-import { executeSQL, updateUserRole } from '@/lib/db/data-api-adapter';
+import { updateUserRole, getUserById } from '@/lib/db/drizzle';
 import { hasRole } from '@/utils/roles';
 import { withErrorHandling, unauthorized } from '@/lib/api-utils';
 import { createError } from '@/lib/error-utils';
@@ -51,15 +51,14 @@ export async function POST(request: Request) {
     log.debug("Promoting user", { targetUserId });
 
     // Update target user role to administrator
+    const targetUserIdNum = Number(targetUserId);
     try {
-      await updateUserRole(targetUserId, 'administrator');
-      
+      await updateUserRole(targetUserIdNum, 'administrator');
+
       // Get updated user info
-      const sql = 'SELECT id, cognito_sub, email, first_name, last_name FROM users WHERE id = :userId';
-      const params = [{ name: 'userId', value: { stringValue: targetUserId } }];
-      const result = await executeSQL(sql, params);
-      
-      if (!result || result.length === 0) {
+      const user = await getUserById(targetUserIdNum);
+
+      if (!user) {
         log.warn("User not found", { targetUserId });
         timer({ status: "error", reason: "user_not_found" });
         throw createError('User not found', {
@@ -68,13 +67,13 @@ export async function POST(request: Request) {
           details: { targetUserId }
         });
       }
-      
+
       log.info("User promoted successfully", { targetUserId });
       timer({ status: "success" });
-      
+
       return {
         success: true,
-        user: result[0]
+        user
       };
     } catch (error) {
       if (getErrorMessage(error).includes('not found')) {

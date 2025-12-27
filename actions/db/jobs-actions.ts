@@ -1,11 +1,18 @@
 "use server"
 
-import { InsertJob, SelectJob } from "@/types/db-types"
 import { ActionState } from "@/types"
-import { executeSQL } from "@/lib/db/data-api-adapter"
-import { SqlParameter } from "@aws-sdk/client-rds-data"
+import {
+  type GenericJob,
+  type CreateGenericJobData,
+  type UpdateGenericJobData,
+  createGenericJob,
+  getGenericJobById,
+  getGenericJobsByUserId,
+  updateGenericJob,
+  deleteGenericJob,
+} from "@/lib/db/drizzle"
 import { getServerSession } from "@/lib/auth/server-session"
-import { 
+import {
   handleError,
   ErrorFactories,
   createSuccess
@@ -18,8 +25,8 @@ import {
 } from "@/lib/logger"
 
 export async function createJobAction(
-  job: Omit<InsertJob, "id" | "createdAt" | "updatedAt">
-): Promise<ActionState<SelectJob>> {
+  job: Omit<CreateGenericJobData, "userId"> & { userId?: number | string }
+): Promise<ActionState<GenericJob>> {
   const requestId = generateRequestId()
   const timer = startTimer("createJob")
   const log = createLogger({ requestId, action: "createJob" })
@@ -55,25 +62,15 @@ export async function createJobAction(
       jobType: job.type,
       status: job.status ?? 'pending'
     })
-    
-    const result = await executeSQL<SelectJob>(`
-      INSERT INTO jobs (user_id, status, type, input, output, error, created_at, updated_at)
-      VALUES (:userId, :status::job_status, :type, :input, :output, :error, NOW(), NOW())
-      RETURNING *
-    `, [
-      { name: 'userId', value: { longValue: userIdNum } },
-      { name: 'status', value: { stringValue: job.status ?? 'pending' } },
-      { name: 'type', value: { stringValue: job.type } },
-      { name: 'input', value: { stringValue: job.input } },
-      { name: 'output', value: job.output ? { stringValue: job.output } : { isNull: true } },
-      { name: 'error', value: job.error ? { stringValue: job.error } : { isNull: true } },
-    ]);
-    
-    const [newJob] = result;
-    if (!newJob) {
-      log.error("Failed to create job: no record returned")
-      throw ErrorFactories.dbQueryFailed("INSERT INTO jobs", new Error("No record returned"))
-    }
+
+    const newJob = await createGenericJob({
+      userId: userIdNum,
+      type: job.type,
+      input: job.input,
+      status: job.status,
+      output: job.output,
+      error: job.error,
+    })
 
     log.info("Job created successfully", {
       jobId: newJob.id,
@@ -96,7 +93,7 @@ export async function createJobAction(
   }
 }
 
-export async function getJobAction(id: string): Promise<ActionState<SelectJob>> {
+export async function getJobAction(id: string): Promise<ActionState<GenericJob>> {
   const requestId = generateRequestId()
   const timer = startTimer("getJob")
   const log = createLogger({ requestId, action: "getJob" })
@@ -119,11 +116,7 @@ export async function getJobAction(id: string): Promise<ActionState<SelectJob>> 
     }
 
     log.debug("Fetching job from database", { jobId: idNum })
-    const result = await executeSQL<SelectJob>(
-      'SELECT * FROM jobs WHERE id = :id',
-      [{ name: 'id', value: { longValue: idNum } }]
-    );
-    const job = result[0];
+    const job = await getGenericJobById(idNum)
 
     if (!job) {
       log.warn("Job not found", { jobId: idNum })
@@ -151,7 +144,7 @@ export async function getJobAction(id: string): Promise<ActionState<SelectJob>> 
   }
 }
 
-export async function getUserJobsAction(userId: string): Promise<ActionState<SelectJob[]>> {
+export async function getUserJobsAction(userId: string): Promise<ActionState<GenericJob[]>> {
   const requestId = generateRequestId()
   const timer = startTimer("getUserJobs")
   const log = createLogger({ requestId, action: "getUserJobs" })
@@ -174,18 +167,15 @@ export async function getUserJobsAction(userId: string): Promise<ActionState<Sel
     }
 
     log.debug("Fetching user jobs from database", { userId: userIdNum })
-    const result = await executeSQL<SelectJob>(
-      'SELECT * FROM jobs WHERE user_id = :userId ORDER BY created_at DESC',
-      [{ name: 'userId', value: { longValue: userIdNum } }]
-    );
+    const result = await getGenericJobsByUserId(userIdNum)
 
     log.info("User jobs retrieved successfully", {
       userId: userIdNum,
       jobCount: result.length
     })
-    
+
     timer({ status: "success", count: result.length })
-    
+
     return createSuccess(result, "Jobs retrieved successfully")
   } catch (error) {
     timer({ status: "error" })
@@ -201,8 +191,8 @@ export async function getUserJobsAction(userId: string): Promise<ActionState<Sel
 
 export async function updateJobAction(
   id: string,
-  data: Partial<Omit<InsertJob, 'id' | 'userId'>>
-): Promise<ActionState<SelectJob>> {
+  data: UpdateGenericJobData
+): Promise<ActionState<GenericJob>> {
   const requestId = generateRequestId()
   const timer = startTimer("updateJob")
   const log = createLogger({ requestId, action: "updateJob" })
@@ -227,54 +217,22 @@ export async function updateJobAction(
       return { isSuccess: false, message: "Invalid job ID" };
     }
 
-    // Define allowed columns to prevent SQL injection
-    const ALLOWED_COLUMNS: Record<string, boolean> = {
-      'status': true,
-      'output': true,
-      'error': true,
-      'type': true,
-      'input': true
-    };
-
-    const setClauses = Object.entries(data)
-      .filter(([key, _]) => ALLOWED_COLUMNS[key]) // Only allow whitelisted columns
-      .map(([key, _value]) => {
-        const dbKey = key.replace(/([A-Z])/g, '_$1').toLowerCase();
-        if (dbKey === 'status') {
-          return `${dbKey} = :${key}::job_status`;
-        }
-        return `${dbKey} = :${key}`;
-      })
-      .join(', ');
-      
-    if (!setClauses) {
+    const fieldsCount = Object.keys(data).length;
+    if (fieldsCount === 0) {
       log.warn("No valid fields provided for update")
       return { isSuccess: false, message: "No valid fields to update" };
     }
 
     log.info("Updating job in database", {
       jobId: idNum,
-      fieldsUpdated: Object.keys(data).filter(key => ALLOWED_COLUMNS[key]).length
+      fieldsUpdated: fieldsCount
     })
-    
-    const parameters: SqlParameter[] = Object.entries(data)
-      .filter(([key, _]) => ALLOWED_COLUMNS[key]) // Only include whitelisted columns
-      .map(([key, value]) => ({
-        name: key,
-        value: value === null || value === undefined ? { isNull: true } : { stringValue: String(value) }
-      }));
-    parameters.push({ name: 'id', value: { longValue: idNum } });
-    
-    const result = await executeSQL<SelectJob>(
-      `UPDATE jobs SET ${setClauses}, updated_at = NOW() WHERE id = :id RETURNING *`,
-      parameters
-    );
 
-    const [updatedJob] = result;
+    const updatedJob = await updateGenericJob(idNum, data)
 
     if (!updatedJob) {
-        log.error("Failed to update job or job not found", { jobId: idNum })
-        throw ErrorFactories.dbRecordNotFound("jobs", idNum)
+      log.error("Failed to update job or job not found", { jobId: idNum })
+      throw ErrorFactories.dbRecordNotFound("jobs", idNum)
     }
 
     log.info("Job updated successfully", {
@@ -320,11 +278,13 @@ export async function deleteJobAction(id: string): Promise<ActionState<void>> {
     }
 
     log.info("Deleting job from database", { jobId: idNum })
-    await executeSQL(
-      'DELETE FROM jobs WHERE id = :id',
-      [{ name: 'id', value: { longValue: idNum } }]
-    );
-    
+    const deleted = await deleteGenericJob(idNum)
+
+    if (!deleted) {
+      log.warn("Job not found for deletion", { jobId: idNum })
+      throw ErrorFactories.dbRecordNotFound("jobs", idNum)
+    }
+
     log.info("Job deleted successfully", { jobId: idNum })
     
     timer({ status: "success", jobId: idNum })

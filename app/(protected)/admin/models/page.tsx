@@ -1,7 +1,7 @@
 import { Suspense } from "react"
 import { AiModelsClient } from "@/components/features/ai-models-client"
 import { requireRole } from "@/lib/auth/role-helpers"
-import { getAIModels } from "@/lib/db/data-api-adapter"
+import { getAIModels } from "@/lib/db/drizzle"
 import type { SelectAiModel } from "@/types/db-types"
 
 

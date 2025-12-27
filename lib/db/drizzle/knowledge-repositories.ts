@@ -208,6 +208,126 @@ export async function getPublicRepositories(): Promise<
 }
 
 /**
+ * Get all repositories with owner information and item count (admin function)
+ * Returns all repositories with owner email and count of items
+ */
+export async function getAllRepositoriesWithOwner(): Promise<
+  Array<
+    SelectKnowledgeRepository & {
+      ownerEmail: string | null;
+      itemCount: number;
+    }
+  >
+> {
+  const { sql } = await import("drizzle-orm");
+
+  const result = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: knowledgeRepositories.id,
+          name: knowledgeRepositories.name,
+          description: knowledgeRepositories.description,
+          ownerId: knowledgeRepositories.ownerId,
+          isPublic: knowledgeRepositories.isPublic,
+          metadata: knowledgeRepositories.metadata,
+          createdAt: knowledgeRepositories.createdAt,
+          updatedAt: knowledgeRepositories.updatedAt,
+          ownerEmail: users.email,
+          itemCount: sql<number>`(SELECT COUNT(*) FROM ${repositoryItems} WHERE ${repositoryItems.repositoryId} = ${knowledgeRepositories.id})`,
+        })
+        .from(knowledgeRepositories)
+        .leftJoin(users, eq(knowledgeRepositories.ownerId, users.id))
+        .orderBy(desc(knowledgeRepositories.createdAt)),
+    "getAllRepositoriesWithOwner"
+  );
+
+  return result;
+}
+
+/**
+ * Get all repositories accessible to a user by cognito sub
+ * Returns repositories with item count and last updated timestamp
+ *
+ * Access is granted if:
+ * - Repository is public
+ * - User owns the repository
+ * - User has direct access via repository_access
+ * - User has role-based access via repository_access + user_roles
+ */
+export async function getUserAccessibleRepositories(
+  cognitoSub: string
+): Promise<
+  Array<{
+    id: number;
+    name: string;
+    description: string | null;
+    isPublic: boolean | null;
+    itemCount: number;
+    lastUpdated: Date | null;
+  }>
+> {
+  const { sql } = await import("drizzle-orm");
+
+  // First get userId from cognitoSub
+  const userResult = await executeQuery(
+    (db) =>
+      db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.cognitoSub, cognitoSub))
+        .limit(1),
+    "getUserIdByCognitoSub"
+  );
+
+  if (userResult.length === 0) {
+    return [];
+  }
+
+  const userId = userResult[0].id;
+
+  // Get accessible repositories with item count and last updated
+  // Use DISTINCT ON to avoid duplicates from multiple access paths
+  const result = await executeQuery(
+    (db) =>
+      db
+        .selectDistinct({
+          id: knowledgeRepositories.id,
+          name: knowledgeRepositories.name,
+          description: knowledgeRepositories.description,
+          isPublic: knowledgeRepositories.isPublic,
+          itemCount: sql<number>`(SELECT COUNT(*) FROM ${repositoryItems} WHERE ${repositoryItems.repositoryId} = ${knowledgeRepositories.id})`,
+          lastUpdated: sql<Date | null>`(SELECT MAX(updated_at) FROM ${repositoryItems} WHERE ${repositoryItems.repositoryId} = ${knowledgeRepositories.id})`,
+        })
+        .from(knowledgeRepositories)
+        .leftJoin(
+          repositoryAccess,
+          eq(repositoryAccess.repositoryId, knowledgeRepositories.id)
+        )
+        .leftJoin(userRoles, eq(userRoles.roleId, repositoryAccess.roleId))
+        .where(
+          or(
+            // Public repositories
+            eq(knowledgeRepositories.isPublic, true),
+            // User owns the repository
+            eq(knowledgeRepositories.ownerId, userId),
+            // Direct user access (must check not null from LEFT JOIN)
+            and(
+              isNotNull(repositoryAccess.userId),
+              eq(repositoryAccess.userId, userId)
+            ),
+            // Role-based access (must check not null from LEFT JOIN)
+            and(isNotNull(userRoles.userId), eq(userRoles.userId, userId))
+          )
+        )
+        .orderBy(knowledgeRepositories.name),
+    "getUserAccessibleRepositories"
+  );
+
+  return result;
+}
+
+/**
  * Check if user has access to specified repository IDs
  * Returns only the IDs that the user can access
  *
@@ -524,6 +644,22 @@ export async function revokeRoleAccess(
   );
 
   return result[0] || null;
+}
+
+/**
+ * Revoke access by access ID
+ */
+export async function revokeAccessById(accessId: number): Promise<number> {
+  const result = await executeQuery(
+    (db) =>
+      db
+        .delete(repositoryAccess)
+        .where(eq(repositoryAccess.id, accessId))
+        .returning({ id: repositoryAccess.id }),
+    "revokeAccessById"
+  );
+
+  return result.length;
 }
 
 /**

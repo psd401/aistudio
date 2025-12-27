@@ -3,7 +3,7 @@ import { PreviewPageClient } from "./_components/preview-page-client"
 import { CreateLayout } from "../../../create/_components/create-layout"
 import { redirect, notFound } from "next/navigation"
 import { getServerSession } from "@/lib/auth/server-session"
-import { checkUserRoleByCognitoSub } from "@/lib/db/data-api-adapter"
+import { checkUserRoleByCognitoSub } from "@/lib/db/drizzle"
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
 
 interface PreviewPageProps {

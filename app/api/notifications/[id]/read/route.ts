@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
-import { executeSQL } from "@/lib/db/data-api-adapter"
+import { markNotificationAsRead, getUserIdByCognitoSub } from "@/lib/db/drizzle"
 
 
 export async function PUT(request: NextRequest, context: { params: Promise<{ id: string }> }) {
@@ -27,36 +27,18 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
     }
 
     // Get user ID from database using cognito sub
-    const userResult = await executeSQL(`
-      SELECT id FROM users WHERE cognito_sub = :cognitoSub
-    `, [{ name: 'cognitoSub', value: { stringValue: session.sub } }])
+    const userIdString = await getUserIdByCognitoSub(session.sub)
 
-    if (!userResult || userResult.length === 0) {
+    if (!userIdString) {
       throw ErrorFactories.dbRecordNotFound("users", session.sub)
     }
 
-    const userId = Number(userResult[0].id)
+    const userId = Number(userIdString)
 
     // Verify notification belongs to user and update status
-    const sql = `
-      UPDATE user_notifications
-      SET
-        status = 'read',
-        last_attempt_at = NOW()
-      WHERE id = :notification_id
-        AND user_id = :user_id
-        AND status != 'read'
-      RETURNING id, status
-    `
+    const result = await markNotificationAsRead(notificationId, userId)
 
-    const parameters = [
-      { name: 'notification_id', value: { longValue: notificationId } },
-      { name: 'user_id', value: { longValue: userId } }
-    ]
-
-    const results = await executeSQL(sql, parameters)
-
-    if (results.length === 0) {
+    if (!result) {
       log.warn("Notification not found or already read", {
         notificationId: sanitizeForLogging(notificationId),
         userId: sanitizeForLogging(userId)

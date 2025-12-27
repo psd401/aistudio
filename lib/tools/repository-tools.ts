@@ -2,7 +2,7 @@ import { tool } from 'ai';
 import { z } from 'zod';
 import { vectorSearch, keywordSearch, hybridSearch } from '@/lib/repositories/search-service';
 import { createLogger } from '@/lib/logger';
-import { executeSQL } from '@/lib/db/data-api-adapter';
+import { getAccessibleRepositoriesByCognitoSub } from '@/lib/db/drizzle';
 
 /**
  * Repository Search Tools for AI Assistant
@@ -29,29 +29,15 @@ async function verifyRepositoryAccess(
   userCognitoSub: string,
   assistantOwnerSub?: string
 ): Promise<number[]> {
-  const placeholders = repositoryIds.map((_, i) => `:repoId${i}`).join(', ');
-  const params = [
-    ...repositoryIds.map((id, i) => ({
-      name: `repoId${i}`,
-      value: { longValue: id }
-    })),
-    { name: 'cognitoSub', value: { stringValue: userCognitoSub } },
-    { name: 'assistantOwnerSub', value: assistantOwnerSub ? { stringValue: assistantOwnerSub } : { isNull: true } }
-  ];
-
-  const accessCheck = await executeSQL<{ id: number }>(
-    `SELECT DISTINCT r.id FROM knowledge_repositories r
-     WHERE r.id IN (${placeholders})
-     AND (r.is_public = true
-          OR r.owner_id = (SELECT id FROM users WHERE cognito_sub = :cognitoSub)
-          OR (:assistantOwnerSub IS NOT NULL
-              AND r.owner_id = (SELECT id FROM users WHERE cognito_sub = :assistantOwnerSub))
-          OR EXISTS (SELECT 1 FROM repository_access ra JOIN users u ON u.id = ra.user_id
-                     WHERE ra.repository_id = r.id AND u.cognito_sub = :cognitoSub))`,
-    params
+  const repositories = await getAccessibleRepositoriesByCognitoSub(
+    repositoryIds,
+    userCognitoSub,
+    assistantOwnerSub
   );
 
-  return accessCheck.map(r => r.id);
+  return repositories
+    .filter(repo => repo.isAccessible)
+    .map(repo => repo.id);
 }
 
 /**

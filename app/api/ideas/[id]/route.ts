@@ -1,10 +1,9 @@
 import { NextResponse, NextRequest } from 'next/server';
 import { getServerSession } from '@/lib/auth/server-session';
-import { executeSQL } from '@/lib/db/data-api-adapter';
+import { getUserIdByCognitoSub, updateIdea } from '@/lib/db/drizzle';
 import { executeTransaction as drizzleTransaction, ideas, ideaVotes, ideaNotes } from '@/lib/db/drizzle-client';
 import { hasRole } from '@/utils/roles';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
-import { SqlParameter } from '@aws-sdk/client-rds-data';
 import { eq } from 'drizzle-orm';
 export async function PATCH(
   request: NextRequest,
@@ -35,53 +34,39 @@ export async function PATCH(
     const body = await request.json();
     const resolvedParams = await context.params;
     const { id } = resolvedParams;
+    const ideaId = Number.parseInt(id);
 
-    const updateFields: string[] = [];
-    const params: SqlParameter[] = [{ name: 'id', value: { longValue: Number.parseInt(id) } }];
+    const updates: {
+      title?: string;
+      description?: string;
+      priorityLevel?: string;
+      status?: string;
+      completedBy?: string;
+    } = {};
 
-    if (body.title) {
-      updateFields.push('title = :title');
-      params.push({ name: 'title', value: { stringValue: body.title } });
-    }
-    if (body.description) {
-      updateFields.push('description = :description');
-      params.push({ name: 'description', value: { stringValue: body.description } });
-    }
-    if (body.priorityLevel) {
-      updateFields.push('priority_level = :priorityLevel');
-      params.push({ name: 'priorityLevel', value: { stringValue: body.priorityLevel } });
-    }
+    if (body.title) updates.title = body.title;
+    if (body.description) updates.description = body.description;
+    if (body.priorityLevel) updates.priorityLevel = body.priorityLevel;
     if (body.status) {
-      updateFields.push('status = :status');
-      params.push({ name: 'status', value: { stringValue: body.status } });
+      updates.status = body.status;
       if (body.status === 'completed') {
         // Get the user's numeric ID from their cognito_sub
-        const userSql = 'SELECT id FROM users WHERE cognito_sub = :cognitoSub';
-        const userResult = await executeSQL(userSql, [{ name: 'cognitoSub', value: { stringValue: session.sub } }]);
-        
-        if (!userResult || userResult.length === 0) {
+        const userIdString = await getUserIdByCognitoSub(session.sub);
+
+        if (!userIdString) {
           return NextResponse.json({ error: 'User not found' }, { status: 404 });
         }
-        
-        const userId = userResult[0].id;
-        updateFields.push('completed_by = :completedBy', 'completed_at = NOW()');
-        params.push({ name: 'completedBy', value: { stringValue: String(userId || '') } });
+
+        updates.completedBy = userIdString;
       }
     }
 
-    if (updateFields.length === 0) {
+    if (Object.keys(updates).length === 0) {
       return NextResponse.json({ error: 'No fields to update' }, { status: 400 });
     }
 
-    const sql = `
-      UPDATE ideas
-      SET ${updateFields.join(', ')}, updated_at = NOW()
-      WHERE id = :id
-      RETURNING *
-    `;
-    
-    const result = await executeSQL(sql, params);
-    return NextResponse.json(result[0]);
+    const result = await updateIdea(ideaId, updates);
+    return NextResponse.json(result);
   } catch (error) {
     log.error('Failed to update idea:', error);
     return NextResponse.json({ error: 'Failed to update idea' }, { status: 500 });
