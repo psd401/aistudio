@@ -1,4 +1,6 @@
-import { executeSQL } from "@/lib/db/data-api-adapter"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { inArray, eq } from "drizzle-orm"
+import { assistantArchitects, chainPrompts, toolInputFields, aiModels } from "@/lib/db/schema"
 import logger from "@/lib/logger"
 export interface ExportedAssistant {
   name: string
@@ -41,103 +43,81 @@ export const CURRENT_EXPORT_VERSION = "1.0"
 export async function getAssistantDataForExport(assistantIds: number[]): Promise<ExportedAssistant[]> {
   if (assistantIds.length === 0) return []
 
-  // Create parameter placeholders for the IN clause
-  const placeholders = assistantIds.map((_, index) => `:id${index}`).join(', ')
-  const parameters = assistantIds.map((id, index) => ({
-    name: `id${index}`,
-    value: { longValue: id }
-  }))
-
   // Fetch assistants
-  const assistantsQuery = `
-    SELECT id, name, description, status, image_path, is_parallel, timeout_seconds
-    FROM assistant_architects
-    WHERE id IN (${placeholders})
-  `
-  const assistantsRaw = await executeSQL(assistantsQuery, parameters)
-  const assistants = assistantsRaw as Array<{
-    id: number
-    name: string
-    description: string
-    status: string
-    imagePath?: string
-    isParallel?: boolean
-    timeoutSeconds?: number
-  }>
+  const assistants = await executeQuery(
+    (db) => db.select({
+      id: assistantArchitects.id,
+      name: assistantArchitects.name,
+      description: assistantArchitects.description,
+      status: assistantArchitects.status,
+      imagePath: assistantArchitects.imagePath,
+      isParallel: assistantArchitects.isParallel,
+      timeoutSeconds: assistantArchitects.timeoutSeconds
+    })
+    .from(assistantArchitects)
+    .where(inArray(assistantArchitects.id, assistantIds)),
+    "getAssistantsForExport"
+  )
 
   // For each assistant, fetch related data
   const exportedAssistants = await Promise.all(assistants.map(async (assistant) => {
     // Fetch prompts with model information
-    const promptsQuery = `
-      SELECT 
-        cp.name, 
-        cp.content, 
-        cp.system_context, 
-        cp.position,
-        cp.parallel_group,
-        cp.input_mapping,
-        cp.timeout_seconds,
-        am.model_id as model_name
-      FROM chain_prompts cp
-      LEFT JOIN ai_models am ON cp.model_id = am.id
-      WHERE cp.assistant_architect_id = :assistantId
-      ORDER BY cp.position ASC
-    `
-    const promptsRaw = await executeSQL(promptsQuery, [
-      { name: 'assistantId', value: { longValue: assistant.id } }
-    ])
-    const prompts = promptsRaw as unknown as Array<{
-      name: string
-      content: string
-      systemContext?: string
-      position: number
-      parallelGroup?: number
-      inputMapping?: Record<string, unknown>
-      timeoutSeconds?: number
-      modelName: string
-    }>
+    const prompts = await executeQuery(
+      (db) => db.select({
+        name: chainPrompts.name,
+        content: chainPrompts.content,
+        systemContext: chainPrompts.systemContext,
+        position: chainPrompts.position,
+        parallelGroup: chainPrompts.parallelGroup,
+        inputMapping: chainPrompts.inputMapping,
+        timeoutSeconds: chainPrompts.timeoutSeconds,
+        modelName: aiModels.modelId
+      })
+      .from(chainPrompts)
+      .leftJoin(aiModels, eq(chainPrompts.modelId, aiModels.id))
+      .where(eq(chainPrompts.assistantArchitectId, assistant.id))
+      .orderBy(chainPrompts.position),
+      "getPromptsForExport"
+    )
 
     // Fetch input fields
-    const fieldsQuery = `
-      SELECT name, label, field_type, position, options
-      FROM tool_input_fields
-      WHERE assistant_architect_id = :assistantId
-      ORDER BY position ASC
-    `
-    const inputFieldsRaw = await executeSQL(fieldsQuery, [
-      { name: 'assistantId', value: { longValue: assistant.id } }
-    ])
-    const inputFields = inputFieldsRaw as unknown as Array<{
-      name: string
-      label: string
-      fieldType: string
-      position: number
-      options?: Record<string, unknown>
-    }>
+    const inputFields = await executeQuery(
+      (db) => db.select({
+        name: toolInputFields.name,
+        label: toolInputFields.label,
+        fieldType: toolInputFields.fieldType,
+        position: toolInputFields.position,
+        options: toolInputFields.options
+      })
+      .from(toolInputFields)
+      .where(eq(toolInputFields.assistantArchitectId, assistant.id))
+      .orderBy(toolInputFields.position),
+      "getInputFieldsForExport"
+    )
 
     return {
       name: assistant.name,
-      description: assistant.description,
+      description: assistant.description || '',
       status: assistant.status,
-      image_path: assistant.imagePath,
-      is_parallel: assistant.isParallel,
-      timeout_seconds: assistant.timeoutSeconds,
+      image_path: assistant.imagePath ?? undefined,
+      is_parallel: assistant.isParallel ?? undefined,
+      timeout_seconds: assistant.timeoutSeconds ?? undefined,
       prompts: prompts.map(p => ({
         name: p.name,
         content: p.content,
-        system_context: p.systemContext,
+        system_context: p.systemContext ?? undefined,
         model_name: p.modelName || 'gpt-4', // Default fallback
         position: p.position,
-        parallel_group: p.parallelGroup,
-        input_mapping: p.inputMapping,
-        timeout_seconds: p.timeoutSeconds
+        parallel_group: p.parallelGroup ?? undefined,
+        input_mapping: p.inputMapping ?? undefined,
+        timeout_seconds: p.timeoutSeconds ?? undefined
       })),
       input_fields: inputFields.map(f => ({
         name: f.name,
         label: f.label,
         field_type: f.fieldType,
         position: f.position,
-        options: f.options
+        options: f.options ?? undefined
       }))
     }
   }))
@@ -203,19 +183,19 @@ export function validateImportFile(data: unknown): { valid: boolean; error?: str
  */
 export async function mapModelsForImport(modelNames: string[]): Promise<Map<string, number>> {
   const modelMap = new Map<string, number>()
-  
+
   // Get all available models
-  const modelsRaw = await executeSQL(`
-    SELECT id, model_id, provider, capabilities
-    FROM ai_models
-    WHERE active = true
-  `)
-  const models = modelsRaw as unknown as Array<{
-    id: number
-    modelId: string
-    provider: string
-    capabilities?: unknown
-  }>
+  const models = await executeQuery(
+    (db) => db.select({
+      id: aiModels.id,
+      modelId: aiModels.modelId,
+      provider: aiModels.provider,
+      capabilities: aiModels.capabilities
+    })
+    .from(aiModels)
+    .where(eq(aiModels.active, true)),
+    "getActiveModelsForImport"
+  )
 
   // Create a lookup map
   const modelLookup = new Map(models.map(m => [m.modelId, m.id]))
