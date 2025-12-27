@@ -48,7 +48,9 @@ import {
   updateToolInputField,
   createChainPrompt,
   updateChainPrompt,
-  deleteChainPrompt
+  deleteChainPrompt,
+  getTools,
+  getAIModels
 } from "@/lib/db/drizzle";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { eq } from "drizzle-orm";
@@ -1987,25 +1989,12 @@ export async function getToolsAction(): Promise<ActionState<SelectTool[]>> {
   
   try {
     log.info("Action started: Getting tools")
-    const toolsRaw = await executeSQL<FormattedRow>(`
-      SELECT id, identifier, name, description, assistant_architect_id, is_active, created_at, updated_at
-      FROM tools
-      WHERE is_active = true
-      ORDER BY name ASC
-    `);
-    
-    const tools = toolsRaw.map((tool: FormattedRow) => {
-      const transformed = transformSnakeToCamel<SelectTool>(tool);
-      // Map assistant_architect_id to promptChainToolId for backward compatibility
-      return {
-        ...transformed,
-        promptChainToolId: tool.assistant_architect_id
-      } as SelectTool;
-    });
-    
+
+    const tools = await getTools();
+
     log.info("Tools retrieved successfully", { count: tools.length })
     timer({ status: "success", count: tools.length })
-    
+
     return {
       isSuccess: true,
       message: "Tools retrieved successfully",
@@ -2025,17 +2014,12 @@ export async function getAiModelsAction(): Promise<ActionState<SelectAiModel[]>>
   
   try {
     log.info("Action started: Getting AI models")
-    const aiModelsRaw = await executeSQL<FormattedRow>(`
-      SELECT id, name, provider, model_id, description, capabilities, max_tokens, active, chat_enabled, created_at, updated_at
-      FROM ai_models
-      ORDER BY name ASC
-    `);
-    
-    const aiModels = aiModelsRaw.map((model: FormattedRow) => transformSnakeToCamel<SelectAiModel>(model));
-    
+
+    const aiModels = await getAIModels();
+
     log.info("AI models retrieved successfully", { count: aiModels.length })
     timer({ status: "success", count: aiModels.length })
-    
+
     return {
       isSuccess: true,
       message: "AI models retrieved successfully",
