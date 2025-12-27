@@ -3,6 +3,7 @@
 import { getServerSession } from "@/lib/auth/server-session"
 import { type ActionState } from "@/types/actions-types"
 import { hasToolAccess } from "@/utils/roles"
+import { getUserIdFromSession, canModifyRepository } from "@/actions/repositories/repository-permissions"
 import {
   createRepository as drizzleCreateRepository,
   updateRepository as drizzleUpdateRepository,
@@ -16,6 +17,9 @@ import {
   revokeAccessById,
   getUserAccessibleRepositories
 } from "@/lib/db/drizzle"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { eq } from "drizzle-orm"
+import { repositoryAccess } from "@/lib/db/schema"
 import {
   handleError,
   ErrorFactories,
@@ -28,7 +32,6 @@ import {
   sanitizeForLogging
 } from "@/lib/logger"
 import { revalidatePath } from "next/cache"
-import { canModifyRepository, getUserIdFromSession } from "./repository-permissions"
 
 export interface Repository {
   id: number
@@ -542,6 +545,9 @@ export async function grantRepositoryAccess(
   userId: number | null,
   roleId: number | null
 ): Promise<ActionState<void>> {
+  const requestId = generateRequestId()
+  const log = createLogger({ requestId, action: "grantRepositoryAccess" })
+
   try {
     const session = await getServerSession()
     if (!session) {
@@ -551,6 +557,14 @@ export async function grantRepositoryAccess(
     const hasAccess = await hasToolAccess("knowledge-repositories")
     if (!hasAccess) {
       return { isSuccess: false, message: "Access denied. You need knowledge repository access." }
+    }
+
+    // Check if user owns this repository
+    const currentUserId = await getUserIdFromSession(session.sub)
+    const canModify = await canModifyRepository(repositoryId, currentUserId)
+    if (!canModify) {
+      log.warn("Grant access denied - not owner", { repositoryId, currentUserId })
+      return { isSuccess: false, message: "Only the repository owner can grant access" }
     }
 
     if (!userId && !roleId) {
@@ -573,6 +587,9 @@ export async function grantRepositoryAccess(
 export async function revokeRepositoryAccess(
   accessId: number
 ): Promise<ActionState<void>> {
+  const requestId = generateRequestId()
+  const log = createLogger({ requestId, action: "revokeRepositoryAccess" })
+
   try {
     const session = await getServerSession()
     if (!session) {
@@ -582,6 +599,32 @@ export async function revokeRepositoryAccess(
     const hasAccess = await hasToolAccess("knowledge-repositories")
     if (!hasAccess) {
       return { isSuccess: false, message: "Access denied. You need knowledge repository access." }
+    }
+
+    // Get the access record to find the repository and verify ownership
+    const accessRecord = await executeQuery(
+      (db) => db.select({
+        id: repositoryAccess.id,
+        repositoryId: repositoryAccess.repositoryId
+      })
+      .from(repositoryAccess)
+      .where(eq(repositoryAccess.id, accessId))
+      .limit(1),
+      "getAccessRecordForRevoke"
+    )
+
+    if (accessRecord.length === 0) {
+      return { isSuccess: false, message: "Access record not found" }
+    }
+
+    const { repositoryId } = accessRecord[0]
+
+    // Verify the current user owns this repository
+    const currentUserId = await getUserIdFromSession(session.sub)
+    const canModify = await canModifyRepository(repositoryId, currentUserId)
+    if (!canModify) {
+      log.warn("Revoke access denied - not owner", { repositoryId, accessId, currentUserId })
+      return { isSuccess: false, message: "Only the repository owner can revoke access" }
     }
 
     const deletedCount = await revokeAccessById(accessId)

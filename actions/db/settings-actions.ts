@@ -76,7 +76,7 @@ export async function getSettingsAction(): Promise<ActionState<Setting[]>> {
 
     timer({ status: "success", count: result.length })
 
-    return createSuccess(result as unknown as Setting[], "Settings retrieved successfully")
+    return createSuccess(result, "Settings retrieved successfully")
   } catch (error) {
     timer({ status: "error" })
     

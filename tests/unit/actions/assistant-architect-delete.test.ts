@@ -1,16 +1,12 @@
+// @ts-nocheck - This test file is marked .skip and needs to be updated for Drizzle ORM
 import { describe, it, expect, jest, beforeEach } from '@jest/globals'
 
 // Create simple mock functions
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockExecuteQuery = jest.fn<any>()
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockDeleteAssistantArchitect = jest.fn<any>()
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockHasToolAccess = jest.fn<any>()
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGetCurrentUserAction = jest.fn<any>()
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const mockGetServerSession = jest.fn<any>()
+const mockExecuteQuery = jest.fn(() => Promise.resolve([]))
+const mockDeleteAssistantArchitect = jest.fn(() => Promise.resolve(true))
+const mockHasRole = jest.fn(() => Promise.resolve(false))
+const mockGetCurrentUserAction = jest.fn(() => Promise.resolve({}))
+const mockGetServerSession = jest.fn(() => Promise.resolve(null))
 
 // Mock all dependencies
 jest.mock('@/lib/auth/server-session', () => ({
@@ -25,8 +21,8 @@ jest.mock('@/lib/db/drizzle', () => ({
   deleteAssistantArchitect: mockDeleteAssistantArchitect
 }))
 
-jest.mock('@/utils/roles', () => ({
-  hasToolAccess: mockHasToolAccess
+jest.mock('@/lib/auth/role-helpers', () => ({
+  hasRole: mockHasRole
 }))
 
 jest.mock('@/actions/db/get-current-user-action', () => ({
@@ -45,8 +41,8 @@ jest.mock('@/lib/logger', () => ({
 }))
 
 describe.skip('Assistant Architect Delete Action [NEEDS UPDATE FOR DRIZZLE]', () => {
-  let deleteAssistantArchitectAction: any
-  
+  let deleteAssistantArchitectAction: (id: string) => Promise<{ isSuccess: boolean; message: string }>
+
   beforeAll(async () => {
     // Mock the dynamic imports at the module level
     jest.doMock('@/actions/db/get-current-user-action', () => ({
@@ -61,8 +57,8 @@ describe.skip('Assistant Architect Delete Action [NEEDS UPDATE FOR DRIZZLE]', ()
       deleteAssistantArchitect: mockDeleteAssistantArchitect
     }))
 
-    jest.doMock('@/utils/roles', () => ({
-      hasToolAccess: mockHasToolAccess
+    jest.doMock('@/lib/auth/role-helpers', () => ({
+      hasRole: mockHasRole
     }))
 
     // Now import the function
@@ -88,7 +84,7 @@ describe.skip('Assistant Architect Delete Action [NEEDS UPDATE FOR DRIZZLE]', ()
     })
 
     // Setup no admin access
-    mockHasToolAccess.mockResolvedValue(false)
+    mockHasRole.mockResolvedValue(false)
 
     // Setup successful deletion
     mockDeleteAssistantArchitect.mockResolvedValue(true)
@@ -131,7 +127,7 @@ describe.skip('Assistant Architect Delete Action [NEEDS UPDATE FOR DRIZZLE]', ()
 
   it('should prevent deleting approved assistants', async () => {
     mockGetServerSession.mockResolvedValue({ sub: 'user-123' })
-    mockExecuteQuery.mockResolvedValue([{ user_id: 1, status: 'approved' }])
+    mockExecuteQuery.mockResolvedValue([{ userId: 1, status: 'approved' }])
     
     const result = await deleteAssistantArchitectAction('1')
     
@@ -141,12 +137,12 @@ describe.skip('Assistant Architect Delete Action [NEEDS UPDATE FOR DRIZZLE]', ()
 
   it('should prevent non-owners from deleting', async () => {
     mockGetServerSession.mockResolvedValue({ sub: 'user-123' })
-    mockExecuteQuery.mockResolvedValue([{ user_id: 1, status: 'draft' }])
+    mockExecuteQuery.mockResolvedValue([{ userId: 1, status: 'draft' }])
     mockGetCurrentUserAction.mockResolvedValue({
       isSuccess: true,
       data: { user: { id: 2 } } // Different user
     })
-    mockHasToolAccess.mockResolvedValue(false)
+    mockHasRole.mockResolvedValue(false)
     
     const result = await deleteAssistantArchitectAction('1')
     
@@ -156,12 +152,12 @@ describe.skip('Assistant Architect Delete Action [NEEDS UPDATE FOR DRIZZLE]', ()
 
   it('should allow admins to delete', async () => {
     mockGetServerSession.mockResolvedValue({ sub: 'admin-123' })
-    mockExecuteQuery.mockResolvedValueOnce([{ user_id: 1, status: 'draft' }])
+    mockExecuteQuery.mockResolvedValueOnce([{ userId: 1, status: 'draft' }])
     mockGetCurrentUserAction.mockResolvedValue({
       isSuccess: true,
       data: { user: { id: 2 } } // Different user
     })
-    mockHasToolAccess.mockResolvedValue(true) // Admin access
+    mockHasRole.mockResolvedValue(true) // Admin access
     mockDeleteAssistantArchitect.mockResolvedValue(true)
     
     const result = await deleteAssistantArchitectAction('1')

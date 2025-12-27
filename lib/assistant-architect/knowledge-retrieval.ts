@@ -78,6 +78,9 @@ export async function retrieveKnowledgeForPrompt(
     return []
   }
 
+  // Normalize optional assistant owner sub to handle null/undefined/empty string consistently
+  const ownerSub = assistantOwnerSub || null
+
   try {
     // First, verify user has access to all specified repositories
     const accessibleRepos = await executeQuery(
@@ -88,8 +91,8 @@ export async function retrieveKnowledgeForPrompt(
         AND (
           r.is_public = true
           OR r.owner_id = (SELECT id FROM users WHERE cognito_sub = ${userCognitoSub})
-          OR (${assistantOwnerSub !== undefined ? sql`${assistantOwnerSub}` : sql`NULL`} IS NOT NULL
-              AND r.owner_id = (SELECT id FROM users WHERE cognito_sub = ${assistantOwnerSub || null}))
+          OR (${ownerSub} IS NOT NULL
+              AND r.owner_id = (SELECT id FROM users WHERE cognito_sub = ${ownerSub}))
           OR EXISTS (
             SELECT 1 FROM repository_access ra
             JOIN users u ON u.id = ra.user_id

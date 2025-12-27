@@ -131,7 +131,8 @@ export async function getDocumentsByConversationId({
         updatedAt: documents.updatedAt
       })
       .from(documents)
-      .where(eq(documents.conversationId, conversationId)),
+      .where(eq(documents.conversationId, conversationId))
+      .orderBy(desc(documents.createdAt)),
       "getDocumentsByConversationId"
     )
 

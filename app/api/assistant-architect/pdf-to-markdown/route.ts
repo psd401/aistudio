@@ -250,7 +250,6 @@ async function processPdfInBackground(jobId: number, jobInput: JobInput) {
       
   } catch (error) {
     log.error(`[PDF-to-Markdown Background] Job ${jobId} failed:`, error);
-    log.error(`[PDF-to-Markdown Background] Error details:`, error);
 
     // Update job with error
     await updateGenericJobStatus(jobId, 'failed', undefined, getErrorMessage(error) || 'Unknown error');
