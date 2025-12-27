@@ -42,11 +42,14 @@ import {
   getPendingAssistantArchitects as drizzleGetPendingAssistantArchitects,
   getToolInputFields,
   getChainPrompts,
-  getUserById
+  getUserById,
+  createToolInputField,
+  deleteToolInputField,
+  updateToolInputField
 } from "@/lib/db/drizzle";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { eq } from "drizzle-orm";
-import { tools, navigationItems } from "@/lib/db/schema";
+import { tools, navigationItems, toolInputFields } from "@/lib/db/schema";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -727,17 +730,15 @@ export async function addToolInputFieldAction(
   
   try {
     log.info("Action started: Adding tool input field", { architectId, fieldName: data.name })
-    await executeSQL<never>(`
-      INSERT INTO tool_input_fields (assistant_architect_id, name, label, field_type, position, options, created_at, updated_at)
-      VALUES (:toolId, :name, :label, :fieldType::field_type, :position, :options::jsonb, NOW(), NOW())
-    `, [
-      { name: 'toolId', value: { longValue: Number.parseInt(architectId, 10) } },
-      { name: 'name', value: { stringValue: data.name } },
-      { name: 'label', value: { stringValue: data.label ?? data.name } },
-      { name: 'fieldType', value: { stringValue: data.type } },
-      { name: 'position', value: { longValue: data.position ?? 0 } },
-      { name: 'options', value: data.options ? { stringValue: JSON.stringify(data.options) } : { isNull: true } }
-    ]);
+
+    await createToolInputField({
+      assistantArchitectId: Number.parseInt(architectId, 10),
+      name: data.name,
+      label: data.label ?? data.name,
+      fieldType: data.type as "text" | "number" | "select" | "multiselect" | "textarea" | "checkbox" | "date" | "email" | "url" | "tel" | "color" | "range" | "time" | "datetime-local" | "month" | "week",
+      position: data.position ?? 0,
+      options: data.options ?? undefined
+    });
 
     log.info("Tool input field added successfully", { architectId, fieldName: data.name })
     timer({ status: "success", architectId })
@@ -772,49 +773,47 @@ export async function deleteInputFieldAction(
     
     log.debug("User authenticated", { userId: session.sub })
 
-    // Get the field to find its tool using data API
-    const fieldResult = await executeSQL<FormattedRow>(`
-      SELECT id, assistant_architect_id
-      FROM tool_input_fields
-      WHERE id = :fieldId
-    `, [{ name: 'fieldId', value: { longValue: Number.parseInt(fieldId, 10) } }]);
+    const fieldIdInt = Number.parseInt(fieldId, 10);
 
-    if (!fieldResult || fieldResult.length === 0) {
+    // Get the field to find its tool
+    const [field] = await executeQuery(
+      (db) =>
+        db
+          .select({
+            id: toolInputFields.id,
+            assistantArchitectId: toolInputFields.assistantArchitectId
+          })
+          .from(toolInputFields)
+          .where(eq(toolInputFields.id, fieldIdInt))
+          .limit(1),
+      "getToolInputFieldById"
+    );
+
+    if (!field || !field.assistantArchitectId) {
       return { isSuccess: false, message: "Input field not found" }
     }
 
-    // Transform snake_case to camelCase for proper type access
-    const field = transformSnakeToCamel<{ id: number; assistantArchitectId: number }>(fieldResult[0])
-    const architectId = field.assistantArchitectId
-
     // Check if user is the creator of the tool
-    const toolResult = await executeSQL<FormattedRow>(`
-      SELECT user_id
-      FROM assistant_architects
-      WHERE id = :toolId
-    `, [{ name: 'toolId', value: { longValue: architectId } }]);
+    const architect = await drizzleGetAssistantArchitectById(field.assistantArchitectId);
 
-    if (!toolResult || toolResult.length === 0) {
+    if (!architect) {
       return { isSuccess: false, message: "Tool not found" }
     }
 
-    const tool = toolResult[0];
-
     // Check permissions
-    const isAdmin = await checkUserRoleByCognitoSub(session.sub, "administrator")
-    const currentUserId = await getCurrentUserId();
-    if (!currentUserId) {
+    const isAdmin = await hasRole("administrator");
+    const currentUserResult = await getCurrentUserAction();
+    if (!currentUserResult.isSuccess || !currentUserResult.data) {
       return { isSuccess: false, message: "User not found" }
     }
-    if (!isAdmin && tool.user_id !== currentUserId) {
+    const currentUserId = currentUserResult.data.user.id;
+
+    if (!isAdmin && architect.userId !== currentUserId) {
       return { isSuccess: false, message: "Forbidden" }
     }
 
     // Delete the field
-    await executeSQL<never>(`
-      DELETE FROM tool_input_fields
-      WHERE id = :fieldId
-    `, [{ name: 'fieldId', value: { longValue: Number.parseInt(fieldId, 10) } }]);
+    await deleteToolInputField(fieldIdInt);
 
     log.info("Input field deleted successfully", { fieldId })
     timer({ status: "success", fieldId })
@@ -850,113 +849,78 @@ export async function updateInputFieldAction(
     
     log.debug("User authenticated", { userId: session.sub })
 
-    // Find the field using data API
-    const fieldResult = await executeSQL<SelectToolInputField>(`
-      SELECT id, assistant_architect_id, name, label, field_type, position, options, created_at, updated_at
-      FROM tool_input_fields
-      WHERE id = :id
-    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
+    const idInt = Number.parseInt(id, 10);
 
-    if (!fieldResult || fieldResult.length === 0) {
+    // Find the field
+    const [field] = await executeQuery(
+      (db) =>
+        db
+          .select({
+            id: toolInputFields.id,
+            assistantArchitectId: toolInputFields.assistantArchitectId
+          })
+          .from(toolInputFields)
+          .where(eq(toolInputFields.id, idInt))
+          .limit(1),
+      "getToolInputFieldById"
+    );
+
+    if (!field || !field.assistantArchitectId) {
       return { isSuccess: false, message: "Input field not found" }
     }
 
-    const field = fieldResult[0];
-
     // Get the tool to check permissions
-    const toolResult = await executeSQL<FormattedRow>(`
-      SELECT user_id
-      FROM assistant_architects
-      WHERE id = :toolId
-    `, [{ name: 'toolId', value: { longValue: Number((field as SelectToolInputField & { assistant_architect_id?: number }).assistant_architect_id || field.assistantArchitectId) } }]);
+    const architect = await drizzleGetAssistantArchitectById(field.assistantArchitectId);
 
-    if (!toolResult || toolResult.length === 0) {
+    if (!architect) {
       return { isSuccess: false, message: "Tool not found" }
     }
 
-    const tool = toolResult[0];
-
     // Only tool creator or admin can update fields
-    const isAdmin = await checkUserRoleByCognitoSub(session.sub, "administrator")
-    const currentUserId = await getCurrentUserId();
-    if (!currentUserId) {
+    const isAdmin = await hasRole("administrator");
+    const currentUserResult = await getCurrentUserAction();
+    if (!currentUserResult.isSuccess || !currentUserResult.data) {
       return { isSuccess: false, message: "User not found" }
     }
-    if (!isAdmin && tool.user_id !== currentUserId) {
+    const currentUserId = currentUserResult.data.user.id;
+
+    if (!isAdmin && architect.userId !== currentUserId) {
       return { isSuccess: false, message: "Forbidden" }
     }
 
-    // Build update query dynamically
-    const updateFields = [];
-    const parameters: SqlParameter[] = [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }];
-    let paramIndex = 0;
-    
-    for (const [key, value] of Object.entries(data)) {
-      if (value !== undefined) {
-        const snakeKey = key === 'fieldType' ? 'field_type' : key === 'toolId' ? 'assistant_architect_id' : key;
-        if (key === 'fieldType') {
-          updateFields.push(`${snakeKey} = :param${paramIndex}::field_type`);
-        } else if (key === 'options') {
-          // Options is a JSONB column - must cast from text to jsonb
-          updateFields.push(`${snakeKey} = :param${paramIndex}::jsonb`);
-        } else {
-          updateFields.push(`${snakeKey} = :param${paramIndex}`);
-        }
-        
-        let paramValue;
-        if (value === null) {
-          paramValue = { isNull: true };
-        } else if (typeof value === 'number') {
-          paramValue = { longValue: value };
-        } else if (typeof value === 'object') {
-          // Special handling for arrays and objects
-          if (value === null) {
-            paramValue = { isNull: true };
-          } else if (Array.isArray(value)) {
-            if (value.length === 0) {
-              paramValue = { isNull: true };
-            } else {
-              // Make sure all array elements are defined
-              const cleanArray = value.filter(v => v !== undefined);
-              paramValue = { stringValue: JSON.stringify(cleanArray) };
-            }
-          } else {
-            // For non-array objects, stringify them
-            paramValue = { stringValue: JSON.stringify(value) };
-          }
-        } else {
-          paramValue = { stringValue: String(value) };
-        }
-        
-        parameters.push({ name: `param${paramIndex}`, value: paramValue });
-        paramIndex++;
-      }
+    // Build update data
+    const updates: {
+      name?: string;
+      label?: string;
+      fieldType?: "text" | "number" | "select" | "multiselect" | "textarea" | "checkbox" | "date" | "email" | "url" | "tel" | "color" | "range" | "time" | "datetime-local" | "month" | "week";
+      position?: number;
+      options?: { values?: string[]; multiSelect?: boolean; placeholder?: string };
+    } = {};
+
+    if (data.name !== undefined) updates.name = data.name;
+    if (data.label !== undefined) updates.label = data.label;
+    if (data.fieldType !== undefined) updates.fieldType = data.fieldType as typeof updates.fieldType;
+    if (data.position !== undefined) updates.position = data.position;
+    if (data.options !== undefined) updates.options = data.options;
+
+    // Always ensure label is set to name if not provided
+    if (!updates.label && updates.name) {
+      updates.label = updates.name;
     }
-    
-    // Always ensure label is set
-    if (!data.label && data.name) {
-      updateFields.push(`label = :labelParam`);
-      parameters.push({ name: 'labelParam', value: { stringValue: String(data.name) } });
-    }
-    
-    if (updateFields.length === 0) {
+
+    if (Object.keys(updates).length === 0) {
       return { isSuccess: false, message: "No fields to update" }
     }
 
-    const updatedFieldResult = await executeSQL<FormattedRow>(`
-      UPDATE tool_input_fields 
-      SET ${updateFields.join(', ')}, updated_at = NOW()
-      WHERE id = :id
-      RETURNING id, assistant_architect_id, name, label, field_type, position, options, created_at, updated_at
-    `, parameters);
+    const [updatedField] = await updateToolInputField(idInt, updates);
 
     log.info("Input field updated successfully", { id })
     timer({ status: "success", id })
-    
+
     return {
       isSuccess: true,
       message: "Input field updated successfully",
-      data: transformSnakeToCamel<SelectToolInputField>(updatedFieldResult[0])
+      data: updatedField
     }
   } catch (error) {
     timer({ status: "error" })
