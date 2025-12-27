@@ -50,7 +50,8 @@ import {
   updateChainPrompt,
   deleteChainPrompt,
   getTools,
-  getAIModels
+  getAIModels,
+  getAssistantArchitectsByStatus
 } from "@/lib/db/drizzle";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { eq } from "drizzle-orm";
@@ -2047,42 +2048,36 @@ export async function setPromptPositionsAction(
       return { isSuccess: false, message: "Unauthorized" }
     }
 
-    const userId = await getCurrentUserId();
-    if (!userId) {
+    const currentUserResult = await getCurrentUserAction();
+    if (!currentUserResult.isSuccess || !currentUserResult.data) {
       return { isSuccess: false, message: "User not found" }
     }
+    const userId = currentUserResult.data.user.id;
+
+    const toolIdInt = Number.parseInt(toolId, 10);
 
     // Verify permissions
-    const toolResult = await executeSQL(
-      `SELECT user_id FROM assistant_architects WHERE id = :id`,
-      [{ name: 'id', value: { longValue: Number.parseInt(toolId, 10) } }]
-    )
+    const architect = await drizzleGetAssistantArchitectById(toolIdInt);
 
-    if (!toolResult || toolResult.length === 0) {
+    if (!architect) {
       return { isSuccess: false, message: "Tool not found" }
     }
 
-    const tool = toolResult[0] as FormattedRow;
-    const toolUserId = tool.user_id;
-
-    const isAdmin = await checkUserRoleByCognitoSub(session.sub, "administrator");
-    if (!isAdmin && toolUserId !== userId) {
+    const isAdmin = await hasRole("administrator");
+    if (!isAdmin && architect.userId !== userId) {
       return { isSuccess: false, message: "Forbidden" }
     }
 
-    // Update positions and parallel_group for each prompt using parameterized queries
-    // Note: Individual queries are used to maintain security (prevent SQL injection)
-    // Performance impact is minimal for typical use cases (<20 prompts)
-    for (const { id, position, parallelGroup } of positions) {
-      await executeSQL<never>(
-        `UPDATE chain_prompts SET position = :position, parallel_group = :parallelGroup WHERE id = :id`,
-        [
-          { name: 'position', value: { longValue: position } },
-          { name: 'parallelGroup', value: parallelGroup !== undefined && parallelGroup !== null ? { longValue: parallelGroup } : { isNull: true } },
-          { name: 'id', value: { longValue: Number.parseInt(id, 10) } }
-        ]
+    // Update positions and parallel_group for each prompt
+    // Use Promise.all for concurrent updates
+    await Promise.all(
+      positions.map(({ id, position, parallelGroup }) =>
+        updateChainPrompt(Number.parseInt(id, 10), {
+          position,
+          parallelGroup: parallelGroup ?? null
+        })
       )
-    }
+    );
 
     log.info("Prompt positions updated successfully", { toolId, count: positions.length })
     timer({ status: "success", toolId })
@@ -2116,25 +2111,15 @@ export async function getApprovedAssistantArchitectsForAdminAction(): Promise<
     }
     
     log.debug("User authenticated", { userId: session.sub })
-    
-    const userId = await getCurrentUserId();
-    if (!userId) {
-      return { isSuccess: false, message: "User not found" }
-    }
 
     // Check if user is an administrator
-    const isAdmin = await checkUserRoleByCognitoSub(session.sub, "administrator")
+    const isAdmin = await hasRole("administrator");
     if (!isAdmin) {
       return { isSuccess: false, message: "Only administrators can view approved tools" }
     }
 
     // Get all approved tools
-    const toolsResultRaw = await executeSQL(
-      `SELECT id, name, description, status, image_path, user_id, created_at, updated_at FROM assistant_architects WHERE status = :status`,
-      [{ name: 'status', value: { stringValue: 'approved' } }]
-    )
-    
-    const toolsResult = toolsResultRaw.map((raw) => transformSnakeToCamel<SelectAssistantArchitect>(raw))
+    const toolsResult = await getAssistantArchitectsByStatus("approved");
 
     if (!toolsResult || toolsResult.length === 0) {
       return {
@@ -2146,32 +2131,12 @@ export async function getApprovedAssistantArchitectsForAdminAction(): Promise<
 
     // Get related data for each tool
     const toolsWithRelations = await Promise.all(
-      toolsResult.map(async (toolRecord) => {
-        const toolId = String(toolRecord.id || '')
-        
+      toolsResult.map(async (tool) => {
         // Run input fields and prompts queries in parallel
-        const [inputFieldsResultRaw, promptsResultRaw] = await Promise.all([
-          executeSQL(
-            `SELECT id, assistant_architect_id, name, label, field_type, position, options, created_at, updated_at FROM tool_input_fields WHERE assistant_architect_id = :toolId ORDER BY position ASC`,
-            [{ name: 'toolId', value: { longValue: Number.parseInt(toolId, 10) } }]
-          ),
-          executeSQL(
-            `SELECT id, assistant_architect_id, name, content, system_context, model_id, position, input_mapping, parallel_group, timeout_seconds, repository_ids, enabled_tools, created_at, updated_at FROM chain_prompts WHERE assistant_architect_id = :toolId ORDER BY position ASC`,
-            [{ name: 'toolId', value: { longValue: Number.parseInt(toolId, 10) } }]
-          )
+        const [inputFields, prompts] = await Promise.all([
+          getToolInputFields(tool.id),
+          getChainPrompts(tool.id)
         ]);
-        
-        const inputFieldsResult = inputFieldsResultRaw;
-        const promptsResult = promptsResultRaw;
-
-        // Map the tool record
-        const tool = transformSnakeToCamel<SelectAssistantArchitect>(toolRecord);
-
-        // Map input fields
-        const inputFields = inputFieldsResult.map((record) => transformSnakeToCamel<SelectToolInputField>(record));
-
-        // Map prompts
-        const prompts = promptsResult.map(transformPrompt)
 
         return {
           ...tool,
@@ -2207,43 +2172,23 @@ export async function getAllAssistantArchitectsForAdminAction(): Promise<ActionS
     if (!session) {
       return { isSuccess: false, message: "Unauthorized" }
     }
-    const isAdmin = await checkUserRoleByCognitoSub(session.sub, "administrator")
+    const isAdmin = await hasRole("administrator");
     if (!isAdmin) {
       return { isSuccess: false, message: "Only administrators can view all assistants" }
     }
     // Get all assistants
-    const allAssistants = await executeSQL<FormattedRow>(`
-      SELECT id, name, description, status, image_path, user_id, created_at, updated_at
-      FROM assistant_architects
-      ORDER BY created_at DESC
-    `);
-    
+    const allAssistants = await drizzleGetAssistantArchitects();
+
     // Get related data for each assistant
     const assistantsWithRelations = await Promise.all(
-      allAssistants.map(async (tool: FormattedRow) => {
-        const [inputFieldsRaw, promptsRaw] = await Promise.all([
-          executeSQL<FormattedRow>(`
-            SELECT * FROM tool_input_fields 
-            WHERE assistant_architect_id = :toolId 
-            ORDER BY position ASC
-          `, [{ name: 'toolId', value: { longValue: Number(tool.id) } }]),
-          executeSQL<FormattedRow>(`
-            SELECT * FROM chain_prompts 
-            WHERE assistant_architect_id = :toolId 
-            ORDER BY position ASC
-          `, [{ name: 'toolId', value: { longValue: Number(tool.id) } }])
+      allAssistants.map(async (tool) => {
+        const [inputFields, prompts] = await Promise.all([
+          getToolInputFields(tool.id),
+          getChainPrompts(tool.id)
         ]);
-        
-        // Transform input fields to camelCase
-        const inputFields = inputFieldsRaw.map((field) => transformSnakeToCamel<SelectToolInputField>(field));
-        
-        // Transform prompts to camelCase
-        const prompts = promptsRaw.map(transformPrompt);
-        
-        const transformedTool = transformSnakeToCamel<SelectAssistantArchitect>(tool);
-        
+
         return {
-          ...transformedTool,
+          ...tool,
           inputFields,
           prompts
         };
