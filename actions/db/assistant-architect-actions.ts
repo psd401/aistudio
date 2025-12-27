@@ -1224,47 +1224,46 @@ export async function deletePromptAction(
     
     log.debug("User authenticated", { userId: session.sub })
 
-    // Find the prompt using data API
-    const promptResult = await executeSQL<{ assistantArchitectId: number }>(`
-      SELECT assistant_architect_id
-      FROM chain_prompts
-      WHERE id = :id
-    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
+    const idInt = Number.parseInt(id, 10);
 
-    if (!promptResult || promptResult.length === 0) {
+    // Find the prompt
+    const [prompt] = await executeQuery(
+      (db) =>
+        db
+          .select({
+            assistantArchitectId: chainPrompts.assistantArchitectId
+          })
+          .from(chainPrompts)
+          .where(eq(chainPrompts.id, idInt))
+          .limit(1),
+      "getChainPromptById"
+    );
+
+    if (!prompt || !prompt.assistantArchitectId) {
       return { isSuccess: false, message: "Prompt not found" }
     }
 
-    const prompt = promptResult[0];
-
     // Get the tool to check permissions
-    const toolResult = await executeSQL<{ userId: number }>(`
-      SELECT user_id
-      FROM assistant_architects
-      WHERE id = :toolId
-    `, [{ name: 'toolId', value: { longValue: prompt.assistantArchitectId } }]);
+    const architect = await drizzleGetAssistantArchitectById(prompt.assistantArchitectId);
 
-    if (!toolResult || toolResult.length === 0) {
+    if (!architect) {
       return { isSuccess: false, message: "Tool not found" }
     }
 
-    const tool = toolResult[0];
-
     // Only tool creator or admin can delete prompts
-    const isAdmin = await checkUserRoleByCognitoSub(session.sub, "administrator")
-    const currentUserId = await getCurrentUserId();
-    if (!currentUserId) {
+    const isAdmin = await hasRole("administrator");
+    const currentUserResult = await getCurrentUserAction();
+    if (!currentUserResult.isSuccess || !currentUserResult.data) {
       return { isSuccess: false, message: "User not found" }
     }
-    if (!isAdmin && tool.userId !== currentUserId) {
+    const currentUserId = currentUserResult.data.user.id;
+
+    if (!isAdmin && architect.userId !== currentUserId) {
       return { isSuccess: false, message: "Forbidden" }
     }
 
     // Delete the prompt
-    await executeSQL<never>(`
-      DELETE FROM chain_prompts
-      WHERE id = :id
-    `, [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]);
+    await deleteChainPrompt(idInt);
 
     log.info("Prompt deleted successfully", { id })
     timer({ status: "success", id })
@@ -1299,52 +1298,47 @@ export async function updatePromptPositionAction(
     }
     
     log.debug("User authenticated", { userId: session.sub })
-    
-    const userId = await getCurrentUserId();
-    if (!userId) {
-      return { isSuccess: false, message: "User not found" }
-    }
+
+    const idInt = Number.parseInt(id, 10);
 
     // Find the prompt
-    const promptResult = await executeSQL(
-      `SELECT assistant_architect_id FROM chain_prompts WHERE id = :id`,
-      [{ name: 'id', value: { longValue: Number.parseInt(id, 10) } }]
-    )
+    const [prompt] = await executeQuery(
+      (db) =>
+        db
+          .select({
+            assistantArchitectId: chainPrompts.assistantArchitectId
+          })
+          .from(chainPrompts)
+          .where(eq(chainPrompts.id, idInt))
+          .limit(1),
+      "getChainPromptById"
+    );
 
-    if (!promptResult || promptResult.length === 0) {
+    if (!prompt || !prompt.assistantArchitectId) {
       return { isSuccess: false, message: "Prompt not found" }
     }
 
-    const prompt = promptResult[0] as FormattedRow;
-    const toolId = prompt.assistant_architect_id;
-
     // Get the tool to check permissions
-    const toolResult = await executeSQL(
-      `SELECT user_id FROM assistant_architects WHERE id = :id`,
-      [{ name: 'id', value: { longValue: Number(toolId) } }]
-    )
+    const architect = await drizzleGetAssistantArchitectById(prompt.assistantArchitectId);
 
-    if (!toolResult || toolResult.length === 0) {
+    if (!architect) {
       return { isSuccess: false, message: "Tool not found" }
     }
 
-    const tool = toolResult[0] as FormattedRow;
-    const toolUserId = tool.user_id;
-
     // Only tool creator or admin can update prompt positions
-    const isAdmin = await checkUserRoleByCognitoSub(session.sub, "administrator");
-    if (!isAdmin && toolUserId !== userId) {
+    const isAdmin = await hasRole("administrator");
+    const currentUserResult = await getCurrentUserAction();
+    if (!currentUserResult.isSuccess || !currentUserResult.data) {
+      return { isSuccess: false, message: "User not found" }
+    }
+    const userId = currentUserResult.data.user.id;
+
+    if (!isAdmin && architect.userId !== userId) {
       return { isSuccess: false, message: "Forbidden" }
     }
 
     // Update the prompt's position
-    await executeSQL<never>(
-      `UPDATE chain_prompts SET position = :position WHERE id = :id`,
-      [
-        { name: 'position', value: { longValue: position } },
-        { name: 'id', value: { longValue: Number.parseInt(id, 10) } }
-      ]
-    )
+    await updateChainPrompt(idInt, { position });
 
     log.info("Prompt position updated successfully", { id, position })
     timer({ status: "success", id })
