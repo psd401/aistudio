@@ -6,6 +6,8 @@ import { getServerSession } from "@/lib/auth/server-session"
 import { checkUserRoleByCognitoSub } from "@/lib/db/drizzle"
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
 
+// Note: This is a Server Component (no "use server" needed)
+
 interface Props {
   params: Promise<{
     id: string

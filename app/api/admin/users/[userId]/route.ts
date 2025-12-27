@@ -35,7 +35,7 @@ export async function DELETE(
       );
     }
 
-    // Delete the user via Data API
+    // Delete the user via Drizzle ORM
     log.debug("Deleting user", { targetUserId });
     const deletedUser = await deleteUser(Number.parseInt(targetUserId));
 

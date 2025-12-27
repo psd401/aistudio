@@ -540,8 +540,7 @@ export async function getRepositoryAccess(
 export async function grantRepositoryAccess(
   repositoryId: number,
   userId: number | null,
-  roleId: number | null,
-  _accessLevel: 'read' | 'write' | 'admin'
+  roleId: number | null
 ): Promise<ActionState<void>> {
   try {
     const session = await getServerSession()

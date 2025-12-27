@@ -182,6 +182,7 @@ export async function POST(request: NextRequest) {
     }
 
     log.info(`Successfully imported ${successCount} out of ${importData.assistants.length} assistants`)
+    timer({ status: "success", successCount, totalCount: importData.assistants.length })
 
     return NextResponse.json({
       isSuccess: true,
@@ -196,6 +197,7 @@ export async function POST(request: NextRequest) {
     })
 
   } catch (error) {
+    timer({ status: "error" })
     log.error('Error importing assistants:', error)
 
     return NextResponse.json(

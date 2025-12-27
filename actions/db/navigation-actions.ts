@@ -47,8 +47,24 @@ export async function getNavigationItemsAction(): Promise<ActionState<SelectNavi
     })
     
     timer({ status: "success", count: items.length })
-    
-    return createSuccess(items as unknown as SelectNavigationItem[], "Navigation items retrieved successfully")
+
+    // Transform to SelectNavigationItem type
+    const transformedItems: SelectNavigationItem[] = items.map(item => ({
+      id: item.id,
+      label: item.label,
+      icon: item.icon,
+      link: item.link ?? null,
+      description: item.description ?? null,
+      type: item.type,
+      parentId: item.parentId ?? null,
+      toolId: item.toolId ?? null,
+      requiresRole: item.requiresRole ?? null,
+      position: item.position,
+      isActive: item.isActive,
+      createdAt: item.createdAt
+    }))
+
+    return createSuccess(transformedItems, "Navigation items retrieved successfully")
   } catch (error) {
     timer({ status: "error" })
     
@@ -107,8 +123,24 @@ export async function createNavigationItemAction(
     })
     
     timer({ status: "success", itemId: newItem.id })
-    
-    return createSuccess(newItem as unknown as SelectNavigationItem, "Navigation item created successfully")
+
+    // Transform to SelectNavigationItem type
+    const transformedItem: SelectNavigationItem = {
+      id: newItem.id,
+      label: newItem.label,
+      icon: newItem.icon,
+      link: newItem.link ?? null,
+      description: newItem.description ?? null,
+      type: newItem.type,
+      parentId: newItem.parentId ?? null,
+      toolId: newItem.toolId ?? null,
+      requiresRole: newItem.requiresRole ?? null,
+      position: newItem.position,
+      isActive: newItem.isActive,
+      createdAt: newItem.createdAt
+    }
+
+    return createSuccess(transformedItem, "Navigation item created successfully")
   } catch (error) {
     timer({ status: "error" })
     
@@ -180,8 +212,24 @@ export async function updateNavigationItemAction(
     })
     
     timer({ status: "success", itemId: updatedItem.id })
-    
-    return createSuccess(updatedItem as unknown as SelectNavigationItem, "Navigation item updated successfully")
+
+    // Transform to SelectNavigationItem type
+    const transformedUpdatedItem: SelectNavigationItem = {
+      id: updatedItem.id,
+      label: updatedItem.label,
+      icon: updatedItem.icon,
+      link: updatedItem.link ?? null,
+      description: updatedItem.description ?? null,
+      type: updatedItem.type,
+      parentId: updatedItem.parentId ?? null,
+      toolId: updatedItem.toolId ?? null,
+      requiresRole: updatedItem.requiresRole ?? null,
+      position: updatedItem.position,
+      isActive: updatedItem.isActive,
+      createdAt: updatedItem.createdAt
+    }
+
+    return createSuccess(transformedUpdatedItem, "Navigation item updated successfully")
   } catch (error) {
     timer({ status: "error" })
     

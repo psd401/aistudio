@@ -51,11 +51,12 @@ export async function POST(request: Request) {
     log.debug("Promoting user", { targetUserId });
 
     // Update target user role to administrator
+    const targetUserIdNum = Number(targetUserId);
     try {
-      await updateUserRole(Number(targetUserId), 'administrator');
+      await updateUserRole(targetUserIdNum, 'administrator');
 
       // Get updated user info
-      const user = await getUserById(Number(targetUserId));
+      const user = await getUserById(targetUserIdNum);
 
       if (!user) {
         log.warn("User not found", { targetUserId });

@@ -38,8 +38,8 @@ export async function PUT(
       );
     }
     const { role: newRole } = validatedData!;
-    
-    // Update the user's role via Data API
+
+    // Update the user's role via Drizzle ORM
     const userId = Number.parseInt(userIdString, 10);
     if (Number.isNaN(userId)) {
       log.warn("Invalid user ID", { userIdString });

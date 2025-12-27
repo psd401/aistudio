@@ -436,7 +436,7 @@ export async function addUrlItem(
     if (!input.name || input.name.trim().length === 0) {
       return { isSuccess: false, message: "Name is required" }
     }
-    
+
     if (!input.url || !validateUrl(input.url)) {
       return { isSuccess: false, message: "Valid HTTP/HTTPS URL is required" }
     }
@@ -453,13 +453,6 @@ export async function addUrlItem(
         repositoryId: input.repository_id
       })
       throw ErrorFactories.authzOwnerRequired("add items to repository")
-    }
-
-    // Validate URL
-    try {
-      new URL(input.url)
-    } catch {
-      return { isSuccess: false, message: "Invalid URL" }
     }
 
     // Create URL repository item via Drizzle
@@ -518,15 +511,13 @@ export async function addUrlItem(
       itemId: item.id,
       repositoryId: input.repository_id
     })
-    
-    const endTimer = timer
-    endTimer({ status: "success", itemId: item.id })
-    
+
+    timer({ status: "success", itemId: item.id })
+
     revalidatePath(`/repositories/${input.repository_id}`)
     return createSuccess(item, "URL added successfully")
   } catch (error) {
-    const endTimer = timer
-    endTimer({ status: "error" })
+    timer({ status: "error" })
     
     return handleError(error, "Failed to add URL. Please try again or contact support.", {
       context: "addUrlItem",

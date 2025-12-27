@@ -106,7 +106,22 @@ export async function retrieveKnowledgeForPrompt(
       "getAccessibleRepositories"
     )
 
-    const repos = accessibleRepos.rows as Array<{ id: number; name: string }>
+    // Runtime validation of query results
+    const repos: Array<{ id: number; name: string }> = []
+    for (const row of accessibleRepos.rows) {
+      // Validate row structure
+      if (typeof row === 'object' && row !== null && 'id' in row && 'name' in row) {
+        const id = row.id
+        const name = row.name
+        if (typeof id === 'number' && typeof name === 'string') {
+          repos.push({ id, name })
+        } else {
+          log.warn('Invalid row structure in repository query', { row })
+        }
+      } else {
+        log.warn('Invalid row in repository query results', { row })
+      }
+    }
 
     if (repos.length !== repositoryIds.length) {
       const accessibleIds = repos.map(r => r.id)
