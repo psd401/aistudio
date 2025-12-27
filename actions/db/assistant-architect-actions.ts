@@ -15,7 +15,6 @@ import {
   type ToolInputFieldOptions
 } from "@/types/db-types"
 // CoreMessage import removed - AI completion now handled by Lambda workers
-import { transformSnakeToCamel } from '@/lib/db/field-mapper'
 import { parseRepositoryIds, serializeRepositoryIds } from "@/lib/utils/repository-utils"
 import { getAvailableToolsForModel, getAllTools } from "@/lib/tools/tool-registry"
 
@@ -29,9 +28,22 @@ import {
   startTimer
 } from "@/lib/logger"
 import { getServerSession } from "@/lib/auth/server-session";
-import { executeSQL, checkUserRoleByCognitoSub, hasToolAccess, type FormattedRow } from "@/lib/db/data-api-adapter";
+import { hasToolAccess, hasRole } from "@/utils/roles";
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action";
-import { SqlParameter } from "@aws-sdk/client-rds-data";
+import {
+  getAssistantArchitects as drizzleGetAssistantArchitects,
+  getAssistantArchitectById as drizzleGetAssistantArchitectById,
+  createAssistantArchitect as drizzleCreateAssistantArchitect,
+  updateAssistantArchitect as drizzleUpdateAssistantArchitect,
+  deleteAssistantArchitect as drizzleDeleteAssistantArchitect,
+  approveAssistantArchitect as drizzleApproveAssistantArchitect,
+  rejectAssistantArchitect as drizzleRejectAssistantArchitect,
+  submitForApproval as drizzleSubmitForApproval,
+  getPendingAssistantArchitects as drizzleGetPendingAssistantArchitects,
+  getToolInputFields,
+  getChainPrompts,
+  getUserById
+} from "@/lib/db/drizzle";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -52,28 +64,48 @@ function safeParseInt(value: string, fieldName: string): number {
 }
 
 // Helper function to transform and parse prompt data consistently
-function transformPrompt(prompt: FormattedRow): SelectChainPrompt {
-  const transformed = transformSnakeToCamel<SelectChainPrompt>(prompt);
-  // Parse repository_ids using utility function
-  transformed.repositoryIds = parseRepositoryIds(transformed.repositoryIds);
+// TODO: Remove when all functions migrated - temporary generic version for unmigrated functions
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function transformPrompt(prompt: any): SelectChainPrompt {
+  // Handle both snake_case (from executeSQL) and camelCase (from Drizzle)
+  const repositoryIds = parseRepositoryIds(prompt.repository_ids || prompt.repositoryIds);
+
   // Parse enabled_tools from JSONB array to string array
-  if (transformed.enabledTools && typeof transformed.enabledTools === 'string') {
+  let enabledTools: string[] = [];
+  const tools = prompt.enabled_tools || prompt.enabledTools;
+  if (tools && typeof tools === 'string') {
     try {
       // Add length check to prevent DoS
-      if ((transformed.enabledTools as string).length > 10000) {
-        transformed.enabledTools = [];
-        return transformed;
+      if ((tools as string).length > 10000) {
+        enabledTools = [];
+      } else {
+        const parsed = JSON.parse(tools);
+        // Validate parsed data structure
+        enabledTools = Array.isArray(parsed) ? parsed : [];
       }
-      const parsed = JSON.parse(transformed.enabledTools);
-      // Validate parsed data structure
-      transformed.enabledTools = Array.isArray(parsed) ? parsed : [];
     } catch {
-      transformed.enabledTools = [];
+      enabledTools = [];
     }
-  } else if (!transformed.enabledTools) {
-    transformed.enabledTools = [];
+  } else if (Array.isArray(tools)) {
+    enabledTools = tools;
   }
-  return transformed;
+
+  return {
+    id: prompt.id,
+    assistantArchitectId: prompt.assistant_architect_id || prompt.assistantArchitectId,
+    name: prompt.name,
+    content: prompt.content,
+    systemContext: prompt.system_context || prompt.systemContext,
+    modelId: prompt.model_id || prompt.modelId,
+    position: prompt.position,
+    parallelGroup: prompt.parallel_group || prompt.parallelGroup,
+    inputMapping: prompt.input_mapping || prompt.inputMapping,
+    timeoutSeconds: prompt.timeout_seconds || prompt.timeoutSeconds,
+    repositoryIds,
+    enabledTools,
+    createdAt: prompt.created_at || prompt.createdAt,
+    updatedAt: prompt.updated_at || prompt.updatedAt
+  };
 }
 
 // Helper function to validate enabled tools against model capabilities
@@ -200,24 +232,19 @@ export async function createAssistantArchitectAction(
       throw ErrorFactories.dbRecordNotFound("users", session.sub)
     }
 
+    // Create assistant architect via Drizzle
     log.info("Creating assistant architect in database", {
       name: assistant.name,
       userId: currentUser.data.user.id
     })
-    
-    const [architectRaw] = await executeSQL<FormattedRow>(`
-      INSERT INTO assistant_architects (name, description, status, image_path, user_id, created_at, updated_at)
-      VALUES (:name, :description, :status::tool_status, :imagePath, :userId, NOW(), NOW())
-      RETURNING id, name, description, status, image_path, user_id, created_at, updated_at
-    `, [
-      { name: 'name', value: { stringValue: assistant.name } },
-      { name: 'description', value: { stringValue: assistant.description || '' } },
-      { name: 'status', value: { stringValue: assistant.status || 'draft' } },
-      { name: 'imagePath', value: assistant.imagePath ? { stringValue: assistant.imagePath } : { isNull: true } },
-      { name: 'userId', value: { longValue: currentUser.data.user.id } }
-    ]);
 
-    const architect = transformSnakeToCamel<SelectAssistantArchitect>(architectRaw);
+    const architect = await drizzleCreateAssistantArchitect({
+      name: assistant.name,
+      description: assistant.description || null,
+      userId: currentUser.data.user.id,
+      status: (assistant.status || 'draft') as "draft" | "pending_approval" | "approved" | "rejected" | "disabled",
+      imagePath: assistant.imagePath || null
+    });
 
     log.info("Assistant architect created successfully", {
       architectId: architect.id,
@@ -250,51 +277,48 @@ export async function getAssistantArchitectsAction(): Promise<
   const requestId = generateRequestId()
   const timer = startTimer("getAssistantArchitects")
   const log = createLogger({ requestId, action: "getAssistantArchitects" })
-  
-  try {
-    log.info("Action started: Getting assistant architects")
-    
-    const architectsRaw = await executeSQL<FormattedRow>(`
-      SELECT a.id, a.name, a.description, a.status, a.image_path, a.user_id, a.created_at, a.updated_at,
-             u.first_name AS creator_first_name, u.last_name AS creator_last_name, u.email AS creator_email,
-             u.cognito_sub
-      FROM assistant_architects a
-      LEFT JOIN users u ON a.user_id = u.id
-    `);
 
+  try {
+    log.info("Action started: Getting assistant architects via Drizzle")
+
+    // Get all architects with creator info via Drizzle
+    const architects = await drizzleGetAssistantArchitects();
+
+    // For each architect, get input fields, prompts, and cognito_sub in parallel
     const architectsWithRelations = await Promise.all(
-      architectsRaw.map(async (architect: FormattedRow) => {
-        const [inputFieldsRaw, promptsRaw] = await Promise.all([
-          executeSQL<FormattedRow>(`
-            SELECT id, assistant_architect_id, name, label, field_type, position, options, created_at, updated_at
-            FROM tool_input_fields
-            WHERE assistant_architect_id = :toolId
-            ORDER BY position ASC
-          `, [{ name: 'toolId', value: { longValue: Number(architect.id) } }]),
-          executeSQL<FormattedRow>(`
-            SELECT id, assistant_architect_id, name, content, system_context, model_id, position, input_mapping, repository_ids, enabled_tools, created_at, updated_at
-            FROM chain_prompts
-            WHERE assistant_architect_id = :toolId
-            ORDER BY position ASC
-          `, [{ name: 'toolId', value: { longValue: Number(architect.id) } }])
+      architects.map(async (architect) => {
+        const [inputFields, prompts, user] = await Promise.all([
+          getToolInputFields(architect.id),
+          getChainPrompts(architect.id),
+          architect.userId ? getUserById(architect.userId) : Promise.resolve(null)
         ]);
 
-        const inputFields = inputFieldsRaw.map((field) => transformSnakeToCamel<SelectToolInputField>(field));
-        const prompts = promptsRaw.map(transformPrompt);
-        const transformedArchitect = transformSnakeToCamel<SelectAssistantArchitect>(architect);
+        // Transform prompts to handle repositoryIds and enabledTools
+        const transformedPrompts = prompts.map(prompt => ({
+          ...prompt,
+          repositoryIds: parseRepositoryIds(prompt.repositoryIds),
+          enabledTools: Array.isArray(prompt.enabledTools) ? prompt.enabledTools : []
+        }));
 
         return {
-          ...transformedArchitect,
+          id: architect.id,
+          name: architect.name,
+          description: architect.description,
+          status: architect.status,
+          imagePath: architect.imagePath,
+          userId: architect.userId,
+          isParallel: architect.isParallel,
+          timeoutSeconds: architect.timeoutSeconds,
+          createdAt: architect.createdAt,
+          updatedAt: architect.updatedAt,
           inputFields,
-          prompts,
-          creator: architect.creator_first_name && architect.creator_last_name && architect.creator_email
-            ? {
-                firstName: String(architect.creator_first_name),
-                lastName: String(architect.creator_last_name),
-                email: String(architect.creator_email)
-              }
-            : null,
-          cognito_sub: String(architect.cognito_sub)
+          prompts: transformedPrompts,
+          creator: architect.creator ? {
+            firstName: architect.creator.firstName || '',
+            lastName: architect.creator.lastName || '',
+            email: architect.creator.email
+          } : null,
+          cognito_sub: user?.cognitoSub || ''
         };
       })
     );
@@ -302,13 +326,13 @@ export async function getAssistantArchitectsAction(): Promise<
     log.info("Assistant architects retrieved successfully", {
       count: architectsWithRelations.length
     })
-    
+
     timer({ status: "success", count: architectsWithRelations.length })
-    
+
     return createSuccess(architectsWithRelations, "Assistant architects retrieved successfully");
   } catch (error) {
     timer({ status: "error" })
-    
+
     return handleError(error, "Failed to get assistant architects. Please try again or contact support.", {
       context: "getAssistantArchitects",
       requestId,
@@ -322,10 +346,10 @@ export async function getAssistantArchitectByIdAction(
 ): Promise<ActionState<ArchitectWithRelations | undefined>> {
   const requestId = generateRequestId()
   const log = createLogger({ requestId, action: "getAssistantArchitectById" })
-  
+
   try {
-    log.info("Action started: Getting assistant architect by ID", { architectId: id })
-    
+    log.info("Action started: Getting assistant architect by ID via Drizzle", { architectId: id })
+
     // Parse string ID to integer
     const idInt = Number.parseInt(id, 10);
     if (Number.isNaN(idInt)) {
@@ -337,13 +361,10 @@ export async function getAssistantArchitectByIdAction(
       });
     }
 
-    const architectResult = await executeSQL<FormattedRow>(`
-      SELECT id, name, description, status, image_path, user_id, created_at, updated_at
-      FROM assistant_architects
-      WHERE id = :id
-    `, [{ name: 'id', value: { longValue: idInt } }]);
+    // Get architect via Drizzle
+    const architect = await drizzleGetAssistantArchitectById(idInt);
 
-    if (!architectResult || architectResult.length === 0) {
+    if (!architect) {
       throw createError("Assistant architect not found", {
         code: "NOT_FOUND",
         level: ErrorLevel.WARN,
@@ -351,31 +372,22 @@ export async function getAssistantArchitectByIdAction(
       });
     }
 
-    const architect = transformSnakeToCamel<SelectAssistantArchitect>(architectResult[0]);
-    
-    // Get input fields and prompts using data API
-    const [inputFieldsRaw, promptsRaw] = await Promise.all([
-      executeSQL<FormattedRow>(`
-        SELECT id, assistant_architect_id, name, label, field_type, position, options, created_at, updated_at
-        FROM tool_input_fields
-        WHERE assistant_architect_id = :toolId
-        ORDER BY position ASC
-      `, [{ name: 'toolId', value: { longValue: idInt } }]),
-      executeSQL<FormattedRow>(`
-        SELECT id, assistant_architect_id, name, content, system_context, model_id, position, input_mapping, parallel_group, repository_ids, enabled_tools, created_at, updated_at
-        FROM chain_prompts
-        WHERE assistant_architect_id = :toolId
-        ORDER BY position ASC
-      `, [{ name: 'toolId', value: { longValue: idInt } }])
+    // Get input fields and prompts in parallel via Drizzle
+    const [inputFields, prompts] = await Promise.all([
+      getToolInputFields(idInt),
+      getChainPrompts(idInt)
     ]);
 
-    // Transform snake_case to camelCase for frontend compatibility
-    const transformedInputFields = (inputFieldsRaw || []).map((field) => transformSnakeToCamel<SelectToolInputField>(field));
-    const transformedPrompts = (promptsRaw || []).map(transformPrompt);
+    // Transform prompts to handle repositoryIds and enabledTools
+    const transformedPrompts = prompts.map(prompt => ({
+      ...prompt,
+      repositoryIds: parseRepositoryIds(prompt.repositoryIds),
+      enabledTools: Array.isArray(prompt.enabledTools) ? prompt.enabledTools : []
+    }));
 
     const architectWithRelations: ArchitectWithRelations = {
       ...architect,
-      inputFields: transformedInputFields,
+      inputFields,
       prompts: transformedPrompts
     };
 
@@ -393,58 +405,46 @@ export async function getPendingAssistantArchitectsAction(): Promise<
   const requestId = generateRequestId()
   const timer = startTimer("getPendingAssistantArchitects")
   const log = createLogger({ requestId, action: "getPendingAssistantArchitects" })
-  
+
   try {
-    log.info("Action started: Getting pending assistant architects")
-    
+    log.info("Action started: Getting pending assistant architects via Drizzle")
+
     const session = await getServerSession();
     if (!session || !session.sub) {
       log.warn("Unauthorized pending assistant architects access attempt")
       return { isSuccess: false, message: "Unauthorized" }
     }
-    
+
     log.debug("User authenticated", { userId: session.sub })
 
-    // Check if user is an administrator using Cognito sub
-    const isAdmin = await checkUserRoleByCognitoSub(session.sub, "administrator")
+    // Check if user is an administrator
+    const isAdmin = await hasRole("administrator")
     if (!isAdmin) {
       return { isSuccess: false, message: "Only administrators can view pending tools" }
     }
 
-    // Get pending tools using data API
-    const pendingTools = await executeSQL<FormattedRow>(`
-      SELECT id, name, description, status, image_path, user_id, created_at, updated_at
-      FROM assistant_architects
-      WHERE status = 'pending_approval'
-      ORDER BY created_at DESC
-    `);
+    // Get pending tools via Drizzle
+    const pendingTools = await drizzleGetPendingAssistantArchitects();
 
     // For each tool, get its input fields and prompts
     const toolsWithRelations = await Promise.all(
-      pendingTools.map(async (tool: FormattedRow) => {
-        const [inputFieldsRaw, promptsRaw] = await Promise.all([
-          executeSQL<FormattedRow>(`
-            SELECT id, assistant_architect_id, name, label, field_type, position, options, created_at, updated_at
-            FROM tool_input_fields
-            WHERE assistant_architect_id = :toolId
-            ORDER BY position ASC
-          `, [{ name: 'toolId', value: { longValue: Number(tool.id) } }]),
-          executeSQL<FormattedRow>(`
-            SELECT id, assistant_architect_id, name, content, system_context, model_id, position, input_mapping, repository_ids, enabled_tools, created_at, updated_at
-            FROM chain_prompts
-            WHERE assistant_architect_id = :toolId
-            ORDER BY position ASC
-          `, [{ name: 'toolId', value: { longValue: Number(tool.id) } }])
+      pendingTools.map(async (tool) => {
+        const [inputFields, prompts] = await Promise.all([
+          getToolInputFields(tool.id),
+          getChainPrompts(tool.id)
         ]);
 
-        const transformedTool = transformSnakeToCamel<SelectAssistantArchitect>(tool);
-        const inputFields = inputFieldsRaw.map((field) => transformSnakeToCamel<SelectToolInputField>(field));
-        const prompts = promptsRaw.map(transformPrompt);
+        // Transform prompts to handle repositoryIds and enabledTools
+        const transformedPrompts = prompts.map(prompt => ({
+          ...prompt,
+          repositoryIds: parseRepositoryIds(prompt.repositoryIds),
+          enabledTools: Array.isArray(prompt.enabledTools) ? prompt.enabledTools : []
+        }));
 
         return {
-          ...transformedTool,
+          ...tool,
           inputFields: inputFields || [],
-          prompts: prompts || []
+          prompts: transformedPrompts || []
         };
       })
     );
@@ -453,7 +453,7 @@ export async function getPendingAssistantArchitectsAction(): Promise<
       count: toolsWithRelations.length
     })
     timer({ status: "success", count: toolsWithRelations.length })
-    
+
     return {
       isSuccess: true,
       message: "Pending Assistant Architects retrieved successfully",
