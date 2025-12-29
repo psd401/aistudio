@@ -122,8 +122,14 @@ WHERE r.name = 'staff' AND t.identifier = 'assistant-architect';
 
 **Example:**
 ```typescript
+import { executeQuery } from "@/lib/db/drizzle-client";
+import { users } from "@/lib/db/schema";
+
 try {
-  await executeSQL(`INSERT INTO users (email) VALUES (:email)`, params);
+  await executeQuery(
+    (db) => db.insert(users).values({ email: params.email }),
+    "insertUser"
+  );
 } catch (error) {
   // Logged with full stack trace
   throw ErrorFactories.databaseError(error);
@@ -132,10 +138,12 @@ try {
 
 **Debugging:**
 ```typescript
-// Enable query logging
-const result = await executeSQL(query, params, {
-  logQueries: true  // Logs SQL + params
-});
+// Queries are automatically logged with context
+// Check logs for requestId and operation name
+const result = await executeQuery(
+  (db) => db.select().from(users),
+  "debugQuery"  // Shows in logs as "executeWithRetry_debugQuery"
+);
 ```
 
 ### Not Found Errors
