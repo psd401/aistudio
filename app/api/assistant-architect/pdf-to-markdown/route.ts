@@ -1,5 +1,3 @@
-"use server"
-
 import { NextRequest, NextResponse } from 'next/server'
 import { generateCompletion } from '@/lib/ai-helpers'
 import { getServerSession } from '@/lib/auth/server-session'
