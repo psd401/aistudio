@@ -22,7 +22,6 @@ import {
   nexusConversations,
   nexusMessages,
   nexusFolders,
-  aiModels,
 } from "@/lib/db/schema";
 import {
   calculateOffset,
@@ -33,7 +32,7 @@ import {
 } from "./pagination";
 import { buildMultiColumnSearch } from "./search";
 import { combineAnd, eqOrSkip, inArrayOrSkip } from "./filters";
-import { buildSort, buildPinnedFirstSort, buildRecentActivitySort } from "./sorting";
+import { buildPinnedFirstSort } from "./sorting";
 
 // ============================================
 // Types - Users

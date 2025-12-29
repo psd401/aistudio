@@ -10,7 +10,7 @@
  */
 
 import { asc, desc, sql, type SQL } from "drizzle-orm";
-import type { PgColumn, PgTable } from "drizzle-orm/pg-core";
+import type { PgColumn } from "drizzle-orm/pg-core";
 
 // ============================================
 // Types
