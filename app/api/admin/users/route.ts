@@ -18,7 +18,7 @@ export async function GET() {
       return authError;
     }
     
-    // Get users from database via Data API
+    // Get users from database
     const dbUsers = await getUsers();
     
     // Get all user roles

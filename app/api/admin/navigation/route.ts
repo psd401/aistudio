@@ -22,7 +22,7 @@ export async function GET() {
     // Get all navigation items (not just active ones for admin)
     const navItems = await getNavigationItems(false)
     
-    // Items are already in camelCase from the data adapter
+    // Items are already in camelCase from Drizzle
     const transformedItems = navItems
 
     log.info("Navigation items retrieved successfully", { count: transformedItems.length });

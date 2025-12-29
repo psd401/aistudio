@@ -1,3 +1,5 @@
+"use server"
+
 import { NextRequest, NextResponse } from 'next/server'
 import { generateCompletion } from '@/lib/ai-helpers'
 import { getServerSession } from '@/lib/auth/server-session'
@@ -6,8 +8,6 @@ import { getCurrentUserAction } from '@/actions/db/get-current-user-action'
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { getErrorMessage } from "@/types/errors"
 import { ErrorFactories } from "@/lib/error-utils"
-
-// Note: This is an API route handler (no "use server" needed)
 
 // Easily change the model id here
 const PDF_TO_MARKDOWN_MODEL_ID = 20
