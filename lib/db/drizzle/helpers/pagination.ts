@@ -102,6 +102,7 @@ export const MIN_PAGE = 1;
  * @param params - Pagination parameters
  * @param maxLimit - Maximum allowed limit (default: MAX_PAGE_SIZE)
  * @returns Object with offset and limit values
+ * @throws Error if maxLimit is invalid (not a positive number)
  *
  * @example
  * ```typescript
@@ -115,8 +116,26 @@ export function calculateOffset(
   params: OffsetPaginationParams,
   maxLimit: number = MAX_PAGE_SIZE
 ): { offset: number; limit: number } {
-  const page = Math.max(MIN_PAGE, params.page ?? MIN_PAGE);
-  const limit = Math.min(Math.max(1, params.limit ?? DEFAULT_PAGE_SIZE), maxLimit);
+  // Validate maxLimit
+  if (!Number.isFinite(maxLimit) || maxLimit < 1) {
+    throw new Error(`Invalid maxLimit: ${maxLimit}. Must be a positive number.`);
+  }
+
+  // Safely coerce page to number, handling NaN/Infinity/undefined
+  const rawPage = params.page ?? MIN_PAGE;
+  const page = Number.isFinite(rawPage) && rawPage >= MIN_PAGE ? rawPage : MIN_PAGE;
+
+  // Safely coerce limit to number, handling NaN/Infinity/undefined/zero
+  const rawLimit = params.limit ?? DEFAULT_PAGE_SIZE;
+  let limit: number;
+  if (Number.isFinite(rawLimit)) {
+    // Finite number - ensure minimum of 1, maximum of maxLimit
+    limit = Math.min(Math.max(1, rawLimit), maxLimit);
+  } else {
+    // NaN/Infinity - use default page size
+    limit = Math.min(DEFAULT_PAGE_SIZE, maxLimit);
+  }
+
   const offset = (page - 1) * limit;
 
   return { offset, limit };

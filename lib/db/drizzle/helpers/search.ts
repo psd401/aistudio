@@ -50,14 +50,26 @@ export interface MultiColumnSearchConfig {
 /**
  * Escape special SQL LIKE pattern characters
  *
+ * NOTE: This is NOT for SQL injection prevention (Drizzle handles that via parameterization).
+ * This escapes LIKE wildcards so they're treated as literal characters.
+ *
+ * Without escaping: searching for "50%" would match "50abc", "50xyz", etc.
+ * With escaping: searching for "50%" matches only the literal string "50%"
+ *
  * @param value - String to escape
  * @returns Escaped string safe for LIKE patterns
+ *
+ * @example
+ * ```typescript
+ * escapeSearchPattern("50%")  // Returns "50\\%"
+ * escapeSearchPattern("_test")  // Returns "\\_test"
+ * ```
  */
 export function escapeSearchPattern(value: string): string {
   return value
-    .replace(/\\/g, "\\\\")
-    .replace(/%/g, "\\%")
-    .replace(/_/g, "\\_");
+    .replace(/\\/g, "\\\\")  // Escape backslashes first
+    .replace(/%/g, "\\%")     // Escape % wildcard (matches any characters)
+    .replace(/_/g, "\\_");    // Escape _ wildcard (matches single character)
 }
 
 /**
@@ -66,8 +78,14 @@ export function escapeSearchPattern(value: string): string {
  * @param term - Search term
  * @param options - Search options
  * @returns Search pattern with appropriate wildcards
+ * @throws Error if term is not a string
  */
 export function buildSearchPattern(term: string, options: SearchOptions = {}): string {
+  // Validate input is a string
+  if (typeof term !== "string") {
+    throw new TypeError(`Search term must be a string. Received: ${typeof term}`);
+  }
+
   const escaped = escapeSearchPattern(term.trim());
 
   if (options.exactMatch) {

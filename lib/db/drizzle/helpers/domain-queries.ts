@@ -11,7 +11,7 @@
  * @see /docs/database/drizzle-relational-queries.md
  */
 
-import { eq, and, or, desc, isNull, inArray } from "drizzle-orm";
+import { eq, and, or, desc, isNull, inArray, sql } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   users,
@@ -271,6 +271,7 @@ export async function getUsersWithRoles(
   let totalCount: number;
   if (hasRoleFilter) {
     // Count distinct users who have the specified role(s)
+    // Use COUNT(DISTINCT users.id) not SELECT DISTINCT count(*)
     const countConditions = combineAnd(
       searchCondition,
       filters.roleName ? eq(roles.name, filters.roleName) : undefined,
@@ -282,7 +283,7 @@ export async function getUsersWithRoles(
     const [{ count }] = await executeQuery(
       (db) =>
         db
-          .selectDistinct({ count: countAsInt })
+          .select({ count: sql<number>`count(distinct ${users.id})::int` })
           .from(users)
           .innerJoin(userRoles, eq(users.id, userRoles.userId))
           .innerJoin(roles, eq(userRoles.roleId, roles.id))
@@ -484,39 +485,57 @@ export async function getConversationsWithMessages(
   const folderMap = new Map(foldersData.map((f) => [f.id, f]));
 
   // Get recent messages for each conversation (last 3)
+  // Uses window function to limit at database level for efficiency
   const conversationIds = conversationsData.map((c) => c.id);
+
   const messagesData = await executeQuery(
-    (db) =>
-      db
+    (db) => {
+      // Use CTE with window function to fetch only top 3 messages per conversation
+      const rankedMessages = db.$with("ranked_messages").as(
+        db
+          .select({
+            conversationId: nexusMessages.conversationId,
+            id: nexusMessages.id,
+            role: nexusMessages.role,
+            content: nexusMessages.content,
+            createdAt: nexusMessages.createdAt,
+            rn: sql<number>`ROW_NUMBER() OVER (PARTITION BY ${nexusMessages.conversationId} ORDER BY ${nexusMessages.createdAt} DESC)`.as(
+              "rn"
+            ),
+          })
+          .from(nexusMessages)
+          .where(inArray(nexusMessages.conversationId, conversationIds))
+      );
+
+      return db
+        .with(rankedMessages)
         .select({
-          conversationId: nexusMessages.conversationId,
-          id: nexusMessages.id,
-          role: nexusMessages.role,
-          content: nexusMessages.content,
-          createdAt: nexusMessages.createdAt,
+          conversationId: rankedMessages.conversationId,
+          id: rankedMessages.id,
+          role: rankedMessages.role,
+          content: rankedMessages.content,
+          createdAt: rankedMessages.createdAt,
         })
-        .from(nexusMessages)
-        .where(inArray(nexusMessages.conversationId, conversationIds))
-        .orderBy(desc(nexusMessages.createdAt)),
+        .from(rankedMessages)
+        .where(sql`${rankedMessages.rn} <= 3`);
+    },
     "getConversationsWithMessages.messages"
   );
 
-  // Group messages by conversation (limit to 3 per conversation)
+  // Group messages by conversation
   const messageMap = new Map<
     string,
     Array<{ id: string; role: string; content: string | null; createdAt: Date | null }>
   >();
   for (const m of messagesData) {
     const existing = messageMap.get(m.conversationId) || [];
-    if (existing.length < 3) {
-      existing.push({
-        id: m.id,
-        role: m.role,
-        content: m.content,
-        createdAt: m.createdAt,
-      });
-      messageMap.set(m.conversationId, existing);
-    }
+    existing.push({
+      id: m.id,
+      role: m.role,
+      content: m.content,
+      createdAt: m.createdAt,
+    });
+    messageMap.set(m.conversationId, existing);
   }
 
   // Combine data

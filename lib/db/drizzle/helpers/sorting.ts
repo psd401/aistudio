@@ -116,7 +116,7 @@ export function buildMultiSort(configs: SortConfig[]): SQL[] {
  * @param direction - Sort direction (default: "desc")
  * @param defaultColumn - Fallback column if field is invalid
  * @returns SQL order by expression
- * @throws Error if field is invalid and no default provided
+ * @throws Error if field is invalid and no default provided, or if direction is invalid
  *
  * @example
  * ```typescript
@@ -141,6 +141,11 @@ export function buildSortFromField<T extends string>(
   direction: SortDirection = "desc",
   defaultColumn?: PgColumn
 ): SQL {
+  // Validate direction
+  if (direction !== "asc" && direction !== "desc") {
+    throw new Error(`Invalid sort direction: "${direction}". Must be "asc" or "desc".`);
+  }
+
   const column = sortableColumns[field as T];
 
   if (!column) {
