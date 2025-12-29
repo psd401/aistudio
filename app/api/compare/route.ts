@@ -3,23 +3,15 @@ import { streamText } from 'ai';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
-import { executeSQL } from '@/lib/db/data-api-adapter';
-import { transformSnakeToCamel } from '@/lib/db/field-mapper';
+import { executeQuery } from '@/lib/db/drizzle-client';
+import { eq, inArray } from 'drizzle-orm';
+import { modelComparisons, aiModels } from '@/lib/db/schema';
 import { hasToolAccess } from '@/utils/roles';
 import { createProviderModel } from '@/lib/ai/provider-factory';
 import { mergeStreamsWithIdentifiers, asyncGeneratorToStream } from '@/lib/compare/dual-stream-merger';
 
 // Allow streaming responses up to 5 minutes
 export const maxDuration = 300;
-
-// Type definition for database model rows
-interface ModelRow {
-  id: number;
-  provider: string;
-  modelId: string;
-  name: string;
-  chatEnabled: boolean;
-}
 
 // Input validation schema for compare requests
 const CompareRequestSchema = z.object({
@@ -102,19 +94,18 @@ export async function POST(req: Request) {
     // 5. Validate both models exist and are active
     log.debug('Querying for models', { model1Id, model2Id });
 
-    const modelsResultRaw = await executeSQL(
-      `SELECT id, provider, model_id, name, chat_enabled
-       FROM ai_models
-       WHERE model_id IN (:model1Id, :model2Id)
-       AND active = true`,
-      [
-        { name: 'model1Id', value: { stringValue: model1Id } },
-        { name: 'model2Id', value: { stringValue: model2Id } }
-      ]
+    const modelsResult = await executeQuery(
+      (db) => db.select({
+        id: aiModels.id,
+        provider: aiModels.provider,
+        modelId: aiModels.modelId,
+        name: aiModels.name,
+        chatEnabled: aiModels.chatEnabled
+      })
+      .from(aiModels)
+      .where(inArray(aiModels.modelId, [model1Id, model2Id])),
+      'getModelsForComparison'
     );
-
-    // Transform snake_case fields to camelCase using field mapper utility
-    const modelsResult = modelsResultRaw.map(row => transformSnakeToCamel<ModelRow>(row));
 
     log.debug('Database query results', {
       foundCount: modelsResult.length,
@@ -202,27 +193,26 @@ export async function POST(req: Request) {
     }));
 
     // 6. Create comparison record for tracking
-    const comparisonResult = await executeSQL(
-      `INSERT INTO model_comparisons (
-        user_id, prompt, model1_id, model2_id, model1_name, model2_name,
-        metadata, created_at, updated_at
-      ) VALUES (
-        :userId, :prompt, :model1Id, :model2Id, :model1Name, :model2Name,
-        :metadata::jsonb, NOW(), NOW()
-      ) RETURNING id`,
-      [
-        { name: 'userId', value: { longValue: userId } },
-        { name: 'prompt', value: { stringValue: prompt } },
-        { name: 'model1Id', value: { longValue: Number(model1Config.id) } },
-        { name: 'model2Id', value: { longValue: Number(model2Config.id) } },
-        { name: 'model1Name', value: { stringValue: model1Name || String(model1Config.name) } },
-        { name: 'model2Name', value: { stringValue: model2Name || String(model2Config.name) } },
-        { name: 'metadata', value: { stringValue: JSON.stringify({
-          source: 'compare-streaming',
-          requestId,
-          sessionId: session.sub
-        }) } }
-      ]
+    const now = new Date();
+    const comparisonResult = await executeQuery(
+      (db) => db.insert(modelComparisons)
+        .values({
+          userId,
+          prompt,
+          model1Id: Number(model1Config.id),
+          model2Id: Number(model2Config.id),
+          model1Name: model1Name || String(model1Config.name),
+          model2Name: model2Name || String(model2Config.name),
+          metadata: {
+            source: 'compare-streaming',
+            requestId,
+            sessionId: session.sub
+          },
+          createdAt: now,
+          updatedAt: now
+        })
+        .returning({ id: modelComparisons.id }),
+      'createComparisonRecord'
     );
 
     const comparisonId = Number(comparisonResult[0].id);
@@ -257,19 +247,16 @@ export async function POST(req: Request) {
       onFinish: async ({ text, usage, finishReason }) => {
         // Save Model 1 response
         try {
-          await executeSQL(
-            `UPDATE model_comparisons
-             SET response1 = :response,
-                 execution_time_ms1 = :executionTime,
-                 tokens_used1 = :tokensUsed,
-                 updated_at = NOW()
-             WHERE id = :comparisonId`,
-            [
-              { name: 'response', value: { stringValue: text } },
-              { name: 'executionTime', value: { longValue: Date.now() - timerStartTime } },
-              { name: 'tokensUsed', value: { longValue: usage?.totalTokens || 0 } },
-              { name: 'comparisonId', value: { longValue: comparisonId } }
-            ]
+          await executeQuery(
+            (db) => db.update(modelComparisons)
+              .set({
+                response1: text,
+                executionTimeMs1: Date.now() - timerStartTime,
+                tokensUsed1: usage?.totalTokens || 0,
+                updatedAt: new Date()
+              })
+              .where(eq(modelComparisons.id, comparisonId)),
+            'saveModel1Response'
           );
 
           log.info('Model 1 response saved', {
@@ -298,19 +285,16 @@ export async function POST(req: Request) {
       onFinish: async ({ text, usage, finishReason }) => {
         // Save Model 2 response
         try {
-          await executeSQL(
-            `UPDATE model_comparisons
-             SET response2 = :response,
-                 execution_time_ms2 = :executionTime,
-                 tokens_used2 = :tokensUsed,
-                 updated_at = NOW()
-             WHERE id = :comparisonId`,
-            [
-              { name: 'response', value: { stringValue: text } },
-              { name: 'executionTime', value: { longValue: Date.now() - timerStartTime } },
-              { name: 'tokensUsed', value: { longValue: usage?.totalTokens || 0 } },
-              { name: 'comparisonId', value: { longValue: comparisonId } }
-            ]
+          await executeQuery(
+            (db) => db.update(modelComparisons)
+              .set({
+                response2: text,
+                executionTimeMs2: Date.now() - timerStartTime,
+                tokensUsed2: usage?.totalTokens || 0,
+                updatedAt: new Date()
+              })
+              .where(eq(modelComparisons.id, comparisonId)),
+            'saveModel2Response'
           );
 
           log.info('Model 2 response saved', {

@@ -2,9 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { ErrorFactories } from "@/lib/error-utils"
-import { executeSQL } from "@/lib/db/data-api-adapter"
-import { transformSnakeToCamel } from "@/lib/db/field-mapper"
-import type { SqlParameter } from "@aws-sdk/client-rds-data"
+import { getExecutionResultById, getUserIdByCognitoSub, deleteExecutionResult } from "@/lib/db/drizzle"
 
 interface ExecutionResult {
   id: number
@@ -45,52 +43,21 @@ async function getHandler(
     }
 
     // Get user ID from database using cognito sub
-    const userResult = await executeSQL(`
-      SELECT id FROM users WHERE cognito_sub = :cognitoSub
-    `, [{ name: 'cognitoSub', value: { stringValue: session.sub } }])
+    const userIdString = await getUserIdByCognitoSub(session.sub)
 
-    if (!userResult || userResult.length === 0) {
+    if (!userIdString) {
       throw ErrorFactories.dbRecordNotFound("users", session.sub)
     }
 
-    // SECURITY FIX: Use safe parsing for user ID from database result
-    const userIdRaw = userResult[0].id
-    if (typeof userIdRaw !== 'number' && typeof userIdRaw !== 'string') {
-      throw ErrorFactories.invalidInput("userId", userIdRaw, "invalid user ID format from database")
-    }
-
-    const userId = Number(userIdRaw)
+    const userId = Number(userIdString)
     if (!Number.isInteger(userId) || userId <= 0) {
-      throw ErrorFactories.invalidInput("userId", userIdRaw, "must be a positive integer")
+      throw ErrorFactories.invalidInput("userId", userIdString, "must be a positive integer")
     }
 
     // Get execution result with all related data - includes access control check
-    const sql = `
-      SELECT
-        er.id,
-        er.scheduled_execution_id,
-        er.result_data,
-        er.status,
-        er.executed_at,
-        er.execution_duration_ms,
-        er.error_message,
-        se.name as schedule_name,
-        se.user_id,
-        aa.name as assistant_architect_name
-      FROM execution_results er
-      JOIN scheduled_executions se ON er.scheduled_execution_id = se.id
-      JOIN assistant_architects aa ON se.assistant_architect_id = aa.id
-      WHERE er.id = :result_id AND se.user_id = :user_id
-    `
+    const result = await getExecutionResultById(resultId, userId)
 
-    const parameters: SqlParameter[] = [
-      { name: 'result_id', value: { longValue: resultId } },
-      { name: 'user_id', value: { longValue: userId } }
-    ]
-
-    const results = await executeSQL(sql, parameters)
-
-    if (!results || results.length === 0) {
+    if (!result) {
       log.warn("Execution result not found or access denied", { resultId, userId })
       return NextResponse.json(
         { error: "Execution result not found" },
@@ -99,31 +66,17 @@ async function getHandler(
     }
 
     // Transform the result
-    const rawResult = transformSnakeToCamel<Record<string, unknown>>(results[0])
-
     const executionResult: ExecutionResult = {
-      id: Number(rawResult.id),
-      scheduledExecutionId: Number(rawResult.scheduledExecutionId),
-      resultData: (() => {
-        try {
-          return typeof rawResult.resultData === 'string'
-            ? JSON.parse(rawResult.resultData)
-            : rawResult.resultData || {};
-        } catch (error) {
-          log.warn('Invalid JSON in resultData', {
-            resultId: rawResult.id,
-            error: error instanceof Error ? error.message : 'Unknown error'
-          });
-          return {};
-        }
-      })(),
-      status: String(rawResult.status) as 'success' | 'failed' | 'running',
-      executedAt: rawResult.executedAt ? new Date(String(rawResult.executedAt) + ' UTC').toISOString() : '',
-      executionDurationMs: Number(rawResult.executionDurationMs),
-      errorMessage: rawResult.errorMessage ? String(rawResult.errorMessage) : null,
-      scheduleName: String(rawResult.scheduleName),
-      userId: Number(rawResult.userId),
-      assistantArchitectName: String(rawResult.assistantArchitectName)
+      id: result.id,
+      scheduledExecutionId: result.scheduledExecutionId,
+      resultData: result.resultData || {},
+      status: result.status as 'success' | 'failed' | 'running',
+      executedAt: result.executedAt?.toISOString() || '',
+      executionDurationMs: result.executionDurationMs || 0,
+      errorMessage: result.errorMessage || null,
+      scheduleName: result.scheduleName,
+      userId: result.userId,
+      assistantArchitectName: result.assistantArchitectName
     }
 
     timer({ status: "success" })
@@ -199,59 +152,27 @@ async function deleteHandler(
     }
 
     // Get user ID from database using cognito sub
-    const userResult = await executeSQL(`
-      SELECT id FROM users WHERE cognito_sub = :cognitoSub
-    `, [{ name: 'cognitoSub', value: { stringValue: session.sub } }])
+    const userIdString = await getUserIdByCognitoSub(session.sub)
 
-    if (!userResult || userResult.length === 0) {
+    if (!userIdString) {
       throw ErrorFactories.dbRecordNotFound("users", session.sub)
     }
 
-    // SECURITY FIX: Use safe parsing for user ID from database result
-    const userIdRaw = userResult[0].id
-    if (typeof userIdRaw !== 'number' && typeof userIdRaw !== 'string') {
-      throw ErrorFactories.invalidInput("userId", userIdRaw, "invalid user ID format from database")
-    }
-
-    const userId = Number(userIdRaw)
+    const userId = Number(userIdString)
     if (!Number.isInteger(userId) || userId <= 0) {
-      throw ErrorFactories.invalidInput("userId", userIdRaw, "must be a positive integer")
+      throw ErrorFactories.invalidInput("userId", userIdString, "must be a positive integer")
     }
 
-    // First check if the execution result exists and belongs to the user
-    const checkSql = `
-      SELECT er.id
-      FROM execution_results er
-      JOIN scheduled_executions se ON er.scheduled_execution_id = se.id
-      WHERE er.id = :result_id AND se.user_id = :user_id
-    `
+    // Delete the execution result with access control check
+    const deleted = await deleteExecutionResult(resultId, userId)
 
-    const checkParameters: SqlParameter[] = [
-      { name: 'result_id', value: { longValue: resultId } },
-      { name: 'user_id', value: { longValue: userId } }
-    ]
-
-    const checkResults = await executeSQL(checkSql, checkParameters)
-
-    if (!checkResults || checkResults.length === 0) {
+    if (!deleted) {
       log.warn("Execution result not found or access denied for deletion", { resultId, userId })
       return NextResponse.json(
         { error: "Execution result not found" },
         { status: 404 }
       )
     }
-
-    // Delete the execution result
-    const deleteSql = `
-      DELETE FROM execution_results
-      WHERE id = :result_id
-    `
-
-    const deleteParameters: SqlParameter[] = [
-      { name: 'result_id', value: { longValue: resultId } }
-    ]
-
-    await executeSQL(deleteSql, deleteParameters)
 
     timer({ status: "success" })
     log.info("Execution result deleted successfully", { resultId, userId })

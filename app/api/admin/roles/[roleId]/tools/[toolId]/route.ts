@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
-import { assignToolToRole, removeToolFromRole } from "@/lib/db/data-api-adapter"
+import { assignToolToRole, removeToolFromRole } from "@/lib/db/drizzle"
 import { requireAdmin } from "@/lib/auth/admin-check"
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { getErrorMessage } from "@/types/errors";
@@ -25,7 +25,7 @@ export async function POST(
     
     const { roleId, toolId } = await params
     log.debug("Assigning tool to role", { roleId, toolId });
-    const success = await assignToolToRole(roleId, toolId)
+    const success = await assignToolToRole(Number.parseInt(roleId), Number.parseInt(toolId))
     
     log.info("Tool assigned to role successfully", { roleId, toolId });
     timer({ status: "success" });
@@ -61,7 +61,7 @@ export async function DELETE(
     
     const { roleId, toolId } = await params
     log.debug("Removing tool from role", { roleId, toolId });
-    const success = await removeToolFromRole(roleId, toolId)
+    const success = await removeToolFromRole(Number.parseInt(roleId), Number.parseInt(toolId))
     
     log.info("Tool removed from role successfully", { roleId, toolId });
     timer({ status: "success" });

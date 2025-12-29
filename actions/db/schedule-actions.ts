@@ -1,6 +1,6 @@
 "use server"
 
-import { hasToolAccess } from "@/lib/db/data-api-adapter"
+import { hasToolAccess } from "@/lib/db/drizzle"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
 import { getServerSession } from "@/lib/auth/server-session"

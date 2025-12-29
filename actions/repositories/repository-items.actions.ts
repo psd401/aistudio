@@ -1,8 +1,16 @@
 "use server"
 
 import { getServerSession } from "@/lib/auth/server-session"
-import { executeSQL } from "@/lib/db/data-api-adapter"
-import { executeTransaction as drizzleTransaction, repositoryItems, repositoryItemChunks } from "@/lib/db/drizzle-client"
+import { executeTransaction as drizzleTransaction, executeQuery, repositoryItems, repositoryItemChunks } from "@/lib/db/drizzle-client"
+import { eq, and, sql, desc } from "drizzle-orm"
+import {
+  createRepositoryItem,
+  getRepositoryItemById,
+  getRepositoryItems,
+  getRepositoryItemChunks,
+  deleteRepositoryItem,
+  updateRepositoryItemStatus
+} from "@/lib/db/drizzle"
 import { type ActionState } from "@/types/actions-types"
 import { hasToolAccess } from "@/utils/roles"
 import {
@@ -176,31 +184,40 @@ export async function addDocumentItem(
     
     log.debug("Document uploaded to S3 successfully", { s3Key: key })
 
-    // Create repository item
+    // Create repository item via Drizzle
     log.info("Creating repository item in database", {
       repositoryId: input.repository_id,
       type: 'document',
       source: key
     })
-    
-    const result = await executeSQL<RepositoryItem>(
-      `INSERT INTO repository_items (repository_id, type, name, source, metadata, processing_status)
-       VALUES (:repository_id, 'document', :name, :source, :metadata::jsonb, 'pending')
-       RETURNING *`,
-      [
-        { name: "repository_id", value: { longValue: input.repository_id } },
-        { name: "name", value: { stringValue: input.name } },
-        { name: "source", value: { stringValue: key } },
-        { name: "metadata", value: { stringValue: JSON.stringify({
-          contentType: input.file.contentType,
-          size: input.file.size,
-          s3_url: url,
-          originalFileName: input.file.fileName
-        }) } }
-      ]
-    )
 
-    const item = result[0]
+    const itemRaw = await createRepositoryItem({
+      repositoryId: input.repository_id,
+      type: 'document',
+      name: input.name,
+      source: key,
+      metadata: {
+        contentType: input.file.contentType,
+        size: input.file.size,
+        s3_url: url,
+        originalFileName: input.file.fileName
+      },
+      processingStatus: 'pending'
+    })
+
+    // Convert to action type
+    const item: RepositoryItem = {
+      id: itemRaw.id,
+      repositoryId: itemRaw.repositoryId,
+      type: itemRaw.type as 'document' | 'url' | 'text',
+      name: itemRaw.name,
+      source: itemRaw.source,
+      metadata: itemRaw.metadata ?? {},
+      processingStatus: itemRaw.processingStatus ?? 'pending',
+      processingError: itemRaw.processingError,
+      createdAt: itemRaw.createdAt ?? new Date(),
+      updatedAt: itemRaw.updatedAt ?? new Date()
+    }
 
     // Queue the document for processing
     log.info("Queueing document for processing", {
@@ -297,31 +314,40 @@ export async function addDocumentWithPresignedUrl(
       throw ErrorFactories.authzOwnerRequired("add items to repository")
     }
 
-    // Create repository item with S3 key reference
+    // Create repository item with S3 key reference via Drizzle
     log.info("Creating repository item in database", {
       repositoryId: input.repository_id,
       type: 'document',
       s3Key: input.s3Key
     })
-    
-    const result = await executeSQL<RepositoryItem>(
-      `INSERT INTO repository_items (repository_id, type, name, source, metadata, processing_status)
-       VALUES (:repository_id, 'document', :name, :source, :metadata::jsonb, 'pending')
-       RETURNING *`,
-      [
-        { name: "repository_id", value: { longValue: input.repository_id } },
-        { name: "name", value: { stringValue: input.name } },
-        { name: "source", value: { stringValue: input.s3Key } },
-        { name: "metadata", value: { stringValue: JSON.stringify({
-          contentType: input.metadata.contentType,
-          size: input.metadata.size,
-          originalFileName: input.metadata.originalFileName,
-          uploadedAt: new Date().toISOString()
-        }) } }
-      ]
-    )
 
-    const item = result[0]
+    const itemRaw = await createRepositoryItem({
+      repositoryId: input.repository_id,
+      type: 'document',
+      name: input.name,
+      source: input.s3Key,
+      metadata: {
+        contentType: input.metadata.contentType,
+        size: input.metadata.size,
+        originalFileName: input.metadata.originalFileName,
+        uploadedAt: new Date().toISOString()
+      },
+      processingStatus: 'pending'
+    })
+
+    // Convert to action type
+    const item: RepositoryItem = {
+      id: itemRaw.id,
+      repositoryId: itemRaw.repositoryId,
+      type: itemRaw.type as 'document' | 'url' | 'text',
+      name: itemRaw.name,
+      source: itemRaw.source,
+      metadata: itemRaw.metadata ?? {},
+      processingStatus: itemRaw.processingStatus ?? 'pending',
+      processingError: itemRaw.processingError,
+      createdAt: itemRaw.createdAt ?? new Date(),
+      updatedAt: itemRaw.updatedAt ?? new Date()
+    }
 
     // Queue for processing (embedding generation, etc.)
     log.info("Queueing document for processing", {
@@ -410,7 +436,7 @@ export async function addUrlItem(
     if (!input.name || input.name.trim().length === 0) {
       return { isSuccess: false, message: "Name is required" }
     }
-    
+
     if (!input.url || !validateUrl(input.url)) {
       return { isSuccess: false, message: "Valid HTTP/HTTPS URL is required" }
     }
@@ -429,32 +455,35 @@ export async function addUrlItem(
       throw ErrorFactories.authzOwnerRequired("add items to repository")
     }
 
-    // Validate URL
-    try {
-      new URL(input.url)
-    } catch {
-      return { isSuccess: false, message: "Invalid URL" }
-    }
-
+    // Create URL repository item via Drizzle
     log.info("Creating URL repository item in database", {
       repositoryId: input.repository_id,
       type: 'url',
       url: input.url
     })
-    
-    const result = await executeSQL<RepositoryItem>(
-      `INSERT INTO repository_items (repository_id, type, name, source, metadata, processing_status)
-       VALUES (:repository_id, 'url', :name, :source, :metadata::jsonb, 'pending')
-       RETURNING *`,
-      [
-        { name: "repository_id", value: { longValue: input.repository_id } },
-        { name: "name", value: { stringValue: input.name } },
-        { name: "source", value: { stringValue: input.url } },
-        { name: "metadata", value: { stringValue: JSON.stringify({}) } }
-      ]
-    )
 
-    const item = result[0]
+    const itemRaw = await createRepositoryItem({
+      repositoryId: input.repository_id,
+      type: 'url',
+      name: input.name,
+      source: input.url,
+      metadata: {},
+      processingStatus: 'pending'
+    })
+
+    // Convert to action type
+    const item: RepositoryItem = {
+      id: itemRaw.id,
+      repositoryId: itemRaw.repositoryId,
+      type: itemRaw.type as 'document' | 'url' | 'text',
+      name: itemRaw.name,
+      source: itemRaw.source,
+      metadata: itemRaw.metadata ?? {},
+      processingStatus: itemRaw.processingStatus ?? 'pending',
+      processingError: itemRaw.processingError,
+      createdAt: itemRaw.createdAt ?? new Date(),
+      updatedAt: itemRaw.updatedAt ?? new Date()
+    }
 
     // Process the URL
     log.info("Processing URL content", {
@@ -482,15 +511,13 @@ export async function addUrlItem(
       itemId: item.id,
       repositoryId: input.repository_id
     })
-    
-    const endTimer = timer
-    endTimer({ status: "success", itemId: item.id })
-    
+
+    timer({ status: "success", itemId: item.id })
+
     revalidatePath(`/repositories/${input.repository_id}`)
     return createSuccess(item, "URL added successfully")
   } catch (error) {
-    const endTimer = timer
-    endTimer({ status: "error" })
+    timer({ status: "error" })
     
     return handleError(error, "Failed to add URL. Please try again or contact support.", {
       context: "addUrlItem",
@@ -586,22 +613,37 @@ export async function addTextItem(
       'addTextItem'
     )
 
-    // Fetch the created item
+    // Fetch the created item via Drizzle
     log.debug("Fetching created text item", { itemId })
-    const result = await executeSQL<RepositoryItem>(
-      `SELECT * FROM repository_items WHERE id = :id`,
-      [{ name: "id", value: { longValue: itemId } }]
-    )
+    const itemRaw = await getRepositoryItemById(itemId)
+
+    if (!itemRaw) {
+      throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
+    }
+
+    // Convert to action type
+    const item: RepositoryItem = {
+      id: itemRaw.id,
+      repositoryId: itemRaw.repositoryId,
+      type: itemRaw.type as 'document' | 'url' | 'text',
+      name: itemRaw.name,
+      source: itemRaw.source,
+      metadata: itemRaw.metadata ?? {},
+      processingStatus: itemRaw.processingStatus ?? 'pending',
+      processingError: itemRaw.processingError,
+      createdAt: itemRaw.createdAt ?? new Date(),
+      updatedAt: itemRaw.updatedAt ?? new Date()
+    }
 
     log.info("Text added successfully", {
       itemId,
       repositoryId: input.repository_id
     })
-    
+
     timer({ status: "success", itemId })
-    
+
     revalidatePath(`/repositories/${input.repository_id}`)
-    return createSuccess(result[0], "Text added successfully")
+    return createSuccess(item, "Text added successfully")
   } catch (error) {
     timer({ status: "error" })
     
@@ -643,17 +685,28 @@ export async function removeRepositoryItem(
     // Get the user ID from the cognito_sub
     const userId = await getUserIdFromSession(session.sub)
 
-    // Get the item to check if it's a document (need to delete from S3)
-    const items = await executeSQL<RepositoryItem>(
-      `SELECT * FROM repository_items WHERE id = :id`,
-      [{ name: "id", value: { longValue: itemId } }]
-    )
+    // Get the item to check if it's a document (need to delete from S3) via Drizzle
+    log.debug("Fetching item details", { itemId })
+    const itemRaw = await getRepositoryItemById(itemId)
 
-    if (items.length === 0) {
-      return { isSuccess: false, message: "Item not found" }
+    if (!itemRaw) {
+      log.warn("Item not found for removal", { itemId })
+      throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
     }
 
-    const item = items[0]
+    // Convert to action type
+    const item: RepositoryItem = {
+      id: itemRaw.id,
+      repositoryId: itemRaw.repositoryId,
+      type: itemRaw.type as 'document' | 'url' | 'text',
+      name: itemRaw.name,
+      source: itemRaw.source,
+      metadata: itemRaw.metadata ?? {},
+      processingStatus: itemRaw.processingStatus ?? 'pending',
+      processingError: itemRaw.processingError,
+      createdAt: itemRaw.createdAt ?? new Date(),
+      updatedAt: itemRaw.updatedAt ?? new Date()
+    }
 
     // Check if user can modify this repository
     log.debug("Checking repository ownership", { repositoryId: item.repositoryId, userId })
@@ -687,12 +740,14 @@ export async function removeRepositoryItem(
       }
     }
 
-    // Delete from database (cascades to chunks)
+    // Delete from database via Drizzle (cascades to chunks)
     log.info("Deleting item from database", { itemId })
-    await executeSQL(
-      `DELETE FROM repository_items WHERE id = :id`,
-      [{ name: "id", value: { longValue: itemId } }]
-    )
+    const deletedCount = await deleteRepositoryItem(itemId)
+
+    if (deletedCount === 0) {
+      log.warn("Item not found for deletion", { itemId })
+      throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
+    }
 
     log.info("Repository item removed successfully", {
       itemId,
@@ -741,21 +796,31 @@ export async function listRepositoryItems(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
+    // Fetch repository items via Drizzle
     log.debug("Fetching repository items from database", { repositoryId })
-    const items = await executeSQL<RepositoryItem>(
-      `SELECT * FROM repository_items 
-       WHERE repository_id = :repository_id
-       ORDER BY created_at DESC`,
-      [{ name: "repository_id", value: { longValue: repositoryId } }]
-    )
+    const itemsRaw = await getRepositoryItems(repositoryId)
+
+    // Convert to action type
+    const items: RepositoryItem[] = itemsRaw.map(item => ({
+      id: item.id,
+      repositoryId: item.repositoryId,
+      type: item.type as 'document' | 'url' | 'text',
+      name: item.name,
+      source: item.source,
+      metadata: item.metadata ?? {},
+      processingStatus: item.processingStatus ?? 'pending',
+      processingError: item.processingError,
+      createdAt: item.createdAt ?? new Date(),
+      updatedAt: item.updatedAt ?? new Date()
+    }))
 
     log.info("Repository items fetched successfully", {
       repositoryId,
       itemCount: items.length
     })
-    
+
     timer({ status: "success", count: items.length })
-    
+
     return createSuccess(items, "Items loaded successfully")
   } catch (error) {
     timer({ status: "error" })
@@ -802,36 +867,78 @@ export async function searchRepositoryItems(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
-    // Search in item names
+    // Search in item names via Drizzle
     log.debug("Searching item names", { repositoryId, query })
-    const items = await executeSQL<RepositoryItem>(
-      `SELECT * FROM repository_items 
-       WHERE repository_id = :repository_id
-       AND LOWER(name) LIKE LOWER(:query)
-       ORDER BY created_at DESC`,
-      [
-        { name: "repository_id", value: { longValue: repositoryId } },
-        { name: "query", value: { stringValue: `%${query}%` } }
-      ]
+    const itemsRaw = await executeQuery(
+      (db) =>
+        db
+          .select()
+          .from(repositoryItems)
+          .where(
+            and(
+              eq(repositoryItems.repositoryId, repositoryId),
+              sql`LOWER(${repositoryItems.name}) LIKE LOWER(${`%${query}%`})`
+            )
+          )
+          .orderBy(desc(repositoryItems.createdAt)),
+      "searchRepositoryItemsByName"
     )
 
-    // Search in chunk content
+    // Convert to action type
+    const items: RepositoryItem[] = itemsRaw.map(item => ({
+      id: item.id,
+      repositoryId: item.repositoryId,
+      type: item.type as 'document' | 'url' | 'text',
+      name: item.name,
+      source: item.source,
+      metadata: item.metadata ?? {},
+      processingStatus: item.processingStatus ?? 'pending',
+      processingError: item.processingError,
+      createdAt: item.createdAt ?? new Date(),
+      updatedAt: item.updatedAt ?? new Date()
+    }))
+
+    // Search in chunk content via Drizzle
     log.debug("Searching chunk content", { repositoryId, query })
-    const chunks = await executeSQL<RepositoryItemChunk & { itemName: string }>(
-      `SELECT 
-        c.*,
-        i.name as item_name
-       FROM repository_item_chunks c
-       JOIN repository_items i ON c.item_id = i.id
-       WHERE i.repository_id = :repository_id
-       AND LOWER(c.content) LIKE LOWER(:query)
-       ORDER BY c.item_id, c.chunk_index
-       LIMIT 20`,
-      [
-        { name: "repository_id", value: { longValue: repositoryId } },
-        { name: "query", value: { stringValue: `%${query}%` } }
-      ]
+    const chunksRaw = await executeQuery(
+      (db) =>
+        db
+          .select({
+            id: repositoryItemChunks.id,
+            itemId: repositoryItemChunks.itemId,
+            content: repositoryItemChunks.content,
+            embedding: repositoryItemChunks.embedding,
+            metadata: repositoryItemChunks.metadata,
+            chunkIndex: repositoryItemChunks.chunkIndex,
+            tokens: repositoryItemChunks.tokens,
+            createdAt: repositoryItemChunks.createdAt,
+            itemName: repositoryItems.name,
+          })
+          .from(repositoryItemChunks)
+          .innerJoin(repositoryItems, eq(repositoryItemChunks.itemId, repositoryItems.id))
+          .where(
+            and(
+              eq(repositoryItems.repositoryId, repositoryId),
+              sql`LOWER(${repositoryItemChunks.content}) LIKE LOWER(${`%${query}%`})`
+            )
+          )
+          .orderBy(repositoryItemChunks.itemId, repositoryItemChunks.chunkIndex)
+          .limit(20),
+      "searchRepositoryItemChunks"
     )
+
+    // Convert to action type
+    const chunks: (RepositoryItemChunk & { itemName: string })[] = chunksRaw.map(chunk => ({
+      id: chunk.id,
+      itemId: chunk.itemId,
+      content: chunk.content,
+      embeddingVector: chunk.embedding as number[] | null,
+      metadata: chunk.metadata ?? {},
+      chunkIndex: chunk.chunkIndex,
+      tokens: chunk.tokens,
+      createdAt: chunk.createdAt ?? new Date(),
+      itemName: chunk.itemName
+    }))
 
     log.info("Search completed successfully", {
       repositoryId,
@@ -880,21 +987,29 @@ export async function getItemChunks(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
+    // Fetch chunks via Drizzle
     log.debug("Fetching chunks from database", { itemId })
-    const chunks = await executeSQL<RepositoryItemChunk>(
-      `SELECT * FROM repository_item_chunks 
-       WHERE item_id = :item_id
-       ORDER BY chunk_index`,
-      [{ name: "item_id", value: { longValue: itemId } }]
-    )
+    const chunksRaw = await getRepositoryItemChunks(itemId)
+
+    // Convert to action type
+    const chunks: RepositoryItemChunk[] = chunksRaw.map(chunk => ({
+      id: chunk.id,
+      itemId: chunk.itemId,
+      content: chunk.content,
+      embeddingVector: chunk.embedding as number[] | null,
+      metadata: chunk.metadata ?? {},
+      chunkIndex: chunk.chunkIndex,
+      tokens: chunk.tokens,
+      createdAt: chunk.createdAt ?? new Date()
+    }))
 
     log.info("Chunks fetched successfully", {
       itemId,
       chunkCount: chunks.length
     })
-    
+
     timer({ status: "success", count: chunks.length })
-    
+
     return createSuccess(chunks, "Chunks loaded successfully")
   } catch (error) {
     timer({ status: "error" })
@@ -940,24 +1055,14 @@ export async function updateItemProcessingStatus(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
+    // Update processing status via Drizzle
     log.info("Updating processing status in database", {
       itemId,
       status,
       hasError: !!error
     })
-    
-    await executeSQL(
-      `UPDATE repository_items 
-       SET processing_status = :status, 
-           processing_error = :error,
-           updated_at = CURRENT_TIMESTAMP
-       WHERE id = :id`,
-      [
-        { name: "id", value: { longValue: itemId } },
-        { name: "status", value: { stringValue: status } },
-        { name: "error", value: error ? { stringValue: error } : { isNull: true } }
-      ]
-    )
+
+    await updateRepositoryItemStatus(itemId, status as "pending" | "processing" | "completed" | "failed", error ?? null)
 
     log.info("Processing status updated successfully", { itemId, status })
 
@@ -1002,19 +1107,28 @@ export async function getDocumentDownloadUrl(
       throw ErrorFactories.authzToolAccessDenied("knowledge-repositories")
     }
 
-    // Get the item to check if it's a document
+    // Get the item to check if it's a document via Drizzle
     log.debug("Fetching item from database", { itemId })
-    const items = await executeSQL<RepositoryItem>(
-      `SELECT * FROM repository_items WHERE id = :id`,
-      [{ name: "id", value: { longValue: itemId } }]
-    )
+    const itemRaw = await getRepositoryItemById(itemId)
 
-    if (items.length === 0) {
+    if (!itemRaw) {
       log.warn("Item not found for download URL", { itemId })
       throw ErrorFactories.dbRecordNotFound("repository_items", itemId)
     }
 
-    const item = items[0]
+    // Convert to action type
+    const item: RepositoryItem = {
+      id: itemRaw.id,
+      repositoryId: itemRaw.repositoryId,
+      type: itemRaw.type as 'document' | 'url' | 'text',
+      name: itemRaw.name,
+      source: itemRaw.source,
+      metadata: itemRaw.metadata ?? {},
+      processingStatus: itemRaw.processingStatus ?? 'pending',
+      processingError: itemRaw.processingError,
+      createdAt: itemRaw.createdAt ?? new Date(),
+      updatedAt: itemRaw.updatedAt ?? new Date()
+    }
 
     if (item.type !== 'document') {
       log.warn("Download URL requested for non-document item", {

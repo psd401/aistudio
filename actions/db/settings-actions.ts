@@ -1,7 +1,7 @@
 "use server"
 
 import { getServerSession } from "@/lib/auth/server-session"
-import { executeSQL } from "@/lib/db/data-api-adapter"
+import { getSettings, getSettingValue as getSettingValueDrizzle, upsertSetting, deleteSetting as deleteSettingDrizzle, getSettingActualValue as getSettingActualValueDrizzle } from "@/lib/db/drizzle"
 import { hasRole } from "@/lib/auth/role-helpers"
 import { ActionState } from "@/types/actions-types"
 import {
@@ -23,10 +23,10 @@ export interface Setting {
   value: string | null
   description: string | null
   category: string | null
-  isSecret: boolean
+  isSecret: boolean | null
   hasValue?: boolean
-  createdAt: Date
-  updatedAt: Date
+  createdAt: Date | null
+  updatedAt: Date | null
 }
 
 export interface CreateSettingInput {
@@ -67,35 +67,16 @@ export async function getSettingsAction(): Promise<ActionState<Setting[]>> {
     }
 
     log.debug("Fetching settings from database")
-    const result = await executeSQL(`
-      SELECT 
-        id,
-        key,
-        CASE 
-          WHEN is_secret = true THEN '••••••••'
-          ELSE value
-        END as value,
-        CASE 
-          WHEN value IS NOT NULL AND value != '' THEN true
-          ELSE false
-        END as has_value,
-        description,
-        category,
-        is_secret,
-        created_at,
-        updated_at
-      FROM settings
-      ORDER BY category, key
-    `)
+    const result = await getSettings()
 
     log.info("Settings retrieved successfully", {
       settingCount: result.length,
-      secretCount: result.filter(s => s.is_secret).length
+      secretCount: result.filter(s => s.isSecret === true).length
     })
-    
+
     timer({ status: "success", count: result.length })
-    
-    return createSuccess(result as unknown as Setting[], "Settings retrieved successfully")
+
+    return createSuccess(result, "Settings retrieved successfully")
   } catch (error) {
     timer({ status: "error" })
     
@@ -115,22 +96,12 @@ export async function getSettingValueAction(key: string): Promise<string | null>
   
   try {
     log.debug("Getting setting value", { key })
-    
-    const result = await executeSQL(
-      `SELECT value FROM settings WHERE key = :key`,
-      [{ name: 'key', value: { stringValue: key } }]
-    )
 
-    if (result && result.length > 0) {
-      const value = result[0].value
-      log.debug("Setting value retrieved", { key, hasValue: !!value })
-      timer({ status: "success", key })
-      return typeof value === 'string' ? value : null
-    }
+    const value = await getSettingValueDrizzle(key)
 
-    log.debug("Setting not found", { key })
-    timer({ status: "not_found", key })
-    return null
+    log.debug("Setting value retrieved", { key, hasValue: !!value })
+    timer({ status: value ? "success" : "not_found", key })
+    return value
   } catch (error) {
     log.error("Error getting setting value", { key, error })
     timer({ status: "error" })
@@ -166,112 +137,9 @@ export async function upsertSettingAction(input: CreateSettingInput): Promise<Ac
       throw ErrorFactories.authzAdminRequired("manage settings")
     }
 
-    // Check if setting exists
-    log.debug("Checking if setting exists", { key: input.key })
-    const existingResult = await executeSQL(
-      `SELECT id FROM settings WHERE key = :key`,
-      [{ name: 'key', value: { stringValue: input.key } }]
-    )
-
-    let result
-    if (existingResult && existingResult.length > 0) {
-      // Check if this is a secret being updated with empty value (keep existing)
-      const existingIsSecret = await executeSQL(
-        `SELECT is_secret, value FROM settings WHERE key = :key`,
-        [{ name: 'key', value: { stringValue: input.key } }]
-      )
-      
-      const isSecret = existingIsSecret?.[0]?.is_secret === true || existingIsSecret?.[0]?.is_secret === 1
-      const hasExistingValue = existingIsSecret?.[0]?.value !== null && existingIsSecret?.[0]?.value !== ''
-      const keepExistingValue = isSecret && !input.value && hasExistingValue
-      
-      // Update existing setting
-      if (keepExistingValue) {
-        // Update without changing the value
-        result = await executeSQL(
-          `UPDATE settings 
-           SET description = :description, 
-               category = :category, 
-               is_secret = :isSecret,
-               updated_at = NOW()
-           WHERE key = :key
-           RETURNING id, key, 
-             CASE 
-               WHEN is_secret = true THEN '••••••••'
-               ELSE value
-             END as value,
-             CASE 
-               WHEN value IS NOT NULL AND value != '' THEN true
-               ELSE false
-             END as has_value,
-             description, category, is_secret, created_at, updated_at`,
-          [
-            { name: 'description', value: input.description ? { stringValue: input.description } : { isNull: true } },
-            { name: 'category', value: input.category ? { stringValue: input.category } : { isNull: true } },
-            { name: 'isSecret', value: { booleanValue: input.isSecret || false } },
-            { name: 'key', value: { stringValue: input.key } }
-          ]
-        )
-      } else {
-        // Update including the value
-        result = await executeSQL(
-          `UPDATE settings 
-           SET value = :value, 
-               description = :description, 
-               category = :category, 
-               is_secret = :isSecret,
-               updated_at = NOW()
-           WHERE key = :key
-           RETURNING id, key, 
-             CASE 
-               WHEN is_secret = true THEN '••••••••'
-               ELSE value
-             END as value,
-             CASE 
-               WHEN value IS NOT NULL AND value != '' THEN true
-               ELSE false
-             END as has_value,
-             description, category, is_secret, created_at, updated_at`,
-          [
-            { name: 'value', value: input.value ? { stringValue: input.value } : { isNull: true } },
-            { name: 'description', value: input.description ? { stringValue: input.description } : { isNull: true } },
-            { name: 'category', value: input.category ? { stringValue: input.category } : { isNull: true } },
-            { name: 'isSecret', value: { booleanValue: input.isSecret || false } },
-            { name: 'key', value: { stringValue: input.key } }
-          ]
-        )
-      }
-    } else {
-      // Create new setting
-      result = await executeSQL(
-        `INSERT INTO settings (key, value, description, category, is_secret)
-         VALUES (:key, :value, :description, :category, :isSecret)
-         RETURNING id, key, 
-           CASE 
-             WHEN is_secret = true THEN '••••••••'
-             ELSE value
-           END as value,
-           CASE 
-             WHEN value IS NOT NULL AND value != '' THEN true
-             ELSE false
-           END as has_value,
-           description, category, is_secret, created_at, updated_at`,
-        [
-          { name: 'key', value: { stringValue: input.key } },
-          { name: 'value', value: input.value ? { stringValue: input.value } : { isNull: true } },
-          { name: 'description', value: input.description ? { stringValue: input.description } : { isNull: true } },
-          { name: 'category', value: input.category ? { stringValue: input.category } : { isNull: true } },
-          { name: 'isSecret', value: { booleanValue: input.isSecret || false } }
-        ]
-      )
-    }
-
-    if (!result || result.length === 0) {
-      log.error("Failed to save setting", { key: input.key })
-      throw ErrorFactories.dbQueryFailed("INSERT/UPDATE settings", new Error("No record returned"))
-    }
-
-    const setting = result[0] as unknown as Setting
+    // Upsert the setting using Drizzle
+    log.debug("Upserting setting", { key: input.key })
+    const setting = await upsertSetting(input)
 
     // Invalidate the settings cache
     log.debug("Invalidating settings cache")
@@ -279,8 +147,7 @@ export async function upsertSettingAction(input: CreateSettingInput): Promise<Ac
 
     log.info("Setting saved successfully", {
       key: setting.key,
-      category: setting.category,
-      isUpdate: !!(existingResult && existingResult.length > 0)
+      category: setting.category
     })
     
     timer({ status: "success", key: setting.key })
@@ -322,10 +189,7 @@ export async function deleteSettingAction(key: string): Promise<ActionState<void
     }
 
     log.info("Deleting setting from database", { key })
-    await executeSQL(
-      `DELETE FROM settings WHERE key = :key`,
-      [{ name: 'key', value: { stringValue: key } }]
-    )
+    await deleteSettingDrizzle(key)
 
     // Invalidate the settings cache
     log.debug("Invalidating settings cache")
@@ -372,21 +236,11 @@ export async function getSettingActualValueAction(key: string): Promise<ActionSt
     }
 
     log.debug("Fetching actual setting value from database", { key })
-    const result = await executeSQL(
-      `SELECT value FROM settings WHERE key = :key`,
-      [{ name: 'key', value: { stringValue: key } }]
-    )
+    const value = await getSettingActualValueDrizzle(key)
 
-    if (result && result.length > 0) {
-      const value = result[0].value
-      log.info("Actual setting value retrieved", { key, hasValue: !!value })
-      timer({ status: "success", key })
-      return createSuccess(typeof value === 'string' ? value : null, "Value retrieved successfully")
-    }
-
-    log.warn("Setting not found", { key })
-    timer({ status: "not_found", key })
-    return createSuccess(null, "Setting not found")
+    log.info("Actual setting value retrieved", { key, hasValue: !!value })
+    timer({ status: value ? "success" : "not_found", key })
+    return createSuccess(value, value ? "Value retrieved successfully" : "Setting not found")
   } catch (error) {
     timer({ status: "error" })
     

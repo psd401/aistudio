@@ -1,7 +1,9 @@
+"use server"
+
 import { NextRequest, NextResponse } from 'next/server'
 import { generateCompletion } from '@/lib/ai-helpers'
 import { getServerSession } from '@/lib/auth/server-session'
-import { executeSQL } from '@/lib/db/data-api-adapter'
+import { createGenericJob, getGenericJobById, updateGenericJobStatus, getAIModelById } from '@/lib/db/drizzle'
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action'
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { getErrorMessage } from "@/types/errors"
@@ -103,31 +105,23 @@ export async function POST(req: NextRequest) {
       fileData: base64Data,
       modelId: PDF_TO_MARKDOWN_MODEL_ID
     };
-    
-    const jobResult = await executeSQL(`
-      INSERT INTO jobs (user_id, type, status, input, created_at, updated_at)
-      VALUES (:userId, 'pdf-to-markdown', 'pending'::job_status, :input, NOW(), NOW())
-      RETURNING id, user_id, type, status, input, output, error, created_at, updated_at
-    `, [
-      { name: 'userId', value: { longValue: currentUser.data.user.id } },
-      { name: 'input', value: { stringValue: JSON.stringify(jobInput) } }
-    ]);
-    
-    const job = jobResult[0];
-    
+
+    const job = await createGenericJob({
+      userId: currentUser.data.user.id,
+      type: 'pdf-to-markdown',
+      status: 'pending',
+      input: JSON.stringify(jobInput)
+    });
+
     log.info('Job created', { jobId: job.id });
     
     // Ensure job is committed and visible before returning
     let committedJob = null;
     for (let i = 0; i < 5; i++) {
-      const foundJobs = await executeSQL(`
-        SELECT id, user_id, type, status, input, output, error, created_at, updated_at
-        FROM jobs
-        WHERE id = :jobId
-      `, [{ name: 'jobId', value: { longValue: job.id as number } }]);
-      
-      if (foundJobs && foundJobs.length > 0) {
-        committedJob = foundJobs[0];
+      const foundJob = await getGenericJobById(job.id);
+
+      if (foundJob) {
+        committedJob = foundJob;
         break;
       }
       await new Promise(res => setTimeout(res, 100)); // wait 100ms
@@ -142,7 +136,7 @@ export async function POST(req: NextRequest) {
     }
     
     // Start processing in the background (non-blocking)
-    processPdfInBackground(job.id as number, jobInput).catch(error => {
+    processPdfInBackground(job.id, jobInput).catch(error => {
       const bgLog = createLogger({ requestId: `job-${job.id}`, route: "api.assistant-architect.pdf-to-markdown" });
       bgLog.error('Background processing error', error);
     });
@@ -155,11 +149,11 @@ export async function POST(req: NextRequest) {
     
     // Return immediately with job ID
     return new NextResponse(
-      JSON.stringify({ 
-        jobId: job.id as number,
+      JSON.stringify({
+        jobId: job.id,
         status: 'processing',
         message: 'PDF processing started. Poll for status updates.'
-      }), 
+      }),
       { status: 202, headers }
     );
     
@@ -184,26 +178,16 @@ interface JobInput {
 
 async function processPdfInBackground(jobId: number, jobInput: JobInput) {
   const log = createLogger({ requestId: `job-${jobId}`, route: "api.assistant-architect.pdf-background" });
-  
+
   try {
     log.info('Starting background processing', { jobId });
-    
+
     // Update job status to running
-    await executeSQL(`
-      UPDATE jobs
-      SET status = 'running'::job_status, updated_at = NOW()
-      WHERE id = :jobId
-    `, [{ name: 'jobId', value: { longValue: jobId } }]);
-    
+    await updateGenericJobStatus(jobId, 'running');
+
     // Get model config from DB
-    const modelResult = await executeSQL(`
-      SELECT id, name, provider, model_id, description, capabilities, max_tokens, active, chat_enabled
-      FROM ai_models
-      WHERE id = :modelId
-    `, [{ name: 'modelId', value: { longValue: jobInput.modelId } }]);
-    
-    const model = modelResult && modelResult.length > 0 ? modelResult[0] : null;
-    
+    const model = await getAIModelById(jobInput.modelId);
+
     if (!model) {
       throw ErrorFactories.dbRecordNotFound('ai_models', jobInput.modelId);
     }
@@ -259,30 +243,15 @@ async function processPdfInBackground(jobId: number, jobInput: JobInput) {
       markdownLength: markdown.length,
       fileName: jobInput.fileName
     });
-    
-    await executeSQL(`
-      UPDATE jobs
-      SET status = 'completed'::job_status, output = :output, updated_at = NOW()
-      WHERE id = :jobId
-    `, [
-      { name: 'output', value: { stringValue: JSON.stringify(outputData) } },
-      { name: 'jobId', value: { longValue: jobId } }
-    ]);
-    
+
+    await updateGenericJobStatus(jobId, 'completed', JSON.stringify(outputData));
+
     log.info(`[PDF-to-Markdown Background] Job ${jobId} successfully saved to database`);
       
   } catch (error) {
     log.error(`[PDF-to-Markdown Background] Job ${jobId} failed:`, error);
-    log.error(`[PDF-to-Markdown Background] Error details:`, error);
-    
+
     // Update job with error
-    await executeSQL(`
-      UPDATE jobs
-      SET status = 'failed'::job_status, error = :error, updated_at = NOW()
-      WHERE id = :jobId
-    `, [
-      { name: 'error', value: { stringValue: getErrorMessage(error) || 'Unknown error' } },
-      { name: 'jobId', value: { longValue: jobId } }
-    ]);
+    await updateGenericJobStatus(jobId, 'failed', undefined, getErrorMessage(error) || 'Unknown error');
   }
 }

@@ -623,6 +623,135 @@ export async function ensureTagsExist(
 }
 
 /**
+ * Get all tags with usage count
+ * Returns tags ordered by usage count descending, then name ascending
+ */
+export async function getAllTags(): Promise<
+  Array<{ id: number; name: string; createdAt: Date; usageCount: number }>
+> {
+  const result = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: promptTags.id,
+          name: promptTags.name,
+          createdAt: promptTags.createdAt,
+          usageCount: sql<number>`COUNT(${promptLibraryTags.promptId})`,
+        })
+        .from(promptTags)
+        .leftJoin(
+          promptLibraryTags,
+          eq(promptTags.id, promptLibraryTags.tagId)
+        )
+        .groupBy(promptTags.id, promptTags.name, promptTags.createdAt)
+        .orderBy(
+          desc(sql<number>`COUNT(${promptLibraryTags.promptId})`),
+          promptTags.name
+        ),
+    "getAllTags"
+  );
+
+  return result;
+}
+
+/**
+ * Get popular tags (tags with at least one usage)
+ * Returns tags ordered by usage count descending
+ */
+export async function getPopularTags(
+  limit: number = 20
+): Promise<
+  Array<{ id: number; name: string; createdAt: Date; usageCount: number }>
+> {
+  const result = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: promptTags.id,
+          name: promptTags.name,
+          createdAt: promptTags.createdAt,
+          usageCount: sql<number>`COUNT(${promptLibraryTags.promptId})`,
+        })
+        .from(promptTags)
+        .innerJoin(
+          promptLibraryTags,
+          eq(promptTags.id, promptLibraryTags.tagId)
+        )
+        .innerJoin(
+          promptLibrary,
+          and(
+            eq(promptLibraryTags.promptId, promptLibrary.id),
+            sql`${promptLibrary.deletedAt} IS NULL`
+          )
+        )
+        .groupBy(promptTags.id, promptTags.name, promptTags.createdAt)
+        .having(sql`COUNT(${promptLibraryTags.promptId}) > 0`)
+        .orderBy(
+          desc(sql<number>`COUNT(${promptLibraryTags.promptId})`),
+          promptTags.name
+        )
+        .limit(limit),
+    "getPopularTags"
+  );
+
+  return result;
+}
+
+/**
+ * Get tags for a specific prompt
+ * Returns tags ordered by name ascending
+ */
+export async function getTagsForPrompt(
+  promptId: string
+): Promise<Array<{ id: number; name: string; createdAt: Date }>> {
+  const result = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: promptTags.id,
+          name: promptTags.name,
+          createdAt: promptTags.createdAt,
+        })
+        .from(promptTags)
+        .innerJoin(
+          promptLibraryTags,
+          eq(promptTags.id, promptLibraryTags.tagId)
+        )
+        .where(eq(promptLibraryTags.promptId, promptId))
+        .orderBy(promptTags.name),
+    "getTagsForPrompt"
+  );
+
+  return result;
+}
+
+/**
+ * Search tags by name (case-insensitive)
+ * Returns tags ordered by name ascending
+ */
+export async function searchTagsByName(
+  query: string,
+  limit: number = 10
+): Promise<Array<{ id: number; name: string; createdAt: Date }>> {
+  const result = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: promptTags.id,
+          name: promptTags.name,
+          createdAt: promptTags.createdAt,
+        })
+        .from(promptTags)
+        .where(ilike(promptTags.name, `%${query}%`))
+        .orderBy(promptTags.name)
+        .limit(limit),
+    "searchTagsByName"
+  );
+
+  return result;
+}
+
+/**
  * Set tags for a prompt (replaces existing)
  * Uses transaction to ensure atomicity
  */
@@ -794,4 +923,168 @@ export async function usePromptAndCreateConversation(
   await incrementUseCount(promptId);
 
   return conversationId;
+}
+
+/**
+ * Get moderation queue with filtering
+ */
+export async function getModerationQueue(filters: {
+  status?: "pending" | "approved" | "rejected" | "all";
+  limit?: number;
+  offset?: number;
+}): Promise<{
+  items: Array<{
+    id: string;
+    userId: number;
+    title: string;
+    content: string;
+    description: string | null;
+    visibility: string;
+    moderationStatus: string;
+    createdAt: Date;
+    updatedAt: Date;
+    creatorFirstName: string | null;
+    creatorLastName: string | null;
+    creatorEmail: string | null;
+    viewCount: number;
+    useCount: number;
+    tags: string[];
+  }>;
+  total: number;
+}> {
+  const { status = "pending", limit = 50, offset = 0 } = filters;
+
+  // Build WHERE conditions
+  const conditions = [
+    eq(promptLibrary.visibility, "public"),
+    sql`${promptLibrary.deletedAt} IS NULL`,
+  ];
+
+  if (status !== "all") {
+    conditions.push(eq(promptLibrary.moderationStatus, status));
+  }
+
+  // Get items with user info and tags
+  const items = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: promptLibrary.id,
+          userId: promptLibrary.userId,
+          title: promptLibrary.title,
+          content: promptLibrary.content,
+          description: promptLibrary.description,
+          visibility: promptLibrary.visibility,
+          moderationStatus: promptLibrary.moderationStatus,
+          createdAt: promptLibrary.createdAt,
+          updatedAt: promptLibrary.updatedAt,
+          viewCount: promptLibrary.viewCount,
+          useCount: promptLibrary.useCount,
+          creatorFirstName: users.firstName,
+          creatorLastName: users.lastName,
+          creatorEmail: users.email,
+          tags: sql<string[]>`COALESCE(
+            ARRAY_AGG(DISTINCT ${promptTags.name}) FILTER (WHERE ${promptTags.name} IS NOT NULL),
+            ARRAY[]::VARCHAR[]
+          )`,
+        })
+        .from(promptLibrary)
+        .innerJoin(users, eq(promptLibrary.userId, users.id))
+        .leftJoin(promptLibraryTags, eq(promptLibrary.id, promptLibraryTags.promptId))
+        .leftJoin(promptTags, eq(promptLibraryTags.tagId, promptTags.id))
+        .where(and(...conditions))
+        .groupBy(
+          promptLibrary.id,
+          users.id,
+          users.firstName,
+          users.lastName,
+          users.email
+        )
+        .orderBy(desc(promptLibrary.createdAt))
+        .limit(limit)
+        .offset(offset),
+    "getModerationQueue"
+  );
+
+  // Get total count
+  const countResult = await executeQuery(
+    (db) =>
+      db
+        .select({ count: sql<number>`COUNT(*)` })
+        .from(promptLibrary)
+        .where(and(...conditions)),
+    "getModerationQueueCount"
+  );
+
+  const total = countResult[0]?.count ?? 0;
+
+  return { items, total };
+}
+
+/**
+ * Bulk moderate multiple prompts
+ */
+export async function bulkModeratePrompts(
+  promptIds: string[],
+  status: ModerationStatus,
+  moderatorId: number,
+  notes?: string
+): Promise<number> {
+  const result = await executeQuery(
+    (db) =>
+      db
+        .update(promptLibrary)
+        .set({
+          moderationStatus: status,
+          moderatedBy: moderatorId,
+          moderatedAt: new Date(),
+          moderationNotes: notes ?? null,
+        })
+        .where(
+          and(
+            inArray(promptLibrary.id, promptIds),
+            sql`${promptLibrary.deletedAt} IS NULL`
+          )
+        )
+        .returning({ id: promptLibrary.id }),
+    "bulkModeratePrompts"
+  );
+
+  return result.length;
+}
+
+/**
+ * Get moderation statistics
+ */
+export async function getModerationStats(): Promise<{
+  pending: number;
+  approved: number;
+  rejected: number;
+  totalToday: number;
+}> {
+  const result = await executeQuery(
+    (db) =>
+      db
+        .select({
+          pending: sql<number>`COUNT(*) FILTER (WHERE ${promptLibrary.moderationStatus} = 'pending')`,
+          approved: sql<number>`COUNT(*) FILTER (WHERE ${promptLibrary.moderationStatus} = 'approved')`,
+          rejected: sql<number>`COUNT(*) FILTER (WHERE ${promptLibrary.moderationStatus} = 'rejected')`,
+          totalToday: sql<number>`COUNT(*) FILTER (WHERE ${promptLibrary.moderatedAt} >= CURRENT_DATE)`,
+        })
+        .from(promptLibrary)
+        .where(
+          and(
+            eq(promptLibrary.visibility, "public"),
+            sql`${promptLibrary.deletedAt} IS NULL`
+          )
+        ),
+    "getModerationStats"
+  );
+
+  return {
+    pending: result[0]?.pending ?? 0,
+    approved: result[0]?.approved ?? 0,
+    rejected: result[0]?.rejected ?? 0,
+    totalToday: result[0]?.totalToday ?? 0,
+  };
 }

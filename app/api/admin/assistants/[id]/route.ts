@@ -1,11 +1,11 @@
 import { NextResponse } from "next/server"
 import { requireAdmin } from "@/lib/auth/admin-check"
-import { 
-  updateAssistantArchitect, 
+import {
+  updateAssistantArchitect,
   deleteAssistantArchitect,
   approveAssistantArchitect,
   rejectAssistantArchitect
-} from "@/lib/db/data-api-adapter"
+} from "@/lib/db/drizzle"
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger'
 
 export async function PUT(

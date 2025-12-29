@@ -1,39 +1,21 @@
 import { createLogger } from '@/lib/logger';
 import { executeSQL, type DatabaseRow } from './db-helpers';
-import { transformSnakeToCamel } from '@/lib/db/field-mapper';
 
 const log = createLogger({ module: 'cost-optimizer' });
 
-// Database row interfaces for cost optimization queries
-interface AIModelRow extends DatabaseRow {
-  provider: string;
-  model_id: string;
-  name: string;
-  description: string | null;
-  max_tokens: number | null;
-  input_cost_per_1k_tokens: number | null;
-  output_cost_per_1k_tokens: number | null;
-  cached_input_cost_per_1k_tokens: number | null;
-  average_latency_ms: number | null;
-  max_concurrency: number | null;
-  supports_batching: boolean | null;
-  nexus_capabilities: Record<string, unknown> | null;
-  provider_metadata: Record<string, unknown> | null;
-  allowed_roles: string[] | null;
-}
-
+// Database row interfaces for cost optimization queries (camelCase)
 interface CostModelRow extends DatabaseRow {
-  input_cost_per_1k_tokens: number | null;
-  output_cost_per_1k_tokens: number | null;
+  inputCostPer1kTokens: number | null;
+  outputCostPer1kTokens: number | null;
 }
 
 interface UsageMetricsRow extends DatabaseRow {
   provider: string;
-  model_id: string;
-  total_cost: number | null;
-  total_tokens: number | null;
-  request_count: number;
-  usage_date: string;
+  modelId: string;
+  totalCost: number | null;
+  totalTokens: number | null;
+  requestCount: number;
+  usageDate: string;
 }
 
 // Transform model data with proper typing
@@ -192,35 +174,35 @@ export class CostOptimizer {
       const startDate = new Date();
       startDate.setDate(startDate.getDate() - days);
       
-      // Get usage metrics
+      // Get usage metrics (with camelCase aliases)
       const usageResult = await executeSQL<UsageMetricsRow>(`
-        SELECT 
+        SELECT
           provider,
-          model_id,
-          SUM(cost_usd) as total_cost,
-          SUM(prompt_tokens + completion_tokens) as total_tokens,
-          COUNT(*) as request_count,
-          DATE(created_at) as usage_date
+          model_id AS "modelId",
+          SUM(cost_usd) AS "totalCost",
+          SUM(prompt_tokens + completion_tokens) AS "totalTokens",
+          COUNT(*) AS "requestCount",
+          DATE(created_at) AS "usageDate"
         FROM nexus_provider_metrics npm
         JOIN nexus_conversations nc ON npm.conversation_id = nc.id
-        WHERE nc.user_id = $1 
+        WHERE nc.user_id = $1
           AND npm.created_at >= $2
         GROUP BY provider, model_id, DATE(created_at)
-        ORDER BY total_cost DESC
+        ORDER BY "totalCost" DESC
       `, [userId, startDate.toISOString()]);
       
       // Calculate metrics
-      const totalCost = usageResult.reduce((sum, row) => sum + (row.total_cost || 0), 0);
+      const totalCost = usageResult.reduce((sum, row) => sum + (row.totalCost || 0), 0);
       const avgCostPerDay = totalCost / days;
-      
+
       // Get top models by cost
       const modelCosts = new Map<string, { cost: number; tokens: number }>();
       for (const row of usageResult) {
-        const key = `${row.provider}:${row.model_id}`;
+        const key = `${row.provider}:${row.modelId}`;
         const existing = modelCosts.get(key) || { cost: 0, tokens: 0 };
         modelCosts.set(key, {
-          cost: existing.cost + (row.total_cost || 0),
-          tokens: existing.tokens + (row.total_tokens || 0)
+          cost: existing.cost + (row.totalCost || 0),
+          tokens: existing.tokens + (row.totalTokens || 0)
         });
       }
       
@@ -240,19 +222,19 @@ export class CostOptimizer {
       // Calculate cost trend
       const recentCost = usageResult
         .filter((row) => {
-          const rowDate = new Date(row.usage_date);
+          const rowDate = new Date(row.usageDate);
           const daysAgo = (Date.now() - rowDate.getTime()) / (1000 * 60 * 60 * 24);
           return daysAgo <= 7;
         })
-        .reduce((sum, row) => sum + (row.total_cost || 0), 0);
-      
+        .reduce((sum, row) => sum + (row.totalCost || 0), 0);
+
       const olderCost = usageResult
         .filter((row) => {
-          const rowDate = new Date(row.usage_date);
+          const rowDate = new Date(row.usageDate);
           const daysAgo = (Date.now() - rowDate.getTime()) / (1000 * 60 * 60 * 24);
           return daysAgo > 7 && daysAgo <= 14;
         })
-        .reduce((sum, row) => sum + (row.total_cost || 0), 0);
+        .reduce((sum, row) => sum + (row.totalCost || 0), 0);
       
       let costTrend: 'increasing' | 'decreasing' | 'stable' = 'stable';
       if (recentCost > olderCost * 1.1) {
@@ -297,28 +279,28 @@ export class CostOptimizer {
     }
     
     try {
-      const result = await executeSQL<AIModelRow>(`
-        SELECT 
+      const result = await executeSQL<TransformedModel>(`
+        SELECT
           provider,
-          model_id,
+          model_id as "modelId",
           name,
           description,
-          max_tokens,
-          input_cost_per_1k_tokens,
-          output_cost_per_1k_tokens,
-          cached_input_cost_per_1k_tokens,
-          average_latency_ms,
-          max_concurrency,
-          supports_batching,
-          nexus_capabilities,
-          provider_metadata,
-          allowed_roles
-        FROM ai_models 
+          max_tokens as "maxTokens",
+          input_cost_per_1k_tokens as "inputCostPer1kTokens",
+          output_cost_per_1k_tokens as "outputCostPer1kTokens",
+          cached_input_cost_per_1k_tokens as "cachedInputCostPer1kTokens",
+          average_latency_ms as "averageLatencyMs",
+          max_concurrency as "maxConcurrency",
+          supports_batching as "supportsBatching",
+          nexus_capabilities as "nexusCapabilities",
+          provider_metadata as "providerMetadata",
+          allowed_roles as "allowedRoles"
+        FROM ai_models
         WHERE active = true AND chat_enabled = true
         ORDER BY provider, name
       `);
-      
-      const models = result.map((row) => transformSnakeToCamel<TransformedModel>(row));
+
+      const models = result;
       
       // Update cache
       this.modelCache.clear();
@@ -341,17 +323,19 @@ export class CostOptimizer {
     const model = this.modelCache.get(`${provider}:${modelId}`);
     
     if (!model) {
-      // Try to fetch from database
+      // Try to fetch from database (with camelCase aliases)
       const result = await executeSQL<CostModelRow>(`
-        SELECT input_cost_per_1k_tokens, output_cost_per_1k_tokens
-        FROM ai_models 
+        SELECT
+          input_cost_per_1k_tokens AS "inputCostPer1kTokens",
+          output_cost_per_1k_tokens AS "outputCostPer1kTokens"
+        FROM ai_models
         WHERE provider = $1 AND model_id = $2
         LIMIT 1
       `, [provider, modelId]);
       
       if (result.length > 0) {
-        const inputCost = result[0].input_cost_per_1k_tokens || 0;
-        const outputCost = result[0].output_cost_per_1k_tokens || 0;
+        const inputCost = result[0].inputCostPer1kTokens || 0;
+        const outputCost = result[0].outputCostPer1kTokens || 0;
         // Rough estimate: 60% input, 40% output
         return (tokens / 1000) * (inputCost * 0.6 + outputCost * 0.4);
       }

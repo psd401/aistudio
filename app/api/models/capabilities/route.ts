@@ -1,7 +1,7 @@
 import { getModelCapabilities } from '@/lib/ai/provider-factory';
 import { createLogger, generateRequestId } from '@/lib/logger';
 import { ErrorFactories } from '@/lib/error-utils';
-import { executeSQL } from '@/lib/db/data-api-adapter';
+import { getActiveAIModels } from '@/lib/db/drizzle';
 import { getServerSession } from '@/lib/auth/server-session';
 
 export const runtime = 'nodejs';
@@ -47,8 +47,8 @@ export async function POST(req: Request) {
 
     // Validate provider exists in database - this makes the system future-proof
     // Any provider added to the database will automatically be valid
-    const providers = await executeSQL<{ provider: string }>('SELECT DISTINCT provider FROM ai_models WHERE active = true');
-    const validProviders = providers.map((p) => p.provider.toLowerCase());
+    const activeModels = await getActiveAIModels();
+    const validProviders = [...new Set(activeModels.map(m => m.provider.toLowerCase()))];
 
     if (!validProviders.includes(body.provider.toLowerCase())) {
       log.warn('Invalid provider requested', {

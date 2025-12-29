@@ -10,7 +10,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, asc } from "drizzle-orm";
+import { eq, and, asc, inArray } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { roles, roleTools, tools } from "@/lib/db/schema";
 import { ErrorFactories } from "@/lib/error-utils";
@@ -240,6 +240,36 @@ export async function getTools() {
         .orderBy(asc(tools.name)),
     "getTools"
   );
+}
+
+/**
+ * Get tools by their IDs
+ * Returns a map of tool IDs to their identifiers for efficient lookup
+ */
+export async function getToolsByIds(
+  toolIds: number[]
+): Promise<Map<number, string>> {
+  if (toolIds.length === 0) {
+    return new Map();
+  }
+
+  const result = await executeQuery(
+    (db) =>
+      db
+        .select({
+          id: tools.id,
+          identifier: tools.identifier,
+        })
+        .from(tools)
+        .where(inArray(tools.id, toolIds)),
+    "getToolsByIds"
+  );
+
+  const toolsMap = new Map<number, string>();
+  for (const tool of result) {
+    toolsMap.set(tool.id, tool.identifier);
+  }
+  return toolsMap;
 }
 
 /**

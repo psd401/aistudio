@@ -1,7 +1,7 @@
 import { redirect, notFound } from "next/navigation"
 import { getAssistantArchitectAction } from "@/actions/db/assistant-architect-actions"
 import { getServerSession } from "@/lib/auth/server-session"
-import { checkUserRoleByCognitoSub } from "@/lib/db/data-api-adapter"
+import { checkUserRoleByCognitoSub } from "@/lib/db/drizzle"
 import { CreateLayout } from "../../../create/_components/create-layout"
 import { InputFieldsPageClient } from "./_components/input-fields-page-client"
 import Link from "next/link"

@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { updateUserRole } from '@/lib/db/data-api-adapter';
+import { updateUserRole } from '@/lib/db/drizzle';
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { validateRequest, updateUserRoleSchema } from '@/lib/validations/api-schemas';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
@@ -38,8 +38,8 @@ export async function PUT(
       );
     }
     const { role: newRole } = validatedData!;
-    
-    // Update the user's role via Data API
+
+    // Update the user's role via Drizzle ORM
     const userId = Number.parseInt(userIdString, 10);
     if (Number.isNaN(userId)) {
       log.warn("Invalid user ID", { userIdString });

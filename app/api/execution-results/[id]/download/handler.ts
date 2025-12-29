@@ -2,9 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { ErrorFactories } from "@/lib/error-utils"
-import { executeSQL } from "@/lib/db/data-api-adapter"
-import { transformSnakeToCamel } from "@/lib/db/field-mapper"
-import type { SqlParameter } from "@aws-sdk/client-rds-data"
+import { getExecutionResultForDownload, getUserIdByCognitoSub } from "@/lib/db/drizzle"
 
 // Content sanitization for markdown to prevent XSS
 function sanitizeMarkdownContent(content: string): string {
@@ -90,45 +88,18 @@ export async function downloadHandler(
     }
 
     // Get user ID from database using cognito sub
-    const userResult = await executeSQL(`
-      SELECT id FROM users WHERE cognito_sub = :cognitoSub
-    `, [{ name: 'cognitoSub', value: { stringValue: session.sub } }])
+    const userIdString = await getUserIdByCognitoSub(session.sub)
 
-    if (!userResult || userResult.length === 0) {
+    if (!userIdString) {
       throw ErrorFactories.dbRecordNotFound("users", session.sub)
     }
 
-    const userId = Number(userResult[0].id)
+    const userId = Number(userIdString)
 
     // Get execution result with all related data - includes access control check
-    const sql = `
-      SELECT
-        er.id,
-        er.scheduled_execution_id,
-        er.result_data,
-        er.status,
-        er.executed_at,
-        er.execution_duration_ms,
-        er.error_message,
-        se.name as schedule_name,
-        se.user_id,
-        se.input_data,
-        se.schedule_config,
-        aa.name as assistant_architect_name
-      FROM execution_results er
-      JOIN scheduled_executions se ON er.scheduled_execution_id = se.id
-      JOIN assistant_architects aa ON se.assistant_architect_id = aa.id
-      WHERE er.id = :result_id AND se.user_id = :user_id
-    `
+    const result = await getExecutionResultForDownload(resultId, userId)
 
-    const parameters: SqlParameter[] = [
-      { name: 'result_id', value: { longValue: resultId } },
-      { name: 'user_id', value: { longValue: userId } }
-    ]
-
-    const results = await executeSQL(sql, parameters)
-
-    if (!results || results.length === 0) {
+    if (!result) {
       log.warn("Execution result not found or access denied", { resultId, userId })
       return NextResponse.json(
         { error: "Execution result not found" },
@@ -136,58 +107,20 @@ export async function downloadHandler(
       )
     }
 
-    // Transform the result
-    const rawResult = transformSnakeToCamel<Record<string, unknown>>(results[0])
-
+    // Transform the result - Drizzle handles JSONB parsing automatically
     const executionResult: ExecutionResultWithSchedule = {
-      id: Number(rawResult.id),
-      scheduledExecutionId: Number(rawResult.scheduledExecutionId),
-      resultData: (() => {
-        try {
-          return typeof rawResult.resultData === 'string'
-            ? JSON.parse(rawResult.resultData)
-            : rawResult.resultData || {};
-        } catch (error) {
-          log.warn('Invalid JSON in resultData', {
-            resultId: rawResult.id,
-            error: error instanceof Error ? error.message : 'Unknown error'
-          });
-          return {};
-        }
-      })(),
-      status: String(rawResult.status) as 'success' | 'failed' | 'running',
-      executedAt: String(rawResult.executedAt),
-      executionDurationMs: Number(rawResult.executionDurationMs),
-      errorMessage: rawResult.errorMessage ? String(rawResult.errorMessage) : null,
-      scheduleName: String(rawResult.scheduleName),
-      userId: Number(rawResult.userId),
-      assistantArchitectName: String(rawResult.assistantArchitectName),
-      inputData: (() => {
-        try {
-          return typeof rawResult.inputData === 'string'
-            ? JSON.parse(rawResult.inputData)
-            : rawResult.inputData || {};
-        } catch (error) {
-          log.warn('Invalid JSON in inputData', {
-            resultId: rawResult.id,
-            error: error instanceof Error ? error.message : 'Unknown error'
-          });
-          return {};
-        }
-      })(),
-      scheduleConfig: (() => {
-        try {
-          return typeof rawResult.scheduleConfig === 'string'
-            ? JSON.parse(rawResult.scheduleConfig)
-            : rawResult.scheduleConfig || {};
-        } catch (error) {
-          log.warn('Invalid JSON in scheduleConfig', {
-            resultId: rawResult.id,
-            error: error instanceof Error ? error.message : 'Unknown error'
-          });
-          return {};
-        }
-      })()
+      id: result.id,
+      scheduledExecutionId: result.scheduledExecutionId,
+      resultData: result.resultData || {},
+      status: result.status as 'success' | 'failed' | 'running',
+      executedAt: result.executedAt?.toISOString() || '',
+      executionDurationMs: result.executionDurationMs || 0,
+      errorMessage: result.errorMessage || null,
+      scheduleName: result.scheduleName,
+      userId: result.userId,
+      assistantArchitectName: result.assistantArchitectName,
+      inputData: result.inputData || {},
+      scheduleConfig: result.scheduleConfig || {}
     }
 
     // Generate markdown content

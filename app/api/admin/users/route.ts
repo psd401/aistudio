@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server"
-import { getUsers, getUserRoles, createUser, updateUser, deleteUser } from "@/lib/db/data-api-adapter"
+import { getUsers, getAllUserRoles, createUser, updateUser, deleteUser } from "@/lib/db/drizzle"
 import { requireAdmin } from "@/lib/auth/admin-check"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 export async function GET() {
@@ -18,11 +18,11 @@ export async function GET() {
       return authError;
     }
     
-    // Get users from database via Data API
+    // Get users from database
     const dbUsers = await getUsers();
     
     // Get all user roles
-    const userRoles = await getUserRoles();
+    const userRoles = await getAllUserRoles();
     
     // Group roles by userId
     const rolesByUser = userRoles.reduce((acc, role) => {
