@@ -10,6 +10,11 @@
 -- NOTE: DO $$ blocks with RAISE NOTICE removed - incompatible with RDS Data API
 -- Pre/post checks moved to manual verification queries in issue comments
 
+-- Step 0: Drop existing index created in 004-indexes.sql
+-- Required because we're changing the column type from INTEGER to UUID
+-- The index will be recreated in Step 3 with filtered optimization
+DROP INDEX IF EXISTS idx_documents_conversation_id;
+
 -- Step 1: Change column type from INTEGER to UUID
 -- This is safe because all existing values are NULL
 -- NULL values are preserved across type changes
@@ -22,9 +27,9 @@ ALTER TABLE documents
   ADD CONSTRAINT documents_conversation_id_fkey
   FOREIGN KEY (conversation_id) REFERENCES nexus_conversations(id) ON DELETE SET NULL;
 
--- Step 3: Create filtered index for conversation-based queries
+-- Step 3: Recreate index with filtered optimization for UUID type
 -- Only indexes non-NULL values for efficiency
-CREATE INDEX IF NOT EXISTS idx_documents_conversation_id
+CREATE INDEX idx_documents_conversation_id
   ON documents(conversation_id) WHERE conversation_id IS NOT NULL;
 
 -- VERIFICATION QUERIES (run manually after migration):
@@ -41,3 +46,4 @@ CREATE INDEX IF NOT EXISTS idx_documents_conversation_id
 --   ALTER TABLE documents DROP CONSTRAINT IF EXISTS documents_conversation_id_fkey;
 --   DROP INDEX IF EXISTS idx_documents_conversation_id;
 --   ALTER TABLE documents ALTER COLUMN conversation_id TYPE integer USING NULL::integer;
+--   CREATE INDEX idx_documents_conversation_id ON documents(conversation_id); -- Restore original index

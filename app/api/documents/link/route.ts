@@ -42,33 +42,27 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
 
     // Validate request body using Zod schema
-    let documentId: number;
-    let conversationId: string;
-    try {
-      const validated = LinkDocumentRequestSchema.parse(body);
-      documentId = validated.documentId;
-      conversationId = validated.conversationId;
-    } catch (validationError) {
-      log.warn("Request validation failed", { error: validationError });
+    const validationResult = LinkDocumentRequestSchema.safeParse(body);
+    if (!validationResult.success) {
+      const firstError = validationResult.error.issues[0];
+      log.warn("Request validation failed", { error: firstError });
       timer({ status: "error", reason: "validation_failed" });
       throw createError(
-        validationError instanceof z.ZodError
-          ? validationError.issues[0].message
-          : 'Invalid request body',
+        firstError.message,
         {
           code: 'VALIDATION',
           level: ErrorLevel.WARN,
           details: {
-            validationErrors: validationError instanceof z.ZodError
-              ? validationError.issues.map(issue => ({
-                  path: issue.path.join('.'),
-                  message: issue.message
-                }))
-              : undefined
+            validationErrors: validationResult.error.issues.map(issue => ({
+              path: issue.path.join('.'),
+              message: issue.message
+            }))
           }
         }
       );
     }
+
+    const { documentId, conversationId } = validationResult.data;
 
     // Verify the document belongs to the user
     const document = await getDocumentById({ id: documentId });
