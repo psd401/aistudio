@@ -73,6 +73,19 @@ import { scheduledExecutions } from "./tables/scheduled-executions";
 import { executionResults } from "./tables/execution-results";
 import { userNotifications } from "./tables/user-notifications";
 
+// Ideas
+import { ideas } from "./tables/ideas";
+import { ideaVotes } from "./tables/idea-votes";
+import { ideaNotes } from "./tables/idea-notes";
+
+// Navigation
+import { navigationItems } from "./tables/navigation-items";
+import { navigationItemRoles } from "./tables/navigation-item-roles";
+
+// Model Management
+import { modelComparisons } from "./tables/model-comparisons";
+import { modelReplacementAudit } from "./tables/model-replacement-audit";
+
 // ============================================
 // User Relations
 // ============================================
@@ -97,6 +110,11 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   userNotifications: many(userNotifications),
   jobs: many(jobs),
   aiStreamingJobs: many(aiStreamingJobs),
+  ideas: many(ideas),
+  ideaVotes: many(ideaVotes),
+  ideaNotes: many(ideaNotes),
+  modelComparisons: many(modelComparisons),
+  modelReplacementsPerformed: many(modelReplacementAudit),
   // One-to-one with nexus_user_preferences (user_id is the primary key)
   preferences: one(nexusUserPreferences, {
     fields: [users.id],
@@ -123,6 +141,7 @@ export const userRolesRelations = relations(userRoles, ({ one }) => ({
 
 export const toolsRelations = relations(tools, ({ many }) => ({
   roleTools: many(roleTools),
+  navigationItems: many(navigationItems),
 }));
 
 export const roleToolsRelations = relations(roleTools, ({ one }) => ({
@@ -554,6 +573,14 @@ export const aiModelsRelations = relations(aiModels, ({ many }) => ({
   chainPrompts: many(chainPrompts),
   nexusMessages: many(nexusMessages),
   aiStreamingJobs: many(aiStreamingJobs),
+  comparisonsAsModel1: many(modelComparisons, { relationName: "model1" }),
+  comparisonsAsModel2: many(modelComparisons, { relationName: "model2" }),
+  replacementsAsOriginal: many(modelReplacementAudit, {
+    relationName: "originalModel",
+  }),
+  replacementsAsReplacement: many(modelReplacementAudit, {
+    relationName: "replacementModel",
+  }),
 }));
 
 // ============================================
@@ -596,3 +623,113 @@ export const aiStreamingJobsRelations = relations(aiStreamingJobs, ({ one }) => 
     references: [aiModels.id],
   }),
 }));
+
+// ============================================
+// Ideas Relations
+// ============================================
+
+export const ideasRelations = relations(ideas, ({ one, many }) => ({
+  user: one(users, {
+    fields: [ideas.userId],
+    references: [users.id],
+  }),
+  votes: many(ideaVotes),
+  notes: many(ideaNotes),
+}));
+
+export const ideaVotesRelations = relations(ideaVotes, ({ one }) => ({
+  idea: one(ideas, {
+    fields: [ideaVotes.ideaId],
+    references: [ideas.id],
+  }),
+  user: one(users, {
+    fields: [ideaVotes.userId],
+    references: [users.id],
+  }),
+}));
+
+export const ideaNotesRelations = relations(ideaNotes, ({ one }) => ({
+  idea: one(ideas, {
+    fields: [ideaNotes.ideaId],
+    references: [ideas.id],
+  }),
+  user: one(users, {
+    fields: [ideaNotes.userId],
+    references: [users.id],
+  }),
+}));
+
+// ============================================
+// Navigation Relations
+// ============================================
+
+export const navigationItemsRelations = relations(
+  navigationItems,
+  ({ one, many }) => ({
+    tool: one(tools, {
+      fields: [navigationItems.toolId],
+      references: [tools.id],
+    }),
+    parent: one(navigationItems, {
+      fields: [navigationItems.parentId],
+      references: [navigationItems.id],
+      relationName: "navigationHierarchy",
+    }),
+    children: many(navigationItems, { relationName: "navigationHierarchy" }),
+    roles: many(navigationItemRoles),
+  })
+);
+
+export const navigationItemRolesRelations = relations(
+  navigationItemRoles,
+  ({ one }) => ({
+    navigationItem: one(navigationItems, {
+      fields: [navigationItemRoles.navigationItemId],
+      references: [navigationItems.id],
+    }),
+  })
+);
+
+// ============================================
+// Model Comparison Relations
+// ============================================
+
+export const modelComparisonsRelations = relations(
+  modelComparisons,
+  ({ one }) => ({
+    user: one(users, {
+      fields: [modelComparisons.userId],
+      references: [users.id],
+    }),
+    model1: one(aiModels, {
+      fields: [modelComparisons.model1Id],
+      references: [aiModels.id],
+      relationName: "model1",
+    }),
+    model2: one(aiModels, {
+      fields: [modelComparisons.model2Id],
+      references: [aiModels.id],
+      relationName: "model2",
+    }),
+  })
+);
+
+export const modelReplacementAuditRelations = relations(
+  modelReplacementAudit,
+  ({ one }) => ({
+    originalModel: one(aiModels, {
+      fields: [modelReplacementAudit.originalModelId],
+      references: [aiModels.id],
+      relationName: "originalModel",
+    }),
+    replacementModel: one(aiModels, {
+      fields: [modelReplacementAudit.replacementModelId],
+      references: [aiModels.id],
+      relationName: "replacementModel",
+    }),
+    replacedByUser: one(users, {
+      fields: [modelReplacementAudit.replacedBy],
+      references: [users.id],
+    }),
+  })
+);
