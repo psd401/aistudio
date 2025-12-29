@@ -84,6 +84,40 @@ npm run migration:create -- "description"
 
 ## Creating New Tables
 
+### Primary Key: Identity vs Serial
+
+**2025 Best Practice:** Use `identity` columns for new tables instead of `serial`.
+
+```typescript
+// ✅ Recommended (2025+): Identity columns
+import { integer } from "drizzle-orm/pg-core";
+
+export const newTable = pgTable("new_table", {
+  id: integer("id").generatedAlwaysAsIdentity({
+    startWith: 1,
+    increment: 1,
+    minValue: 1,
+    maxValue: 2147483647,
+    cache: 1,
+  }).primaryKey(),
+});
+
+// ⚠️ Legacy (still works): Serial columns
+import { serial } from "drizzle-orm/pg-core";
+
+export const legacyTable = pgTable("legacy_table", {
+  id: serial("id").primaryKey(),
+});
+```
+
+**Why identity?**
+- SQL standard compliance (vs PostgreSQL-specific serial)
+- More control over sequence behavior
+- Explicit configuration options
+- Recommended by PostgreSQL 10+
+
+**Note:** Existing tables using `serial` work fine - only use `identity` for NEW tables.
+
 ### Step 1: Define the Schema
 
 Create a new file in `lib/db/schema/tables/`:
@@ -92,7 +126,6 @@ Create a new file in `lib/db/schema/tables/`:
 // lib/db/schema/tables/user-preferences.ts
 import {
   pgTable,
-  serial,
   integer,
   varchar,
   timestamp,
@@ -109,7 +142,8 @@ interface PreferenceSettings {
 }
 
 export const userPreferences = pgTable("user_preferences", {
-  id: serial("id").primaryKey(),
+  // Use identity for new tables (2025+ best practice)
+  id: integer("id").generatedAlwaysAsIdentity().primaryKey(),
   userId: integer("user_id")
     .notNull()
     .references(() => users.id, { onDelete: "cascade" }),
