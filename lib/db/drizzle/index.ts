@@ -599,3 +599,73 @@ export {
   updateComparisonResults,
   deleteComparison,
 } from "./model-comparisons";
+
+// ============================================
+// Query Helpers
+// ============================================
+
+export {
+  // Pagination Types & Helpers
+  type OffsetPaginationParams,
+  type CursorPaginationParams,
+  type PaginationMeta,
+  type PaginatedResult,
+  type CursorPaginatedResult,
+  DEFAULT_PAGE_SIZE,
+  MAX_PAGE_SIZE,
+  calculateOffset,
+  buildPaginationMeta,
+  createPaginatedResult,
+  buildCursorCondition,
+  processCursorResults,
+  countAsInt,
+  // Filter Types & Helpers
+  type FilterOperator,
+  type FilterCondition,
+  type RangeFilter,
+  buildFilter,
+  buildFilters,
+  buildFiltersOr,
+  buildRangeFilter,
+  eqOrSkip,
+  inArrayOrSkip,
+  ilikeOrSkip,
+  combineAnd,
+  combineOr,
+  // Sorting Types & Helpers
+  type SortDirection,
+  type SortConfig,
+  type SortSpec,
+  type SortableColumns,
+  buildSort,
+  buildSortFromConfig,
+  buildMultiSort,
+  buildSortFromField,
+  buildSortFromSpec,
+  buildPinnedFirstSort,
+  buildRecentActivitySort,
+  createSortableColumns,
+  // Search Types & Helpers
+  type SearchOptions,
+  type MultiColumnSearchConfig,
+  escapeSearchPattern,
+  buildSearchPattern,
+  buildSearchCondition,
+  buildMultiColumnSearch,
+  buildSearchFromConfig,
+  searchContains,
+  searchStartsWith,
+  searchEndsWith,
+  searchExact,
+  createSearchableColumns,
+  // Domain Query Types & Helpers
+  type UserWithRoles,
+  type UserWithRolesAndTools,
+  type UserQueryFilters,
+  type ConversationWithMessages,
+  type ConversationQueryFilters,
+  getUsersWithRoles,
+  getUserWithRolesAndTools,
+  getConversationsWithMessages,
+  getConversationWithAllMessages,
+} from "./helpers";
