@@ -18,7 +18,7 @@ jest.mock('@/lib/logger', () => ({
     error: jest.fn(),
   }),
   generateRequestId: () => 'test-request-id',
-  startTimer: () => jest.fn().mockReturnValue(100),
+  startTimer: () => () => 100, // Returns a function that returns a number
 }))
 
 import {
@@ -194,14 +194,14 @@ describe('RDS Error Handler', () => {
     })
 
     describe('edge cases', () => {
-      it('should throw on null error', () => {
-        // The function doesn't guard against null, so it will throw
-        expect(() => isRetryableError(null)).toThrow()
+      it('should return false for null error', () => {
+        // Function now has null guard and returns false
+        expect(isRetryableError(null)).toBe(false)
       })
 
-      it('should throw on undefined error', () => {
-        // The function doesn't guard against undefined, so it will throw
-        expect(() => isRetryableError(undefined)).toThrow()
+      it('should return false for undefined error', () => {
+        // Function now has null guard and returns false
+        expect(isRetryableError(undefined)).toBe(false)
       })
 
       it('should handle empty object', () => {

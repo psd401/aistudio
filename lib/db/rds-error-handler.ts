@@ -40,13 +40,18 @@ const circuitBreakerState: CircuitBreakerState = {
  * Check if an error is retryable based on AWS error codes
  */
 export function isRetryableError(error: unknown): boolean {
-  const awsError = error as { 
+  // Guard against null and undefined
+  if (error == null) {
+    return false
+  }
+
+  const awsError = error as {
     name?: string
     code?: string
     $metadata?: { httpStatusCode?: number }
     message?: string
   }
-  
+
   // Check for specific retryable AWS errors
   const retryableErrorNames = [
     'InternalServerErrorException',
@@ -56,7 +61,7 @@ export function isRetryableError(error: unknown): boolean {
     'RequestTimeoutException',
     'UnknownError'
   ]
-  
+
   const retryableErrorCodes = [
     'ECONNRESET',
     'ETIMEDOUT',
@@ -64,25 +69,25 @@ export function isRetryableError(error: unknown): boolean {
     'EPIPE',
     'ENOTFOUND'
   ]
-  
+
   const retryableStatusCodes = [500, 502, 503, 504, 429]
-  
+
   // Check error name
   if (awsError.name && retryableErrorNames.includes(awsError.name)) {
     return true
   }
-  
+
   // Check error code
   if (awsError.code && retryableErrorCodes.includes(awsError.code)) {
     return true
   }
-  
+
   // Check HTTP status code
-  if (awsError.$metadata?.httpStatusCode && 
+  if (awsError.$metadata?.httpStatusCode &&
       retryableStatusCodes.includes(awsError.$metadata.httpStatusCode)) {
     return true
   }
-  
+
   // Check for network-related error messages
   if (awsError.message) {
     const networkErrorPatterns = [
@@ -92,12 +97,12 @@ export function isRetryableError(error: unknown): boolean {
       /econnreset/i,
       /socket hang up/i
     ]
-    
+
     if (networkErrorPatterns.some(pattern => pattern.test(awsError.message || ''))) {
       return true
     }
   }
-  
+
   return false
 }
 
