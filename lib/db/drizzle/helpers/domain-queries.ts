@@ -11,7 +11,7 @@
  * @see /docs/database/drizzle-relational-queries.md
  */
 
-import { eq, and, or, desc, sql, isNull } from "drizzle-orm";
+import { eq, and, or, desc, isNull, inArray } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   users,
@@ -200,7 +200,7 @@ export async function getUsersWithRoles(
         })
         .from(userRoles)
         .innerJoin(roles, eq(userRoles.roleId, roles.id))
-        .where(sql`${userRoles.userId} = ANY(${userIds})`),
+        .where(inArray(userRoles.userId, userIds)),
     "getUsersWithRoles.roles"
   );
 
@@ -242,16 +242,43 @@ export async function getUsersWithRoles(
     }));
 
   // Get total count for pagination
-  const [{ count }] = await executeQuery(
-    (db) =>
-      db
-        .select({ count: countAsInt })
-        .from(users)
-        .where(baseConditions),
-    "getUsersWithRoles.count"
-  );
+  // If role filtering is applied, we need to count users with those roles
+  let totalCount: number;
+  if (filters.roleName || (filters.roleIds && filters.roleIds.length > 0)) {
+    // Count distinct users who have the specified role(s)
+    const countConditions = combineAnd(
+      baseConditions,
+      filters.roleName ? eq(roles.name, filters.roleName) : undefined,
+      filters.roleIds && filters.roleIds.length > 0
+        ? inArray(roles.id, filters.roleIds)
+        : undefined
+    );
 
-  return createPaginatedResult(usersWithRoles, pagination, count);
+    const [{ count }] = await executeQuery(
+      (db) =>
+        db
+          .selectDistinct({ count: countAsInt })
+          .from(users)
+          .innerJoin(userRoles, eq(users.id, userRoles.userId))
+          .innerJoin(roles, eq(userRoles.roleId, roles.id))
+          .where(countConditions),
+      "getUsersWithRoles.countWithRoles"
+    );
+    totalCount = count;
+  } else {
+    // No role filtering, just count all users matching base conditions
+    const [{ count }] = await executeQuery(
+      (db) =>
+        db
+          .select({ count: countAsInt })
+          .from(users)
+          .where(baseConditions),
+      "getUsersWithRoles.count"
+    );
+    totalCount = count;
+  }
+
+  return createPaginatedResult(usersWithRoles, pagination, totalCount);
 }
 
 /**
@@ -424,7 +451,7 @@ export async function getConversationsWithMessages(
                 color: nexusFolders.color,
               })
               .from(nexusFolders)
-              .where(sql`${nexusFolders.id} = ANY(${folderIds})`),
+              .where(inArray(nexusFolders.id, folderIds)),
           "getConversationsWithMessages.folders"
         )
       : [];
@@ -444,7 +471,7 @@ export async function getConversationsWithMessages(
           createdAt: nexusMessages.createdAt,
         })
         .from(nexusMessages)
-        .where(sql`${nexusMessages.conversationId} = ANY(${conversationIds})`)
+        .where(inArray(nexusMessages.conversationId, conversationIds))
         .orderBy(desc(nexusMessages.createdAt)),
     "getConversationsWithMessages.messages"
   );
