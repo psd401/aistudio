@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { getDocumentsByConversationId, getDocumentChunksByDocumentId } from '@/lib/db/queries/documents';
@@ -54,7 +55,19 @@ export async function POST(request: NextRequest) {
       timer({ status: "error", reason: "query_too_long" });
       return NextResponse.json({ error: 'Query is too long (max 1000 characters)' }, { status: 400, headers: { "X-Request-Id": requestId } });
     }
-    
+
+    // Validate UUID format before database call (Issue #549)
+    try {
+      z.string().uuid().parse(conversationId);
+    } catch {
+      log.warn("Invalid conversation ID format (expected UUID)", { conversationId });
+      timer({ status: "error", reason: "invalid_uuid" });
+      return NextResponse.json(
+        { success: false, error: 'Invalid conversation ID format' },
+        { status: 400, headers: { "X-Request-Id": requestId } }
+      );
+    }
+
     log.debug("Processing query", { conversationId, queryLength: query.length });
 
     // Get documents for the conversation (conversationId is UUID string - Issue #549)
