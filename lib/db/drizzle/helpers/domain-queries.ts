@@ -35,6 +35,16 @@ import { combineAnd, eqOrSkip, inArrayOrSkip } from "./filters";
 import { buildPinnedFirstSort } from "./sorting";
 
 // ============================================
+// Constants
+// ============================================
+
+/**
+ * Maximum number of messages that can be fetched in a single query
+ * to prevent resource exhaustion
+ */
+const MAX_MESSAGE_LIMIT = 1000;
+
+// ============================================
 // Types - Users
 // ============================================
 
@@ -159,35 +169,68 @@ export async function getUsersWithRoles(
       )
     : undefined;
 
-  const baseConditions = combineAnd(searchCondition);
+  const hasRoleFilter = !!(filters.roleName || (filters.roleIds && filters.roleIds.length > 0));
 
   // Get users with pagination
-  const usersData = await executeQuery(
-    (db) =>
-      db
-        .select({
-          id: users.id,
-          cognitoSub: users.cognitoSub,
-          email: users.email,
-          firstName: users.firstName,
-          lastName: users.lastName,
-          createdAt: users.createdAt,
-          updatedAt: users.updatedAt,
-          lastSignInAt: users.lastSignInAt,
-        })
-        .from(users)
-        .where(baseConditions)
-        .orderBy(desc(users.createdAt))
-        .limit(limit)
-        .offset(offset),
-    "getUsersWithRoles.users"
-  );
+  // When role filtering is active, include JOIN at database level for better performance
+  const usersData = hasRoleFilter
+    ? await executeQuery(
+        (db) => {
+          const roleConditions = combineAnd(
+            searchCondition,
+            filters.roleName ? eq(roles.name, filters.roleName) : undefined,
+            filters.roleIds && filters.roleIds.length > 0
+              ? inArray(roles.id, filters.roleIds)
+              : undefined
+          );
+
+          return db
+            .selectDistinct({
+              id: users.id,
+              cognitoSub: users.cognitoSub,
+              email: users.email,
+              firstName: users.firstName,
+              lastName: users.lastName,
+              createdAt: users.createdAt,
+              updatedAt: users.updatedAt,
+              lastSignInAt: users.lastSignInAt,
+            })
+            .from(users)
+            .innerJoin(userRoles, eq(users.id, userRoles.userId))
+            .innerJoin(roles, eq(userRoles.roleId, roles.id))
+            .where(roleConditions)
+            .orderBy(desc(users.createdAt))
+            .limit(limit)
+            .offset(offset);
+        },
+        "getUsersWithRoles.usersWithRoleFilter"
+      )
+    : await executeQuery(
+        (db) =>
+          db
+            .select({
+              id: users.id,
+              cognitoSub: users.cognitoSub,
+              email: users.email,
+              firstName: users.firstName,
+              lastName: users.lastName,
+              createdAt: users.createdAt,
+              updatedAt: users.updatedAt,
+              lastSignInAt: users.lastSignInAt,
+            })
+            .from(users)
+            .where(searchCondition)
+            .orderBy(desc(users.createdAt))
+            .limit(limit)
+            .offset(offset),
+        "getUsersWithRoles.users"
+      );
 
   if (usersData.length === 0) {
     return createPaginatedResult([], pagination, 0);
   }
 
-  // Get roles for all users in a single query
+  // Get all roles for the fetched users in a single query
   const userIds = usersData.map((u) => u.id);
   const rolesData = await executeQuery(
     (db) =>
@@ -204,21 +247,6 @@ export async function getUsersWithRoles(
     "getUsersWithRoles.roles"
   );
 
-  // Filter by role if specified
-  let filteredUserIds = new Set<number>(userIds);
-  if (filters.roleName) {
-    const usersWithRole = rolesData
-      .filter((r) => r.roleName === filters.roleName && r.userId !== null)
-      .map((r) => r.userId as number);
-    filteredUserIds = new Set(usersWithRole);
-  }
-  if (filters.roleIds && filters.roleIds.length > 0) {
-    const usersWithRoles = rolesData
-      .filter((r) => r.userId !== null && filters.roleIds!.includes(r.roleId))
-      .map((r) => r.userId as number);
-    filteredUserIds = new Set(usersWithRoles);
-  }
-
   // Build role map
   const roleMap = new Map<number, Array<{ id: number; name: string; description: string | null }>>();
   for (const r of rolesData) {
@@ -234,20 +262,17 @@ export async function getUsersWithRoles(
   }
 
   // Combine data
-  const usersWithRoles: UserWithRoles[] = usersData
-    .filter((u) => filteredUserIds.has(u.id))
-    .map((u) => ({
-      ...u,
-      roles: roleMap.get(u.id) || [],
-    }));
+  const usersWithRoles: UserWithRoles[] = usersData.map((u) => ({
+    ...u,
+    roles: roleMap.get(u.id) || [],
+  }));
 
   // Get total count for pagination
-  // If role filtering is applied, we need to count users with those roles
   let totalCount: number;
-  if (filters.roleName || (filters.roleIds && filters.roleIds.length > 0)) {
+  if (hasRoleFilter) {
     // Count distinct users who have the specified role(s)
     const countConditions = combineAnd(
-      baseConditions,
+      searchCondition,
       filters.roleName ? eq(roles.name, filters.roleName) : undefined,
       filters.roleIds && filters.roleIds.length > 0
         ? inArray(roles.id, filters.roleIds)
@@ -272,7 +297,7 @@ export async function getUsersWithRoles(
         db
           .select({ count: countAsInt })
           .from(users)
-          .where(baseConditions),
+          .where(searchCondition),
       "getUsersWithRoles.count"
     );
     totalCount = count;
@@ -536,6 +561,9 @@ export async function getConversationWithAllMessages(
   userId: number,
   messageLimit: number = 100
 ): Promise<ConversationWithMessages | null> {
+  // Enforce maximum limit to prevent resource exhaustion
+  const safeLimit = Math.min(Math.max(1, messageLimit), MAX_MESSAGE_LIMIT);
+
   // Get conversation with folder
   const conversationData = await executeQuery(
     (db) =>
@@ -603,7 +631,7 @@ export async function getConversationWithAllMessages(
         .from(nexusMessages)
         .where(eq(nexusMessages.conversationId, conversationId))
         .orderBy(desc(nexusMessages.createdAt))
-        .limit(messageLimit),
+        .limit(safeLimit),
     "getConversationWithAllMessages.messages"
   );
 

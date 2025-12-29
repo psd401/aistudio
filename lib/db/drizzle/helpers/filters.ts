@@ -255,6 +255,9 @@ export function buildRangeFilter<T>(
 /**
  * Build equality filter (or skip if value is undefined/null)
  *
+ * NOTE: This function treats `null` as "skip this filter", not "IS NULL".
+ * If you need to filter for NULL values explicitly, use `isNull(column)` instead.
+ *
  * @param column - Column to filter on
  * @param value - Value to compare
  * @returns SQL condition or undefined
@@ -266,6 +269,9 @@ export function buildRangeFilter<T>(
  *   eq(users.isActive, true),
  *   eqOrSkip(users.status, status)
  * );
+ *
+ * // For explicit NULL checks, use:
+ * // isNull(users.deletedAt)  // WHERE deleted_at IS NULL
  * ```
  */
 export function eqOrSkip<T>(column: PgColumn, value: T | undefined | null): SQL | undefined {
@@ -276,7 +282,9 @@ export function eqOrSkip<T>(column: PgColumn, value: T | undefined | null): SQL 
 }
 
 /**
- * Build IN filter (or skip if array is empty/undefined)
+ * Build IN filter (or skip if array is empty/undefined/null)
+ *
+ * NOTE: This function treats `null` and `undefined` as "skip this filter".
  *
  * @param column - Column to filter on
  * @param values - Array of values
@@ -296,7 +304,9 @@ export function inArrayOrSkip<T>(column: PgColumn, values: T[] | undefined | nul
 }
 
 /**
- * Build ILIKE filter with wildcards (or skip if value is empty)
+ * Build ILIKE filter with wildcards (or skip if value is empty/undefined/null)
+ *
+ * NOTE: This function treats `null` and `undefined` as "skip this filter".
  *
  * @param column - Column to filter on
  * @param value - Search string (wildcards are added automatically)

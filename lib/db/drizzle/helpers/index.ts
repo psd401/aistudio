@@ -47,6 +47,9 @@ export {
   buildCursorCondition,
   processCursorResults,
   // SQL helpers
+  // IMPORTANT: Always use countAsInt for COUNT queries with RDS Data API.
+  // RDS Data API returns bigint as strings; countAsInt casts to int for proper type safety.
+  // Use: .select({ count: countAsInt }) instead of count()
   countAsInt,
 } from "./pagination";
 
