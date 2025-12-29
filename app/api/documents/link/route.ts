@@ -1,11 +1,20 @@
 import { NextRequest } from 'next/server';
+import { z } from 'zod';
 import { linkDocumentToConversation, getDocumentById } from '@/lib/db/queries/documents';
+import { getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 import { withErrorHandling, unauthorized } from '@/lib/api-utils';
 import { createError } from '@/lib/error-utils';
 import { ErrorLevel } from '@/types/actions-types';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+
+// Request validation schema
+// Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
+const LinkDocumentRequestSchema = z.object({
+  documentId: z.number().positive(),
+  conversationId: z.string().uuid()
+});
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId();
   const timer = startTimer("api.documents.link");
@@ -32,27 +41,29 @@ export async function POST(request: NextRequest) {
 
   return withErrorHandling(async () => {
     const body = await request.json();
-    const { documentId, conversationId } = body;
 
-    if (!documentId) {
-      log.warn("Document ID is required");
-      timer({ status: "error", reason: "missing_document_id" });
-      throw createError('Document ID is required', {
-        code: 'VALIDATION',
-        level: ErrorLevel.WARN,
-        details: { field: 'documentId' }
-      });
+    // Validate request body using Zod schema
+    const validationResult = LinkDocumentRequestSchema.safeParse(body);
+    if (!validationResult.success) {
+      const firstError = validationResult.error.issues[0];
+      log.warn("Request validation failed", { error: firstError });
+      timer({ status: "error", reason: "validation_failed" });
+      throw createError(
+        firstError.message,
+        {
+          code: 'VALIDATION',
+          level: ErrorLevel.WARN,
+          details: {
+            validationErrors: validationResult.error.issues.map(issue => ({
+              path: issue.path.join('.'),
+              message: issue.message
+            }))
+          }
+        }
+      );
     }
 
-    if (!conversationId) {
-      log.warn("Conversation ID is required");
-      timer({ status: "error", reason: "missing_conversation_id" });
-      throw createError('Conversation ID is required', {
-        code: 'VALIDATION',
-        level: ErrorLevel.WARN,
-        details: { field: 'conversationId' }
-      });
-    }
+    const { documentId, conversationId } = validationResult.data;
 
     // Verify the document belongs to the user
     const document = await getDocumentById({ id: documentId });
@@ -81,6 +92,18 @@ export async function POST(request: NextRequest) {
         code: 'FORBIDDEN',
         level: ErrorLevel.WARN,
         details: { documentId, userId, documentUserId: document.userId }
+      });
+    }
+
+    // Verify conversation exists and user owns it (prevents linking to others' conversations)
+    const conversation = await getConversationById(conversationId, userId);
+    if (!conversation) {
+      log.warn("Conversation not found or access denied", { conversationId, userId });
+      timer({ status: "error", reason: "conversation_not_found" });
+      throw createError('Conversation not found', {
+        code: 'NOT_FOUND',
+        level: ErrorLevel.WARN,
+        details: { conversationId }
       });
     }
 

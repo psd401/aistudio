@@ -4,6 +4,7 @@ import { getServerSession } from '@/lib/auth/server-session'
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action'
 import { getObjectStream, documentExists } from '@/lib/aws/s3-client'
 import { saveDocument, batchInsertDocumentChunks } from '@/lib/db/queries/documents'
+import { getConversationById } from '@/lib/db/drizzle/nexus-conversations'
 import { extractTextFromDocument, chunkText, getFileTypeFromFileName } from '@/lib/document-processing'
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger'
 import { withActionState, unauthorized } from '@/lib/api-utils'
@@ -16,11 +17,12 @@ export const runtime = "nodejs"
 
 
 // Request validation schema
+// Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
 const ProcessDocumentRequestSchema = z.object({
   key: z.string().min(1),
   fileName: z.string().min(1).max(255),
   fileSize: z.number().positive(),
-  conversationId: z.number().nullable().optional()
+  conversationId: z.string().uuid().nullable().optional()
 })
 
 interface ProcessDocumentResponse {
@@ -145,9 +147,22 @@ export async function POST(request: NextRequest) {
     if (!text) {
       log.error("No text content extracted from document");
       timer({ status: "error", reason: "no_text_content" });
-      return { 
-        isSuccess: false, 
-        message: 'Failed to extract text content from document' 
+      return {
+        isSuccess: false,
+        message: 'Failed to extract text content from document'
+      }
+    }
+
+    // Validate conversation exists and user owns it (if conversationId provided)
+    if (conversationId) {
+      const conversation = await getConversationById(conversationId, userId);
+      if (!conversation) {
+        log.warn("Conversation not found or access denied", { conversationId, userId });
+        timer({ status: "error", reason: "conversation_not_found" });
+        return {
+          isSuccess: false,
+          message: 'Conversation not found'
+        };
       }
     }
 

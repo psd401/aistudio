@@ -261,6 +261,7 @@ export const nexusConversationsRelations = relations(
     conversationFolders: many(nexusConversationFolders),
     promptLibrary: many(promptLibrary),
     promptUsageEvents: many(promptUsageEvents),
+    documents: many(documents), // Added bidirectional relation for Issue #549
   })
 );
 
@@ -591,6 +592,10 @@ export const documentsRelations = relations(documents, ({ one, many }) => ({
   user: one(users, {
     fields: [documents.userId],
     references: [users.id],
+  }),
+  conversation: one(nexusConversations, {
+    fields: [documents.conversationId],
+    references: [nexusConversations.id],
   }),
   chunks: many(documentChunks),
 }));
