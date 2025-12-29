@@ -14,6 +14,7 @@ Drizzle ORM provides a relational query API that enables type-safe eager loading
 ### N+1 Query Problem
 
 **Bad Pattern (N+1 Queries):**
+
 ```typescript
 // ❌ This executes 1 + N queries (1 for users, N for each user's roles)
 const users = await executeQuery(
@@ -33,6 +34,7 @@ for (const user of users) {
 ```
 
 **Good Pattern (Single Query with Eager Loading):**
+
 ```typescript
 // ✅ This executes 1 query total, fetching all related data
 const usersWithRoles = await executeQuery(
@@ -54,6 +56,7 @@ const usersWithRoles = await executeQuery(
 ### Users → UserRoles → Roles
 
 **Schema Definition** (`/lib/db/schema/relations.ts:93-123`):
+
 ```typescript
 export const usersRelations = relations(users, ({ one, many }) => ({
   userRoles: many(userRoles),
@@ -101,7 +104,9 @@ const user = await executeQuery(
 
 // Access related data with full type safety
 user?.userRoles.forEach((ur) => {
-  console.log(ur.role.name); // TypeScript knows the shape
+  // TypeScript knows the shape
+  // In production, use logger: logger.info("Role", { name: ur.role.name })
+  ur.role.name; // Fully typed property access
 });
 
 // Get all users with roles and tools (3-level deep)
@@ -158,6 +163,7 @@ const usersSummary = await executeQuery(
 ### Conversations → Messages
 
 **Schema Definition** (`/lib/db/schema/relations.ts:226-274`):
+
 ```typescript
 export const nexusConversationsRelations = relations(
   nexusConversations,
@@ -720,13 +726,18 @@ const conversation = await executeQuery(
 // TypeScript knows the exact shape
 conversation?.messages.forEach((message) => {
   // ✅ All properties are typed
-  console.log(message.content);
-  console.log(message.model.displayName);
-  console.log(message.model.provider);
+  // In production, use logger:
+  // logger.debug("Message", {
+  //   content: message.content,
+  //   model: message.model.displayName
+  // })
+  message.content;           // Fully typed
+  message.model.displayName; // Fully typed
+  message.model.provider;    // Fully typed
 });
 
 // ❌ TypeScript error: Property doesn't exist
-console.log(conversation?.folder); // Error if not included in 'with'
+// conversation?.folder; // Error if not included in 'with'
 ```
 
 ## References
