@@ -261,6 +261,7 @@ export const nexusConversationsRelations = relations(
     conversationFolders: many(nexusConversationFolders),
     promptLibrary: many(promptLibrary),
     promptUsageEvents: many(promptUsageEvents),
+    documents: many(documents), // Added bidirectional relation for Issue #549
   })
 );
 

@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server';
+import { z } from 'zod';
 import { linkDocumentToConversation, getDocumentById } from '@/lib/db/queries/documents';
 import { withErrorHandling, unauthorized } from '@/lib/api-utils';
 import { createError } from '@/lib/error-utils';
@@ -6,6 +7,13 @@ import { ErrorLevel } from '@/types/actions-types';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+
+// Request validation schema
+// Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
+const LinkDocumentRequestSchema = z.object({
+  documentId: z.number().positive(),
+  conversationId: z.string().uuid()
+});
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId();
   const timer = startTimer("api.documents.link");
@@ -32,38 +40,34 @@ export async function POST(request: NextRequest) {
 
   return withErrorHandling(async () => {
     const body = await request.json();
-    const { documentId, conversationId } = body;
 
-    if (!documentId) {
-      log.warn("Document ID is required");
-      timer({ status: "error", reason: "missing_document_id" });
-      throw createError('Document ID is required', {
-        code: 'VALIDATION',
-        level: ErrorLevel.WARN,
-        details: { field: 'documentId' }
-      });
-    }
-
-    if (!conversationId) {
-      log.warn("Conversation ID is required");
-      timer({ status: "error", reason: "missing_conversation_id" });
-      throw createError('Conversation ID is required', {
-        code: 'VALIDATION',
-        level: ErrorLevel.WARN,
-        details: { field: 'conversationId' }
-      });
-    }
-
-    // Validate conversationId is a valid UUID (Issue #549)
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (typeof conversationId !== 'string' || !uuidRegex.test(conversationId)) {
-      log.warn("Invalid conversation ID format (expected UUID)", { conversationId });
-      timer({ status: "error", reason: "invalid_conversation_id" });
-      throw createError('Invalid conversation ID format', {
-        code: 'VALIDATION',
-        level: ErrorLevel.WARN,
-        details: { field: 'conversationId', expected: 'UUID string' }
-      });
+    // Validate request body using Zod schema
+    let documentId: number;
+    let conversationId: string;
+    try {
+      const validated = LinkDocumentRequestSchema.parse(body);
+      documentId = validated.documentId;
+      conversationId = validated.conversationId;
+    } catch (validationError) {
+      log.warn("Request validation failed", { error: validationError });
+      timer({ status: "error", reason: "validation_failed" });
+      throw createError(
+        validationError instanceof z.ZodError
+          ? validationError.issues[0].message
+          : 'Invalid request body',
+        {
+          code: 'VALIDATION',
+          level: ErrorLevel.WARN,
+          details: {
+            validationErrors: validationError instanceof z.ZodError
+              ? validationError.issues.map(issue => ({
+                  path: issue.path.join('.'),
+                  message: issue.message
+                }))
+              : undefined
+          }
+        }
+      );
     }
 
     // Verify the document belongs to the user

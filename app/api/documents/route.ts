@@ -113,10 +113,11 @@ export async function GET(request: NextRequest) {
     // If conversationId is provided, fetch documents for conversation
     // Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
     if (conversationId) {
-      // Validate UUID format
-      const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-      if (!uuidRegex.test(conversationId)) {
-        log.warn("Invalid conversation ID format (expected UUID)", { conversationId });
+      // Validate UUID format using RFC 4122 compliant regex
+      // Validates version (1-5) and variant (8, 9, a, b) fields
+      const UUID_REGEX = /^[\da-f]{8}-[\da-f]{4}-[1-5][\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i;
+      if (!UUID_REGEX.test(conversationId)) {
+        log.warn("Invalid conversation ID format (expected RFC 4122 UUID)", { conversationId });
         timer({ status: "error", reason: "invalid_id" });
         return NextResponse.json(
           {
