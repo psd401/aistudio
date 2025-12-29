@@ -7,8 +7,10 @@
 -- SAFETY: All 13 existing documents have conversation_id = NULL
 -- This ensures safe type conversion with no data loss
 --
--- NOTE: DO $$ blocks with RAISE NOTICE removed - incompatible with RDS Data API
--- Pre/post checks moved to manual verification queries in issue comments
+-- NOTE: Wrapped in transaction to prevent race conditions during migration
+-- RDS Data API supports transactions for schema modifications
+
+BEGIN;
 
 -- Step 0: Drop existing index created in 004-indexes.sql
 -- Required because we're changing the column type from INTEGER to UUID
@@ -31,6 +33,8 @@ ALTER TABLE documents
 -- Only indexes non-NULL values for efficiency
 CREATE INDEX idx_documents_conversation_id
   ON documents(conversation_id) WHERE conversation_id IS NOT NULL;
+
+COMMIT;
 
 -- VERIFICATION QUERIES (run manually after migration):
 -- Check column type:

@@ -1,6 +1,7 @@
 import { NextRequest } from 'next/server';
 import { z } from 'zod';
 import { linkDocumentToConversation, getDocumentById } from '@/lib/db/queries/documents';
+import { getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 import { withErrorHandling, unauthorized } from '@/lib/api-utils';
 import { createError } from '@/lib/error-utils';
 import { ErrorLevel } from '@/types/actions-types';
@@ -91,6 +92,18 @@ export async function POST(request: NextRequest) {
         code: 'FORBIDDEN',
         level: ErrorLevel.WARN,
         details: { documentId, userId, documentUserId: document.userId }
+      });
+    }
+
+    // Verify conversation exists and user owns it (prevents linking to others' conversations)
+    const conversation = await getConversationById(conversationId, userId);
+    if (!conversation) {
+      log.warn("Conversation not found or access denied", { conversationId, userId });
+      timer({ status: "error", reason: "conversation_not_found" });
+      throw createError('Conversation not found', {
+        code: 'NOT_FOUND',
+        level: ErrorLevel.WARN,
+        details: { conversationId }
       });
     }
 
