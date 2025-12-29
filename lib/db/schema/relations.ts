@@ -592,6 +592,10 @@ export const documentsRelations = relations(documents, ({ one, many }) => ({
     fields: [documents.userId],
     references: [users.id],
   }),
+  conversation: one(nexusConversations, {
+    fields: [documents.conversationId],
+    references: [nexusConversations.id],
+  }),
   chunks: many(documentChunks),
 }));
 

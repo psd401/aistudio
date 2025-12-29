@@ -76,6 +76,8 @@ export interface ChunkMetadata {
 
 /**
  * Data for creating a new document
+ *
+ * Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
  */
 export interface CreateDocumentData {
   name: string;
@@ -83,19 +85,21 @@ export interface CreateDocumentData {
   url: string;
   size: number;
   userId: number;
-  conversationId?: number | null;
+  conversationId?: string | null;
   metadata?: DocumentMetadata | null;
 }
 
 /**
  * Data for updating a document
+ *
+ * Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
  */
 export interface UpdateDocumentData {
   name?: string;
   type?: string;
   url?: string;
   size?: number;
-  conversationId?: number | null;
+  conversationId?: string | null;
   metadata?: DocumentMetadata | null;
 }
 
@@ -154,10 +158,12 @@ export async function getDocumentsByUserId(
 }
 
 /**
- * Get documents by conversation ID
+ * Get documents by conversation ID (UUID)
+ *
+ * Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
  */
 export async function getDocumentsByConversationId(
-  conversationId: number
+  conversationId: string
 ): Promise<SelectDocument[]> {
   const result = await executeQuery(
     (db) =>
@@ -236,11 +242,13 @@ export async function updateDocument(
 }
 
 /**
- * Link a document to a conversation
+ * Link a document to a conversation (UUID)
+ *
+ * Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
  */
 export async function linkDocumentToConversation(
   documentId: number,
-  conversationId: number
+  conversationId: string
 ): Promise<SelectDocument | null> {
   const result = await executeQuery(
     (db) =>

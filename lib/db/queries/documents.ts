@@ -109,12 +109,14 @@ export async function getDocumentsByUserId({ userId }: { userId: number }): Prom
 }
 
 /**
- * Gets documents by conversation id
+ * Gets documents by conversation id (UUID)
+ *
+ * Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
  */
 export async function getDocumentsByConversationId({
   conversationId
 }: {
-  conversationId: number
+  conversationId: string
 }): Promise<SelectDocument[]> {
   try {
     const results = await executeQuery(
@@ -297,10 +299,12 @@ export async function deleteDocumentChunksByDocumentId({
 
 /**
  * Update the conversation ID for a given document ID
+ *
+ * Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
  */
 export async function linkDocumentToConversation(
   documentId: number,
-  conversationId: number
+  conversationId: string
 ): Promise<SelectDocument | undefined> {
   try {
     const results = await executeQuery(

@@ -57,8 +57,8 @@ export async function POST(request: NextRequest) {
     
     log.debug("Processing query", { conversationId, queryLength: query.length });
 
-    // Get documents for the conversation
-    const documents = await getDocumentsByConversationId({ conversationId: Number.parseInt(conversationId) });
+    // Get documents for the conversation (conversationId is UUID string - Issue #549)
+    const documents = await getDocumentsByConversationId({ conversationId });
     
     if (documents.length === 0) {
       log.info("No documents found for conversation", { conversationId });

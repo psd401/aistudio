@@ -16,11 +16,12 @@ export const runtime = "nodejs"
 
 
 // Request validation schema
+// Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
 const ProcessDocumentRequestSchema = z.object({
   key: z.string().min(1),
   fileName: z.string().min(1).max(255),
   fileSize: z.number().positive(),
-  conversationId: z.number().nullable().optional()
+  conversationId: z.string().uuid().nullable().optional()
 })
 
 interface ProcessDocumentResponse {

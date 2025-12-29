@@ -54,6 +54,18 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    // Validate conversationId is a valid UUID (Issue #549)
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (typeof conversationId !== 'string' || !uuidRegex.test(conversationId)) {
+      log.warn("Invalid conversation ID format (expected UUID)", { conversationId });
+      timer({ status: "error", reason: "invalid_conversation_id" });
+      throw createError('Invalid conversation ID format', {
+        code: 'VALIDATION',
+        level: ErrorLevel.WARN,
+        details: { field: 'conversationId', expected: 'UUID string' }
+      });
+    }
+
     // Verify the document belongs to the user
     const document = await getDocumentById({ id: documentId });
     if (!document) {
