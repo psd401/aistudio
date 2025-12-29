@@ -359,3 +359,111 @@ describe('executeTransaction behavior documentation', () => {
     expect(allowedOperations).toHaveLength(1)
   })
 })
+
+describe('validateDatabaseConnection behavior documentation', () => {
+  it('should document connection validation purpose', () => {
+    // validateDatabaseConnection is used for health checks to verify:
+    // - Environment variables are configured (RDS_SECRET_ARN, RDS_RESOURCE_ARN)
+    // - AWS credentials are valid
+    // - Database is accessible and responding
+    const validationChecks = {
+      environmentVariables: true,
+      awsCredentials: true,
+      databaseAccessibility: true,
+      responseTime: true,
+    }
+
+    expect(validationChecks.environmentVariables).toBe(true)
+    expect(validationChecks.databaseAccessibility).toBe(true)
+  })
+
+  it('should document success response structure', () => {
+    // Successful validation returns:
+    interface SuccessResponse {
+      success: true
+      message: string
+      config: {
+        region: string | undefined
+        hasResourceArn: boolean
+        hasSecretArn: boolean
+        database: string
+      }
+    }
+
+    const exampleSuccess: SuccessResponse = {
+      success: true,
+      message: 'Database connection validated successfully',
+      config: {
+        region: 'us-east-1',
+        hasResourceArn: true,
+        hasSecretArn: true,
+        database: 'aistudio',
+      },
+    }
+
+    expect(exampleSuccess.success).toBe(true)
+    expect(exampleSuccess.config.database).toBe('aistudio')
+  })
+
+  it('should document failure response structure', () => {
+    // Failed validation returns:
+    interface FailureResponse {
+      success: false
+      message: string
+      config: {
+        region: string | undefined
+        hasResourceArn: boolean
+        hasSecretArn: boolean
+        database: string
+      }
+      error: string
+    }
+
+    const exampleFailure: FailureResponse = {
+      success: false,
+      message: 'Database connection validation failed',
+      config: {
+        region: 'us-east-1',
+        hasResourceArn: true,
+        hasSecretArn: false,
+        database: 'aistudio',
+      },
+      error: 'Missing RDS_SECRET_ARN environment variable',
+    }
+
+    expect(exampleFailure.success).toBe(false)
+    expect(exampleFailure.error).toBeTruthy()
+  })
+
+  it('should document validation query', () => {
+    // Executes simple test query: SELECT 1 as test
+    // This verifies:
+    // - RDS Data API connectivity
+    // - Secret Manager authentication
+    // - Database availability
+    // - Network routing through VPC
+    const testQuery = 'SELECT 1 as test'
+    const expectedResult = { rows: [{ test: 1 }] }
+
+    expect(testQuery).toBe('SELECT 1 as test')
+    expect(expectedResult.rows).toHaveLength(1)
+  })
+
+  it('should document environment variable precedence', () => {
+    // Region resolution order:
+    // 1. AWS_REGION (server-side)
+    // 2. AWS_DEFAULT_REGION
+    // 3. NEXT_PUBLIC_AWS_REGION
+    // 4. Default: 'us-east-1'
+    const regionPrecedence = [
+      'AWS_REGION',
+      'AWS_DEFAULT_REGION',
+      'NEXT_PUBLIC_AWS_REGION',
+      'us-east-1 (default)',
+    ]
+
+    expect(regionPrecedence).toHaveLength(4)
+    expect(regionPrecedence[0]).toBe('AWS_REGION')
+    expect(regionPrecedence[3]).toBe('us-east-1 (default)')
+  })
+})

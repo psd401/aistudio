@@ -292,6 +292,18 @@ describe('RDS Error Handler', () => {
   })
 
   describe('Circuit Breaker', () => {
+    let originalDateNow: () => number
+
+    beforeEach(() => {
+      // Save original Date.now for tests that mock it
+      originalDateNow = Date.now
+    })
+
+    afterEach(() => {
+      // Restore Date.now after each test
+      Date.now = originalDateNow
+    })
+
     describe('initial state', () => {
       it('should start in closed state', () => {
         const state = getCircuitBreakerState()
@@ -328,14 +340,11 @@ describe('RDS Error Handler', () => {
         expect(getCircuitBreakerState().state).toBe('open')
 
         // Mock Date.now to simulate timeout passing
-        const originalNow = Date.now
-        const futureTime = originalNow() + 31000 // 31 seconds later
+        const futureTime = Date.now() + 31000 // 31 seconds later
         Date.now = () => futureTime
 
         expect(checkCircuitBreaker()).toBe(true)
         expect(getCircuitBreakerState().state).toBe('half-open')
-
-        Date.now = originalNow
       })
 
       it('should allow requests when circuit is half-open', () => {
@@ -345,11 +354,9 @@ describe('RDS Error Handler', () => {
         }
 
         // Mock timeout
-        const originalNow = Date.now
-        const futureTime = originalNow() + 31000
+        const futureTime = Date.now() + 31000
         Date.now = () => futureTime
         checkCircuitBreaker() // Transitions to half-open
-        Date.now = originalNow
 
         expect(getCircuitBreakerState().state).toBe('half-open')
         expect(checkCircuitBreaker()).toBe(true)
@@ -373,11 +380,9 @@ describe('RDS Error Handler', () => {
         }
 
         // Transition to half-open
-        const originalNow = Date.now
-        const futureTime = originalNow() + 31000
+        const futureTime = Date.now() + 31000
         Date.now = () => futureTime
         checkCircuitBreaker()
-        Date.now = originalNow
 
         recordSuccess()
         expect(getCircuitBreakerState().successCount).toBe(1)
@@ -390,11 +395,9 @@ describe('RDS Error Handler', () => {
         }
 
         // Transition to half-open
-        const originalNow = Date.now
-        const futureTime = originalNow() + 31000
+        const futureTime = Date.now() + 31000
         Date.now = () => futureTime
         checkCircuitBreaker()
-        Date.now = originalNow
 
         // Record 2 successes (threshold)
         recordSuccess()
@@ -436,11 +439,9 @@ describe('RDS Error Handler', () => {
           recordFailure()
         }
 
-        const originalNow = Date.now
-        const futureTime = originalNow() + 31000
+        const futureTime = Date.now() + 31000
         Date.now = () => futureTime
         checkCircuitBreaker() // half-open
-        Date.now = originalNow
 
         expect(getCircuitBreakerState().state).toBe('half-open')
 
