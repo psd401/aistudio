@@ -5,6 +5,13 @@ import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { getDocumentsByConversationId, getDocumentChunksByDocumentId } from '@/lib/db/queries/documents';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
+// Request validation schema
+// Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
+const QueryDocumentsRequestSchema = z.object({
+  conversationId: z.string().uuid({ message: "Invalid conversation ID format (expected UUID)" }),
+  query: z.string().min(1, "Query is required").max(1000, "Query is too long (max 1000 characters)")
+});
+
 // Escape special regex characters to prevent regex injection
 // Matches the behavior of lodash's escapeRegExp
 function escapeRegExp(string: string): string {
@@ -35,39 +42,23 @@ export async function POST(request: NextRequest) {
 
   try {
     const body = await request.json();
-    const { conversationId, query } = body;
 
-    if (!conversationId) {
-      log.warn("Conversation ID is required");
-      timer({ status: "error", reason: "missing_conversation_id" });
-      return NextResponse.json({ error: 'Conversation ID is required' }, { status: 400, headers: { "X-Request-Id": requestId } });
-    }
-
-    if (!query || typeof query !== 'string') {
-      log.warn("Query is required and must be a string");
-      timer({ status: "error", reason: "invalid_query" });
-      return NextResponse.json({ error: 'Query is required and must be a string' }, { status: 400, headers: { "X-Request-Id": requestId } });
-    }
-
-    // Validate query length to prevent DoS attacks
-    if (query.length > 1000) {
-      log.warn("Query too long", { queryLength: query.length });
-      timer({ status: "error", reason: "query_too_long" });
-      return NextResponse.json({ error: 'Query is too long (max 1000 characters)' }, { status: 400, headers: { "X-Request-Id": requestId } });
-    }
-
-    // Validate UUID format before database call (Issue #549)
-    try {
-      z.string().uuid().parse(conversationId);
-    } catch {
-      log.warn("Invalid conversation ID format (expected UUID)", { conversationId });
-      timer({ status: "error", reason: "invalid_uuid" });
+    // Validate request body using Zod schema
+    const validationResult = QueryDocumentsRequestSchema.safeParse(body);
+    if (!validationResult.success) {
+      const firstError = validationResult.error.issues[0];
+      log.warn("Request validation failed", { error: firstError });
+      timer({ status: "error", reason: "validation_failed" });
       return NextResponse.json(
-        { success: false, error: 'Invalid conversation ID format' },
+        {
+          success: false,
+          error: firstError.message
+        },
         { status: 400, headers: { "X-Request-Id": requestId } }
       );
     }
 
+    const { conversationId, query } = validationResult.data;
     log.debug("Processing query", { conversationId, queryLength: query.length });
 
     // Get documents for the conversation (conversationId is UUID string - Issue #549)

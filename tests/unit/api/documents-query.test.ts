@@ -33,6 +33,9 @@ jest.mock('@/lib/logger', () => ({
 // The tests below are comprehensive but currently fail due to mock setup issues
 // that also affect existing tests in the codebase (e.g., documents-upload.test.ts)
 
+// Test UUID conversationId (Issue #549 - changed from integer to UUID)
+const TEST_CONVERSATION_ID = '550e8400-e29b-41d4-a716-446655440000';
+
 describe('POST /api/documents/query', () => {
   beforeEach(() => {
     jest.clearAllMocks();
@@ -44,7 +47,7 @@ describe('POST /api/documents/query', () => {
 
       const request = new NextRequest('http://localhost:3000/api/documents/query', {
         method: 'POST',
-        body: JSON.stringify({ conversationId: 1, query: 'test' }),
+        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
       });
 
       const response = await POST(request);
@@ -59,7 +62,7 @@ describe('POST /api/documents/query', () => {
 
       const request = new NextRequest('http://localhost:3000/api/documents/query', {
         method: 'POST',
-        body: JSON.stringify({ conversationId: 1, query: 'test' }),
+        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
       });
 
       const response = await POST(request);
@@ -87,38 +90,41 @@ describe('POST /api/documents/query', () => {
       const response = await POST(request);
       expect(response.status).toBe(400);
       const data = await response.json();
-      expect(data.error).toBe('Conversation ID is required');
+      // Zod validation error when conversationId is undefined
+      expect(data.error).toContain('expected string');
     });
 
     it('should return 400 if query is missing', async () => {
       const request = new NextRequest('http://localhost:3000/api/documents/query', {
         method: 'POST',
-        body: JSON.stringify({ conversationId: 1 }),
+        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID }),
       });
 
       const response = await POST(request);
       expect(response.status).toBe(400);
       const data = await response.json();
-      expect(data.error).toBe('Query is required and must be a string');
+      // Zod validation error when query is undefined
+      expect(data.error).toContain('expected string');
     });
 
     it('should return 400 if query is not a string', async () => {
       const request = new NextRequest('http://localhost:3000/api/documents/query', {
         method: 'POST',
-        body: JSON.stringify({ conversationId: 1, query: 123 }),
+        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 123 }),
       });
 
       const response = await POST(request);
       expect(response.status).toBe(400);
       const data = await response.json();
-      expect(data.error).toBe('Query is required and must be a string');
+      // Zod validation error message for type mismatch
+      expect(data.error).toContain('expected string');
     });
 
     it('should return 400 if query is too long', async () => {
       const longQuery = 'a'.repeat(1001);
       const request = new NextRequest('http://localhost:3000/api/documents/query', {
         method: 'POST',
-        body: JSON.stringify({ conversationId: 1, query: longQuery }),
+        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: longQuery }),
       });
 
       const response = await POST(request);
@@ -136,7 +142,7 @@ describe('POST /api/documents/query', () => {
         data: { user: { id: BigInt(1) } }
       } as any);
       (getDocumentsByConversationId as jest.Mock).mockResolvedValue([
-        { id: 1, name: 'Test Doc', conversationId: 1 }
+        { id: 1, name: 'Test Doc', conversationId: TEST_CONVERSATION_ID }
       ] as any);
       (getDocumentChunksByDocumentId as jest.Mock).mockResolvedValue([
         { 
@@ -168,7 +174,7 @@ describe('POST /api/documents/query', () => {
       for (const query of maliciousQueries) {
         const request = new NextRequest('http://localhost:3000/api/documents/query', {
           method: 'POST',
-          body: JSON.stringify({ conversationId: 1, query }),
+          body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query }),
         });
 
         const response = await POST(request);
@@ -197,7 +203,7 @@ describe('POST /api/documents/query', () => {
 
       const request = new NextRequest('http://localhost:3000/api/documents/query', {
         method: 'POST',
-        body: JSON.stringify({ conversationId: 1, query: '.*' }),
+        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: '.*' }),
       });
 
       const response = await POST(request);
@@ -217,8 +223,8 @@ describe('POST /api/documents/query', () => {
         data: { user: { id: BigInt(1) } }
       } as any);
       (getDocumentsByConversationId as jest.Mock).mockResolvedValue([
-        { id: 1, name: 'Test Doc 1', conversationId: 1 },
-        { id: 2, name: 'Test Doc 2', conversationId: 1 }
+        { id: 1, name: 'Test Doc 1', conversationId: TEST_CONVERSATION_ID },
+        { id: 2, name: 'Test Doc 2', conversationId: TEST_CONVERSATION_ID }
       ] as any);
     });
 
@@ -227,7 +233,7 @@ describe('POST /api/documents/query', () => {
 
       const request = new NextRequest('http://localhost:3000/api/documents/query', {
         method: 'POST',
-        body: JSON.stringify({ conversationId: 1, query: 'test' }),
+        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
       });
 
       const response = await POST(request);
@@ -259,7 +265,7 @@ describe('POST /api/documents/query', () => {
 
       const request = new NextRequest('http://localhost:3000/api/documents/query', {
         method: 'POST',
-        body: JSON.stringify({ conversationId: 1, query: 'test' }),
+        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
       });
 
       const response = await POST(request);
@@ -290,7 +296,7 @@ describe('POST /api/documents/query', () => {
 
       const request = new NextRequest('http://localhost:3000/api/documents/query', {
         method: 'POST',
-        body: JSON.stringify({ conversationId: 1, query: 'test' }),
+        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
       });
 
       const response = await POST(request);
@@ -313,7 +319,7 @@ describe('POST /api/documents/query', () => {
 
       const request = new NextRequest('http://localhost:3000/api/documents/query', {
         method: 'POST',
-        body: JSON.stringify({ conversationId: 1, query: 'test' }),
+        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
       });
 
       const response = await POST(request);
@@ -338,7 +344,7 @@ describe('POST /api/documents/query', () => {
 
       const request = new NextRequest('http://localhost:3000/api/documents/query', {
         method: 'POST',
-        body: JSON.stringify({ conversationId: 1, query: 'test' }),
+        body: JSON.stringify({ conversationId: TEST_CONVERSATION_ID, query: 'test' }),
       });
 
       const response = await POST(request);

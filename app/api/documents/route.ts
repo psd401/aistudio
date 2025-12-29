@@ -115,15 +115,15 @@ export async function GET(request: NextRequest) {
     // Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
     if (conversationId) {
       // Validate UUID format using Zod for consistency with other routes
-      try {
-        z.string().uuid().parse(conversationId);
-      } catch {
-        log.warn("Invalid conversation ID format (expected UUID)", { conversationId });
+      const validationResult = z.string().uuid({ message: "Invalid conversation ID format (expected UUID)" }).safeParse(conversationId);
+      if (!validationResult.success) {
+        const firstError = validationResult.error.issues[0];
+        log.warn("Invalid conversation ID format", { conversationId, error: firstError });
         timer({ status: "error", reason: "invalid_id" });
         return NextResponse.json(
           {
             success: false,
-            error: 'Invalid conversation ID format'
+            error: firstError.message
           },
           { status: 400, headers: { "X-Request-Id": requestId } }
         );
