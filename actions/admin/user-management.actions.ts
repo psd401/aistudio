@@ -15,10 +15,11 @@ import type { ActionState } from "@/types"
 import { getServerSession } from "@/lib/auth/server-session"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
-import { eq, sql, desc, count, inArray, type SQL } from "drizzle-orm"
+import { eq, sql, desc, count, inArray, and, type SQL } from "drizzle-orm"
 import { users, userRoles, roles } from "@/lib/db/schema"
 import { nexusConversations } from "@/lib/db/schema/tables/nexus-conversations"
 import { promptUsageEvents } from "@/lib/db/schema/tables/prompt-usage-events"
+import { getDateThreshold } from "@/lib/date-utils"
 
 // Constants
 const ACTIVE_USER_THRESHOLD_DAYS = 30 // Users who signed in within this many days are considered "active"
@@ -66,8 +67,7 @@ function getUserStatus(lastSignInAt: Date | null): "active" | "inactive" | "pend
     return "pending" // Never signed in
   }
 
-  const thresholdDate = new Date()
-  thresholdDate.setDate(thresholdDate.getDate() - ACTIVE_USER_THRESHOLD_DAYS)
+  const thresholdDate = getDateThreshold(ACTIVE_USER_THRESHOLD_DAYS)
 
   if (lastSignInAt >= thresholdDate) {
     return "active"
@@ -97,8 +97,7 @@ export async function getUserStats(): Promise<ActionState<UserStats>> {
     }
 
     // Calculate threshold for active users
-    const thirtyDaysAgo = new Date()
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - ACTIVE_USER_THRESHOLD_DAYS)
+    const thirtyDaysAgo = getDateThreshold(ACTIVE_USER_THRESHOLD_DAYS)
 
     // Parallelize all stat queries for better performance
     const [totalResult, activeResult, pendingResult, adminResult] = await Promise.all([
@@ -203,12 +202,19 @@ export async function getUsers(
         )
       }
 
-      const searchTerm = `%${searchInput}%`
+      // Escape ILIKE wildcard characters to prevent unintended matching
+      // User searching for "%" should not match all records
+      const escapedInput = searchInput
+        .replace(/\\/g, "\\\\") // Escape backslashes first
+        .replace(/%/g, "\\%")   // Escape % wildcard
+        .replace(/_/g, "\\_")   // Escape _ wildcard
+
+      const searchTerm = `%${escapedInput}%`
       conditions.push(
         sql`(
-          ${users.firstName} ILIKE ${searchTerm} OR
-          ${users.lastName} ILIKE ${searchTerm} OR
-          ${users.email} ILIKE ${searchTerm}
+          ${users.firstName} ILIKE ${searchTerm} ESCAPE '\\' OR
+          ${users.lastName} ILIKE ${searchTerm} ESCAPE '\\' OR
+          ${users.email} ILIKE ${searchTerm} ESCAPE '\\'
         )`
       )
     }
@@ -248,32 +254,26 @@ export async function getUsers(
 
         // Use JOIN when filtering by role for database-level filtering
         if (filters?.role && filters.role !== "all") {
-          let roleQuery = db
+          // Combine role filter with other conditions explicitly using AND
+          const roleConditions = whereClause
+            ? and(eq(roles.name, filters.role), whereClause)
+            : eq(roles.name, filters.role)
+
+          return db
             .select(baseSelect)
             .from(users)
             .innerJoin(userRoles, eq(users.id, userRoles.userId))
             .innerJoin(roles, eq(userRoles.roleId, roles.id))
-            .$dynamic()
-
-          // Apply role filter
-          roleQuery = roleQuery.where(eq(roles.name, filters.role))
-
-          // Apply additional conditions if present
-          if (whereClause) {
-            roleQuery = roleQuery.where(whereClause)
-          }
-
-          return roleQuery.orderBy(desc(users.createdAt))
+            .where(roleConditions)
+            .orderBy(desc(users.createdAt))
         }
 
-        // No role filter - simple query
-        let baseQuery = db.select(baseSelect).from(users).$dynamic()
+        // No role filter - simple query (with optional search/status filters)
+        const simpleQuery = db.select(baseSelect).from(users)
 
-        if (whereClause) {
-          baseQuery = baseQuery.where(whereClause)
-        }
-
-        return baseQuery.orderBy(desc(users.createdAt))
+        return whereClause
+          ? simpleQuery.where(whereClause).orderBy(desc(users.createdAt))
+          : simpleQuery.orderBy(desc(users.createdAt))
       },
       "getUsers-list"
     )
@@ -602,14 +602,13 @@ export async function deleteUser(userId: number): Promise<ActionState<void>> {
 
     // Delete user and role assignments in a transaction
     // This ensures atomicity - if the user delete fails, role delete is rolled back
-    let result: typeof users.$inferSelect[]
     await executeTransaction(
       async (tx) => {
         // Delete user role assignments first (foreign key constraint)
         await tx.delete(userRoles).where(eq(userRoles.userId, userId))
 
-        // Delete the user
-        result = await tx.delete(users).where(eq(users.id, userId)).returning()
+        // Delete the user and check if it existed
+        const result = await tx.delete(users).where(eq(users.id, userId)).returning()
 
         if (result.length === 0) {
           throw ErrorFactories.dbRecordNotFound("users", userId)

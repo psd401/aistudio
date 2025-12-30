@@ -61,7 +61,7 @@ import {
 } from "@/components/ui/alert-dialog"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
-import { IconPlus, IconRefresh } from "@tabler/icons-react"
+import { IconRefresh } from "@tabler/icons-react"
 
 import {
   StatsCards,
@@ -408,10 +408,8 @@ export function UsersPageClient({
             <IconRefresh className="h-4 w-4 mr-2" />
             Refresh
           </Button>
-          <Button size="sm">
-            <IconPlus className="h-4 w-4 mr-2" />
-            Add User
-          </Button>
+          {/* TODO: Add User functionality not yet implemented
+              Will require: user invitation flow, email template, permission setup */}
         </div>
       </div>
 
