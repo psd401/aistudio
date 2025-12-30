@@ -14,7 +14,7 @@ import {
 import type { ActionState } from "@/types"
 import { getServerSession } from "@/lib/auth/server-session"
 import { executeQuery } from "@/lib/db/drizzle-client"
-import { eq, sql, desc, count } from "drizzle-orm"
+import { eq, sql, desc, count, type SQL } from "drizzle-orm"
 import { users, userRoles, roles } from "@/lib/db/schema"
 import { nexusConversations } from "@/lib/db/schema/tables/nexus-conversations"
 import { promptUsageEvents } from "@/lib/db/schema/tables/prompt-usage-events"
@@ -25,6 +25,12 @@ export interface UserStats {
   activeNow: number
   pendingInvites: number
   admins: number
+  trends?: {
+    totalUsers?: number
+    activeNow?: number
+    pendingInvites?: number
+    admins?: number
+  }
 }
 
 export interface UserListItem {
@@ -86,48 +92,50 @@ export async function getUserStats(): Promise<ActionState<UserStats>> {
       throw ErrorFactories.authNoSession()
     }
 
-    // Get total users count
-    const totalResult = await executeQuery(
-      (db) => db.select({ count: count() }).from(users),
-      "getUserStats-total"
-    )
-    const totalUsers = totalResult[0]?.count ?? 0
-
-    // Get active users (signed in within last 30 days)
+    // Calculate threshold for active users
     const thirtyDaysAgo = new Date()
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
 
-    const activeResult = await executeQuery(
-      (db) =>
-        db
-          .select({ count: count() })
-          .from(users)
-          .where(sql`${users.lastSignInAt} >= ${thirtyDaysAgo}`),
-      "getUserStats-active"
-    )
+    // Parallelize all stat queries for better performance
+    const [totalResult, activeResult, pendingResult, adminResult] = await Promise.all([
+      // Get total users count
+      executeQuery(
+        (db) => db.select({ count: count() }).from(users),
+        "getUserStats-total"
+      ),
+      // Get active users (signed in within last 30 days)
+      executeQuery(
+        (db) =>
+          db
+            .select({ count: count() })
+            .from(users)
+            .where(sql`${users.lastSignInAt} >= ${thirtyDaysAgo}`),
+        "getUserStats-active"
+      ),
+      // Get pending users (never signed in)
+      executeQuery(
+        (db) =>
+          db
+            .select({ count: count() })
+            .from(users)
+            .where(sql`${users.lastSignInAt} IS NULL`),
+        "getUserStats-pending"
+      ),
+      // Get admin count
+      executeQuery(
+        (db) =>
+          db
+            .select({ count: count() })
+            .from(userRoles)
+            .innerJoin(roles, eq(userRoles.roleId, roles.id))
+            .where(eq(roles.name, "administrator")),
+        "getUserStats-admins"
+      ),
+    ])
+
+    const totalUsers = totalResult[0]?.count ?? 0
     const activeNow = activeResult[0]?.count ?? 0
-
-    // Get pending users (never signed in)
-    const pendingResult = await executeQuery(
-      (db) =>
-        db
-          .select({ count: count() })
-          .from(users)
-          .where(sql`${users.lastSignInAt} IS NULL`),
-      "getUserStats-pending"
-    )
     const pendingInvites = pendingResult[0]?.count ?? 0
-
-    // Get admin count
-    const adminResult = await executeQuery(
-      (db) =>
-        db
-          .select({ count: count() })
-          .from(userRoles)
-          .innerJoin(roles, eq(userRoles.roleId, roles.id))
-          .where(eq(roles.name, "administrator")),
-      "getUserStats-admins"
-    )
     const admins = adminResult[0]?.count ?? 0
 
     timer({ status: "success" })
@@ -166,10 +174,42 @@ export async function getUsers(
       throw ErrorFactories.authNoSession()
     }
 
-    // Get all users with their roles
+    // Build dynamic WHERE conditions for database-level filtering
+    const conditions: SQL[] = []
+
+    // Search filter - case-insensitive search across firstName, lastName, email
+    if (filters?.search) {
+      const searchTerm = `%${filters.search}%`
+      conditions.push(
+        sql`(
+          ${users.firstName} ILIKE ${searchTerm} OR
+          ${users.lastName} ILIKE ${searchTerm} OR
+          ${users.email} ILIKE ${searchTerm}
+        )`
+      )
+    }
+
+    // Status filter - based on lastSignInAt
+    if (filters?.status && filters.status !== "all") {
+      if (filters.status === "pending") {
+        conditions.push(sql`${users.lastSignInAt} IS NULL`)
+      } else if (filters.status === "active") {
+        const thirtyDaysAgo = new Date()
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+        conditions.push(sql`${users.lastSignInAt} >= ${thirtyDaysAgo}`)
+      } else if (filters.status === "inactive") {
+        const thirtyDaysAgo = new Date()
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+        conditions.push(
+          sql`${users.lastSignInAt} IS NOT NULL AND ${users.lastSignInAt} < ${thirtyDaysAgo}`
+        )
+      }
+    }
+
+    // Get filtered users
     const usersWithRoles = await executeQuery(
-      (db) =>
-        db
+      (db) => {
+        let query = db
           .select({
             id: users.id,
             email: users.email,
@@ -179,20 +219,40 @@ export async function getUsers(
             createdAt: users.createdAt,
           })
           .from(users)
-          .orderBy(desc(users.createdAt)),
+
+        // Apply combined WHERE conditions
+        if (conditions.length > 0) {
+          query = query.where(sql`${sql.join(conditions, sql` AND `)}`) as typeof query
+        }
+
+        return query.orderBy(desc(users.createdAt))
+      },
       "getUsers-list"
     )
 
-    // Get roles for all users
+    // Get user IDs for role filtering
+    const userIds = usersWithRoles.map((u) => u.id)
+
+    if (userIds.length === 0) {
+      timer({ status: "success" })
+      log.info("No users found matching filters")
+      return createSuccess([], "Users fetched successfully")
+    }
+
+    // Get roles for filtered users only
     const allUserRoles = await executeQuery(
-      (db) =>
-        db
+      (db) => {
+        const query = db
           .select({
             userId: userRoles.userId,
             roleName: roles.name,
           })
           .from(userRoles)
-          .innerJoin(roles, eq(userRoles.roleId, roles.id)),
+          .innerJoin(roles, eq(userRoles.roleId, roles.id))
+          .where(sql`${userRoles.userId} IN (${sql.join(userIds.map((id) => sql`${id}`), sql`, `)})`)
+
+        return query
+      },
       "getUsers-roles"
     )
 
@@ -206,7 +266,7 @@ export async function getUsers(
       }
     }
 
-    // Transform and filter results
+    // Transform results
     let userList: UserListItem[] = usersWithRoles.map((user) => ({
       id: user.id,
       firstName: user.firstName || "",
@@ -218,21 +278,7 @@ export async function getUsers(
       createdAt: user.createdAt?.toISOString() || null,
     }))
 
-    // Apply filters
-    if (filters?.search) {
-      const searchLower = filters.search.toLowerCase()
-      userList = userList.filter(
-        (user) =>
-          user.firstName.toLowerCase().includes(searchLower) ||
-          user.lastName.toLowerCase().includes(searchLower) ||
-          user.email.toLowerCase().includes(searchLower)
-      )
-    }
-
-    if (filters?.status && filters.status !== "all") {
-      userList = userList.filter((user) => user.status === filters.status)
-    }
-
+    // Apply role filter (must be done after role map is built)
     if (filters?.role && filters.role !== "all") {
       userList = userList.filter((user) => user.roles.includes(filters.role!))
     }

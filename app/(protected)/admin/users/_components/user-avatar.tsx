@@ -57,6 +57,7 @@ export function UserAvatar({
       </Avatar>
       {showStatusIndicator && status && (
         <div
+          role="status"
           className={cn(
             "absolute bottom-0 right-0 rounded-full border-2 border-white",
             statusColors[status],

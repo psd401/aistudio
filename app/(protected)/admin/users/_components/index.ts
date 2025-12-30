@@ -2,7 +2,8 @@
 export { UserAvatar } from "./user-avatar"
 export { RoleBadge, RoleBadgeList } from "./role-badge"
 export { StatusIndicator, type UserStatus } from "./status-indicator"
-export { StatsCards, StatsCardsSkeleton, type UserStats } from "./stats-cards"
+export { StatsCards, StatsCardsSkeleton } from "./stats-cards"
+export type { UserStats } from "@/actions/admin/user-management.actions"
 export { UserFilters, useUserFilters, type UserFiltersState } from "./user-filters"
 export {
   UsersDataTable,

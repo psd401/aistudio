@@ -4,6 +4,7 @@ import { Card, CardContent } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { IconUsers, IconUserCheck, IconMail, IconShield } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
+import type { UserStats } from "@/actions/admin/user-management.actions"
 
 interface StatCardProps {
   label: string
@@ -62,19 +63,6 @@ function StatCard({ label, value, icon, trend, loading, className }: StatCardPro
       </CardContent>
     </Card>
   )
-}
-
-export interface UserStats {
-  totalUsers: number
-  activeNow: number
-  pendingInvites: number
-  admins: number
-  trends?: {
-    totalUsers?: number
-    activeNow?: number
-    pendingInvites?: number
-    admins?: number
-  }
 }
 
 interface StatsCardsProps {

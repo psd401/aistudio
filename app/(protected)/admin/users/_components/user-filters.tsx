@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState, useCallback, useEffect } from "react"
 import { Input } from "@/components/ui/input"
 import {
   Select,
@@ -66,10 +66,10 @@ export function UserFilters({
     // Debounced value will trigger useEffect below
   }
 
-  // Use effect to notify when debounced search changes
-  useState(() => {
-    // This will run when debouncedSearch changes
-  })
+  // Notify parent when debounced search changes
+  useEffect(() => {
+    notifyChange({ search: debouncedSearch })
+  }, [debouncedSearch, notifyChange])
 
   // Handle status change (immediate)
   const handleStatusChange = (value: UserStatus) => {

@@ -24,6 +24,7 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import { formatDate } from "@/lib/date-utils"
 import { UserAvatar } from "./user-avatar"
 import { RoleBadgeList } from "./role-badge"
 import { StatusIndicator, type UserStatus } from "./status-indicator"
@@ -91,33 +92,6 @@ interface UserDetailSheetProps {
   className?: string
 }
 
-// Format date for display
-function formatDate(dateString: string | null | undefined, includeTime = false): string {
-  if (!dateString) return "Never"
-
-  const utcString = dateString.includes("Z") || dateString.includes("+")
-    ? dateString
-    : dateString + "Z"
-
-  const date = new Date(utcString)
-
-  if (includeTime) {
-    return date.toLocaleString("en-US", {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    })
-  }
-
-  return date.toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  })
-}
-
 // Activity type badge
 function ActivityTypeBadge({ type }: { type: ActivityLogEntry["type"] }) {
   const config: Record<ActivityLogEntry["type"], { label: string; className: string }> = {
@@ -169,7 +143,10 @@ export function UserDetailSheet({
     setIsSaving(true)
     try {
       await onSave(editedUser)
-      setIsEditing(false)
+      setIsEditing(false) // Only exit edit mode on success
+    } catch {
+      // Keep editing mode active on error so user can retry
+      // Error is already handled by parent component with toast notification
     } finally {
       setIsSaving(false)
     }
@@ -354,7 +331,7 @@ export function UserDetailSheet({
                         </SelectTrigger>
                         <SelectContent>
                           {roles.map((role) => (
-                            <SelectItem key={role.id} value={role.id}>
+                            <SelectItem key={role.id} value={role.name}>
                               {role.name}
                             </SelectItem>
                           ))}

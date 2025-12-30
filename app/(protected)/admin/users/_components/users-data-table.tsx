@@ -39,6 +39,7 @@ import {
   IconMail,
 } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
+import { formatDate } from "@/lib/date-utils"
 import { UserAvatar } from "./user-avatar"
 import { RoleBadgeList } from "./role-badge"
 import { StatusIndicator, type UserStatus } from "./status-indicator"
@@ -90,22 +91,6 @@ function SortableHeader({
       )}
     </Button>
   )
-}
-
-// Format date for display
-function formatDate(dateString: string | null | undefined): string {
-  if (!dateString) return "Never"
-
-  const utcString = dateString.includes("Z") || dateString.includes("+")
-    ? dateString
-    : dateString + "Z"
-
-  const date = new Date(utcString)
-  return date.toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  })
 }
 
 export function UsersDataTable({
