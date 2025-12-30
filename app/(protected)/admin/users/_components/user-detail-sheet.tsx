@@ -52,7 +52,6 @@ export interface UserDetail {
   createdAt?: string | null
   // Activity summary
   activitySummary?: {
-    assistantExecutions?: number
     promptsUsed?: number
     nexusConversations?: number
     lastActivity?: string
@@ -383,12 +382,6 @@ export function UserDetailSheet({
                   <div className="grid grid-cols-2 gap-4">
                     <div className="p-4 rounded-lg border bg-muted/50">
                       <p className="text-2xl font-bold">
-                        {user.activitySummary?.assistantExecutions ?? 0}
-                      </p>
-                      <p className="text-sm text-muted-foreground">Assistant Executions</p>
-                    </div>
-                    <div className="p-4 rounded-lg border bg-muted/50">
-                      <p className="text-2xl font-bold">
                         {user.activitySummary?.promptsUsed ?? 0}
                       </p>
                       <p className="text-sm text-muted-foreground">Prompts Used</p>
@@ -399,7 +392,7 @@ export function UserDetailSheet({
                       </p>
                       <p className="text-sm text-muted-foreground">Nexus Conversations</p>
                     </div>
-                    <div className="p-4 rounded-lg border bg-muted/50">
+                    <div className="p-4 rounded-lg border bg-muted/50 col-span-2">
                       <p className="text-sm font-medium">
                         {user.activitySummary?.lastActivity
                           ? formatDate(user.activitySummary.lastActivity, true)

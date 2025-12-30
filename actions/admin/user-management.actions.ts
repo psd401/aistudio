@@ -15,7 +15,7 @@ import type { ActionState } from "@/types"
 import { getServerSession } from "@/lib/auth/server-session"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
-import { eq, sql, desc, count, inArray, ilike, or, type SQL } from "drizzle-orm"
+import { eq, sql, desc, count, inArray, ilike, or, and, type SQL } from "drizzle-orm"
 import { users, userRoles, roles } from "@/lib/db/schema"
 import { nexusConversations } from "@/lib/db/schema/tables/nexus-conversations"
 import { promptUsageEvents } from "@/lib/db/schema/tables/prompt-usage-events"
@@ -371,39 +371,51 @@ export async function getUserActivity(
     // Verify admin role - requireRole throws if unauthorized (validates session internally)
     await requireRole("administrator")
 
-    // Get nexus conversation count
-    const conversationsResult = await executeQuery(
-      (db) =>
-        db
-          .select({ count: count() })
-          .from(nexusConversations)
-          .where(eq(nexusConversations.userId, userId)),
-      "getUserActivity-conversations"
+    // Check if user exists
+    const userExists = await executeQuery(
+      (db) => db.select({ id: users.id }).from(users).where(eq(users.id, userId)).limit(1),
+      "getUserActivity-checkUser"
     )
+
+    if (userExists.length === 0) {
+      throw ErrorFactories.dbRecordNotFound("users", userId)
+    }
+
+    // Parallelize activity queries for better performance
+    const [conversationsResult, promptsResult, lastConversation] = await Promise.all([
+      // Get nexus conversation count
+      executeQuery(
+        (db) =>
+          db
+            .select({ count: count() })
+            .from(nexusConversations)
+            .where(eq(nexusConversations.userId, userId)),
+        "getUserActivity-conversations"
+      ),
+      // Get prompt usage count
+      executeQuery(
+        (db) =>
+          db
+            .select({ count: count() })
+            .from(promptUsageEvents)
+            .where(eq(promptUsageEvents.userId, userId)),
+        "getUserActivity-prompts"
+      ),
+      // Get last activity (most recent conversation)
+      executeQuery(
+        (db) =>
+          db
+            .select({ lastMessageAt: nexusConversations.lastMessageAt })
+            .from(nexusConversations)
+            .where(eq(nexusConversations.userId, userId))
+            .orderBy(desc(nexusConversations.lastMessageAt))
+            .limit(1),
+        "getUserActivity-lastActivity"
+      ),
+    ])
+
     const nexusConversationsCount = conversationsResult[0]?.count ?? 0
-
-    // Get prompt usage count
-    const promptsResult = await executeQuery(
-      (db) =>
-        db
-          .select({ count: count() })
-          .from(promptUsageEvents)
-          .where(eq(promptUsageEvents.userId, userId)),
-      "getUserActivity-prompts"
-    )
     const promptsUsed = promptsResult[0]?.count ?? 0
-
-    // Get last activity (most recent conversation)
-    const lastConversation = await executeQuery(
-      (db) =>
-        db
-          .select({ lastMessageAt: nexusConversations.lastMessageAt })
-          .from(nexusConversations)
-          .where(eq(nexusConversations.userId, userId))
-          .orderBy(desc(nexusConversations.lastMessageAt))
-          .limit(1),
-      "getUserActivity-lastActivity"
-    )
     const lastActivity = lastConversation[0]?.lastMessageAt?.toISOString() || null
 
     timer({ status: "success" })
@@ -465,26 +477,8 @@ export async function updateUser(
       throw ErrorFactories.missingRequiredField("roles")
     }
 
-    // Get role IDs from role names (before transaction)
-    const roleList = await executeQuery(
-      (db) =>
-        db
-          .select({ id: roles.id, name: roles.name })
-          .from(roles)
-          .where(inArray(roles.name, data.roles)),
-      "updateUser-getRoleIds"
-    )
-
-    if (roleList.length !== data.roles.length) {
-      throw ErrorFactories.invalidInput(
-        "roles",
-        data.roles,
-        "One or more role names are invalid"
-      )
-    }
-
     // Update user and role assignments in a transaction
-    // This ensures atomicity - if role insert fails, user update is rolled back
+    // All validation happens inside transaction to prevent race conditions
     await executeTransaction(
       async (tx) => {
         // Update user basic info - verify user exists
@@ -500,6 +494,51 @@ export async function updateUser(
         // Throw if user doesn't exist
         if (result.length === 0) {
           throw ErrorFactories.dbRecordNotFound("users", userId)
+        }
+
+        // Get role IDs from role names (inside transaction to prevent race condition)
+        const roleList = await tx
+          .select({ id: roles.id, name: roles.name })
+          .from(roles)
+          .where(inArray(roles.name, data.roles))
+
+        if (roleList.length !== data.roles.length) {
+          throw ErrorFactories.invalidInput(
+            "roles",
+            data.roles,
+            "One or more role names are invalid"
+          )
+        }
+
+        // Prevent removing admin role from last administrator (would lock everyone out)
+        const isRemovingAdmin = !data.roles.includes("administrator")
+        if (isRemovingAdmin) {
+          // Check if user currently has admin role
+          const currentUserRoles = await tx
+            .select({ roleName: roles.name })
+            .from(userRoles)
+            .innerJoin(roles, eq(userRoles.roleId, roles.id))
+            .where(eq(userRoles.userId, userId))
+
+          const isCurrentlyAdmin = currentUserRoles.some((r) => r.roleName === "administrator")
+
+          if (isCurrentlyAdmin) {
+            // User is currently an admin and we're removing it - check if they're the last one
+            const adminCountResult = await tx
+              .select({ count: count() })
+              .from(userRoles)
+              .innerJoin(roles, eq(userRoles.roleId, roles.id))
+              .where(eq(roles.name, "administrator"))
+
+            const adminCount = adminCountResult[0]?.count ?? 0
+            if (adminCount <= 1) {
+              throw ErrorFactories.bizInvalidState(
+                "updateUser",
+                "last administrator role removal attempted",
+                "Cannot remove administrator role from the last administrator"
+              )
+            }
+          }
         }
 
         // Delete existing role assignments
@@ -563,6 +602,40 @@ export async function deleteUser(userId: number): Promise<ActionState<void>> {
         "self-deletion attempted",
         "cannot delete own account"
       )
+    }
+
+    // Prevent deleting the last administrator (would lock everyone out)
+    const userToDelete = await executeQuery(
+      (db) =>
+        db
+          .select({ id: users.id })
+          .from(users)
+          .innerJoin(userRoles, eq(userRoles.userId, users.id))
+          .innerJoin(roles, eq(userRoles.roleId, roles.id))
+          .where(and(eq(users.id, userId), eq(roles.name, "administrator"))),
+      "deleteUser-checkAdmin"
+    )
+
+    if (userToDelete.length > 0) {
+      // User is an admin - check if they're the last one
+      const adminCountResult = await executeQuery(
+        (db) =>
+          db
+            .select({ count: count() })
+            .from(userRoles)
+            .innerJoin(roles, eq(userRoles.roleId, roles.id))
+            .where(eq(roles.name, "administrator")),
+        "deleteUser-adminCount"
+      )
+
+      const adminCount = adminCountResult[0]?.count ?? 0
+      if (adminCount <= 1) {
+        throw ErrorFactories.bizInvalidState(
+          "deleteUser",
+          "last administrator deletion attempted",
+          "Cannot delete the last administrator"
+        )
+      }
     }
 
     // Delete user and role assignments in a transaction
