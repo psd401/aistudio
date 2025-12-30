@@ -208,6 +208,16 @@ export async function getUsers(
 
     // Status filter - based on lastSignInAt
     if (filters?.status && filters.status !== "all") {
+      // Runtime validation - TypeScript type doesn't enforce this at runtime
+      const VALID_STATUSES = ["all", "active", "inactive", "pending"] as const
+      if (!VALID_STATUSES.includes(filters.status)) {
+        throw ErrorFactories.invalidInput(
+          "status",
+          filters.status,
+          `Invalid status. Must be one of: ${VALID_STATUSES.join(", ")}`
+        )
+      }
+
       if (filters.status === "pending") {
         conditions.push(sql`${users.lastSignInAt} IS NULL`)
       } else if (filters.status === "active") {
@@ -604,44 +614,36 @@ export async function deleteUser(userId: number): Promise<ActionState<void>> {
       )
     }
 
-    // Prevent deleting the last administrator (would lock everyone out)
-    const userToDelete = await executeQuery(
-      (db) =>
-        db
+    // Delete user and role assignments in a transaction
+    // Admin check inside transaction prevents TOCTOU race condition
+    await executeTransaction(
+      async (tx) => {
+        // Check if user being deleted is an admin (inside transaction to prevent race)
+        const userToDelete = await tx
           .select({ id: users.id })
           .from(users)
           .innerJoin(userRoles, eq(userRoles.userId, users.id))
           .innerJoin(roles, eq(userRoles.roleId, roles.id))
-          .where(and(eq(users.id, userId), eq(roles.name, "administrator"))),
-      "deleteUser-checkAdmin"
-    )
+          .where(and(eq(users.id, userId), eq(roles.name, "administrator")))
 
-    if (userToDelete.length > 0) {
-      // User is an admin - check if they're the last one
-      const adminCountResult = await executeQuery(
-        (db) =>
-          db
+        if (userToDelete.length > 0) {
+          // User is an admin - check if they're the last one
+          const adminCountResult = await tx
             .select({ count: count() })
             .from(userRoles)
             .innerJoin(roles, eq(userRoles.roleId, roles.id))
-            .where(eq(roles.name, "administrator")),
-        "deleteUser-adminCount"
-      )
+            .where(eq(roles.name, "administrator"))
 
-      const adminCount = adminCountResult[0]?.count ?? 0
-      if (adminCount <= 1) {
-        throw ErrorFactories.bizInvalidState(
-          "deleteUser",
-          "last administrator deletion attempted",
-          "Cannot delete the last administrator"
-        )
-      }
-    }
+          const adminCount = adminCountResult[0]?.count ?? 0
+          if (adminCount <= 1) {
+            throw ErrorFactories.bizInvalidState(
+              "deleteUser",
+              "last administrator deletion attempted",
+              "Cannot delete the last administrator"
+            )
+          }
+        }
 
-    // Delete user and role assignments in a transaction
-    // This ensures atomicity - if the user delete fails, role delete is rolled back
-    await executeTransaction(
-      async (tx) => {
         // Delete user role assignments first (foreign key constraint)
         await tx.delete(userRoles).where(eq(userRoles.userId, userId))
 

@@ -286,9 +286,19 @@ export function UserDetailSheet({
                     </div>
                     <div className="space-y-2">
                       <Label>Access Level</Label>
-                      {/* NOTE: UI only displays/edits first role. Database supports multiple roles
-                          but current UI design treats roles as single-select. Consider multi-select
-                          component if users need multiple simultaneous roles. */}
+                      {/* LIMITATION: Single-role UI with potential data loss
+
+                          Database supports multiple roles per user, but this UI only shows/edits
+                          the first role. If a user has multiple roles (e.g., ["administrator", "staff"]),
+                          saving changes will DELETE all additional roles, potentially breaking permissions.
+
+                          Current behavior:
+                          - Display: Shows only roles[0]
+                          - Save: Replaces entire roles array with single selected role
+
+                          Recommended fix: Implement multi-select component (e.g., Combobox with multiple)
+                          to preserve all user roles during edits. Until fixed, avoid editing users with
+                          multiple roles or implement validation to prevent multi-role user edits. */}
                       <Select
                         value={editedUser?.roles?.[0] || "student"}
                         onValueChange={(value) =>
