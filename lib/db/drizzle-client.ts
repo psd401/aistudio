@@ -197,17 +197,24 @@ export async function executeQuery<T>(
 
 /**
  * Transaction options for configuring isolation level and access mode
+ *
+ * ⚠️ IMPORTANT: These options are NOT supported when using AWS RDS Data API.
+ * The Data API manages transactions internally and does not expose PostgreSQL
+ * transaction control parameters. All options in this interface are IGNORED.
+ *
+ * This interface is kept for backward compatibility and potential future use
+ * with direct PostgreSQL connections, but currently has no effect.
  */
 export interface TransactionOptions {
-  /** Transaction isolation level (default: undefined - use database default) */
+  /** Transaction isolation level (IGNORED with RDS Data API) */
   isolationLevel?:
     | "read uncommitted"
     | "read committed"
     | "repeatable read"
     | "serializable";
-  /** Access mode for the transaction */
+  /** Access mode for the transaction (IGNORED with RDS Data API) */
   accessMode?: "read only" | "read write";
-  /** Whether to use deferrable mode (only valid with serializable + read only) */
+  /** Whether to use deferrable mode (IGNORED with RDS Data API) */
   deferrable?: boolean;
 }
 
@@ -220,6 +227,11 @@ export interface TransactionOptions {
  *
  * Transactions are automatically rolled back on error. This is the recommended
  * way to perform multi-statement operations that must succeed or fail atomically.
+ *
+ * **IMPORTANT - RDS Data API Limitation:**
+ * AWS RDS Data API does NOT support PostgreSQL transaction control parameters
+ * (isolationLevel, accessMode, deferrable). Any TransactionOptions passed to this
+ * function are IGNORED. The Data API manages transactions internally.
  *
  * **IMPORTANT - Side Effect Warning:**
  * The retry mechanism will re-execute the ENTIRE transaction function on transient
@@ -236,7 +248,7 @@ export interface TransactionOptions {
  *
  * @param transactionFn - Function that performs operations within the transaction
  * @param context - Descriptive name for the operation (used in logging)
- * @param options - Optional retry and transaction configuration
+ * @param options - Optional retry configuration (transaction options ignored with Data API)
  * @returns Promise resolving to the transaction result
  * @throws Error if circuit breaker is open, all retries exhausted, or transaction fails
  *
@@ -293,11 +305,11 @@ export async function executeTransaction<T>(
   try {
     const result = await executeWithRetry(
       async () => {
-        return await db.transaction(transactionFn, {
-          isolationLevel: opts.isolationLevel,
-          accessMode: opts.accessMode,
-          deferrable: opts.deferrable,
-        });
+        // AWS RDS Data API does NOT support PostgreSQL transaction control parameters
+        // (isolationLevel, accessMode, deferrable). The Data API manages transactions
+        // internally and will fail with "Failed query: set transaction params" if you
+        // try to pass these options. Always call db.transaction() without options.
+        return await db.transaction(transactionFn);
       },
       context,
       {
