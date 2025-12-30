@@ -78,40 +78,34 @@ export async function createUserWithRolesAction(
   const log = createLogger({ requestId, action: "createUserWithRoles" })
   
   try {
-    log.info("Creating user with roles", { 
+    log.info("Creating user with roles", {
       email: sanitizeForLogging(userData.email),
-      roleCount: userData.roles.length 
+      roleCount: userData.roles.length
     })
-    
-    const result = await executeTransaction(async (transactionId) => {
-      log.debug("Transaction started", { transactionId })
-      
+
+    const result = await executeTransaction(async (tx) => {
+      log.debug("Transaction started")
+
       // Create user
-      const userResult = await executeSQL(
-        "INSERT INTO users (email, name) VALUES (:email, :name) RETURNING *",
-        [
-          { name: "email", value: { stringValue: userData.email } },
-          { name: "name", value: { stringValue: userData.name } }
-        ],
-        transactionId
-      )
-      log.debug("User created", { userId: userResult[0].id })
-      
+      const [user] = await tx.insert(users).values({
+        email: userData.email,
+        name: userData.name
+      }).returning()
+      log.debug("User created", { userId: user.id })
+
       // Add roles
-      for (const role of userData.roles) {
-        await executeSQL(
-          "INSERT INTO user_roles (user_id, role_id) VALUES (:userId, :roleId)",
-          [
-            { name: "userId", value: { longValue: userResult[0].id } },
-            { name: "roleId", value: { longValue: role.id } }
-          ],
-          transactionId
+      if (userData.roles.length > 0) {
+        await tx.insert(userRoles).values(
+          userData.roles.map(role => ({
+            userId: user.id,
+            roleId: role.id
+          }))
         )
       }
       log.debug("Roles assigned", { count: userData.roles.length })
-      
-      return userResult[0]
-    })
+
+      return user
+    }, "createUserWithRoles")
     
     timer({ status: "success" })
     log.info("User created successfully", { userId: result.id })
@@ -243,10 +237,13 @@ if (!email || !email.includes("@")) {
 
 // Database errors
 try {
-  const result = await executeSQL(query, params)
+  const result = await executeQuery(
+    (db) => db.select().from(users).where(eq(users.id, userId)),
+    "getUser"
+  )
 } catch (dbError) {
-  log.error("Database query failed", { query, error: dbError })
-  throw ErrorFactories.dbQueryFailed(query, dbError)
+  log.error("Database query failed", { error: dbError })
+  throw ErrorFactories.databaseError(dbError)
 }
 
 // Authorization errors
@@ -288,7 +285,10 @@ timer({
 // Nested timers for detailed tracking
 const mainTimer = startTimer("complexOperation")
 const dbTimer = startTimer("databaseQuery")
-const dbResult = await executeSQL(query)
+const dbResult = await executeQuery(
+  (db) => db.select().from(users),
+  "getAllUsers"
+)
 dbTimer({ status: "success", rows: dbResult.length })
 
 const apiTimer = startTimer("externalAPI")

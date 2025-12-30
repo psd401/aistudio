@@ -32,7 +32,7 @@ cd infra && npx cdk deploy AIStudio-FrontendStack-Dev     # Deploy single stack
 
 **Core Patterns**:
 - Server Actions return `ActionState<T>`
-- RDS Data API for all DB operations
+- Drizzle ORM for all DB operations (executeQuery/executeTransaction)
 - JWT sessions via NextAuth v5
 - Layered architecture (presentation → application → infrastructure)
 - **Reusable CDK constructs** for infrastructure consistency
@@ -163,29 +163,35 @@ mcp__awslabs_postgres-mcp-server__run_query
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
 import { getServerSession } from "@/lib/auth/server-session"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { eq } from "drizzle-orm"
+import { users } from "@/lib/db/schema"
 
 export async function actionName(params: ParamsType): Promise<ActionState<ReturnType>> {
   const requestId = generateRequestId()
   const timer = startTimer("actionName")
   const log = createLogger({ requestId, action: "actionName" })
-  
+
   try {
     log.info("Action started", { params: sanitizeForLogging(params) })
-    
+
     // Auth check
     const session = await getServerSession()
     if (!session) {
       log.warn("Unauthorized")
       throw ErrorFactories.authNoSession()
     }
-    
-    // Business logic
-    const result = await executeSQL("SELECT * FROM ...", params)
-    
+
+    // Business logic - use Drizzle ORM executeQuery
+    const result = await executeQuery(
+      (db) => db.select().from(users).where(eq(users.id, params.userId)),
+      "actionName"
+    )
+
     timer({ status: "success" })
     log.info("Action completed")
     return createSuccess(result, "Success message")
-    
+
   } catch (error) {
     timer({ status: "error" })
     return handleError(error, "User-friendly error", {
