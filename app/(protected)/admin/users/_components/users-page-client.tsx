@@ -293,8 +293,10 @@ export function UsersPageClient({
   )
 
   // Edit user
-  const handleEditUser = useCallback((user: UserTableRow) => {
+  const handleEditUser = useCallback(async (user: UserTableRow) => {
     // Open detail sheet in edit mode
+    // Use same logic as handleViewUser to fetch activity data
+    setLoadingActivity(true)
     setSelectedUser({
       id: user.id,
       firstName: user.firstName,
@@ -306,6 +308,24 @@ export function UsersPageClient({
       createdAt: user.createdAt,
     })
     setDetailOpen(true)
+
+    // Load activity data (same as handleViewUser)
+    const activityResult = await getUserActivity(user.id)
+    if (activityResult.isSuccess && activityResult.data) {
+      setSelectedUser((prev) =>
+        prev
+          ? {
+              ...prev,
+              activitySummary: {
+                nexusConversations: activityResult.data!.nexusConversations,
+                promptsUsed: activityResult.data!.promptsUsed,
+                lastActivity: activityResult.data!.lastActivity || undefined,
+              },
+            }
+          : null
+      )
+    }
+    setLoadingActivity(false)
   }, [])
 
   // Delete user
