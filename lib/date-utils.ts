@@ -62,6 +62,8 @@ export function formatDate(
 /**
  * Calculate a threshold date by subtracting days from now
  *
+ * Uses millisecond arithmetic to avoid edge cases with setDate() crossing month boundaries
+ *
  * @param daysAgo - Number of days to subtract from current date
  * @returns Date object representing the threshold (e.g., 30 days ago)
  *
@@ -72,6 +74,6 @@ export function formatDate(
  */
 export function getDateThreshold(daysAgo: number): Date {
   const threshold = new Date()
-  threshold.setDate(threshold.getDate() - daysAgo)
+  threshold.setTime(threshold.getTime() - (daysAgo * 24 * 60 * 60 * 1000))
   return threshold
 }

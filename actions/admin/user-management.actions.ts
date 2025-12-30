@@ -15,7 +15,7 @@ import type { ActionState } from "@/types"
 import { getServerSession } from "@/lib/auth/server-session"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
-import { eq, sql, desc, count, inArray, type SQL } from "drizzle-orm"
+import { eq, sql, desc, count, inArray, ilike, or, type SQL } from "drizzle-orm"
 import { users, userRoles, roles } from "@/lib/db/schema"
 import { nexusConversations } from "@/lib/db/schema/tables/nexus-conversations"
 import { promptUsageEvents } from "@/lib/db/schema/tables/prompt-usage-events"
@@ -87,14 +87,8 @@ export async function getUserStats(): Promise<ActionState<UserStats>> {
   try {
     log.info("Fetching user stats")
 
-    // Verify admin role - requireRole throws if unauthorized
+    // Verify admin role - requireRole throws if unauthorized (validates session internally)
     await requireRole("administrator")
-
-    const session = await getServerSession()
-    if (!session) {
-      log.warn("Unauthorized access attempt")
-      throw ErrorFactories.authNoSession()
-    }
 
     // Calculate threshold for active users
     const thirtyDaysAgo = getDateThreshold(ACTIVE_USER_THRESHOLD_DAYS)
@@ -171,14 +165,8 @@ export async function getUsers(
   try {
     log.info("Fetching users", { filters: sanitizeForLogging(filters) })
 
-    // Verify admin role - requireRole throws if unauthorized
+    // Verify admin role - requireRole throws if unauthorized (validates session internally)
     await requireRole("administrator")
-
-    const session = await getServerSession()
-    if (!session) {
-      log.warn("Unauthorized access attempt")
-      throw ErrorFactories.authNoSession()
-    }
 
     // Build dynamic WHERE conditions for database-level filtering
     const conditions: SQL[] = []
@@ -187,30 +175,35 @@ export async function getUsers(
     if (filters?.search) {
       // Validate search input (prevent DoS with excessively long strings)
       const searchInput = filters.search.trim()
-      if (searchInput.length > 100) {
+
+      // Skip query if empty string after trim (performance optimization)
+      if (searchInput.length === 0) {
+        // Don't add search condition, effectively showing all users
+      } else if (searchInput.length > 100) {
         throw ErrorFactories.invalidInput(
           "search",
           searchInput,
           "Must be 100 characters or less"
         )
+      } else {
+        // Escape ILIKE wildcard characters to prevent unintended matching
+        // User searching for "%" should not match all records
+        const escapedInput = searchInput
+          .replace(/\\/g, "\\\\") // Escape backslashes first
+          .replace(/%/g, "\\%")   // Escape % wildcard
+          .replace(/_/g, "\\_")   // Escape _ wildcard
+
+        const searchTerm = `%${escapedInput}%`
+
+        // Use Drizzle's ilike() for type safety instead of raw SQL
+        conditions.push(
+          or(
+            ilike(users.firstName, searchTerm),
+            ilike(users.lastName, searchTerm),
+            ilike(users.email, searchTerm)
+          )!
+        )
       }
-      // No minimum length requirement - allow single character searches
-
-      // Escape ILIKE wildcard characters to prevent unintended matching
-      // User searching for "%" should not match all records
-      const escapedInput = searchInput
-        .replace(/\\/g, "\\\\") // Escape backslashes first
-        .replace(/%/g, "\\%")   // Escape % wildcard
-        .replace(/_/g, "\\_")   // Escape _ wildcard
-
-      const searchTerm = `%${escapedInput}%`
-      conditions.push(
-        sql`(
-          ${users.firstName} ILIKE ${searchTerm} ESCAPE '\\' OR
-          ${users.lastName} ILIKE ${searchTerm} ESCAPE '\\' OR
-          ${users.email} ILIKE ${searchTerm} ESCAPE '\\'
-        )`
-      )
     }
 
     // Status filter - based on lastSignInAt
@@ -330,13 +323,8 @@ export async function getRoles(): Promise<
   try {
     log.info("Fetching roles")
 
-    // Verify admin role - requireRole throws if unauthorized
+    // Verify admin role - requireRole throws if unauthorized (validates session internally)
     await requireRole("administrator")
-
-    const session = await getServerSession()
-    if (!session) {
-      throw ErrorFactories.authNoSession()
-    }
 
     const roleList = await executeQuery(
       (db) =>
@@ -380,13 +368,8 @@ export async function getUserActivity(
   try {
     log.info("Fetching user activity", { userId })
 
-    // Verify admin role - requireRole throws if unauthorized
+    // Verify admin role - requireRole throws if unauthorized (validates session internally)
     await requireRole("administrator")
-
-    const session = await getServerSession()
-    if (!session) {
-      throw ErrorFactories.authNoSession()
-    }
 
     // Get nexus conversation count
     const conversationsResult = await executeQuery(
@@ -466,13 +449,8 @@ export async function updateUser(
   try {
     log.info("Updating user", { userId, data: sanitizeForLogging(data) })
 
-    // Verify admin role - requireRole throws if unauthorized
+    // Verify admin role - requireRole throws if unauthorized (validates session internally)
     await requireRole("administrator")
-
-    const session = await getServerSession()
-    if (!session) {
-      throw ErrorFactories.authNoSession()
-    }
 
     // Validate input
     if (!data.firstName?.trim()) {
@@ -563,9 +541,10 @@ export async function deleteUser(userId: number): Promise<ActionState<void>> {
   try {
     log.info("Deleting user", { userId })
 
-    // Verify admin role - requireRole throws if unauthorized
+    // Verify admin role - requireRole throws if unauthorized (validates session internally)
     await requireRole("administrator")
 
+    // Get session to check for self-deletion (session.user.id needed)
     const session = await getServerSession()
     if (!session) {
       throw ErrorFactories.authNoSession()
