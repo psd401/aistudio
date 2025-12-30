@@ -14,11 +14,14 @@ import {
 import type { ActionState } from "@/types"
 import { getServerSession } from "@/lib/auth/server-session"
 import { requireRole } from "@/lib/auth/role-helpers"
-import { executeQuery } from "@/lib/db/drizzle-client"
-import { eq, sql, desc, count, type SQL } from "drizzle-orm"
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
+import { eq, sql, desc, count, inArray, type SQL } from "drizzle-orm"
 import { users, userRoles, roles } from "@/lib/db/schema"
 import { nexusConversations } from "@/lib/db/schema/tables/nexus-conversations"
 import { promptUsageEvents } from "@/lib/db/schema/tables/prompt-usage-events"
+
+// Constants
+const ACTIVE_USER_THRESHOLD_DAYS = 30 // Users who signed in within this many days are considered "active"
 
 // Types
 export interface UserStats {
@@ -66,10 +69,10 @@ function getUserStatus(
     return "pending" // Never signed in
   }
 
-  const thirtyDaysAgo = new Date()
-  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+  const thresholdDate = new Date()
+  thresholdDate.setDate(thresholdDate.getDate() - ACTIVE_USER_THRESHOLD_DAYS)
 
-  if (lastSignInAt >= thirtyDaysAgo) {
+  if (lastSignInAt >= thresholdDate) {
     return "active"
   }
 
@@ -98,7 +101,7 @@ export async function getUserStats(): Promise<ActionState<UserStats>> {
 
     // Calculate threshold for active users
     const thirtyDaysAgo = new Date()
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - ACTIVE_USER_THRESHOLD_DAYS)
 
     // Parallelize all stat queries for better performance
     const [totalResult, activeResult, pendingResult, adminResult] = await Promise.all([
@@ -219,11 +222,11 @@ export async function getUsers(
         conditions.push(sql`${users.lastSignInAt} IS NULL`)
       } else if (filters.status === "active") {
         const thirtyDaysAgo = new Date()
-        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - ACTIVE_USER_THRESHOLD_DAYS)
         conditions.push(sql`${users.lastSignInAt} >= ${thirtyDaysAgo}`)
       } else if (filters.status === "inactive") {
         const thirtyDaysAgo = new Date()
-        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30)
+        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - ACTIVE_USER_THRESHOLD_DAYS)
         conditions.push(
           sql`${users.lastSignInAt} IS NOT NULL AND ${users.lastSignInAt} < ${thirtyDaysAgo}`
         )
@@ -265,18 +268,15 @@ export async function getUsers(
 
     // Get roles for filtered users only
     const allUserRoles = await executeQuery(
-      (db) => {
-        const query = db
+      (db) =>
+        db
           .select({
             userId: userRoles.userId,
             roleName: roles.name,
           })
           .from(userRoles)
           .innerJoin(roles, eq(userRoles.roleId, roles.id))
-          .where(sql`${userRoles.userId} IN (${sql.join(userIds.map((id) => sql`${id}`), sql`, `)})`)
-
-        return query
-      },
+          .where(inArray(userRoles.userId, userIds)),
       "getUsers-roles"
     )
 
@@ -491,29 +491,13 @@ export async function updateUser(
       throw ErrorFactories.missingRequiredField("roles")
     }
 
-    // Update user basic info
-    await executeQuery(
-      (db) =>
-        db
-          .update(users)
-          .set({
-            firstName: data.firstName.trim(),
-            lastName: data.lastName.trim(),
-          })
-          .where(eq(users.id, userId)),
-      "updateUser"
-    )
-
-    // Get role IDs from role names
+    // Get role IDs from role names (before transaction)
     const roleList = await executeQuery(
       (db) =>
         db
           .select({ id: roles.id, name: roles.name })
           .from(roles)
-          .where(sql`${roles.name} IN (${sql.join(
-            data.roles.map((name) => sql`${name}`),
-            sql`, `
-          )})`),
+          .where(inArray(roles.name, data.roles)),
       "updateUser-getRoleIds"
     )
 
@@ -525,22 +509,31 @@ export async function updateUser(
       )
     }
 
-    // Delete existing role assignments
-    await executeQuery(
-      (db) => db.delete(userRoles).where(eq(userRoles.userId, userId)),
-      "updateUser-deleteRoles"
-    )
+    // Update user and role assignments in a transaction
+    // This ensures atomicity - if role insert fails, user update is rolled back
+    await executeTransaction(
+      async (tx) => {
+        // Update user basic info
+        await tx
+          .update(users)
+          .set({
+            firstName: data.firstName.trim(),
+            lastName: data.lastName.trim(),
+          })
+          .where(eq(users.id, userId))
 
-    // Insert new role assignments
-    await executeQuery(
-      (db) =>
-        db.insert(userRoles).values(
+        // Delete existing role assignments
+        await tx.delete(userRoles).where(eq(userRoles.userId, userId))
+
+        // Insert new role assignments
+        await tx.insert(userRoles).values(
           roleList.map((role) => ({
             userId,
             roleId: role.id,
           }))
-        ),
-      "updateUser-insertRoles"
+        )
+      },
+      "updateUser-transaction"
     )
 
     timer({ status: "success" })

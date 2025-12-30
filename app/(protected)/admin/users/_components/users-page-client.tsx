@@ -100,17 +100,19 @@ export function UsersPageClient({
       if (rolesResult.isSuccess && rolesResult.data) {
         setRoles(rolesResult.data)
       }
-    } catch {
+    } catch (error) {
+      console.error("Failed to load user data:", error)
       toast({
         title: "Error",
-        description: "Failed to load user data",
+        description: error instanceof Error ? error.message : "Failed to load user data",
         variant: "destructive",
       })
     } finally {
       setLoading(false)
       setLoadingStats(false)
     }
-  }, [toast])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []) // toast is stable from useToast and doesn't need to be a dependency
 
   useEffect(() => {
     if (!initialStats || !initialUsers) {
@@ -121,39 +123,73 @@ export function UsersPageClient({
   // Handle filter changes
   const handleFiltersChange = useCallback(
     async (newFilters: UserFiltersState) => {
+      // Prevent concurrent filter requests
+      if (loading) return
+
       setFilters(newFilters)
+      setLoading(true)
 
-      // Reload users with new filters
-      const result = await getUsers({
-        search: newFilters.search,
-        status: newFilters.status,
-        role: activeTab !== "all" ? activeTab : newFilters.role,
-      })
+      try {
+        // Reload users with new filters
+        const result = await getUsers({
+          search: newFilters.search,
+          status: newFilters.status,
+          role: activeTab !== "all" ? activeTab : newFilters.role,
+        })
 
-      if (result.isSuccess && result.data) {
-        setUsers(result.data)
+        if (result.isSuccess && result.data) {
+          setUsers(result.data)
+        } else if (!result.isSuccess) {
+          console.error("Failed to fetch users:", result.message)
+          toast({
+            title: "Error",
+            description: result.message || "Failed to load users",
+            variant: "destructive",
+          })
+        }
+      } catch (error) {
+        console.error("Failed to fetch users:", error)
+      } finally {
+        setLoading(false)
       }
     },
-    [activeTab]
+    [activeTab, loading, toast]
   )
 
   // Handle tab change
   const handleTabChange = useCallback(
     async (value: string) => {
+      // Prevent concurrent tab change requests
+      if (loading) return
+
       const tab = value as RoleTab
       setActiveTab(tab)
+      setLoading(true)
 
-      const result = await getUsers({
-        search: filters.search,
-        status: filters.status,
-        role: tab !== "all" ? tab : filters.role,
-      })
+      try {
+        const result = await getUsers({
+          search: filters.search,
+          status: filters.status,
+          role: tab !== "all" ? tab : filters.role,
+        })
 
-      if (result.isSuccess && result.data) {
-        setUsers(result.data)
+        if (result.isSuccess && result.data) {
+          setUsers(result.data)
+        } else if (!result.isSuccess) {
+          console.error("Failed to fetch users:", result.message)
+          toast({
+            title: "Error",
+            description: result.message || "Failed to load users",
+            variant: "destructive",
+          })
+        }
+      } catch (error) {
+        console.error("Failed to fetch users:", error)
+      } finally {
+        setLoading(false)
       }
     },
-    [filters]
+    [filters, loading, toast]
   )
 
   // Transform users for table
@@ -253,6 +289,7 @@ export function UsersPageClient({
         setStats(statsResult.data)
       }
     } catch (error) {
+      console.error("Failed to delete user:", error)
       toast({
         title: "Error",
         description: error instanceof Error ? error.message : "Failed to delete user",
@@ -297,6 +334,7 @@ export function UsersPageClient({
           description: "User updated successfully",
         })
       } catch (error) {
+        console.error("Failed to update user:", error)
         toast({
           title: "Error",
           description: error instanceof Error ? error.message : "Failed to update user",

@@ -50,10 +50,6 @@ export interface UserDetail {
   status: UserStatus
   lastSignInAt?: string | null
   createdAt?: string | null
-  // Extended fields for detail view
-  jobTitle?: string
-  organization?: string
-  phone?: string
   // Activity summary
   activitySummary?: {
     assistantExecutions?: number
@@ -272,34 +268,6 @@ export function UserDetailSheet({
                       <Label htmlFor="email">Email</Label>
                       <Input id="email" value={user.email} disabled className="bg-muted" />
                     </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="jobTitle">Job Title</Label>
-                      <Input
-                        id="jobTitle"
-                        value={editedUser?.jobTitle || ""}
-                        onChange={(e) =>
-                          setEditedUser((prev) =>
-                            prev ? { ...prev, jobTitle: e.target.value } : null
-                          )
-                        }
-                        disabled={!isEditing}
-                        placeholder="e.g., Teacher"
-                      />
-                    </div>
-                    <div className="space-y-2">
-                      <Label htmlFor="organization">School/Department</Label>
-                      <Input
-                        id="organization"
-                        value={editedUser?.organization || ""}
-                        onChange={(e) =>
-                          setEditedUser((prev) =>
-                            prev ? { ...prev, organization: e.target.value } : null
-                          )
-                        }
-                        disabled={!isEditing}
-                        placeholder="e.g., Peninsula High School"
-                      />
-                    </div>
                   </div>
                 </section>
 
@@ -317,6 +285,9 @@ export function UserDetailSheet({
                     </div>
                     <div className="space-y-2">
                       <Label>Access Level</Label>
+                      {/* NOTE: UI only displays/edits first role. Database supports multiple roles
+                          but current UI design treats roles as single-select. Consider multi-select
+                          component if users need multiple simultaneous roles. */}
                       <Select
                         value={editedUser?.roles?.[0] || "student"}
                         onValueChange={(value) =>
