@@ -3,7 +3,19 @@
 import { Badge } from "@/components/ui/badge"
 import { cn } from "@/lib/utils"
 
-// Role configuration with colors matching the mockup design
+/**
+ * Role configuration with colors matching the mockup design.
+ *
+ * IMPORTANT: These role names (keys) are part of the API contract and MUST match
+ * the exact role names in the database `roles` table. Changing these values will
+ * break the UI-to-database mapping.
+ *
+ * - Database role names: administrator, staff, student, prompt-engineer
+ * - Display labels: Admin, Editor, Viewer, Prompt Eng
+ *
+ * If database role names change, this mapping must be updated accordingly.
+ * Fallback behavior: Unknown roles display their database name in gray.
+ */
 const ROLE_CONFIG: Record<string, { label: string; className: string }> = {
   administrator: {
     label: "Admin",

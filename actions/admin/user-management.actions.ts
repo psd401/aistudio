@@ -61,10 +61,7 @@ export interface UserFilters {
 }
 
 // Helper to determine user status based on activity
-function getUserStatus(
-  lastSignInAt: Date | null,
-  _createdAt: Date | null
-): "active" | "inactive" | "pending" {
+function getUserStatus(lastSignInAt: Date | null): "active" | "inactive" | "pending" {
   if (!lastSignInAt) {
     return "pending" // Never signed in
   }
@@ -234,25 +231,49 @@ export async function getUsers(
     }
 
     // Get filtered users
+    // When filtering by role, use JOIN for database-level filtering (better performance)
     const usersWithRoles = await executeQuery(
       (db) => {
-        let query = db
-          .select({
-            id: users.id,
-            email: users.email,
-            firstName: users.firstName,
-            lastName: users.lastName,
-            lastSignInAt: users.lastSignInAt,
-            createdAt: users.createdAt,
-          })
-          .from(users)
-
-        // Apply combined WHERE conditions
-        if (conditions.length > 0) {
-          query = query.where(sql`${sql.join(conditions, sql` AND `)}`) as typeof query
+        const baseSelect = {
+          id: users.id,
+          email: users.email,
+          firstName: users.firstName,
+          lastName: users.lastName,
+          lastSignInAt: users.lastSignInAt,
+          createdAt: users.createdAt,
         }
 
-        return query.orderBy(desc(users.createdAt))
+        // Build WHERE clause for search/status filters
+        const whereClause = conditions.length > 0 ? sql`${sql.join(conditions, sql` AND `)}` : undefined
+
+        // Use JOIN when filtering by role for database-level filtering
+        if (filters?.role && filters.role !== "all") {
+          let roleQuery = db
+            .select(baseSelect)
+            .from(users)
+            .innerJoin(userRoles, eq(users.id, userRoles.userId))
+            .innerJoin(roles, eq(userRoles.roleId, roles.id))
+            .$dynamic()
+
+          // Apply role filter
+          roleQuery = roleQuery.where(eq(roles.name, filters.role))
+
+          // Apply additional conditions if present
+          if (whereClause) {
+            roleQuery = roleQuery.where(whereClause)
+          }
+
+          return roleQuery.orderBy(desc(users.createdAt))
+        }
+
+        // No role filter - simple query
+        let baseQuery = db.select(baseSelect).from(users).$dynamic()
+
+        if (whereClause) {
+          baseQuery = baseQuery.where(whereClause)
+        }
+
+        return baseQuery.orderBy(desc(users.createdAt))
       },
       "getUsers-list"
     )
@@ -290,22 +311,17 @@ export async function getUsers(
       }
     }
 
-    // Transform results
-    let userList: UserListItem[] = usersWithRoles.map((user) => ({
+    // Transform results (role filtering is now done at database level via JOIN)
+    const userList: UserListItem[] = usersWithRoles.map((user) => ({
       id: user.id,
       firstName: user.firstName || "",
       lastName: user.lastName || "",
       email: user.email || "",
       roles: roleMap.get(user.id) || [],
-      status: getUserStatus(user.lastSignInAt, user.createdAt),
+      status: getUserStatus(user.lastSignInAt),
       lastSignInAt: user.lastSignInAt?.toISOString() || null,
       createdAt: user.createdAt?.toISOString() || null,
     }))
-
-    // Apply role filter (must be done after role map is built)
-    if (filters?.role && filters.role !== "all") {
-      userList = userList.filter((user) => user.roles.includes(filters.role!))
-    }
 
     timer({ status: "success" })
     log.info("Users fetched", { count: userList.length })
@@ -570,7 +586,13 @@ export async function deleteUser(userId: number): Promise<ActionState<void>> {
     }
 
     // Prevent self-deletion
-    if (session.user && typeof session.user === "object" && "id" in session.user && session.user.id === userId) {
+    // Type guard: NextAuth types session.user as {}, but it contains id at runtime
+    const sessionUserId =
+      session.user && typeof session.user === "object" && "id" in session.user
+        ? (session.user as { id: number }).id
+        : null
+
+    if (sessionUserId === userId) {
       throw ErrorFactories.bizInvalidState(
         "deleteUser",
         "self-deletion attempted",
@@ -578,21 +600,23 @@ export async function deleteUser(userId: number): Promise<ActionState<void>> {
       )
     }
 
-    // Delete user role assignments first (foreign key constraint)
-    await executeQuery(
-      (db) => db.delete(userRoles).where(eq(userRoles.userId, userId)),
-      "deleteUser-roles"
-    )
+    // Delete user and role assignments in a transaction
+    // This ensures atomicity - if the user delete fails, role delete is rolled back
+    let result: typeof users.$inferSelect[]
+    await executeTransaction(
+      async (tx) => {
+        // Delete user role assignments first (foreign key constraint)
+        await tx.delete(userRoles).where(eq(userRoles.userId, userId))
 
-    // Delete the user
-    const result = await executeQuery(
-      (db) => db.delete(users).where(eq(users.id, userId)).returning(),
-      "deleteUser"
-    )
+        // Delete the user
+        result = await tx.delete(users).where(eq(users.id, userId)).returning()
 
-    if (result.length === 0) {
-      throw ErrorFactories.dbRecordNotFound("users", userId)
-    }
+        if (result.length === 0) {
+          throw ErrorFactories.dbRecordNotFound("users", userId)
+        }
+      },
+      "deleteUser-transaction"
+    )
 
     timer({ status: "success" })
     log.info("User deleted successfully", { userId })

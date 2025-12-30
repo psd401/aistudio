@@ -1,7 +1,54 @@
+/**
+ * User Management Page Client Component
+ *
+ * TODO: E2E Test Coverage Required
+ * Per CLAUDE.md requirements, the following E2E tests need to be implemented in /tests/e2e/working-tests.spec.ts:
+ *
+ * 1. User listing with filters:
+ *    - Search by name/email (debounced)
+ *    - Filter by status (active/inactive/pending)
+ *    - Filter by role (administrator/staff/student)
+ *    - Role tabs functionality
+ *    - Clear filters button
+ *
+ * 2. User detail sheet interactions:
+ *    - Open detail sheet from table row click
+ *    - View user information (name, email, roles, status, dates)
+ *    - Switch between tabs (Overview, Permissions, API Usage, Activity)
+ *    - Loading state for activity data
+ *
+ * 3. Role updates:
+ *    - Edit user name (firstName, lastName)
+ *    - Change user role (single role selection)
+ *    - Save changes successfully
+ *    - Cancel edit mode
+ *    - Error handling for failed updates
+ *
+ * 4. User deletion flow:
+ *    - Open delete confirmation dialog
+ *    - Cancel deletion
+ *    - Confirm deletion
+ *    - Verify user removed from list
+ *    - Stats refresh after deletion
+ *    - Error handling for failed deletion
+ *    - Prevent self-deletion
+ *
+ * 5. Stats display:
+ *    - Total users count
+ *    - Active users (signed in within 30 days)
+ *    - Pending invites (never signed in)
+ *    - Administrator count
+ *    - Stats update after user operations
+ *
+ * 6. Race condition prevention:
+ *    - Multiple rapid filter changes handled correctly
+ *    - Multiple rapid tab changes handled correctly
+ */
 "use client"
 
 import { useState, useEffect, useCallback } from "react"
 import { useToast } from "@/components/ui/use-toast"
+import { createLogger } from "@/lib/logger"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -51,6 +98,7 @@ export function UsersPageClient({
   initialRoles,
 }: UsersPageClientProps) {
   const { toast } = useToast()
+  const log = createLogger({ component: "UsersPageClient" })
 
   // State
   const [stats, setStats] = useState<UserStats | null>(initialStats || null)
@@ -101,7 +149,7 @@ export function UsersPageClient({
         setRoles(rolesResult.data)
       }
     } catch (error) {
-      console.error("Failed to load user data:", error)
+      log.error("Failed to load user data", { error })
       toast({
         title: "Error",
         description: error instanceof Error ? error.message : "Failed to load user data",
@@ -111,8 +159,7 @@ export function UsersPageClient({
       setLoading(false)
       setLoadingStats(false)
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []) // toast is stable from useToast and doesn't need to be a dependency
+  }, [toast, log])
 
   useEffect(() => {
     if (!initialStats || !initialUsers) {
@@ -140,7 +187,7 @@ export function UsersPageClient({
         if (result.isSuccess && result.data) {
           setUsers(result.data)
         } else if (!result.isSuccess) {
-          console.error("Failed to fetch users:", result.message)
+          log.error("Failed to fetch users", { message: result.message })
           toast({
             title: "Error",
             description: result.message || "Failed to load users",
@@ -148,12 +195,12 @@ export function UsersPageClient({
           })
         }
       } catch (error) {
-        console.error("Failed to fetch users:", error)
+        log.error("Failed to fetch users", { error })
       } finally {
         setLoading(false)
       }
     },
-    [activeTab, loading, toast]
+    [activeTab, loading, toast, log]
   )
 
   // Handle tab change
@@ -176,7 +223,7 @@ export function UsersPageClient({
         if (result.isSuccess && result.data) {
           setUsers(result.data)
         } else if (!result.isSuccess) {
-          console.error("Failed to fetch users:", result.message)
+          log.error("Failed to fetch users", { message: result.message })
           toast({
             title: "Error",
             description: result.message || "Failed to load users",
@@ -184,12 +231,12 @@ export function UsersPageClient({
           })
         }
       } catch (error) {
-        console.error("Failed to fetch users:", error)
+        log.error("Failed to fetch users", { error })
       } finally {
         setLoading(false)
       }
     },
-    [filters, loading, toast]
+    [filters, loading, toast, log]
   )
 
   // Transform users for table
@@ -289,7 +336,7 @@ export function UsersPageClient({
         setStats(statsResult.data)
       }
     } catch (error) {
-      console.error("Failed to delete user:", error)
+      log.error("Failed to delete user", { error })
       toast({
         title: "Error",
         description: error instanceof Error ? error.message : "Failed to delete user",
@@ -299,7 +346,7 @@ export function UsersPageClient({
       setDeleteDialog(false)
       setUserToDelete(null)
     }
-  }, [userToDelete, toast])
+  }, [userToDelete, toast, log])
 
   // Save user changes
   const handleSaveUser = useCallback(
@@ -334,7 +381,7 @@ export function UsersPageClient({
           description: "User updated successfully",
         })
       } catch (error) {
-        console.error("Failed to update user:", error)
+        log.error("Failed to update user", { error })
         toast({
           title: "Error",
           description: error instanceof Error ? error.message : "Failed to update user",
@@ -343,7 +390,7 @@ export function UsersPageClient({
         throw new Error("Failed to save user")
       }
     },
-    [toast]
+    [toast, log]
   )
 
   return (
