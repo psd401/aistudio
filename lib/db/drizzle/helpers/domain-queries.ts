@@ -283,7 +283,7 @@ export async function getUsersWithRoles(
     const [{ count }] = await executeQuery(
       (db) =>
         db
-          .select({ count: sql<number>`count(distinct ${users.id})::int` })
+          .select({ count: sql<number>`CAST(count(distinct ${users.id}) AS integer)` })
           .from(users)
           .innerJoin(userRoles, eq(users.id, userRoles.userId))
           .innerJoin(roles, eq(userRoles.roleId, roles.id))

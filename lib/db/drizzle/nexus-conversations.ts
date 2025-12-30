@@ -170,7 +170,7 @@ export async function getConversationCount(
   const result = await executeQuery(
     (db) =>
       db
-        .select({ count: sql<number>`count(*)::int` })
+        .select({ count: sql<number>`CAST(count(*) AS integer)` })
         .from(nexusConversations)
         .where(
           includeArchived

@@ -367,7 +367,7 @@ export async function getModelReferenceCounts(modelId: number) {
     executeQuery(
       (db) =>
         db
-          .select({ count: sql<number>`count(*)::int` })
+          .select({ count: sql<number>`CAST(count(*) AS integer)` })
           .from(chainPrompts)
           .where(eq(chainPrompts.modelId, modelId)),
       "countChainPrompts"
@@ -375,7 +375,7 @@ export async function getModelReferenceCounts(modelId: number) {
     executeQuery(
       (db) =>
         db
-          .select({ count: sql<number>`count(*)::int` })
+          .select({ count: sql<number>`CAST(count(*) AS integer)` })
           .from(nexusMessages)
           .where(eq(nexusMessages.modelId, modelId)),
       "countNexusMessages"
@@ -383,7 +383,7 @@ export async function getModelReferenceCounts(modelId: number) {
     executeQuery(
       (db) =>
         db
-          .select({ count: sql<number>`count(*)::int` })
+          .select({ count: sql<number>`CAST(count(*) AS integer)` })
           .from(nexusConversations)
           .where(
             sql`${nexusConversations.modelUsed} = (SELECT model_id FROM ai_models WHERE id = ${modelId})`
@@ -393,7 +393,7 @@ export async function getModelReferenceCounts(modelId: number) {
     executeQuery(
       (db) =>
         db
-          .select({ count: sql<number>`count(*)::int` })
+          .select({ count: sql<number>`CAST(count(*) AS integer)` })
           .from(modelComparisons)
           .where(
             or(
@@ -532,12 +532,14 @@ export async function replaceModelReferences(
         }
 
         // Get reference counts within transaction
+        // NOTE: Uses CAST(... AS integer) instead of ::int shorthand because
+        // RDS Data API fails with ::int syntax inside transaction contexts. See Issue #583.
         const [chainPromptsResult, nexusMessagesResult, nexusConversationsResult, modelComparisonsResult] =
           await Promise.all([
-            tx.select({ count: sql<number>`count(*)::int` }).from(chainPrompts).where(eq(chainPrompts.modelId, targetModelId)),
-            tx.select({ count: sql<number>`count(*)::int` }).from(nexusMessages).where(eq(nexusMessages.modelId, targetModelId)),
-            tx.select({ count: sql<number>`count(*)::int` }).from(nexusConversations).where(sql`${nexusConversations.modelUsed} = ${targetModel.modelId}`),
-            tx.select({ count: sql<number>`count(*)::int` }).from(modelComparisons).where(or(eq(modelComparisons.model1Id, targetModelId), eq(modelComparisons.model2Id, targetModelId))),
+            tx.select({ count: sql<number>`CAST(count(*) AS integer)` }).from(chainPrompts).where(eq(chainPrompts.modelId, targetModelId)),
+            tx.select({ count: sql<number>`CAST(count(*) AS integer)` }).from(nexusMessages).where(eq(nexusMessages.modelId, targetModelId)),
+            tx.select({ count: sql<number>`CAST(count(*) AS integer)` }).from(nexusConversations).where(sql`${nexusConversations.modelUsed} = ${targetModel.modelId}`),
+            tx.select({ count: sql<number>`CAST(count(*) AS integer)` }).from(modelComparisons).where(or(eq(modelComparisons.model1Id, targetModelId), eq(modelComparisons.model2Id, targetModelId))),
           ]);
 
         const counts = {

@@ -212,7 +212,7 @@ export async function getMessageCount(conversationId: string): Promise<number> {
   const result = await executeQuery(
     (db) =>
       db
-        .select({ count: sql<number>`count(*)::int` })
+        .select({ count: sql<number>`CAST(count(*) AS integer)` })
         .from(nexusMessages)
         .where(eq(nexusMessages.conversationId, conversationId)),
     "getMessageCount"
@@ -450,7 +450,7 @@ export async function updateConversationStats(
     (db) =>
       db
         .select({
-          count: sql<number>`count(*)::int`,
+          count: sql<number>`CAST(count(*) AS integer)`,
           lastMessageAt: sql<Date>`max(created_at)`,
         })
         .from(nexusMessages)
