@@ -15,7 +15,7 @@ import type { ActionState } from "@/types"
 import { getServerSession } from "@/lib/auth/server-session"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
-import { eq, sql, desc, count, inArray, and, type SQL } from "drizzle-orm"
+import { eq, sql, desc, count, inArray, type SQL } from "drizzle-orm"
 import { users, userRoles, roles } from "@/lib/db/schema"
 import { nexusConversations } from "@/lib/db/schema/tables/nexus-conversations"
 import { promptUsageEvents } from "@/lib/db/schema/tables/prompt-usage-events"
@@ -224,21 +224,18 @@ export async function getUsers(
       if (filters.status === "pending") {
         conditions.push(sql`${users.lastSignInAt} IS NULL`)
       } else if (filters.status === "active") {
-        const thirtyDaysAgo = new Date()
-        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - ACTIVE_USER_THRESHOLD_DAYS)
-        conditions.push(sql`${users.lastSignInAt} >= ${thirtyDaysAgo}`)
+        const threshold = getDateThreshold(ACTIVE_USER_THRESHOLD_DAYS)
+        conditions.push(sql`${users.lastSignInAt} >= ${threshold}`)
       } else if (filters.status === "inactive") {
-        const thirtyDaysAgo = new Date()
-        thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - ACTIVE_USER_THRESHOLD_DAYS)
+        const threshold = getDateThreshold(ACTIVE_USER_THRESHOLD_DAYS)
         conditions.push(
-          sql`${users.lastSignInAt} IS NOT NULL AND ${users.lastSignInAt} < ${thirtyDaysAgo}`
+          sql`${users.lastSignInAt} IS NOT NULL AND ${users.lastSignInAt} < ${threshold}`
         )
       }
     }
 
-    // Get filtered users
-    // When filtering by role, use JOIN for database-level filtering (better performance)
-    const usersWithRoles = await executeQuery(
+    // Get filtered users (without role filtering - that's done on the role query)
+    const usersResult = await executeQuery(
       (db) => {
         const baseSelect = {
           id: users.id,
@@ -249,37 +246,21 @@ export async function getUsers(
           createdAt: users.createdAt,
         }
 
-        // Build WHERE clause for search/status filters
+        // Build WHERE clause for search/status filters only
         const whereClause = conditions.length > 0 ? sql`${sql.join(conditions, sql` AND `)}` : undefined
 
-        // Use JOIN when filtering by role for database-level filtering
-        if (filters?.role && filters.role !== "all") {
-          // Combine role filter with other conditions explicitly using AND
-          const roleConditions = whereClause
-            ? and(eq(roles.name, filters.role), whereClause)
-            : eq(roles.name, filters.role)
-
-          return db
-            .select(baseSelect)
-            .from(users)
-            .innerJoin(userRoles, eq(users.id, userRoles.userId))
-            .innerJoin(roles, eq(userRoles.roleId, roles.id))
-            .where(roleConditions)
-            .orderBy(desc(users.createdAt))
-        }
-
-        // No role filter - simple query (with optional search/status filters)
-        const simpleQuery = db.select(baseSelect).from(users)
+        // Fetch users with search/status filters (role filtering done in role query)
+        const query = db.select(baseSelect).from(users)
 
         return whereClause
-          ? simpleQuery.where(whereClause).orderBy(desc(users.createdAt))
-          : simpleQuery.orderBy(desc(users.createdAt))
+          ? query.where(whereClause).orderBy(desc(users.createdAt))
+          : query.orderBy(desc(users.createdAt))
       },
       "getUsers-list"
     )
 
-    // Get user IDs for role filtering
-    const userIds = usersWithRoles.map((u) => u.id)
+    // Get user IDs for role query
+    const userIds = usersResult.map((u) => u.id)
 
     if (userIds.length === 0) {
       timer({ status: "success" })
@@ -311,8 +292,8 @@ export async function getUsers(
       }
     }
 
-    // Transform results (role filtering is now done at database level via JOIN)
-    const userList: UserListItem[] = usersWithRoles.map((user) => ({
+    // Transform results and apply role filtering if needed
+    let userList: UserListItem[] = usersResult.map((user) => ({
       id: user.id,
       firstName: user.firstName || "",
       lastName: user.lastName || "",
@@ -322,6 +303,11 @@ export async function getUsers(
       lastSignInAt: user.lastSignInAt?.toISOString() || null,
       createdAt: user.createdAt?.toISOString() || null,
     }))
+
+    // Filter by role if specified (done in-memory after fetching all roles once)
+    if (filters?.role && filters.role !== "all") {
+      userList = userList.filter((user) => user.roles.includes(filters.role!))
+    }
 
     timer({ status: "success" })
     log.info("Users fetched", { count: userList.length })
@@ -529,14 +515,20 @@ export async function updateUser(
     // This ensures atomicity - if role insert fails, user update is rolled back
     await executeTransaction(
       async (tx) => {
-        // Update user basic info
-        await tx
+        // Update user basic info - verify user exists
+        const result = await tx
           .update(users)
           .set({
             firstName: data.firstName.trim(),
             lastName: data.lastName.trim(),
           })
           .where(eq(users.id, userId))
+          .returning({ id: users.id })
+
+        // Throw if user doesn't exist
+        if (result.length === 0) {
+          throw ErrorFactories.dbRecordNotFound("users", userId)
+        }
 
         // Delete existing role assignments
         await tx.delete(userRoles).where(eq(userRoles.userId, userId))
