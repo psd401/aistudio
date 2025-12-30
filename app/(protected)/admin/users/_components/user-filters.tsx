@@ -59,7 +59,10 @@ export function UserFilters({
         role: newFilters.role ?? role
       })
     },
-    [debouncedSearch, status, role, onFiltersChange]
+    // onFiltersChange is stable callback prop and should not be in dependencies
+    // Including it causes infinite loop: parent re-renders → new callback → notifyChange recreated → useEffect fires → parent called → loop
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [debouncedSearch, status, role]
   )
 
   // Handle search input
