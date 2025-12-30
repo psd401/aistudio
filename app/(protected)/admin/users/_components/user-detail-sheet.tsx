@@ -124,14 +124,16 @@ export function UserDetailSheet({
   const [editedUser, setEditedUser] = useState<UserDetail | null>(null)
   const [localModelAccess, setLocalModelAccess] = useState<ModelAccess[]>(modelAccess)
 
-  // Reset state when user changes
+  // Reset state when user changes (only when ID changes, not on prop updates)
+  // This prevents losing unsaved edits during background refetches
   useEffect(() => {
-    if (user) {
+    if (user && (!editedUser || user.id !== editedUser.id)) {
       setEditedUser({ ...user })
       setLocalModelAccess(modelAccess)
+      setIsEditing(false)
     }
-    setIsEditing(false)
-  }, [user, modelAccess])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user?.id])
 
   const handleSave = async () => {
     if (!editedUser || !onSave) return

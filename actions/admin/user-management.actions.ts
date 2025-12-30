@@ -194,13 +194,7 @@ export async function getUsers(
           "Must be 100 characters or less"
         )
       }
-      if (searchInput.length < 2) {
-        throw ErrorFactories.invalidInput(
-          "search",
-          searchInput,
-          "Must be at least 2 characters"
-        )
-      }
+      // No minimum length requirement - allow single character searches
 
       // Escape ILIKE wildcard characters to prevent unintended matching
       // User searching for "%" should not match all records

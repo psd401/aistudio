@@ -132,7 +132,7 @@ export function UserFilters({
           <SelectContent>
             <SelectItem value="all">All Roles</SelectItem>
             {roles.map((r) => (
-              <SelectItem key={r.id} value={r.id}>
+              <SelectItem key={r.id} value={r.name}>
                 {r.name}
               </SelectItem>
             ))}

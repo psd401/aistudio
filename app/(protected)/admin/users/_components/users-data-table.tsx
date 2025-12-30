@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useMemo } from "react"
+import { useToast } from "@/components/ui/use-toast"
 import {
   ColumnDef,
   flexRender,
@@ -102,6 +103,7 @@ export function UsersDataTable({
   loading = false,
   className,
 }: UsersDataTableProps) {
+  const { toast } = useToast()
   const [sorting, setSorting] = useState<SortingState>([])
   const [columnFilters, setColumnFilters] = useState<ColumnFiltersState>([])
   const [rowSelection, setRowSelection] = useState({})
@@ -264,14 +266,9 @@ export function UsersDataTable({
           <span className="text-sm font-medium">
             {selectedCount} user{selectedCount !== 1 ? "s" : ""} selected
           </span>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={() => setRowSelection({})}>
-              Clear Selection
-            </Button>
-            <Button variant="destructive" size="sm">
-              Delete Selected
-            </Button>
-          </div>
+          <Button variant="outline" size="sm" onClick={() => setRowSelection({})}>
+            Clear Selection
+          </Button>
         </div>
       )}
 
@@ -313,7 +310,7 @@ export function UsersDataTable({
                   key={row.id}
                   data-state={row.getIsSelected() ? "selected" : undefined}
                   className="cursor-pointer hover:bg-muted/50"
-                  onClick={(e) => {
+                  onClick={async (e) => {
                     // Don't trigger view if clicking on checkbox or dropdown
                     if (
                       (e.target as HTMLElement).closest('[role="checkbox"]') ||
@@ -322,7 +319,15 @@ export function UsersDataTable({
                     ) {
                       return
                     }
-                    onViewUser(row.original)
+                    try {
+                      await onViewUser(row.original)
+                    } catch {
+                      toast({
+                        title: "Error",
+                        description: "Failed to load user details. Please try again.",
+                        variant: "destructive",
+                      })
+                    }
                   }}
                 >
                   {row.getVisibleCells().map((cell) => (

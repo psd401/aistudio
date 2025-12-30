@@ -48,7 +48,6 @@
 
 import { useState, useEffect, useCallback } from "react"
 import { useToast } from "@/components/ui/use-toast"
-import { createLogger } from "@/lib/logger"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -98,7 +97,6 @@ export function UsersPageClient({
   initialRoles,
 }: UsersPageClientProps) {
   const { toast } = useToast()
-  const log = createLogger({ component: "UsersPageClient" })
 
   // State
   const [stats, setStats] = useState<UserStats | null>(initialStats || null)
@@ -149,7 +147,6 @@ export function UsersPageClient({
         setRoles(rolesResult.data)
       }
     } catch (error) {
-      log.error("Failed to load user data", { error })
       toast({
         title: "Error",
         description: error instanceof Error ? error.message : "Failed to load user data",
@@ -159,7 +156,7 @@ export function UsersPageClient({
       setLoading(false)
       setLoadingStats(false)
     }
-  }, [toast, log])
+  }, [toast])
 
   useEffect(() => {
     if (!initialStats || !initialUsers) {
@@ -187,20 +184,19 @@ export function UsersPageClient({
         if (result.isSuccess && result.data) {
           setUsers(result.data)
         } else if (!result.isSuccess) {
-          log.error("Failed to fetch users", { message: result.message })
           toast({
             title: "Error",
             description: result.message || "Failed to load users",
             variant: "destructive",
           })
         }
-      } catch (error) {
-        log.error("Failed to fetch users", { error })
+      } catch {
+        // Error already shown via toast in else block above
       } finally {
         setLoading(false)
       }
     },
-    [activeTab, loading, toast, log]
+    [activeTab, loading, toast]
   )
 
   // Handle tab change
@@ -223,20 +219,19 @@ export function UsersPageClient({
         if (result.isSuccess && result.data) {
           setUsers(result.data)
         } else if (!result.isSuccess) {
-          log.error("Failed to fetch users", { message: result.message })
           toast({
             title: "Error",
             description: result.message || "Failed to load users",
             variant: "destructive",
           })
         }
-      } catch (error) {
-        log.error("Failed to fetch users", { error })
+      } catch {
+        // Error already shown via toast in else block above
       } finally {
         setLoading(false)
       }
     },
-    [filters, loading, toast, log]
+    [filters, loading, toast]
   )
 
   // Transform users for table
@@ -336,7 +331,6 @@ export function UsersPageClient({
         setStats(statsResult.data)
       }
     } catch (error) {
-      log.error("Failed to delete user", { error })
       toast({
         title: "Error",
         description: error instanceof Error ? error.message : "Failed to delete user",
@@ -346,7 +340,7 @@ export function UsersPageClient({
       setDeleteDialog(false)
       setUserToDelete(null)
     }
-  }, [userToDelete, toast, log])
+  }, [userToDelete, toast])
 
   // Save user changes
   const handleSaveUser = useCallback(
@@ -381,7 +375,6 @@ export function UsersPageClient({
           description: "User updated successfully",
         })
       } catch (error) {
-        log.error("Failed to update user", { error })
         toast({
           title: "Error",
           description: error instanceof Error ? error.message : "Failed to update user",
@@ -390,7 +383,7 @@ export function UsersPageClient({
         throw new Error("Failed to save user")
       }
     },
-    [toast, log]
+    [toast]
   )
 
   return (
