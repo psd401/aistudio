@@ -46,7 +46,7 @@ import { StatusIndicator, type UserStatus } from "./status-indicator"
 
 // Extended user type for the table
 export interface UserTableRow {
-  id: string | number
+  id: number
   firstName: string
   lastName: string
   email: string

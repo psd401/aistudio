@@ -32,6 +32,8 @@ import {
   getUsers,
   getRoles,
   getUserActivity,
+  updateUser,
+  deleteUser,
   type UserListItem,
 } from "@/actions/admin/user-management.actions"
 
@@ -182,8 +184,12 @@ export function UsersPageClient({
       })
       setDetailOpen(true)
 
-      // Load activity data
-      const activityResult = await getUserActivity(Number(user.id))
+      // Load activity data on-demand (N+1 pattern)
+      // NOTE: This fetches activity data individually when opening user details.
+      // For Phase 1 MVP this is acceptable as it only triggers on user interaction.
+      // Future optimization: Prefetch activity data for visible users or implement
+      // pagination with activity data included in initial query.
+      const activityResult = await getUserActivity(user.id)
       if (activityResult.isSuccess && activityResult.data) {
         setSelectedUser((prev) =>
           prev
@@ -229,11 +235,11 @@ export function UsersPageClient({
     if (!userToDelete) return
 
     try {
-      const response = await fetch(`/api/admin/users/${userToDelete.id}`, {
-        method: "DELETE",
-      })
+      const result = await deleteUser(userToDelete.id)
 
-      if (!response.ok) throw new Error("Failed to delete user")
+      if (!result.isSuccess) {
+        throw new Error(result.message || "Failed to delete user")
+      }
 
       setUsers((prev) => prev.filter((u) => u.id !== userToDelete.id))
       toast({
@@ -246,10 +252,10 @@ export function UsersPageClient({
       if (statsResult.isSuccess && statsResult.data) {
         setStats(statsResult.data)
       }
-    } catch {
+    } catch (error) {
       toast({
         title: "Error",
-        description: "Failed to delete user",
+        description: error instanceof Error ? error.message : "Failed to delete user",
         variant: "destructive",
       })
     } finally {
@@ -262,17 +268,15 @@ export function UsersPageClient({
   const handleSaveUser = useCallback(
     async (user: UserDetail) => {
       try {
-        const response = await fetch(`/api/admin/users/${user.id}`, {
-          method: "PUT",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            firstName: user.firstName,
-            lastName: user.lastName,
-            roles: user.roles,
-          }),
+        const result = await updateUser(user.id, {
+          firstName: user.firstName,
+          lastName: user.lastName,
+          roles: user.roles,
         })
 
-        if (!response.ok) throw new Error("Failed to update user")
+        if (!result.isSuccess) {
+          throw new Error(result.message || "Failed to update user")
+        }
 
         // Update local state
         setUsers((prev) =>
@@ -292,10 +296,10 @@ export function UsersPageClient({
           title: "Success",
           description: "User updated successfully",
         })
-      } catch {
+      } catch (error) {
         toast({
           title: "Error",
-          description: "Failed to update user",
+          description: error instanceof Error ? error.message : "Failed to update user",
           variant: "destructive",
         })
         throw new Error("Failed to save user")
@@ -348,6 +352,7 @@ export function UsersPageClient({
         roles={roles}
         onFiltersChange={handleFiltersChange}
         initialFilters={filters}
+        hideRoleFilter={activeTab !== "all"}
       />
 
       {/* Data Table */}

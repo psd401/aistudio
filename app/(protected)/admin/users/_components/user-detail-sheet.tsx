@@ -41,7 +41,7 @@ import {
 
 // User detail type with extended activity info
 export interface UserDetail {
-  id: string | number
+  id: number
   firstName: string
   lastName: string
   email: string

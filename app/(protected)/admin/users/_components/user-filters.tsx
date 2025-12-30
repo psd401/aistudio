@@ -26,6 +26,7 @@ interface UserFiltersProps {
   roles: Array<{ id: string; name: string }>
   onFiltersChange: (filters: UserFiltersState) => void
   initialFilters?: Partial<UserFiltersState>
+  hideRoleFilter?: boolean
   className?: string
 }
 
@@ -40,6 +41,7 @@ export function UserFilters({
   roles,
   onFiltersChange,
   initialFilters,
+  hideRoleFilter = false,
   className
 }: UserFiltersProps) {
   const [search, setSearch] = useState(initialFilters?.search || "")
@@ -121,20 +123,22 @@ export function UserFilters({
         </SelectContent>
       </Select>
 
-      {/* Role Filter */}
-      <Select value={role} onValueChange={handleRoleChange}>
-        <SelectTrigger className="w-full sm:w-[160px]" aria-label="Filter by role">
-          <SelectValue placeholder="All Roles" />
-        </SelectTrigger>
-        <SelectContent>
-          <SelectItem value="all">All Roles</SelectItem>
-          {roles.map((r) => (
-            <SelectItem key={r.id} value={r.id}>
-              {r.name}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
+      {/* Role Filter - Hidden when tab is selected */}
+      {!hideRoleFilter && (
+        <Select value={role} onValueChange={handleRoleChange}>
+          <SelectTrigger className="w-full sm:w-[160px]" aria-label="Filter by role">
+            <SelectValue placeholder="All Roles" />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectItem value="all">All Roles</SelectItem>
+            {roles.map((r) => (
+              <SelectItem key={r.id} value={r.id}>
+                {r.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      )}
 
       {/* Clear Filters Button */}
       {hasActiveFilters && (

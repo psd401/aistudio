@@ -13,6 +13,7 @@ import {
 } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
 import { getServerSession } from "@/lib/auth/server-session"
+import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq, sql, desc, count, type SQL } from "drizzle-orm"
 import { users, userRoles, roles } from "@/lib/db/schema"
@@ -85,6 +86,9 @@ export async function getUserStats(): Promise<ActionState<UserStats>> {
 
   try {
     log.info("Fetching user stats")
+
+    // Verify admin role - requireRole throws if unauthorized
+    await requireRole("administrator")
 
     const session = await getServerSession()
     if (!session) {
@@ -168,6 +172,9 @@ export async function getUsers(
   try {
     log.info("Fetching users", { filters: sanitizeForLogging(filters) })
 
+    // Verify admin role - requireRole throws if unauthorized
+    await requireRole("administrator")
+
     const session = await getServerSession()
     if (!session) {
       log.warn("Unauthorized access attempt")
@@ -179,7 +186,24 @@ export async function getUsers(
 
     // Search filter - case-insensitive search across firstName, lastName, email
     if (filters?.search) {
-      const searchTerm = `%${filters.search}%`
+      // Validate search input (prevent DoS with excessively long strings)
+      const searchInput = filters.search.trim()
+      if (searchInput.length > 100) {
+        throw ErrorFactories.invalidInput(
+          "search",
+          searchInput,
+          "Must be 100 characters or less"
+        )
+      }
+      if (searchInput.length < 2) {
+        throw ErrorFactories.invalidInput(
+          "search",
+          searchInput,
+          "Must be at least 2 characters"
+        )
+      }
+
+      const searchTerm = `%${searchInput}%`
       conditions.push(
         sql`(
           ${users.firstName} ILIKE ${searchTerm} OR
@@ -310,6 +334,9 @@ export async function getRoles(): Promise<
   try {
     log.info("Fetching roles")
 
+    // Verify admin role - requireRole throws if unauthorized
+    await requireRole("administrator")
+
     const session = await getServerSession()
     if (!session) {
       throw ErrorFactories.authNoSession()
@@ -356,6 +383,9 @@ export async function getUserActivity(
 
   try {
     log.info("Fetching user activity", { userId })
+
+    // Verify admin role - requireRole throws if unauthorized
+    await requireRole("administrator")
 
     const session = await getServerSession()
     if (!session) {
@@ -418,6 +448,169 @@ export async function getUserActivity(
       context: "getUserActivity",
       requestId,
       operation: "getUserActivity",
+    })
+  }
+}
+
+/**
+ * Update user information (name and roles)
+ */
+export async function updateUser(
+  userId: number,
+  data: {
+    firstName: string
+    lastName: string
+    roles: string[]
+  }
+): Promise<ActionState<void>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("updateUser")
+  const log = createLogger({ requestId, action: "updateUser" })
+
+  try {
+    log.info("Updating user", { userId, data: sanitizeForLogging(data) })
+
+    // Verify admin role - requireRole throws if unauthorized
+    await requireRole("administrator")
+
+    const session = await getServerSession()
+    if (!session) {
+      throw ErrorFactories.authNoSession()
+    }
+
+    // Validate input
+    if (!data.firstName?.trim()) {
+      throw ErrorFactories.missingRequiredField("firstName")
+    }
+
+    if (!data.lastName?.trim()) {
+      throw ErrorFactories.missingRequiredField("lastName")
+    }
+
+    if (!data.roles || data.roles.length === 0) {
+      throw ErrorFactories.missingRequiredField("roles")
+    }
+
+    // Update user basic info
+    await executeQuery(
+      (db) =>
+        db
+          .update(users)
+          .set({
+            firstName: data.firstName.trim(),
+            lastName: data.lastName.trim(),
+          })
+          .where(eq(users.id, userId)),
+      "updateUser"
+    )
+
+    // Get role IDs from role names
+    const roleList = await executeQuery(
+      (db) =>
+        db
+          .select({ id: roles.id, name: roles.name })
+          .from(roles)
+          .where(sql`${roles.name} IN (${sql.join(
+            data.roles.map((name) => sql`${name}`),
+            sql`, `
+          )})`),
+      "updateUser-getRoleIds"
+    )
+
+    if (roleList.length !== data.roles.length) {
+      throw ErrorFactories.invalidInput(
+        "roles",
+        data.roles,
+        "One or more role names are invalid"
+      )
+    }
+
+    // Delete existing role assignments
+    await executeQuery(
+      (db) => db.delete(userRoles).where(eq(userRoles.userId, userId)),
+      "updateUser-deleteRoles"
+    )
+
+    // Insert new role assignments
+    await executeQuery(
+      (db) =>
+        db.insert(userRoles).values(
+          roleList.map((role) => ({
+            userId,
+            roleId: role.id,
+          }))
+        ),
+      "updateUser-insertRoles"
+    )
+
+    timer({ status: "success" })
+    log.info("User updated successfully", { userId })
+
+    return createSuccess(undefined, "User updated successfully")
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to update user", {
+      context: "updateUser",
+      requestId,
+      operation: "updateUser",
+    })
+  }
+}
+
+/**
+ * Delete a user and all associated data
+ */
+export async function deleteUser(userId: number): Promise<ActionState<void>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("deleteUser")
+  const log = createLogger({ requestId, action: "deleteUser" })
+
+  try {
+    log.info("Deleting user", { userId })
+
+    // Verify admin role - requireRole throws if unauthorized
+    await requireRole("administrator")
+
+    const session = await getServerSession()
+    if (!session) {
+      throw ErrorFactories.authNoSession()
+    }
+
+    // Prevent self-deletion
+    if (session.user && typeof session.user === "object" && "id" in session.user && session.user.id === userId) {
+      throw ErrorFactories.bizInvalidState(
+        "deleteUser",
+        "self-deletion attempted",
+        "cannot delete own account"
+      )
+    }
+
+    // Delete user role assignments first (foreign key constraint)
+    await executeQuery(
+      (db) => db.delete(userRoles).where(eq(userRoles.userId, userId)),
+      "deleteUser-roles"
+    )
+
+    // Delete the user
+    const result = await executeQuery(
+      (db) => db.delete(users).where(eq(users.id, userId)).returning(),
+      "deleteUser"
+    )
+
+    if (result.length === 0) {
+      throw ErrorFactories.dbRecordNotFound("users", userId)
+    }
+
+    timer({ status: "success" })
+    log.info("User deleted successfully", { userId })
+
+    return createSuccess(undefined, "User deleted successfully")
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to delete user", {
+      context: "deleteUser",
+      requestId,
+      operation: "deleteUser",
     })
   }
 }
