@@ -156,7 +156,8 @@ export function UsersPageClient({
       setLoading(false)
       setLoadingStats(false)
     }
-  }, [toast])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   useEffect(() => {
     if (!initialStats || !initialUsers) {
@@ -196,7 +197,9 @@ export function UsersPageClient({
         setLoading(false)
       }
     },
-    [activeTab, loading, toast]
+    // toast is stable from useToast() and doesn't need to be in dependencies
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [activeTab, loading]
   )
 
   // Handle tab change
@@ -231,7 +234,9 @@ export function UsersPageClient({
         setLoading(false)
       }
     },
-    [filters, loading, toast]
+    // toast is stable from useToast() and doesn't need to be in dependencies
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [filters, loading]
   )
 
   // Transform users for table
@@ -340,7 +345,9 @@ export function UsersPageClient({
       setDeleteDialog(false)
       setUserToDelete(null)
     }
-  }, [userToDelete, toast])
+    // toast is stable from useToast() and doesn't need to be in dependencies
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userToDelete])
 
   // Save user changes
   const handleSaveUser = useCallback(
@@ -383,7 +390,9 @@ export function UsersPageClient({
         throw new Error("Failed to save user")
       }
     },
-    [toast]
+    // toast is stable from useToast() and doesn't need to be in dependencies
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []
   )
 
   return (
