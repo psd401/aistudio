@@ -2,12 +2,12 @@
 
 import { useState, useEffect } from "react"
 import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-  SheetDescription,
-} from "@/components/ui/sheet"
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+} from "@/components/ui/dialog"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -165,10 +165,10 @@ export function UserDetailSheet({
   if (!user) return null
 
   return (
-    <Sheet open={open} onOpenChange={onOpenChange}>
-      <SheetContent size="lg" className={cn("flex flex-col p-0", className)}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className={cn("w-[90vw] h-[90vh] max-w-[90vw] flex flex-col p-0", className)}>
         {/* Header */}
-        <SheetHeader className="px-6 py-4 border-b">
+        <DialogHeader className="px-6 py-4 border-b">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-4">
               <UserAvatar
@@ -181,10 +181,10 @@ export function UserDetailSheet({
                 showStatusIndicator
               />
               <div>
-                <SheetTitle className="text-xl">
+                <DialogTitle className="text-xl">
                   {user.firstName} {user.lastName}
-                </SheetTitle>
-                <SheetDescription className="text-sm">{user.email}</SheetDescription>
+                </DialogTitle>
+                <DialogDescription className="text-sm">{user.email}</DialogDescription>
                 <div className="mt-1">
                   <RoleBadgeList roles={user.roles} maxDisplay={3} />
                 </div>
@@ -208,7 +208,7 @@ export function UserDetailSheet({
               </div>
             )}
           </div>
-        </SheetHeader>
+        </DialogHeader>
 
         {/* Tabs */}
         <Tabs value={activeTab} onValueChange={setActiveTab} className="flex-1 flex flex-col">
@@ -467,7 +467,7 @@ export function UserDetailSheet({
             </TabsContent>
           </ScrollArea>
         </Tabs>
-      </SheetContent>
-    </Sheet>
+      </DialogContent>
+    </Dialog>
   )
 }
