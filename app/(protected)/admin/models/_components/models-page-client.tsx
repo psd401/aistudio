@@ -218,8 +218,26 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
         throw new Error("Failed to load models")
       }
       const data = await response.json()
+
+      // Runtime validation for API response
       if (data.isSuccess && Array.isArray(data.data)) {
-        setModels(data.data)
+        const validModels = data.data.filter(
+          (
+            model: unknown
+          ): model is SelectAiModel =>
+            model != null &&
+            typeof model === "object" &&
+            "id" in model &&
+            "name" in model &&
+            "provider" in model &&
+            "modelId" in model &&
+            typeof (model as { id: unknown }).id === "number" &&
+            typeof (model as { name: unknown }).name === "string" &&
+            typeof (model as { provider: unknown }).provider === "string" &&
+            typeof (model as { modelId: unknown }).modelId === "string"
+        )
+
+        setModels(validModels)
       }
     } catch (error) {
       const log = createLogger({ requestId: generateRequestId(), action: "loadModels" })

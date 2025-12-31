@@ -67,8 +67,7 @@ export function ModelFilters({
         availability: newFilters.availability ?? availability,
       })
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [debouncedSearch, status, provider, availability]
+    [debouncedSearch, status, provider, availability, onFiltersChange]
   )
 
   // Handle search input
