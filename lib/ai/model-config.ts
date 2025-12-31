@@ -5,7 +5,8 @@ const log = createLogger({ module: 'model-config' });
 
 /**
  * Get model configuration from database
- * This is used by Nexus chat to validate models, so checks nexusEnabled flag
+ * Used by: Nexus chat, Model Compare
+ * Validates that model is active AND nexusEnabled
  */
 export async function getModelConfig(modelId: string | number) {
   log.info('getModelConfig called', { modelId, type: typeof modelId });

@@ -170,7 +170,8 @@ export async function POST(req: Request) {
     }
 
     // Check if models are enabled for Nexus/Compare
-    if (!model1Config.nexusEnabled || !model2Config.nexusEnabled) {
+    // Explicit !== true check handles null/undefined from older data
+    if (model1Config.nexusEnabled !== true || model2Config.nexusEnabled !== true) {
       log.error('One or both models not enabled for Nexus/Compare', {
         model1Enabled: model1Config.nexusEnabled,
         model2Enabled: model2Config.nexusEnabled

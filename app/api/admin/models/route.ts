@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getAIModels, createAIModel, updateAIModel, deleteAIModel, getRoles } from '@/lib/db/drizzle';
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+import { normalizeBoolean } from '@/lib/validations/api-schemas';
 
 /**
  * Validate and sanitize allowedRoles field
@@ -272,18 +273,18 @@ export async function PUT(request: Request) {
     }
 
     // Handle boolean fields - ensure proper type (frontend may send as string)
-    // IMPORTANT: Boolean("false") === true, so we need explicit string handling
+    // Uses normalizeBoolean utility to handle "false", "0", 0, false correctly
     if ('active' in updates) {
-      updates.active = updates.active === 'false' || updates.active === '0' || updates.active === 0 || updates.active === false ? false : Boolean(updates.active);
+      updates.active = normalizeBoolean(updates.active);
     }
     if ('chatEnabled' in updates) {
-      updates.chatEnabled = updates.chatEnabled === 'false' || updates.chatEnabled === '0' || updates.chatEnabled === 0 || updates.chatEnabled === false ? false : Boolean(updates.chatEnabled);
+      updates.chatEnabled = normalizeBoolean(updates.chatEnabled);
     }
     if ('nexusEnabled' in updates) {
-      updates.nexusEnabled = updates.nexusEnabled === 'false' || updates.nexusEnabled === '0' || updates.nexusEnabled === 0 || updates.nexusEnabled === false ? false : Boolean(updates.nexusEnabled);
+      updates.nexusEnabled = normalizeBoolean(updates.nexusEnabled);
     }
     if ('architectEnabled' in updates) {
-      updates.architectEnabled = updates.architectEnabled === 'false' || updates.architectEnabled === '0' || updates.architectEnabled === 0 || updates.architectEnabled === false ? false : Boolean(updates.architectEnabled);
+      updates.architectEnabled = normalizeBoolean(updates.architectEnabled);
     }
 
     // Handle JSONB fields - stringify if they're objects
