@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useEffect } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import { createLogger, generateRequestId } from "@/lib/logger"
 import {
   Dialog,
@@ -141,6 +141,10 @@ export function ModelDetailModal({
   const { toast } = useToast()
   const [formData, setFormData] = useState<ModelFormData>(emptyFormData)
   const [saving, setSaving] = useState(false)
+
+  // Focus management refs
+  const firstInputRef = useRef<HTMLInputElement>(null)
+  const triggerElementRef = useRef<HTMLElement | null>(null)
   const [costOpen, setCostOpen] = useState(false)
 
   // Initialize form data when model changes
@@ -210,6 +214,24 @@ export function ModelDetailModal({
       setFormData(emptyFormData)
     }
   }, [model, isNew, open])
+
+  // Focus management - capture trigger and focus first input on open
+  useEffect(() => {
+    if (open) {
+      // Capture the element that triggered the dialog
+      triggerElementRef.current = document.activeElement as HTMLElement
+
+      // Focus first input after dialog animation (150ms)
+      const timer = setTimeout(() => {
+        firstInputRef.current?.focus()
+      }, 150)
+
+      return () => clearTimeout(timer)
+    } else {
+      // Return focus to trigger element when closed
+      triggerElementRef.current?.focus()
+    }
+  }, [open])
 
   // Field handlers
   const updateField = useCallback(
@@ -323,6 +345,7 @@ export function ModelDetailModal({
                   <div className="space-y-2">
                     <Label htmlFor="name">Display Name *</Label>
                     <Input
+                      ref={firstInputRef}
                       id="name"
                       value={formData.name}
                       onChange={(e) => updateField("name", e.target.value)}

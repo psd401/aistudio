@@ -58,6 +58,7 @@ interface ModelsDataTableProps {
   onToggleArchitect: (modelId: number, enabled: boolean) => void
   onDeleteModel: (model: ModelTableRow) => void
   loading?: boolean
+  loadingToggles?: Set<number>
   className?: string
 }
 
@@ -98,6 +99,7 @@ export function ModelsDataTable({
   onToggleArchitect,
   onDeleteModel,
   loading = false,
+  loadingToggles,
   className,
 }: ModelsDataTableProps) {
   const [sorting, setSorting] = useState<SortingState>([])
@@ -140,7 +142,9 @@ export function ModelsDataTable({
           <Switch
             checked={row.original.active}
             onCheckedChange={(checked) => onToggleActive(row.original.id, checked)}
+            disabled={loadingToggles?.has(row.original.id)}
             aria-label={`Toggle active for ${row.original.name}`}
+            aria-busy={loadingToggles?.has(row.original.id)}
           />
         ),
         size: 80,
@@ -153,7 +157,9 @@ export function ModelsDataTable({
           <Switch
             checked={row.original.nexusEnabled}
             onCheckedChange={(checked) => onToggleNexus(row.original.id, checked)}
+            disabled={loadingToggles?.has(row.original.id)}
             aria-label={`Toggle Nexus for ${row.original.name}`}
+            aria-busy={loadingToggles?.has(row.original.id)}
           />
         ),
         size: 80,
@@ -166,7 +172,9 @@ export function ModelsDataTable({
           <Switch
             checked={row.original.architectEnabled}
             onCheckedChange={(checked) => onToggleArchitect(row.original.id, checked)}
+            disabled={loadingToggles?.has(row.original.id)}
             aria-label={`Toggle Architect for ${row.original.name}`}
+            aria-busy={loadingToggles?.has(row.original.id)}
           />
         ),
         size: 80,
@@ -206,7 +214,7 @@ export function ModelsDataTable({
         size: 60,
       },
     ],
-    [onViewModel, onToggleActive, onToggleNexus, onToggleArchitect, onDeleteModel]
+    [onViewModel, onToggleActive, onToggleNexus, onToggleArchitect, onDeleteModel, loadingToggles]
   )
 
   const table = useReactTable({

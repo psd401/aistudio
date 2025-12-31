@@ -34,6 +34,7 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
   const [loading, setLoading] = useState(false)
   const [roleOptions, setRoleOptions] = useState<MultiSelectOption[]>(fallbackRoleOptions)
   const [roleLoading, setRoleLoading] = useState(true)
+  const [loadingToggles, setLoadingToggles] = useState<Set<number>>(new Set())
 
   // Filters
   const [filters, setFilters] = useState<ModelFiltersState>({
@@ -260,6 +261,12 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
   // Handle toggle active
   const handleToggleActive = useCallback(
     async (modelId: number, active: boolean) => {
+      // Add to loading state
+      setLoadingToggles((prev) => new Set(prev).add(modelId))
+
+      // Optimistic update
+      setModels((prev) => prev.map((m) => (m.id === modelId ? { ...m, active } : m)))
+
       try {
         const response = await fetch("/api/admin/models", {
           method: "PUT",
@@ -271,9 +278,9 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
           throw new Error("Failed to update model")
         }
 
-        setModels((prev) =>
-          prev.map((m) => (m.id === modelId ? { ...m, active } : m))
-        )
+        toast({
+          description: `Model ${active ? "activated" : "deactivated"} successfully`,
+        })
       } catch (error) {
         const log = createLogger({ requestId: generateRequestId(), action: "toggleActive" })
         log.error("Failed to toggle active status", {
@@ -281,10 +288,21 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
           active,
           error: error instanceof Error ? error.message : String(error),
         })
+
+        // Revert optimistic update
+        setModels((prev) => prev.map((m) => (m.id === modelId ? { ...m, active: !active } : m)))
+
         toast({
           title: "Error",
           description: error instanceof Error ? error.message : "Failed to update model",
           variant: "destructive",
+        })
+      } finally {
+        // Remove from loading state
+        setLoadingToggles((prev) => {
+          const next = new Set(prev)
+          next.delete(modelId)
+          return next
         })
       }
     },
@@ -294,6 +312,12 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
   // Handle toggle nexus
   const handleToggleNexus = useCallback(
     async (modelId: number, enabled: boolean) => {
+      // Add to loading state
+      setLoadingToggles((prev) => new Set(prev).add(modelId))
+
+      // Optimistic update
+      setModels((prev) => prev.map((m) => (m.id === modelId ? { ...m, nexusEnabled: enabled } : m)))
+
       try {
         const response = await fetch("/api/admin/models", {
           method: "PUT",
@@ -305,9 +329,9 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
           throw new Error("Failed to update model")
         }
 
-        setModels((prev) =>
-          prev.map((m) => (m.id === modelId ? { ...m, nexusEnabled: enabled } : m))
-        )
+        toast({
+          description: `Nexus ${enabled ? "enabled" : "disabled"} successfully`,
+        })
       } catch (error) {
         const log = createLogger({ requestId: generateRequestId(), action: "toggleNexus" })
         log.error("Failed to toggle Nexus availability", {
@@ -315,10 +339,23 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
           enabled,
           error: error instanceof Error ? error.message : String(error),
         })
+
+        // Revert optimistic update
+        setModels((prev) =>
+          prev.map((m) => (m.id === modelId ? { ...m, nexusEnabled: !enabled } : m))
+        )
+
         toast({
           title: "Error",
           description: error instanceof Error ? error.message : "Failed to update model",
           variant: "destructive",
+        })
+      } finally {
+        // Remove from loading state
+        setLoadingToggles((prev) => {
+          const next = new Set(prev)
+          next.delete(modelId)
+          return next
         })
       }
     },
@@ -328,6 +365,14 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
   // Handle toggle architect
   const handleToggleArchitect = useCallback(
     async (modelId: number, enabled: boolean) => {
+      // Add to loading state
+      setLoadingToggles((prev) => new Set(prev).add(modelId))
+
+      // Optimistic update
+      setModels((prev) =>
+        prev.map((m) => (m.id === modelId ? { ...m, architectEnabled: enabled } : m))
+      )
+
       try {
         const response = await fetch("/api/admin/models", {
           method: "PUT",
@@ -339,9 +384,9 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
           throw new Error("Failed to update model")
         }
 
-        setModels((prev) =>
-          prev.map((m) => (m.id === modelId ? { ...m, architectEnabled: enabled } : m))
-        )
+        toast({
+          description: `Architect ${enabled ? "enabled" : "disabled"} successfully`,
+        })
       } catch (error) {
         const log = createLogger({ requestId: generateRequestId(), action: "toggleArchitect" })
         log.error("Failed to toggle Architect availability", {
@@ -349,10 +394,23 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
           enabled,
           error: error instanceof Error ? error.message : String(error),
         })
+
+        // Revert optimistic update
+        setModels((prev) =>
+          prev.map((m) => (m.id === modelId ? { ...m, architectEnabled: !enabled } : m))
+        )
+
         toast({
           title: "Error",
           description: error instanceof Error ? error.message : "Failed to update model",
           variant: "destructive",
+        })
+      } finally {
+        // Remove from loading state
+        setLoadingToggles((prev) => {
+          const next = new Set(prev)
+          next.delete(modelId)
+          return next
         })
       }
     },
@@ -609,6 +667,7 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
         onToggleArchitect={handleToggleArchitect}
         onDeleteModel={handleDeleteModel}
         loading={loading}
+        loadingToggles={loadingToggles}
       />
 
       {/* Model Detail Modal */}
