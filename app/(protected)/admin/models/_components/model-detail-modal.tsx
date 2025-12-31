@@ -336,7 +336,10 @@ export function ModelDetailModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-[95vw] max-h-[90vh] w-full h-full flex flex-col">
+      <DialogContent
+        className="max-w-[95vw] max-h-[90vh] w-full h-full flex flex-col"
+        style={{ maxWidth: '95vw', maxHeight: '90vh' }}
+      >
         <DialogHeader className="flex-shrink-0">
           <div className="flex items-center gap-3">
             <DialogTitle className="text-xl">{title}</DialogTitle>
