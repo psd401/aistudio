@@ -546,9 +546,13 @@ export async function replaceModelReferences(
         }
 
         // Get both models within transaction
+        // NOTE: Removed .limit(1) to avoid RDS Data API parameter binding issues
+        // when using Promise.all() inside executeTransaction(). ID queries return
+        // 0 or 1 row due to primary key constraint, so limit is unnecessary.
+        // See Issue #583 for RDS Data API driver limitations with parameter binding.
         const [targetModelResult, replacementModelResult] = await Promise.all([
-          tx.select().from(aiModels).where(eq(aiModels.id, targetModelId)).limit(1),
-          tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId)).limit(1),
+          tx.select().from(aiModels).where(eq(aiModels.id, targetModelId)),
+          tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId)),
         ]);
 
         const targetModel = targetModelResult[0];

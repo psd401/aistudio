@@ -441,6 +441,52 @@ await executeTransaction(
 - `executeTransaction()` - For multi-statement transactions
 - **NEVER** mix them: `executeQuery(db => db.transaction(...))`
 
+### ⚠️ Promise.all() + .limit() in Transactions
+
+**AVOID using `.limit()` with `Promise.all()` inside `executeTransaction()`**
+
+```typescript
+// ❌ WRONG - Causes parameter binding issues with concurrent queries
+await executeTransaction(
+  async (tx) => {
+    const [model1Result, model2Result] = await Promise.all([
+      tx.select().from(aiModels).where(eq(aiModels.id, id1)).limit(1),  // Binding conflict!
+      tx.select().from(aiModels).where(eq(aiModels.id, id2)).limit(1),  // Binding conflict!
+    ]);
+  },
+  "getModels"
+);
+// Error: "Failed query: ... limit :2params: 62,1"
+
+// ✅ CORRECT - Remove .limit() for ID-based queries (primary key ensures 0 or 1 row)
+await executeTransaction(
+  async (tx) => {
+    const [model1Result, model2Result] = await Promise.all([
+      tx.select().from(aiModels).where(eq(aiModels.id, id1)),  // No limit needed
+      tx.select().from(aiModels).where(eq(aiModels.id, id2)),  // No limit needed
+    ]);
+    const model1 = model1Result[0];  // Extract first (and only) row
+    const model2 = model2Result[0];
+  },
+  "getModels"
+);
+
+// ✅ ALTERNATIVE - Run queries sequentially if .limit() is required
+await executeTransaction(
+  async (tx) => {
+    const model1Result = await tx.select().from(users).where(eq(users.email, email)).limit(1);
+    const model2Result = await tx.select().from(users).where(eq(users.email, email2)).limit(1);
+  },
+  "getUsers"
+);
+```
+
+**Why this matters:**
+- RDS Data API tracks parameter positions across all queries in a transaction
+- `Promise.all()` executes queries concurrently, confusing the parameter offset tracker
+- `.limit()` adds an additional parameter (`:2`), causing offset conflicts
+- For primary key/unique constraint queries, `.limit(1)` is redundant anyway
+
 ### Side Effect Warning
 
 ```typescript
