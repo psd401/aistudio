@@ -24,6 +24,7 @@ import {
   nexusFolders,
   nexusConversationEvents,
 } from "@/lib/db/schema";
+import { countAsInt } from "@/lib/db/drizzle/helpers/pagination";
 import type {
   NexusConversationMetadata,
   NexusFolderSettings,
@@ -170,7 +171,7 @@ export async function getConversationCount(
   const result = await executeQuery(
     (db) =>
       db
-        .select({ count: sql<number>`CAST(count(*) AS integer)` })
+        .select({ count: countAsInt })
         .from(nexusConversations)
         .where(
           includeArchived

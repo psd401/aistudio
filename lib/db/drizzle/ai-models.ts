@@ -48,6 +48,7 @@ import {
 import { createLogger, generateRequestId } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
 import type { NexusCapabilities, ProviderMetadata } from "@/lib/db/types/jsonb";
+import { countAsInt } from "@/lib/db/drizzle/helpers/pagination";
 
 // ============================================
 // Types
@@ -367,7 +368,7 @@ export async function getModelReferenceCounts(modelId: number) {
     executeQuery(
       (db) =>
         db
-          .select({ count: sql<number>`CAST(count(*) AS integer)` })
+          .select({ count: countAsInt })
           .from(chainPrompts)
           .where(eq(chainPrompts.modelId, modelId)),
       "countChainPrompts"
@@ -375,7 +376,7 @@ export async function getModelReferenceCounts(modelId: number) {
     executeQuery(
       (db) =>
         db
-          .select({ count: sql<number>`CAST(count(*) AS integer)` })
+          .select({ count: countAsInt })
           .from(nexusMessages)
           .where(eq(nexusMessages.modelId, modelId)),
       "countNexusMessages"
@@ -383,7 +384,7 @@ export async function getModelReferenceCounts(modelId: number) {
     executeQuery(
       (db) =>
         db
-          .select({ count: sql<number>`CAST(count(*) AS integer)` })
+          .select({ count: countAsInt })
           .from(nexusConversations)
           .where(
             sql`${nexusConversations.modelUsed} = (SELECT model_id FROM ai_models WHERE id = ${modelId})`
@@ -393,7 +394,7 @@ export async function getModelReferenceCounts(modelId: number) {
     executeQuery(
       (db) =>
         db
-          .select({ count: sql<number>`CAST(count(*) AS integer)` })
+          .select({ count: countAsInt })
           .from(modelComparisons)
           .where(
             or(
@@ -532,14 +533,14 @@ export async function replaceModelReferences(
         }
 
         // Get reference counts within transaction
-        // NOTE: Uses CAST(... AS integer) instead of ::int shorthand because
-        // RDS Data API fails with ::int syntax inside transaction contexts. See Issue #583.
+        // NOTE: Uses countAsInt helper (which uses CAST syntax) instead of ::int shorthand
+        // because RDS Data API fails with ::int syntax inside transaction contexts. See Issue #583.
         const [chainPromptsResult, nexusMessagesResult, nexusConversationsResult, modelComparisonsResult] =
           await Promise.all([
-            tx.select({ count: sql<number>`CAST(count(*) AS integer)` }).from(chainPrompts).where(eq(chainPrompts.modelId, targetModelId)),
-            tx.select({ count: sql<number>`CAST(count(*) AS integer)` }).from(nexusMessages).where(eq(nexusMessages.modelId, targetModelId)),
-            tx.select({ count: sql<number>`CAST(count(*) AS integer)` }).from(nexusConversations).where(sql`${nexusConversations.modelUsed} = ${targetModel.modelId}`),
-            tx.select({ count: sql<number>`CAST(count(*) AS integer)` }).from(modelComparisons).where(or(eq(modelComparisons.model1Id, targetModelId), eq(modelComparisons.model2Id, targetModelId))),
+            tx.select({ count: countAsInt }).from(chainPrompts).where(eq(chainPrompts.modelId, targetModelId)),
+            tx.select({ count: countAsInt }).from(nexusMessages).where(eq(nexusMessages.modelId, targetModelId)),
+            tx.select({ count: countAsInt }).from(nexusConversations).where(sql`${nexusConversations.modelUsed} = ${targetModel.modelId}`),
+            tx.select({ count: countAsInt }).from(modelComparisons).where(or(eq(modelComparisons.model1Id, targetModelId), eq(modelComparisons.model2Id, targetModelId))),
           ]);
 
         const counts = {
