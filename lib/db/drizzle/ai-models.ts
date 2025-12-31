@@ -64,6 +64,8 @@ export interface AIModelData {
   maxTokens?: number | null;
   active?: boolean;
   chatEnabled?: boolean;
+  nexusEnabled?: boolean;
+  architectEnabled?: boolean;
   inputCostPer1kTokens?: string | null;
   outputCostPer1kTokens?: string | null;
   cachedInputCostPer1kTokens?: string | null;
@@ -85,6 +87,8 @@ export interface AIModelUpdateData {
   maxTokens?: number | null;
   active?: boolean;
   chatEnabled?: boolean;
+  nexusEnabled?: boolean;
+  architectEnabled?: boolean;
   inputCostPer1kTokens?: string | null;
   outputCostPer1kTokens?: string | null;
   cachedInputCostPer1kTokens?: string | null;
@@ -118,6 +122,8 @@ export async function getAIModels() {
           maxTokens: aiModels.maxTokens,
           active: aiModels.active,
           chatEnabled: aiModels.chatEnabled,
+          nexusEnabled: aiModels.nexusEnabled,
+          architectEnabled: aiModels.architectEnabled,
           createdAt: aiModels.createdAt,
           updatedAt: aiModels.updatedAt,
           inputCostPer1kTokens: aiModels.inputCostPer1kTokens,
@@ -295,6 +301,8 @@ export async function createAIModel(modelData: AIModelData) {
           maxTokens: modelData.maxTokens,
           active: modelData.active ?? true,
           chatEnabled: modelData.chatEnabled ?? false,
+          nexusEnabled: modelData.nexusEnabled ?? true,
+          architectEnabled: modelData.architectEnabled ?? true,
           inputCostPer1kTokens: modelData.inputCostPer1kTokens,
           outputCostPer1kTokens: modelData.outputCostPer1kTokens,
           cachedInputCostPer1kTokens: modelData.cachedInputCostPer1kTokens,

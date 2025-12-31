@@ -27,6 +27,8 @@ export const aiModels = pgTable("ai_models", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at"),
   chatEnabled: boolean("chat_enabled").default(false).notNull(),
+  nexusEnabled: boolean("nexus_enabled").default(true).notNull(),
+  architectEnabled: boolean("architect_enabled").default(true).notNull(),
   allowedRoles: jsonb("allowed_roles").$type<string[]>(),
   inputCostPer1kTokens: numeric("input_cost_per_1k_tokens", {
     precision: 10,
