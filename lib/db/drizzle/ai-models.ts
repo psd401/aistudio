@@ -514,9 +514,10 @@ export async function replaceModelReferences(
         }
 
         // Get both models within transaction with row-level locking
-        // NOTE: FOR UPDATE requires raw SQL with RDS Data API - Drizzle's .for('update')
-        // fails with "for updateparams" parsing error. See Issue #583.
-        // Pattern from ai-streaming-jobs.ts lines 529-552
+        // NOTE: FOR UPDATE requires raw SQL with RDS Data API driver
+        // Drizzle's .for('update') method fails with RDS Data API - parsed as parameter binding
+        // Error: "for updateparams: 62,1" - RDS treats "for update" as params
+        // Following pattern from ai-streaming-jobs.ts which uses raw SQL for FOR UPDATE
         const [targetModelResult, replacementModelResult] = await Promise.all([
           tx.execute(
             sql`SELECT * FROM ai_models WHERE id = ${targetModelId} LIMIT 1 FOR UPDATE`
@@ -526,7 +527,7 @@ export async function replaceModelReferences(
           ),
         ]);
 
-        // Extract from rows (db.execute returns {rows: []})
+        // Cast rows to expected type - RDS Data API returns rows array
         const targetModel = targetModelResult.rows[0] as SelectAiModel | undefined;
         const replacementModel = replacementModelResult.rows[0] as SelectAiModel | undefined;
 
