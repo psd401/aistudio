@@ -10,13 +10,11 @@ ALTER TABLE ai_models
   ADD COLUMN IF NOT EXISTS architect_enabled BOOLEAN DEFAULT true NOT NULL;
 
 -- Migrate existing chatEnabled to both new flags
--- Models that were chat-enabled remain visible everywhere
--- Models that were NOT chat-enabled will now be invisible in both places
+-- All existing models get their chat_enabled value copied to both new flags
+-- This preserves existing behavior during the transition period
 UPDATE ai_models
 SET nexus_enabled = chat_enabled,
-    architect_enabled = chat_enabled
-WHERE nexus_enabled = true
-  AND architect_enabled = true;
+    architect_enabled = chat_enabled;
 
 -- Note: DO NOT drop chat_enabled yet - keep for backward compatibility during transition
 -- chat_enabled removal will be a separate P2 issue after all code references are updated
