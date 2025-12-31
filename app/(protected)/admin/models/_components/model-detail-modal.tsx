@@ -147,6 +147,13 @@ export function ModelDetailModal({
   const triggerElementRef = useRef<HTMLElement | null>(null)
   const [costOpen, setCostOpen] = useState(false)
 
+  // Cost validation errors
+  const [costErrors, setCostErrors] = useState<{
+    inputCostPer1kTokens?: string
+    outputCostPer1kTokens?: string
+    cachedInputCostPer1kTokens?: string
+  }>({})
+
   // Initialize form data when model changes
   useEffect(() => {
     if (model) {
@@ -246,18 +253,41 @@ export function ModelDetailModal({
     (field: "inputCostPer1kTokens" | "outputCostPer1kTokens" | "cachedInputCostPer1kTokens") =>
       (e: React.ChangeEvent<HTMLInputElement>) => {
         const value = e.target.value
+
+        // Allow empty values
         if (!value) {
           updateField(field, null)
+          setCostErrors((prev) => ({ ...prev, [field]: undefined }))
           return
         }
-        const numericPattern = /^-?\d*\.?\d+$/
+
+        // Only allow positive numbers with optional decimal
+        const numericPattern = /^\d*\.?\d*$/
         if (!numericPattern.test(value)) {
+          setCostErrors((prev) => ({ ...prev, [field]: "Must be a valid number" }))
           return
         }
+
+        // Validate range
         const parsed = Number.parseFloat(value)
-        if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
-          updateField(field, value)
+        if (Number.isNaN(parsed)) {
+          setCostErrors((prev) => ({ ...prev, [field]: "Must be a valid number" }))
+          return
         }
+
+        if (parsed < 0) {
+          setCostErrors((prev) => ({ ...prev, [field]: "Must be 0 or greater" }))
+          return
+        }
+
+        if (parsed > 100) {
+          setCostErrors((prev) => ({ ...prev, [field]: "Must be 100 or less" }))
+          return
+        }
+
+        // Valid value
+        updateField(field, value)
+        setCostErrors((prev) => ({ ...prev, [field]: undefined }))
       },
     [updateField]
   )
@@ -534,7 +564,16 @@ export function ModelDetailModal({
                         value={formData.inputCostPer1kTokens || ""}
                         onChange={handleCostChange("inputCostPer1kTokens")}
                         placeholder="0.000000"
+                        aria-invalid={!!costErrors.inputCostPer1kTokens}
+                        aria-describedby={
+                          costErrors.inputCostPer1kTokens ? "inputCost-error" : undefined
+                        }
                       />
+                      {costErrors.inputCostPer1kTokens && (
+                        <p id="inputCost-error" className="text-sm text-destructive">
+                          {costErrors.inputCostPer1kTokens}
+                        </p>
+                      )}
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="outputCost">Output Cost per 1K tokens ($)</Label>
@@ -545,7 +584,16 @@ export function ModelDetailModal({
                         value={formData.outputCostPer1kTokens || ""}
                         onChange={handleCostChange("outputCostPer1kTokens")}
                         placeholder="0.000000"
+                        aria-invalid={!!costErrors.outputCostPer1kTokens}
+                        aria-describedby={
+                          costErrors.outputCostPer1kTokens ? "outputCost-error" : undefined
+                        }
                       />
+                      {costErrors.outputCostPer1kTokens && (
+                        <p id="outputCost-error" className="text-sm text-destructive">
+                          {costErrors.outputCostPer1kTokens}
+                        </p>
+                      )}
                     </div>
                     <div className="space-y-2">
                       <Label htmlFor="cachedCost">Cached Input Cost per 1K ($)</Label>
@@ -556,7 +604,16 @@ export function ModelDetailModal({
                         value={formData.cachedInputCostPer1kTokens || ""}
                         onChange={handleCostChange("cachedInputCostPer1kTokens")}
                         placeholder="0.000000"
+                        aria-invalid={!!costErrors.cachedInputCostPer1kTokens}
+                        aria-describedby={
+                          costErrors.cachedInputCostPer1kTokens ? "cachedCost-error" : undefined
+                        }
                       />
+                      {costErrors.cachedInputCostPer1kTokens && (
+                        <p id="cachedCost-error" className="text-sm text-destructive">
+                          {costErrors.cachedInputCostPer1kTokens}
+                        </p>
+                      )}
                     </div>
                   </div>
                 </CollapsibleContent>

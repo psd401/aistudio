@@ -265,21 +265,7 @@ export function ModelsDataTable({
               ))
             ) : table.getRowModel().rows.length ? (
               table.getRowModel().rows.map((row) => (
-                <TableRow
-                  key={row.id}
-                  className="cursor-pointer hover:bg-muted/50"
-                  onClick={(e) => {
-                    // Don't trigger view if clicking on switch or dropdown
-                    if (
-                      (e.target as HTMLElement).closest('[role="switch"]') ||
-                      (e.target as HTMLElement).closest('[role="menu"]') ||
-                      (e.target as HTMLElement).closest("button")
-                    ) {
-                      return
-                    }
-                    onViewModel(row.original)
-                  }}
-                >
+                <TableRow key={row.id} className="hover:bg-muted/50">
                   {row.getVisibleCells().map((cell) => (
                     <TableCell key={cell.id}>
                       {flexRender(cell.column.columnDef.cell, cell.getContext())}
