@@ -341,7 +341,7 @@ export function ModelDetailModal({
         style={{ maxWidth: '95vw', maxHeight: '90vh', width: '95vw' } as React.CSSProperties}
         data-wide-modal="true"
       >
-        <div className="w-full h-full max-w-[95vw] max-h-[90vh] flex flex-col p-6 gap-4">
+        <div className="min-w-[95vw] w-[95vw] max-w-[95vw] h-full max-h-[90vh] flex flex-col p-6 gap-4">
         <DialogHeader className="flex-shrink-0">
           <div className="flex items-center gap-3">
             <DialogTitle className="text-xl">{title}</DialogTitle>
