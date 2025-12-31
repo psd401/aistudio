@@ -48,7 +48,6 @@ import {
 import { createLogger, generateRequestId } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
 import type { NexusCapabilities, ProviderMetadata } from "@/lib/db/types/jsonb";
-import type { SelectAiModel } from "@/lib/db/types";
 import { countAsInt } from "@/lib/db/drizzle/helpers/pagination";
 
 // ============================================
@@ -514,22 +513,15 @@ export async function replaceModelReferences(
         }
 
         // Get both models within transaction with row-level locking
-        // NOTE: FOR UPDATE requires raw SQL with RDS Data API driver
-        // Drizzle's .for('update') method fails with RDS Data API - parsed as parameter binding
-        // Error: "for updateparams: 62,1" - RDS treats "for update" as params
-        // Following pattern from ai-streaming-jobs.ts which uses raw SQL for FOR UPDATE
-        const [targetModelResult, replacementModelResult] = await Promise.all([
-          tx.execute(
-            sql`SELECT * FROM ai_models WHERE id = ${targetModelId} LIMIT 1 FOR UPDATE`
-          ),
-          tx.execute(
-            sql`SELECT * FROM ai_models WHERE id = ${replacementModelId} LIMIT 1 FOR UPDATE`
-          ),
+        // Testing Drizzle's .for('update') method with RDS Data API driver
+        // Query builder automatically handles snake_case → camelCase transformation
+        const [targetModel, replacementModel] = await Promise.all([
+          tx.select().from(aiModels).where(eq(aiModels.id, targetModelId)).limit(1).for('update'),
+          tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId)).limit(1).for('update'),
+        ]).then(([targetResult, replacementResult]) => [
+          targetResult[0],
+          replacementResult[0],
         ]);
-
-        // Cast rows to expected type - RDS Data API returns rows array
-        const targetModel = targetModelResult.rows[0] as SelectAiModel | undefined;
-        const replacementModel = replacementModelResult.rows[0] as SelectAiModel | undefined;
 
         if (!targetModel) {
           throw ErrorFactories.dbRecordNotFound("ai_models", targetModelId);
