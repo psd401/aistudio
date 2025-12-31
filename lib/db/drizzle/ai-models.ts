@@ -48,6 +48,7 @@ import {
 import { createLogger, generateRequestId } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
 import type { NexusCapabilities, ProviderMetadata } from "@/lib/db/types/jsonb";
+import type { SelectAiModel } from "@/lib/db/types";
 import { countAsInt } from "@/lib/db/drizzle/helpers/pagination";
 
 // ============================================
@@ -513,14 +514,21 @@ export async function replaceModelReferences(
         }
 
         // Get both models within transaction with row-level locking
-        // Use FOR UPDATE to prevent concurrent modifications during validation
+        // NOTE: FOR UPDATE requires raw SQL with RDS Data API - Drizzle's .for('update')
+        // fails with "for updateparams" parsing error. See Issue #583.
+        // Pattern from ai-streaming-jobs.ts lines 529-552
         const [targetModelResult, replacementModelResult] = await Promise.all([
-          tx.select().from(aiModels).where(eq(aiModels.id, targetModelId)).limit(1).for('update'),
-          tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId)).limit(1).for('update'),
+          tx.execute(
+            sql`SELECT * FROM ai_models WHERE id = ${targetModelId} LIMIT 1 FOR UPDATE`
+          ),
+          tx.execute(
+            sql`SELECT * FROM ai_models WHERE id = ${replacementModelId} LIMIT 1 FOR UPDATE`
+          ),
         ]);
 
-        const targetModel = targetModelResult[0];
-        const replacementModel = replacementModelResult[0];
+        // Extract from rows (db.execute returns {rows: []})
+        const targetModel = targetModelResult.rows[0] as SelectAiModel | undefined;
+        const replacementModel = replacementModelResult.rows[0] as SelectAiModel | undefined;
 
         if (!targetModel) {
           throw ErrorFactories.dbRecordNotFound("ai_models", targetModelId);
