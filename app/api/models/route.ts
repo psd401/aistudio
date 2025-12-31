@@ -1,6 +1,6 @@
 import { withErrorHandling, unauthorized } from '@/lib/api-utils';
 import { getServerSession } from '@/lib/auth/server-session';
-import { getChatEnabledModels } from '@/lib/db/drizzle';
+import { getNexusEnabledModels } from '@/lib/db/drizzle';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
 export async function GET() {
@@ -21,7 +21,7 @@ export async function GET() {
   log.debug("User authenticated", { userId: session.sub });
 
   return withErrorHandling(async () => {
-    const models = await getChatEnabledModels();
+    const models = await getNexusEnabledModels();
 
     log.info("Models retrieved successfully", { count: models.length });
     timer({ status: "success", count: models.length });

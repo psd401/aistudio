@@ -82,8 +82,14 @@ const ModelForm = React.memo(function ModelForm({
   const handleActiveChange = (checked: boolean) => 
     setModelData({ ...modelData, active: checked });
     
-  const handleChatEnabledChange = (checked: boolean) => 
+  const handleChatEnabledChange = (checked: boolean) =>
     setModelData({ ...modelData, chatEnabled: checked });
+
+  const handleNexusEnabledChange = (checked: boolean) =>
+    setModelData({ ...modelData, nexusEnabled: checked });
+
+  const handleArchitectEnabledChange = (checked: boolean) =>
+    setModelData({ ...modelData, architectEnabled: checked });
 
   // Pricing field handlers with validation
   // Note: Cost fields are stored as strings in DB for precision (PostgreSQL numeric type)
@@ -300,22 +306,42 @@ const ModelForm = React.memo(function ModelForm({
           </div>
         </div>
 
-        <div className="flex items-center space-x-4">
-          <div className="flex items-center space-x-2">
-            <Switch
-              id="model-active"
-              checked={modelData.active}
-              onCheckedChange={handleActiveChange}
-            />
-            <label htmlFor="model-active" className="text-sm font-medium">Active</label>
+        <div className="space-y-4">
+          <div className="flex items-center space-x-4">
+            <div className="flex items-center space-x-2">
+              <Switch
+                id="model-active"
+                checked={modelData.active}
+                onCheckedChange={handleActiveChange}
+              />
+              <label htmlFor="model-active" className="text-sm font-medium">Active</label>
+            </div>
+            <div className="flex items-center space-x-2">
+              <Switch
+                id="model-chat-enabled"
+                checked={modelData.chatEnabled}
+                onCheckedChange={handleChatEnabledChange}
+              />
+              <label htmlFor="model-chat-enabled" className="text-sm font-medium">Chat Enabled (deprecated)</label>
+            </div>
           </div>
-          <div className="flex items-center space-x-2">
-            <Switch
-              id="model-chat-enabled"
-              checked={modelData.chatEnabled}
-              onCheckedChange={handleChatEnabledChange}
-            />
-            <label htmlFor="model-chat-enabled" className="text-sm font-medium">Chat Enabled</label>
+          <div className="flex items-center space-x-4">
+            <div className="flex items-center space-x-2">
+              <Switch
+                id="model-nexus-enabled"
+                checked={modelData.nexusEnabled ?? true}
+                onCheckedChange={handleNexusEnabledChange}
+              />
+              <label htmlFor="model-nexus-enabled" className="text-sm font-medium">Nexus Enabled</label>
+            </div>
+            <div className="flex items-center space-x-2">
+              <Switch
+                id="model-architect-enabled"
+                checked={modelData.architectEnabled ?? true}
+                onCheckedChange={handleArchitectEnabledChange}
+              />
+              <label htmlFor="model-architect-enabled" className="text-sm font-medium">Architect Enabled</label>
+            </div>
           </div>
         </div>
       </div>

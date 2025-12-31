@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { getAIModels, createAIModel, updateAIModel, deleteAIModel, getRoles } from '@/lib/db/drizzle';
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+import { normalizeBoolean } from '@/lib/validations/api-schemas';
 
 /**
  * Validate and sanitize allowedRoles field
@@ -194,8 +195,10 @@ export async function POST(request: Request) {
       capabilities: validatedCapabilities || undefined,
       allowedRoles: validatedAllowedRoles || undefined,
       maxTokens: body.maxTokens ? Number.parseInt(body.maxTokens) : undefined,
-      isActive: body.active ?? true,
-      chatEnabled: body.chatEnabled ?? false,
+      active: body.active ?? true,
+      chatEnabled: body.chatEnabled ?? false, // @deprecated - kept for backward compatibility
+      nexusEnabled: body.nexusEnabled ?? true,
+      architectEnabled: body.architectEnabled ?? true,
       // Pricing fields
       inputCostPer1kTokens: body.inputCostPer1kTokens || undefined,
       outputCostPer1kTokens: body.outputCostPer1kTokens || undefined,
@@ -269,11 +272,26 @@ export async function PUT(request: Request) {
       updates.maxTokens = updates.maxTokens ? Number.parseInt(updates.maxTokens) : null;
     }
 
+    // Handle boolean fields - ensure proper type (frontend may send as string)
+    // Uses normalizeBoolean utility to handle "false", "0", 0, false correctly
+    if ('active' in updates) {
+      updates.active = normalizeBoolean(updates.active);
+    }
+    if ('chatEnabled' in updates) {
+      updates.chatEnabled = normalizeBoolean(updates.chatEnabled);
+    }
+    if ('nexusEnabled' in updates) {
+      updates.nexusEnabled = normalizeBoolean(updates.nexusEnabled);
+    }
+    if ('architectEnabled' in updates) {
+      updates.architectEnabled = normalizeBoolean(updates.architectEnabled);
+    }
+
     // Handle JSONB fields - stringify if they're objects
     if (updates.nexusCapabilities && typeof updates.nexusCapabilities === 'object') {
       updates.nexusCapabilities = JSON.stringify(updates.nexusCapabilities);
     }
-    
+
     if (updates.providerMetadata && typeof updates.providerMetadata === 'object') {
       updates.providerMetadata = JSON.stringify(updates.providerMetadata);
     }

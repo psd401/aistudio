@@ -193,16 +193,42 @@ export async function getActiveAIModels() {
 
 /**
  * Get active chat-enabled models
+ * @deprecated Since January 2025 (PR #592, Issue #585). Use getNexusEnabledModels() instead.
+ * This function is maintained for backward compatibility and will be removed in v2.0.
  */
 export async function getChatEnabledModels() {
+  return getNexusEnabledModels();
+}
+
+/**
+ * Get models enabled for Nexus chat and Model Compare
+ * These models appear in Nexus chat model selector and Model Compare feature
+ */
+export async function getNexusEnabledModels() {
   return executeQuery(
     (db) =>
       db
         .select()
         .from(aiModels)
-        .where(and(eq(aiModels.active, true), eq(aiModels.chatEnabled, true)))
+        .where(and(eq(aiModels.active, true), eq(aiModels.nexusEnabled, true)))
         .orderBy(aiModels.provider, aiModels.name),
-    "getChatEnabledModels"
+    "getNexusEnabledModels"
+  );
+}
+
+/**
+ * Get models enabled for Assistant Architect
+ * These models appear in Assistant Architect prompt configuration
+ */
+export async function getArchitectEnabledModels() {
+  return executeQuery(
+    (db) =>
+      db
+        .select()
+        .from(aiModels)
+        .where(and(eq(aiModels.active, true), eq(aiModels.architectEnabled, true)))
+        .orderBy(aiModels.provider, aiModels.name),
+    "getArchitectEnabledModels"
   );
 }
 
@@ -270,7 +296,7 @@ export async function getModelsWithCapabilities(
         .where(
           and(
             eq(aiModels.active, true),
-            eq(aiModels.chatEnabled, true),
+            eq(aiModels.nexusEnabled, true),
             ...conditions
           )
         )
@@ -521,10 +547,12 @@ export async function replaceModelReferences(
         }
 
         // Get both models within transaction
-        const [targetModelResult, replacementModelResult] = await Promise.all([
-          tx.select().from(aiModels).where(eq(aiModels.id, targetModelId)).limit(1),
-          tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId)).limit(1),
-        ]);
+        // NOTE: Sequential execution required for RDS Data API parameter binding.
+        // Concurrent queries with WHERE clauses cause malformed bindings like ":1params: 22".
+        // Even without .limit(), Promise.all() with parameterized queries confuses the driver's
+        // offset tracker. See Issue #583 and docs/database/drizzle-patterns.md.
+        const targetModelResult = await tx.select().from(aiModels).where(eq(aiModels.id, targetModelId));
+        const replacementModelResult = await tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId));
 
         const targetModel = targetModelResult[0];
         const replacementModel = replacementModelResult[0];
@@ -540,15 +568,14 @@ export async function replaceModelReferences(
         }
 
         // Get reference counts within transaction
-        // NOTE: Uses countAsInt helper (which uses CAST syntax) instead of ::int shorthand
-        // because RDS Data API fails with ::int syntax inside transaction contexts. See Issue #583.
-        const [chainPromptsResult, nexusMessagesResult, nexusConversationsResult, modelComparisonsResult] =
-          await Promise.all([
-            tx.select({ count: countAsInt }).from(chainPrompts).where(eq(chainPrompts.modelId, targetModelId)),
-            tx.select({ count: countAsInt }).from(nexusMessages).where(eq(nexusMessages.modelId, targetModelId)),
-            tx.select({ count: countAsInt }).from(nexusConversations).where(sql`${nexusConversations.modelUsed} = ${targetModel.modelId}`),
-            tx.select({ count: countAsInt }).from(modelComparisons).where(or(eq(modelComparisons.model1Id, targetModelId), eq(modelComparisons.model2Id, targetModelId))),
-          ]);
+        // NOTE: Sequential execution required for RDS Data API parameter binding.
+        // Concurrent queries cause offset tracking issues, especially with multi-parameter
+        // queries like or(eq(...), eq(...)) which creates :1 and :2 bindings.
+        // Uses countAsInt helper (CAST syntax) instead of ::int - see Issue #583.
+        const chainPromptsResult = await tx.select({ count: countAsInt }).from(chainPrompts).where(eq(chainPrompts.modelId, targetModelId));
+        const nexusMessagesResult = await tx.select({ count: countAsInt }).from(nexusMessages).where(eq(nexusMessages.modelId, targetModelId));
+        const nexusConversationsResult = await tx.select({ count: countAsInt }).from(nexusConversations).where(sql`${nexusConversations.modelUsed} = ${targetModel.modelId}`);
+        const modelComparisonsResult = await tx.select({ count: countAsInt }).from(modelComparisons).where(or(eq(modelComparisons.model1Id, targetModelId), eq(modelComparisons.model2Id, targetModelId)));
 
         const counts = {
           chainPromptsCount: chainPromptsResult[0]?.count ?? 0,

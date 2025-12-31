@@ -5,6 +5,8 @@ const log = createLogger({ module: 'model-config' });
 
 /**
  * Get model configuration from database
+ * Used by: Nexus chat, Model Compare
+ * Validates that model is active AND nexusEnabled
  */
 export async function getModelConfig(modelId: string | number) {
   log.info('getModelConfig called', { modelId, type: typeof modelId });
@@ -15,8 +17,8 @@ export async function getModelConfig(modelId: string | number) {
     ? await getAIModelById(Number(modelId))
     : await getAIModelByModelId(String(modelId));
 
-  if (!model || !model.active || !model.chatEnabled) {
-    log.error('Model not found or not enabled for chat', { modelId, found: !!model });
+  if (!model || !model.active || !model.nexusEnabled) {
+    log.error('Model not found or not enabled for Nexus', { modelId, found: !!model });
     return null;
   }
 

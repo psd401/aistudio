@@ -53,7 +53,9 @@ export const createModelSchema = z.object({
   capabilities: z.array(z.string()).optional(),
   maxTokens: z.string().regex(/^\d+$/).optional(),
   active: z.boolean().optional(),
-  chatEnabled: z.boolean().optional()
+  chatEnabled: z.boolean().optional(), // @deprecated - use nexusEnabled instead
+  nexusEnabled: z.boolean().optional(),
+  architectEnabled: z.boolean().optional()
 });
 
 export const updateModelSchema = z.object({
@@ -64,7 +66,9 @@ export const updateModelSchema = z.object({
   capabilities: z.array(z.string()).optional(),
   maxTokens: z.string().regex(/^\d+$/).optional(),
   active: z.boolean().optional(),
-  chatEnabled: z.boolean().optional()
+  chatEnabled: z.boolean().optional(), // @deprecated - use nexusEnabled instead
+  nexusEnabled: z.boolean().optional(),
+  architectEnabled: z.boolean().optional()
 });
 
 // Navigation schemas
@@ -212,11 +216,50 @@ export function validateSearchParams<T>(
 ): { data: T | null; error: string | null } {
   const params = Object.fromEntries(searchParams.entries());
   const result = schema.safeParse(params);
-  
+
   if (!result.success) {
     const errors = result.error.issues.map((e: { path: PropertyKey[]; message: string }) => `${e.path.join('.')}: ${e.message}`).join(', ');
     return { data: null, error: errors };
   }
-  
+
   return { data: result.data, error: null };
+}
+
+/**
+ * Normalize boolean values from various input types
+ *
+ * Handles common cases from form submissions and API requests:
+ * - String "false", "0" → false
+ * - Numeric 0 → false
+ * - Boolean false → false
+ * - Everything else → true (via Boolean coercion)
+ *
+ * @param value - Value to normalize (unknown type from API)
+ * @returns Normalized boolean value
+ *
+ * @example
+ * normalizeBoolean(true) // true
+ * normalizeBoolean("true") // true
+ * normalizeBoolean(false) // false
+ * normalizeBoolean("false") // false
+ * normalizeBoolean("0") // false
+ * normalizeBoolean(0) // false
+ * normalizeBoolean("") // false (empty string is falsy)
+ * normalizeBoolean(null) // false
+ * normalizeBoolean(undefined) // false
+ */
+export function normalizeBoolean(value: unknown): boolean {
+  // Handle actual boolean type
+  if (typeof value === 'boolean') {
+    return value;
+  }
+
+  // Explicit false cases: string "false", string "0", number 0
+  if (value === 'false' || value === '0' || value === 0) {
+    return false;
+  }
+
+  // Falsy values (null, undefined, "", NaN) → false
+  // Truthy values (non-empty strings, objects, arrays) → true
+  return Boolean(value);
 }

@@ -1,6 +1,6 @@
 import { redirect, notFound } from "next/navigation"
 import { getAssistantArchitectAction } from "@/actions/db/assistant-architect-actions"
-import { getAiModelsAction } from "@/actions/db/ai-models-actions"
+import { getArchitectModelsAction } from "@/actions/db/ai-models-actions"
 import { getServerSession } from "@/lib/auth/server-session"
 import { checkUserRoleByCognitoSub } from "@/lib/db/drizzle"
 import { CreateLayout } from "../../../create/_components/create-layout"
@@ -34,7 +34,7 @@ export default async function PromptsPage({ params }: { params: Promise<{ id: st
   if (!canEdit) {
     redirect(`/utilities/assistant-architect/${id}`)
   }
-  const modelsResult = await getAiModelsAction()
+  const modelsResult = await getArchitectModelsAction()
   const models = modelsResult.isSuccess ? modelsResult.data : []
   const sortedPrompts = tool.prompts?.slice().sort((a, b) => a.position - b.position) || []
   const sortedInputFields = tool.inputFields?.slice().sort((a, b) => a.position - b.position) || []
