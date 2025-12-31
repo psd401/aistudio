@@ -193,16 +193,41 @@ export async function getActiveAIModels() {
 
 /**
  * Get active chat-enabled models
+ * @deprecated Use getNexusEnabledModels() instead. This function is maintained for backward compatibility.
  */
 export async function getChatEnabledModels() {
+  return getNexusEnabledModels();
+}
+
+/**
+ * Get models enabled for Nexus chat and Model Compare
+ * These models appear in Nexus chat model selector and Model Compare feature
+ */
+export async function getNexusEnabledModels() {
   return executeQuery(
     (db) =>
       db
         .select()
         .from(aiModels)
-        .where(and(eq(aiModels.active, true), eq(aiModels.chatEnabled, true)))
+        .where(and(eq(aiModels.active, true), eq(aiModels.nexusEnabled, true)))
         .orderBy(aiModels.provider, aiModels.name),
-    "getChatEnabledModels"
+    "getNexusEnabledModels"
+  );
+}
+
+/**
+ * Get models enabled for Assistant Architect
+ * These models appear in Assistant Architect prompt configuration
+ */
+export async function getArchitectEnabledModels() {
+  return executeQuery(
+    (db) =>
+      db
+        .select()
+        .from(aiModels)
+        .where(and(eq(aiModels.active, true), eq(aiModels.architectEnabled, true)))
+        .orderBy(aiModels.provider, aiModels.name),
+    "getArchitectEnabledModels"
   );
 }
 
@@ -270,7 +295,7 @@ export async function getModelsWithCapabilities(
         .where(
           and(
             eq(aiModels.active, true),
-            eq(aiModels.chatEnabled, true),
+            eq(aiModels.nexusEnabled, true),
             ...conditions
           )
         )

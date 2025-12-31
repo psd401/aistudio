@@ -100,7 +100,7 @@ export async function POST(req: Request) {
         provider: aiModels.provider,
         modelId: aiModels.modelId,
         name: aiModels.name,
-        chatEnabled: aiModels.chatEnabled
+        nexusEnabled: aiModels.nexusEnabled
       })
       .from(aiModels)
       .where(inArray(aiModels.modelId, [model1Id, model2Id])),
@@ -114,7 +114,7 @@ export async function POST(req: Request) {
         modelId: m.modelId,
         name: m.name,
         provider: m.provider,
-        chatEnabled: m.chatEnabled
+        nexusEnabled: m.nexusEnabled
       }))
     });
 
@@ -169,14 +169,14 @@ export async function POST(req: Request) {
       );
     }
 
-    // Check if models are enabled for chat
-    if (!model1Config.chatEnabled || !model2Config.chatEnabled) {
-      log.error('One or both models not enabled for chat', {
-        model1Enabled: model1Config.chatEnabled,
-        model2Enabled: model2Config.chatEnabled
+    // Check if models are enabled for Nexus/Compare
+    if (!model1Config.nexusEnabled || !model2Config.nexusEnabled) {
+      log.error('One or both models not enabled for Nexus/Compare', {
+        model1Enabled: model1Config.nexusEnabled,
+        model2Enabled: model2Config.nexusEnabled
       });
       return new Response(
-        JSON.stringify({ error: 'One or both models not enabled for chat' }),
+        JSON.stringify({ error: 'One or both models not enabled for comparison' }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
       );
     }

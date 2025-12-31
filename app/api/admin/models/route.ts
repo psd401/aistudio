@@ -194,8 +194,10 @@ export async function POST(request: Request) {
       capabilities: validatedCapabilities || undefined,
       allowedRoles: validatedAllowedRoles || undefined,
       maxTokens: body.maxTokens ? Number.parseInt(body.maxTokens) : undefined,
-      isActive: body.active ?? true,
-      chatEnabled: body.chatEnabled ?? false,
+      active: body.active ?? true,
+      chatEnabled: body.chatEnabled ?? false, // @deprecated - kept for backward compatibility
+      nexusEnabled: body.nexusEnabled ?? true,
+      architectEnabled: body.architectEnabled ?? true,
       // Pricing fields
       inputCostPer1kTokens: body.inputCostPer1kTokens || undefined,
       outputCostPer1kTokens: body.outputCostPer1kTokens || undefined,

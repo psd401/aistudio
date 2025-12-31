@@ -227,6 +227,8 @@ export {
   getAIModelByModelId,
   getActiveAIModels,
   getChatEnabledModels,
+  getNexusEnabledModels,
+  getArchitectEnabledModels,
   getAIModelsByProvider,
   getModelsWithCapabilities,
   // CRUD operations
