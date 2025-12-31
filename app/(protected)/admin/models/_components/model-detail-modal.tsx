@@ -338,7 +338,8 @@ export function ModelDetailModal({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         className="max-w-[95vw] max-h-[90vh] w-full h-full flex flex-col"
-        style={{ maxWidth: '95vw', maxHeight: '90vh' }}
+        style={{ maxWidth: '95vw', maxHeight: '90vh', width: '95vw' } as React.CSSProperties}
+        data-wide-modal="true"
       >
         <DialogHeader className="flex-shrink-0">
           <div className="flex items-center gap-3">

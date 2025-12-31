@@ -127,3 +127,10 @@ html.dark .shiki span {
 *:hover > .hover-visible {
   opacity: 1;
 }
+
+/* Force wide modal styling */
+[data-wide-modal="true"] {
+  width: 95vw !important;
+  max-width: 95vw !important;
+  max-height: 90vh !important;
+}
