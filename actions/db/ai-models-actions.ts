@@ -43,7 +43,7 @@ export async function getAiModelsAction(): Promise<ActionState<SelectAiModel[]>>
 
     timer({ status: "success", count: models.length })
 
-    return createSuccess(models as unknown as SelectAiModel[], "Models retrieved successfully")
+    return createSuccess(models, "Models retrieved successfully")
   } catch (error) {
     timer({ status: "error" })
 
@@ -84,7 +84,7 @@ export async function getArchitectModelsAction(): Promise<ActionState<SelectAiMo
 
     timer({ status: "success", count: models.length })
 
-    return createSuccess(models as unknown as SelectAiModel[], "Models retrieved successfully")
+    return createSuccess(models, "Models retrieved successfully")
   } catch (error) {
     timer({ status: "error" })
 

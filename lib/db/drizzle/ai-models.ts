@@ -193,7 +193,8 @@ export async function getActiveAIModels() {
 
 /**
  * Get active chat-enabled models
- * @deprecated Use getNexusEnabledModels() instead. This function is maintained for backward compatibility.
+ * @deprecated Since January 2025 (PR #592, Issue #585). Use getNexusEnabledModels() instead.
+ * This function is maintained for backward compatibility and will be removed in v2.0.
  */
 export async function getChatEnabledModels() {
   return getNexusEnabledModels();

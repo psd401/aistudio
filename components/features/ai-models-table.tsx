@@ -329,7 +329,7 @@ const ModelForm = React.memo(function ModelForm({
             <div className="flex items-center space-x-2">
               <Switch
                 id="model-nexus-enabled"
-                checked={modelData.nexusEnabled}
+                checked={modelData.nexusEnabled ?? true}
                 onCheckedChange={handleNexusEnabledChange}
               />
               <label htmlFor="model-nexus-enabled" className="text-sm font-medium">Nexus Enabled</label>
@@ -337,7 +337,7 @@ const ModelForm = React.memo(function ModelForm({
             <div className="flex items-center space-x-2">
               <Switch
                 id="model-architect-enabled"
-                checked={modelData.architectEnabled}
+                checked={modelData.architectEnabled ?? true}
                 onCheckedChange={handleArchitectEnabledChange}
               />
               <label htmlFor="model-architect-enabled" className="text-sm font-medium">Architect Enabled</label>
