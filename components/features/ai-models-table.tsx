@@ -528,6 +528,8 @@ type ModelFormData = {
   maxTokens: number;
   active: boolean;
   chatEnabled: boolean;
+  nexusEnabled: boolean;
+  architectEnabled: boolean;
   allowedRoles: string[];
   capabilitiesList: string[];
   // Pricing fields - stored as string in DB (PostgreSQL numeric) for precision
@@ -568,6 +570,8 @@ const emptyModel: ModelFormData = {
   maxTokens: 4096,
   active: true,
   chatEnabled: false,
+  nexusEnabled: true,
+  architectEnabled: true,
   allowedRoles: [],
   capabilitiesList: [],
   // Pricing fields
@@ -792,6 +796,8 @@ export const AiModelsTable = React.memo(function AiModelsTable({
       maxTokens: model.maxTokens || 4096,
       active: model.active,
       chatEnabled: model.chatEnabled || false,
+      nexusEnabled: model.nexusEnabled ?? true,
+      architectEnabled: model.architectEnabled ?? true,
       // Pricing fields
       inputCostPer1kTokens: model.inputCostPer1kTokens || null,
       outputCostPer1kTokens: model.outputCostPer1kTokens || null,
@@ -1006,6 +1012,9 @@ export const AiModelsTable = React.memo(function AiModelsTable({
       ...dbData,
       // Use explicit chatEnabled value (maintains backward compatibility by defaulting to capability-based inference)
       chatEnabled: modelData.chatEnabled,
+      // Feature-specific availability flags
+      nexusEnabled: modelData.nexusEnabled,
+      architectEnabled: modelData.architectEnabled,
       // Ensure pricing fields are properly set
       inputCostPer1kTokens: modelData.inputCostPer1kTokens,
       outputCostPer1kTokens: modelData.outputCostPer1kTokens,

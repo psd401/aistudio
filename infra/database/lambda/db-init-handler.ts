@@ -60,7 +60,8 @@ const MIGRATION_FILES = [
   '040-update-model-replacement-audit.sql',
   '041-add-user-cascade-constraints.sql',
   '042-ai-streaming-jobs-pending-index.sql',
-  '043-migrate-documents-conversation-uuid.sql'
+  '043-migrate-documents-conversation-uuid.sql',
+  '044-add-model-availability-flags.sql'
   // ADD NEW MIGRATIONS HERE - they will run once and be tracked
 ];
 
