@@ -271,11 +271,25 @@ export async function PUT(request: Request) {
       updates.maxTokens = updates.maxTokens ? Number.parseInt(updates.maxTokens) : null;
     }
 
+    // Handle boolean fields - ensure proper type (frontend may send as string)
+    if ('active' in updates) {
+      updates.active = Boolean(updates.active);
+    }
+    if ('chatEnabled' in updates) {
+      updates.chatEnabled = Boolean(updates.chatEnabled);
+    }
+    if ('nexusEnabled' in updates) {
+      updates.nexusEnabled = Boolean(updates.nexusEnabled);
+    }
+    if ('architectEnabled' in updates) {
+      updates.architectEnabled = Boolean(updates.architectEnabled);
+    }
+
     // Handle JSONB fields - stringify if they're objects
     if (updates.nexusCapabilities && typeof updates.nexusCapabilities === 'object') {
       updates.nexusCapabilities = JSON.stringify(updates.nexusCapabilities);
     }
-    
+
     if (updates.providerMetadata && typeof updates.providerMetadata === 'object') {
       updates.providerMetadata = JSON.stringify(updates.providerMetadata);
     }
