@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useMemo } from "react"
 import { useToast } from "@/components/ui/use-toast"
+import { createLogger, generateRequestId } from "@/lib/logger"
 import { Button } from "@/components/ui/button"
 import { IconRefresh, IconPlus } from "@tabler/icons-react"
 import { ModelReplacementDialog } from "@/components/features/model-replacement-dialog"
@@ -184,7 +185,11 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
         if (!cancelled) {
           setRoleOptions(options.length > 0 ? options : fallbackRoleOptions)
         }
-      } catch {
+      } catch (error) {
+        const log = createLogger({ requestId: generateRequestId(), action: "fetchRoles" })
+        log.error("Failed to fetch roles", {
+          error: error instanceof Error ? error.message : String(error),
+        })
         if (!cancelled) {
           setRoleOptions(fallbackRoleOptions)
         }
@@ -216,6 +221,10 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
         setModels(data.data)
       }
     } catch (error) {
+      const log = createLogger({ requestId: generateRequestId(), action: "loadModels" })
+      log.error("Failed to load models", {
+        error: error instanceof Error ? error.message : String(error),
+      })
       toast({
         title: "Error",
         description: error instanceof Error ? error.message : "Failed to load models",
@@ -266,6 +275,12 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
           prev.map((m) => (m.id === modelId ? { ...m, active } : m))
         )
       } catch (error) {
+        const log = createLogger({ requestId: generateRequestId(), action: "toggleActive" })
+        log.error("Failed to toggle active status", {
+          modelId,
+          active,
+          error: error instanceof Error ? error.message : String(error),
+        })
         toast({
           title: "Error",
           description: error instanceof Error ? error.message : "Failed to update model",
@@ -294,6 +309,12 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
           prev.map((m) => (m.id === modelId ? { ...m, nexusEnabled: enabled } : m))
         )
       } catch (error) {
+        const log = createLogger({ requestId: generateRequestId(), action: "toggleNexus" })
+        log.error("Failed to toggle Nexus availability", {
+          modelId,
+          enabled,
+          error: error instanceof Error ? error.message : String(error),
+        })
         toast({
           title: "Error",
           description: error instanceof Error ? error.message : "Failed to update model",
@@ -322,6 +343,12 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
           prev.map((m) => (m.id === modelId ? { ...m, architectEnabled: enabled } : m))
         )
       } catch (error) {
+        const log = createLogger({ requestId: generateRequestId(), action: "toggleArchitect" })
+        log.error("Failed to toggle Architect availability", {
+          modelId,
+          enabled,
+          error: error instanceof Error ? error.message : String(error),
+        })
         toast({
           title: "Error",
           description: error instanceof Error ? error.message : "Failed to update model",
@@ -372,6 +399,12 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
           })
         }
       } catch (error) {
+        const log = createLogger({ requestId: generateRequestId(), action: "deleteModel" })
+        log.error("Failed to delete model", {
+          modelId: model.id,
+          modelName: model.name,
+          error: error instanceof Error ? error.message : String(error),
+        })
         toast({
           title: "Error",
           description: error instanceof Error ? error.message : "Failed to delete model",
@@ -419,6 +452,12 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
           description: result.message || "Model replaced and deleted successfully",
         })
       } catch (error) {
+        const log = createLogger({ requestId: generateRequestId(), action: "replaceModel" })
+        log.error("Failed to replace model", {
+          originalModelId: replacementDialog.model?.id,
+          replacementModelId,
+          error: error instanceof Error ? error.message : String(error),
+        })
         toast({
           title: "Error",
           description: error instanceof Error ? error.message : "Failed to replace model",
@@ -493,6 +532,13 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
           })
         }
       } catch (error) {
+        const log = createLogger({ requestId: generateRequestId(), action: "saveModel" })
+        log.error("Failed to save model", {
+          modelId: data.id,
+          modelName: data.name,
+          isNewModel,
+          error: error instanceof Error ? error.message : String(error),
+        })
         toast({
           title: "Error",
           description: error instanceof Error ? error.message : "Failed to save model",

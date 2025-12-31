@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useCallback, useEffect } from "react"
+import { createLogger, generateRequestId } from "@/lib/logger"
 import {
   Dialog,
   DialogContent,
@@ -156,7 +157,12 @@ export function ModelDetailModal({
           if (Array.isArray(parsed)) {
             capabilitiesList = parsed
           }
-        } catch {
+        } catch (error) {
+          const log = createLogger({ requestId: generateRequestId(), action: "parseCapabilities" })
+          log.error("Failed to parse capabilities JSON", {
+            modelId: model.id,
+            error: error instanceof Error ? error.message : String(error),
+          })
           if (typeof model.capabilities === "string" && model.capabilities.trim()) {
             capabilitiesList = [model.capabilities]
           }
@@ -262,8 +268,13 @@ export function ModelDetailModal({
     try {
       await onSave(formData)
       onOpenChange(false)
-    } catch {
-      // Error handling is done in parent
+    } catch (error) {
+      const log = createLogger({ requestId: generateRequestId(), action: "saveModel" })
+      log.error("Model save error in modal", {
+        modelName: formData.name,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      // Error toast is shown in parent component
     } finally {
       setSaving(false)
     }
