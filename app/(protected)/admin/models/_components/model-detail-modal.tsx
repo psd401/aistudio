@@ -337,10 +337,11 @@ export function ModelDetailModal({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="max-w-[95vw] max-h-[90vh] w-full h-full flex flex-col"
+        className="!p-0 !gap-0"
         style={{ maxWidth: '95vw', maxHeight: '90vh', width: '95vw' } as React.CSSProperties}
         data-wide-modal="true"
       >
+        <div className="w-full h-full max-w-[95vw] max-h-[90vh] flex flex-col p-6 gap-4">
         <DialogHeader className="flex-shrink-0">
           <div className="flex items-center gap-3">
             <DialogTitle className="text-xl">{title}</DialogTitle>
@@ -649,6 +650,7 @@ export function ModelDetailModal({
             </Button>
           </div>
         </DialogFooter>
+        </div>
       </DialogContent>
     </Dialog>
   )
