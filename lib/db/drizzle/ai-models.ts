@@ -512,16 +512,15 @@ export async function replaceModelReferences(
           throw new Error("A model cannot replace itself");
         }
 
-        // Get both models within transaction with row-level locking
-        // Testing Drizzle's .for('update') method with RDS Data API driver
-        // Query builder automatically handles snake_case → camelCase transformation
-        const [targetModel, replacementModel] = await Promise.all([
-          tx.select().from(aiModels).where(eq(aiModels.id, targetModelId)).limit(1).for('update'),
-          tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId)).limit(1).for('update'),
-        ]).then(([targetResult, replacementResult]) => [
-          targetResult[0],
-          replacementResult[0],
+        // Get both models within transaction
+        // Transaction provides atomicity, and updates are idempotent
+        const [targetModelResult, replacementModelResult] = await Promise.all([
+          tx.select().from(aiModels).where(eq(aiModels.id, targetModelId)).limit(1),
+          tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId)).limit(1),
         ]);
+
+        const targetModel = targetModelResult[0];
+        const replacementModel = replacementModelResult[0];
 
         if (!targetModel) {
           throw ErrorFactories.dbRecordNotFound("ai_models", targetModelId);
