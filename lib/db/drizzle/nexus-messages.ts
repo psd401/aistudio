@@ -24,6 +24,7 @@ import {
   nexusConversations,
   aiModels,
 } from "@/lib/db/schema";
+import { countAsInt } from "@/lib/db/drizzle/helpers/pagination";
 import type { SelectNexusMessage } from "@/lib/db/types";
 
 // ============================================
@@ -212,7 +213,7 @@ export async function getMessageCount(conversationId: string): Promise<number> {
   const result = await executeQuery(
     (db) =>
       db
-        .select({ count: sql<number>`count(*)::int` })
+        .select({ count: countAsInt })
         .from(nexusMessages)
         .where(eq(nexusMessages.conversationId, conversationId)),
     "getMessageCount"
@@ -450,7 +451,7 @@ export async function updateConversationStats(
     (db) =>
       db
         .select({
-          count: sql<number>`count(*)::int`,
+          count: countAsInt,
           lastMessageAt: sql<Date>`max(created_at)`,
         })
         .from(nexusMessages)

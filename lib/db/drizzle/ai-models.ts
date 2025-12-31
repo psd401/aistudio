@@ -36,7 +36,7 @@
  */
 
 import { eq, and, sql, or } from "drizzle-orm";
-import { executeQuery } from "@/lib/db/drizzle-client";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import {
   aiModels,
   chainPrompts,
@@ -48,6 +48,7 @@ import {
 import { createLogger, generateRequestId } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
 import type { NexusCapabilities, ProviderMetadata } from "@/lib/db/types/jsonb";
+import { countAsInt } from "@/lib/db/drizzle/helpers/pagination";
 
 // ============================================
 // Types
@@ -367,7 +368,7 @@ export async function getModelReferenceCounts(modelId: number) {
     executeQuery(
       (db) =>
         db
-          .select({ count: sql<number>`count(*)::int` })
+          .select({ count: countAsInt })
           .from(chainPrompts)
           .where(eq(chainPrompts.modelId, modelId)),
       "countChainPrompts"
@@ -375,7 +376,7 @@ export async function getModelReferenceCounts(modelId: number) {
     executeQuery(
       (db) =>
         db
-          .select({ count: sql<number>`count(*)::int` })
+          .select({ count: countAsInt })
           .from(nexusMessages)
           .where(eq(nexusMessages.modelId, modelId)),
       "countNexusMessages"
@@ -383,7 +384,7 @@ export async function getModelReferenceCounts(modelId: number) {
     executeQuery(
       (db) =>
         db
-          .select({ count: sql<number>`count(*)::int` })
+          .select({ count: countAsInt })
           .from(nexusConversations)
           .where(
             sql`${nexusConversations.modelUsed} = (SELECT model_id FROM ai_models WHERE id = ${modelId})`
@@ -393,7 +394,7 @@ export async function getModelReferenceCounts(modelId: number) {
     executeQuery(
       (db) =>
         db
-          .select({ count: sql<number>`count(*)::int` })
+          .select({ count: countAsInt })
           .from(modelComparisons)
           .where(
             or(
@@ -504,18 +505,17 @@ export async function replaceModelReferences(
 
   try {
     // Execute all validation and updates in a single transaction to prevent race conditions
-    const result = await executeQuery(
-      (db) => db.transaction(async (tx) => {
+    const result = await executeTransaction(
+      async (tx) => {
         // Validate replacement within transaction
         if (targetModelId === replacementModelId) {
           throw new Error("A model cannot replace itself");
         }
 
-        // Get both models within transaction with row-level locking
-        // Use FOR UPDATE to prevent concurrent modifications during validation
+        // Get both models within transaction
         const [targetModelResult, replacementModelResult] = await Promise.all([
-          tx.select().from(aiModels).where(eq(aiModels.id, targetModelId)).limit(1).for('update'),
-          tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId)).limit(1).for('update'),
+          tx.select().from(aiModels).where(eq(aiModels.id, targetModelId)).limit(1),
+          tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId)).limit(1),
         ]);
 
         const targetModel = targetModelResult[0];
@@ -532,12 +532,14 @@ export async function replaceModelReferences(
         }
 
         // Get reference counts within transaction
+        // NOTE: Uses countAsInt helper (which uses CAST syntax) instead of ::int shorthand
+        // because RDS Data API fails with ::int syntax inside transaction contexts. See Issue #583.
         const [chainPromptsResult, nexusMessagesResult, nexusConversationsResult, modelComparisonsResult] =
           await Promise.all([
-            tx.select({ count: sql<number>`count(*)::int` }).from(chainPrompts).where(eq(chainPrompts.modelId, targetModelId)),
-            tx.select({ count: sql<number>`count(*)::int` }).from(nexusMessages).where(eq(nexusMessages.modelId, targetModelId)),
-            tx.select({ count: sql<number>`count(*)::int` }).from(nexusConversations).where(sql`${nexusConversations.modelUsed} = ${targetModel.modelId}`),
-            tx.select({ count: sql<number>`count(*)::int` }).from(modelComparisons).where(or(eq(modelComparisons.model1Id, targetModelId), eq(modelComparisons.model2Id, targetModelId))),
+            tx.select({ count: countAsInt }).from(chainPrompts).where(eq(chainPrompts.modelId, targetModelId)),
+            tx.select({ count: countAsInt }).from(nexusMessages).where(eq(nexusMessages.modelId, targetModelId)),
+            tx.select({ count: countAsInt }).from(nexusConversations).where(sql`${nexusConversations.modelUsed} = ${targetModel.modelId}`),
+            tx.select({ count: countAsInt }).from(modelComparisons).where(or(eq(modelComparisons.model1Id, targetModelId), eq(modelComparisons.model2Id, targetModelId))),
           ]);
 
         const counts = {
@@ -638,7 +640,7 @@ export async function replaceModelReferences(
             counts.nexusConversationsCount +
             counts.modelComparisonsCount,
         };
-      }),
+      },
       "replaceModelReferencesTransaction"
     );
 

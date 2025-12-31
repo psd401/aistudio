@@ -72,8 +72,8 @@ export async function getIdeas() {
           creatorLastName: users.lastName,
           creatorEmail: users.email,
           // Counts from aggregations - we'll compute these separately
-          votesCount: sql<number>`COUNT(DISTINCT ${ideaVotes.id})::int`,
-          notesCount: sql<number>`COUNT(DISTINCT ${ideaNotes.id})::int`,
+          votesCount: sql<number>`CAST(COUNT(DISTINCT ${ideaVotes.id}) AS integer)`,
+          notesCount: sql<number>`CAST(COUNT(DISTINCT ${ideaNotes.id}) AS integer)`,
         })
         .from(ideas)
         .leftJoin(users, eq(ideas.userId, users.id))

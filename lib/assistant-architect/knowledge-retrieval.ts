@@ -83,11 +83,13 @@ export async function retrieveKnowledgeForPrompt(
 
   try {
     // First, verify user has access to all specified repositories
+    // NOTE: Uses CAST(... AS integer[]) instead of ::int[] shorthand because
+    // RDS Data API has parsing differences with PostgreSQL type cast shorthand. See Issue #583.
     const accessibleRepos = await executeQuery(
       (db) => db.execute(sql`
         SELECT DISTINCT r.id, r.name
         FROM knowledge_repositories r
-        WHERE r.id = ANY(${repositoryIds}::int[])
+        WHERE r.id = ANY(CAST(${repositoryIds} AS integer[]))
         AND (
           r.is_public = true
           OR r.owner_id = (SELECT id FROM users WHERE cognito_sub = ${userCognitoSub})

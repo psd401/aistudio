@@ -228,6 +228,15 @@ export interface TransactionOptions {
  * Transactions are automatically rolled back on error. This is the recommended
  * way to perform multi-statement operations that must succeed or fail atomically.
  *
+ * **CRITICAL - RDS Data API Transaction Pattern:**
+ * ALWAYS use executeTransaction() directly. NEVER nest db.transaction() inside executeQuery().
+ *
+ * ❌ WRONG: executeQuery((db) => db.transaction(async (tx) => { ... }))
+ * ✅ CORRECT: executeTransaction(async (tx) => { ... })
+ *
+ * Nesting causes parameter binding offset errors with RDS Data API driver, resulting in
+ * cryptic errors like "limit :2params: 63,1" or "for updateparams: 63,1". See Issue #583.
+ *
  * **IMPORTANT - RDS Data API Limitation:**
  * AWS RDS Data API does NOT support PostgreSQL transaction control parameters
  * (isolationLevel, accessMode, deferrable). Any TransactionOptions passed to this

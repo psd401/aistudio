@@ -404,6 +404,43 @@ await executeTransaction(
 );
 ```
 
+### ⚠️ CRITICAL: RDS Data API Transaction Pattern
+
+**ALWAYS use `executeTransaction()` directly - NEVER nest `db.transaction()` inside `executeQuery()`**
+
+```typescript
+// ❌ WRONG - Causes parameter binding offset errors with RDS Data API
+await executeQuery(
+  (db) => db.transaction(async (tx) => {
+    const [model] = await tx.select().from(aiModels).where(eq(aiModels.id, id)).limit(1);
+    await tx.update(aiModels).set({ active: false }).where(eq(aiModels.id, id));
+  }),
+  "updateModel"
+);
+// Error: "Failed query: select ... limit :2params: 63,1"
+// RDS Data API driver fails with parameter binding offset issues
+
+// ✅ CORRECT - Use executeTransaction directly
+await executeTransaction(
+  async (tx) => {
+    const [model] = await tx.select().from(aiModels).where(eq(aiModels.id, id)).limit(1);
+    await tx.update(aiModels).set({ active: false }).where(eq(aiModels.id, id));
+  },
+  "updateModel"
+);
+```
+
+**Why this matters:**
+- RDS Data API uses numbered parameter binding (`:1`, `:2`, etc.)
+- Nesting `db.transaction()` inside `executeQuery()` breaks parameter offset tracking
+- Results in cryptic errors like `"limit :2params: 63,1"` or `"for updateparams: 63,1"`
+- **This is a known RDS Data API driver limitation** (See Issue #583)
+
+**Pattern to follow:**
+- `executeQuery()` - For single queries or read operations
+- `executeTransaction()` - For multi-statement transactions
+- **NEVER** mix them: `executeQuery(db => db.transaction(...))`
+
 ### Side Effect Warning
 
 ```typescript

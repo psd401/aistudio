@@ -125,6 +125,12 @@ await executeTransaction(
 );
 ```
 
+**⚠️ CRITICAL - RDS Data API Pattern**:
+- ✅ Use `executeTransaction()` directly for multi-statement transactions
+- ❌ NEVER nest `db.transaction()` inside `executeQuery()`
+- Wrong pattern causes parameter binding errors: `"limit :2params: 63,1"`
+- See Issue #583, `/docs/database/drizzle-patterns.md`, and `drizzle-client.ts` JSDoc
+
 **JSONB Columns** (type-safe via `.$type<T>()`):
 ```typescript
 import type { UserSettings } from "@/lib/db/types/jsonb";

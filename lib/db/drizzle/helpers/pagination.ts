@@ -183,7 +183,7 @@ export function buildPaginationMeta(
  * @example
  * ```typescript
  * const users = await db.select().from(usersTable).limit(limit).offset(offset);
- * const count = await db.select({ count: sql`count(*)::int` }).from(usersTable);
+ * const count = await db.select({ count: countAsInt }).from(usersTable);
  * return createPaginatedResult(users, { page: 1, limit: 25 }, count[0].count);
  * ```
  */
@@ -288,6 +288,10 @@ export function processCursorResults<T, C>(
  *
  * Use in select queries to get total count for pagination.
  *
+ * NOTE: Uses CAST(... AS integer) instead of ::int shorthand because
+ * RDS Data API has parsing differences with PostgreSQL type cast shorthand
+ * syntax (::type) inside transaction contexts. See Issue #583.
+ *
  * @example
  * ```typescript
  * const [{ count }] = await db
@@ -296,4 +300,4 @@ export function processCursorResults<T, C>(
  *   .where(eq(users.isActive, true));
  * ```
  */
-export const countAsInt = sql<number>`count(*)::int`;
+export const countAsInt = sql<number>`CAST(count(*) AS integer)`;
