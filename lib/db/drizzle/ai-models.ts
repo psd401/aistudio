@@ -36,7 +36,7 @@
  */
 
 import { eq, and, sql, or } from "drizzle-orm";
-import { executeQuery } from "@/lib/db/drizzle-client";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import {
   aiModels,
   chainPrompts,
@@ -505,15 +505,14 @@ export async function replaceModelReferences(
 
   try {
     // Execute all validation and updates in a single transaction to prevent race conditions
-    const result = await executeQuery(
-      (db) => db.transaction(async (tx) => {
+    const result = await executeTransaction(
+      async (tx) => {
         // Validate replacement within transaction
         if (targetModelId === replacementModelId) {
           throw new Error("A model cannot replace itself");
         }
 
         // Get both models within transaction
-        // Transaction provides atomicity, and updates are idempotent
         const [targetModelResult, replacementModelResult] = await Promise.all([
           tx.select().from(aiModels).where(eq(aiModels.id, targetModelId)).limit(1),
           tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId)).limit(1),
@@ -641,7 +640,7 @@ export async function replaceModelReferences(
             counts.nexusConversationsCount +
             counts.modelComparisonsCount,
         };
-      }),
+      },
       "replaceModelReferencesTransaction"
     );
 
