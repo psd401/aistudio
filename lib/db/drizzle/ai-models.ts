@@ -547,14 +547,12 @@ export async function replaceModelReferences(
         }
 
         // Get both models within transaction
-        // NOTE: Removed .limit(1) to avoid RDS Data API parameter binding issues
-        // when using Promise.all() inside executeTransaction(). ID queries return
-        // 0 or 1 row due to primary key constraint, so limit is unnecessary.
-        // See Issue #583 for RDS Data API driver limitations with parameter binding.
-        const [targetModelResult, replacementModelResult] = await Promise.all([
-          tx.select().from(aiModels).where(eq(aiModels.id, targetModelId)),
-          tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId)),
-        ]);
+        // NOTE: Sequential execution required for RDS Data API parameter binding.
+        // Concurrent queries with WHERE clauses cause malformed bindings like ":1params: 22".
+        // Even without .limit(), Promise.all() with parameterized queries confuses the driver's
+        // offset tracker. See Issue #583 and docs/database/drizzle-patterns.md.
+        const targetModelResult = await tx.select().from(aiModels).where(eq(aiModels.id, targetModelId));
+        const replacementModelResult = await tx.select().from(aiModels).where(eq(aiModels.id, replacementModelId));
 
         const targetModel = targetModelResult[0];
         const replacementModel = replacementModelResult[0];
@@ -570,15 +568,14 @@ export async function replaceModelReferences(
         }
 
         // Get reference counts within transaction
-        // NOTE: Uses countAsInt helper (which uses CAST syntax) instead of ::int shorthand
-        // because RDS Data API fails with ::int syntax inside transaction contexts. See Issue #583.
-        const [chainPromptsResult, nexusMessagesResult, nexusConversationsResult, modelComparisonsResult] =
-          await Promise.all([
-            tx.select({ count: countAsInt }).from(chainPrompts).where(eq(chainPrompts.modelId, targetModelId)),
-            tx.select({ count: countAsInt }).from(nexusMessages).where(eq(nexusMessages.modelId, targetModelId)),
-            tx.select({ count: countAsInt }).from(nexusConversations).where(sql`${nexusConversations.modelUsed} = ${targetModel.modelId}`),
-            tx.select({ count: countAsInt }).from(modelComparisons).where(or(eq(modelComparisons.model1Id, targetModelId), eq(modelComparisons.model2Id, targetModelId))),
-          ]);
+        // NOTE: Sequential execution required for RDS Data API parameter binding.
+        // Concurrent queries cause offset tracking issues, especially with multi-parameter
+        // queries like or(eq(...), eq(...)) which creates :1 and :2 bindings.
+        // Uses countAsInt helper (CAST syntax) instead of ::int - see Issue #583.
+        const chainPromptsResult = await tx.select({ count: countAsInt }).from(chainPrompts).where(eq(chainPrompts.modelId, targetModelId));
+        const nexusMessagesResult = await tx.select({ count: countAsInt }).from(nexusMessages).where(eq(nexusMessages.modelId, targetModelId));
+        const nexusConversationsResult = await tx.select({ count: countAsInt }).from(nexusConversations).where(sql`${nexusConversations.modelUsed} = ${targetModel.modelId}`);
+        const modelComparisonsResult = await tx.select({ count: countAsInt }).from(modelComparisons).where(or(eq(modelComparisons.model1Id, targetModelId), eq(modelComparisons.model2Id, targetModelId)));
 
         const counts = {
           chainPromptsCount: chainPromptsResult[0]?.count ?? 0,

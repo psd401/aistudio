@@ -441,51 +441,81 @@ await executeTransaction(
 - `executeTransaction()` - For multi-statement transactions
 - **NEVER** mix them: `executeQuery(db => db.transaction(...))`
 
-### ⚠️ Promise.all() + .limit() in Transactions
+### ⚠️ Concurrent Parameterized Queries in Transactions
 
-**AVOID using `.limit()` with `Promise.all()` inside `executeTransaction()`**
+**CRITICAL: AVOID using `Promise.all()` with ANY parameterized queries inside `executeTransaction()`**
+
+The RDS Data API driver **cannot handle concurrent parameterized queries** inside transactions. This applies to:
+- Queries with WHERE clauses (`eq()`, `and()`, `or()`, etc.)
+- Queries with `.limit()`, `.offset()`, or other parameter-based clauses
+- Multi-parameter queries (e.g., `or(eq(...), eq(...))`) are especially problematic
 
 ```typescript
-// ❌ WRONG - Causes parameter binding issues with concurrent queries
+// ❌ WRONG - Even simple WHERE clauses cause issues with Promise.all()
 await executeTransaction(
   async (tx) => {
     const [model1Result, model2Result] = await Promise.all([
-      tx.select().from(aiModels).where(eq(aiModels.id, id1)).limit(1),  // Binding conflict!
-      tx.select().from(aiModels).where(eq(aiModels.id, id2)).limit(1),  // Binding conflict!
+      tx.select().from(aiModels).where(eq(aiModels.id, id1)),  // :1 binding
+      tx.select().from(aiModels).where(eq(aiModels.id, id2)),  // :1 binding (conflict!)
     ]);
   },
   "getModels"
 );
-// Error: "Failed query: ... limit :2params: 62,1"
+// Error: "Failed query: select ... where "ai_models"."id" = :1params: 22"
+// Malformed parameter binding: ":1params: 22" instead of ":1" = [22]
 
-// ✅ CORRECT - Remove .limit() for ID-based queries (primary key ensures 0 or 1 row)
+// ❌ CRITICAL - Multi-parameter queries (or/and) in Promise.all() are worst
 await executeTransaction(
   async (tx) => {
-    const [model1Result, model2Result] = await Promise.all([
-      tx.select().from(aiModels).where(eq(aiModels.id, id1)),  // No limit needed
-      tx.select().from(aiModels).where(eq(aiModels.id, id2)),  // No limit needed
+    const [count1, count2] = await Promise.all([
+      tx.select({ count: countAsInt }).from(table1).where(eq(table1.id, id)),  // :1
+      tx.select({ count: countAsInt }).from(table2).where(                     // :1 + :2 (TWO params!)
+        or(eq(table2.col1, id), eq(table2.col2, id))
+      ),
     ]);
-    const model1 = model1Result[0];  // Extract first (and only) row
+  },
+  "getCounts"
+);
+// Error: Parameter offset completely corrupted with multi-parameter queries
+
+// ✅ CORRECT - Always use sequential execution in transactions
+await executeTransaction(
+  async (tx) => {
+    // Execute queries one at a time
+    const model1Result = await tx.select().from(aiModels).where(eq(aiModels.id, id1));
+    const model2Result = await tx.select().from(aiModels).where(eq(aiModels.id, id2));
+
+    const model1 = model1Result[0];
     const model2 = model2Result[0];
   },
   "getModels"
 );
 
-// ✅ ALTERNATIVE - Run queries sequentially if .limit() is required
+// ✅ CORRECT - Sequential execution handles multi-parameter queries safely
 await executeTransaction(
   async (tx) => {
-    const model1Result = await tx.select().from(users).where(eq(users.email, email)).limit(1);
-    const model2Result = await tx.select().from(users).where(eq(users.email, email2)).limit(1);
+    const count1 = await tx.select({ count: countAsInt }).from(table1).where(eq(table1.id, id));
+    const count2 = await tx.select({ count: countAsInt }).from(table2).where(
+      or(eq(table2.col1, id), eq(table2.col2, id))  // TWO params, but sequential = OK
+    );
   },
-  "getUsers"
+  "getCounts"
 );
 ```
 
-**Why this matters:**
-- RDS Data API tracks parameter positions across all queries in a transaction
-- `Promise.all()` executes queries concurrently, confusing the parameter offset tracker
-- `.limit()` adds an additional parameter (`:2`), causing offset conflicts
-- For primary key/unique constraint queries, `.limit(1)` is redundant anyway
+**Why this happens:**
+- RDS Data API uses numbered parameter binding (`:1`, `:2`, etc.)
+- Driver tracks parameter positions across ALL queries in a transaction
+- `Promise.all()` sends concurrent `PREPARE` statements simultaneously
+- Driver's parameter offset tracker loses sync
+- Bindings fail: offsets collide and concatenate (`:1params: 22`)
+- Multi-parameter queries (`or()`, `and()`) amplify the issue
+
+**Performance vs Correctness:**
+- Sequential execution adds ~50ms per query
+- For 4 queries: ~200ms total overhead
+- **Trade-off is acceptable**: Admin operations, correctness > speed
+- Alternative: Use `executeQuery()` outside transaction if queries are independent
 
 ### Side Effect Warning
 

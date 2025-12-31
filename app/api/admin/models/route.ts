@@ -272,17 +272,18 @@ export async function PUT(request: Request) {
     }
 
     // Handle boolean fields - ensure proper type (frontend may send as string)
+    // IMPORTANT: Boolean("false") === true, so we need explicit string handling
     if ('active' in updates) {
-      updates.active = Boolean(updates.active);
+      updates.active = updates.active === 'false' || updates.active === '0' || updates.active === 0 || updates.active === false ? false : Boolean(updates.active);
     }
     if ('chatEnabled' in updates) {
-      updates.chatEnabled = Boolean(updates.chatEnabled);
+      updates.chatEnabled = updates.chatEnabled === 'false' || updates.chatEnabled === '0' || updates.chatEnabled === 0 || updates.chatEnabled === false ? false : Boolean(updates.chatEnabled);
     }
     if ('nexusEnabled' in updates) {
-      updates.nexusEnabled = Boolean(updates.nexusEnabled);
+      updates.nexusEnabled = updates.nexusEnabled === 'false' || updates.nexusEnabled === '0' || updates.nexusEnabled === 0 || updates.nexusEnabled === false ? false : Boolean(updates.nexusEnabled);
     }
     if ('architectEnabled' in updates) {
-      updates.architectEnabled = Boolean(updates.architectEnabled);
+      updates.architectEnabled = updates.architectEnabled === 'false' || updates.architectEnabled === '0' || updates.architectEnabled === 0 || updates.architectEnabled === false ? false : Boolean(updates.architectEnabled);
     }
 
     // Handle JSONB fields - stringify if they're objects
