@@ -548,6 +548,26 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
   const handleSaveModel = useCallback(
     async (data: ModelFormData) => {
       try {
+        // Sync capabilities to nexusCapabilities for runtime compatibility
+        const syncedNexusCapabilities = { ...data.nexusCapabilities }
+
+        // Map capability strings to nexusCapabilities boolean flags
+        const capabilityMapping: Record<string, string> = {
+          web_search: "webSearch",
+          code_interpreter: "codeInterpreter",
+          code_execution: "codeExecution",
+          canvas: "canvas",
+          artifacts: "artifacts",
+          thinking: "thinking",
+          reasoning: "reasoning",
+          computer_use: "computerUse",
+        }
+
+        // Update nexusCapabilities based on selected capabilities
+        Object.entries(capabilityMapping).forEach(([capValue, nexusKey]) => {
+          syncedNexusCapabilities[nexusKey] = data.capabilitiesList.includes(capValue)
+        })
+
         // Prepare data for API
         const apiData = {
           ...data,
@@ -557,9 +577,7 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
               : null,
           allowedRoles: data.allowedRoles.length > 0 ? data.allowedRoles : null,
           nexusCapabilities:
-            Object.keys(data.nexusCapabilities).length > 0
-              ? data.nexusCapabilities
-              : null,
+            Object.keys(syncedNexusCapabilities).length > 0 ? syncedNexusCapabilities : null,
           providerMetadata:
             Object.keys(data.providerMetadata).length > 0 ? data.providerMetadata : null,
         }
