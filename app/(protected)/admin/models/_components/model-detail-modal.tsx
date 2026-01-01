@@ -336,7 +336,22 @@ export function ModelDetailModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent wide className="p-0 flex flex-col">
+      <DialogContent
+        wide
+        className="p-0 flex flex-col"
+        style={{
+          position: 'fixed',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          width: '95vw',
+          maxWidth: '95vw',
+          minWidth: '95vw',
+          height: '90vh',
+          maxHeight: '90vh',
+          zIndex: 50,
+        }}
+      >
         <DialogHeader className="flex-shrink-0 px-6 pt-6 pb-4">
           <div className="flex items-center gap-3">
             <DialogTitle className="text-xl">{title}</DialogTitle>
