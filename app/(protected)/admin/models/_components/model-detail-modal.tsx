@@ -337,12 +337,9 @@ export function ModelDetailModal({
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
-        className="!p-0 !gap-0"
-        style={{ maxWidth: '95vw', maxHeight: '90vh', width: '95vw' } as React.CSSProperties}
-        data-wide-modal="true"
+        className="max-w-[95vw] sm:max-w-[95vw] md:max-w-[95vw] lg:max-w-[95vw] xl:max-w-[95vw] 2xl:max-w-[95vw] w-[95vw] h-[90vh] max-h-[90vh] p-0 gap-0 flex flex-col"
       >
-        <div className="min-w-[95vw] w-[95vw] max-w-[95vw] h-full max-h-[90vh] flex flex-col p-6 gap-4">
-        <DialogHeader className="flex-shrink-0">
+        <DialogHeader className="flex-shrink-0 px-6 pt-6 pb-4">
           <div className="flex items-center gap-3">
             <DialogTitle className="text-xl">{title}</DialogTitle>
             {model && <ProviderBadge provider={formData.provider} />}
@@ -352,7 +349,7 @@ export function ModelDetailModal({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex-1 overflow-y-auto">
+        <div className="flex-1 overflow-y-auto px-6">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 py-4">
             {/* Left Panel - Identity & Connection */}
             <div className="space-y-6">
@@ -627,7 +624,7 @@ export function ModelDetailModal({
           </div>
         </div>
 
-        <DialogFooter className="flex-shrink-0 flex items-center justify-between border-t pt-4">
+        <DialogFooter className="flex-shrink-0 flex items-center justify-between border-t pt-4 px-6 pb-6">
           <div>
             {model && onDelete && (
               <Button
@@ -650,7 +647,6 @@ export function ModelDetailModal({
             </Button>
           </div>
         </DialogFooter>
-        </div>
       </DialogContent>
     </Dialog>
   )
