@@ -3,13 +3,13 @@
 import { useState, useCallback, useEffect, useRef } from "react"
 import { createLogger, generateRequestId } from "@/lib/logger"
 import {
-  WideDialog as Dialog,
-  WideDialogContent as DialogContent,
-  WideDialogHeader as DialogHeader,
-  WideDialogTitle as DialogTitle,
-  WideDialogFooter as DialogFooter,
-  WideDialogDescription as DialogDescription,
-} from "@/components/ui/wide-dialog"
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogFooter,
+  DialogDescription,
+} from "@/components/ui/dialog"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -336,7 +336,7 @@ export function ModelDetailModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="p-0 flex flex-col">
+      <DialogContent wide className="p-0 flex flex-col">
         <DialogHeader className="flex-shrink-0 px-6 pt-6 pb-4">
           <div className="flex items-center gap-3">
             <DialogTitle className="text-xl">{title}</DialogTitle>
