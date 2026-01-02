@@ -1,3 +1,7 @@
+/**
+ * Database Initialization Handler - Version 2026-01-02-20:15
+ * Updated to force CDK rebundle after schema file changes
+ */
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
 
