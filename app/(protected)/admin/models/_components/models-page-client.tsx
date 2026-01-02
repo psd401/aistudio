@@ -27,6 +27,9 @@ const fallbackRoleOptions: MultiSelectOption[] = [
 ]
 
 export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
+  // DIAGNOSTIC: Verify page component loads with new code
+  console.log('🔍 MODELS-PAGE-LOADED-20260101-1925 - Build verification marker')
+
   const { toast } = useToast()
 
   // State
