@@ -228,7 +228,6 @@ export {
   getAIModelById,
   getAIModelByModelId,
   getActiveAIModels,
-  getChatEnabledModels,
   getNexusEnabledModels,
   getArchitectEnabledModels,
   getAIModelsByProvider,

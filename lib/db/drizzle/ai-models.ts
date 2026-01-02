@@ -63,7 +63,6 @@ export interface AIModelData {
   allowedRoles?: string[] | null;
   maxTokens?: number | null;
   active?: boolean;
-  chatEnabled?: boolean;
   nexusEnabled?: boolean;
   architectEnabled?: boolean;
   inputCostPer1kTokens?: string | null;
@@ -86,7 +85,6 @@ export interface AIModelUpdateData {
   allowedRoles?: string[] | null;
   maxTokens?: number | null;
   active?: boolean;
-  chatEnabled?: boolean;
   nexusEnabled?: boolean;
   architectEnabled?: boolean;
   inputCostPer1kTokens?: string | null;
@@ -121,7 +119,6 @@ export async function getAIModels() {
           allowedRoles: aiModels.allowedRoles,
           maxTokens: aiModels.maxTokens,
           active: aiModels.active,
-          chatEnabled: aiModels.chatEnabled,
           nexusEnabled: aiModels.nexusEnabled,
           architectEnabled: aiModels.architectEnabled,
           createdAt: aiModels.createdAt,
@@ -189,15 +186,6 @@ export async function getActiveAIModels() {
         .orderBy(aiModels.provider, aiModels.name),
     "getActiveAIModels"
   );
-}
-
-/**
- * Get active chat-enabled models
- * @deprecated Since January 2025 (PR #592, Issue #585). Use getNexusEnabledModels() instead.
- * This function is maintained for backward compatibility and will be removed in v2.0.
- */
-export async function getChatEnabledModels() {
-  return getNexusEnabledModels();
 }
 
 /**
@@ -326,7 +314,6 @@ export async function createAIModel(modelData: AIModelData) {
           allowedRoles: modelData.allowedRoles,
           maxTokens: modelData.maxTokens,
           active: modelData.active ?? true,
-          chatEnabled: modelData.chatEnabled ?? false,
           nexusEnabled: modelData.nexusEnabled ?? true,
           architectEnabled: modelData.architectEnabled ?? true,
           inputCostPer1kTokens: modelData.inputCostPer1kTokens,

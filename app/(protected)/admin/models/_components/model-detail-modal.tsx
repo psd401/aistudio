@@ -40,7 +40,6 @@ export interface ModelFormData {
   capabilitiesList: string[]
   maxTokens: number
   active: boolean
-  chatEnabled: boolean
   nexusEnabled: boolean
   architectEnabled: boolean
   allowedRoles: string[]
@@ -84,7 +83,6 @@ const emptyFormData: ModelFormData = {
   capabilitiesList: [],
   maxTokens: 4096,
   active: true,
-  chatEnabled: false,
   nexusEnabled: true,
   architectEnabled: true,
   allowedRoles: [],
@@ -185,7 +183,6 @@ export function ModelDetailModal({
         capabilitiesList,
         maxTokens: model.maxTokens || 4096,
         active: model.active,
-        chatEnabled: model.chatEnabled || false,
         nexusEnabled: model.nexusEnabled ?? true,
         architectEnabled: model.architectEnabled ?? true,
         allowedRoles,
