@@ -35,7 +35,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, sql, or } from "drizzle-orm";
+import { eq, and, sql, or, inArray } from "drizzle-orm";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import {
   aiModels,
@@ -745,9 +745,17 @@ export async function bulkImportAIModels(
   try {
     await executeTransaction(
       async (tx) => {
-        // Get all existing models by modelId for upsert logic
+        // Get existing models for the current import batch (optimized query)
+        // Only query for models that are being imported, not the entire table
         // NOTE: Sequential execution within transaction for RDS Data API safety
-        const existingModels = await tx.select().from(aiModels);
+        const modelIdsToImport = models.map((m) => m.modelId);
+        const existingModels =
+          modelIdsToImport.length > 0
+            ? await tx
+                .select()
+                .from(aiModels)
+                .where(inArray(aiModels.modelId, modelIdsToImport))
+            : [];
         const existingByModelId = new Map(
           existingModels.map((m) => [m.modelId, m])
         );
@@ -763,24 +771,26 @@ export async function bulkImportAIModels(
 
           if (existing) {
             // Update existing model
+            // Note: Using nullish coalescing (??) means undefined = keep existing, but null = clear field
+            // For optional fields not provided, use 'field' in model to check if explicitly set to null
             await tx
               .update(aiModels)
               .set({
                 name: model.name,
                 provider: model.provider,
-                description: model.description ?? existing.description,
-                capabilities: capabilitiesJson ?? existing.capabilities,
-                maxTokens: model.maxTokens ?? existing.maxTokens,
-                active: model.active ?? existing.active,
-                nexusEnabled: model.nexusEnabled ?? existing.nexusEnabled,
-                architectEnabled: model.architectEnabled ?? existing.architectEnabled,
-                allowedRoles: model.allowedRoles ?? existing.allowedRoles,
+                description: "description" in model ? model.description : existing.description,
+                capabilities: capabilitiesJson !== null ? capabilitiesJson : existing.capabilities,
+                maxTokens: "maxTokens" in model ? model.maxTokens : existing.maxTokens,
+                active: "active" in model ? model.active : existing.active,
+                nexusEnabled: "nexusEnabled" in model ? model.nexusEnabled : existing.nexusEnabled,
+                architectEnabled: "architectEnabled" in model ? model.architectEnabled : existing.architectEnabled,
+                allowedRoles: "allowedRoles" in model ? model.allowedRoles : existing.allowedRoles,
                 inputCostPer1kTokens:
-                  model.inputCostPer1kTokens ?? existing.inputCostPer1kTokens,
+                  "inputCostPer1kTokens" in model ? model.inputCostPer1kTokens : existing.inputCostPer1kTokens,
                 outputCostPer1kTokens:
-                  model.outputCostPer1kTokens ?? existing.outputCostPer1kTokens,
+                  "outputCostPer1kTokens" in model ? model.outputCostPer1kTokens : existing.outputCostPer1kTokens,
                 cachedInputCostPer1kTokens:
-                  model.cachedInputCostPer1kTokens ?? existing.cachedInputCostPer1kTokens,
+                  "cachedInputCostPer1kTokens" in model ? model.cachedInputCostPer1kTokens : existing.cachedInputCostPer1kTokens,
                 updatedAt: new Date(),
               })
               .where(eq(aiModels.id, existing.id));

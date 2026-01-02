@@ -7,12 +7,7 @@ import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { useToast } from "@/components/ui/use-toast"
-import { PROVIDER_OPTIONS } from "./provider-badge"
-
-// Valid provider values from the system
-const VALID_PROVIDERS: Set<string> = new Set(
-  PROVIDER_OPTIONS.map((opt) => opt.value)
-)
+import { validateModel } from "@/lib/validators/model-import-validator"
 
 // JSON input schema for validation
 interface ModelJsonInput {
@@ -52,99 +47,6 @@ export function JsonImportDialog({
   const [jsonInput, setJsonInput] = useState("")
   const [errors, setErrors] = useState<string[]>([])
   const [importing, setImporting] = useState(false)
-
-  // Validate a single model object
-  const validateModel = (
-    model: unknown,
-    index: number
-  ): { valid: boolean; errors: string[] } => {
-    const modelErrors: string[] = []
-    const prefix = `Model ${index + 1}`
-
-    if (!model || typeof model !== "object") {
-      return { valid: false, errors: [`${prefix}: Must be an object`] }
-    }
-
-    const m = model as Record<string, unknown>
-
-    // Required fields
-    if (!m.name || typeof m.name !== "string" || !m.name.trim()) {
-      modelErrors.push(`${prefix}: 'name' is required and must be a non-empty string`)
-    }
-
-    if (!m.modelId || typeof m.modelId !== "string" || !m.modelId.trim()) {
-      modelErrors.push(`${prefix}: 'modelId' is required and must be a non-empty string`)
-    }
-
-    if (!m.provider || typeof m.provider !== "string") {
-      modelErrors.push(`${prefix}: 'provider' is required`)
-    } else if (!VALID_PROVIDERS.has(m.provider)) {
-      modelErrors.push(
-        `${prefix}: Invalid provider '${m.provider}'. Valid values: ${Array.from(VALID_PROVIDERS).join(", ")}`
-      )
-    }
-
-    // Optional field type validation
-    if (m.description !== undefined && typeof m.description !== "string") {
-      modelErrors.push(`${prefix}: 'description' must be a string`)
-    }
-
-    if (m.capabilities !== undefined) {
-      if (!Array.isArray(m.capabilities)) {
-        modelErrors.push(`${prefix}: 'capabilities' must be an array`)
-      } else if (!m.capabilities.every((c) => typeof c === "string")) {
-        modelErrors.push(`${prefix}: 'capabilities' must be an array of strings`)
-      }
-    }
-
-    if (m.maxTokens !== undefined) {
-      if (typeof m.maxTokens !== "number" || !Number.isInteger(m.maxTokens)) {
-        modelErrors.push(`${prefix}: 'maxTokens' must be an integer`)
-      } else if (m.maxTokens < 0) {
-        modelErrors.push(`${prefix}: 'maxTokens' must be non-negative`)
-      }
-    }
-
-    // Boolean fields
-    for (const field of ["active", "nexusEnabled", "architectEnabled"] as const) {
-      if (m[field] !== undefined && typeof m[field] !== "boolean") {
-        modelErrors.push(`${prefix}: '${field}' must be a boolean`)
-      }
-    }
-
-    // Array fields
-    if (m.allowedRoles !== undefined) {
-      if (!Array.isArray(m.allowedRoles)) {
-        modelErrors.push(`${prefix}: 'allowedRoles' must be an array`)
-      } else if (!m.allowedRoles.every((r) => typeof r === "string")) {
-        modelErrors.push(`${prefix}: 'allowedRoles' must be an array of strings`)
-      }
-    }
-
-    // Pricing fields (string numbers)
-    for (const field of [
-      "inputCostPer1kTokens",
-      "outputCostPer1kTokens",
-      "cachedInputCostPer1kTokens",
-    ] as const) {
-      if (m[field] !== undefined) {
-        const value = m[field]
-        if (typeof value !== "string" && typeof value !== "number") {
-          modelErrors.push(`${prefix}: '${field}' must be a number or string`)
-        } else {
-          const num = Number(value)
-          if (Number.isNaN(num) || num < 0) {
-            modelErrors.push(`${prefix}: '${field}' must be a valid non-negative number`)
-          }
-        }
-      }
-    }
-
-    return {
-      valid: modelErrors.length === 0,
-      errors: modelErrors,
-    }
-  }
 
   // Parse and validate JSON input
   const parseAndValidate = useCallback(
