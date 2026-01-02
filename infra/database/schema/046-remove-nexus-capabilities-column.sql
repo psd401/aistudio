@@ -11,9 +11,12 @@
 -- capability data. The unified 'capabilities' TEXT field is now the single
 -- source of truth for model capabilities.
 --
--- Note: Uses DROP COLUMN IF EXISTS for idempotent operation (safe re-runs)
+-- Note: Uses IF EXISTS for idempotent operation (safe re-runs)
 
--- Drop the deprecated nexus_capabilities JSONB column
+-- Step 1: Drop the GIN index on nexus_capabilities (required before dropping column)
+DROP INDEX IF EXISTS idx_ai_models_nexus_capabilities;
+
+-- Step 2: Drop the deprecated nexus_capabilities JSONB column
 ALTER TABLE ai_models
   DROP COLUMN IF EXISTS nexus_capabilities;
 
