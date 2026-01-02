@@ -10,4 +10,5 @@ export {
 } from "./model-filters"
 export { ModelsDataTable, type ModelTableRow } from "./models-data-table"
 export { ModelDetailModal, type ModelFormData } from "./model-detail-modal"
+export { JsonImportDialog } from "./json-import-dialog"
 export { ModelsPageClient } from "./models-page-client"

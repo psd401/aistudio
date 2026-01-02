@@ -221,6 +221,8 @@ export {
   // Types
   type AIModelData,
   type AIModelUpdateData,
+  type BulkModelImportData,
+  type BulkImportResult,
   // Query operations
   getAIModels,
   getAIModelById,
@@ -236,6 +238,8 @@ export {
   updateAIModel,
   deleteAIModel,
   setAIModelActive,
+  // Bulk operations
+  bulkImportAIModels,
   // Reference operations
   getModelReferenceCounts,
   validateModelReplacement,

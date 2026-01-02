@@ -3,10 +3,11 @@
 import { useState, useEffect, useCallback, useMemo } from "react"
 import { useToast } from "@/components/ui/use-toast"
 import { Button } from "@/components/ui/button"
-import { IconRefresh, IconPlus } from "@tabler/icons-react"
+import { IconRefresh, IconPlus, IconFileImport } from "@tabler/icons-react"
 import { ModelReplacementDialog } from "@/components/features/model-replacement-dialog"
 
 import { StatsCards, StatsCardsSkeleton, type ModelStats } from "./stats-cards"
+import { JsonImportDialog } from "./json-import-dialog"
 import { ModelFilters, type ModelFiltersState } from "./model-filters"
 import { ModelsDataTable, type ModelTableRow } from "./models-data-table"
 import { ModelDetailModal, type ModelFormData } from "./model-detail-modal"
@@ -47,6 +48,9 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
   const [selectedModel, setSelectedModel] = useState<SelectAiModel | null>(null)
   const [modalOpen, setModalOpen] = useState(false)
   const [isNewModel, setIsNewModel] = useState(false)
+
+  // Import dialog state
+  const [importDialogOpen, setImportDialogOpen] = useState(false)
 
   // Replacement dialog state
   const [replacementDialog, setReplacementDialog] = useState<{
@@ -643,6 +647,14 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
             <IconRefresh className="h-4 w-4 mr-2" />
             Refresh
           </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setImportDialogOpen(true)}
+          >
+            <IconFileImport className="h-4 w-4 mr-2" />
+            Import JSON
+          </Button>
           <Button size="sm" onClick={handleAddModel}>
             <IconPlus className="h-4 w-4 mr-2" />
             Add Model
@@ -701,6 +713,13 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
           onConfirm={handleModelReplacement}
         />
       )}
+
+      {/* JSON Import Dialog */}
+      <JsonImportDialog
+        open={importDialogOpen}
+        onOpenChange={setImportDialogOpen}
+        onImportComplete={loadData}
+      />
     </div>
   )
 }

@@ -35,7 +35,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, sql, or } from "drizzle-orm";
+import { eq, and, sql, or, inArray } from "drizzle-orm";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import {
   aiModels,
@@ -687,6 +687,148 @@ export async function replaceModelReferences(
       error: error instanceof Error ? error.message : String(error),
       targetModelId,
       replacementModelId,
+    });
+    throw error;
+  }
+}
+
+// ============================================
+// Bulk Import Operations
+// ============================================
+
+/**
+ * Data structure for bulk model import
+ */
+export interface BulkModelImportData {
+  name: string;
+  modelId: string;
+  provider: string;
+  description?: string | null;
+  capabilities?: string[] | null;
+  maxTokens?: number | null;
+  active?: boolean;
+  nexusEnabled?: boolean;
+  architectEnabled?: boolean;
+  allowedRoles?: string[] | null;
+  inputCostPer1kTokens?: string | null;
+  outputCostPer1kTokens?: string | null;
+  cachedInputCostPer1kTokens?: string | null;
+}
+
+/**
+ * Result of bulk model import operation
+ */
+export interface BulkImportResult {
+  created: number;
+  updated: number;
+  errors: string[];
+}
+
+/**
+ * Import multiple AI models with upsert logic (create or update based on modelId)
+ * Uses a transaction to ensure atomicity - all models succeed or all fail
+ */
+export async function bulkImportAIModels(
+  models: BulkModelImportData[]
+): Promise<BulkImportResult> {
+  const requestId = generateRequestId();
+  const log = createLogger({ requestId, operation: "bulkImportAIModels" });
+
+  log.info("Starting bulk model import", { count: models.length });
+
+  const result: BulkImportResult = {
+    created: 0,
+    updated: 0,
+    errors: [],
+  };
+
+  try {
+    await executeTransaction(
+      async (tx) => {
+        // Get existing models for the current import batch (optimized query)
+        // Only query for models that are being imported, not the entire table
+        // NOTE: Sequential execution within transaction for RDS Data API safety
+        const modelIdsToImport = models.map((m) => m.modelId);
+        const existingModels =
+          modelIdsToImport.length > 0
+            ? await tx
+                .select()
+                .from(aiModels)
+                .where(inArray(aiModels.modelId, modelIdsToImport))
+            : [];
+        const existingByModelId = new Map(
+          existingModels.map((m) => [m.modelId, m])
+        );
+
+        for (let i = 0; i < models.length; i++) {
+          const model = models[i];
+          const existing = existingByModelId.get(model.modelId);
+
+          // Serialize capabilities to JSON string if provided as array
+          const capabilitiesJson = model.capabilities
+            ? JSON.stringify(model.capabilities)
+            : null;
+
+          if (existing) {
+            // Update existing model
+            // Note: Using 'field' in model checks if field was explicitly provided (even if null)
+            // This allows: undefined = keep existing, null = clear field, value = update field
+            await tx
+              .update(aiModels)
+              .set({
+                name: model.name,
+                provider: model.provider,
+                description: "description" in model ? model.description : existing.description,
+                capabilities: "capabilities" in model ? capabilitiesJson : existing.capabilities,
+                maxTokens: "maxTokens" in model ? model.maxTokens : existing.maxTokens,
+                active: "active" in model ? model.active : existing.active,
+                nexusEnabled: "nexusEnabled" in model ? model.nexusEnabled : existing.nexusEnabled,
+                architectEnabled: "architectEnabled" in model ? model.architectEnabled : existing.architectEnabled,
+                allowedRoles: "allowedRoles" in model ? model.allowedRoles : existing.allowedRoles,
+                inputCostPer1kTokens:
+                  "inputCostPer1kTokens" in model ? model.inputCostPer1kTokens : existing.inputCostPer1kTokens,
+                outputCostPer1kTokens:
+                  "outputCostPer1kTokens" in model ? model.outputCostPer1kTokens : existing.outputCostPer1kTokens,
+                cachedInputCostPer1kTokens:
+                  "cachedInputCostPer1kTokens" in model ? model.cachedInputCostPer1kTokens : existing.cachedInputCostPer1kTokens,
+                updatedAt: new Date(),
+              })
+              .where(eq(aiModels.id, existing.id));
+            result.updated++;
+          } else {
+            // Create new model
+            await tx.insert(aiModels).values({
+              name: model.name,
+              modelId: model.modelId,
+              provider: model.provider,
+              description: model.description,
+              capabilities: capabilitiesJson,
+              maxTokens: model.maxTokens,
+              active: model.active ?? true,
+              nexusEnabled: model.nexusEnabled ?? true,
+              architectEnabled: model.architectEnabled ?? true,
+              allowedRoles: model.allowedRoles,
+              inputCostPer1kTokens: model.inputCostPer1kTokens,
+              outputCostPer1kTokens: model.outputCostPer1kTokens,
+              cachedInputCostPer1kTokens: model.cachedInputCostPer1kTokens,
+            });
+            result.created++;
+          }
+        }
+      },
+      "bulkImportAIModelsTransaction"
+    );
+
+    log.info("Bulk import completed successfully", {
+      created: result.created,
+      updated: result.updated,
+    });
+
+    return result;
+  } catch (error) {
+    log.error("Bulk import failed", {
+      error: error instanceof Error ? error.message : String(error),
+      modelsCount: models.length,
     });
     throw error;
   }
