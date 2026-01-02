@@ -41,6 +41,8 @@
  * ```
  */
 
+import type { NexusCapabilities } from "@/lib/db/types/jsonb";
+
 /**
  * Valid capability names (camelCase for runtime use)
  */
@@ -343,4 +345,69 @@ export function toDatabaseCapability(
   runtimeCapability: CapabilityKey
 ): DatabaseCapability | undefined {
   return RUNTIME_TO_DB_MAP[runtimeCapability];
+}
+
+// ============================================
+// UI Helpers
+// ============================================
+
+/**
+ * Default NexusCapabilities object (all capabilities disabled)
+ * Used as base for UI components that display capability toggles
+ */
+const DEFAULT_NEXUS_CAPABILITIES: NexusCapabilities = {
+  canvas: false,
+  thinking: false,
+  artifacts: false,
+  grounding: false,
+  reasoning: false,
+  webSearch: false,
+  computerUse: false,
+  responsesAPI: false,
+  codeExecution: false,
+  promptCaching: false,
+  contextCaching: false,
+  workspaceTools: false,
+  codeInterpreter: false,
+  imageGeneration: false,
+} as const;
+
+/**
+ * Convert capabilities field (JSON array) to NexusCapabilities object for UI
+ *
+ * This helper bridges the gap between the database format (TEXT/JSON array) and
+ * the UI format (NexusCapabilities object with boolean flags). Used in admin UI
+ * components that need to display/edit capabilities as checkboxes.
+ *
+ * @param capabilities - Raw capabilities from database (string JSON or array)
+ * @returns NexusCapabilities object with boolean flags for each capability
+ *
+ * @example
+ * ```typescript
+ * const model = await getAIModelByModelId('gpt-4');
+ * const uiCapabilities = capabilitiesToNexusCapabilities(model.capabilities);
+ * // Returns: { canvas: true, thinking: false, webSearch: true, ... }
+ * ```
+ */
+export function capabilitiesToNexusCapabilities(
+  capabilities: string | string[] | null | undefined
+): NexusCapabilities {
+  const parsed = parseCapabilities(capabilities);
+  return {
+    ...DEFAULT_NEXUS_CAPABILITIES,
+    canvas: parsed.has("canvas"),
+    thinking: parsed.has("thinking"),
+    artifacts: parsed.has("artifacts"),
+    grounding: parsed.has("grounding"),
+    reasoning: parsed.has("reasoning"),
+    webSearch: parsed.has("webSearch"),
+    computerUse: parsed.has("computerUse"),
+    responsesAPI: parsed.has("responsesAPI"),
+    codeExecution: parsed.has("codeExecution"),
+    promptCaching: parsed.has("promptCaching"),
+    contextCaching: parsed.has("contextCaching"),
+    workspaceTools: parsed.has("workspaceTools"),
+    codeInterpreter: parsed.has("codeInterpreter"),
+    imageGeneration: parsed.has("imageGeneration"),
+  };
 }

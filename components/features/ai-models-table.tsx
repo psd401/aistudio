@@ -11,7 +11,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { IconPlus, IconEdit, IconTrash, IconChevronRight } from '@tabler/icons-react';
 import type { SelectAiModel, NexusCapabilities, ProviderMetadata } from '@/types';
 import { MultiSelect, type MultiSelectOption } from '@/components/ui/multi-select';
-import { parseCapabilities } from '@/lib/ai/capability-utils';
+import { capabilitiesToNexusCapabilities } from '@/lib/ai/capability-utils';
 import { Badge } from '@/components/ui/badge';
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible';
 import {
@@ -558,50 +558,6 @@ type ModelFormData = {
   providerMetadata: ProviderMetadata;
 };
 
-const DEFAULT_NEXUS_CAPABILITIES: NexusCapabilities = {
-  canvas: false,
-  thinking: false,
-  artifacts: false,
-  grounding: false,
-  reasoning: false,
-  webSearch: false,
-  computerUse: false,
-  responsesAPI: false,
-  codeExecution: false,
-  promptCaching: false,
-  contextCaching: false,
-  workspaceTools: false,
-  codeInterpreter: false,
-  imageGeneration: false
-} as const;
-
-/**
- * Convert capabilities field (JSON array) to NexusCapabilities object for UI
- * Uses parseCapabilities helper which handles JSON parsing and snake_case conversion
- */
-function capabilitiesToNexusCapabilities(
-  capabilities: string | string[] | null | undefined
-): NexusCapabilities {
-  const parsed = parseCapabilities(capabilities);
-  return {
-    ...DEFAULT_NEXUS_CAPABILITIES,
-    canvas: parsed.has("canvas"),
-    thinking: parsed.has("thinking"),
-    artifacts: parsed.has("artifacts"),
-    grounding: parsed.has("grounding"),
-    reasoning: parsed.has("reasoning"),
-    webSearch: parsed.has("webSearch"),
-    computerUse: parsed.has("computerUse"),
-    responsesAPI: parsed.has("responsesAPI"),
-    codeExecution: parsed.has("codeExecution"),
-    promptCaching: parsed.has("promptCaching"),
-    contextCaching: parsed.has("contextCaching"),
-    workspaceTools: parsed.has("workspaceTools"),
-    codeInterpreter: parsed.has("codeInterpreter"),
-    imageGeneration: parsed.has("imageGeneration"),
-  };
-}
-
 const emptyModel: ModelFormData = {
   name: '',
   provider: '',
@@ -623,7 +579,7 @@ const emptyModel: ModelFormData = {
   maxConcurrency: null,
   supportsBatching: false,
   // Capability/Metadata fields
-  nexusCapabilities: { ...DEFAULT_NEXUS_CAPABILITIES },
+  nexusCapabilities: capabilitiesToNexusCapabilities(''),
   providerMetadata: {}
 };
 

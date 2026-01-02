@@ -274,8 +274,8 @@ export async function getModelsWithCapabilities(
   // The capabilities field stores a JSON array like '["web_search", "canvas"]'
   const conditions = dbCapabilities.map((cap) => {
     // Use JSON containment operator to check if array contains the capability
-    // capabilities::jsonb @> '"web_search"' checks if array contains "web_search"
-    return sql`${aiModels.capabilities}::jsonb @> ${JSON.stringify(cap)}::jsonb`;
+    // capabilities::jsonb @> '["web_search"]' checks if array contains "web_search"
+    return sql`${aiModels.capabilities}::jsonb @> ${JSON.stringify([cap])}::jsonb`;
   });
 
   return executeQuery(
