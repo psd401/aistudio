@@ -11,7 +11,12 @@
 -- capability data. The unified 'capabilities' TEXT field is now the single
 -- source of truth for model capabilities.
 --
+-- Dependencies to drop (in order):
+--   1. Trigger: validate_ai_models_nexus_capabilities
+--   2. Index: idx_ai_models_nexus_capabilities
+--
 -- Note: Uses IF EXISTS for idempotent operation (safe re-runs)
+-- Updated: 2026-01-02 - Added trigger and index drops before column drop
 
 -- Step 1: Drop the trigger that validates nexus_capabilities (required before dropping column)
 DROP TRIGGER IF EXISTS validate_ai_models_nexus_capabilities ON ai_models;
