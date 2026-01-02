@@ -180,9 +180,37 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json();
-    
+
+    // Validate required fields
+    if (!body.name?.trim()) {
+      log.warn("Model creation failed - missing name");
+      timer({ status: "error", reason: "validation" });
+      return NextResponse.json(
+        { isSuccess: false, message: "Model name is required" },
+        { status: 400 }
+      );
+    }
+
+    if (!body.modelId?.trim()) {
+      log.warn("Model creation failed - missing modelId");
+      timer({ status: "error", reason: "validation" });
+      return NextResponse.json(
+        { isSuccess: false, message: "Model ID is required" },
+        { status: 400 }
+      );
+    }
+
+    if (!body.provider) {
+      log.warn("Model creation failed - missing provider");
+      timer({ status: "error", reason: "validation" });
+      return NextResponse.json(
+        { isSuccess: false, message: "Provider is required" },
+        { status: 400 }
+      );
+    }
+
     log.debug("Creating model", { modelName: body.name, provider: body.provider });
-    
+
     // Validate and sanitize capabilities and allowedRoles
     const validatedCapabilities = validateCapabilities(body.capabilities, log);
     const validatedAllowedRoles = await validateAllowedRoles(body.allowedRoles, log);
@@ -287,14 +315,8 @@ export async function PUT(request: Request) {
       updates.architectEnabled = normalizeBoolean(updates.architectEnabled);
     }
 
-    // Handle JSONB fields - stringify if they're objects
-    if (updates.nexusCapabilities && typeof updates.nexusCapabilities === 'object') {
-      updates.nexusCapabilities = JSON.stringify(updates.nexusCapabilities);
-    }
-
-    if (updates.providerMetadata && typeof updates.providerMetadata === 'object') {
-      updates.providerMetadata = JSON.stringify(updates.providerMetadata);
-    }
+    // JSONB fields - pass as objects, Drizzle serializes automatically via .$type<T>()
+    // No manual JSON.stringify needed - consistent with POST handler
 
     // Handle Date fields
     if (updates.pricingUpdatedAt && updates.pricingUpdatedAt instanceof Date) {

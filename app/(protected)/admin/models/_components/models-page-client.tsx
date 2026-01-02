@@ -174,6 +174,7 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
               typeof role === "object" &&
               "id" in role &&
               "name" in role &&
+              typeof (role as { id: unknown }).id === "string" &&
               typeof (role as { name: unknown }).name === "string"
           )
           .map((role: { name: string; description?: string }) => ({
@@ -272,6 +273,9 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
   // Handle toggle active
   const handleToggleActive = useCallback(
     async (modelId: number, active: boolean) => {
+      // Prevent concurrent toggles on same model
+      if (loadingToggles.has(modelId)) return
+
       // Add to loading state
       setLoadingToggles((prev) => new Set(prev).add(modelId))
 
@@ -310,12 +314,15 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
         })
       }
     },
-    [toast]
+    [loadingToggles, toast]
   )
 
   // Handle toggle nexus
   const handleToggleNexus = useCallback(
     async (modelId: number, enabled: boolean) => {
+      // Prevent concurrent toggles on same model
+      if (loadingToggles.has(modelId)) return
+
       // Add to loading state
       setLoadingToggles((prev) => new Set(prev).add(modelId))
 
@@ -356,12 +363,15 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
         })
       }
     },
-    [toast]
+    [loadingToggles, toast]
   )
 
   // Handle toggle architect
   const handleToggleArchitect = useCallback(
     async (modelId: number, enabled: boolean) => {
+      // Prevent concurrent toggles on same model
+      if (loadingToggles.has(modelId)) return
+
       // Add to loading state
       setLoadingToggles((prev) => new Set(prev).add(modelId))
 
@@ -404,7 +414,7 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
         })
       }
     },
-    [toast]
+    [loadingToggles, toast]
   )
 
   // Handle delete model

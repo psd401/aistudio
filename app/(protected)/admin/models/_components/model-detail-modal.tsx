@@ -211,18 +211,10 @@ export function ModelDetailModal({
     }
   }, [model, isNew, open])
 
-  // Focus management - capture trigger and focus first input on open
+  // Focus management - capture trigger element when modal opens
   useEffect(() => {
     if (open) {
-      // Capture the element that triggered the dialog
       triggerElementRef.current = document.activeElement as HTMLElement
-
-      // Focus first input after dialog animation (150ms)
-      const timer = setTimeout(() => {
-        firstInputRef.current?.focus()
-      }, 150)
-
-      return () => clearTimeout(timer)
     } else {
       // Return focus to trigger element when closed
       triggerElementRef.current?.focus()
@@ -309,7 +301,7 @@ export function ModelDetailModal({
     try {
       await onSave(formData)
       onOpenChange(false)
-    } catch (error) {
+    } catch {
       // Error toast is shown in parent component
       // Server action logs error on server side
     } finally {
@@ -330,12 +322,16 @@ export function ModelDetailModal({
             top: '50%',
             left: '50%',
             transform: 'translate(-50%, -50%)',
-            width: '95vw',
-            maxWidth: '95vw',
-            minWidth: '95vw',
+            width: 'min(95vw, 1600px)', // Cap at 1600px for ultra-wide monitors
+            maxWidth: 'min(95vw, 1600px)',
+            minWidth: '90vw',
             height: '90vh',
             maxHeight: '90vh',
             zIndex: 50,
+          }}
+          onOpenAutoFocus={(e) => {
+            e.preventDefault()
+            firstInputRef.current?.focus()
           }}
         >
           {/* Close button */}
