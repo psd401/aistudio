@@ -56,10 +56,6 @@ function DialogContent({
   showCloseButton?: boolean
   wide?: boolean
 }) {
-  // DIAGNOSTIC: Verify this code is being built and executed
-  console.log('DialogContent-LOADED-20260101-1915', { wide })
-
-  // Inline styles directly in the return - no intermediate variable
   const inlineStyles = wide
     ? {
         position: 'fixed' as const,

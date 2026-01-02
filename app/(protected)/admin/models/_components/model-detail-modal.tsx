@@ -2,14 +2,8 @@
 
 import { useState, useCallback, useEffect, useRef } from "react"
 import { createLogger, generateRequestId } from "@/lib/logger"
-import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogFooter,
-  DialogDescription,
-} from "@/components/ui/dialog"
+import * as Dialog from "@radix-ui/react-dialog"
+import { XIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
@@ -335,32 +329,38 @@ export function ModelDetailModal({
   const title = isNew ? "Add New Model" : `Edit ${model?.name || "Model"}`
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent
-        wide
-        className="p-0 flex flex-col"
-        style={{
-          position: 'fixed',
-          top: '50%',
-          left: '50%',
-          transform: 'translate(-50%, -50%)',
-          width: '95vw',
-          maxWidth: '95vw',
-          minWidth: '95vw',
-          height: '90vh',
-          maxHeight: '90vh',
-          zIndex: 50,
-        }}
-      >
-        <DialogHeader className="flex-shrink-0 px-6 pt-6 pb-4">
-          <div className="flex items-center gap-3">
-            <DialogTitle className="text-xl">{title}</DialogTitle>
+    <Dialog.Root open={open} onOpenChange={onOpenChange}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+        <Dialog.Content
+          className="rounded-lg border bg-background shadow-lg p-0 flex flex-col data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 duration-200"
+          style={{
+            position: 'fixed',
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            width: '95vw',
+            maxWidth: '95vw',
+            minWidth: '95vw',
+            height: '90vh',
+            maxHeight: '90vh',
+            zIndex: 50,
+          }}
+        >
+          {/* Close button */}
+          <Dialog.Close className="absolute top-4 right-4 rounded-sm opacity-70 transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:pointer-events-none">
+            <XIcon className="h-4 w-4" />
+            <span className="sr-only">Close</span>
+          </Dialog.Close>
+
+          {/* Header */}
+          <div className="flex-shrink-0 px-6 pt-6 pb-4">
+            <Dialog.Title className="text-xl font-semibold leading-none">{title}</Dialog.Title>
             {model && <ProviderBadge provider={formData.provider} />}
+            <Dialog.Description className="sr-only">
+              {isNew ? "Add a new AI model to the system" : "Edit AI model configuration"}
+            </Dialog.Description>
           </div>
-          <DialogDescription className="sr-only">
-            {isNew ? "Add a new AI model to the system" : "Edit AI model configuration"}
-          </DialogDescription>
-        </DialogHeader>
 
         <div className="flex-1 overflow-y-auto px-6">
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 py-4">
@@ -637,30 +637,32 @@ export function ModelDetailModal({
           </div>
         </div>
 
-        <DialogFooter className="flex-shrink-0 flex items-center justify-between border-t pt-4 px-6 pb-6">
-          <div>
-            {model && onDelete && (
-              <Button
-                variant="destructive"
-                onClick={() => onDelete(model)}
-                disabled={saving}
-              >
-                <IconTrash className="mr-2 h-4 w-4" />
-                Delete Model
+          {/* Footer */}
+          <div className="flex-shrink-0 flex items-center justify-between border-t pt-4 px-6 pb-6">
+            <div>
+              {model && onDelete && (
+                <Button
+                  variant="destructive"
+                  onClick={() => onDelete(model)}
+                  disabled={saving}
+                >
+                  <IconTrash className="mr-2 h-4 w-4" />
+                  Delete Model
+                </Button>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
+                Cancel
               </Button>
-            )}
+              <Button onClick={handleSave} disabled={saving}>
+                {saving && <IconLoader2 className="mr-2 h-4 w-4 animate-spin" />}
+                {isNew ? "Add Model" : "Save Changes"}
+              </Button>
+            </div>
           </div>
-          <div className="flex gap-2">
-            <Button variant="outline" onClick={() => onOpenChange(false)} disabled={saving}>
-              Cancel
-            </Button>
-            <Button onClick={handleSave} disabled={saving}>
-              {saving && <IconLoader2 className="mr-2 h-4 w-4 animate-spin" />}
-              {isNew ? "Add Model" : "Save Changes"}
-            </Button>
-          </div>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   )
 }
