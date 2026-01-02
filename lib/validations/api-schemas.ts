@@ -53,7 +53,6 @@ export const createModelSchema = z.object({
   capabilities: z.array(z.string()).optional(),
   maxTokens: z.string().regex(/^\d+$/).optional(),
   active: z.boolean().optional(),
-  chatEnabled: z.boolean().optional(), // @deprecated - use nexusEnabled instead
   nexusEnabled: z.boolean().optional(),
   architectEnabled: z.boolean().optional()
 });
@@ -66,7 +65,6 @@ export const updateModelSchema = z.object({
   capabilities: z.array(z.string()).optional(),
   maxTokens: z.string().regex(/^\d+$/).optional(),
   active: z.boolean().optional(),
-  chatEnabled: z.boolean().optional(), // @deprecated - use nexusEnabled instead
   nexusEnabled: z.boolean().optional(),
   architectEnabled: z.boolean().optional()
 });

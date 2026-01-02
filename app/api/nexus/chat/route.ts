@@ -147,7 +147,7 @@ export async function POST(req: Request) {
 
     const isImageGenerationModel = capabilities?.imageGeneration === true;
 
-    // Note: getModelConfig already filters by chat_enabled=true, so if we got a model, it's chat-enabled
+    // Note: getModelConfig already filters by nexus_enabled=true, so if we got a model, it's Nexus-enabled
     // Image generation models are handled separately below
 
     log.info('Model configured', sanitizeForLogging({

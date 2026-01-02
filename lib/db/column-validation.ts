@@ -18,9 +18,9 @@ export const ALLOWED_UPDATE_COLUMNS = {
   ],
   
   ai_models: [
-    'name', 'provider', 'model_id', 'description', 
-    'capabilities', 'max_tokens', 'active', 'chat_enabled', 
-    'updated_at'
+    'name', 'provider', 'model_id', 'description',
+    'capabilities', 'max_tokens', 'active', 'nexus_enabled',
+    'architect_enabled', 'updated_at'
   ],
   
   roles: [

@@ -224,7 +224,6 @@ export async function POST(request: Request) {
       allowedRoles: validatedAllowedRoles || undefined,
       maxTokens: body.maxTokens ? Number.parseInt(body.maxTokens) : undefined,
       active: body.active ?? true,
-      chatEnabled: body.chatEnabled ?? false, // @deprecated - kept for backward compatibility
       nexusEnabled: body.nexusEnabled ?? true,
       architectEnabled: body.architectEnabled ?? true,
       // Pricing fields
@@ -304,9 +303,6 @@ export async function PUT(request: Request) {
     // Uses normalizeBoolean utility to handle "false", "0", 0, false correctly
     if ('active' in updates) {
       updates.active = normalizeBoolean(updates.active);
-    }
-    if ('chatEnabled' in updates) {
-      updates.chatEnabled = normalizeBoolean(updates.chatEnabled);
     }
     if ('nexusEnabled' in updates) {
       updates.nexusEnabled = normalizeBoolean(updates.nexusEnabled);

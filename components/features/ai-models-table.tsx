@@ -79,11 +79,8 @@ const ModelForm = React.memo(function ModelForm({
   const handleMaxTokensChange = (e: React.ChangeEvent<HTMLInputElement>) => 
     setModelData({ ...modelData, maxTokens: Number.parseInt(e.target.value) || 4096 });
     
-  const handleActiveChange = (checked: boolean) => 
+  const handleActiveChange = (checked: boolean) =>
     setModelData({ ...modelData, active: checked });
-    
-  const handleChatEnabledChange = (checked: boolean) =>
-    setModelData({ ...modelData, chatEnabled: checked });
 
   const handleNexusEnabledChange = (checked: boolean) =>
     setModelData({ ...modelData, nexusEnabled: checked });
@@ -318,16 +315,6 @@ const ModelForm = React.memo(function ModelForm({
             </div>
             <div className="flex items-center space-x-2">
               <Switch
-                id="model-chat-enabled"
-                checked={modelData.chatEnabled}
-                onCheckedChange={handleChatEnabledChange}
-              />
-              <label htmlFor="model-chat-enabled" className="text-sm font-medium">Chat Enabled (deprecated)</label>
-            </div>
-          </div>
-          <div className="flex items-center space-x-4">
-            <div className="flex items-center space-x-2">
-              <Switch
                 id="model-nexus-enabled"
                 checked={modelData.nexusEnabled ?? true}
                 onCheckedChange={handleNexusEnabledChange}
@@ -553,7 +540,6 @@ type ModelFormData = {
   capabilities: string;
   maxTokens: number;
   active: boolean;
-  chatEnabled: boolean;
   nexusEnabled: boolean;
   architectEnabled: boolean;
   allowedRoles: string[];
@@ -595,7 +581,6 @@ const emptyModel: ModelFormData = {
   capabilities: '',
   maxTokens: 4096,
   active: true,
-  chatEnabled: false,
   nexusEnabled: true,
   architectEnabled: true,
   allowedRoles: [],
@@ -821,7 +806,6 @@ export const AiModelsTable = React.memo(function AiModelsTable({
       allowedRoles,
       maxTokens: model.maxTokens || 4096,
       active: model.active,
-      chatEnabled: model.chatEnabled || false,
       nexusEnabled: model.nexusEnabled ?? true,
       architectEnabled: model.architectEnabled ?? true,
       // Pricing fields
@@ -1036,8 +1020,6 @@ export const AiModelsTable = React.memo(function AiModelsTable({
     const { capabilitiesList, ...dbData } = dataToSubmit;
     const finalData = {
       ...dbData,
-      // Use explicit chatEnabled value (maintains backward compatibility by defaulting to capability-based inference)
-      chatEnabled: modelData.chatEnabled,
       // Feature-specific availability flags
       nexusEnabled: modelData.nexusEnabled,
       architectEnabled: modelData.architectEnabled,

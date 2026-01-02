@@ -296,7 +296,7 @@ export class CostOptimizer {
           provider_metadata as "providerMetadata",
           allowed_roles as "allowedRoles"
         FROM ai_models
-        WHERE active = true AND chat_enabled = true
+        WHERE active = true AND nexus_enabled = true
         ORDER BY provider, name
       `);
 

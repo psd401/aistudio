@@ -655,7 +655,7 @@ export class NexusProviderFactory {
       // Note: RDS Data API adapter transforms snake_case to camelCase
       const result = await executeSQL<{modelId: string}>(`
         SELECT model_id FROM ai_models
-        WHERE provider = $1 AND active = true AND chat_enabled = true
+        WHERE provider = $1 AND active = true AND nexus_enabled = true
         ORDER BY name
       `, [provider]);
 
