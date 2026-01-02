@@ -28,6 +28,7 @@ import { cn } from "@/lib/utils"
 import { ProviderBadge, PROVIDER_OPTIONS } from "./provider-badge"
 import type { SelectAiModel } from "@/types/db-types"
 import type { NexusCapabilities, ProviderMetadata } from "@/lib/db/types/jsonb"
+import { parseCapabilities } from "@/lib/ai/capability-utils"
 
 // Form data type
 export interface ModelFormData {
@@ -71,6 +72,34 @@ const DEFAULT_NEXUS_CAPABILITIES: NexusCapabilities = {
   contextCaching: false,
   workspaceTools: false,
   codeInterpreter: false,
+  imageGeneration: false,
+}
+
+/**
+ * Convert capabilities field (JSON array) to NexusCapabilities object for UI
+ * Uses parseCapabilities helper which handles JSON parsing and snake_case conversion
+ */
+function capabilitiesToNexusCapabilities(
+  capabilities: string | string[] | null | undefined
+): NexusCapabilities {
+  const parsed = parseCapabilities(capabilities);
+  return {
+    ...DEFAULT_NEXUS_CAPABILITIES,
+    canvas: parsed.has("canvas"),
+    thinking: parsed.has("thinking"),
+    artifacts: parsed.has("artifacts"),
+    grounding: parsed.has("grounding"),
+    reasoning: parsed.has("reasoning"),
+    webSearch: parsed.has("webSearch"),
+    computerUse: parsed.has("computerUse"),
+    responsesAPI: parsed.has("responsesAPI"),
+    codeExecution: parsed.has("codeExecution"),
+    promptCaching: parsed.has("promptCaching"),
+    contextCaching: parsed.has("contextCaching"),
+    workspaceTools: parsed.has("workspaceTools"),
+    codeInterpreter: parsed.has("codeInterpreter"),
+    imageGeneration: parsed.has("imageGeneration"),
+  };
 }
 
 // Empty form state
@@ -192,11 +221,8 @@ export function ModelDetailModal({
         averageLatencyMs: model.averageLatencyMs || null,
         maxConcurrency: model.maxConcurrency || null,
         supportsBatching: model.supportsBatching || false,
-        nexusCapabilities: model.nexusCapabilities
-          ? typeof model.nexusCapabilities === "string"
-            ? JSON.parse(model.nexusCapabilities)
-            : model.nexusCapabilities
-          : { ...DEFAULT_NEXUS_CAPABILITIES },
+        // Convert capabilities field to NexusCapabilities object for UI
+        nexusCapabilities: capabilitiesToNexusCapabilities(model.capabilities),
         providerMetadata: model.providerMetadata
           ? typeof model.providerMetadata === "string"
             ? JSON.parse(model.providerMetadata)

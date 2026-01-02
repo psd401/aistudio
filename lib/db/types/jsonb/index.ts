@@ -10,10 +10,10 @@
  * @example
  * ```typescript
  * import { jsonb } from 'drizzle-orm/pg-core';
- * import type { NexusCapabilities } from '@/lib/db/types/jsonb';
+ * import type { ProviderMetadata } from '@/lib/db/types/jsonb';
  *
  * export const aiModels = pgTable('ai_models', {
- *   nexusCapabilities: jsonb('nexus_capabilities').$type<NexusCapabilities>(),
+ *   providerMetadata: jsonb('provider_metadata').$type<ProviderMetadata>(),
  * });
  * ```
  */
@@ -24,6 +24,13 @@
 
 /**
  * Nexus AI model capabilities flags
+ *
+ * @deprecated Issue #594: This interface is deprecated. Use the unified
+ * `capabilities` TEXT/JSON array field and @/lib/ai/capability-utils helpers
+ * for capability checks instead. This interface is retained temporarily for
+ * backward compatibility with admin UI components during the transition.
+ *
+ * @see @/lib/ai/capability-utils for the new capability handling pattern
  */
 export interface NexusCapabilities {
   canvas: boolean;
@@ -39,8 +46,9 @@ export interface NexusCapabilities {
   contextCaching: boolean;
   workspaceTools: boolean;
   codeInterpreter: boolean;
+  imageGeneration?: boolean;
   /** Allow string indexing for dynamic access */
-  [key: string]: boolean;
+  [key: string]: boolean | undefined;
 }
 
 /**

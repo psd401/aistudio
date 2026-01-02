@@ -5,6 +5,7 @@ import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
 import { getAIModelById } from '@/lib/db/drizzle';
 import { executeQuery } from '@/lib/db/drizzle-client';
+import { hasCapability } from '@/lib/ai/capability-utils';
 import { eq, sql } from 'drizzle-orm';
 import { nexusConversations, nexusMessages } from '@/lib/db/schema';
 import type { MessagePart } from '@/lib/db/drizzle/nexus-messages';
@@ -140,12 +141,10 @@ export async function POST(req: Request) {
     const dbModelId = modelConfig.id;
 
     // Check if this is an image generation model
-    // Note: getModelConfig doesn't return nexus_capabilities, so we query it separately if needed
+    // Query model capabilities to check for image generation
     const modelWithCapabilities = await getAIModelById(dbModelId);
 
-    const capabilities = modelWithCapabilities?.nexusCapabilities || null;
-
-    const isImageGenerationModel = capabilities?.imageGeneration === true;
+    const isImageGenerationModel = hasCapability(modelWithCapabilities?.capabilities, 'imageGeneration');
 
     // Note: getModelConfig already filters by nexus_enabled=true, so if we got a model, it's Nexus-enabled
     // Image generation models are handled separately below

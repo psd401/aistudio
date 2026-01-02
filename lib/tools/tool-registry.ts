@@ -1,5 +1,6 @@
 import type { ToolSet } from 'ai'
 import { getAIModelByModelId } from '@/lib/db/drizzle'
+import { parseCapabilities, type CapabilityKey } from '@/lib/ai/capability-utils'
 
 // Note: Logger removed to avoid browser compatibility issues when imported client-side
 
@@ -81,6 +82,9 @@ const TOOL_REGISTRY: Record<string, ToolConfig> = {
 
 /**
  * Get model capabilities from database (SERVER-SIDE ONLY)
+ *
+ * Reads from the unified `capabilities` text/JSON array field.
+ * Part of Issue #594 - Migrate from nexus_capabilities JSONB to capabilities array.
  */
 export async function getModelCapabilities(modelId: string): Promise<ModelCapabilities | null> {
   // Server-side only guard
@@ -100,14 +104,29 @@ export async function getModelCapabilities(modelId: string): Promise<ModelCapabi
       return null
     }
 
-    const capabilities = model.nexusCapabilities
+    // Parse capabilities from the unified capabilities field (text/JSON array)
+    const capabilitySet = parseCapabilities(model.capabilities)
 
-    // JSONB fields should come back as objects, but handle string case too
-    if (typeof capabilities === 'string') {
-      return JSON.parse(capabilities) as ModelCapabilities
+    // Helper function to check if a capability exists in the set
+    const has = (key: CapabilityKey): boolean => capabilitySet.has(key)
+
+    // Map to ModelCapabilities interface
+    return {
+      webSearch: has('webSearch'),
+      codeInterpreter: has('codeInterpreter'),
+      codeExecution: has('codeExecution'),
+      grounding: has('grounding'),
+      workspaceTools: has('workspaceTools'),
+      canvas: has('canvas'),
+      artifacts: has('artifacts'),
+      thinking: has('thinking'),
+      reasoning: has('reasoning'),
+      computerUse: has('computerUse'),
+      responsesAPI: has('responsesAPI'),
+      promptCaching: has('promptCaching'),
+      contextCaching: has('contextCaching'),
+      imageGeneration: has('imageGeneration')
     }
-
-    return capabilities as unknown as ModelCapabilities
   } catch {
     // Return null on error - error details available through proper logging
     // in calling functions (server actions, API routes) that have access to logger

@@ -27,6 +27,7 @@ import type { SelectAiStreamingJob } from "@/lib/db/types";
 import type { UIMessage } from "ai";
 import { createLogger } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
+import { hasCapability } from "@/lib/ai/capability-utils";
 
 // ============================================
 // Constants
@@ -1023,7 +1024,7 @@ export async function getOptimalPollingInterval(
     (db) =>
       db
         .select({
-          nexusCapabilities: aiModels.nexusCapabilities,
+          capabilities: aiModels.capabilities,
           averageLatencyMs: aiModels.averageLatencyMs,
         })
         .from(aiModels)
@@ -1038,25 +1039,13 @@ export async function getOptimalPollingInterval(
   }
 
   const model = result[0];
-  // Parse capabilities if it's a string
-  let capabilities: Record<string, unknown> = {};
-  if (model.nexusCapabilities) {
-    if (typeof model.nexusCapabilities === "string") {
-      try {
-        capabilities = JSON.parse(model.nexusCapabilities);
-      } catch {
-        // Use empty object
-      }
-    } else {
-      capabilities = model.nexusCapabilities as Record<string, unknown>;
-    }
-  }
   const averageLatency = model.averageLatencyMs ?? 5000;
 
   // Base interval based on model characteristics
   let baseInterval = 1000; // 1 second default
 
-  if (capabilities.reasoning) {
+  // Check for reasoning capability using unified capabilities field
+  if (hasCapability(model.capabilities, "reasoning")) {
     baseInterval = 1500; // Slower polling for reasoning models
   } else if (averageLatency < 3000) {
     baseInterval = 500; // Faster polling for quick models
