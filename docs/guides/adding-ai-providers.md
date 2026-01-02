@@ -214,19 +214,14 @@ Update the AI models table to include the new provider:
 INSERT INTO ai_models (
   provider,
   model_id,
-  display_name,
+  name,
   description,
   input_cost_per_1k_tokens,
   output_cost_per_1k_tokens,
   max_tokens,
-  context_window,
-  supports_tools,
-  supports_vision,
-  supports_streaming,
-  chat_enabled,
-  assistant_enabled,
-  compare_enabled,
   active,
+  nexus_enabled,
+  architect_enabled,
   nexus_capabilities
 ) VALUES
 (
@@ -237,15 +232,10 @@ INSERT INTO ai_models (
   0.002,
   0.006,
   8192,
-  32000,
-  true,
-  false,
   true,
   true,
   true,
-  true,
-  true,
-  '{"supportsReasoning": false, "supportsThinking": false, "supportedTools": ["function_calling"]}'::jsonb
+  '{"reasoning": false, "thinking": false, "artifacts": false, "grounding": false, "webSearch": false, "computerUse": false, "responsesAPI": false, "codeExecution": false, "promptCaching": false, "contextCaching": false, "workspaceTools": false, "codeInterpreter": false, "canvas": false}'::jsonb
 ),
 (
   'mistral',
@@ -255,15 +245,10 @@ INSERT INTO ai_models (
   0.001,
   0.003,
   8192,
-  32000,
-  true,
-  false,
   true,
   true,
   true,
-  false,
-  true,
-  '{"supportsReasoning": false, "supportsThinking": false, "supportedTools": ["function_calling", "code_interpreter"]}'::jsonb
+  '{"reasoning": false, "thinking": false, "artifacts": false, "grounding": false, "webSearch": false, "computerUse": false, "responsesAPI": false, "codeExecution": false, "promptCaching": false, "contextCaching": false, "workspaceTools": false, "codeInterpreter": true, "canvas": false}'::jsonb
 );
 ```
 
