@@ -771,15 +771,15 @@ export async function bulkImportAIModels(
 
           if (existing) {
             // Update existing model
-            // Note: Using nullish coalescing (??) means undefined = keep existing, but null = clear field
-            // For optional fields not provided, use 'field' in model to check if explicitly set to null
+            // Note: Using 'field' in model checks if field was explicitly provided (even if null)
+            // This allows: undefined = keep existing, null = clear field, value = update field
             await tx
               .update(aiModels)
               .set({
                 name: model.name,
                 provider: model.provider,
                 description: "description" in model ? model.description : existing.description,
-                capabilities: capabilitiesJson !== null ? capabilitiesJson : existing.capabilities,
+                capabilities: "capabilities" in model ? capabilitiesJson : existing.capabilities,
                 maxTokens: "maxTokens" in model ? model.maxTokens : existing.maxTokens,
                 active: "active" in model ? model.active : existing.active,
                 nexusEnabled: "nexusEnabled" in model ? model.nexusEnabled : existing.nexusEnabled,
