@@ -1,7 +1,6 @@
 "use client"
 
 import { useState, useCallback, useEffect, useRef } from "react"
-import { createLogger, generateRequestId } from "@/lib/logger"
 import * as Dialog from "@radix-ui/react-dialog"
 import { XIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -163,8 +162,7 @@ export function ModelDetailModal({
             capabilitiesList = parsed
           }
         } catch (error) {
-          const log = createLogger({ requestId: generateRequestId(), action: "parseCapabilities" })
-          log.error("Failed to parse capabilities JSON", {
+          console.error("Failed to parse capabilities JSON", {
             modelId: model.id,
             error: error instanceof Error ? error.message : String(error),
           })
@@ -315,8 +313,7 @@ export function ModelDetailModal({
       await onSave(formData)
       onOpenChange(false)
     } catch (error) {
-      const log = createLogger({ requestId: generateRequestId(), action: "saveModel" })
-      log.error("Model save error in modal", {
+      console.error("Model save error in modal", {
         modelName: formData.name,
         error: error instanceof Error ? error.message : String(error),
       })
