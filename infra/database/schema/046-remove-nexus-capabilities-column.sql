@@ -13,10 +13,13 @@
 --
 -- Note: Uses IF EXISTS for idempotent operation (safe re-runs)
 
--- Step 1: Drop the GIN index on nexus_capabilities (required before dropping column)
+-- Step 1: Drop the trigger that validates nexus_capabilities (required before dropping column)
+DROP TRIGGER IF EXISTS validate_ai_models_nexus_capabilities ON ai_models;
+
+-- Step 2: Drop the GIN index on nexus_capabilities (required before dropping column)
 DROP INDEX IF EXISTS idx_ai_models_nexus_capabilities;
 
--- Step 2: Drop the deprecated nexus_capabilities JSONB column
+-- Step 3: Drop the deprecated nexus_capabilities JSONB column
 ALTER TABLE ai_models
   DROP COLUMN IF EXISTS nexus_capabilities;
 
