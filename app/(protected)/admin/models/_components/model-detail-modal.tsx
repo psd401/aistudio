@@ -161,11 +161,8 @@ export function ModelDetailModal({
           if (Array.isArray(parsed)) {
             capabilitiesList = parsed
           }
-        } catch (error) {
-          console.error("Failed to parse capabilities JSON", {
-            modelId: model.id,
-            error: error instanceof Error ? error.message : String(error),
-          })
+        } catch {
+          // Parsing error - fallback to string if parse fails
           if (typeof model.capabilities === "string" && model.capabilities.trim()) {
             capabilitiesList = [model.capabilities]
           }
@@ -313,11 +310,8 @@ export function ModelDetailModal({
       await onSave(formData)
       onOpenChange(false)
     } catch (error) {
-      console.error("Model save error in modal", {
-        modelName: formData.name,
-        error: error instanceof Error ? error.message : String(error),
-      })
       // Error toast is shown in parent component
+      // Server action logs error on server side
     } finally {
       setSaving(false)
     }
