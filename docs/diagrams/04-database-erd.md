@@ -78,7 +78,6 @@ erDiagram
         int average_latency_ms
         int max_concurrency
         boolean supports_batching
-        jsonb nexus_capabilities
         jsonb provider_metadata
     }
 
