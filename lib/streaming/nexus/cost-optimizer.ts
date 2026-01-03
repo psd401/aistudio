@@ -1,5 +1,6 @@
 import { createLogger } from '@/lib/logger';
 import { executeSQL, type DatabaseRow } from './db-helpers';
+import { hasCapability, hasAnyCapability } from '@/lib/ai/capability-utils';
 
 const log = createLogger({ module: 'cost-optimizer' });
 
@@ -31,7 +32,7 @@ interface TransformedModel extends DatabaseRow {
   averageLatencyMs?: number;
   maxConcurrency?: number;
   supportsBatching?: boolean;
-  nexusCapabilities?: Record<string, unknown>;
+  capabilities?: string | string[] | null;
   providerMetadata?: Record<string, unknown>;
   allowedRoles?: string[];
 }
@@ -292,7 +293,7 @@ export class CostOptimizer {
           average_latency_ms as "averageLatencyMs",
           max_concurrency as "maxConcurrency",
           supports_batching as "supportsBatching",
-          nexus_capabilities as "nexusCapabilities",
+          capabilities,
           provider_metadata as "providerMetadata",
           allowed_roles as "allowedRoles"
         FROM ai_models
@@ -380,8 +381,7 @@ export class CostOptimizer {
       
       if (request.priority === 'quality') {
         // Prefer models with advanced capabilities
-        const caps = (model.nexusCapabilities as Record<string, boolean>) || {};
-        if (!caps.reasoning && !caps.thinking && !caps.artifacts) {
+        if (!hasAnyCapability(model.capabilities, ['reasoning', 'thinking', 'artifacts'])) {
           return false;
         }
       }
@@ -427,19 +427,18 @@ export class CostOptimizer {
   
   private calculateQualityScore(model: TransformedModel): number {
     let score = 50; // Base score
-    const caps = (model.nexusCapabilities as Record<string, boolean>) || {};
-    
-    if (caps.reasoning) score += 20;
-    if (caps.thinking) score += 15;
-    if (caps.artifacts) score += 10;
-    if (caps.webSearch) score += 5;
-    if (caps.codeInterpreter) score += 5;
-    if (caps.codeExecution) score += 5;
-    
+
+    if (hasCapability(model.capabilities, 'reasoning')) score += 20;
+    if (hasCapability(model.capabilities, 'thinking')) score += 15;
+    if (hasCapability(model.capabilities, 'artifacts')) score += 10;
+    if (hasCapability(model.capabilities, 'webSearch')) score += 5;
+    if (hasCapability(model.capabilities, 'codeInterpreter')) score += 5;
+    if (hasCapability(model.capabilities, 'codeExecution')) score += 5;
+
     // Bonus for larger context windows
     if ((model.maxTokens || 0) > 100000) score += 10;
     if ((model.maxTokens || 0) > 500000) score += 10;
-    
+
     return Math.min(100, score);
   }
   
@@ -478,11 +477,10 @@ export class CostOptimizer {
         reasons.push(`Fast response time of ${model.averageLatencyMs || 1000}ms`);
         break;
       case 'quality': {
-        const caps = (model.nexusCapabilities as Record<string, boolean>) || {};
         const features: string[] = [];
-        if (caps.reasoning) features.push('advanced reasoning');
-        if (caps.thinking) features.push('thinking display');
-        if (caps.artifacts) features.push('artifact creation');
+        if (hasCapability(model.capabilities, 'reasoning')) features.push('advanced reasoning');
+        if (hasCapability(model.capabilities, 'thinking')) features.push('thinking display');
+        if (hasCapability(model.capabilities, 'artifacts')) features.push('artifact creation');
         if (features.length > 0) {
           reasons.push(`High quality with ${features.join(', ')}`);
         }

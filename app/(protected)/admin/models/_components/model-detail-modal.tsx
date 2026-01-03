@@ -28,6 +28,7 @@ import { cn } from "@/lib/utils"
 import { ProviderBadge, PROVIDER_OPTIONS } from "./provider-badge"
 import type { SelectAiModel } from "@/types/db-types"
 import type { NexusCapabilities, ProviderMetadata } from "@/lib/db/types/jsonb"
+import { capabilitiesToNexusCapabilities } from "@/lib/ai/capability-utils"
 
 // Form data type
 export interface ModelFormData {
@@ -56,23 +57,6 @@ export interface ModelFormData {
   providerMetadata: ProviderMetadata
 }
 
-// Default capabilities for new models
-const DEFAULT_NEXUS_CAPABILITIES: NexusCapabilities = {
-  canvas: false,
-  thinking: false,
-  artifacts: false,
-  grounding: false,
-  reasoning: false,
-  webSearch: false,
-  computerUse: false,
-  responsesAPI: false,
-  codeExecution: false,
-  promptCaching: false,
-  contextCaching: false,
-  workspaceTools: false,
-  codeInterpreter: false,
-}
-
 // Empty form state
 const emptyFormData: ModelFormData = {
   name: "",
@@ -92,7 +76,7 @@ const emptyFormData: ModelFormData = {
   averageLatencyMs: null,
   maxConcurrency: null,
   supportsBatching: false,
-  nexusCapabilities: { ...DEFAULT_NEXUS_CAPABILITIES },
+  nexusCapabilities: capabilitiesToNexusCapabilities(""),
   providerMetadata: {},
 }
 
@@ -192,11 +176,8 @@ export function ModelDetailModal({
         averageLatencyMs: model.averageLatencyMs || null,
         maxConcurrency: model.maxConcurrency || null,
         supportsBatching: model.supportsBatching || false,
-        nexusCapabilities: model.nexusCapabilities
-          ? typeof model.nexusCapabilities === "string"
-            ? JSON.parse(model.nexusCapabilities)
-            : model.nexusCapabilities
-          : { ...DEFAULT_NEXUS_CAPABILITIES },
+        // Convert capabilities field to NexusCapabilities object for UI
+        nexusCapabilities: capabilitiesToNexusCapabilities(model.capabilities),
         providerMetadata: model.providerMetadata
           ? typeof model.providerMetadata === "string"
             ? JSON.parse(model.providerMetadata)

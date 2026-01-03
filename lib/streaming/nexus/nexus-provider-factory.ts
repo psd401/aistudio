@@ -3,6 +3,7 @@ import { createProviderModelWithCapabilities } from '@/lib/ai/provider-factory';
 import { createLogger, generateRequestId, sanitizeForLogging } from '@/lib/logger';
 import { executeSQL, type DatabaseRow } from './db-helpers';
 import type { ProviderCapabilities } from '@/lib/streaming/types';
+import { hasCapability } from '@/lib/ai/capability-utils';
 
 const log = createLogger({ module: 'nexus-provider-factory' });
 
@@ -19,7 +20,7 @@ interface DatabaseModelInfo extends DatabaseRow {
   averageLatencyMs?: number;
   maxConcurrency?: number;
   supportsBatching?: boolean;
-  nexusCapabilities?: Record<string, unknown>;
+  capabilities?: string | string[] | null;
   providerMetadata?: Record<string, unknown>;
   allowedRoles?: string[];
 }
@@ -230,29 +231,28 @@ export class NexusProviderFactory {
       supportsBatching: false
     };
     
-    // Use nexus_capabilities from database if available
-    if (modelInfo?.nexusCapabilities) {
+    // Use capabilities from database if available
+    if (modelInfo?.capabilities) {
       try {
-        const nexusCaps = modelInfo.nexusCapabilities;
-        // Apply all capabilities from database
-        enhanced.responsesAPI = Boolean(nexusCaps.responsesAPI) || false;
-        enhanced.promptCaching = Boolean(nexusCaps.promptCaching) || false;
-        enhanced.contextCaching = Boolean(nexusCaps.contextCaching) || false;
-        enhanced.artifacts = Boolean(nexusCaps.artifacts) || false;
-        enhanced.canvas = Boolean(nexusCaps.canvas) || false;
-        enhanced.webSearch = Boolean(nexusCaps.webSearch) || false;
-        enhanced.codeInterpreter = Boolean(nexusCaps.codeInterpreter) || false;
-        enhanced.grounding = Boolean(nexusCaps.grounding) || false;
-        enhanced.codeExecution = Boolean(nexusCaps.codeExecution) || false;
-        enhanced.computerUse = Boolean(nexusCaps.computerUse) || false;
-        enhanced.workspaceTools = Boolean(nexusCaps.workspaceTools) || false;
-        enhanced.supportsReasoning = Boolean(nexusCaps.reasoning) || baseCapabilities.supportsReasoning;
-        enhanced.supportsThinking = Boolean(nexusCaps.thinking) || baseCapabilities.supportsThinking;
+        // Apply all capabilities from database using the unified capabilities field
+        enhanced.responsesAPI = hasCapability(modelInfo.capabilities, 'responsesAPI');
+        enhanced.promptCaching = hasCapability(modelInfo.capabilities, 'promptCaching');
+        enhanced.contextCaching = hasCapability(modelInfo.capabilities, 'contextCaching');
+        enhanced.artifacts = hasCapability(modelInfo.capabilities, 'artifacts');
+        enhanced.canvas = hasCapability(modelInfo.capabilities, 'canvas');
+        enhanced.webSearch = hasCapability(modelInfo.capabilities, 'webSearch');
+        enhanced.codeInterpreter = hasCapability(modelInfo.capabilities, 'codeInterpreter');
+        enhanced.grounding = hasCapability(modelInfo.capabilities, 'grounding');
+        enhanced.codeExecution = hasCapability(modelInfo.capabilities, 'codeExecution');
+        enhanced.computerUse = hasCapability(modelInfo.capabilities, 'computerUse');
+        enhanced.workspaceTools = hasCapability(modelInfo.capabilities, 'workspaceTools');
+        enhanced.supportsReasoning = hasCapability(modelInfo.capabilities, 'reasoning') || baseCapabilities.supportsReasoning;
+        enhanced.supportsThinking = hasCapability(modelInfo.capabilities, 'thinking') || baseCapabilities.supportsThinking;
       } catch (error) {
-        log.warn('Failed to parse nexus capabilities from database', {
+        log.warn('Failed to parse capabilities from database', {
           provider,
           modelId,
-          nexusCapabilities: modelInfo?.nexusCapabilities,
+          capabilities: modelInfo?.capabilities,
           error: error instanceof Error ? error.message : String(error)
         });
       }
@@ -451,7 +451,7 @@ export class NexusProviderFactory {
   private async loadModelsFromDatabase(): Promise<DatabaseModelInfo[]> {
     try {
       const results = await executeSQL<DatabaseModelInfo>(`
-        SELECT 
+        SELECT
           provider,
           model_id as "modelId",
           name,
@@ -463,14 +463,14 @@ export class NexusProviderFactory {
           average_latency_ms as "averageLatencyMs",
           max_concurrency as "maxConcurrency",
           supports_batching as "supportsBatching",
-          nexus_capabilities as "nexusCapabilities",
+          capabilities,
           provider_metadata as "providerMetadata",
           allowed_roles as "allowedRoles"
-        FROM ai_models 
+        FROM ai_models
         WHERE enabled = true
         ORDER BY provider, model_id
       `);
-      
+
       return results;
     } catch (error) {
       log.error('Failed to load models from database', { error });
@@ -496,7 +496,7 @@ export class NexusProviderFactory {
           average_latency_ms as "averageLatencyMs",
           max_concurrency as "maxConcurrency",
           supports_batching as "supportsBatching",
-          nexus_capabilities as "nexusCapabilities",
+          capabilities,
           provider_metadata as "providerMetadata",
           allowed_roles as "allowedRoles"
         FROM ai_models

@@ -47,7 +47,9 @@ import {
 } from "@/lib/db/schema";
 import { createLogger, generateRequestId } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
-import type { NexusCapabilities, ProviderMetadata } from "@/lib/db/types/jsonb";
+import type { ProviderMetadata } from "@/lib/db/types/jsonb";
+import type { CapabilityKey, DatabaseCapability } from "@/lib/ai/capability-utils";
+import { toDatabaseCapability } from "@/lib/ai/capability-utils";
 import { countAsInt } from "@/lib/db/drizzle/helpers/pagination";
 
 // ============================================
@@ -72,7 +74,6 @@ export interface AIModelData {
   averageLatencyMs?: number | null;
   maxConcurrency?: number | null;
   supportsBatching?: boolean | null;
-  nexusCapabilities?: NexusCapabilities | null;
   providerMetadata?: ProviderMetadata | null;
 }
 
@@ -94,7 +95,6 @@ export interface AIModelUpdateData {
   averageLatencyMs?: number | null;
   maxConcurrency?: number | null;
   supportsBatching?: boolean | null;
-  nexusCapabilities?: NexusCapabilities | null;
   providerMetadata?: ProviderMetadata | null;
 }
 
@@ -130,7 +130,6 @@ export async function getAIModels() {
           averageLatencyMs: aiModels.averageLatencyMs,
           maxConcurrency: aiModels.maxConcurrency,
           supportsBatching: aiModels.supportsBatching,
-          nexusCapabilities: aiModels.nexusCapabilities,
           providerMetadata: aiModels.providerMetadata,
         })
         .from(aiModels)
@@ -236,45 +235,48 @@ export async function getAIModelsByProvider(provider: string) {
 }
 
 /**
- * Get models with specific Nexus capabilities
- * Queries JSONB nexus_capabilities field for capability flags at the database level
+ * Get models with specific capabilities
+ *
+ * Queries the `capabilities` TEXT field (JSON array) for capability values.
+ * Part of Issue #594 - Consolidate to single capabilities field.
+ *
+ * @param requiredCapabilities - Array of required capability keys (camelCase)
+ * @returns Models that have ALL the specified capabilities
+ *
+ * @example
+ * ```typescript
+ * // Find models with web search and code interpreter
+ * const models = await getModelsWithCapabilities(['webSearch', 'codeInterpreter']);
+ * ```
  */
 export async function getModelsWithCapabilities(
-  capabilities: Partial<NexusCapabilities>
+  requiredCapabilities: CapabilityKey[]
 ) {
-  // Whitelist of valid NexusCapabilities keys to prevent SQL injection
-  const validKeys: Set<keyof NexusCapabilities> = new Set([
-    "canvas",
-    "thinking",
-    "artifacts",
-    "grounding",
-    "reasoning",
-    "webSearch",
-    "computerUse",
-    "responsesAPI",
-    "codeExecution",
-    "promptCaching",
-    "contextCaching",
-    "workspaceTools",
-    "codeInterpreter",
-  ]);
+  // Convert runtime capability keys to database format (snake_case)
+  const dbCapabilities = requiredCapabilities
+    .map((cap) => toDatabaseCapability(cap))
+    .filter((cap): cap is DatabaseCapability => cap !== undefined);
 
-  // Build JSONB conditions for database-level filtering with validated keys
-  const conditions = Object.entries(capabilities)
-    .filter(([key, value]) => {
-      // Only include valid keys that are set to true
-      return value === true && validKeys.has(key as keyof NexusCapabilities);
-    })
-    .map(([key]) => {
-      // Runtime assertion: Key must be alphanumeric for SQL safety
-      // This defends against whitelist compromise or extension errors
-      if (!/^[A-Za-z]+$/.test(key)) {
-        throw new Error(`Invalid capability key format: ${key}`);
-      }
+  if (dbCapabilities.length === 0) {
+    // If no valid capabilities requested, return all active Nexus-enabled models
+    return executeQuery(
+      (db) =>
+        db
+          .select()
+          .from(aiModels)
+          .where(and(eq(aiModels.active, true), eq(aiModels.nexusEnabled, true)))
+          .orderBy(aiModels.provider, aiModels.name),
+      "getModelsWithCapabilities"
+    );
+  }
 
-      // Use COALESCE to handle null/missing fields as false
-      return sql`COALESCE((${aiModels.nexusCapabilities} ->> ${key})::boolean, false) = true`;
-    });
+  // Build conditions to check each capability exists in the JSON array
+  // The capabilities field stores a JSON array like '["web_search", "canvas"]'
+  const conditions = dbCapabilities.map((cap) => {
+    // Use JSON containment operator to check if array contains the capability
+    // capabilities::jsonb @> '["web_search"]' checks if array contains "web_search"
+    return sql`${aiModels.capabilities}::jsonb @> ${JSON.stringify([cap])}::jsonb`;
+  });
 
   return executeQuery(
     (db) =>
@@ -323,7 +325,6 @@ export async function createAIModel(modelData: AIModelData) {
           averageLatencyMs: modelData.averageLatencyMs,
           maxConcurrency: modelData.maxConcurrency,
           supportsBatching: modelData.supportsBatching,
-          nexusCapabilities: modelData.nexusCapabilities,
           providerMetadata: modelData.providerMetadata ?? {},
         })
         .returning(),

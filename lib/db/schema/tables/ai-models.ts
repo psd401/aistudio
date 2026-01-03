@@ -1,6 +1,10 @@
 /**
  * AI Models Table Schema
  * AI/LLM model registry with capabilities and pricing
+ *
+ * Issue #594: Removed nexusCapabilities JSONB column.
+ * All capability checks now use the unified `capabilities` TEXT/JSON array field
+ * via @/lib/ai/capability-utils helpers.
  */
 
 import {
@@ -13,7 +17,7 @@ import {
   text,
   timestamp,
 } from "drizzle-orm/pg-core";
-import type { NexusCapabilities, ProviderMetadata } from "@/lib/db/types/jsonb";
+import type { ProviderMetadata } from "@/lib/db/types/jsonb";
 
 export const aiModels = pgTable("ai_models", {
   id: serial("id").primaryKey(),
@@ -45,7 +49,7 @@ export const aiModels = pgTable("ai_models", {
   averageLatencyMs: integer("average_latency_ms"),
   maxConcurrency: integer("max_concurrency").default(10),
   supportsBatching: boolean("supports_batching").default(false),
-  nexusCapabilities: jsonb("nexus_capabilities").$type<NexusCapabilities>(),
+  // nexusCapabilities removed in Issue #594 - use capabilities field instead
   providerMetadata: jsonb("provider_metadata")
     .$type<ProviderMetadata>()
     .default({}),

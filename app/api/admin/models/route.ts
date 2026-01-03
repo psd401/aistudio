@@ -235,8 +235,7 @@ export async function POST(request: Request) {
       averageLatencyMs: body.averageLatencyMs || undefined,
       maxConcurrency: body.maxConcurrency || undefined,
       supportsBatching: body.supportsBatching ?? undefined,
-      // JSONB fields - these are already objects from the frontend
-      nexusCapabilities: body.nexusCapabilities || undefined,
+      // JSONB fields - providerMetadata only (nexusCapabilities removed in #594)
       providerMetadata: body.providerMetadata || undefined
     };
 

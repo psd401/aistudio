@@ -11,6 +11,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { IconPlus, IconEdit, IconTrash, IconChevronRight } from '@tabler/icons-react';
 import type { SelectAiModel, NexusCapabilities, ProviderMetadata } from '@/types';
 import { MultiSelect, type MultiSelectOption } from '@/components/ui/multi-select';
+import { capabilitiesToNexusCapabilities } from '@/lib/ai/capability-utils';
 import { Badge } from '@/components/ui/badge';
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible';
 import {
@@ -557,22 +558,6 @@ type ModelFormData = {
   providerMetadata: ProviderMetadata;
 };
 
-const DEFAULT_NEXUS_CAPABILITIES: NexusCapabilities = {
-  canvas: false,
-  thinking: false,
-  artifacts: false,
-  grounding: false,
-  reasoning: false,
-  webSearch: false,
-  computerUse: false,
-  responsesAPI: false,
-  codeExecution: false,
-  promptCaching: false,
-  contextCaching: false,
-  workspaceTools: false,
-  codeInterpreter: false
-} as const;
-
 const emptyModel: ModelFormData = {
   name: '',
   provider: '',
@@ -594,7 +579,7 @@ const emptyModel: ModelFormData = {
   maxConcurrency: null,
   supportsBatching: false,
   // Capability/Metadata fields
-  nexusCapabilities: { ...DEFAULT_NEXUS_CAPABILITIES },
+  nexusCapabilities: capabilitiesToNexusCapabilities(''),
   providerMetadata: {}
 };
 
@@ -816,19 +801,8 @@ export const AiModelsTable = React.memo(function AiModelsTable({
       averageLatencyMs: model.averageLatencyMs || null,
       maxConcurrency: model.maxConcurrency || null,
       supportsBatching: model.supportsBatching || false,
-      // Capability/Metadata fields - parse JSON strings if needed
-      nexusCapabilities: (() => {
-        if (!model.nexusCapabilities) {
-          return { ...DEFAULT_NEXUS_CAPABILITIES };
-        }
-        try {
-          return typeof model.nexusCapabilities === 'string' 
-            ? JSON.parse(model.nexusCapabilities) 
-            : model.nexusCapabilities;
-        } catch {
-          return { ...DEFAULT_NEXUS_CAPABILITIES };
-        }
-      })(),
+      // Capability/Metadata fields - convert from capabilities to nexusCapabilities for UI
+      nexusCapabilities: capabilitiesToNexusCapabilities(model.capabilities),
       providerMetadata: (() => {
         if (!model.providerMetadata) return {};
         try {
