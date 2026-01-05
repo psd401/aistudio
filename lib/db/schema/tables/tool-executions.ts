@@ -20,7 +20,7 @@ export const toolExecutions = pgTable("tool_executions", {
   userId: integer("user_id")
     .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
-  inputData: jsonb("input_data").notNull().$type<Record<string, unknown>>(),
+  inputData: jsonb("input_data").$type<Record<string, unknown>>().default({}).notNull(),
   status: executionStatusEnum("status").default("pending").notNull(),
   errorMessage: text("error_message"),
   startedAt: timestamp("started_at").defaultNow().notNull(),

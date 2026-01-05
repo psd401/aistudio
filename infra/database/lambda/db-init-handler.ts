@@ -67,7 +67,8 @@ const MIGRATION_FILES = [
   '043-migrate-documents-conversation-uuid.sql',
   '044-add-model-availability-flags.sql',
   '045-remove-chat-enabled-column.sql',
-  '046-remove-nexus-capabilities-column.sql'
+  '046-remove-nexus-capabilities-column.sql',
+  '047-add-jsonb-defaults.sql'
   // ADD NEW MIGRATIONS HERE - they will run once and be tracked
 ];
 
