@@ -11,7 +11,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, asc } from "drizzle-orm";
+import { eq, and, asc, sql } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { assistantArchitectEvents } from "@/lib/db/schema";
 import type { SSEEventType, SSEEventMap } from "@/types/sse-events";
@@ -60,7 +60,7 @@ export async function storeExecutionEvent<K extends SSEEventType>(
       db.insert(assistantArchitectEvents).values({
         executionId,
         eventType,
-        eventData: fullEventData as Record<string, unknown>,
+        eventData: sql`${JSON.stringify(fullEventData)}::jsonb`,
       }),
     "storeExecutionEvent"
   );

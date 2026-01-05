@@ -271,12 +271,12 @@ export async function createMessage(
           conversationId: data.conversationId,
           role: data.role,
           content: data.content || null,
-          parts: data.parts || null,
+          parts: data.parts ? sql`${JSON.stringify(data.parts)}::jsonb` : null,
           modelId: data.modelId || null,
           reasoningContent: data.reasoningContent || null,
-          tokenUsage: data.tokenUsage || null,
+          tokenUsage: data.tokenUsage ? sql`${JSON.stringify(data.tokenUsage)}::jsonb` : null,
           finishReason: data.finishReason || null,
-          metadata: data.metadata || {},
+          metadata: sql`${JSON.stringify(data.metadata || {})}::jsonb`,
         })
         .returning(),
     "createMessage"
@@ -303,24 +303,24 @@ export async function upsertMessage(
           conversationId,
           role: data.role,
           content: data.content || null,
-          parts: data.parts || null,
+          parts: data.parts ? sql`${JSON.stringify(data.parts)}::jsonb` : null,
           modelId: data.modelId || null,
           reasoningContent: data.reasoningContent || null,
-          tokenUsage: data.tokenUsage || null,
+          tokenUsage: data.tokenUsage ? sql`${JSON.stringify(data.tokenUsage)}::jsonb` : null,
           finishReason: data.finishReason || null,
-          metadata: data.metadata || {},
+          metadata: sql`${JSON.stringify(data.metadata || {})}::jsonb`,
         })
         .onConflictDoUpdate({
           target: nexusMessages.id,
           set: {
             role: data.role,
             content: data.content || null,
-            parts: data.parts || null,
+            parts: data.parts ? sql`${JSON.stringify(data.parts)}::jsonb` : null,
             modelId: data.modelId || null,
             reasoningContent: data.reasoningContent || null,
-            tokenUsage: data.tokenUsage || null,
+            tokenUsage: data.tokenUsage ? sql`${JSON.stringify(data.tokenUsage)}::jsonb` : null,
             finishReason: data.finishReason || null,
-            metadata: data.metadata || {},
+            metadata: sql`${JSON.stringify(data.metadata || {})}::jsonb`,
             updatedAt: new Date(),
           },
         })
@@ -347,12 +347,12 @@ export async function batchCreateMessages(
     conversationId: msg.conversationId,
     role: msg.role,
     content: msg.content || null,
-    parts: msg.parts || null,
+    parts: msg.parts ? sql`${JSON.stringify(msg.parts)}::jsonb` : null,
     modelId: msg.modelId || null,
     reasoningContent: msg.reasoningContent || null,
-    tokenUsage: msg.tokenUsage || null,
+    tokenUsage: msg.tokenUsage ? sql`${JSON.stringify(msg.tokenUsage)}::jsonb` : null,
     finishReason: msg.finishReason || null,
-    metadata: msg.metadata || {},
+    metadata: sql`${JSON.stringify(msg.metadata || {})}::jsonb`,
   }));
 
   return executeQuery(
@@ -370,14 +370,41 @@ export async function updateMessage(
   conversationId: string,
   updates: UpdateMessageData
 ): Promise<SelectNexusMessage | null> {
+  // Build update object with explicit JSONB casting for JSONB fields
+  const updateData: Record<string, unknown> = {
+    updatedAt: new Date(),
+  };
+
+  // Non-JSONB fields
+  if (updates.content !== undefined) {
+    updateData.content = updates.content;
+  }
+  if (updates.modelId !== undefined) {
+    updateData.modelId = updates.modelId;
+  }
+  if (updates.reasoningContent !== undefined) {
+    updateData.reasoningContent = updates.reasoningContent;
+  }
+  if (updates.finishReason !== undefined) {
+    updateData.finishReason = updates.finishReason;
+  }
+
+  // JSONB fields with explicit casting
+  if (updates.parts !== undefined) {
+    updateData.parts = updates.parts ? sql`${JSON.stringify(updates.parts)}::jsonb` : null;
+  }
+  if (updates.tokenUsage !== undefined) {
+    updateData.tokenUsage = updates.tokenUsage ? sql`${JSON.stringify(updates.tokenUsage)}::jsonb` : null;
+  }
+  if (updates.metadata !== undefined) {
+    updateData.metadata = sql`${JSON.stringify(updates.metadata)}::jsonb`;
+  }
+
   const result = await executeQuery(
     (db) =>
       db
         .update(nexusMessages)
-        .set({
-          ...updates,
-          updatedAt: new Date(),
-        })
+        .set(updateData)
         .where(
           and(
             eq(nexusMessages.id, messageId),

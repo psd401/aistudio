@@ -619,7 +619,7 @@ export async function createJob(data: CreateJobData): Promise<StreamingJob> {
           userId: data.userId,
           modelId: data.modelId,
           status: "pending",
-          requestData: requestDataForDb,
+          requestData: sql`${JSON.stringify(requestDataForDb)}::jsonb`,
         })
         .returning(),
     "createJob"
@@ -721,14 +721,9 @@ export async function completeJob(
     unknown
   >;
 
-  const updateData: {
-    status: "completed";
-    responseData: Record<string, unknown>;
-    completedAt: Date;
-    partialContent?: string;
-  } = {
+  const updateData: Record<string, unknown> = {
     status: "completed",
-    responseData: responseDataForDb,
+    responseData: sql`${JSON.stringify(responseDataForDb)}::jsonb`,
     completedAt: new Date(),
   };
 

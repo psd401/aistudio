@@ -8,7 +8,6 @@ import { executeQuery } from '@/lib/db/drizzle-client';
 import { hasCapability } from '@/lib/ai/capability-utils';
 import { eq, sql } from 'drizzle-orm';
 import { nexusConversations, nexusMessages } from '@/lib/db/schema';
-import type { MessagePart } from '@/lib/db/drizzle/nexus-messages';
 import { processMessagesWithAttachments } from '@/lib/services/attachment-storage-service';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import type { StreamRequest } from '@/lib/streaming/types';
@@ -293,7 +292,7 @@ export async function POST(req: Request) {
             title: sanitizedTitle,
             messageCount: 0,
             totalTokens: 0,
-            metadata: { source: 'nexus', streaming: true } as Record<string, unknown>,
+            metadata: sql`${JSON.stringify({ source: 'nexus', streaming: true })}::jsonb`,
             createdAt: now,
             updatedAt: now
           })
@@ -393,9 +392,9 @@ export async function POST(req: Request) {
             conversationId,
             role: 'user',
             content: userContent || '',
-            parts: serializableParts as MessagePart[],
+            parts: sql`${JSON.stringify(serializableParts)}::jsonb`,
             modelId: dbModelId,
-            metadata: {},
+            metadata: sql`${JSON.stringify({})}::jsonb`,
             createdAt: new Date()
           }),
         'saveUserMessage'
@@ -517,15 +516,15 @@ export async function POST(req: Request) {
                   conversationId,
                   role: 'assistant',
                   content: sanitizedAssistantContent,
-                  parts: [{ type: 'text', text: sanitizedAssistantContent }] as MessagePart[],
+                  parts: sql`${JSON.stringify([{ type: 'text', text: sanitizedAssistantContent }])}::jsonb`,
                   modelId: dbModelId,
-                  tokenUsage: {
+                  tokenUsage: sql`${JSON.stringify({
                     promptTokens: usage?.promptTokens || 0,
                     completionTokens: usage?.completionTokens || 0,
                     totalTokens: usage?.totalTokens || 0
-                  },
+                  })}::jsonb`,
                   finishReason: finishReason || 'stop',
-                  metadata: {},
+                  metadata: sql`${JSON.stringify({})}::jsonb`,
                   createdAt: now,
                   updatedAt: now
                 }),

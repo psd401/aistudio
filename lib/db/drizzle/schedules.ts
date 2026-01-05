@@ -290,8 +290,8 @@ export async function createSchedule(
           userId: data.userId,
           assistantArchitectId: data.assistantArchitectId,
           name: data.name,
-          scheduleConfig: data.scheduleConfig,
-          inputData: data.inputData,
+          scheduleConfig: sql`${JSON.stringify(data.scheduleConfig)}::jsonb`,
+          inputData: sql`${JSON.stringify(data.inputData)}::jsonb`,
           active: true,
           updatedBy: data.updatedBy ?? null,
         })
@@ -331,10 +331,10 @@ export async function updateSchedule(
     updateData.assistantArchitectId = data.assistantArchitectId;
   }
   if (data.scheduleConfig !== undefined) {
-    updateData.scheduleConfig = data.scheduleConfig;
+    updateData.scheduleConfig = sql`${JSON.stringify(data.scheduleConfig)}::jsonb`;
   }
   if (data.inputData !== undefined) {
-    updateData.inputData = data.inputData;
+    updateData.inputData = sql`${JSON.stringify(data.inputData)}::jsonb`;
   }
   if (data.active !== undefined) {
     updateData.active = data.active;
@@ -417,7 +417,7 @@ export async function createExecutionResult(
         .insert(executionResults)
         .values({
           scheduledExecutionId: data.scheduledExecutionId,
-          resultData: data.resultData,
+          resultData: sql`${JSON.stringify(data.resultData)}::jsonb`,
           status: data.status,
           executionDurationMs: data.executionDurationMs ?? null,
           errorMessage: data.errorMessage ?? null,
