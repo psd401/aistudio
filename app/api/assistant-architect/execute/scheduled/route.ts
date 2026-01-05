@@ -302,13 +302,12 @@ export async function POST(req: NextRequest) {
     // Explicitly stringify and cast to jsonb to ensure proper parameter binding.
     // See: https://github.com/drizzle-team/drizzle-orm/issues/724
     // Related: Issue #599
-    const safeInputData = inputs && typeof inputs === 'object' ? inputs : {};
     const executionResult = await executeQuery(
       (db) => db.insert(toolExecutions)
         .values({
           assistantArchitectId: toolId,
           userId,
-          inputData: sql`${JSON.stringify(safeInputData)}::jsonb`,
+          inputData: sql`${JSON.stringify(inputs)}::jsonb`,
           status: 'running',
           startedAt: new Date()
         })

@@ -628,6 +628,61 @@ await executeQuery(
 );
 ```
 
+### ⚠️ AWS Data API JSONB Workaround
+
+**CRITICAL**: When using AWS Data API driver, JSONB values must be explicitly cast to prevent serialization errors.
+
+The Drizzle ORM AWS Data API driver has a known issue ([drizzle-team/drizzle-orm#724](https://github.com/drizzle-team/drizzle-orm/issues/724)) where JavaScript objects are not properly serialized to JSONB. The driver's `toValueParam` function only handles primitive types (string, number, boolean, Date, null) and throws `Unknown type for ${value}` when receiving objects.
+
+**Solution**: Use explicit JSONB casting with `sql` template tag:
+
+```typescript
+import { sql } from 'drizzle-orm';
+
+// ❌ WRONG - Will fail with AWS Data API
+await executeQuery(
+  (db) => db.insert(toolExecutions)
+    .values({
+      inputData: { key: 'value' } as Record<string, unknown>,
+      // Other fields...
+    }),
+  "createExecution"
+);
+
+// ✅ CORRECT - Use explicit JSONB casting
+await executeQuery(
+  (db) => db.insert(toolExecutions)
+    .values({
+      inputData: sql`${JSON.stringify({ key: 'value' })}::jsonb`,
+      // Other fields...
+    }),
+  "createExecution"
+);
+
+// For complex objects, extract to variable for clarity
+const executionData = {
+  originalContent: content,
+  processedContent: processed,
+  metadata: { source: 'api' }
+};
+
+await executeQuery(
+  (db) => db.insert(executionResults)
+    .values({
+      resultData: sql`${JSON.stringify(executionData)}::jsonb`,
+      // Other fields...
+    }),
+  "saveResult"
+);
+```
+
+**When this workaround is needed:**
+- All JSONB inserts and updates when using AWS Data API driver
+- Especially critical for empty objects `{}` which commonly fail
+- Applies to both scheduled and interactive execution routes
+
+**Note**: This workaround bypasses Drizzle's type checking for the JSONB field. Ensure your objects match the expected schema type before stringification.
+
 ---
 
 ## Pagination

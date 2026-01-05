@@ -6,7 +6,7 @@ import { getAssistantArchitectByIdAction } from '@/actions/db/assistant-architec
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
 import { getAIModelById } from '@/lib/db/drizzle';
 import { executeQuery } from '@/lib/db/drizzle-client';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { toolExecutions, promptResults } from '@/lib/db/schema';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from '@/lib/assistant-architect/knowledge-retrieval';
@@ -259,12 +259,14 @@ export async function POST(req: Request) {
     }));
 
     // 6. Create tool_execution record
+    // WORKAROUND: Use explicit JSONB casting for AWS Data API compatibility
+    // See: https://github.com/drizzle-team/drizzle-orm/issues/724
     const executionResult = await executeQuery(
       (db) => db.insert(toolExecutions)
         .values({
           assistantArchitectId: toolId,
           userId,
-          inputData: inputs as Record<string, unknown>,
+          inputData: sql`${JSON.stringify(inputs)}::jsonb`,
           status: 'running',
           startedAt: new Date()
         })
@@ -820,16 +822,18 @@ async function executeSinglePromptWithCompletion(
 
               const startedAt = new Date(Date.now() - executionTimeMs);
 
+              // WORKAROUND: Use explicit JSONB casting for AWS Data API compatibility
+              const promptInputData = {
+                originalContent: prompt.content,
+                processedContent,
+                repositoryContext: repositoryContext ? 'included' : 'none'
+              };
               await executeQuery(
                 (db) => db.insert(promptResults)
                   .values({
                     executionId: context.executionId,
                     promptId: prompt.id,
-                    inputData: {
-                      originalContent: prompt.content,
-                      processedContent,
-                      repositoryContext: repositoryContext ? 'included' : 'none'
-                    } as Record<string, unknown>,
+                    inputData: sql`${JSON.stringify(promptInputData)}::jsonb`,
                     outputData: text || '',
                     status: 'completed',
                     startedAt,
@@ -987,13 +991,15 @@ async function executeSinglePromptWithCompletion(
     }).catch(err => log.error('Failed to store prompt error event', { error: err }));
 
     // Save failed prompt result
+    // WORKAROUND: Use explicit JSONB casting for AWS Data API compatibility
     const now = new Date();
+    const failedInputData = { prompt: prompt.content };
     await executeQuery(
       (db) => db.insert(promptResults)
         .values({
           executionId: context.executionId,
           promptId: prompt.id,
-          inputData: { prompt: prompt.content } as Record<string, unknown>,
+          inputData: sql`${JSON.stringify(failedInputData)}::jsonb`,
           outputData: '',
           status: 'failed',
           errorMessage: promptError instanceof Error ? promptError.message : String(promptError),
