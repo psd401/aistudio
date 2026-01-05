@@ -4,7 +4,7 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { ErrorFactories } from '@/lib/error-utils';
 import { getUserById, getAssistantArchitectById, getChainPrompts, getAIModelById } from '@/lib/db/drizzle';
 import { executeQuery } from '@/lib/db/drizzle-client';
-import { eq, desc } from 'drizzle-orm';
+import { eq, desc, sql } from 'drizzle-orm';
 import { toolExecutions, promptResults, executionResults, scheduledExecutions } from '@/lib/db/schema';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from '@/lib/assistant-architect/knowledge-retrieval';
@@ -298,12 +298,17 @@ export async function POST(req: NextRequest) {
     }));
 
     // 6. Create tool_execution record
+    // WORKAROUND: Drizzle ORM AWS Data API driver has issues with JSONB serialization.
+    // Explicitly stringify and cast to jsonb to ensure proper parameter binding.
+    // See: https://github.com/drizzle-team/drizzle-orm/issues/724
+    // Related: Issue #599
+    const safeInputData = inputs && typeof inputs === 'object' ? inputs : {};
     const executionResult = await executeQuery(
       (db) => db.insert(toolExecutions)
         .values({
           assistantArchitectId: toolId,
           userId,
-          inputData: inputs as Record<string, unknown>,
+          inputData: sql`${JSON.stringify(safeInputData)}::jsonb`,
           status: 'running',
           startedAt: new Date()
         })
@@ -378,12 +383,13 @@ export async function POST(req: NextRequest) {
       });
 
       // Update execution_results for UI/notification with result data and duration
+      // WORKAROUND: Use explicit JSONB casting for AWS Data API compatibility
       await executeQuery(
         (db) => db.update(executionResults)
           .set({
             status: 'success',
             executedAt: new Date(),
-            resultData: resultData as Record<string, unknown>,
+            resultData: sql`${JSON.stringify(resultData)}::jsonb`,
             executionDurationMs
           })
           .where(eq(executionResults.id, executionResultId)),
@@ -743,16 +749,18 @@ async function executePromptChainServerSide(
               const completedAt = new Date();
               const startedAt = new Date(completedAt.getTime() - executionTimeMs);
 
+              // WORKAROUND: Use explicit JSONB casting for AWS Data API compatibility
+              const promptInputData = {
+                originalContent: prompt.content,
+                processedContent,
+                repositoryContext: repositoryContext ? 'included' : 'none'
+              };
               await executeQuery(
                 (db) => db.insert(promptResults)
                   .values({
                     executionId: context.executionId,
                     promptId: prompt.id,
-                    inputData: {
-                      originalContent: prompt.content,
-                      processedContent,
-                      repositoryContext: repositoryContext ? 'included' : 'none'
-                    } as Record<string, unknown>,
+                    inputData: sql`${JSON.stringify(promptInputData)}::jsonb`,
                     outputData: text || '',
                     status: resultStatus as 'completed',
                     startedAt,
@@ -840,13 +848,15 @@ async function executePromptChainServerSide(
       });
 
       // Save failed prompt result
+      // WORKAROUND: Use explicit JSONB casting for AWS Data API compatibility
       const now = new Date();
+      const failedInputData = { prompt: prompt.content };
       await executeQuery(
         (db) => db.insert(promptResults)
           .values({
             executionId: context.executionId,
             promptId: prompt.id,
-            inputData: { prompt: prompt.content } as Record<string, unknown>,
+            inputData: sql`${JSON.stringify(failedInputData)}::jsonb`,
             outputData: '',
             status: 'failed',
             errorMessage: promptError instanceof Error ? promptError.message : String(promptError),
