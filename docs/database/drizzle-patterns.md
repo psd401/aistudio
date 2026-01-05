@@ -634,10 +634,11 @@ await executeQuery(
 
 The Drizzle ORM AWS Data API driver has a known issue ([drizzle-team/drizzle-orm#724](https://github.com/drizzle-team/drizzle-orm/issues/724)) where JavaScript objects are not properly serialized to JSONB. The driver's `toValueParam` function only handles primitive types (string, number, boolean, Date, null) and throws `Unknown type for ${value}` when receiving objects.
 
-**Solution**: Use explicit JSONB casting with `sql` template tag:
+**Solution**: Use the `safeJsonbStringify` utility with explicit JSONB casting:
 
 ```typescript
 import { sql } from 'drizzle-orm';
+import { safeJsonbStringify } from '@/lib/db/json-utils';
 
 // ❌ WRONG - Will fail with AWS Data API
 await executeQuery(
@@ -649,11 +650,11 @@ await executeQuery(
   "createExecution"
 );
 
-// ✅ CORRECT - Use explicit JSONB casting
+// ✅ CORRECT - Use safeJsonbStringify with explicit JSONB casting
 await executeQuery(
   (db) => db.insert(toolExecutions)
     .values({
-      inputData: sql`${JSON.stringify({ key: 'value' })}::jsonb`,
+      inputData: sql`${safeJsonbStringify({ key: 'value' })}::jsonb`,
       // Other fields...
     }),
   "createExecution"
@@ -669,12 +670,18 @@ const executionData = {
 await executeQuery(
   (db) => db.insert(executionResults)
     .values({
-      resultData: sql`${JSON.stringify(executionData)}::jsonb`,
+      resultData: sql`${safeJsonbStringify(executionData)}::jsonb`,
       // Other fields...
     }),
   "saveResult"
 );
 ```
+
+**Why use safeJsonbStringify:**
+- Handles top-level `undefined` (converts to `null`)
+- Catches circular reference errors with descriptive messages
+- Provides centralized error handling
+- Never returns `undefined` (breaks type contract)
 
 **When this workaround is needed:**
 - All JSONB inserts and updates when using AWS Data API driver
