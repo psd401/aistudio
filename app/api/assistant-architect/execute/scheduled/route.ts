@@ -13,6 +13,7 @@ import type { StreamRequest } from '@/lib/streaming/types';
 import type { UIMessage } from 'ai';
 import jwt from 'jsonwebtoken';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+import { safeJsonbStringify } from '@/lib/db/json-utils';
 
 // Allow up to 15 minutes for long scheduled executions
 export const maxDuration = 900;
@@ -307,7 +308,7 @@ export async function POST(req: NextRequest) {
         .values({
           assistantArchitectId: toolId,
           userId,
-          inputData: sql`${JSON.stringify(inputs)}::jsonb`,
+          inputData: sql`${safeJsonbStringify(inputs)}::jsonb`,
           status: 'running',
           startedAt: new Date()
         })
@@ -388,7 +389,7 @@ export async function POST(req: NextRequest) {
           .set({
             status: 'success',
             executedAt: new Date(),
-            resultData: sql`${JSON.stringify(resultData)}::jsonb`,
+            resultData: sql`${safeJsonbStringify(resultData)}::jsonb`,
             executionDurationMs
           })
           .where(eq(executionResults.id, executionResultId)),
@@ -759,7 +760,7 @@ async function executePromptChainServerSide(
                   .values({
                     executionId: context.executionId,
                     promptId: prompt.id,
-                    inputData: sql`${JSON.stringify(promptInputData)}::jsonb`,
+                    inputData: sql`${safeJsonbStringify(promptInputData)}::jsonb`,
                     outputData: text || '',
                     status: resultStatus as 'completed',
                     startedAt,
@@ -855,7 +856,7 @@ async function executePromptChainServerSide(
           .values({
             executionId: context.executionId,
             promptId: prompt.id,
-            inputData: sql`${JSON.stringify(failedInputData)}::jsonb`,
+            inputData: sql`${safeJsonbStringify(failedInputData)}::jsonb`,
             outputData: '',
             status: 'failed',
             errorMessage: promptError instanceof Error ? promptError.message : String(promptError),

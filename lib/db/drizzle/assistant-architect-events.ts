@@ -15,6 +15,7 @@ import { eq, and, asc, sql } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { assistantArchitectEvents } from "@/lib/db/schema";
 import type { SSEEventType, SSEEventMap } from "@/types/sse-events";
+import { safeJsonbStringify } from "@/lib/db/json-utils";
 
 // ============================================
 // Types
@@ -60,7 +61,7 @@ export async function storeExecutionEvent<K extends SSEEventType>(
       db.insert(assistantArchitectEvents).values({
         executionId,
         eventType,
-        eventData: sql`${JSON.stringify(fullEventData)}::jsonb`,
+        eventData: sql`${safeJsonbStringify(fullEventData)}::jsonb`,
       }),
     "storeExecutionEvent"
   );

@@ -13,6 +13,7 @@ import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-servi
 import type { StreamRequest } from '@/lib/streaming/types';
 import { getModelConfig } from '@/lib/ai/model-config';
 import { sanitizeTextForDatabase } from '@/lib/utils/text-sanitizer';
+import { safeJsonbStringify } from '@/lib/db/json-utils';
 
 // Allow streaming responses up to 5 minutes for long-running conversations
 export const maxDuration = 300;
@@ -292,7 +293,7 @@ export async function POST(req: Request) {
             title: sanitizedTitle,
             messageCount: 0,
             totalTokens: 0,
-            metadata: sql`${JSON.stringify({ source: 'nexus', streaming: true })}::jsonb`,
+            metadata: sql`${safeJsonbStringify({ source: 'nexus', streaming: true })}::jsonb`,
             createdAt: now,
             updatedAt: now
           })
@@ -392,9 +393,9 @@ export async function POST(req: Request) {
             conversationId,
             role: 'user',
             content: userContent || '',
-            parts: sql`${JSON.stringify(serializableParts)}::jsonb`,
+            parts: serializableParts.length > 0 ? sql`${safeJsonbStringify(serializableParts)}::jsonb` : null,
             modelId: dbModelId,
-            metadata: sql`${JSON.stringify({})}::jsonb`,
+            metadata: sql`${safeJsonbStringify({})}::jsonb`,
             createdAt: new Date()
           }),
         'saveUserMessage'
@@ -510,21 +511,24 @@ export async function POST(req: Request) {
             const sanitizedAssistantContent = sanitizeTextForDatabase(text);
 
             const now = new Date();
+            const assistantParts = [{ type: 'text', text: sanitizedAssistantContent }];
+            const assistantTokenUsage = {
+              promptTokens: usage?.promptTokens || 0,
+              completionTokens: usage?.completionTokens || 0,
+              totalTokens: usage?.totalTokens || 0
+            };
+
             await executeQuery(
               (db) => db.insert(nexusMessages)
                 .values({
                   conversationId,
                   role: 'assistant',
                   content: sanitizedAssistantContent,
-                  parts: sql`${JSON.stringify([{ type: 'text', text: sanitizedAssistantContent }])}::jsonb`,
+                  parts: sql`${safeJsonbStringify(assistantParts)}::jsonb`,
                   modelId: dbModelId,
-                  tokenUsage: sql`${JSON.stringify({
-                    promptTokens: usage?.promptTokens || 0,
-                    completionTokens: usage?.completionTokens || 0,
-                    totalTokens: usage?.totalTokens || 0
-                  })}::jsonb`,
+                  tokenUsage: sql`${safeJsonbStringify(assistantTokenUsage)}::jsonb`,
                   finishReason: finishReason || 'stop',
-                  metadata: sql`${JSON.stringify({})}::jsonb`,
+                  metadata: sql`${safeJsonbStringify({})}::jsonb`,
                   createdAt: now,
                   updatedAt: now
                 }),

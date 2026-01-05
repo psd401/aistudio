@@ -29,6 +29,7 @@ import {
 } from "@/lib/db/schema";
 import { createLogger, sanitizeForLogging } from "@/lib/logger";
 import { getUserIdByCognitoSubAsNumber } from "./utils";
+import { safeJsonbStringify } from "@/lib/db/json-utils";
 
 // Re-export ScheduleConfig from jsonb types (used in schema)
 import type { ScheduleConfig } from "@/lib/db/types/jsonb";
@@ -290,8 +291,8 @@ export async function createSchedule(
           userId: data.userId,
           assistantArchitectId: data.assistantArchitectId,
           name: data.name,
-          scheduleConfig: sql`${JSON.stringify(data.scheduleConfig)}::jsonb`,
-          inputData: sql`${JSON.stringify(data.inputData)}::jsonb`,
+          scheduleConfig: sql`${safeJsonbStringify(data.scheduleConfig)}::jsonb`,
+          inputData: sql`${safeJsonbStringify(data.inputData)}::jsonb`,
           active: true,
           updatedBy: data.updatedBy ?? null,
         })
@@ -331,10 +332,10 @@ export async function updateSchedule(
     updateData.assistantArchitectId = data.assistantArchitectId;
   }
   if (data.scheduleConfig !== undefined) {
-    updateData.scheduleConfig = sql`${JSON.stringify(data.scheduleConfig)}::jsonb`;
+    updateData.scheduleConfig = sql`${safeJsonbStringify(data.scheduleConfig)}::jsonb`;
   }
   if (data.inputData !== undefined) {
-    updateData.inputData = sql`${JSON.stringify(data.inputData)}::jsonb`;
+    updateData.inputData = sql`${safeJsonbStringify(data.inputData)}::jsonb`;
   }
   if (data.active !== undefined) {
     updateData.active = data.active;
@@ -417,7 +418,7 @@ export async function createExecutionResult(
         .insert(executionResults)
         .values({
           scheduledExecutionId: data.scheduledExecutionId,
-          resultData: sql`${JSON.stringify(data.resultData)}::jsonb`,
+          resultData: sql`${safeJsonbStringify(data.resultData)}::jsonb`,
           status: data.status,
           executionDurationMs: data.executionDurationMs ?? null,
           errorMessage: data.errorMessage ?? null,

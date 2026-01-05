@@ -15,6 +15,7 @@ import { ErrorFactories } from '@/lib/error-utils';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
 import type { StreamRequest } from '@/lib/streaming/types';
 import { storeExecutionEvent } from '@/lib/assistant-architect/event-storage';
+import { safeJsonbStringify } from '@/lib/db/json-utils';
 
 // Allow streaming responses up to 15 minutes for long chains
 export const maxDuration = 900;
@@ -266,7 +267,7 @@ export async function POST(req: Request) {
         .values({
           assistantArchitectId: toolId,
           userId,
-          inputData: sql`${JSON.stringify(inputs)}::jsonb`,
+          inputData: sql`${safeJsonbStringify(inputs)}::jsonb`,
           status: 'running',
           startedAt: new Date()
         })
@@ -833,7 +834,7 @@ async function executeSinglePromptWithCompletion(
                   .values({
                     executionId: context.executionId,
                     promptId: prompt.id,
-                    inputData: sql`${JSON.stringify(promptInputData)}::jsonb`,
+                    inputData: sql`${safeJsonbStringify(promptInputData)}::jsonb`,
                     outputData: text || '',
                     status: 'completed',
                     startedAt,
@@ -999,7 +1000,7 @@ async function executeSinglePromptWithCompletion(
         .values({
           executionId: context.executionId,
           promptId: prompt.id,
-          inputData: sql`${JSON.stringify(failedInputData)}::jsonb`,
+          inputData: sql`${safeJsonbStringify(failedInputData)}::jsonb`,
           outputData: '',
           status: 'failed',
           errorMessage: promptError instanceof Error ? promptError.message : String(promptError),
