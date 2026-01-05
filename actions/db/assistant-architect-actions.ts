@@ -55,8 +55,9 @@ import {
   createNavigationItem
 } from "@/lib/db/drizzle";
 import { executeQuery } from "@/lib/db/drizzle-client";
-import { eq, and, inArray, desc } from "drizzle-orm";
+import { eq, and, inArray, desc, sql } from "drizzle-orm";
 import { tools, navigationItems, toolInputFields, chainPrompts, assistantArchitects, roleTools, userRoles, toolExecutions, promptResults } from "@/lib/db/schema";
+import { safeJsonbStringify } from "@/lib/db/json-utils";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -1357,7 +1358,7 @@ export async function createToolExecutionAction(
           .values({
             assistantArchitectId: execution.assistantArchitectId,
             userId: execution.userId,
-            inputData: execution.inputData || {},
+            inputData: sql`${safeJsonbStringify(execution.inputData || {})}::jsonb`,
             status: "pending",
             startedAt: new Date()
           })
