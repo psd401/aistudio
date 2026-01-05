@@ -1351,6 +1351,10 @@ export async function createToolExecutionAction(
 
     execution.userId = userId
 
+    const inputData = execution.inputData && Object.keys(execution.inputData).length > 0
+      ? execution.inputData
+      : { __no_inputs: true };
+
     const [result] = await executeQuery(
       (db) =>
         db
@@ -1358,7 +1362,7 @@ export async function createToolExecutionAction(
           .values({
             assistantArchitectId: execution.assistantArchitectId,
             userId: execution.userId,
-            inputData: sql`${safeJsonbStringify(execution.inputData || {})}::jsonb`,
+            inputData: sql`${safeJsonbStringify(inputData)}::jsonb`,
             status: "pending",
             startedAt: new Date()
           })

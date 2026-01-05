@@ -262,12 +262,14 @@ export async function POST(req: Request) {
     // 6. Create tool_execution record
     // WORKAROUND: Use explicit JSONB casting for AWS Data API compatibility
     // See: https://github.com/drizzle-team/drizzle-orm/issues/724
+    const inputData = Object.keys(inputs).length > 0 ? inputs : { __no_inputs: true };
+
     const executionResult = await executeQuery(
       (db) => db.insert(toolExecutions)
         .values({
           assistantArchitectId: toolId,
           userId,
-          inputData: sql`${safeJsonbStringify(inputs)}::jsonb`,
+          inputData: sql`${safeJsonbStringify(inputData)}::jsonb`,
           status: 'running',
           startedAt: new Date()
         })
