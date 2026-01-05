@@ -262,7 +262,10 @@ export async function POST(req: Request) {
     // 6. Create tool_execution record
     // WORKAROUND: Use explicit JSONB casting for AWS Data API compatibility
     // See: https://github.com/drizzle-team/drizzle-orm/issues/724
-    const inputData = Object.keys(inputs).length > 0 ? inputs : { __no_inputs: true };
+    // Create a clean copy of inputs to avoid issues with object references from req.json()
+    const inputData = Object.keys(inputs).length > 0
+      ? JSON.parse(JSON.stringify(inputs))
+      : { __no_inputs: true };
 
     const executionResult = await executeQuery(
       (db) => db.insert(toolExecutions)

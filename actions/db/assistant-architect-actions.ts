@@ -1351,8 +1351,9 @@ export async function createToolExecutionAction(
 
     execution.userId = userId
 
+    // Create a clean copy of inputs to avoid issues with object references
     const inputData = execution.inputData && Object.keys(execution.inputData).length > 0
-      ? execution.inputData
+      ? JSON.parse(JSON.stringify(execution.inputData))
       : { __no_inputs: true };
 
     const [result] = await executeQuery(
