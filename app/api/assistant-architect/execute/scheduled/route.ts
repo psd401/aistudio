@@ -310,7 +310,7 @@ export async function POST(req: NextRequest) {
         .values({
           assistantArchitectId: toolId,
           userId,
-          inputData,
+          inputData: sql`${safeJsonbStringify(inputData)}::jsonb`,
           status: 'running',
           startedAt: new Date()
         })
