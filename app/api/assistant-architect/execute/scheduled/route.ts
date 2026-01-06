@@ -5,7 +5,7 @@ import { ErrorFactories } from '@/lib/error-utils';
 import { getUserById, getAssistantArchitectById, getChainPrompts, getAIModelById } from '@/lib/db/drizzle';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { eq, desc, sql } from 'drizzle-orm';
-import { toolExecutions, promptResults, executionResults, scheduledExecutions } from '@/lib/db/schema';
+import { promptResults, scheduledExecutions } from '@/lib/db/schema';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from '@/lib/assistant-architect/knowledge-retrieval';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
@@ -13,7 +13,6 @@ import type { StreamRequest } from '@/lib/streaming/types';
 import type { UIMessage } from 'ai';
 import jwt from 'jsonwebtoken';
 import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
-import { safeJsonbStringify } from '@/lib/db/json-utils';
 
 // Allow up to 15 minutes for long scheduled executions
 export const maxDuration = 900;
@@ -299,26 +298,25 @@ export async function POST(req: NextRequest) {
     }));
 
     // 6. Create tool_execution record
-    // WORKAROUND: Drizzle ORM AWS Data API driver has issues with JSONB serialization.
-    // Explicitly stringify and cast to jsonb to ensure proper parameter binding.
-    // See: https://github.com/drizzle-team/drizzle-orm/issues/724
-    // Related: Issue #599
+    // CRITICAL: Drizzle's AWS Data API driver doesn't properly serialize JSONB.
+    // The driver bypasses customType.toDriver() and passes objects directly,
+    // causing RDS Data API to fail. We must use raw SQL to work around this.
+    // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
     const inputData = Object.keys(inputs).length > 0 ? inputs : { __no_inputs: true };
+    const inputDataJson = JSON.stringify(inputData);
 
     const executionResult = await executeQuery(
-      (db) => db.insert(toolExecutions)
-        .values({
-          assistantArchitectId: toolId,
-          userId,
-          inputData,
-          status: 'running',
-          startedAt: new Date()
-        })
-        .returning({ id: toolExecutions.id }),
+      (db) => db.execute(sql`
+        INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
+        VALUES (${userId}, ${inputDataJson}::jsonb, 'running', ${new Date().toISOString()}::timestamp, ${toolId})
+        RETURNING id
+      `),
       'createToolExecution'
     );
 
-    if (!executionResult || executionResult.length === 0 || !executionResult[0]?.id) {
+    // db.execute() returns { rows: [...] } format
+    const rows = executionResult.rows as Array<{ id: number }>;
+    if (!rows || rows.length === 0 || !rows[0]?.id) {
       log.error('Failed to create tool execution', { toolId });
       return new Response(
         JSON.stringify({
@@ -329,7 +327,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const executionId = Number(executionResult[0].id);
+    const executionId = Number(rows[0].id);
     log.info('Tool execution created for scheduled run', { executionId, toolId, scheduleId });
 
     // 7. Execute prompt chain server-side (no SSE)
@@ -353,13 +351,15 @@ export async function POST(req: NextRequest) {
       const executionDurationMs = Date.now() - executionStartTime;
 
       // Update execution status to completed
+      // CRITICAL: Drizzle's AWS Data API driver has issues with timestamp serialization.
+      // Must use raw SQL with db.execute() for reliable parameter binding.
+      // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
       await executeQuery(
-        (db) => db.update(toolExecutions)
-          .set({
-            status: 'completed',
-            completedAt: new Date()
-          })
-          .where(eq(toolExecutions.id, executionId)),
+        (db) => db.execute(sql`
+          UPDATE tool_executions
+          SET status = 'completed', completed_at = ${new Date().toISOString()}::timestamp
+          WHERE id = ${executionId}
+        `),
         'updateToolExecutionCompleted'
       );
 
@@ -385,16 +385,16 @@ export async function POST(req: NextRequest) {
       });
 
       // Update execution_results for UI/notification with result data and duration
-      // WORKAROUND: Use explicit JSONB casting for AWS Data API compatibility
+      // CRITICAL: Drizzle's AWS Data API driver doesn't properly serialize JSONB.
+      // Must use raw SQL with db.execute() to bypass broken parameter binding.
+      // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+      const resultDataJson = JSON.stringify(resultData);
       await executeQuery(
-        (db) => db.update(executionResults)
-          .set({
-            status: 'success',
-            executedAt: new Date(),
-            resultData: sql`${safeJsonbStringify(resultData)}::jsonb`,
-            executionDurationMs
-          })
-          .where(eq(executionResults.id, executionResultId)),
+        (db) => db.execute(sql`
+          UPDATE execution_results
+          SET status = 'success', executed_at = ${new Date().toISOString()}::timestamp, result_data = ${resultDataJson}::jsonb, execution_duration_ms = ${executionDurationMs}
+          WHERE id = ${executionResultId}
+        `),
         'updateExecutionResultSuccess'
       );
 
@@ -450,26 +450,28 @@ export async function POST(req: NextRequest) {
       const errorMessage = executionError instanceof Error ? executionError.message : String(executionError);
 
       // Update execution status to failed
+      // CRITICAL: Drizzle's AWS Data API driver has issues with timestamp serialization.
+      // Must use raw SQL with db.execute() for reliable parameter binding.
+      // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
       await executeQuery(
-        (db) => db.update(toolExecutions)
-          .set({
-            status: 'failed',
-            errorMessage,
-            completedAt: new Date()
-          })
-          .where(eq(toolExecutions.id, executionId)),
+        (db) => db.execute(sql`
+          UPDATE tool_executions
+          SET status = 'failed', error_message = ${errorMessage}, completed_at = ${new Date().toISOString()}::timestamp
+          WHERE id = ${executionId}
+        `),
         'updateToolExecutionFailed'
       );
 
       // Update execution_results for UI/notification using direct ID
+      // CRITICAL: Drizzle's AWS Data API driver has issues with timestamp serialization.
+      // Must use raw SQL with db.execute() for reliable parameter binding.
+      // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
       await executeQuery(
-        (db) => db.update(executionResults)
-          .set({
-            status: 'failed',
-            errorMessage,
-            executedAt: new Date()
-          })
-          .where(eq(executionResults.id, executionResultId)),
+        (db) => db.execute(sql`
+          UPDATE execution_results
+          SET status = 'failed', error_message = ${errorMessage}, executed_at = ${new Date().toISOString()}::timestamp
+          WHERE id = ${executionResultId}
+        `),
         'updateExecutionResultFailed'
       );
 
@@ -751,24 +753,20 @@ async function executePromptChainServerSide(
               const completedAt = new Date();
               const startedAt = new Date(completedAt.getTime() - executionTimeMs);
 
-              // WORKAROUND: Use explicit JSONB casting for AWS Data API compatibility
+              // CRITICAL: Drizzle's AWS Data API driver doesn't properly serialize JSONB.
+              // Must use raw SQL with db.execute() to bypass broken parameter binding.
+              // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
               const promptInputData = {
                 originalContent: prompt.content,
                 processedContent,
                 repositoryContext: repositoryContext ? 'included' : 'none'
               };
+              const inputDataJson = JSON.stringify(promptInputData);
               await executeQuery(
-                (db) => db.insert(promptResults)
-                  .values({
-                    executionId: context.executionId,
-                    promptId: prompt.id,
-                    inputData: sql`${safeJsonbStringify(promptInputData)}::jsonb`,
-                    outputData: text || '',
-                    status: resultStatus as 'completed',
-                    startedAt,
-                    completedAt,
-                    executionTimeMs
-                  }),
+                (db) => db.execute(sql`
+                  INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, started_at, completed_at, execution_time_ms)
+                  VALUES (${context.executionId}, ${prompt.id}, ${inputDataJson}::jsonb, ${text || ''}, ${resultStatus}, ${startedAt.toISOString()}::timestamp, ${completedAt.toISOString()}::timestamp, ${executionTimeMs})
+                `),
                 'savePromptResult'
               );
 
@@ -850,21 +848,18 @@ async function executePromptChainServerSide(
       });
 
       // Save failed prompt result
-      // WORKAROUND: Use explicit JSONB casting for AWS Data API compatibility
+      // CRITICAL: Drizzle's AWS Data API driver doesn't properly serialize JSONB.
+      // Must use raw SQL with db.execute() to bypass broken parameter binding.
+      // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
       const now = new Date();
       const failedInputData = { prompt: prompt.content };
+      const failedInputJson = JSON.stringify(failedInputData);
+      const errorMsg = promptError instanceof Error ? promptError.message : String(promptError);
       await executeQuery(
-        (db) => db.insert(promptResults)
-          .values({
-            executionId: context.executionId,
-            promptId: prompt.id,
-            inputData: sql`${safeJsonbStringify(failedInputData)}::jsonb`,
-            outputData: '',
-            status: 'failed',
-            errorMessage: promptError instanceof Error ? promptError.message : String(promptError),
-            startedAt: now,
-            completedAt: now
-          }),
+        (db) => db.execute(sql`
+          INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, error_message, started_at, completed_at)
+          VALUES (${context.executionId}, ${prompt.id}, ${failedInputJson}::jsonb, '', 'failed', ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
+        `),
         'saveFailedPromptResult'
       );
 

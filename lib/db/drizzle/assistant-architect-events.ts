@@ -15,7 +15,6 @@ import { eq, and, asc, sql } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { assistantArchitectEvents } from "@/lib/db/schema";
 import type { SSEEventType, SSEEventMap } from "@/types/sse-events";
-import { safeJsonbStringify } from "@/lib/db/json-utils";
 
 // ============================================
 // Types
@@ -41,6 +40,10 @@ export interface ExecutionEvent<K extends SSEEventType = SSEEventType> {
  * - Post-execution analysis
  * - Future real-time SSE streaming
  *
+ * CRITICAL: Drizzle's AWS Data API driver doesn't properly serialize JSONB.
+ * Must use raw SQL with db.execute() to bypass broken parameter binding.
+ * See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+ *
  * @param executionId - The tool execution ID
  * @param eventType - The type of event
  * @param eventData - The event data payload
@@ -55,14 +58,20 @@ export async function storeExecutionEvent<K extends SSEEventType>(
     ...eventData,
     timestamp: new Date().toISOString(),
   };
+  const eventDataJson = JSON.stringify(fullEventData);
+
+  // CRITICAL: Drizzle's AWS Data API driver has issues with JSONB and ENUM parameter serialization.
+  // Even with db.execute(), parameters go through the driver which can corrupt values.
+  // Using sql.raw() to embed values directly in the SQL, bypassing parameter binding.
+  // Single quotes in JSON are escaped by replacing ' with '' (SQL escape).
+  // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+  const escapedJson = eventDataJson.replace(/'/g, "''");
 
   await executeQuery(
-    (db) =>
-      db.insert(assistantArchitectEvents).values({
-        executionId,
-        eventType,
-        eventData: sql`${safeJsonbStringify(fullEventData)}::jsonb`,
-      }),
+    (db) => db.execute(sql`
+      INSERT INTO assistant_architect_events (execution_id, event_type, event_data)
+      VALUES (${executionId}, ${sql.raw(`'${eventType}'::assistant_event_type`)}, ${sql.raw(`'${escapedJson}'::jsonb`)})
+    `),
     "storeExecutionEvent"
   );
 }
