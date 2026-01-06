@@ -11,6 +11,7 @@ import {
   text,
   timestamp,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import { executionStatusEnum } from "../enums";
 import { users } from "./users";
 import { assistantArchitects } from "./assistant-architects";
@@ -20,7 +21,7 @@ export const toolExecutions = pgTable("tool_executions", {
   userId: integer("user_id")
     .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
-  inputData: jsonb("input_data").$type<Record<string, unknown>>().default({}).notNull(),
+  inputData: jsonb("input_data").$type<Record<string, unknown>>().default(sql`'{}'::jsonb`),
   status: executionStatusEnum("status").default("pending").notNull(),
   errorMessage: text("error_message"),
   startedAt: timestamp("started_at").defaultNow().notNull(),

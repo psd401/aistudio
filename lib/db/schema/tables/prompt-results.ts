@@ -17,7 +17,7 @@ import { chainPrompts } from "./chain-prompts";
 
 export const promptResults = pgTable("prompt_results", {
   id: serial("id").primaryKey(),
-  inputData: jsonb("input_data").$type<Record<string, unknown>>().default({}).notNull(),
+  inputData: jsonb("input_data").$type<Record<string, unknown>>().default({}),
   outputData: text("output_data"),
   status: executionStatusEnum("status").default("pending").notNull(),
   errorMessage: text("error_message"),

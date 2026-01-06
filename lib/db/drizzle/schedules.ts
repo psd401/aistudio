@@ -141,7 +141,12 @@ export async function getScheduleById(
     return null;
   }
 
-  return result[0];
+  // Assert non-null for JSONB fields (defaults ensure they're never null)
+  return {
+    ...result[0],
+    scheduleConfig: result[0].scheduleConfig!,
+    inputData: result[0].inputData!,
+  };
 }
 
 /**
@@ -185,7 +190,12 @@ export async function getSchedulesByUserId(
     "getSchedulesByUserId"
   );
 
-  return schedules;
+  // Assert non-null for JSONB fields (defaults ensure they're never null)
+  return schedules.map(s => ({
+    ...s,
+    scheduleConfig: s.scheduleConfig!,
+    inputData: s.inputData!,
+  }));
 }
 
 
@@ -243,7 +253,12 @@ export async function getScheduleByIdForUser(
     return null;
   }
 
-  return result[0];
+  // Assert non-null for JSONB fields (defaults ensure they're never null)
+  return {
+    ...result[0],
+    scheduleConfig: result[0].scheduleConfig!,
+    inputData: result[0].inputData!,
+  };
 }
 
 /**
@@ -305,8 +320,11 @@ export async function createSchedule(
     throw new Error("Failed to create schedule");
   }
 
+  // Assert non-null for JSONB fields (defaults ensure they're never null)
   return {
     ...result[0],
+    scheduleConfig: result[0].scheduleConfig!,
+    inputData: result[0].inputData!,
     lastExecutedAt: null,
     lastExecutionStatus: null,
   };
@@ -434,7 +452,11 @@ export async function createExecutionResult(
     throw new Error("Failed to create execution result");
   }
 
-  return result[0];
+  // Assert non-null for JSONB field (default ensures it's never null)
+  return {
+    ...result[0],
+    resultData: result[0].resultData!,
+  };
 }
 
 /**
@@ -465,7 +487,11 @@ export async function getExecutionHistory(
     "getExecutionHistory"
   );
 
-  return result;
+  // Assert non-null for JSONB field (default ensures it's never null)
+  return result.map(r => ({
+    ...r,
+    resultData: r.resultData!,
+  }));
 }
 
 /**

@@ -23,7 +23,7 @@ export const nexusMcpCapabilities = pgTable("nexus_mcp_capabilities", {
   type: varchar("type", { length: 50 }).notNull(),
   name: varchar("name", { length: 255 }).notNull(),
   description: text("description"),
-  inputSchema: jsonb("input_schema").$type<NexusMcpSchema>().default(sql`'{}'::jsonb`).notNull(),
+  inputSchema: jsonb("input_schema").$type<NexusMcpSchema>().default(sql`'{}'::jsonb`),
   outputSchema: jsonb("output_schema").$type<NexusMcpSchema>(),
   sandboxLevel: varchar("sandbox_level", { length: 50 }).default("standard"),
   rateLimit: integer("rate_limit").default(10),

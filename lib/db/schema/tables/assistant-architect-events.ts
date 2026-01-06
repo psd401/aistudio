@@ -10,6 +10,6 @@ export const assistantArchitectEvents = pgTable("assistant_architect_events", {
   id: serial("id").primaryKey(),
   executionId: integer("execution_id").notNull(),
   eventType: assistantEventTypeEnum("event_type").notNull(),
-  eventData: jsonb("event_data").$type<Record<string, unknown>>().default({}).notNull(),
+  eventData: jsonb("event_data").$type<Record<string, unknown>>().default({}),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
