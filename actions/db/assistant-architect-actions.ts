@@ -1362,7 +1362,7 @@ export async function createToolExecutionAction(
           .values({
             assistantArchitectId: execution.assistantArchitectId,
             userId: execution.userId,
-            inputData: sql`${safeJsonbStringify(inputData)}`,
+            inputData,
             status: "pending",
             startedAt: new Date()
           })

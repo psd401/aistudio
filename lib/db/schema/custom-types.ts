@@ -6,9 +6,54 @@
  *
  * Part of Epic #526 - RDS Data API to Drizzle ORM Migration
  * Issue #528 - Generate Drizzle schema from live database
+ * Issue #599 - JSONB serialization fix for AWS Data API
  */
 
 import { customType } from "drizzle-orm/pg-core";
+
+/**
+ * Custom JSONB type that properly serializes objects to JSON strings
+ * for AWS Data API compatibility.
+ *
+ * The AWS RDS Data API driver requires JSONB values to be passed as
+ * JSON strings, not raw JavaScript objects. The standard Drizzle jsonb()
+ * type doesn't perform this serialization automatically.
+ *
+ * This is the ROOT CAUSE of Issue #599 - the standard jsonb() type causes
+ * parameter binding errors because objects are passed directly instead of
+ * being serialized to strings.
+ *
+ * Usage:
+ * ```typescript
+ * import { customJsonb } from "./custom-types";
+ *
+ * export const myTable = pgTable("my_table", {
+ *   data: customJsonb<MyDataType>("data").default({}),
+ * });
+ * ```
+ *
+ * @see https://orm.drizzle.team/docs/custom-types
+ * @template TData - The TypeScript type for the JSONB data
+ * @param name - The column name in the database
+ * @returns A Drizzle column builder for JSONB with proper serialization
+ */
+export function customJsonb<TData>(name: string) {
+  return customType<{ data: TData; driverData: string }>({
+    dataType() {
+      return "jsonb";
+    },
+    toDriver(value: TData): string {
+      return JSON.stringify(value);
+    },
+    fromDriver(value: unknown): TData {
+      // AWS Data API may return already-parsed objects or strings
+      if (typeof value === "string") {
+        return JSON.parse(value) as TData;
+      }
+      return value as TData;
+    },
+  })(name);
+}
 
 /**
  * pgvector type for embedding columns
