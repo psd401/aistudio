@@ -12,7 +12,6 @@ import {
   text,
   timestamp,
 } from "drizzle-orm/pg-core";
-import { sql } from "drizzle-orm";
 import type { ScheduleConfig } from "@/lib/db/types/jsonb";
 import { users } from "./users";
 import { assistantArchitects } from "./assistant-architects";
@@ -26,8 +25,8 @@ export const scheduledExecutions = pgTable("scheduled_executions", {
     .references(() => assistantArchitects.id)
     .notNull(),
   name: text("name").notNull(),
-  scheduleConfig: jsonb("schedule_config").$type<ScheduleConfig>().default(sql`'{}'::jsonb`),
-  inputData: jsonb("input_data").$type<Record<string, string>>().default(sql`'{}'::jsonb`),
+  scheduleConfig: jsonb("schedule_config").$type<ScheduleConfig>().default({} as ScheduleConfig),
+  inputData: jsonb("input_data").$type<Record<string, string>>().default({} as Record<string, string>),
   active: boolean("active").default(true),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
