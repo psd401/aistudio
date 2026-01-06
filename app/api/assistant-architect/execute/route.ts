@@ -835,11 +835,11 @@ async function executeSinglePromptWithCompletion(
                 repositoryContext: repositoryContext ? 'included' : 'none'
               };
               const inputDataJson = JSON.stringify(promptInputData);
-              const escapedInputJson = inputDataJson.replace(/'/g, "''");
+              // Use dollar-quoting to avoid all escape interpretation issues
               await executeQuery(
                 (db) => db.execute(sql`
                   INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, started_at, completed_at, execution_time_ms)
-                  VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedInputJson}'::jsonb`)}, ${text || ''}, 'completed', ${startedAt.toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
+                  VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`$json$${inputDataJson}$json$::jsonb`)}, ${text || ''}, 'completed', ${startedAt.toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
                 `),
                 'savePromptResult'
               );
@@ -1000,12 +1000,12 @@ async function executeSinglePromptWithCompletion(
     const now = new Date();
     const failedInputData = { prompt: prompt.content };
     const failedInputJson = JSON.stringify(failedInputData);
-    const escapedFailedJson = failedInputJson.replace(/'/g, "''");
+    // Use dollar-quoting to avoid all escape interpretation issues
     const errorMsg = promptError instanceof Error ? promptError.message : String(promptError);
     await executeQuery(
       (db) => db.execute(sql`
         INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, error_message, started_at, completed_at)
-        VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedFailedJson}'::jsonb`)}, '', 'failed', ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
+        VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`$json$${failedInputJson}$json$::jsonb`)}, '', 'failed', ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
       `),
       'saveFailedPromptResult'
     );
