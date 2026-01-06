@@ -826,8 +826,8 @@ async function executeSinglePromptWithCompletion(
 
               const startedAt = new Date(Date.now() - executionTimeMs);
 
-              // CRITICAL: Drizzle's AWS Data API driver doesn't properly serialize JSONB.
-              // Must use raw SQL with db.execute() to bypass broken parameter binding.
+              // CRITICAL: Drizzle's AWS Data API driver corrupts JSONB values during parameter binding.
+              // Must use sql.raw() to embed stringified JSON directly in SQL, bypassing parameter binding.
               // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
               const promptInputData = {
                 originalContent: prompt.content,
@@ -835,10 +835,11 @@ async function executeSinglePromptWithCompletion(
                 repositoryContext: repositoryContext ? 'included' : 'none'
               };
               const inputDataJson = JSON.stringify(promptInputData);
+              const escapedInputJson = inputDataJson.replace(/'/g, "''");
               await executeQuery(
                 (db) => db.execute(sql`
                   INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, started_at, completed_at, execution_time_ms)
-                  VALUES (${context.executionId}, ${prompt.id}, ${inputDataJson}::jsonb, ${text || ''}, 'completed', ${startedAt.toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
+                  VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedInputJson}'::jsonb`)}, ${text || ''}, 'completed', ${startedAt.toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
                 `),
                 'savePromptResult'
               );
@@ -993,17 +994,18 @@ async function executeSinglePromptWithCompletion(
     }).catch(err => log.error('Failed to store prompt error event', { error: err }));
 
     // Save failed prompt result
-    // CRITICAL: Drizzle's AWS Data API driver doesn't properly serialize JSONB.
-    // Must use raw SQL with db.execute() to bypass broken parameter binding.
+    // CRITICAL: Drizzle's AWS Data API driver corrupts JSONB values during parameter binding.
+    // Must use sql.raw() to embed stringified JSON directly in SQL, bypassing parameter binding.
     // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
     const now = new Date();
     const failedInputData = { prompt: prompt.content };
     const failedInputJson = JSON.stringify(failedInputData);
+    const escapedFailedJson = failedInputJson.replace(/'/g, "''");
     const errorMsg = promptError instanceof Error ? promptError.message : String(promptError);
     await executeQuery(
       (db) => db.execute(sql`
         INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, error_message, started_at, completed_at)
-        VALUES (${context.executionId}, ${prompt.id}, ${failedInputJson}::jsonb, '', 'failed', ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
+        VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedFailedJson}'::jsonb`)}, '', 'failed', ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
       `),
       'saveFailedPromptResult'
     );
