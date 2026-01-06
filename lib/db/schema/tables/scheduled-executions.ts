@@ -25,8 +25,8 @@ export const scheduledExecutions = pgTable("scheduled_executions", {
     .references(() => assistantArchitects.id)
     .notNull(),
   name: text("name").notNull(),
-  scheduleConfig: jsonb("schedule_config").notNull().$type<ScheduleConfig>(),
-  inputData: jsonb("input_data").notNull().$type<Record<string, string>>(),
+  scheduleConfig: jsonb("schedule_config").$type<ScheduleConfig>().default({} as ScheduleConfig),
+  inputData: jsonb("input_data").$type<Record<string, string>>().default({} as Record<string, string>),
   active: boolean("active").default(true),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),

@@ -28,6 +28,7 @@ import type { UIMessage } from "ai";
 import { createLogger } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
 import { hasCapability } from "@/lib/ai/capability-utils";
+import { safeJsonbStringify } from "@/lib/db/json-utils";
 
 // ============================================
 // Constants
@@ -619,7 +620,7 @@ export async function createJob(data: CreateJobData): Promise<StreamingJob> {
           userId: data.userId,
           modelId: data.modelId,
           status: "pending",
-          requestData: requestDataForDb,
+          requestData: sql`${safeJsonbStringify(requestDataForDb)}::jsonb`,
         })
         .returning(),
     "createJob"
@@ -721,14 +722,9 @@ export async function completeJob(
     unknown
   >;
 
-  const updateData: {
-    status: "completed";
-    responseData: Record<string, unknown>;
-    completedAt: Date;
-    partialContent?: string;
-  } = {
+  const updateData: Record<string, unknown> = {
     status: "completed",
-    responseData: responseDataForDb,
+    responseData: sql`${safeJsonbStringify(responseDataForDb)}::jsonb`,
     completedAt: new Date(),
   };
 

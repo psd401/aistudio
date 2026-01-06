@@ -29,6 +29,7 @@ import {
 } from "@/lib/db/schema";
 import { createLogger, sanitizeForLogging } from "@/lib/logger";
 import { getUserIdByCognitoSubAsNumber } from "./utils";
+import { safeJsonbStringify } from "@/lib/db/json-utils";
 
 // Re-export ScheduleConfig from jsonb types (used in schema)
 import type { ScheduleConfig } from "@/lib/db/types/jsonb";
@@ -140,7 +141,12 @@ export async function getScheduleById(
     return null;
   }
 
-  return result[0];
+  // Assert non-null for JSONB fields (defaults ensure they're never null)
+  return {
+    ...result[0],
+    scheduleConfig: result[0].scheduleConfig!,
+    inputData: result[0].inputData!,
+  };
 }
 
 /**
@@ -184,7 +190,12 @@ export async function getSchedulesByUserId(
     "getSchedulesByUserId"
   );
 
-  return schedules;
+  // Assert non-null for JSONB fields (defaults ensure they're never null)
+  return schedules.map(s => ({
+    ...s,
+    scheduleConfig: s.scheduleConfig!,
+    inputData: s.inputData!,
+  }));
 }
 
 
@@ -242,7 +253,12 @@ export async function getScheduleByIdForUser(
     return null;
   }
 
-  return result[0];
+  // Assert non-null for JSONB fields (defaults ensure they're never null)
+  return {
+    ...result[0],
+    scheduleConfig: result[0].scheduleConfig!,
+    inputData: result[0].inputData!,
+  };
 }
 
 /**
@@ -290,8 +306,8 @@ export async function createSchedule(
           userId: data.userId,
           assistantArchitectId: data.assistantArchitectId,
           name: data.name,
-          scheduleConfig: data.scheduleConfig,
-          inputData: data.inputData,
+          scheduleConfig: sql`${safeJsonbStringify(data.scheduleConfig)}::jsonb`,
+          inputData: sql`${safeJsonbStringify(data.inputData)}::jsonb`,
           active: true,
           updatedBy: data.updatedBy ?? null,
         })
@@ -304,8 +320,11 @@ export async function createSchedule(
     throw new Error("Failed to create schedule");
   }
 
+  // Assert non-null for JSONB fields (defaults ensure they're never null)
   return {
     ...result[0],
+    scheduleConfig: result[0].scheduleConfig!,
+    inputData: result[0].inputData!,
     lastExecutedAt: null,
     lastExecutionStatus: null,
   };
@@ -331,10 +350,10 @@ export async function updateSchedule(
     updateData.assistantArchitectId = data.assistantArchitectId;
   }
   if (data.scheduleConfig !== undefined) {
-    updateData.scheduleConfig = data.scheduleConfig;
+    updateData.scheduleConfig = sql`${safeJsonbStringify(data.scheduleConfig)}::jsonb`;
   }
   if (data.inputData !== undefined) {
-    updateData.inputData = data.inputData;
+    updateData.inputData = sql`${safeJsonbStringify(data.inputData)}::jsonb`;
   }
   if (data.active !== undefined) {
     updateData.active = data.active;
@@ -417,7 +436,7 @@ export async function createExecutionResult(
         .insert(executionResults)
         .values({
           scheduledExecutionId: data.scheduledExecutionId,
-          resultData: data.resultData,
+          resultData: sql`${safeJsonbStringify(data.resultData)}::jsonb`,
           status: data.status,
           executionDurationMs: data.executionDurationMs ?? null,
           errorMessage: data.errorMessage ?? null,
@@ -433,7 +452,11 @@ export async function createExecutionResult(
     throw new Error("Failed to create execution result");
   }
 
-  return result[0];
+  // Assert non-null for JSONB field (default ensures it's never null)
+  return {
+    ...result[0],
+    resultData: result[0].resultData!,
+  };
 }
 
 /**
@@ -464,7 +487,11 @@ export async function getExecutionHistory(
     "getExecutionHistory"
   );
 
-  return result;
+  // Assert non-null for JSONB field (default ensures it's never null)
+  return result.map(r => ({
+    ...r,
+    resultData: r.resultData!,
+  }));
 }
 
 /**

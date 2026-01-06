@@ -26,7 +26,7 @@ export const aiStreamingJobs = pgTable("ai_streaming_jobs", {
     .references(() => aiModels.id)
     .notNull(),
   status: jobStatusEnum("status").default("pending").notNull(),
-  requestData: jsonb("request_data").notNull().$type<Record<string, unknown>>(),
+  requestData: jsonb("request_data").$type<Record<string, unknown>>().default({}),
   responseData: jsonb("response_data").$type<Record<string, unknown>>(),
   partialContent: text("partial_content"),
   errorMessage: text("error_message"),

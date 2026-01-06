@@ -5,7 +5,6 @@
 
 import {
   integer,
-  jsonb,
   pgTable,
   serial,
   text,
@@ -14,13 +13,14 @@ import {
 import { executionStatusEnum } from "../enums";
 import { users } from "./users";
 import { assistantArchitects } from "./assistant-architects";
+import { customJsonb } from "../custom-types";
 
 export const toolExecutions = pgTable("tool_executions", {
   id: serial("id").primaryKey(),
   userId: integer("user_id")
     .references(() => users.id, { onDelete: "cascade" })
     .notNull(),
-  inputData: jsonb("input_data").notNull().$type<Record<string, unknown>>(),
+  inputData: customJsonb<Record<string, unknown>>("input_data").default({}),
   status: executionStatusEnum("status").default("pending").notNull(),
   errorMessage: text("error_message"),
   startedAt: timestamp("started_at").defaultNow().notNull(),

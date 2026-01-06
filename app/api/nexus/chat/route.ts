@@ -8,12 +8,12 @@ import { executeQuery } from '@/lib/db/drizzle-client';
 import { hasCapability } from '@/lib/ai/capability-utils';
 import { eq, sql } from 'drizzle-orm';
 import { nexusConversations, nexusMessages } from '@/lib/db/schema';
-import type { MessagePart } from '@/lib/db/drizzle/nexus-messages';
 import { processMessagesWithAttachments } from '@/lib/services/attachment-storage-service';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import type { StreamRequest } from '@/lib/streaming/types';
 import { getModelConfig } from '@/lib/ai/model-config';
 import { sanitizeTextForDatabase } from '@/lib/utils/text-sanitizer';
+import { safeJsonbStringify } from '@/lib/db/json-utils';
 
 // Allow streaming responses up to 5 minutes for long-running conversations
 export const maxDuration = 300;
@@ -293,7 +293,7 @@ export async function POST(req: Request) {
             title: sanitizedTitle,
             messageCount: 0,
             totalTokens: 0,
-            metadata: { source: 'nexus', streaming: true } as Record<string, unknown>,
+            metadata: sql`${safeJsonbStringify({ source: 'nexus', streaming: true })}::jsonb`,
             createdAt: now,
             updatedAt: now
           })
@@ -393,9 +393,9 @@ export async function POST(req: Request) {
             conversationId,
             role: 'user',
             content: userContent || '',
-            parts: serializableParts as MessagePart[],
+            parts: serializableParts.length > 0 ? sql`${safeJsonbStringify(serializableParts)}::jsonb` : null,
             modelId: dbModelId,
-            metadata: {},
+            metadata: sql`${safeJsonbStringify({})}::jsonb`,
             createdAt: new Date()
           }),
         'saveUserMessage'
@@ -511,21 +511,24 @@ export async function POST(req: Request) {
             const sanitizedAssistantContent = sanitizeTextForDatabase(text);
 
             const now = new Date();
+            const assistantParts = [{ type: 'text', text: sanitizedAssistantContent }];
+            const assistantTokenUsage = {
+              promptTokens: usage?.promptTokens || 0,
+              completionTokens: usage?.completionTokens || 0,
+              totalTokens: usage?.totalTokens || 0
+            };
+
             await executeQuery(
               (db) => db.insert(nexusMessages)
                 .values({
                   conversationId,
                   role: 'assistant',
                   content: sanitizedAssistantContent,
-                  parts: [{ type: 'text', text: sanitizedAssistantContent }] as MessagePart[],
+                  parts: sql`${safeJsonbStringify(assistantParts)}::jsonb`,
                   modelId: dbModelId,
-                  tokenUsage: {
-                    promptTokens: usage?.promptTokens || 0,
-                    completionTokens: usage?.completionTokens || 0,
-                    totalTokens: usage?.totalTokens || 0
-                  },
+                  tokenUsage: sql`${safeJsonbStringify(assistantTokenUsage)}::jsonb`,
                   finishReason: finishReason || 'stop',
-                  metadata: {},
+                  metadata: sql`${safeJsonbStringify({})}::jsonb`,
                   createdAt: now,
                   updatedAt: now
                 }),

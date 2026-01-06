@@ -18,7 +18,7 @@ export const executionResults = pgTable("execution_results", {
   scheduledExecutionId: integer("scheduled_execution_id")
     .references(() => scheduledExecutions.id)
     .notNull(),
-  resultData: jsonb("result_data").notNull().$type<Record<string, unknown>>(),
+  resultData: jsonb("result_data").$type<Record<string, unknown>>().default({}),
   status: text("status").notNull(),
   executedAt: timestamp("executed_at").defaultNow(),
   executionDurationMs: integer("execution_duration_ms"),

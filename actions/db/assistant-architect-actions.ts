@@ -55,7 +55,7 @@ import {
   createNavigationItem
 } from "@/lib/db/drizzle";
 import { executeQuery } from "@/lib/db/drizzle-client";
-import { eq, and, inArray, desc } from "drizzle-orm";
+import { eq, and, inArray, desc, sql } from "drizzle-orm";
 import { tools, navigationItems, toolInputFields, chainPrompts, assistantArchitects, roleTools, userRoles, toolExecutions, promptResults } from "@/lib/db/schema";
 
 // Use inline type for architect with relations
@@ -1350,26 +1350,31 @@ export async function createToolExecutionAction(
 
     execution.userId = userId
 
-    const [result] = await executeQuery(
-      (db) =>
-        db
-          .insert(toolExecutions)
-          .values({
-            assistantArchitectId: execution.assistantArchitectId,
-            userId: execution.userId,
-            inputData: execution.inputData || {},
-            status: "pending",
-            startedAt: new Date()
-          })
-          .returning({ id: toolExecutions.id }),
-      "createToolExecution"
-    )
+    // CRITICAL: Drizzle's AWS Data API driver doesn't properly serialize JSONB.
+    // The driver bypasses customType.toDriver() and passes objects directly,
+    // causing RDS Data API to fail. We must use raw SQL to work around this.
+    // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+    const inputData = execution.inputData && Object.keys(execution.inputData).length > 0
+      ? execution.inputData
+      : { __no_inputs: true };
+    const inputDataJson = JSON.stringify(inputData);
 
-    if (!result) {
-      throw new Error("Failed to create tool execution")
+    const executionResult = await executeQuery(
+      (db) => db.execute(sql`
+        INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
+        VALUES (${execution.userId}, ${inputDataJson}::jsonb, 'pending', ${new Date().toISOString()}::timestamp, ${execution.assistantArchitectId})
+        RETURNING id
+      `),
+      "createToolExecution"
+    );
+
+    // db.execute() returns { rows: [...] } format
+    const rows = executionResult.rows as Array<{ id: number }>;
+    if (!rows || rows.length === 0 || !rows[0]?.id) {
+      throw ErrorFactories.dbQueryFailed("INSERT INTO tool_executions", new Error("No rows returned"))
     }
 
-    const executionId = result.id
+    const executionId = rows[0].id
 
     log.info("Tool execution created successfully", { executionId })
     timer({ status: "success", executionId })
