@@ -61,7 +61,8 @@ export async function executeSQL<T extends DatabaseRow = DatabaseRow>(
     'executeSQL'
   );
 
-  return result.rows as T[];
+  // postgres.js returns result directly as array-like object (no .rows property)
+  return result as unknown as T[];
 }
 
 /**
@@ -107,7 +108,8 @@ export async function executeSQLTransaction<T extends DatabaseRow = DatabaseRow>
           result = await tx.execute(sql(strings as unknown as TemplateStringsArray, ...values));
         }
 
-        results.push(result.rows as T[]);
+        // postgres.js returns result directly as array-like object
+        results.push(result as unknown as T[]);
       }
 
       return results;

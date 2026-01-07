@@ -44,11 +44,13 @@ export async function canReadPrompt(
     "canReadPrompt"
   )
 
-  if (results.rows.length === 0 || (results.rows[0] as Record<string, unknown>).deleted_at) {
+  // postgres.js returns result directly as array-like object (no .rows property)
+  const rows = results as unknown as Array<Record<string, unknown>>
+  if (rows.length === 0 || rows[0].deleted_at) {
     return false
   }
 
-  const prompt = results.rows[0] as Record<string, unknown>
+  const prompt = rows[0]
 
   // Owner can always read their own prompts - ensure numeric comparison
   if (Number(prompt.user_id) === Number(userId)) {
@@ -90,12 +92,14 @@ export async function canUpdatePrompt(
     "canUpdatePrompt"
   )
 
-  if (results.rows.length === 0) {
+  // postgres.js returns result directly as array-like object (no .rows property)
+  const rows = results as unknown as Array<Record<string, unknown>>
+  if (rows.length === 0) {
     log.warn("Prompt not found", { promptId })
     return false
   }
 
-  const row = results.rows[0] as Record<string, unknown>
+  const row = rows[0]
 
   if (row.deleted_at) {
     log.warn("Prompt is deleted", { promptId, deletedAt: row.deleted_at })
@@ -182,11 +186,13 @@ export async function canDeletePrompt(
     "canDeletePrompt"
   )
 
-  if (results.rows.length === 0 || (results.rows[0] as Record<string, unknown>).deleted_at) {
+  // postgres.js returns result directly as array-like object (no .rows property)
+  const rows = results as unknown as Array<Record<string, unknown>>
+  if (rows.length === 0 || rows[0].deleted_at) {
     return false
   }
 
-  const prompt = results.rows[0] as Record<string, unknown>
+  const prompt = rows[0]
 
   // Owner can delete their own prompts - ensure numeric comparison
   if (Number(prompt.user_id) === Number(userId)) {

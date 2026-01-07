@@ -2,9 +2,15 @@
  * JSON Utilities for Database Operations
  *
  * Provides safe JSON serialization for JSONB database fields.
- * Used with AWS Data API driver workaround for JSONB serialization.
+ * Required pattern for postgres.js + Drizzle ORM due to JSONB handling quirks.
+ * See: https://github.com/drizzle-team/drizzle-orm/issues/724
  *
- * @see /docs/database/drizzle-patterns.md - AWS Data API JSONB Workaround
+ * The pattern `sql\`${safeJsonbStringify(data)}::jsonb\`` ensures:
+ * 1. Proper JSON serialization (handles undefined, circular refs)
+ * 2. Explicit PostgreSQL JSONB type casting
+ * 3. Correct handling across different Drizzle drivers
+ *
+ * @see /docs/database/drizzle-patterns.md - JSONB Insert Pattern
  */
 
 /**

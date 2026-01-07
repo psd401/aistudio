@@ -79,7 +79,7 @@ createProviderModel(provider: string, modelId: string): Promise<LanguageModel>
 
 ## 🗄️ Database Operations
 
-**ORM**: Drizzle ORM with AWS RDS Data API driver
+**ORM**: Drizzle ORM with postgres.js driver (direct PostgreSQL connection)
 
 **Always use Drizzle queries** - Import from `@/lib/db/drizzle` for type-safe operations:
 
@@ -125,11 +125,11 @@ await executeTransaction(
 );
 ```
 
-**⚠️ CRITICAL - RDS Data API Pattern**:
+**⚠️ CRITICAL - Transaction Pattern**:
 - ✅ Use `executeTransaction()` directly for multi-statement transactions
+- ✅ Transaction isolation levels are supported (serializable, repeatable read, etc.)
 - ❌ NEVER nest `db.transaction()` inside `executeQuery()`
-- Wrong pattern causes parameter binding errors: `"limit :2params: 63,1"`
-- See Issue #583, `/docs/database/drizzle-patterns.md`, and `drizzle-client.ts` JSDoc
+- See `/docs/database/drizzle-patterns.md` and `drizzle-client.ts` JSDoc
 
 **JSONB Columns** (type-safe via `.$type<T>()`):
 ```typescript
@@ -159,8 +159,9 @@ mcp__awslabs_postgres-mcp-server__run_query
 **Aurora Serverless v2 Configuration**:
 - **Dev**: Auto-pause enabled (scales to 0 ACU when idle, saves ~$44/month)
 - **Prod**: Min 2 ACU, Max 8 ACU, always-on for reliability
-- **Connection**: RDS Data API (no connection pooling needed)
+- **Connection**: postgres.js driver with connection pooling (max: 20, idle_timeout: 20s)
 - **Backups**: Automated daily snapshots, 7-day retention (dev), 30-day (prod)
+- **Local Access**: Use `scripts/db-tunnel.sh` for SSM port forwarding to Aurora
 
 ## 📝 Server Action Template
 

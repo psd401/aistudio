@@ -418,8 +418,16 @@ export class EcsServiceConstruct extends Construct {
         AUTH_URL: props.authUrl,
         AUTH_COGNITO_CLIENT_ID: props.cognitoClientId,
         AUTH_COGNITO_ISSUER: props.cognitoIssuer,
+        // Legacy RDS Data API variables (kept for backward compatibility during migration)
         RDS_RESOURCE_ARN: props.rdsResourceArn,
         RDS_SECRET_ARN: props.rdsSecretArn,
+        // Issue #603: Direct PostgreSQL connection via postgres.js
+        // DB credentials are injected via secrets below
+        DB_HOST: ssm.StringParameter.valueForStringParameter(this, `/aistudio/${environment}/db-host`),
+        DB_PORT: '5432',
+        DB_NAME: 'aistudio',
+        DB_MAX_CONNECTIONS: '20',
+        DB_IDLE_TIMEOUT: '20',
         // Queue URLs from Processing Stack exports
         EMBEDDING_QUEUE_URL: cdk.Fn.importValue(`${environment}-EmbeddingQueueUrl`),
         FILE_PROCESSING_QUEUE_URL: cdk.Fn.importValue(`${environment}-FileProcessingQueueUrl`),
@@ -455,6 +463,16 @@ export class EcsServiceConstruct extends Construct {
         INTERNAL_API_SECRET: ecs.Secret.fromSecretsManager(
           secretsmanager.Secret.fromSecretCompleteArn(this, 'InternalApiSecret', props.internalApiSecretArn),
           'INTERNAL_API_SECRET'
+        ),
+        // Issue #603: Database credentials for postgres.js driver
+        // The RDS secret contains a JSON object with: username, password, host, port, dbname
+        DB_USER: ecs.Secret.fromSecretsManager(
+          secretsmanager.Secret.fromSecretCompleteArn(this, 'DbSecret', props.rdsSecretArn),
+          'username'
+        ),
+        DB_PASSWORD: ecs.Secret.fromSecretsManager(
+          secretsmanager.Secret.fromSecretCompleteArn(this, 'DbSecretPassword', props.rdsSecretArn),
+          'password'
         ),
       },
       // Security: Read-only root filesystem with tmpfs mounts for writable directories

@@ -1,50 +1,59 @@
 import { defineConfig } from "drizzle-kit";
 
 /**
- * Drizzle Kit Configuration for AWS RDS Data API
+ * Drizzle Kit Configuration for postgres.js driver
+ *
+ * Issue #603 - Migrated from AWS RDS Data API to direct PostgreSQL connection
  *
  * Available commands:
- * - drizzle:generate: Generate migration files from schema changes
- * - drizzle:push: Push schema changes directly to database (use with caution in production)
- * - drizzle:studio: Launch Drizzle Studio (requires direct TCP connection - not available via Data API)
- * - drizzle:check: Validate migration files for correctness
- *
- * Note: Uses AWS RDS Data API driver which works without VPC connectivity.
- * Perfect for local development and serverless environments.
+ * - npm run drizzle:generate: Generate migration files from schema changes
+ * - npm run drizzle:push: Push schema changes directly to database (use with caution)
+ * - npm run drizzle:studio: Launch Drizzle Studio (NOW WORKS with direct connection!)
+ * - npm run drizzle:check: Validate migration files for correctness
  *
  * Environment variables required:
- * - RDS_RESOURCE_ARN: Aurora cluster ARN
- * - RDS_SECRET_ARN: Secrets Manager ARN for database credentials
- * - RDS_DATABASE_NAME: Database name (defaults to 'aistudio')
+ * - DATABASE_URL: Full PostgreSQL connection string
+ *   Format: postgresql://user:password@host:port/database
+ *
+ * For local development with SSM tunnel:
+ *   1. Run: ./scripts/db-tunnel.sh dev
+ *   2. Set DATABASE_URL=postgresql://user:password@localhost:5432/aistudio
+ *   3. Run: npm run drizzle:studio
  */
 
 /**
- * Retrieves a required environment variable with proper error handling
- * @param key - Environment variable name
- * @returns Environment variable value
- * @throws Error if environment variable is not set
+ * Get database URL from environment
+ * Supports DATABASE_URL or individual DB_* variables
  */
-function getRequiredEnv(key: string): string {
-  const value = process.env[key];
-  if (!value) {
-    throw new Error(
-      `Required environment variable ${key} is not set. ` +
-        `Please ensure it's defined in your environment or .env file.`
-    );
+function getDatabaseUrl(): string {
+  if (process.env.DATABASE_URL) {
+    return process.env.DATABASE_URL;
   }
-  return value;
+
+  const host = process.env.DB_HOST;
+  const port = process.env.DB_PORT || "5432";
+  const user = process.env.DB_USER;
+  const password = process.env.DB_PASSWORD;
+  const database = process.env.DB_NAME || process.env.RDS_DATABASE_NAME || "aistudio";
+
+  if (host && user && password) {
+    return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${database}`;
+  }
+
+  throw new Error(
+    "DATABASE_URL environment variable is not set. " +
+    "Set DATABASE_URL or DB_HOST/DB_USER/DB_PASSWORD for Drizzle Kit commands. " +
+    "For local dev, use: ./scripts/db-tunnel.sh dev"
+  );
 }
 
 export default defineConfig({
   dialect: "postgresql",
-  driver: "aws-data-api",
   schema: "./lib/db/schema/index.ts",
   // Output to drizzle folder for staging - use prepare-migration.ts to format and copy to Lambda schema dir
   out: "./drizzle/migrations",
   dbCredentials: {
-    database: process.env.RDS_DATABASE_NAME || "aistudio",
-    resourceArn: getRequiredEnv("RDS_RESOURCE_ARN"),
-    secretArn: getRequiredEnv("RDS_SECRET_ARN"),
+    url: getDatabaseUrl(),
   },
   // Strict mode to ensure schema consistency
   strict: true,
