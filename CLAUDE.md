@@ -161,10 +161,9 @@ mcp__awslabs_postgres-mcp-server__run_query
 - **Prod**: Min 2 ACU, Max 8 ACU, always-on for reliability
 - **Connection**: postgres.js driver with connection pooling (max: 20, idle_timeout: 20s)
 - **Backups**: Automated daily snapshots, 7-day retention (dev), 30-day (prod)
-- **Local Access**: Use `scripts/db-tunnel.sh` for SSM port forwarding to Aurora
 
 **Connection Management** (Issue #603):
-- Use `DATABASE_URL` for local dev with db-tunnel.sh
+- Use `DATABASE_URL` for local dev (set in .env.local)
 - Use `DB_HOST/DB_USER/DB_PASSWORD` for ECS (auto-injected from Secrets Manager)
 - Connection pool auto-manages connections (max: 20 per container)
 - Graceful shutdown: Handled automatically via `instrumentation.ts`
