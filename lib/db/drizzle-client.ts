@@ -209,7 +209,7 @@ export function toPgRows<T>(result: unknown): T[] {
 
   // postgres.js results are array-like with numeric indices
   if (typeof result !== "object") {
-    throw new Error(
+    throw new TypeError(
       `Invalid postgres.js result format: expected array-like object, got ${typeof result}`
     );
   }
@@ -224,7 +224,7 @@ export function toPgRows<T>(result: unknown): T[] {
     return Array.from(result as ArrayLike<T>);
   }
 
-  throw new Error(
+  throw new TypeError(
     "Invalid postgres.js result format: expected array-like object with length property"
   );
 }

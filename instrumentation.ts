@@ -96,9 +96,10 @@ export async function register(): Promise<void> {
     // Warm up connection pool (async, non-blocking)
     // Use setImmediate to not block server startup
     setImmediate(() => {
-      warmupConnectionPool().catch((error) => {
-        // Silently catch - warmup failures are logged but shouldn't crash
-        console.error("Connection pool warmup failed:", error);
+      // warmupConnectionPool already logs errors internally
+      // Empty catch prevents unhandled rejection without redundant logging
+      warmupConnectionPool().catch(() => {
+        // Errors already logged in warmupConnectionPool
       });
     });
   }
