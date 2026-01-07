@@ -163,6 +163,33 @@ mcp__awslabs_postgres-mcp-server__run_query
 - **Backups**: Automated daily snapshots, 7-day retention (dev), 30-day (prod)
 - **Local Access**: Use `scripts/db-tunnel.sh` for SSM port forwarding to Aurora
 
+**Connection Management** (Issue #603):
+- Use `DATABASE_URL` for local dev with db-tunnel.sh
+- Use `DB_HOST/DB_USER/DB_PASSWORD` for ECS (auto-injected from Secrets Manager)
+- Connection pool auto-manages connections (max: 20 per container)
+- Graceful shutdown: Handled automatically via `instrumentation.ts`
+- Connection warmup: Pools are pre-initialized on server startup
+
+**Raw SQL Results** (postgres.js driver):
+```typescript
+import { toPgRows, executeQuery } from "@/lib/db/drizzle-client";
+import { sql } from "drizzle-orm";
+
+// Raw SQL returns array-like object (no .rows property)
+const result = await executeQuery(
+  (db) => db.execute(sql`SELECT id, name FROM users WHERE active = true`),
+  "getActiveUsers"
+);
+const users = toPgRows<{ id: number; name: string }>(result);
+```
+
+**Troubleshooting**:
+- "Connection refused": Check VPC security groups allow traffic from ECS to Aurora
+- "Too many connections": Increase Aurora max_connections or reduce `DB_MAX_CONNECTIONS` per task
+- "SSL required": Ensure connection string includes `?sslmode=require` (auto-added by drizzle-client)
+- "Connection timeout": Check `DB_CONNECT_TIMEOUT` env var (default: 10s)
+- First request slow: Connection pool warmup happens on startup; check logs for "warmed up successfully"
+
 ## 📝 Server Action Template
 
 ```typescript

@@ -76,14 +76,21 @@ function getDatabaseUrl(): string {
 /**
  * Lazy-initialized postgres.js client instance with connection pooling
  *
- * Configuration optimized for ECS Fargate:
- * - max: 20 connections per container (Aurora can handle 100s across fleet)
- * - idle_timeout: 20s (faster cleanup for idle connections)
- * - connect_timeout: 10s (fail fast on issues)
- * - max_lifetime: 3600s (1 hour, supports credential rotation)
+ * Connection Pool Sizing Calculation:
+ * - Aurora Serverless v2 max_connections: ~600 (for 2 ACU in dev), ~1200+ in prod
+ * - Expected ECS tasks: 2-10 (dev) to 4-20 (prod) with auto-scaling
+ * - Max connections per task: 20 (configurable via DB_MAX_CONNECTIONS)
+ * - Total fleet connections: 40-400 (well within Aurora limits)
+ *
+ * Timeouts:
+ * - idle_timeout: 20s (aggressive cleanup for cost optimization in serverless)
+ * - max_lifetime: 3600s (1 hour, supports Aurora credential rotation)
+ * - connect_timeout: 10s (fail fast on network issues)
  *
  * Lazy initialization is required because Next.js builds pages statically
  * and the database client should only be created at runtime.
+ *
+ * @see https://orm.drizzle.team/docs/connect-postgresql
  */
 let pgClient: ReturnType<typeof postgres> | null = null;
 
@@ -92,9 +99,10 @@ function getPgClient(): ReturnType<typeof postgres> {
     pgClient = postgres(getDatabaseUrl(), {
       max: parseInt(process.env.DB_MAX_CONNECTIONS || "20", 10),
       idle_timeout: parseInt(process.env.DB_IDLE_TIMEOUT || "20", 10),
-      connect_timeout: 10,
+      connect_timeout: parseInt(process.env.DB_CONNECT_TIMEOUT || "10", 10),
       max_lifetime: 60 * 60, // 1 hour - forces reconnection for credential rotation
       prepare: true, // Enable prepared statements for performance
+      ssl: "require", // Explicit SSL enforcement (defense in depth)
       onnotice: () => {}, // Suppress PostgreSQL notices
       debug: process.env.NODE_ENV === "development",
     });
@@ -118,7 +126,18 @@ function getPgClient(): ReturnType<typeof postgres> {
  */
 let _db: ReturnType<typeof drizzle<typeof schema>> | null = null;
 
-function getDb(): ReturnType<typeof drizzle<typeof schema>> {
+/**
+ * Get the Drizzle database instance (lazy-initialized)
+ *
+ * Use this function for explicit initialization control (e.g., in tests)
+ * or when you need to ensure the database is initialized before accessing it.
+ *
+ * For most use cases, use the `db` export directly which is a lazy Proxy.
+ *
+ * @returns Drizzle database instance with schema
+ * @throws Error if database URL is not configured
+ */
+export function getDb(): ReturnType<typeof drizzle<typeof schema>> {
   if (!_db) {
     _db = drizzle(getPgClient(), { schema });
   }
@@ -126,8 +145,23 @@ function getDb(): ReturnType<typeof drizzle<typeof schema>> {
 }
 
 /**
- * Drizzle database instance - lazily initialized on first access
- * @deprecated Use getDb() internally. This export maintains backward compatibility.
+ * Drizzle database instance - lazily initialized on first property access
+ *
+ * This is a Proxy that initializes the postgres.js connection pool on first
+ * property access. Use this for all normal database operations.
+ *
+ * IMPORTANT: Initialization errors will be thrown on first database operation.
+ *
+ * For testing or explicit initialization, use getDb() directly.
+ *
+ * @example
+ * ```typescript
+ * // Normal usage - db is initialized on first query
+ * const users = await db.select().from(usersTable);
+ *
+ * // For explicit initialization control
+ * const database = getDb();
+ * ```
  */
 export const db = new Proxy({} as ReturnType<typeof drizzle<typeof schema>>, {
   get(_, prop) {
@@ -141,6 +175,59 @@ export const db = new Proxy({} as ReturnType<typeof drizzle<typeof schema>>, {
  * Useful for typing function parameters and return values
  */
 export type DrizzleDB = typeof db;
+
+// ============================================
+// Result Type Helpers
+// ============================================
+
+/**
+ * Type-safe helper for postgres.js raw query results
+ *
+ * postgres.js returns results directly as array-like objects (no .rows property)
+ * unlike the RDS Data API which returned { rows: [...] }. This helper provides
+ * a consistent, type-safe way to handle raw SQL results.
+ *
+ * Issue #603: Consolidates the repeated `as unknown as T[]` pattern across the codebase.
+ *
+ * @param result - Raw result from postgres.js query
+ * @returns Typed array of rows
+ * @throws Error if result is not a valid array-like object
+ *
+ * @example
+ * ```typescript
+ * const result = await executeQuery(
+ *   (db) => db.execute(sql`SELECT id, name FROM users WHERE active = true`),
+ *   "getActiveUsers"
+ * );
+ * const users = toPgRows<{ id: number; name: string }>(result);
+ * ```
+ */
+export function toPgRows<T>(result: unknown): T[] {
+  if (result === null || result === undefined) {
+    return [];
+  }
+
+  // postgres.js results are array-like with numeric indices
+  if (typeof result !== "object") {
+    throw new Error(
+      `Invalid postgres.js result format: expected array-like object, got ${typeof result}`
+    );
+  }
+
+  // Handle both true arrays and array-like postgres.js results
+  if (Array.isArray(result)) {
+    return result as T[];
+  }
+
+  // postgres.js results have a length property and numeric indices
+  if ("length" in result && typeof (result as { length: unknown }).length === "number") {
+    return Array.from(result as ArrayLike<T>);
+  }
+
+  throw new Error(
+    "Invalid postgres.js result format: expected array-like object with length property"
+  );
+}
 
 // ============================================
 // Retry Options Interface

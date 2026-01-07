@@ -6,8 +6,9 @@
 #
 # Prerequisites:
 #   - AWS CLI v2 with session-manager-plugin installed
+#   - jq installed (for JSON parsing)
 #   - AWS credentials configured with appropriate IAM permissions
-#   - ECS Exec enabled on the target ECS cluster
+#   - An EC2 instance or ECS task in the VPC for tunneling
 #
 # Usage:
 #   ./scripts/db-tunnel.sh [dev|prod]
@@ -15,8 +16,10 @@
 #   ./scripts/db-tunnel.sh prod         # Connect to prod Aurora cluster (caution!)
 #
 # After running, you can:
-#   - Connect with psql: psql postgres://user:pass@localhost:5432/aistudio
-#   - Run Drizzle Studio: DATABASE_URL="postgresql://..." npm run drizzle:studio
+#   - Connect with psql: psql "$DATABASE_URL"
+#   - Run Drizzle Studio: npm run drizzle:studio
+#
+# The script creates a secure temp file with credentials that auto-deletes on exit.
 
 set -e
 
@@ -29,11 +32,24 @@ if [[ "$ENVIRONMENT" != "dev" && "$ENVIRONMENT" != "prod" ]]; then
   exit 1
 fi
 
+# Check for required tools
+if ! command -v jq &> /dev/null; then
+  echo "Error: jq is required but not installed"
+  echo "Install with: brew install jq (macOS) or apt-get install jq (Ubuntu)"
+  exit 1
+fi
+
+if ! command -v aws &> /dev/null; then
+  echo "Error: AWS CLI is required but not installed"
+  echo "See: https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html"
+  exit 1
+fi
+
 echo "=== AI Studio Database Tunnel ==="
 echo "Environment: $ENVIRONMENT"
 echo ""
 
-# Get cluster ARN and endpoint from SSM Parameter Store
+# Get cluster endpoint from SSM Parameter Store
 echo "Fetching database parameters from SSM..."
 
 DB_HOST=$(aws ssm get-parameter \
@@ -61,31 +77,6 @@ echo "Database Host: $DB_HOST"
 echo "Secret ARN: ${DB_SECRET_ARN:0:50}..."
 echo ""
 
-# Get ECS cluster and task for the tunnel
-ECS_CLUSTER="aistudio-${ENVIRONMENT}"
-echo "Looking for running ECS task in cluster: $ECS_CLUSTER"
-
-TASK_ARN=$(aws ecs list-tasks \
-  --cluster "$ECS_CLUSTER" \
-  --desired-status RUNNING \
-  --query 'taskArns[0]' \
-  --output text 2>/dev/null || echo "")
-
-if [[ -z "$TASK_ARN" || "$TASK_ARN" == "None" ]]; then
-  echo "Error: No running ECS tasks found in cluster $ECS_CLUSTER"
-  echo ""
-  echo "Alternative: Use an EC2 instance in the VPC as a jump host"
-  echo ""
-  echo "Manual port forward (if you have an EC2 instance):"
-  echo "  aws ssm start-session --target <instance-id> \\"
-  echo "    --document-name AWS-StartPortForwardingSessionToRemoteHost \\"
-  echo "    --parameters '{\"host\":[\"$DB_HOST\"],\"portNumber\":[\"5432\"],\"localPortNumber\":[\"5432\"]}'"
-  exit 1
-fi
-
-echo "Found ECS task: ${TASK_ARN##*/}"
-echo ""
-
 # Get the credentials from Secrets Manager
 echo "Retrieving database credentials..."
 CREDENTIALS=$(aws secretsmanager get-secret-value \
@@ -102,36 +93,79 @@ DB_USER=$(echo "$CREDENTIALS" | jq -r '.username // .user // "master"')
 DB_PASS=$(echo "$CREDENTIALS" | jq -r '.password')
 DB_NAME="aistudio"
 
+# Create a secure temp file for the connection string (auto-cleaned on exit)
+TEMP_FILE=$(mktemp)
+chmod 600 "$TEMP_FILE"
+
+# Cleanup temp file on script exit
+cleanup() {
+  rm -f "$TEMP_FILE"
+  echo ""
+  echo "Tunnel closed. Temporary credentials file removed."
+}
+trap cleanup EXIT
+
+# Write connection string to temp file (never echoed to terminal)
+echo "export DATABASE_URL=\"postgresql://${DB_USER}:${DB_PASS}@localhost:5432/${DB_NAME}\"" > "$TEMP_FILE"
+
 echo ""
-echo "=== Connection Ready ==="
-echo ""
-echo "Starting port forward on localhost:5432 -> $DB_HOST:5432"
-echo ""
-echo "In another terminal, use this connection string:"
-echo ""
-echo "  DATABASE_URL=\"postgresql://${DB_USER}:****@localhost:5432/${DB_NAME}\""
-echo ""
-echo "Commands:"
-echo "  psql \"postgresql://${DB_USER}:****@localhost:5432/${DB_NAME}\""
-echo "  DATABASE_URL=\"postgresql://${DB_USER}:${DB_PASS}@localhost:5432/${DB_NAME}\" npm run drizzle:studio"
-echo ""
-echo "Press Ctrl+C to stop the tunnel"
+echo "=== Finding Tunnel Target ==="
 echo ""
 
-# Start the port forward session using ECS Exec
-# Note: This requires the ECS task to have ExecuteCommand enabled
-aws ecs execute-command \
-  --cluster "$ECS_CLUSTER" \
-  --task "$TASK_ARN" \
-  --container "nextjs-app" \
-  --interactive \
-  --command "/bin/sh -c 'while true; do nc -l -p 5432 | nc $DB_HOST 5432; done'" &
+# Method 1: Try to find a bastion/jumpbox EC2 instance
+INSTANCE_ID=$(aws ec2 describe-instances \
+  --filters "Name=tag:Environment,Values=${ENVIRONMENT}" \
+            "Name=instance-state-name,Values=running" \
+  --query 'Reservations[*].Instances[*].[InstanceId,Tags[?Key==`Name`].Value|[0]]' \
+  --output text 2>/dev/null | grep -i -E "bastion|jumpbox|tunnel" | head -1 | awk '{print $1}' || echo "")
 
-# Alternative: Use SSM Session Manager port forwarding (requires EC2 or Fargate with SSM agent)
-# This is a simpler approach if direct ECS Exec port forwarding doesn't work
+if [[ -n "$INSTANCE_ID" && "$INSTANCE_ID" != "None" ]]; then
+  echo "Found bastion instance: $INSTANCE_ID"
+  echo ""
+  echo "=== Connection Ready ==="
+  echo ""
+  echo "Starting port forward on localhost:5432 -> $DB_HOST:5432"
+  echo ""
+  echo "To use the connection, source the credentials file in another terminal:"
+  echo ""
+  echo "  source $TEMP_FILE"
+  echo "  psql \"\$DATABASE_URL\""
+  echo "  # or"
+  echo "  npm run drizzle:studio"
+  echo ""
+  echo "Press Ctrl+C to stop the tunnel"
+  echo ""
+
+  aws ssm start-session \
+    --target "$INSTANCE_ID" \
+    --document-name AWS-StartPortForwardingSessionToRemoteHost \
+    --parameters "{\"host\":[\"$DB_HOST\"],\"portNumber\":[\"5432\"],\"localPortNumber\":[\"5432\"]}"
+  exit 0
+fi
+
+# Method 2: No bastion found, provide manual instructions
+echo "No bastion/jumpbox instance found with Environment=$ENVIRONMENT tag."
 echo ""
-echo "Note: If the above command fails, you can try direct SSM port forwarding"
-echo "using an EC2 instance in the same VPC as a jump host."
+echo "=== Alternative Methods ==="
+echo ""
+echo "Option 1: Deploy a bastion host in the VPC"
+echo "  - Create an EC2 instance in a private subnet with SSM Agent"
+echo "  - Tag it with Environment=${ENVIRONMENT} and Name=*bastion*"
+echo "  - Re-run this script"
+echo ""
+echo "Option 2: Use AWS Console for RDS connection"
+echo "  - Open AWS Console -> RDS -> Databases"
+echo "  - Select your Aurora cluster"
+echo "  - Use 'Query Editor' or 'Connect' features"
+echo ""
+echo "Option 3: Manual SSM port forwarding (if you have an EC2 instance)"
+echo "  aws ssm start-session --target <instance-id> \\"
+echo "    --document-name AWS-StartPortForwardingSessionToRemoteHost \\"
+echo "    --parameters '{\"host\":[\"$DB_HOST\"],\"portNumber\":[\"5432\"],\"localPortNumber\":[\"5432\"]}'"
+echo ""
+echo "Once connected, source credentials with:"
+echo "  source $TEMP_FILE"
 echo ""
 
-wait
+# Keep temp file available for manual use
+read -p "Press Enter to exit (temp credentials file will be deleted)..."
