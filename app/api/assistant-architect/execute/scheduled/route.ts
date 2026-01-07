@@ -764,10 +764,12 @@ async function executePromptChainServerSide(
               const inputDataJson = JSON.stringify(promptInputData);
               // Only escape single quotes for SQL string literal (PostgreSQL treats backslashes literally)
               const escapedInputJson = inputDataJson.replace(/'/g, "''");
+              // CRITICAL: Use sql.raw() for ENUM values - RDS Data API driver corrupts ENUM parameter binding
+              // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
               await executeQuery(
                 (db) => db.execute(sql`
                   INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, started_at, completed_at, execution_time_ms)
-                  VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedInputJson}'::jsonb`)}, ${text || ''}, ${resultStatus}, ${startedAt.toISOString()}::timestamp, ${completedAt.toISOString()}::timestamp, ${executionTimeMs})
+                  VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedInputJson}'::jsonb`)}, ${text || ''}, ${sql.raw(`'${resultStatus}'::execution_status`)}, ${startedAt.toISOString()}::timestamp, ${completedAt.toISOString()}::timestamp, ${executionTimeMs})
                 `),
                 'savePromptResult'
               );
@@ -859,10 +861,12 @@ async function executePromptChainServerSide(
       // Only escape single quotes for SQL string literal (PostgreSQL treats backslashes literally)
       const escapedFailedJson = failedInputJson.replace(/'/g, "''");
       const errorMsg = promptError instanceof Error ? promptError.message : String(promptError);
+      // CRITICAL: Use sql.raw() for ENUM values - RDS Data API driver corrupts ENUM parameter binding
+      // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
       await executeQuery(
         (db) => db.execute(sql`
           INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, error_message, started_at, completed_at)
-          VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedFailedJson}'::jsonb`)}, '', 'failed', ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
+          VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedFailedJson}'::jsonb`)}, '', ${sql.raw("'failed'::execution_status")}, ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
         `),
         'saveFailedPromptResult'
       );
