@@ -45,6 +45,8 @@ services:
     container_name: aistudio-app
     ports:
       - "3000:3000"
+    env_file:
+      - .env.local
     environment:
       # Node environment
       NODE_ENV: development
