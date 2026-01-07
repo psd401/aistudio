@@ -1368,8 +1368,8 @@ export async function createToolExecutionAction(
       "createToolExecution"
     );
 
-    // db.execute() returns { rows: [...] } format
-    const rows = executionResult.rows as Array<{ id: number }>;
+    // postgres.js returns result directly as array-like object (no .rows property - Issue #603)
+    const rows = executionResult as unknown as Array<{ id: number }>;
     if (!rows || rows.length === 0 || !rows[0]?.id) {
       throw ErrorFactories.dbQueryFailed("INSERT INTO tool_executions", new Error("No rows returned"))
     }

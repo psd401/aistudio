@@ -1,18 +1,24 @@
 /**
  * Drizzle Database Client Wrapper
  *
- * Provides a Drizzle ORM instance configured for AWS RDS Data API with
- * integrated circuit breaker and retry logic for resilience.
+ * Provides a Drizzle ORM instance configured for direct PostgreSQL connection
+ * via postgres.js driver with integrated circuit breaker and retry logic.
  *
- * Part of Epic #526 - RDS Data API to Drizzle ORM Migration
- * Issue #529 - Create Drizzle database client wrapper with circuit breaker
+ * Issue #603 - Migrate from RDS Data API to Direct PostgreSQL via postgres.js
  *
- * @see https://orm.drizzle.team/docs/connect-aws-data-api-pg
+ * Benefits of postgres.js over RDS Data API:
+ * - Native JSONB handling (no stringify workarounds needed)
+ * - Full transaction isolation level support
+ * - Parallel queries work correctly in transactions
+ * - ~10-50ms lower latency per query (TCP vs HTTP)
+ * - Connection pooling for efficient resource usage
+ *
+ * @see https://orm.drizzle.team/docs/get-started-postgresql
  */
 
-import { drizzle } from "drizzle-orm/aws-data-api/pg";
+import { drizzle } from "drizzle-orm/postgres-js";
 import { sql } from "drizzle-orm";
-import { RDSDataClient } from "@aws-sdk/client-rds-data";
+import postgres from "postgres";
 import {
   executeWithRetry,
   getCircuitBreakerState,
@@ -22,56 +28,206 @@ import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import * as schema from "./schema";
 
 // ============================================
-// RDS Data API Client Configuration
+// PostgreSQL Connection Configuration
 // ============================================
 
 /**
- * RDS Data API client instance
- * Uses server-side AWS_REGION (not NEXT_PUBLIC_AWS_REGION for security)
- */
-const rdsClient = new RDSDataClient({
-  region: process.env.AWS_REGION || "us-east-1",
-});
-
-// ============================================
-// Drizzle Instance
-// ============================================
-
-/**
- * Drizzle ORM instance configured for AWS RDS Data API
+ * Build DATABASE_URL from environment variables
  *
- * Uses environment variables:
- * - RDS_DATABASE_NAME: Database name (default: 'aistudio')
- * - RDS_SECRET_ARN: AWS Secrets Manager ARN for database credentials
- * - RDS_RESOURCE_ARN: Aurora cluster ARN
+ * Supports two configuration modes:
+ * 1. DATABASE_URL: Full connection string (preferred for local dev)
+ * 2. Individual vars: DB_HOST, DB_PORT, DB_USER, DB_PASSWORD, DB_NAME
  *
- * Validates required environment variables at module load time to fail fast
- * with clear error messages rather than cryptic runtime failures.
+ * For production on ECS, credentials are injected from Secrets Manager
+ * at container startup via the getDatabaseUrl() function.
  */
-export const db = (() => {
-  const secretArn = process.env.RDS_SECRET_ARN;
-  const resourceArn = process.env.RDS_RESOURCE_ARN;
+function getDatabaseUrl(): string {
+  // Option 1: Direct DATABASE_URL (local dev or pre-constructed URL)
+  if (process.env.DATABASE_URL) {
+    return process.env.DATABASE_URL;
+  }
 
-  if (!secretArn || !resourceArn) {
+  // Option 2: Construct from individual components
+  const host = process.env.DB_HOST;
+  const port = process.env.DB_PORT || "5432";
+  const user = process.env.DB_USER;
+  const password = process.env.DB_PASSWORD;
+  const database = process.env.DB_NAME || process.env.RDS_DATABASE_NAME || "aistudio";
+
+  if (host && user && password) {
+    return `postgresql://${encodeURIComponent(user)}:${encodeURIComponent(password)}@${host}:${port}/${database}?sslmode=require`;
+  }
+
+  // Fallback: Check for legacy RDS Data API config (error with migration guidance)
+  if (process.env.RDS_SECRET_ARN && process.env.RDS_RESOURCE_ARN) {
     throw new Error(
-      "Required environment variables RDS_SECRET_ARN and RDS_RESOURCE_ARN are not set. " +
-      "Database client cannot be initialized without these credentials."
+      "RDS Data API configuration detected but no DATABASE_URL found. " +
+      "Issue #603 migrated to postgres.js driver. " +
+      "Set DATABASE_URL or DB_HOST/DB_USER/DB_PASSWORD environment variables."
     );
   }
 
-  return drizzle(rdsClient, {
-    database: process.env.RDS_DATABASE_NAME || "aistudio",
-    secretArn,
-    resourceArn,
-    schema,
-  });
-})();
+  throw new Error(
+    "Database configuration not found. " +
+    "Set DATABASE_URL or DB_HOST/DB_USER/DB_PASSWORD environment variables."
+  );
+}
+
+/**
+ * Lazy-initialized postgres.js client instance with connection pooling
+ *
+ * Connection Pool Sizing Calculation:
+ * - Aurora Serverless v2 max_connections: ~600 (for 2 ACU in dev), ~1200+ in prod
+ * - Expected ECS tasks: 2-10 (dev) to 4-20 (prod) with auto-scaling
+ * - Max connections per task: 20 (configurable via DB_MAX_CONNECTIONS)
+ * - Total fleet connections: 40-400 (well within Aurora limits)
+ *
+ * Timeouts:
+ * - idle_timeout: 20s (aggressive cleanup for cost optimization in serverless)
+ * - max_lifetime: 3600s (1 hour, supports Aurora credential rotation)
+ * - connect_timeout: 10s (fail fast on network issues)
+ *
+ * Lazy initialization is required because Next.js builds pages statically
+ * and the database client should only be created at runtime.
+ *
+ * @see https://orm.drizzle.team/docs/connect-postgresql
+ */
+let pgClient: ReturnType<typeof postgres> | null = null;
+
+function getPgClient(): ReturnType<typeof postgres> {
+  if (!pgClient) {
+    pgClient = postgres(getDatabaseUrl(), {
+      max: parseInt(process.env.DB_MAX_CONNECTIONS || "20", 10),
+      idle_timeout: parseInt(process.env.DB_IDLE_TIMEOUT || "20", 10),
+      connect_timeout: parseInt(process.env.DB_CONNECT_TIMEOUT || "10", 10),
+      max_lifetime: 60 * 60, // 1 hour - forces reconnection for credential rotation
+      prepare: true, // Enable prepared statements for performance
+      ssl: "require", // Explicit SSL enforcement (defense in depth)
+      onnotice: () => {}, // Suppress PostgreSQL notices
+      debug: process.env.NODE_ENV === "development",
+    });
+  }
+  return pgClient;
+}
+
+// ============================================
+// Drizzle Instance (lazy-loaded)
+// ============================================
+
+/**
+ * Drizzle ORM instance configured for postgres.js driver
+ *
+ * Key improvements over RDS Data API:
+ * - Native JSONB: Pass objects directly, no JSON.stringify needed
+ * - Transactions: Full isolation level support (serializable, etc.)
+ * - Parallel queries: Promise.all() works correctly in transactions
+ *
+ * Note: This is lazy-initialized to support Next.js static builds.
+ */
+let _db: ReturnType<typeof drizzle<typeof schema>> | null = null;
+
+/**
+ * Get the Drizzle database instance (lazy-initialized)
+ *
+ * Use this function for explicit initialization control (e.g., in tests)
+ * or when you need to ensure the database is initialized before accessing it.
+ *
+ * For most use cases, use the `db` export directly which is a lazy Proxy.
+ *
+ * @returns Drizzle database instance with schema
+ * @throws Error if database URL is not configured
+ */
+export function getDb(): ReturnType<typeof drizzle<typeof schema>> {
+  if (!_db) {
+    _db = drizzle(getPgClient(), { schema });
+  }
+  return _db;
+}
+
+/**
+ * Drizzle database instance - lazily initialized on first property access
+ *
+ * This is a Proxy that initializes the postgres.js connection pool on first
+ * property access. Use this for all normal database operations.
+ *
+ * IMPORTANT: Initialization errors will be thrown on first database operation.
+ *
+ * For testing or explicit initialization, use getDb() directly.
+ *
+ * @example
+ * ```typescript
+ * // Normal usage - db is initialized on first query
+ * const users = await db.select().from(usersTable);
+ *
+ * // For explicit initialization control
+ * const database = getDb();
+ * ```
+ */
+export const db = new Proxy({} as ReturnType<typeof drizzle<typeof schema>>, {
+  get(_, prop) {
+    // Use unknown intermediate cast to avoid type inference issues
+    return (getDb() as unknown as Record<string | symbol, unknown>)[prop];
+  },
+});
 
 /**
  * Type alias for the Drizzle database instance
  * Useful for typing function parameters and return values
  */
 export type DrizzleDB = typeof db;
+
+// ============================================
+// Result Type Helpers
+// ============================================
+
+/**
+ * Type-safe helper for postgres.js raw query results
+ *
+ * postgres.js returns results directly as array-like objects (no .rows property)
+ * unlike the RDS Data API which returned { rows: [...] }. This helper provides
+ * a consistent, type-safe way to handle raw SQL results.
+ *
+ * Issue #603: Consolidates the repeated `as unknown as T[]` pattern across the codebase.
+ *
+ * @param result - Raw result from postgres.js query
+ * @returns Typed array of rows
+ * @throws Error if result is not a valid array-like object
+ *
+ * @example
+ * ```typescript
+ * const result = await executeQuery(
+ *   (db) => db.execute(sql`SELECT id, name FROM users WHERE active = true`),
+ *   "getActiveUsers"
+ * );
+ * const users = toPgRows<{ id: number; name: string }>(result);
+ * ```
+ */
+export function toPgRows<T>(result: unknown): T[] {
+  if (result === null || result === undefined) {
+    return [];
+  }
+
+  // postgres.js results are array-like with numeric indices
+  if (typeof result !== "object") {
+    throw new TypeError(
+      `Invalid postgres.js result format: expected array-like object, got ${typeof result}`
+    );
+  }
+
+  // Handle both true arrays and array-like postgres.js results
+  if (Array.isArray(result)) {
+    return result as T[];
+  }
+
+  // postgres.js results have a length property and numeric indices
+  if ("length" in result && typeof (result as { length: unknown }).length === "number") {
+    return Array.from(result as ArrayLike<T>);
+  }
+
+  throw new TypeError(
+    "Invalid postgres.js result format: expected array-like object with length property"
+  );
+}
 
 // ============================================
 // Retry Options Interface
@@ -198,23 +354,26 @@ export async function executeQuery<T>(
 /**
  * Transaction options for configuring isolation level and access mode
  *
- * ⚠️ IMPORTANT: These options are NOT supported when using AWS RDS Data API.
- * The Data API manages transactions internally and does not expose PostgreSQL
- * transaction control parameters. All options in this interface are IGNORED.
+ * ✅ FULLY SUPPORTED with postgres.js driver (Issue #603 migration)
  *
- * This interface is kept for backward compatibility and potential future use
- * with direct PostgreSQL connections, but currently has no effect.
+ * These options now work correctly, unlike the previous RDS Data API driver.
  */
 export interface TransactionOptions {
-  /** Transaction isolation level (IGNORED with RDS Data API) */
+  /**
+   * Transaction isolation level
+   * - "read uncommitted": Allows dirty reads (rarely used)
+   * - "read committed": Default PostgreSQL level
+   * - "repeatable read": Consistent reads within transaction
+   * - "serializable": Full ACID isolation (strictest)
+   */
   isolationLevel?:
     | "read uncommitted"
     | "read committed"
     | "repeatable read"
     | "serializable";
-  /** Access mode for the transaction (IGNORED with RDS Data API) */
+  /** Access mode for the transaction */
   accessMode?: "read only" | "read write";
-  /** Whether to use deferrable mode (IGNORED with RDS Data API) */
+  /** Whether to use deferrable mode (only for serializable read-only) */
   deferrable?: boolean;
 }
 
@@ -228,19 +387,16 @@ export interface TransactionOptions {
  * Transactions are automatically rolled back on error. This is the recommended
  * way to perform multi-statement operations that must succeed or fail atomically.
  *
- * **CRITICAL - RDS Data API Transaction Pattern:**
+ * **TRANSACTION PATTERN (Still recommended):**
  * ALWAYS use executeTransaction() directly. NEVER nest db.transaction() inside executeQuery().
  *
  * ❌ WRONG: executeQuery((db) => db.transaction(async (tx) => { ... }))
  * ✅ CORRECT: executeTransaction(async (tx) => { ... })
  *
- * Nesting causes parameter binding offset errors with RDS Data API driver, resulting in
- * cryptic errors like "limit :2params: 63,1" or "for updateparams: 63,1". See Issue #583.
- *
- * **IMPORTANT - RDS Data API Limitation:**
- * AWS RDS Data API does NOT support PostgreSQL transaction control parameters
- * (isolationLevel, accessMode, deferrable). Any TransactionOptions passed to this
- * function are IGNORED. The Data API manages transactions internally.
+ * **✅ postgres.js IMPROVEMENTS (Issue #603):**
+ * - Transaction options (isolationLevel, accessMode, deferrable) are NOW SUPPORTED
+ * - Parallel queries work correctly inside transactions (Promise.all() is safe)
+ * - No more parameter binding offset errors
  *
  * **IMPORTANT - Side Effect Warning:**
  * The retry mechanism will re-execute the ENTIRE transaction function on transient
@@ -257,7 +413,7 @@ export interface TransactionOptions {
  *
  * @param transactionFn - Function that performs operations within the transaction
  * @param context - Descriptive name for the operation (used in logging)
- * @param options - Optional retry configuration (transaction options ignored with Data API)
+ * @param options - Optional retry and transaction configuration
  * @returns Promise resolving to the transaction result
  * @throws Error if circuit breaker is open, all retries exhausted, or transaction fails
  *
@@ -274,14 +430,16 @@ export interface TransactionOptions {
  *       roleIds.map(roleId => ({ userId, roleId }))
  *     );
  *
- *     // Update version for optimistic locking
- *     await tx.update(users)
- *       .set({ roleVersion: sql`${users.roleVersion} + 1` })
- *       .where(eq(users.id, userId));
+ *     // ✅ NEW: Parallel queries now work correctly!
+ *     const [users, settings] = await Promise.all([
+ *       tx.select().from(usersTable).where(eq(usersTable.id, userId)),
+ *       tx.select().from(settingsTable).where(eq(settingsTable.userId, userId)),
+ *     ]);
  *
  *     return true;
  *   },
- *   "updateUserRoles"
+ *   "updateUserRoles",
+ *   { isolationLevel: "serializable" } // ✅ NOW SUPPORTED
  * );
  *
  * // Side effects AFTER transaction succeeds
@@ -314,10 +472,27 @@ export async function executeTransaction<T>(
   try {
     const result = await executeWithRetry(
       async () => {
-        // AWS RDS Data API does NOT support PostgreSQL transaction control parameters
-        // (isolationLevel, accessMode, deferrable). The Data API manages transactions
-        // internally and will fail with "Failed query: set transaction params" if you
-        // try to pass these options. Always call db.transaction() without options.
+        // postgres.js driver supports full PostgreSQL transaction options
+        const txOptions: {
+          isolationLevel?: typeof opts.isolationLevel;
+          accessMode?: typeof opts.accessMode;
+          deferrable?: boolean;
+        } = {};
+
+        if (opts.isolationLevel) {
+          txOptions.isolationLevel = opts.isolationLevel;
+        }
+        if (opts.accessMode) {
+          txOptions.accessMode = opts.accessMode;
+        }
+        if (opts.deferrable !== undefined) {
+          txOptions.deferrable = opts.deferrable;
+        }
+
+        // Pass transaction options if any were specified
+        if (Object.keys(txOptions).length > 0) {
+          return await db.transaction(transactionFn, txOptions);
+        }
         return await db.transaction(transactionFn);
       },
       context,
@@ -405,8 +580,8 @@ export function resetDatabaseCircuit() {
  * Validate database connection by executing a simple query
  *
  * Used for health checks to verify:
- * - Environment variables are configured
- * - AWS credentials are valid
+ * - Database URL is configured
+ * - Connection pool is healthy
  * - Database is accessible and responding
  *
  * @returns Object with success status and diagnostic information
@@ -415,41 +590,38 @@ export async function validateDatabaseConnection(): Promise<{
   success: boolean;
   message: string;
   config: {
-    region: string | undefined;
-    hasResourceArn: boolean;
-    hasSecretArn: boolean;
+    hasDatabaseUrl: boolean;
+    hasDbHost: boolean;
+    maxConnections: string;
     database: string;
   };
   error?: string;
 }> {
   const log = createLogger({ context: "validateDatabaseConnection" });
-  const region =
-    process.env.AWS_REGION ||
-    process.env.AWS_DEFAULT_REGION ||
-    process.env.NEXT_PUBLIC_AWS_REGION ||
-    "us-east-1";
 
   const config = {
-    region,
-    hasResourceArn: !!process.env.RDS_RESOURCE_ARN,
-    hasSecretArn: !!process.env.RDS_SECRET_ARN,
-    database: process.env.RDS_DATABASE_NAME || "aistudio",
+    hasDatabaseUrl: !!process.env.DATABASE_URL,
+    hasDbHost: !!process.env.DB_HOST,
+    maxConnections: process.env.DB_MAX_CONNECTIONS || "20",
+    database: process.env.DB_NAME || process.env.RDS_DATABASE_NAME || "aistudio",
   };
 
   try {
-    log.info("Validating database connection", { region, database: config.database });
+    log.info("Validating database connection", { database: config.database });
 
     // Execute simple query to test connectivity
+    // postgres.js returns the result array directly (no .rows property)
     const result = await executeQuery(
       (database) => database.execute(sql`SELECT 1 as test`),
       "validateConnection"
     );
 
-    if (result && result.rows && result.rows.length > 0) {
+    // postgres.js returns result as an array-like object
+    if (result && Array.isArray(result) && result.length > 0) {
       log.info("Database connectivity test passed");
       return {
         success: true,
-        message: "Database connection validated successfully",
+        message: "Database connection validated successfully (postgres.js)",
         config,
       };
     }
@@ -465,6 +637,38 @@ export async function validateDatabaseConnection(): Promise<{
       config,
       error: errorMessage,
     };
+  }
+}
+
+// ============================================
+// Graceful Shutdown
+// ============================================
+
+/**
+ * Close database connection pool
+ *
+ * Call this during graceful shutdown (e.g., ECS SIGTERM) to ensure
+ * all connections are properly closed before the process exits.
+ *
+ * @example
+ * ```typescript
+ * // In instrumentation.ts or custom server
+ * process.on('SIGTERM', async () => {
+ *   await closeDatabase();
+ *   process.exit(0);
+ * });
+ * ```
+ */
+export async function closeDatabase(): Promise<void> {
+  const log = createLogger({ context: "closeDatabase" });
+  if (pgClient) {
+    log.info("Closing database connection pool");
+    await pgClient.end({ timeout: 5 }); // 5 second timeout
+    pgClient = null;
+    _db = null;
+    log.info("Database connection pool closed");
+  } else {
+    log.info("Database connection pool was not initialized, skipping close");
   }
 }
 

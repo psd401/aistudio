@@ -1,4 +1,4 @@
-import { executeQuery, executeTransaction as executeQueryTransaction } from '@/lib/db/drizzle-client';
+import { executeQuery, executeTransaction as executeQueryTransaction, toPgRows } from '@/lib/db/drizzle-client';
 import { sql } from 'drizzle-orm';
 
 /**
@@ -61,7 +61,9 @@ export async function executeSQL<T extends DatabaseRow = DatabaseRow>(
     'executeSQL'
   );
 
-  return result.rows as T[];
+  // postgres.js returns result directly as array-like object (no .rows property)
+  // Use toPgRows helper for consistent type-safe handling
+  return toPgRows<T>(result);
 }
 
 /**
@@ -107,7 +109,9 @@ export async function executeSQLTransaction<T extends DatabaseRow = DatabaseRow>
           result = await tx.execute(sql(strings as unknown as TemplateStringsArray, ...values));
         }
 
-        results.push(result.rows as T[]);
+        // postgres.js returns result directly as array-like object
+        // Use toPgRows helper for consistent type-safe handling
+        results.push(toPgRows<T>(result));
       }
 
       return results;

@@ -112,8 +112,10 @@ export async function retrieveKnowledgeForPrompt(
     )
 
     // Runtime validation of query results
+    // postgres.js returns result directly as array-like object (no .rows property)
+    const rows = accessibleRepos as unknown as Array<Record<string, unknown>>
     const repos: Array<{ id: number; name: string }> = []
-    for (const row of accessibleRepos.rows) {
+    for (const row of rows) {
       // Validate row structure
       if (typeof row === 'object' && row !== null && 'id' in row && 'name' in row) {
         const id = row.id

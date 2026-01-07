@@ -556,8 +556,9 @@ export async function getPendingJobs(
     "getPendingJobs"
   );
 
-  // Cast rows to expected type - columns match SelectAiStreamingJob exactly
-  const rows = result.rows as unknown as SelectAiStreamingJob[];
+  // Cast result to expected type - postgres.js returns result directly as array-like
+  // (no .rows property - Issue #603 migration)
+  const rows = result as unknown as SelectAiStreamingJob[];
   return rows.map(transformToStreamingJob);
 }
 

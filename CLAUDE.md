@@ -79,7 +79,7 @@ createProviderModel(provider: string, modelId: string): Promise<LanguageModel>
 
 ## 🗄️ Database Operations
 
-**ORM**: Drizzle ORM with AWS RDS Data API driver
+**ORM**: Drizzle ORM with postgres.js driver (direct PostgreSQL connection)
 
 **Always use Drizzle queries** - Import from `@/lib/db/drizzle` for type-safe operations:
 
@@ -125,11 +125,11 @@ await executeTransaction(
 );
 ```
 
-**⚠️ CRITICAL - RDS Data API Pattern**:
+**⚠️ CRITICAL - Transaction Pattern**:
 - ✅ Use `executeTransaction()` directly for multi-statement transactions
+- ✅ Transaction isolation levels are supported (serializable, repeatable read, etc.)
 - ❌ NEVER nest `db.transaction()` inside `executeQuery()`
-- Wrong pattern causes parameter binding errors: `"limit :2params: 63,1"`
-- See Issue #583, `/docs/database/drizzle-patterns.md`, and `drizzle-client.ts` JSDoc
+- See `/docs/database/drizzle-patterns.md` and `drizzle-client.ts` JSDoc
 
 **JSONB Columns** (type-safe via `.$type<T>()`):
 ```typescript
@@ -159,8 +159,35 @@ mcp__awslabs_postgres-mcp-server__run_query
 **Aurora Serverless v2 Configuration**:
 - **Dev**: Auto-pause enabled (scales to 0 ACU when idle, saves ~$44/month)
 - **Prod**: Min 2 ACU, Max 8 ACU, always-on for reliability
-- **Connection**: RDS Data API (no connection pooling needed)
+- **Connection**: postgres.js driver with connection pooling (max: 20, idle_timeout: 20s)
 - **Backups**: Automated daily snapshots, 7-day retention (dev), 30-day (prod)
+
+**Connection Management** (Issue #603):
+- Use `DATABASE_URL` for local dev (set in .env.local)
+- Use `DB_HOST/DB_USER/DB_PASSWORD` for ECS (auto-injected from Secrets Manager)
+- Connection pool auto-manages connections (max: 20 per container)
+- Graceful shutdown: Handled automatically via `instrumentation.ts`
+- Connection warmup: Pools are pre-initialized on server startup
+
+**Raw SQL Results** (postgres.js driver):
+```typescript
+import { toPgRows, executeQuery } from "@/lib/db/drizzle-client";
+import { sql } from "drizzle-orm";
+
+// Raw SQL returns array-like object (no .rows property)
+const result = await executeQuery(
+  (db) => db.execute(sql`SELECT id, name FROM users WHERE active = true`),
+  "getActiveUsers"
+);
+const users = toPgRows<{ id: number; name: string }>(result);
+```
+
+**Troubleshooting**:
+- "Connection refused": Check VPC security groups allow traffic from ECS to Aurora
+- "Too many connections": Increase Aurora max_connections or reduce `DB_MAX_CONNECTIONS` per task
+- "SSL required": Ensure connection string includes `?sslmode=require` (auto-added by drizzle-client)
+- "Connection timeout": Check `DB_CONNECT_TIMEOUT` env var (default: 10s)
+- First request slow: Connection pool warmup happens on startup; check logs for "warmed up successfully"
 
 ## 📝 Server Action Template
 

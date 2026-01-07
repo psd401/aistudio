@@ -358,6 +358,28 @@ export class DatabaseStack extends cdk.Stack {
       description: 'Secrets Manager ARN for DB credentials',
     });
 
+    // Issue #603: Add direct PostgreSQL connection parameters for postgres.js driver
+    // These enable ECS tasks to connect directly to Aurora without Data API
+    if (!restoreFromSnapshot && this.cluster instanceof rds.DatabaseCluster) {
+      new ssm.StringParameter(this, 'DbHostParam', {
+        parameterName: `/aistudio/${props.environment}/db-host`,
+        stringValue: this.cluster.clusterEndpoint.hostname,
+        description: 'Aurora cluster endpoint hostname for direct PostgreSQL connection',
+      });
+
+      new ssm.StringParameter(this, 'DbPortParam', {
+        parameterName: `/aistudio/${props.environment}/db-port`,
+        stringValue: '5432',
+        description: 'Aurora cluster port for PostgreSQL connection',
+      });
+
+      new ssm.StringParameter(this, 'DbNameParam', {
+        parameterName: `/aistudio/${props.environment}/db-name`,
+        stringValue: 'aistudio',
+        description: 'Database name',
+      });
+    }
+
     // Keep CloudFormation outputs for backward compatibility and monitoring
     new cdk.CfnOutput(this, 'ClusterArn', {
       value: this.databaseResourceArn,

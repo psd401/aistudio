@@ -79,7 +79,10 @@ function isErrorWithMessage(error: unknown): error is { message: string } {
 }
 
 /**
- * Check if an error is retryable based on AWS error codes
+ * Check if an error is retryable based on error codes
+ *
+ * Supports both AWS errors and postgres.js/PostgreSQL errors.
+ * Issue #603 added postgres.js error code support.
  */
 export function isRetryableError(error: unknown): boolean {
   // Guard against null and undefined
@@ -87,22 +90,46 @@ export function isRetryableError(error: unknown): boolean {
     return false
   }
 
-  // Check for specific retryable AWS errors
+  // Retryable error names (AWS SDK and postgres.js)
   const retryableErrorNames = [
     'InternalServerErrorException',
     'ServiceUnavailableException',
     'ThrottlingException',
     'TooManyRequestsException',
     'RequestTimeoutException',
-    'UnknownError'
+    'UnknownError',
+    // postgres.js specific
+    'PostgresError',
+    'ConnectionError',
   ]
 
+  // Retryable error codes (Node.js and PostgreSQL)
   const retryableErrorCodes = [
+    // Node.js network errors
     'ECONNRESET',
     'ETIMEDOUT',
     'ECONNREFUSED',
     'EPIPE',
-    'ENOTFOUND'
+    'ENOTFOUND',
+    // PostgreSQL error codes (Class 08 - Connection Exception)
+    '08000', // connection_exception
+    '08003', // connection_does_not_exist
+    '08006', // connection_failure
+    '08001', // sqlclient_unable_to_establish_sqlconnection
+    '08004', // sqlserver_rejected_establishment_of_sqlconnection
+    '08007', // transaction_resolution_unknown
+    '08P01', // protocol_violation
+    // PostgreSQL error codes (Class 53 - Insufficient Resources)
+    '53000', // insufficient_resources
+    '53100', // disk_full
+    '53200', // out_of_memory
+    '53300', // too_many_connections
+    // PostgreSQL error codes (Class 57 - Operator Intervention)
+    '57000', // operator_intervention
+    '57014', // query_canceled
+    '57P01', // admin_shutdown
+    '57P02', // crash_shutdown
+    '57P03', // cannot_connect_now
   ]
 
   const retryableStatusCodes = [500, 502, 503, 504, 429]
@@ -112,27 +139,34 @@ export function isRetryableError(error: unknown): boolean {
     return true
   }
 
-  // Check error code
+  // Check error code (string codes like ECONNRESET and PostgreSQL codes)
   if (isErrorWithCode(error) && retryableErrorCodes.includes(error.code)) {
     return true
   }
 
-  // Check HTTP status code
+  // Check HTTP status code (AWS SDK errors)
   if (isErrorWithMetadata(error) && retryableStatusCodes.includes(error.$metadata.httpStatusCode)) {
     return true
   }
 
-  // Check for network-related error messages
+  // Check for connection-related error messages
   if (isErrorWithMessage(error)) {
-    const networkErrorPatterns = [
+    const connectionErrorPatterns = [
       /network/i,
       /timeout/i,
       /connection/i,
       /econnreset/i,
-      /socket hang up/i
+      /socket hang up/i,
+      // postgres.js specific patterns
+      /terminating connection/i,
+      /server closed the connection/i,
+      /too many connections/i,
+      /Connection terminated/i,
+      /Connection refused/i,
+      /Connection reset/i,
     ]
 
-    if (networkErrorPatterns.some(pattern => pattern.test(error.message))) {
+    if (connectionErrorPatterns.some(pattern => pattern.test(error.message))) {
       return true
     }
   }

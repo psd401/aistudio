@@ -78,7 +78,9 @@ export async function vectorSearch(
     "vectorSearch"
   )
 
-  return (results.rows as Array<Record<string, unknown>>).map((row) => ({
+  // postgres.js returns result directly as array-like object (no .rows property)
+  const rows = results as unknown as Array<Record<string, unknown>>
+  return rows.map((row) => ({
     chunkId: Number(row.chunk_id) || 0,
     itemId: Number(row.item_id) || 0,
     itemName: String(row.item_name || ''),
@@ -139,7 +141,9 @@ export async function keywordSearch(
     "keywordSearch"
   )
 
-  return (results.rows as Array<Record<string, unknown>>).map((row) => ({
+  // postgres.js returns result directly as array-like object (no .rows property)
+  const rows = results as unknown as Array<Record<string, unknown>>
+  return rows.map((row) => ({
     chunkId: Number(row.chunk_id) || 0,
     itemId: Number(row.item_id) || 0,
     itemName: String(row.item_name || ''),
@@ -220,5 +224,7 @@ export async function getChunkContext(
     "getChunkContext"
   )
 
-  return (results.rows as Array<{ content: string }>).map(row => row.content).join('\n\n')
+  // postgres.js returns result directly as array-like object (no .rows property)
+  const rows = results as unknown as Array<{ content: string }>
+  return rows.map(row => row.content).join('\n\n')
 }
