@@ -48,12 +48,12 @@ services:
     env_file:
       - .env.local
     environment:
-      # Node environment
+      # Docker-specific overrides (these take precedence over .env.local)
       NODE_ENV: development
       PORT: 3000
       HOSTNAME: 0.0.0.0
 
-      # Database - local PostgreSQL (no SSL required)
+      # Database - override to use Docker network hostname
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/aistudio
       DB_SSL: "false"
 
@@ -61,26 +61,10 @@ services:
       WATCHPACK_POLLING: "true"
       NEXT_TELEMETRY_DISABLED: "1"
 
-      # Authentication (use dev AWS Cognito pool)
+      # Auth URL must be localhost for browser redirects
       AUTH_URL: http://localhost:3000
-      AUTH_SECRET: ${AUTH_SECRET:-local-dev-secret-change-me}
-      AUTH_COGNITO_CLIENT_ID: ${AUTH_COGNITO_CLIENT_ID:-}
-      AUTH_COGNITO_ISSUER: ${AUTH_COGNITO_ISSUER:-}
-      NEXT_PUBLIC_COGNITO_USER_POOL_ID: ${NEXT_PUBLIC_COGNITO_USER_POOL_ID:-}
-      NEXT_PUBLIC_COGNITO_CLIENT_ID: ${NEXT_PUBLIC_COGNITO_CLIENT_ID:-}
-      NEXT_PUBLIC_COGNITO_DOMAIN: ${NEXT_PUBLIC_COGNITO_DOMAIN:-}
-      NEXT_PUBLIC_AWS_REGION: ${NEXT_PUBLIC_AWS_REGION:-us-west-2}
 
-      # AI Providers (from .env.local)
-      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      AZURE_OPENAI_KEY: ${AZURE_OPENAI_KEY:-}
-      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
-
-      # AWS (for S3, Bedrock access in dev)
-      AWS_REGION: ${AWS_REGION:-us-west-2}
-      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      # All other env vars (Cognito, AI providers, AWS) come from .env.local
 
     volumes:
       # Mount source code for hot reload
