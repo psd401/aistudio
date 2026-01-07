@@ -3,6 +3,9 @@ const path = require('path');
 
 const nextConfig = {
   reactStrictMode: true,
+  // Externalize Node.js-only packages from webpack bundling
+  // winston uses 'os', 'fs' which aren't available in webpack context
+  serverExternalPackages: ['winston', 'logform', '@colors/colors'],
   typescript: {
     ignoreBuildErrors: true,
   },
@@ -55,13 +58,25 @@ const nextConfig = {
       timeout: 300
     },
   },
-  webpack: (config) => {
+  webpack: (config, { isServer }) => {
     // Modify cache configuration
     config.cache = {
       type: 'memory',
       maxGenerations: 1,
     };
-    
+
+    // Externalize Node.js-only packages for server builds
+    // These packages use 'os', 'fs', 'stream', etc. which cause issues in instrumentation bundling
+    if (isServer) {
+      config.externals = config.externals || [];
+      config.externals.push({
+        'winston': 'commonjs winston',
+        'logform': 'commonjs logform',
+        '@colors/colors': 'commonjs @colors/colors',
+        'postgres': 'commonjs postgres',
+      });
+    }
+
     return config;
   },
 };
