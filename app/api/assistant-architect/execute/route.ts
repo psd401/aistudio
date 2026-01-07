@@ -835,8 +835,8 @@ async function executeSinglePromptWithCompletion(
                 repositoryContext: repositoryContext ? 'included' : 'none'
               };
               const inputDataJson = JSON.stringify(promptInputData);
-              // Escape backslashes then single quotes for PostgreSQL string literal
-              const escapedInputJson = inputDataJson.replace(/\\/g, '\\\\').replace(/'/g, "''");
+              // Only escape single quotes for SQL string literal (PostgreSQL treats backslashes literally)
+              const escapedInputJson = inputDataJson.replace(/'/g, "''");
               await executeQuery(
                 (db) => db.execute(sql`
                   INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, started_at, completed_at, execution_time_ms)
@@ -1001,8 +1001,8 @@ async function executeSinglePromptWithCompletion(
     const now = new Date();
     const failedInputData = { prompt: prompt.content };
     const failedInputJson = JSON.stringify(failedInputData);
-    // Escape backslashes then single quotes for PostgreSQL string literal
-    const escapedFailedJson = failedInputJson.replace(/\\/g, '\\\\').replace(/'/g, "''");
+    // Only escape single quotes for SQL string literal (PostgreSQL treats backslashes literally)
+    const escapedFailedJson = failedInputJson.replace(/'/g, "''");
     const errorMsg = promptError instanceof Error ? promptError.message : String(promptError);
     await executeQuery(
       (db) => db.execute(sql`
