@@ -96,13 +96,17 @@ let pgClient: ReturnType<typeof postgres> | null = null;
 
 function getPgClient(): ReturnType<typeof postgres> {
   if (!pgClient) {
+    // SSL configuration: required for AWS Aurora, optional for local development
+    // Set DB_SSL=false for local PostgreSQL without SSL certificates
+    const sslEnabled = process.env.DB_SSL !== "false";
+
     pgClient = postgres(getDatabaseUrl(), {
       max: parseInt(process.env.DB_MAX_CONNECTIONS || "20", 10),
       idle_timeout: parseInt(process.env.DB_IDLE_TIMEOUT || "20", 10),
       connect_timeout: parseInt(process.env.DB_CONNECT_TIMEOUT || "10", 10),
       max_lifetime: 60 * 60, // 1 hour - forces reconnection for credential rotation
       prepare: true, // Enable prepared statements for performance
-      ssl: "require", // Explicit SSL enforcement (defense in depth)
+      ssl: sslEnabled ? "require" : false, // SSL required for AWS, optional for local dev
       onnotice: () => {}, // Suppress PostgreSQL notices
       debug: process.env.NODE_ENV === "development",
     });

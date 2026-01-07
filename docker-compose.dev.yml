@@ -1,0 +1,103 @@
+# Docker Compose for Local Development
+# Issue #607 - Local Development Environment with PostgreSQL and Hot Reload
+#
+# Usage:
+#   bun run db:up        # Start PostgreSQL only
+#   bun run dev:docker   # Start both app and database with hot reload
+#   bun run db:reset     # Reset database (destroys all data)
+#   bun run db:studio    # Open Drizzle Studio to inspect database
+#
+# This configuration provides:
+# - PostgreSQL 16 (matching Aurora version)
+# - Volume-mounted source code for hot reload
+# - Automatic migration execution on database startup
+# - Persistent database data between restarts
+
+services:
+  # PostgreSQL Database (matches Aurora PostgreSQL 16)
+  postgres:
+    image: postgres:16-alpine
+    container_name: aistudio-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: aistudio
+    volumes:
+      # Persistent data storage
+      - postgres_data:/var/lib/postgresql/data
+      # Initialize database with schema on first run
+      - ./scripts/db/init-local.sh:/docker-entrypoint-initdb.d/01-init-local.sh:ro
+      - ./infra/database/schema:/docker-entrypoint-initdb.d/schema:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d aistudio"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Next.js Application with Hot Reload
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: aistudio-app
+    ports:
+      - "3000:3000"
+    environment:
+      # Node environment
+      NODE_ENV: development
+      PORT: 3000
+      HOSTNAME: 0.0.0.0
+
+      # Database - local PostgreSQL (no SSL required)
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/aistudio
+      DB_SSL: "false"
+
+      # Next.js hot reload configuration
+      WATCHPACK_POLLING: "true"
+      NEXT_TELEMETRY_DISABLED: "1"
+
+      # Authentication (use dev AWS Cognito pool)
+      AUTH_URL: http://localhost:3000
+      AUTH_SECRET: ${AUTH_SECRET:-local-dev-secret-change-me}
+      AUTH_COGNITO_CLIENT_ID: ${AUTH_COGNITO_CLIENT_ID:-}
+      AUTH_COGNITO_ISSUER: ${AUTH_COGNITO_ISSUER:-}
+      NEXT_PUBLIC_COGNITO_USER_POOL_ID: ${NEXT_PUBLIC_COGNITO_USER_POOL_ID:-}
+      NEXT_PUBLIC_COGNITO_CLIENT_ID: ${NEXT_PUBLIC_COGNITO_CLIENT_ID:-}
+      NEXT_PUBLIC_COGNITO_DOMAIN: ${NEXT_PUBLIC_COGNITO_DOMAIN:-}
+      NEXT_PUBLIC_AWS_REGION: ${NEXT_PUBLIC_AWS_REGION:-us-west-2}
+
+      # AI Providers (from .env.local)
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      AZURE_OPENAI_KEY: ${AZURE_OPENAI_KEY:-}
+      AZURE_OPENAI_ENDPOINT: ${AZURE_OPENAI_ENDPOINT:-}
+
+      # AWS (for S3, Bedrock access in dev)
+      AWS_REGION: ${AWS_REGION:-us-west-2}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+
+    volumes:
+      # Mount source code for hot reload
+      - .:/app
+      # Preserve node_modules (don't overwrite with host)
+      - /app/node_modules
+      # Preserve .next cache for faster rebuilds
+      - /app/.next
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    # Enable init process for proper signal handling
+    init: true
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  default:
+    name: aistudio-dev-network

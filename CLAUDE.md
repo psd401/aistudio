@@ -5,7 +5,15 @@ AI Studio codebase guidance for Claude Code. Optimized for token efficiency and 
 ## 🚀 Quick Reference
 
 ```bash
-# Development
+# Local Development (Issue #607)
+npm run db:up              # Start local PostgreSQL (Docker)
+npm run dev:local          # Run Next.js with local database
+npm run db:studio          # Open Drizzle Studio to inspect DB
+npm run db:psql            # Connect to local DB via psql
+npm run db:seed            # Create test users (admin/staff/student)
+npm run db:reset           # Reset database (destroys all data)
+
+# Development (without Docker)
 npm run dev                # Start dev server (port 3000)
 npm run build              # Build for production
 npm run lint               # MUST pass before commit
@@ -168,6 +176,32 @@ mcp__awslabs_postgres-mcp-server__run_query
 - Connection pool auto-manages connections (max: 20 per container)
 - Graceful shutdown: Handled automatically via `instrumentation.ts`
 - Connection warmup: Pools are pre-initialized on server startup
+
+**Local Development Setup** (Issue #607):
+```bash
+# Quick Start (first time)
+npm run db:up              # Start PostgreSQL container
+npm run db:seed            # Create test users
+npm run dev:local          # Start Next.js with local DB
+
+# Daily workflow
+npm run db:up && npm run dev:local   # Start everything
+
+# Reset if database gets corrupted
+npm run db:reset           # Destroys all data, re-runs migrations
+npm run db:seed            # Re-create test users
+```
+
+**Local vs AWS Configuration**:
+| Environment | DATABASE_URL | DB_SSL |
+|-------------|--------------|--------|
+| Local Docker | `postgresql://postgres:postgres@localhost:5432/aistudio` | `false` |
+| AWS Aurora | `postgresql://user:pass@aurora-cluster:5432/aistudio` | `true` (default) |
+
+**Test Users** (after `npm run db:seed`):
+- `test@example.com` - administrator role
+- `staff@example.com` - staff role
+- `student@example.com` - student role
 
 **Raw SQL Results** (postgres.js driver):
 ```typescript
