@@ -1,4 +1,4 @@
-import { streamText, type LanguageModel, type CoreMessage, type ToolSet } from 'ai';
+import { streamText, type LanguageModel, type ModelMessage, type ToolSet } from 'ai';
 import { createLogger } from '@/lib/logger';
 import type { 
   ProviderAdapter, 
@@ -119,7 +119,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       // Start streaming with AI SDK
       const result = streamText({
         model: enhancedConfig.model,
-        messages: enhancedConfig.messages as CoreMessage[],
+        messages: enhancedConfig.messages as ModelMessage[],
         system: enhancedConfig.system,
         tools: enhancedConfig.tools,
         toolChoice: enhancedConfig.toolChoice,
@@ -194,11 +194,11 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       this.handleStreamProgress(result, callbacks);
       
       return {
-        toDataStreamResponse: (options?: { headers?: Record<string, string> }) => 
+        toDataStreamResponse: (options?: { headers?: Record<string, string> }) =>
           result.toUIMessageStreamResponse ? result.toUIMessageStreamResponse(options) : result.toTextStreamResponse(options),
-        toUIMessageStreamResponse: (options?: { headers?: Record<string, string> }) => 
+        toUIMessageStreamResponse: (options?: { headers?: Record<string, string> }) =>
           result.toUIMessageStreamResponse ? result.toUIMessageStreamResponse(options) : result.toTextStreamResponse(options),
-        usage: result.usage
+        usage: Promise.resolve(result.usage)
       };
       
     } catch (error) {

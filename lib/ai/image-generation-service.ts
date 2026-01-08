@@ -34,8 +34,44 @@ interface GeminiGenerateTextResult {
 
 const log = createLogger({ module: 'image-generation-service' });
 
-// Initialize S3 client
-const s3Client = new S3Client({});
+// Cache S3 client to avoid repeated async calls
+let s3ClientCache: S3Client | null = null;
+let s3RegionCache: string | null = null;
+
+// Get or create S3 client (reads region from Settings)
+async function getS3Client(): Promise<S3Client> {
+  if (s3ClientCache) {
+    return s3ClientCache;
+  }
+
+  // Get region from Settings (reads AWS_REGION from database)
+  const s3Config = await Settings.getS3();
+  s3RegionCache = s3Config.region || 'us-west-2';
+
+  s3ClientCache = new S3Client({
+    region: s3RegionCache,
+  });
+
+  log.debug('S3 client initialized', { region: s3RegionCache });
+  return s3ClientCache;
+}
+
+/**
+ * Reference image for image editing/generation
+ * Can be from previous generated images or user uploads
+ */
+export interface ReferenceImage {
+  /** Base64 encoded image data (data URL format: data:image/png;base64,...) */
+  base64?: string;
+  /** S3 presigned URL for the image */
+  url?: string;
+  /** S3 key for retrieving the image */
+  s3Key?: string;
+  /** MIME type of the image */
+  mimeType?: string;
+  /** Role of this image: reference for style/content, mask for editing regions */
+  role?: 'reference' | 'mask';
+}
 
 export interface ImageGenerationRequest {
   prompt: string;
@@ -46,6 +82,8 @@ export interface ImageGenerationRequest {
   size?: string;
   quality?: 'standard' | 'hd';
   style?: 'vivid' | 'natural';
+  /** Reference images for editing or style transfer */
+  referenceImages?: ReferenceImage[];
 }
 
 export interface ImageGenerationResult {
@@ -93,7 +131,8 @@ export async function generateImageForNexus(
     provider: request.provider,
     modelId: request.modelId,
     promptLength: request.prompt.length,
-    conversationId: request.conversationId
+    conversationId: request.conversationId,
+    referenceImageCount: request.referenceImages?.length || 0
   });
 
   try {
@@ -127,12 +166,17 @@ export async function generateImageForNexus(
 /**
  * Generate image using OpenAI's gpt-image-1.5 or similar models
  * Uses AI SDK's experimental_generateImage function
+ * Supports reference images for editing/compositing (gpt-image-1.5)
  */
 async function generateWithOpenAI(
   request: ImageGenerationRequest,
   requestId: string
 ): Promise<ImageGenerationResult> {
-  log.debug('Generating image with OpenAI', { requestId, modelId: request.modelId });
+  log.debug('Generating image with OpenAI', {
+    requestId,
+    modelId: request.modelId,
+    hasReferenceImages: (request.referenceImages?.length || 0) > 0
+  });
 
   try {
     const apiKey = await Settings.getOpenAI();
@@ -149,28 +193,87 @@ async function generateWithOpenAI(
 
     const imageModel = openai.image(imageModelId);
 
-    // Build provider options for quality and style
-    // Map size string to valid OpenAI size type
-    const sizeMap: Record<string, OpenAIImageSize> = {
+    // Check if this is a GPT image model (gpt-image-1, gpt-image-1.5) vs DALL-E
+    const isGptImageModel = imageModelId.includes('gpt-image');
+
+    // Map size string to valid size for the model type
+    // GPT image models: 1024x1024, 1536x1024, 1024x1536
+    // DALL-E models: 256x256, 512x512, 1024x1024, 1792x1024, 1024x1792
+    const gptSizeMap: Record<string, string> = {
+      '1024x1024': '1024x1024',
+      '1536x1024': '1536x1024',
+      '1024x1536': '1024x1536'
+    };
+    const dalleSizeMap: Record<string, OpenAIImageSize> = {
       '256x256': '256x256',
       '512x512': '512x512',
       '1024x1024': '1024x1024',
       '1792x1024': '1792x1024',
       '1024x1792': '1024x1792'
     };
-    const imageSize: OpenAIImageSize = sizeMap[request.size || '1024x1024'] || '1024x1024';
 
-    // Generate the image
-    const result = await generateImage({
-      model: imageModel,
-      prompt: request.prompt,
-      n: 1,
-      size: imageSize,
-      providerOptions: {
-        openai: {
+    const imageSize = isGptImageModel
+      ? (gptSizeMap[request.size || '1024x1024'] || '1024x1024')
+      : (dalleSizeMap[request.size || '1024x1024'] || '1024x1024');
+
+    // Build provider options based on model type
+    // GPT image models use output_format, quality (low/medium/high)
+    // DALL-E models use response_format, quality (standard/hd), style
+    const providerOpts: Record<string, string | string[] | undefined> = isGptImageModel
+      ? {
+          output_format: 'png',
+          quality: request.quality === 'hd' ? 'high' : 'medium'
+        }
+      : {
           ...(request.quality && { quality: request.quality }),
           ...(request.style && { style: request.style })
+        };
+
+    // Build prompt - use object format with images array when we have reference images
+    // The AI SDK automatically routes to /images/edits endpoint when images are provided
+    // See: https://ai-sdk.dev/docs/reference/ai-sdk-core/generate-image
+    type ImagePrompt = string | { text: string; images: string[] };
+    let imagePrompt: ImagePrompt;
+
+    if (request.referenceImages && request.referenceImages.length > 0) {
+      // Convert reference images to format expected by AI SDK
+      const imageInputs: string[] = [];
+      for (const refImage of request.referenceImages) {
+        if (refImage.base64) {
+          // AI SDK accepts base64 strings (with or without data URL prefix)
+          imageInputs.push(refImage.base64);
+        } else if (refImage.url) {
+          // AI SDK also accepts URLs
+          imageInputs.push(refImage.url);
         }
+      }
+
+      if (imageInputs.length > 0) {
+        imagePrompt = {
+          text: request.prompt,
+          images: imageInputs
+        };
+
+        log.info('Using OpenAI image editing with reference images', {
+          requestId,
+          imageCount: imageInputs.length
+        });
+      } else {
+        imagePrompt = request.prompt;
+      }
+    } else {
+      imagePrompt = request.prompt;
+    }
+
+    // Generate the image
+    // When prompt has images, AI SDK automatically uses /images/edits endpoint
+    const result = await generateImage({
+      model: imageModel,
+      prompt: imagePrompt,
+      n: 1,
+      size: imageSize as OpenAIImageSize,
+      providerOptions: {
+        openai: providerOpts
       }
     });
 
@@ -240,6 +343,7 @@ async function generateWithOpenAI(
 /**
  * Generate image using Google's Gemini image models
  * CRITICAL: Uses generateText() NOT generateImage() - Gemini returns images in result.files
+ * Supports reference images for editing/compositing (Gemini 3 Pro Image supports up to 14 reference images)
  *
  * @see https://ai-sdk.dev/cookbook/guides/google-gemini-image-generation
  */
@@ -247,7 +351,11 @@ async function generateWithGemini(
   request: ImageGenerationRequest,
   requestId: string
 ): Promise<ImageGenerationResult> {
-  log.debug('Generating image with Gemini', { requestId, modelId: request.modelId });
+  log.debug('Generating image with Gemini', {
+    requestId,
+    modelId: request.modelId,
+    hasReferenceImages: (request.referenceImages?.length || 0) > 0
+  });
 
   try {
     const apiKey = await Settings.getGoogleAI();
@@ -265,16 +373,78 @@ async function generateWithGemini(
     // CRITICAL: Gemini image models use generateText with responseModalities
     const model = google(imageModelId);
 
-    // Generate using generateText (NOT generateImage)
-    const textResult = await generateText({
-      model: model as LanguageModel,
-      prompt: request.prompt,
-      providerOptions: {
-        google: {
-          responseModalities: ['TEXT', 'IMAGE'] // REQUIRED for image output
+    // Build content parts for the prompt
+    // If we have reference images, include them along with the text prompt
+    type ContentPart = { type: 'text'; text: string } | { type: 'image'; image: string; mimeType?: string };
+    const contentParts: ContentPart[] = [];
+
+    // Add reference images first (Gemini processes images in order)
+    if (request.referenceImages && request.referenceImages.length > 0) {
+      for (const refImage of request.referenceImages) {
+        if (refImage.base64) {
+          // Extract base64 data if it's a data URL
+          let imageData = refImage.base64;
+          let mimeType = refImage.mimeType || 'image/png';
+
+          if (refImage.base64.startsWith('data:')) {
+            // Parse data URL: data:image/png;base64,XXXX
+            const matches = refImage.base64.match(/^data:([^;]+);base64,(.+)$/);
+            if (matches) {
+              mimeType = matches[1];
+              imageData = matches[2];
+            }
+          }
+
+          contentParts.push({
+            type: 'image',
+            image: imageData,
+            mimeType
+          });
+        } else if (refImage.url) {
+          // Gemini can fetch images from URLs
+          contentParts.push({
+            type: 'image',
+            image: refImage.url
+          });
         }
       }
+
+      log.debug('Added reference images to Gemini request', {
+        requestId,
+        imageCount: contentParts.length
+      });
+    }
+
+    // Add the text prompt
+    contentParts.push({
+      type: 'text',
+      text: request.prompt
     });
+
+    // Generate using generateText (NOT generateImage)
+    // Use messages format when we have reference images, simple prompt otherwise
+    const textResult = request.referenceImages && request.referenceImages.length > 0
+      ? await generateText({
+          model: model as LanguageModel,
+          messages: [{
+            role: 'user',
+            content: contentParts
+          }],
+          providerOptions: {
+            google: {
+              responseModalities: ['TEXT', 'IMAGE'] // REQUIRED for image output
+            }
+          }
+        })
+      : await generateText({
+          model: model as LanguageModel,
+          prompt: request.prompt,
+          providerOptions: {
+            google: {
+              responseModalities: ['TEXT', 'IMAGE'] // REQUIRED for image output
+            }
+          }
+        });
 
     // Cast to extended result type that includes files
     const result = textResult as unknown as GeminiGenerateTextResult;
@@ -380,6 +550,9 @@ async function storeImageInS3(params: {
 
   // Create S3 key with proper path structure
   const s3Key = `v2/generated-images/${params.conversationId}/${timestamp}-${sanitizedModelId}.png`;
+
+  // Get S3 client (reads region from Settings)
+  const s3Client = await getS3Client();
 
   try {
     // Upload to S3

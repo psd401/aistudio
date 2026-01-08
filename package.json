@@ -43,11 +43,11 @@
     "dev:local": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false npm run dev"
   },
   "dependencies": {
-    "@ai-sdk/amazon-bedrock": "^3.0.53",
-    "@ai-sdk/azure": "^2.0.66",
-    "@ai-sdk/google": "^2.0.30",
-    "@ai-sdk/openai": "^2.0.14",
-    "@ai-sdk/react": "^2.0.90",
+    "@ai-sdk/amazon-bedrock": "^4.0.11",
+    "@ai-sdk/azure": "^3.0.7",
+    "@ai-sdk/google": "^3.0.6",
+    "@ai-sdk/openai": "^3.0.7",
+    "@ai-sdk/react": "^3.0.20",
     "@assistant-ui/react": "^0.11.53",
     "@assistant-ui/react-ai-sdk": "^1.1.20",
     "@assistant-ui/react-markdown": "^0.11.9",
@@ -101,7 +101,7 @@
     "@types/uuid": "^11.0.0",
     "@uiw/react-markdown-preview": "^5.1.5",
     "@xyflow/react": "^12.9.2",
-    "ai": "~5.0.0",
+    "ai": "~6.0.0",
     "aws-amplify": "^6.15.8",
     "aws-jwt-verify": "^5.1.1",
     "class-variance-authority": "^0.7.1",
@@ -188,6 +188,8 @@
     "openai": {
       "zod": "^4.1.11"
     },
-    "ai": "~5.0.0"
+    "ai": "~6.0.0",
+    "@ai-sdk/provider": "^3.0.2",
+    "@ai-sdk/provider-utils": "^4.0.4"
   }
 }

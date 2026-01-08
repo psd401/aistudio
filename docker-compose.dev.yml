@@ -80,6 +80,8 @@ services:
       - /app/node_modules
       # Preserve .next cache for faster rebuilds
       - /app/.next
+      # Mount AWS credentials for S3 access (read-only)
+      - ~/.aws:/root/.aws:ro
     depends_on:
       postgres:
         condition: service_healthy

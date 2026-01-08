@@ -1,4 +1,4 @@
-import { UIMessage } from 'ai';
+import { UIMessage, createUIMessageStream, createUIMessageStreamResponse } from 'ai';
 import { z } from 'zod';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
@@ -6,9 +6,9 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { getAIModelById } from '@/lib/db/drizzle';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { hasCapability } from '@/lib/ai/capability-utils';
-import { eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { nexusConversations, nexusMessages } from '@/lib/db/schema';
-import { processMessagesWithAttachments } from '@/lib/services/attachment-storage-service';
+import { processMessagesWithAttachments, getAttachmentFromS3 } from '@/lib/services/attachment-storage-service';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import type { StreamRequest } from '@/lib/streaming/types';
 import { getModelConfig } from '@/lib/ai/model-config';
@@ -285,11 +285,181 @@ export async function POST(req: Request) {
       );
 
       try {
+        // Extract reference images from:
+        // 1. Current user message (uploaded images in content or parts)
+        // 2. Previous messages in the conversation (generated images)
+        type ReferenceImageType = { base64?: string; url?: string; s3Key?: string; mimeType?: string; role?: 'reference' | 'mask' };
+        const referenceImages: ReferenceImageType[] = [];
+
+        // Cast lastMessage to access all potential properties
+        const messageWithContent = lastMessage as UIMessage & {
+          content?: string | Array<{ type: string; text?: string; image?: string }>;
+          parts?: Array<{ type: string; text?: string; image?: string; imageUrl?: string; s3Key?: string }>;
+          experimental_attachments?: Array<{ contentType?: string; url?: string; name?: string }>;
+          attachments?: Array<{ content?: Array<{ type: string; image?: string }>; contentType?: string; url?: string }>;
+        };
+
+        // Extract images from message parts
+        // UIMessage parts can have various structures depending on source:
+        // - type: "image" with s3Key (processed by attachment-storage-service)
+        // - type: "image" with image property containing base64 (legacy format)
+        // - type: "file" with mediaType starting with "image/" (assistant-ui format)
+        const partsArray = messageWithContent.parts as unknown as Array<{
+          type: string;
+          text?: string;
+          image?: string;
+          imageUrl?: string;
+          s3Key?: string;
+          mediaType?: string;
+          mimeType?: string;
+          data?: string;
+          url?: string;
+        }> | undefined;
+
+        if (partsArray && Array.isArray(partsArray)) {
+          for (const part of partsArray) {
+            // Check for image type
+            if (part.type === 'image') {
+              // Check if image has an S3 key (stored by attachment-storage-service)
+              if (part.s3Key) {
+                try {
+                  log.debug('Retrieving image from S3 for reference', { s3Key: part.s3Key });
+                  const attachmentData = await getAttachmentFromS3(part.s3Key);
+                  if (attachmentData.image) {
+                    referenceImages.push({
+                      base64: attachmentData.image,
+                      mimeType: attachmentData.contentType,
+                      role: 'reference' as const
+                    });
+                    log.debug('Retrieved image from S3 successfully', {
+                      s3Key: part.s3Key,
+                      hasImage: true
+                    });
+                  }
+                } catch (s3Error) {
+                  log.warn('Failed to retrieve image from S3', {
+                    s3Key: part.s3Key,
+                    error: s3Error instanceof Error ? s3Error.message : String(s3Error)
+                  });
+                }
+              }
+              // Check for direct base64 data (not an S3 reference)
+              else if (part.image && !part.image.startsWith('s3://')) {
+                referenceImages.push({
+                  base64: part.image,
+                  role: 'reference' as const
+                });
+              }
+              // Check for imageUrl (URL-based images)
+              else if (part.imageUrl) {
+                referenceImages.push({
+                  url: part.imageUrl,
+                  s3Key: part.s3Key,
+                  role: 'reference' as const
+                });
+              }
+            }
+            // Check for file type with image mediaType (assistant-ui format)
+            else if (part.type === 'file') {
+              const mimeType = part.mediaType || part.mimeType || '';
+              if (mimeType.startsWith('image/')) {
+                // Check for S3 reference in url
+                if (part.s3Key || (part.url && part.url.startsWith('s3://'))) {
+                  const s3Key = part.s3Key || part.url?.replace('s3://', '');
+                  if (s3Key) {
+                    try {
+                      log.debug('Retrieving file image from S3', { s3Key });
+                      const attachmentData = await getAttachmentFromS3(s3Key);
+                      if (attachmentData.image) {
+                        referenceImages.push({
+                          base64: attachmentData.image,
+                          mimeType: attachmentData.contentType || mimeType,
+                          role: 'reference' as const
+                        });
+                      }
+                    } catch (s3Error) {
+                      log.warn('Failed to retrieve file image from S3', {
+                        s3Key,
+                        error: s3Error instanceof Error ? s3Error.message : String(s3Error)
+                      });
+                    }
+                  }
+                }
+                // Direct base64 data
+                else if (part.data) {
+                  const base64WithPrefix = part.data.startsWith('data:')
+                    ? part.data
+                    : `data:${mimeType};base64,${part.data}`;
+                  referenceImages.push({
+                    base64: base64WithPrefix,
+                    mimeType,
+                    role: 'reference' as const
+                  });
+                }
+                // URL-based image
+                else if (part.url && !part.url.startsWith('s3://')) {
+                  referenceImages.push({
+                    url: part.url,
+                    mimeType,
+                    role: 'reference' as const
+                  });
+                }
+              }
+            }
+          }
+        }
+
+        log.info('Image generation - extracted reference images', {
+          referenceImageCount: referenceImages.length,
+          partsCount: partsArray?.length || 0,
+          partTypes: partsArray?.map(p => p.type) || []
+        });
+
+        // If this is an existing conversation, look for previous generated images
+        if (conversationIdValue && referenceImages.length === 0) {
+          // Find the most recent generated image in this conversation
+          const previousImages = await executeQuery(
+            (db) => db
+              .select({ parts: nexusMessages.parts })
+              .from(nexusMessages)
+              .where(
+                and(
+                  eq(nexusMessages.conversationId, conversationIdValue),
+                  eq(nexusMessages.role, 'assistant')
+                )
+              )
+              .orderBy(desc(nexusMessages.createdAt))
+              .limit(5), // Check last 5 assistant messages for images
+            'getPreviousGeneratedImages'
+          );
+
+          if (previousImages && previousImages.length > 0) {
+            for (const msg of previousImages) {
+              if (msg.parts && Array.isArray(msg.parts)) {
+                for (const part of msg.parts) {
+                  const partData = part as { type: string; imageUrl?: string; s3Key?: string };
+                  if (partData.type === 'image' && (partData.imageUrl || partData.s3Key)) {
+                    referenceImages.push({
+                      url: partData.imageUrl,
+                      s3Key: partData.s3Key,
+                      role: 'reference' as const
+                    });
+                    // Only use the most recent generated image as reference
+                    break;
+                  }
+                }
+                if (referenceImages.length > 0) break;
+              }
+            }
+          }
+        }
+
         // Generate the image
         log.info('Starting image generation', {
           provider: imageProvider,
           modelId: modelConfig.model_id,
-          promptLength: imagePrompt.length
+          promptLength: imagePrompt.length,
+          referenceImageCount: referenceImages.length
         });
 
         const imageResult = await generateImageForNexus({
@@ -299,7 +469,8 @@ export async function POST(req: Request) {
           conversationId: imageConversationId,
           userId: userId.toString(),
           size: '1024x1024',
-          quality: 'standard'
+          quality: 'standard',
+          referenceImages: referenceImages.length > 0 ? referenceImages : undefined
         });
 
         // Save assistant message with image (and optional text from Gemini)
@@ -363,58 +534,22 @@ export async function POST(req: Request) {
 
         timer({ status: 'success', conversationId: imageConversationId });
 
-        // Return SSE stream with image result
-        // Use ReadableStream to send SSE events compatible with AI SDK
-        const encoder = new TextEncoder();
-        const stream = new ReadableStream({
-          start(controller) {
-            // Send text-start event
-            controller.enqueue(encoder.encode(`0:""\n`));
+        // Build response content: include both text and image if available
+        // Gemini returns text description + image, OpenAI returns just image
+        let responseContent = '';
 
-            // Build response content: include both text and image if available
-            // Gemini returns text description + image, OpenAI returns just image
-            let responseContent = '';
+        // Add text description if available (from Gemini)
+        if (imageResult.altText && imageResult.altText.trim()) {
+          responseContent += imageResult.altText.trim() + '\n\n';
+        }
 
-            // Add text description if available (from Gemini)
-            if (imageResult.altText && imageResult.altText.trim()) {
-              responseContent += imageResult.altText.trim() + '\n\n';
-            }
+        // Add the image as markdown
+        responseContent += `![Generated Image](${imageResult.imageUrl})`;
 
-            // Add the image as markdown
-            responseContent += `![Generated Image](${imageResult.imageUrl})`;
-
-            const escapedContent = JSON.stringify(responseContent);
-            controller.enqueue(encoder.encode(`0:${escapedContent}\n`));
-
-            // Send finish event with message structure
-            const finishData = {
-              finishReason: 'stop',
-              usage: { promptTokens: 0, completionTokens: 0 },
-              isContinued: false
-            };
-            controller.enqueue(encoder.encode(`e:${JSON.stringify(finishData)}\n`));
-
-            // Send message annotation with image data for frontend
-            const imageAnnotation = {
-              type: 'image-generated',
-              imageUrl: imageResult.imageUrl,
-              s3Key: imageResult.s3Key,
-              provider: imageResult.provider,
-              model: imageResult.model,
-              altText: imageResult.altText,
-              dimensions: imageResult.dimensions
-            };
-            controller.enqueue(encoder.encode(`8:${JSON.stringify([imageAnnotation])}\n`));
-
-            // Send done
-            controller.enqueue(encoder.encode(`d:{"finishReason":"stop","usage":{"promptTokens":0,"completionTokens":0}}\n`));
-
-            controller.close();
-          }
-        });
+        // Use AI SDK's createUIMessageStreamResponse for proper client compatibility
+        const messageId = `img-${Date.now()}`;
 
         const responseHeaders: Record<string, string> = {
-          'Content-Type': 'text/plain; charset=utf-8',
           'X-Request-Id': requestId,
           'X-Conversation-Id': imageConversationId,
           'X-Image-Generated': 'true'
@@ -424,7 +559,18 @@ export async function POST(req: Request) {
           responseHeaders['X-Conversation-Title'] = encodeURIComponent(imageConversationTitle);
         }
 
-        return new Response(stream, { headers: responseHeaders });
+        return createUIMessageStreamResponse({
+          status: 200,
+          headers: responseHeaders,
+          stream: createUIMessageStream({
+            async execute({ writer }) {
+              // Write text content as a complete message
+              writer.write({ type: 'text-start', id: messageId });
+              writer.write({ type: 'text-delta', id: messageId, delta: responseContent });
+              writer.write({ type: 'text-end', id: messageId });
+            }
+          })
+        });
 
       } catch (imageError) {
         log.error('Image generation failed', {

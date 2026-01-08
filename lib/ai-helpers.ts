@@ -1,10 +1,10 @@
-import { 
-  generateText, 
+import {
+  generateText,
   generateObject,
   embed,
   embedMany,
   tool,
-  CoreMessage,
+  ModelMessage,
   StreamTextResult,
   InvalidToolInputError,
   NoSuchToolError,
@@ -63,7 +63,7 @@ async function getModelClient(modelConfig: ModelConfig): Promise<LanguageModel> 
 // Generate a text completion
 export async function generateCompletion(
   modelConfig: ModelConfig,
-  messages: CoreMessage[],
+  messages: ModelMessage[],
   tools?: Record<string, unknown>
 ) {
   const model = await getModelClient(modelConfig);
@@ -101,7 +101,7 @@ export async function generateCompletion(
 // Stream a text completion using unified streaming service
 export async function streamCompletion(
   modelConfig: ModelConfig,
-  messages: CoreMessage[],
+  messages: ModelMessage[],
   options?: StreamingOptions,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   tools?: any
@@ -188,7 +188,7 @@ export async function streamCompletion(
 // Generate a structured object
 export async function generateStructuredOutput<T>(
   modelConfig: ModelConfig,
-  messages: CoreMessage[],
+  messages: ModelMessage[],
   schema: z.ZodType<T>
 ): Promise<T> {
   const model = await getModelClient(modelConfig);

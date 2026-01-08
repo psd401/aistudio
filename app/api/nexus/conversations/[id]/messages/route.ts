@@ -121,16 +121,43 @@ export async function GET(
       return content
     }
 
-    const truncatePartsContent = (parts: MessagePart[]): ContentPart[] => {
-      return parts.map(part => {
-        if (part.text && typeof part.text === 'string' && part.text.length > MAX_CONTENT_LENGTH) {
-          return {
-            ...part,
-            text: part.text.substring(0, MAX_CONTENT_LENGTH) + '...[content truncated for size]'
-          }
+    // Convert a part to text format, handling images as markdown
+    // Note: Database parts can have various types beyond the strict MessagePart type
+    const convertPartToTextContent = (part: MessagePart): ContentPart | null => {
+      const partType = part.type as string // Database may have additional part types
+
+      if (partType === 'text') {
+        const text = part.text && typeof part.text === 'string' && part.text.length > MAX_CONTENT_LENGTH
+          ? part.text.substring(0, MAX_CONTENT_LENGTH) + '...[content truncated for size]'
+          : part.text || ''
+        return { type: 'text', text }
+      }
+      if (partType === 'image') {
+        // Convert image parts to markdown image syntax
+        const imageUrl = (part as unknown as { imageUrl?: string }).imageUrl
+        if (imageUrl) {
+          return { type: 'text', text: `![Generated Image](${imageUrl})` }
         }
-        return part as ContentPart
-      })
+        return null
+      }
+      // Skip step-start, step-finish, and other control types
+      if (partType === 'step-start' || partType === 'step-finish') {
+        return null
+      }
+      // For other types, try to extract text if available
+      if (part.text) {
+        return { type: 'text', text: part.text }
+      }
+      return null
+    }
+
+    const truncatePartsContent = (parts: MessagePart[]): ContentPart[] => {
+      const converted = parts
+        .map(part => convertPartToTextContent(part))
+        .filter((part): part is ContentPart => part !== null)
+
+      // Ensure at least one content part
+      return converted.length > 0 ? converted : [{ type: 'text', text: '' }]
     }
 
     // Convert to AI SDK format with content size limits
