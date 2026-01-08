@@ -54,40 +54,27 @@ export async function GET() {
     
     log.debug("User authenticated", { userId: session.sub });
     
-    // Check if Data API is configured
-    const missingEnvVars = [];
-    if (!process.env.RDS_RESOURCE_ARN) missingEnvVars.push('RDS_RESOURCE_ARN');
-    if (!process.env.RDS_SECRET_ARN) missingEnvVars.push('RDS_SECRET_ARN');
-    
-    // AWS Amplify provides AWS_REGION and AWS_DEFAULT_REGION at runtime
-    // We should check NEXT_PUBLIC_AWS_REGION as a fallback
-    const region = process.env.AWS_REGION || 
-                   process.env.AWS_DEFAULT_REGION || 
-                   process.env.NEXT_PUBLIC_AWS_REGION;
-    
-    if (!region) missingEnvVars.push('NEXT_PUBLIC_AWS_REGION');
-    
-    if (missingEnvVars.length > 0) {
-      log.error("Missing required environment variables:", {
-        missing: missingEnvVars,
-        RDS_RESOURCE_ARN: process.env.RDS_RESOURCE_ARN ? 'set' : 'missing',
-        RDS_SECRET_ARN: process.env.RDS_SECRET_ARN ? 'set' : 'missing',
-        AWS_REGION: process.env.AWS_REGION || 'not set (provided by Amplify)',
-        AWS_DEFAULT_REGION: process.env.AWS_DEFAULT_REGION || 'not set (provided by Amplify)',
-        NEXT_PUBLIC_AWS_REGION: process.env.NEXT_PUBLIC_AWS_REGION || 'not set',
-        availableEnvVars: Object.keys(process.env).filter(k => 
-          k.includes('AWS') || k.includes('RDS')).join(', ')
+    // Check if database is configured (postgres.js driver - Issue #603)
+    // Either DATABASE_URL (local dev) or DB_HOST (AWS ECS) must be set
+    const hasDatabaseUrl = !!process.env.DATABASE_URL;
+    const hasAwsDbConfig = !!process.env.DB_HOST;
+
+    if (!hasDatabaseUrl && !hasAwsDbConfig) {
+      log.error("Database configuration incomplete:", {
+        DATABASE_URL: hasDatabaseUrl ? 'set' : 'missing',
+        DB_HOST: hasAwsDbConfig ? 'set' : 'missing',
+        hint: 'Set DATABASE_URL for local dev or DB_HOST for AWS ECS'
       });
-      
+
       timer({ status: "error", reason: "missing_config" });
       return NextResponse.json(
         {
           isSuccess: false,
-          message: `Database configuration incomplete. Missing: ${missingEnvVars.join(', ')}`,
+          message: `Database configuration incomplete. Set DATABASE_URL (local) or DB_HOST (AWS)`,
           debug: process.env.NODE_ENV !== 'production' ? {
-            missing: missingEnvVars,
-            availableEnvVars: Object.keys(process.env).filter(k => 
-              k.includes('AWS') || k.includes('RDS'))
+            hasDatabaseUrl,
+            hasAwsDbConfig,
+            hint: 'For local dev: set DATABASE_URL. For AWS: DB_HOST is injected from Secrets Manager'
           } : undefined
         },
         { status: 500, headers: { "X-Request-Id": requestId } }
