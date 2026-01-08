@@ -59,7 +59,8 @@ import {
   BlockTypeSelect,
   ListsToggle,
   Separator,
-  CreateLink
+  CreateLink,
+  type MDXEditorMethods
 } from "@mdxeditor/editor"
 import DocumentUploadButton from "@/components/ui/document-upload-button"
 import { RepositoryBrowser } from "@/components/features/assistant-architect/repository-browser"
@@ -735,14 +736,7 @@ function slugify(str: string): string {
 }
 
 // Custom Variable Insert Dropdown for MDXEditor toolbar
-interface MDXEditorHandle {
-  insertMarkdown: (text: string) => void;
-  getMarkdown: () => string;
-  setMarkdown: (markdown: string) => void;
-  focus: () => void;
-}
-
-function VariableInsertDropdown({ variables, editorRef }: { variables: string[], editorRef: React.RefObject<MDXEditorHandle | null> }) {
+function VariableInsertDropdown({ variables, editorRef }: { variables: string[], editorRef: React.RefObject<MDXEditorMethods | null> }) {
   return (
     <select
       className="border rounded px-2 py-1 text-xs bg-muted mr-2"
@@ -784,7 +778,7 @@ export function PromptsPageClient({ assistantId, prompts: initialPrompts, models
   const [promptTokens, setPromptTokens] = useState(0)
   const [flowKey, setFlowKey] = useState(0)
   const [enabledTools, setEnabledTools] = useState<string[]>([])
-  const mdxEditorRef = useRef<MDXEditorHandle>(null);
+  const mdxEditorRef = useRef<MDXEditorMethods>(null);
 
   // When initialPrompts changes (from server), update our local state
   useEffect(() => {
