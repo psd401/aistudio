@@ -218,16 +218,258 @@ export async function POST(req: Request) {
         );
       }
 
-      // TODO: Implement actual image generation
-      // This would call the OpenAI DALL-E API or equivalent
-      // For now, return error indicating feature not yet implemented in streaming mode
-      return new Response(
-        JSON.stringify({
-          error: 'Image generation via streaming is not yet implemented. Please use the legacy endpoint.',
-          suggestion: 'Image generation support will be added in a future update.'
-        }),
-        { status: 501, headers: { 'Content-Type': 'application/json' } }
+      // Generate image using the image generation service
+      const { generateImageForNexus } = await import('@/lib/ai/image-generation-service');
+
+      // Determine provider from model config
+      const imageProvider = modelConfig.provider === 'google' ? 'google' : 'openai';
+
+      // Handle conversation creation for image generation
+      let imageConversationId: string = conversationIdValue || '';
+      let imageConversationTitle = 'Image Generation';
+
+      if (!imageConversationId) {
+        // Generate a title from the prompt
+        const cleanedPrompt = imagePrompt.replace(/\s+/g, ' ').trim();
+        imageConversationTitle = cleanedPrompt.slice(0, 40).trim();
+        if (cleanedPrompt.length > 40) {
+          imageConversationTitle += '...';
+        }
+
+        // Create new Nexus conversation
+        const now = new Date();
+        const createResult = await executeQuery(
+          (db) => db.insert(nexusConversations)
+            .values({
+              userId,
+              provider: imageProvider,
+              modelUsed: modelId,
+              title: sanitizeTextForDatabase(imageConversationTitle),
+              messageCount: 0,
+              totalTokens: 0,
+              metadata: sql`${safeJsonbStringify({ source: 'nexus', type: 'image-generation' })}::jsonb`,
+              createdAt: now,
+              updatedAt: now
+            })
+            .returning({ id: nexusConversations.id }),
+          'createImageConversation'
+        );
+
+        if (!createResult || createResult.length === 0 || !createResult[0]?.id) {
+          log.error('Failed to create image conversation');
+          return new Response(
+            JSON.stringify({ error: 'Failed to create conversation', requestId }),
+            { status: 500, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+
+        imageConversationId = createResult[0].id as string;
+        log.info('Created new image conversation', { conversationId: imageConversationId });
+      }
+
+      // Save user message
+      const userMessageId = crypto.randomUUID();
+      await executeQuery(
+        (db) => db.insert(nexusMessages)
+          .values({
+            id: userMessageId,
+            conversationId: imageConversationId,
+            role: 'user',
+            content: imagePrompt,
+            parts: sql`${safeJsonbStringify([{ type: 'text', text: imagePrompt }])}::jsonb`,
+            modelId: dbModelId,
+            metadata: sql`${safeJsonbStringify({})}::jsonb`,
+            createdAt: new Date()
+          }),
+        'saveImageUserMessage'
       );
+
+      try {
+        // Generate the image
+        log.info('Starting image generation', {
+          provider: imageProvider,
+          modelId: modelConfig.model_id,
+          promptLength: imagePrompt.length
+        });
+
+        const imageResult = await generateImageForNexus({
+          prompt: imagePrompt,
+          modelId: modelConfig.model_id,
+          provider: imageProvider as 'openai' | 'google',
+          conversationId: imageConversationId,
+          userId: userId.toString(),
+          size: '1024x1024',
+          quality: 'standard'
+        });
+
+        // Save assistant message with image (and optional text from Gemini)
+        // Build parts array: include text if present, always include image
+        const messageParts: Array<{ type: string; text?: string; imageUrl?: string; s3Key?: string; altText?: string }> = [];
+
+        // Gemini returns text description along with image
+        if (imageResult.altText && imageResult.altText.trim()) {
+          messageParts.push({
+            type: 'text',
+            text: imageResult.altText.trim()
+          });
+        }
+
+        // Always include the generated image
+        messageParts.push({
+          type: 'image',
+          imageUrl: imageResult.imageUrl,
+          s3Key: imageResult.s3Key,
+          altText: 'Generated image'
+        });
+
+        const assistantMessageContent = JSON.stringify({
+          type: 'image',
+          imageUrl: imageResult.imageUrl,
+          s3Key: imageResult.s3Key,
+          model: imageResult.model,
+          provider: imageResult.provider,
+          altText: imageResult.altText,
+          dimensions: imageResult.dimensions
+        });
+
+        await executeQuery(
+          (db) => db.insert(nexusMessages)
+            .values({
+              conversationId: imageConversationId,
+              role: 'assistant',
+              content: assistantMessageContent,
+              parts: sql`${safeJsonbStringify(messageParts)}::jsonb`,
+              modelId: dbModelId,
+              metadata: sql`${safeJsonbStringify({
+                generationType: 'image',
+                estimatedCost: imageResult.estimatedCost
+              })}::jsonb`,
+              createdAt: new Date()
+            }),
+          'saveImageAssistantMessage'
+        );
+
+        // Update conversation stats
+        await executeQuery(
+          (db) => db.update(nexusConversations)
+            .set({
+              messageCount: sql`${nexusConversations.messageCount} + 2`,
+              lastMessageAt: new Date(),
+              updatedAt: new Date()
+            })
+            .where(eq(nexusConversations.id, imageConversationId)),
+          'updateImageConversationStats'
+        );
+
+        timer({ status: 'success', conversationId: imageConversationId });
+
+        // Return SSE stream with image result
+        // Use ReadableStream to send SSE events compatible with AI SDK
+        const encoder = new TextEncoder();
+        const stream = new ReadableStream({
+          start(controller) {
+            // Send text-start event
+            controller.enqueue(encoder.encode(`0:""\n`));
+
+            // Build response content: include both text and image if available
+            // Gemini returns text description + image, OpenAI returns just image
+            let responseContent = '';
+
+            // Add text description if available (from Gemini)
+            if (imageResult.altText && imageResult.altText.trim()) {
+              responseContent += imageResult.altText.trim() + '\n\n';
+            }
+
+            // Add the image as markdown
+            responseContent += `![Generated Image](${imageResult.imageUrl})`;
+
+            const escapedContent = JSON.stringify(responseContent);
+            controller.enqueue(encoder.encode(`0:${escapedContent}\n`));
+
+            // Send finish event with message structure
+            const finishData = {
+              finishReason: 'stop',
+              usage: { promptTokens: 0, completionTokens: 0 },
+              isContinued: false
+            };
+            controller.enqueue(encoder.encode(`e:${JSON.stringify(finishData)}\n`));
+
+            // Send message annotation with image data for frontend
+            const imageAnnotation = {
+              type: 'image-generated',
+              imageUrl: imageResult.imageUrl,
+              s3Key: imageResult.s3Key,
+              provider: imageResult.provider,
+              model: imageResult.model,
+              altText: imageResult.altText,
+              dimensions: imageResult.dimensions
+            };
+            controller.enqueue(encoder.encode(`8:${JSON.stringify([imageAnnotation])}\n`));
+
+            // Send done
+            controller.enqueue(encoder.encode(`d:{"finishReason":"stop","usage":{"promptTokens":0,"completionTokens":0}}\n`));
+
+            controller.close();
+          }
+        });
+
+        const responseHeaders: Record<string, string> = {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'X-Request-Id': requestId,
+          'X-Conversation-Id': imageConversationId,
+          'X-Image-Generated': 'true'
+        };
+
+        if (!conversationIdValue) {
+          responseHeaders['X-Conversation-Title'] = encodeURIComponent(imageConversationTitle);
+        }
+
+        return new Response(stream, { headers: responseHeaders });
+
+      } catch (imageError) {
+        log.error('Image generation failed', {
+          error: imageError instanceof Error ? imageError.message : String(imageError),
+          conversationId: imageConversationId
+        });
+
+        // Check for typed image generation errors
+        const typedError = imageError as Error & { type?: string; retryAfter?: number };
+
+        if (typedError.type === 'CONTENT_POLICY') {
+          return new Response(
+            JSON.stringify({ error: typedError.message, code: 'CONTENT_POLICY' }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+
+        if (typedError.type === 'RATE_LIMIT') {
+          return new Response(
+            JSON.stringify({
+              error: typedError.message,
+              code: 'RATE_LIMIT',
+              retryAfter: typedError.retryAfter || 60
+            }),
+            { status: 429, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+
+        if (typedError.type === 'AUTHENTICATION') {
+          return new Response(
+            JSON.stringify({ error: 'Image generation service authentication failed', code: 'AUTH_ERROR' }),
+            { status: 401, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+
+        // Generic error
+        return new Response(
+          JSON.stringify({
+            error: 'Image generation failed. Please try again.',
+            details: typedError.message,
+            requestId
+          }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
     }
 
     // 6. Handle conversation (create new or use existing)
