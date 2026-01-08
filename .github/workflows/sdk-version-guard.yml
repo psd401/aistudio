@@ -178,10 +178,16 @@ jobs:
         uses: actions/github-script@v8
         with:
           script: |
-            const labels = context.payload.pull_request.labels.map(l => l.name);
-            const hasApproval = labels.includes('sdk-upgrade-approved');
+            // Fetch current labels from API (not from payload which is frozen at trigger time)
+            const { data: labels } = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+            const labelNames = labels.map(l => l.name);
+            const hasApproval = labelNames.includes('sdk-upgrade-approved');
             core.setOutput('approved', hasApproval ? 'true' : 'false');
-            console.log(`Labels: ${labels.join(', ')}`);
+            console.log(`Labels: ${labelNames.join(', ')}`);
             console.log(`SDK upgrade approved: ${hasApproval}`);
 
       - name: Fail on major version change (without approval)
