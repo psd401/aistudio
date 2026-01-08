@@ -88,9 +88,9 @@ export function NexusDetailSheet({
               </div>
               <div>
                 <span className="text-muted-foreground">Provider</span>
-                <p>
+                <div className="mt-1">
                   <Badge variant="secondary">{conversation.provider}</Badge>
-                </p>
+                </div>
               </div>
               <div>
                 <span className="text-muted-foreground">Model</span>

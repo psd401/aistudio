@@ -106,9 +106,9 @@ export function ExecutionDetailSheet({
                   </div>
                   <div>
                     <span className="text-muted-foreground">Status</span>
-                    <p>
+                    <div className="mt-1">
                       <StatusBadge status={execution.status} />
-                    </p>
+                    </div>
                   </div>
                   <div>
                     <span className="text-muted-foreground">Schedule</span>
