@@ -87,9 +87,8 @@ export async function GET() {
       'NEXT_PUBLIC_COGNITO_USER_POOL_ID',
       'NEXT_PUBLIC_COGNITO_CLIENT_ID',
       'NEXT_PUBLIC_COGNITO_DOMAIN',
-      'NEXT_PUBLIC_AWS_REGION',
-      'RDS_RESOURCE_ARN',
-      'RDS_SECRET_ARN'
+      'NEXT_PUBLIC_AWS_REGION'
+      // Database config checked separately: DATABASE_URL (local) or DB_HOST (AWS)
     ]
 
     const missingVars = requiredEnvVars.filter(varName => !process.env[varName])
@@ -112,12 +111,15 @@ export async function GET() {
         hasAuthUrl: !!process.env.AUTH_URL,
         hasAuthSecret: !!process.env.AUTH_SECRET,
         hasCognitoConfig: !!process.env.AUTH_COGNITO_CLIENT_ID && !!process.env.AUTH_COGNITO_ISSUER,
-        hasRdsConfig: !!process.env.RDS_RESOURCE_ARN && !!process.env.RDS_SECRET_ARN,
+        // Database: postgres.js driver (Issue #603)
+        hasDatabaseUrl: !!process.env.DATABASE_URL,
+        hasDbHost: !!process.env.DB_HOST,
+        dbConfigured: !!process.env.DATABASE_URL || !!process.env.DB_HOST,
         hasAwsRegion: !!region,
         hasAwsExecution: !!process.env.AWS_EXECUTION_ENV,
-        awsRegionSource: process.env.AWS_REGION ? 'AWS_REGION (Amplify)' : 
-                        process.env.AWS_DEFAULT_REGION ? 'AWS_DEFAULT_REGION (Amplify)' : 
-                        process.env.NEXT_PUBLIC_AWS_REGION ? 'NEXT_PUBLIC_AWS_REGION (User)' : 
+        awsRegionSource: process.env.AWS_REGION ? 'AWS_REGION (Amplify)' :
+                        process.env.AWS_DEFAULT_REGION ? 'AWS_DEFAULT_REGION (Amplify)' :
+                        process.env.NEXT_PUBLIC_AWS_REGION ? 'NEXT_PUBLIC_AWS_REGION (User)' :
                         'none'
       }
     }
@@ -156,13 +158,18 @@ export async function GET() {
     }
   }
 
-  // 3. Check database connectivity (skip if missing database config)
-  if (process.env.RDS_RESOURCE_ARN && process.env.RDS_SECRET_ARN) {
+  // 3. Check database connectivity (postgres.js driver - Issue #603)
+  // Either DATABASE_URL (local dev) or DB_HOST (AWS ECS) must be configured
+  const hasDatabaseUrl = !!process.env.DATABASE_URL;
+  const hasAwsDbConfig = !!process.env.DB_HOST;
+
+  if (hasDatabaseUrl || hasAwsDbConfig) {
     try {
       const dbValidation = await validateDatabaseConnection()
       log.debug("Database check completed", { success: dbValidation.success });
       healthCheck.checks.database = {
         status: dbValidation.success ? "healthy" : "unhealthy",
+        connectionType: hasDatabaseUrl ? 'DATABASE_URL (local)' : 'DB_HOST (AWS)',
         ...dbValidation
       }
     } catch (error) {
@@ -172,7 +179,7 @@ export async function GET() {
         error: error instanceof Error ? {
           name: error.name,
           message: error.message,
-          stack: process.env.NODE_ENV !== 'production' ? 
+          stack: process.env.NODE_ENV !== 'production' ?
             error.stack?.split('\n').slice(0, 5).join('\n') : undefined
         } : "Unknown error"
       }
@@ -181,7 +188,7 @@ export async function GET() {
     healthCheck.checks.database = {
       status: "unhealthy",
       configured: false,
-      hint: "Database environment variables (RDS_RESOURCE_ARN, RDS_SECRET_ARN) not set"
+      hint: "Database not configured. Set DATABASE_URL (local dev) or DB_HOST (AWS ECS)"
     }
   }
 
@@ -229,22 +236,22 @@ export async function GET() {
         )
       } else if (!healthCheck.checks.database.configured) {
         healthCheck.diagnostics.hints.push(
-          "Database not configured. Set RDS_RESOURCE_ARN and RDS_SECRET_ARN environment variables."
+          "Database not configured. Set DATABASE_URL (local dev) or DB_HOST (AWS ECS)."
         )
       } else {
         healthCheck.diagnostics.hints.push(
-          "Database connectivity issue. Check RDS_RESOURCE_ARN and RDS_SECRET_ARN values."
+          "Database connectivity issue. Check DATABASE_URL or DB_HOST/DB_USER/DB_PASSWORD values."
         )
       }
     }
     
     // Add deployment checklist
     healthCheck.diagnostics.deploymentChecklist = [
-      "1. Set all required environment variables in AWS Amplify console",
-      "2. Ensure NEXT_PUBLIC_AWS_REGION is set (AWS Amplify provides AWS_REGION automatically)",
-      "3. Redeploy the application after setting variables",
-      "4. Check CloudWatch logs for detailed error messages",
-      "5. Verify IAM permissions for RDS Data API and Secrets Manager"
+      "1. Set all required environment variables in AWS ECS task definition",
+      "2. For AWS: DB_HOST, DB_USER, DB_PASSWORD are injected from Secrets Manager",
+      "3. For local dev: Set DATABASE_URL in .env.local",
+      "4. Check CloudWatch/container logs for detailed error messages",
+      "5. Verify security group allows traffic from ECS to Aurora on port 5432"
     ]
   }
 

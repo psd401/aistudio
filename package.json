@@ -30,7 +30,17 @@
     "drizzle:check": "drizzle-kit check",
     "migration:prepare": "tsx scripts/drizzle-helpers/prepare-migration.ts",
     "migration:create": "tsx scripts/drizzle-helpers/create-migration.ts",
-    "migration:list": "tsx scripts/drizzle-helpers/list-migrations.ts"
+    "migration:list": "tsx scripts/drizzle-helpers/list-migrations.ts",
+    "db:up": "docker compose -f docker-compose.dev.yml up -d postgres",
+    "db:down": "docker compose -f docker-compose.dev.yml down",
+    "db:reset": "docker compose -f docker-compose.dev.yml down -v && docker compose -f docker-compose.dev.yml up -d postgres",
+    "db:logs": "docker compose -f docker-compose.dev.yml logs -f postgres",
+    "db:migrate": "tsx scripts/db/run-migrations.ts",
+    "db:seed": "docker exec -i aistudio-postgres psql -U postgres -d aistudio < scripts/db/seed-local.sql",
+    "db:studio": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false npm run drizzle:studio",
+    "db:psql": "docker exec -it aistudio-postgres psql -U postgres -d aistudio",
+    "dev:docker": "docker compose -f docker-compose.dev.yml up",
+    "dev:local": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false npm run dev"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "^3.0.53",

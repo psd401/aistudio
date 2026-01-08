@@ -19,10 +19,15 @@ const ENV_VARS: EnvVar[] = [
   { name: 'AUTH_COGNITO_CLIENT_SECRET', required: false, description: 'AWS Cognito client secret' },
   { name: 'AUTH_COGNITO_ISSUER', required: true, description: 'AWS Cognito issuer URL' },
   
-  // Database
-  { name: 'RDS_RESOURCE_ARN', required: true, description: 'AWS RDS cluster ARN' },
-  { name: 'RDS_SECRET_ARN', required: true, description: 'AWS Secrets Manager ARN for RDS' },
-  { name: 'RDS_DATABASE_NAME', required: false, description: 'Database name (defaults to aistudio)' },
+  // Database - postgres.js driver (Issue #603)
+  // Either DATABASE_URL (local dev) OR DB_HOST (AWS ECS) must be configured
+  // Validation is done separately below since only one is needed
+  { name: 'DATABASE_URL', required: false, description: 'PostgreSQL connection URL (local dev)' },
+  { name: 'DB_HOST', required: false, description: 'Database hostname (AWS ECS)' },
+  { name: 'DB_USER', required: false, description: 'Database username (AWS ECS)' },
+  { name: 'DB_PASSWORD', required: false, description: 'Database password (AWS ECS)' },
+  { name: 'DB_NAME', required: false, description: 'Database name (defaults to aistudio)' },
+  { name: 'DB_SSL', required: false, description: 'Enable SSL (defaults to true)' },
   
   // AWS Configuration
   { name: 'NEXT_PUBLIC_AWS_REGION', required: true, description: 'AWS region' },
@@ -68,6 +73,13 @@ export function validateEnv(): { isValid: boolean; missing: string[]; warnings: 
   // Additional validation logic
   if (!process.env.AWS_REGION && !process.env.AWS_DEFAULT_REGION && !process.env.NEXT_PUBLIC_AWS_REGION) {
     missing.push('AWS_REGION or AWS_DEFAULT_REGION or NEXT_PUBLIC_AWS_REGION');
+  }
+
+  // Database configuration: Either DATABASE_URL (local) or DB_HOST (AWS) must be set
+  const hasDatabaseUrl = !!process.env.DATABASE_URL;
+  const hasAwsDbConfig = !!process.env.DB_HOST;
+  if (!hasDatabaseUrl && !hasAwsDbConfig) {
+    missing.push('DATABASE_URL or DB_HOST (database configuration required)');
   }
   
   // Check for at least one AI API key
