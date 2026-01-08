@@ -1,4 +1,4 @@
-import type { UIMessage, LanguageModel, CoreMessage, ToolSet } from 'ai';
+import type { UIMessage, LanguageModel, ModelMessage, ToolSet } from 'ai';
 import type { SSEEventEmitter } from '@/types/sse-events';
 import type { SSEEvent } from './sse-event-types';
 
@@ -81,7 +81,7 @@ export interface StreamResponse {
 
 export interface StreamConfig {
   model: LanguageModel;
-  messages: CoreMessage[];
+  messages: ModelMessage[];
   system?: string;
   maxTokens?: number;
   temperature?: number;

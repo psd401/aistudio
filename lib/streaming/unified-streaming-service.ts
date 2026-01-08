@@ -106,7 +106,7 @@ export class UnifiedStreamingService {
       
       let convertedMessages;
       try {
-        convertedMessages = convertToModelMessages(request.messages);
+        convertedMessages = await convertToModelMessages(request.messages);
       } catch (conversionError) {
         const error = conversionError as Error;
         log.error('Failed to convert messages', {

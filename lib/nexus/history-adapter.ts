@@ -29,23 +29,50 @@ type MessageData = {
   [key: string]: unknown
 }
 
+// Helper to convert a content part to text format
+// Handles text, image, and other part types by converting to displayable text
+const convertPartToText = (part: { type: string; text?: string; imageUrl?: string; [key: string]: unknown }): string => {
+  if (part.type === 'text') {
+    return part.text || ''
+  }
+  if (part.type === 'image' && part.imageUrl) {
+    // Convert image parts to markdown image syntax
+    return `![Generated Image](${part.imageUrl})`
+  }
+  // Skip step-start, step-finish, and other control types
+  if (part.type === 'step-start' || part.type === 'step-finish') {
+    return ''
+  }
+  return ''
+}
+
 // We'll use a simple implementation since ExportedMessageRepository.fromArray may not be accessible
 const createExportedMessageRepository = (messages: MessageData[]): ExportedMessageRepository => ({
   messages: messages.map((msg, index) => {
     // Ensure content is in the correct format for assistant-ui
     let content: Array<{ type: 'text'; text: string }> = []
-    
+
     if (Array.isArray(msg.content)) {
-      content = msg.content.map(part => ({
+      // Convert all parts to text, handling images as markdown
+      const textParts = msg.content
+        .map(part => convertPartToText(part as { type: string; text?: string; imageUrl?: string }))
+        .filter(text => text.length > 0)
+
+      content = textParts.map(text => ({
         type: 'text' as const,
-        text: part.text || ''
+        text
       }))
+
+      // Ensure at least one content part
+      if (content.length === 0) {
+        content = [{ type: 'text', text: '' }]
+      }
     } else if (typeof msg.content === 'string') {
       content = [{ type: 'text', text: msg.content }]
     } else {
       content = [{ type: 'text', text: '' }]
     }
-    
+
     return {
       message: INTERNAL.fromThreadMessageLike({
         id: msg.id,
@@ -208,14 +235,19 @@ export function createNexusHistoryAdapter(conversationId: string | null): Thread
 
           // Convert storage format back to ThreadMessage format
           // Storage has .parts, ThreadMessage expects .content
-          // Filter out step-start/step-finish parts that assistant-ui doesn't support
-          const filteredParts = encodedAny.parts.filter(
-            (p): p is { type: 'text'; text: string } => p.type !== 'step-start' && p.type !== 'step-finish'
-          )
+          // Convert all parts to text format (handles images as markdown, filters control types)
+          const textParts = encodedAny.parts
+            .map(part => convertPartToText(part as { type: string; text?: string; imageUrl?: string }))
+            .filter(text => text.length > 0)
+            .map(text => ({ type: 'text' as const, text }))
+
+          // Ensure at least one content part
+          const content = textParts.length > 0 ? textParts : [{ type: 'text' as const, text: '' }]
+
           const threadMessage = INTERNAL.fromThreadMessageLike({
             id: formatAdapter.getId(item.message),
             role: encodedAny.role,
-            content: filteredParts,
+            content,
             ...(encodedAny.createdAt && {
               createdAt: encodedAny.createdAt
             }),

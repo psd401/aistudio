@@ -170,13 +170,47 @@ jobs:
               body: body
             });
 
-      - name: Fail on major version change
-        if: steps.version-check.outputs.major_change == 'true'
+      - name: Check for upgrade approval label
+        if: |
+          github.event_name == 'pull_request' &&
+          steps.version-check.outputs.major_change == 'true'
+        id: check-label
+        uses: actions/github-script@v8
+        with:
+          script: |
+            // Fetch current labels from API (not from payload which is frozen at trigger time)
+            const { data: labels } = await github.rest.issues.listLabelsOnIssue({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number
+            });
+            const labelNames = labels.map(l => l.name);
+            const hasApproval = labelNames.includes('sdk-upgrade-approved');
+            core.setOutput('approved', hasApproval ? 'true' : 'false');
+            console.log(`Labels: ${labelNames.join(', ')}`);
+            console.log(`SDK upgrade approved: ${hasApproval}`);
+
+      - name: Fail on major version change (without approval)
+        if: |
+          steps.version-check.outputs.major_change == 'true' &&
+          (github.event_name != 'pull_request' || steps.check-label.outputs.approved != 'true')
         run: |
           echo "❌ Major AI SDK version change detected"
           echo "Please complete the upgrade checklist before merging"
           echo "See: /docs/operations/ai-sdk-upgrade-checklist.md"
+          echo ""
+          echo "To bypass this check after completing the checklist:"
+          echo "  Add the 'sdk-upgrade-approved' label to the PR"
           exit 1
+
+      - name: Major version change approved
+        if: |
+          steps.version-check.outputs.major_change == 'true' &&
+          github.event_name == 'pull_request' &&
+          steps.check-label.outputs.approved == 'true'
+        run: |
+          echo "✅ Major AI SDK version change approved via label"
+          echo "Checklist has been reviewed and approved"
 
       - name: Summary
         if: always()

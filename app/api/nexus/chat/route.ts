@@ -1,4 +1,4 @@
-import { UIMessage } from 'ai';
+import { UIMessage, createUIMessageStream, createUIMessageStreamResponse } from 'ai';
 import { z } from 'zod';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
@@ -6,9 +6,9 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { getAIModelById } from '@/lib/db/drizzle';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { hasCapability } from '@/lib/ai/capability-utils';
-import { eq, sql } from 'drizzle-orm';
+import { and, desc, eq, sql } from 'drizzle-orm';
 import { nexusConversations, nexusMessages } from '@/lib/db/schema';
-import { processMessagesWithAttachments } from '@/lib/services/attachment-storage-service';
+import { processMessagesWithAttachments, getAttachmentFromS3 } from '@/lib/services/attachment-storage-service';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import type { StreamRequest } from '@/lib/streaming/types';
 import { getModelConfig } from '@/lib/ai/model-config';
@@ -218,16 +218,404 @@ export async function POST(req: Request) {
         );
       }
 
-      // TODO: Implement actual image generation
-      // This would call the OpenAI DALL-E API or equivalent
-      // For now, return error indicating feature not yet implemented in streaming mode
-      return new Response(
-        JSON.stringify({
-          error: 'Image generation via streaming is not yet implemented. Please use the legacy endpoint.',
-          suggestion: 'Image generation support will be added in a future update.'
-        }),
-        { status: 501, headers: { 'Content-Type': 'application/json' } }
+      // Generate image using the image generation service
+      const { generateImageForNexus } = await import('@/lib/ai/image-generation-service');
+
+      // Determine provider from model config
+      const imageProvider = modelConfig.provider === 'google' ? 'google' : 'openai';
+
+      // Handle conversation creation for image generation
+      let imageConversationId: string = conversationIdValue || '';
+      let imageConversationTitle = 'Image Generation';
+
+      if (!imageConversationId) {
+        // Generate a title from the prompt
+        const cleanedPrompt = imagePrompt.replace(/\s+/g, ' ').trim();
+        imageConversationTitle = cleanedPrompt.slice(0, 40).trim();
+        if (cleanedPrompt.length > 40) {
+          imageConversationTitle += '...';
+        }
+
+        // Create new Nexus conversation
+        const now = new Date();
+        const createResult = await executeQuery(
+          (db) => db.insert(nexusConversations)
+            .values({
+              userId,
+              provider: imageProvider,
+              modelUsed: modelId,
+              title: sanitizeTextForDatabase(imageConversationTitle),
+              messageCount: 0,
+              totalTokens: 0,
+              metadata: sql`${safeJsonbStringify({ source: 'nexus', type: 'image-generation' })}::jsonb`,
+              createdAt: now,
+              updatedAt: now
+            })
+            .returning({ id: nexusConversations.id }),
+          'createImageConversation'
+        );
+
+        if (!createResult || createResult.length === 0 || !createResult[0]?.id) {
+          log.error('Failed to create image conversation');
+          return new Response(
+            JSON.stringify({ error: 'Failed to create conversation', requestId }),
+            { status: 500, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+
+        imageConversationId = createResult[0].id as string;
+        log.info('Created new image conversation', { conversationId: imageConversationId });
+      }
+
+      // Save user message
+      const userMessageId = crypto.randomUUID();
+      await executeQuery(
+        (db) => db.insert(nexusMessages)
+          .values({
+            id: userMessageId,
+            conversationId: imageConversationId,
+            role: 'user',
+            content: imagePrompt,
+            parts: sql`${safeJsonbStringify([{ type: 'text', text: imagePrompt }])}::jsonb`,
+            modelId: dbModelId,
+            metadata: sql`${safeJsonbStringify({})}::jsonb`,
+            createdAt: new Date()
+          }),
+        'saveImageUserMessage'
       );
+
+      try {
+        // Extract reference images from:
+        // 1. Current user message (uploaded images in content or parts)
+        // 2. Previous messages in the conversation (generated images)
+        type ReferenceImageType = { base64?: string; url?: string; s3Key?: string; mimeType?: string; role?: 'reference' | 'mask' };
+        const referenceImages: ReferenceImageType[] = [];
+
+        // Cast lastMessage to access all potential properties
+        const messageWithContent = lastMessage as UIMessage & {
+          content?: string | Array<{ type: string; text?: string; image?: string }>;
+          parts?: Array<{ type: string; text?: string; image?: string; imageUrl?: string; s3Key?: string }>;
+          experimental_attachments?: Array<{ contentType?: string; url?: string; name?: string }>;
+          attachments?: Array<{ content?: Array<{ type: string; image?: string }>; contentType?: string; url?: string }>;
+        };
+
+        // Extract images from message parts
+        // UIMessage parts can have various structures depending on source:
+        // - type: "image" with s3Key (processed by attachment-storage-service)
+        // - type: "image" with image property containing base64 (legacy format)
+        // - type: "file" with mediaType starting with "image/" (assistant-ui format)
+        const partsArray = messageWithContent.parts as unknown as Array<{
+          type: string;
+          text?: string;
+          image?: string;
+          imageUrl?: string;
+          s3Key?: string;
+          mediaType?: string;
+          mimeType?: string;
+          data?: string;
+          url?: string;
+        }> | undefined;
+
+        if (partsArray && Array.isArray(partsArray)) {
+          for (const part of partsArray) {
+            // Check for image type
+            if (part.type === 'image') {
+              // Check if image has an S3 key (stored by attachment-storage-service)
+              if (part.s3Key) {
+                try {
+                  log.debug('Retrieving image from S3 for reference', { s3Key: part.s3Key });
+                  const attachmentData = await getAttachmentFromS3(part.s3Key);
+                  if (attachmentData.image) {
+                    referenceImages.push({
+                      base64: attachmentData.image,
+                      mimeType: attachmentData.contentType,
+                      role: 'reference' as const
+                    });
+                    log.debug('Retrieved image from S3 successfully', {
+                      s3Key: part.s3Key,
+                      hasImage: true
+                    });
+                  }
+                } catch (s3Error) {
+                  log.warn('Failed to retrieve image from S3', {
+                    s3Key: part.s3Key,
+                    error: s3Error instanceof Error ? s3Error.message : String(s3Error)
+                  });
+                }
+              }
+              // Check for direct base64 data (not an S3 reference)
+              else if (part.image && !part.image.startsWith('s3://')) {
+                referenceImages.push({
+                  base64: part.image,
+                  role: 'reference' as const
+                });
+              }
+              // Check for imageUrl (URL-based images)
+              else if (part.imageUrl) {
+                referenceImages.push({
+                  url: part.imageUrl,
+                  s3Key: part.s3Key,
+                  role: 'reference' as const
+                });
+              }
+            }
+            // Check for file type with image mediaType (assistant-ui format)
+            else if (part.type === 'file') {
+              const mimeType = part.mediaType || part.mimeType || '';
+              if (mimeType.startsWith('image/')) {
+                // Check for S3 reference in url
+                if (part.s3Key || (part.url && part.url.startsWith('s3://'))) {
+                  const s3Key = part.s3Key || part.url?.replace('s3://', '');
+                  if (s3Key) {
+                    try {
+                      log.debug('Retrieving file image from S3', { s3Key });
+                      const attachmentData = await getAttachmentFromS3(s3Key);
+                      if (attachmentData.image) {
+                        referenceImages.push({
+                          base64: attachmentData.image,
+                          mimeType: attachmentData.contentType || mimeType,
+                          role: 'reference' as const
+                        });
+                      }
+                    } catch (s3Error) {
+                      log.warn('Failed to retrieve file image from S3', {
+                        s3Key,
+                        error: s3Error instanceof Error ? s3Error.message : String(s3Error)
+                      });
+                    }
+                  }
+                }
+                // Direct base64 data
+                else if (part.data) {
+                  const base64WithPrefix = part.data.startsWith('data:')
+                    ? part.data
+                    : `data:${mimeType};base64,${part.data}`;
+                  referenceImages.push({
+                    base64: base64WithPrefix,
+                    mimeType,
+                    role: 'reference' as const
+                  });
+                }
+                // URL-based image
+                else if (part.url && !part.url.startsWith('s3://')) {
+                  referenceImages.push({
+                    url: part.url,
+                    mimeType,
+                    role: 'reference' as const
+                  });
+                }
+              }
+            }
+          }
+        }
+
+        log.info('Image generation - extracted reference images', {
+          referenceImageCount: referenceImages.length,
+          partsCount: partsArray?.length || 0,
+          partTypes: partsArray?.map(p => p.type) || []
+        });
+
+        // If this is an existing conversation, look for previous generated images
+        if (conversationIdValue && referenceImages.length === 0) {
+          // Find the most recent generated image in this conversation
+          const previousImages = await executeQuery(
+            (db) => db
+              .select({ parts: nexusMessages.parts })
+              .from(nexusMessages)
+              .where(
+                and(
+                  eq(nexusMessages.conversationId, conversationIdValue),
+                  eq(nexusMessages.role, 'assistant')
+                )
+              )
+              .orderBy(desc(nexusMessages.createdAt))
+              .limit(5), // Check last 5 assistant messages for images
+            'getPreviousGeneratedImages'
+          );
+
+          if (previousImages && previousImages.length > 0) {
+            for (const msg of previousImages) {
+              if (msg.parts && Array.isArray(msg.parts)) {
+                for (const part of msg.parts) {
+                  const partData = part as { type: string; imageUrl?: string; s3Key?: string };
+                  if (partData.type === 'image' && (partData.imageUrl || partData.s3Key)) {
+                    referenceImages.push({
+                      url: partData.imageUrl,
+                      s3Key: partData.s3Key,
+                      role: 'reference' as const
+                    });
+                    // Only use the most recent generated image as reference
+                    break;
+                  }
+                }
+                if (referenceImages.length > 0) break;
+              }
+            }
+          }
+        }
+
+        // Generate the image
+        log.info('Starting image generation', {
+          provider: imageProvider,
+          modelId: modelConfig.model_id,
+          promptLength: imagePrompt.length,
+          referenceImageCount: referenceImages.length
+        });
+
+        const imageResult = await generateImageForNexus({
+          prompt: imagePrompt,
+          modelId: modelConfig.model_id,
+          provider: imageProvider as 'openai' | 'google',
+          conversationId: imageConversationId,
+          userId: userId.toString(),
+          size: '1024x1024',
+          quality: 'standard',
+          referenceImages: referenceImages.length > 0 ? referenceImages : undefined
+        });
+
+        // Save assistant message with image (and optional text from Gemini)
+        // Build parts array: include text if present, always include image
+        const messageParts: Array<{ type: string; text?: string; imageUrl?: string; s3Key?: string; altText?: string }> = [];
+
+        // Gemini returns text description along with image
+        if (imageResult.altText && imageResult.altText.trim()) {
+          messageParts.push({
+            type: 'text',
+            text: imageResult.altText.trim()
+          });
+        }
+
+        // Always include the generated image
+        messageParts.push({
+          type: 'image',
+          imageUrl: imageResult.imageUrl,
+          s3Key: imageResult.s3Key,
+          altText: 'Generated image'
+        });
+
+        const assistantMessageContent = JSON.stringify({
+          type: 'image',
+          imageUrl: imageResult.imageUrl,
+          s3Key: imageResult.s3Key,
+          model: imageResult.model,
+          provider: imageResult.provider,
+          altText: imageResult.altText,
+          dimensions: imageResult.dimensions
+        });
+
+        await executeQuery(
+          (db) => db.insert(nexusMessages)
+            .values({
+              conversationId: imageConversationId,
+              role: 'assistant',
+              content: assistantMessageContent,
+              parts: sql`${safeJsonbStringify(messageParts)}::jsonb`,
+              modelId: dbModelId,
+              metadata: sql`${safeJsonbStringify({
+                generationType: 'image',
+                estimatedCost: imageResult.estimatedCost
+              })}::jsonb`,
+              createdAt: new Date()
+            }),
+          'saveImageAssistantMessage'
+        );
+
+        // Update conversation stats
+        await executeQuery(
+          (db) => db.update(nexusConversations)
+            .set({
+              messageCount: sql`${nexusConversations.messageCount} + 2`,
+              lastMessageAt: new Date(),
+              updatedAt: new Date()
+            })
+            .where(eq(nexusConversations.id, imageConversationId)),
+          'updateImageConversationStats'
+        );
+
+        timer({ status: 'success', conversationId: imageConversationId });
+
+        // Build response content: include both text and image if available
+        // Gemini returns text description + image, OpenAI returns just image
+        let responseContent = '';
+
+        // Add text description if available (from Gemini)
+        if (imageResult.altText && imageResult.altText.trim()) {
+          responseContent += imageResult.altText.trim() + '\n\n';
+        }
+
+        // Add the image as markdown
+        responseContent += `![Generated Image](${imageResult.imageUrl})`;
+
+        // Use AI SDK's createUIMessageStreamResponse for proper client compatibility
+        const messageId = `img-${Date.now()}`;
+
+        const responseHeaders: Record<string, string> = {
+          'X-Request-Id': requestId,
+          'X-Conversation-Id': imageConversationId,
+          'X-Image-Generated': 'true'
+        };
+
+        if (!conversationIdValue) {
+          responseHeaders['X-Conversation-Title'] = encodeURIComponent(imageConversationTitle);
+        }
+
+        return createUIMessageStreamResponse({
+          status: 200,
+          headers: responseHeaders,
+          stream: createUIMessageStream({
+            async execute({ writer }) {
+              // Write text content as a complete message
+              writer.write({ type: 'text-start', id: messageId });
+              writer.write({ type: 'text-delta', id: messageId, delta: responseContent });
+              writer.write({ type: 'text-end', id: messageId });
+            }
+          })
+        });
+
+      } catch (imageError) {
+        log.error('Image generation failed', {
+          error: imageError instanceof Error ? imageError.message : String(imageError),
+          conversationId: imageConversationId
+        });
+
+        // Check for typed image generation errors
+        const typedError = imageError as Error & { type?: string; retryAfter?: number };
+
+        if (typedError.type === 'CONTENT_POLICY') {
+          return new Response(
+            JSON.stringify({ error: typedError.message, code: 'CONTENT_POLICY' }),
+            { status: 400, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+
+        if (typedError.type === 'RATE_LIMIT') {
+          return new Response(
+            JSON.stringify({
+              error: typedError.message,
+              code: 'RATE_LIMIT',
+              retryAfter: typedError.retryAfter || 60
+            }),
+            { status: 429, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+
+        if (typedError.type === 'AUTHENTICATION') {
+          return new Response(
+            JSON.stringify({ error: 'Image generation service authentication failed', code: 'AUTH_ERROR' }),
+            { status: 401, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+
+        // Generic error
+        return new Response(
+          JSON.stringify({
+            error: 'Image generation failed. Please try again.',
+            details: typedError.message,
+            requestId
+          }),
+          { status: 500, headers: { 'Content-Type': 'application/json' } }
+        );
+      }
     }
 
     // 6. Handle conversation (create new or use existing)

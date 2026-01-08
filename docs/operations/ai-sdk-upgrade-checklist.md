@@ -442,6 +442,6 @@ npm run typecheck
 
 ---
 
-**Last Updated:** 2025-01-19
-**AI SDK Version:** 5.0.0
-**Compatibility:** v4.x, v5.x (with adapter)
+**Last Updated:** 2026-01-08
+**AI SDK Version:** 6.0.0
+**Compatibility:** v4.x, v5.x, v6.x (with adapter)

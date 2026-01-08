@@ -95,22 +95,31 @@ export class SSEEventAdapter {
       });
     }
 
-    // v5 is the current version - no mappings needed
+    // v5 compatibility - no mappings needed
     if (this.version.major === 5) {
-      // No mappings needed for current version
       log.debug('v5 detected - no compatibility mappings needed');
     }
 
-    // v6 placeholder for future versions
-    if (this.version.major >= 6) {
-      const v6Mappings = new Map<string, string>();
-      // Add mappings when v6 is released and we know what changed
-      // Example:
-      // v6Mappings.set('oldFieldName', 'newFieldName');
+    // v6 - verified compatible with v5 event formats
+    // AI SDK v6 maintains backward compatibility for SSE events:
+    // - text-delta uses 'delta' field (same as v5)
+    // - reasoning-delta uses 'delta' field (same as v5)
+    // - tool events unchanged
+    // Main changes in v6:
+    // - generateImage now stable (was experimental_generateImage)
+    // - New createUIMessageStream/createUIMessageStreamResponse utilities
+    // - toUIMessageStreamResponse method on stream results
+    if (this.version.major === 6) {
+      log.debug('v6 detected - event formats compatible with v5');
+    }
 
-      this.fieldMappings.set('6', v6Mappings);
+    // v7+ placeholder for future versions
+    if (this.version.major >= 7) {
+      const v7Mappings = new Map<string, string>();
+      // Add mappings when v7 is released and we know what changed
+      this.fieldMappings.set('7', v7Mappings);
 
-      log.warn('SDK v6+ detected - compatibility mappings may be incomplete', {
+      log.warn('SDK v7+ detected - compatibility mappings may be incomplete', {
         version: this.version.version,
       });
     }

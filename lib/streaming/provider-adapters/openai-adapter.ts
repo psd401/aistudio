@@ -1,5 +1,5 @@
 import { createOpenAI } from '@ai-sdk/openai';
-import { streamText, type CoreMessage, type ToolSet } from 'ai';
+import { streamText, type ModelMessage, type ToolSet } from 'ai';
 import { createLogger } from '@/lib/logger';
 import { Settings } from '@/lib/settings-manager';
 import { ErrorFactories } from '@/lib/error-utils';
@@ -309,7 +309,7 @@ export class OpenAIAdapter extends BaseProviderAdapter {
       // Stream with Responses API enhancements
       const result = streamText({
         model: enhancedConfig.model,
-        messages: enhancedConfig.messages as CoreMessage[],
+        messages: enhancedConfig.messages as ModelMessage[],
         system: enhancedConfig.system,
         tools: enhancedConfig.tools,
         toolChoice: enhancedConfig.toolChoice,
@@ -357,14 +357,14 @@ export class OpenAIAdapter extends BaseProviderAdapter {
       this.processResponsesAPIStream(result, callbacks);
       
       return {
-        toDataStreamResponse: (options?: { headers?: Record<string, string> }) => 
+        toDataStreamResponse: (options?: { headers?: Record<string, string> }) =>
           result.toUIMessageStreamResponse ? result.toUIMessageStreamResponse(options) : result.toTextStreamResponse(options),
-        toUIMessageStreamResponse: (options?: { headers?: Record<string, string> }) => 
+        toUIMessageStreamResponse: (options?: { headers?: Record<string, string> }) =>
           result.toUIMessageStreamResponse ? result.toUIMessageStreamResponse(options) : result.toTextStreamResponse(options),
-        usage: result.usage
+        usage: Promise.resolve(result.usage)
       };
     }
-    
+
     // Fall back to base implementation for non-Responses API models
     return super.streamWithEnhancements(config, callbacks);
   }
