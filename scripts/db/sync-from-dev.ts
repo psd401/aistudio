@@ -17,9 +17,9 @@
  * For most development work, the seed data (npm run db:seed) is sufficient.
  */
 
-import { execSync } from "child_process";
-import fs from "fs";
-import path from "path";
+import { execSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 
 const LOCAL_DB_URL =
   process.env.LOCAL_DATABASE_URL ||
