@@ -93,14 +93,14 @@ export function createEdgeLogger(context: LogContext): EdgeLogger {
           })
         }
 
-        // For development debugging - this will work in Node.js runtime
-        // but fail silently in Edge Runtime
-        if (typeof process !== 'undefined' && process.stderr && process.stdout) {
-          if (level === 'ERROR') {
-            process.stderr.write(`${formattedMessage}${metaString}\n`)
-          } else {
-            process.stdout.write(`${formattedMessage}${metaString}\n`)
-          }
+        // For development debugging - works in both Node.js and Edge Runtime
+        // eslint-disable-next-line no-console
+        if (level === 'ERROR') {
+          // eslint-disable-next-line no-console
+          console.error(`${formattedMessage}${metaString}`)
+        } else {
+          // eslint-disable-next-line no-console
+          console.log(`${formattedMessage}${metaString}`)
         }
       } catch {
         // Silently fail if any logging mechanism fails

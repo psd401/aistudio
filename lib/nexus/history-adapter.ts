@@ -199,18 +199,23 @@ export function createNexusHistoryAdapter(conversationId: string | null): Thread
 
           // Encode the message to storage format
           const encoded = formatAdapter.encode(item);
+          // Parts may include AI SDK v5 control types (step-start, step-finish) that need filtering
           const encodedAny = encoded as {
             role: 'user' | 'assistant' | 'system';
-            parts: Array<{ type: 'text'; text: string }>;
+            parts: Array<{ type: string; text?: string }>;
             createdAt?: Date;
           };
 
           // Convert storage format back to ThreadMessage format
           // Storage has .parts, ThreadMessage expects .content
+          // Filter out step-start/step-finish parts that assistant-ui doesn't support
+          const filteredParts = encodedAny.parts.filter(
+            (p): p is { type: 'text'; text: string } => p.type !== 'step-start' && p.type !== 'step-finish'
+          )
           const threadMessage = INTERNAL.fromThreadMessageLike({
             id: formatAdapter.getId(item.message),
             role: encodedAny.role,
-            content: encodedAny.parts, // Convert .parts → .content
+            content: filteredParts,
             ...(encodedAny.createdAt && {
               createdAt: encodedAny.createdAt
             }),

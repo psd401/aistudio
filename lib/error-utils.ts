@@ -372,10 +372,16 @@ export function handleError(
   // CRITICAL: Prevent recursive error handling (stack overflow protection)
   // Module-level flag is safe because error handling is synchronous
   if (isHandlingError) {
-    // Last-resort failsafe: Use process.stderr.write to avoid triggering our own error handling
+    // Last-resort failsafe: Log recursion without triggering our own error handling
     // This bypasses all logging infrastructure to prevent infinite recursion
-    // More reliable than console.error for CloudWatch integration
-    process.stderr.write(`[RECURSION GUARD] Recursive error handling detected: ${String(error)}\n`)
+    // Use process.stderr.write in Node.js (more reliable for CloudWatch), console.error in Edge Runtime
+    const message = `[RECURSION GUARD] Recursive error handling detected: ${String(error)}\n`
+    if (typeof process !== 'undefined' && process.stderr?.write) {
+      process.stderr.write(message)
+    } else {
+      // eslint-disable-next-line no-console
+      console.error(message)
+    }
     return {
       isSuccess: false,
       message: "System error occurred"
