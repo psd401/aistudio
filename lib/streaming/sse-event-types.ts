@@ -5,7 +5,8 @@
  * field name mismatches and improve developer experience across all streaming
  * implementations in the application.
  *
- * Based on Vercel AI SDK v5 stream protocol and production event logs.
+ * Compatible with Vercel AI SDK v5 and v6 stream protocols.
+ * Verified: v6 maintains backward compatibility for all SSE event formats.
  *
  * @see https://sdk.vercel.ai/docs/ai-sdk-ui/stream-protocol
  * @see https://github.com/psd401/aistudio/issues/363
