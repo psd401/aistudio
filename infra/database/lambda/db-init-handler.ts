@@ -1,9 +1,10 @@
 /**
- * Database Initialization Handler - Version 2026-01-02-20:15
- * Updated to force CDK rebundle after schema file changes
+ * Database Initialization Handler - Version 2026-01-07-10:00
+ * Updated to import migrations from single source of truth (migrations.json)
  */
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+import migrationsConfig from '../migrations.json';
 
 const rdsClient = new RDSDataClient({});
 const secretsClient = new SecretsManagerClient({});
@@ -32,56 +33,14 @@ interface CustomResourceEvent {
  * @see /docs/database-restoration/DATABASE-MIGRATIONS.md for full details
  */
 
-// Migration files that should ALWAYS run (additive only)
-// These files should ONLY create new objects, never modify existing ones
-const MIGRATION_FILES = [
-  '010-knowledge-repositories.sql',
-  '11_textract_jobs.sql',
-  '12_textract_usage.sql',
-  '013-add-knowledge-repositories-tool.sql',
-  '014-model-comparisons.sql',
-  '015-add-model-compare-tool.sql',
-  '016-assistant-architect-repositories.sql',
-  '017-add-user-roles-updated-at.sql',
-  '018-model-replacement-audit.sql',
-  '019-fix-navigation-role-display.sql',
-  '020-add-user-role-version.sql',
-  '023-navigation-multi-roles.sql',
-  '024-model-role-restrictions.sql',
-  '026-add-model-compare-source.sql',
-  '027-messages-model-tracking.sql',
-  '028-nexus-schema.sql',
-  '029-ai-models-nexus-enhancements.sql',
-  '030-nexus-provider-metrics.sql',
-  '031-nexus-messages.sql',
-  '032-remove-nexus-provider-constraint.sql',
-  '033-ai-streaming-jobs.sql',
-  '034-assistant-architect-enabled-tools.sql',
-  '035-schedule-management-schema.sql',
-  '036-remove-legacy-chat-tables.sql',
-  '037-assistant-architect-events.sql',
-  '039-prompt-library-schema.sql',
-  '040-update-model-replacement-audit.sql',
-  '041-add-user-cascade-constraints.sql',
-  '042-ai-streaming-jobs-pending-index.sql',
-  '043-migrate-documents-conversation-uuid.sql',
-  '044-add-model-availability-flags.sql',
-  '045-remove-chat-enabled-column.sql',
-  '046-remove-nexus-capabilities-column.sql',
-  '047-add-jsonb-defaults.sql',
-  '048-remove-jsonb-not-null.sql'
-  // ADD NEW MIGRATIONS HERE - they will run once and be tracked
-];
+// Import migration lists from single source of truth
+// See /infra/database/migrations.json for the complete list
+// ADD NEW MIGRATIONS to migrations.json - they will run once and be tracked
+const MIGRATION_FILES = migrationsConfig.migrationFiles;
 
 // Initial setup files (only run on empty database)
 // WARNING: These must EXACTLY match existing database structure!
-const INITIAL_SETUP_FILES = [
-  '001-enums.sql',      // Creates enum types
-  '002-tables.sql',     // Creates all core tables
-  '003-constraints.sql', // Adds foreign key constraints
-  '004-indexes.sql',     // Creates performance indexes
-  '005-initial-data.sql' // Inserts required seed data
-];
+const INITIAL_SETUP_FILES = migrationsConfig.initialSetupFiles;
 
 export async function handler(event: CustomResourceEvent): Promise<any> {
   console.log('Database initialization event:', JSON.stringify(event, null, 2));

@@ -18,6 +18,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import postgres from "postgres";
+import { scriptLogger as log } from "./script-logger";
+import { MIGRATION_FILES, SCHEMA_DIR } from "./migration-manifest";
 
 // Default to local PostgreSQL connection
 const DATABASE_URL =
@@ -25,60 +27,12 @@ const DATABASE_URL =
   "postgresql://postgres:postgres@localhost:5432/aistudio";
 const sslEnabled = process.env.DB_SSL !== "false";
 
-// Migration files (must match MIGRATION_FILES in db-init-handler.ts)
-const MIGRATION_FILES = [
-  "010-knowledge-repositories.sql",
-  "11_textract_jobs.sql",
-  "12_textract_usage.sql",
-  "013-add-knowledge-repositories-tool.sql",
-  "014-model-comparisons.sql",
-  "015-add-model-compare-tool.sql",
-  "016-assistant-architect-repositories.sql",
-  "017-add-user-roles-updated-at.sql",
-  "018-model-replacement-audit.sql",
-  "019-fix-navigation-role-display.sql",
-  "020-add-user-role-version.sql",
-  "023-navigation-multi-roles.sql",
-  "024-model-role-restrictions.sql",
-  "026-add-model-compare-source.sql",
-  "027-messages-model-tracking.sql",
-  "028-nexus-schema.sql",
-  "029-ai-models-nexus-enhancements.sql",
-  "030-nexus-provider-metrics.sql",
-  "031-nexus-messages.sql",
-  "032-remove-nexus-provider-constraint.sql",
-  "033-ai-streaming-jobs.sql",
-  "034-assistant-architect-enabled-tools.sql",
-  "035-schedule-management-schema.sql",
-  "036-remove-legacy-chat-tables.sql",
-  "037-assistant-architect-events.sql",
-  "039-prompt-library-schema.sql",
-  "040-update-model-replacement-audit.sql",
-  "041-add-user-cascade-constraints.sql",
-  "042-ai-streaming-jobs-pending-index.sql",
-  "043-migrate-documents-conversation-uuid.sql",
-  "044-add-model-availability-flags.sql",
-  "045-remove-chat-enabled-column.sql",
-  "046-remove-nexus-capabilities-column.sql",
-  "047-add-jsonb-defaults.sql",
-  "048-remove-jsonb-not-null.sql",
-];
-
-const SCHEMA_DIR = path.join(
-  process.cwd(),
-  "infra",
-  "database",
-  "schema"
-);
+const schemaPath = path.join(process.cwd(), SCHEMA_DIR);
 
 async function main(): Promise<void> {
-  console.log("==========================================");
-  console.log("AI Studio - Database Migration Runner");
-  console.log("==========================================");
-  console.log("");
-  console.log(`Database: ${DATABASE_URL.replace(/:\/\/.*@/, "://*****@")}`);
-  console.log(`SSL: ${sslEnabled ? "enabled" : "disabled"}`);
-  console.log("");
+  log.section("AI Studio - Database Migration Runner");
+  log.info("Database", { url: DATABASE_URL.replace(/:\/\/.*@/, "://*****@") });
+  log.info("SSL", { enabled: sslEnabled });
 
   const sql = postgres(DATABASE_URL, {
     ssl: sslEnabled ? "require" : false,
@@ -89,10 +43,9 @@ async function main(): Promise<void> {
 
   try {
     // Test connection
-    console.log("Testing database connection...");
+    log.info("Testing database connection...");
     await sql`SELECT 1`;
-    console.log("Connection successful!");
-    console.log("");
+    log.success("Connection successful");
 
     // Ensure migration_log table exists
     await sql`
@@ -113,27 +66,27 @@ async function main(): Promise<void> {
     `;
     const completedSet = new Set(completedMigrations.map((r) => r.description));
 
-    console.log("Processing migrations...");
-    console.log("-------------------------");
+    log.info("Processing migrations...");
 
     let runCount = 0;
     let skipCount = 0;
+    let failCount = 0;
 
     for (const migrationFile of MIGRATION_FILES) {
       if (completedSet.has(migrationFile)) {
-        console.log(`  SKIP: ${migrationFile} (already run)`);
+        log.debug(`SKIP: ${migrationFile} (already run)`);
         skipCount++;
         continue;
       }
 
-      const filePath = path.join(SCHEMA_DIR, migrationFile);
+      const filePath = path.join(schemaPath, migrationFile);
 
       if (!fs.existsSync(filePath)) {
-        console.log(`  WARN: ${migrationFile} not found`);
+        log.warn(`Migration file not found: ${migrationFile}`);
         continue;
       }
 
-      console.log(`  RUN:  ${migrationFile}`);
+      log.info(`Running: ${migrationFile}`);
       const startTime = Date.now();
 
       try {
@@ -170,11 +123,12 @@ async function main(): Promise<void> {
           FROM migration_log
         `;
 
-        console.log(`        Completed in ${duration}ms`);
+        log.success(`${migrationFile} (${duration}ms)`);
         runCount++;
       } catch (err: unknown) {
         const error = err as Error;
-        console.error(`        FAILED: ${error.message}`);
+        log.fail(`${migrationFile}: ${error.message}`);
+        failCount++;
 
         // Record failure
         await sql`
@@ -187,14 +141,13 @@ async function main(): Promise<void> {
       }
     }
 
-    console.log("");
-    console.log("==========================================");
-    console.log("Migration Summary");
-    console.log("==========================================");
-    console.log(`  Migrations run: ${runCount}`);
-    console.log(`  Migrations skipped: ${skipCount}`);
-    console.log(`  Total migrations: ${MIGRATION_FILES.length}`);
-    console.log("");
+    log.section("Migration Summary");
+    log.info("Results", {
+      run: runCount,
+      skipped: skipCount,
+      failed: failCount,
+      total: MIGRATION_FILES.length,
+    });
   } finally {
     await sql.end();
   }
@@ -258,6 +211,6 @@ function splitSqlStatements(sqlContent: string): string[] {
 }
 
 main().catch((error) => {
-  console.error("Migration failed:", error);
+  log.error("Migration failed", { error: error.message });
   process.exit(1);
 });

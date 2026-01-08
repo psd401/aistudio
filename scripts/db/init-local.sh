@@ -20,6 +20,7 @@ echo ""
 
 # Schema files are mounted at /docker-entrypoint-initdb.d/schema/
 SCHEMA_DIR="/docker-entrypoint-initdb.d/schema"
+MANIFEST_FILE="/docker-entrypoint-initdb.d/migrations.json"
 
 # Check if schema directory exists and has files
 if [ ! -d "$SCHEMA_DIR" ]; then
@@ -28,55 +29,35 @@ if [ ! -d "$SCHEMA_DIR" ]; then
     exit 1
 fi
 
-# Initial setup files (run first, in order)
-INITIAL_FILES=(
-    "001-enums.sql"
-    "002-tables.sql"
-    "003-constraints.sql"
-    "004-indexes.sql"
-    "005-initial-data.sql"
-)
+# Check if manifest file exists
+if [ ! -f "$MANIFEST_FILE" ]; then
+    echo "ERROR: Migration manifest not found at $MANIFEST_FILE"
+    echo "Make sure docker-compose.dev.yml mounts migrations.json correctly."
+    exit 1
+fi
 
-# Migration files (run after initial setup, in order)
-MIGRATION_FILES=(
-    "010-knowledge-repositories.sql"
-    "11_textract_jobs.sql"
-    "12_textract_usage.sql"
-    "013-add-knowledge-repositories-tool.sql"
-    "014-model-comparisons.sql"
-    "015-add-model-compare-tool.sql"
-    "016-assistant-architect-repositories.sql"
-    "017-add-user-roles-updated-at.sql"
-    "018-model-replacement-audit.sql"
-    "019-fix-navigation-role-display.sql"
-    "020-add-user-role-version.sql"
-    "023-navigation-multi-roles.sql"
-    "024-model-role-restrictions.sql"
-    "026-add-model-compare-source.sql"
-    "027-messages-model-tracking.sql"
-    "028-nexus-schema.sql"
-    "029-ai-models-nexus-enhancements.sql"
-    "030-nexus-provider-metrics.sql"
-    "031-nexus-messages.sql"
-    "032-remove-nexus-provider-constraint.sql"
-    "033-ai-streaming-jobs.sql"
-    "034-assistant-architect-enabled-tools.sql"
-    "035-schedule-management-schema.sql"
-    "036-remove-legacy-chat-tables.sql"
-    "037-assistant-architect-events.sql"
-    "039-prompt-library-schema.sql"
-    "040-update-model-replacement-audit.sql"
-    "041-add-user-cascade-constraints.sql"
-    "042-ai-streaming-jobs-pending-index.sql"
-    "043-migrate-documents-conversation-uuid.sql"
-    "044-add-model-availability-flags.sql"
-    "045-remove-chat-enabled-column.sql"
-    "046-remove-nexus-capabilities-column.sql"
-    "047-add-jsonb-defaults.sql"
-    "048-remove-jsonb-not-null.sql"
-)
+# Parse JSON manifest without jq (postgres:alpine doesn't have it)
+# Extract initialSetupFiles array
+parse_json_array() {
+    local key=$1
+    local file=$2
+    # Extract the array, remove brackets, quotes, and whitespace
+    grep -A 100 "\"$key\"" "$file" | \
+        grep -o '"[^"]*\.sql"' | \
+        tr -d '"' | \
+        head -50  # Safety limit
+}
+
+echo "Reading migration manifest from $MANIFEST_FILE..."
+INITIAL_FILES=($(parse_json_array "initialSetupFiles" "$MANIFEST_FILE"))
+MIGRATION_FILES=($(parse_json_array "migrationFiles" "$MANIFEST_FILE"))
+
+echo "Found ${#INITIAL_FILES[@]} initial setup files"
+echo "Found ${#MIGRATION_FILES[@]} migration files"
+echo ""
 
 # Create migration_log table first (to track what's been run)
+# Using ON_ERROR_STOP=1 to fail fast on errors
 echo "Creating migration_log table..."
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
     CREATE TABLE IF NOT EXISTS migration_log (
@@ -94,6 +75,7 @@ EOSQL
 run_sql_file() {
     local filename=$1
     local filepath="$SCHEMA_DIR/$filename"
+    local allow_failures=${2:-false}
 
     if [ ! -f "$filepath" ]; then
         echo "WARNING: File not found: $filepath"
@@ -103,37 +85,58 @@ run_sql_file() {
     echo "Running: $filename"
 
     # Execute the SQL file
-    if psql -v ON_ERROR_STOP=0 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -f "$filepath" 2>&1; then
-        # Log success
-        psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
-            INSERT INTO migration_log (step_number, description, sql_executed, status)
-            SELECT COALESCE(MAX(step_number), 0) + 1, '$filename', 'File executed', 'completed'
-            FROM migration_log;
-EOSQL
-        echo "  SUCCESS"
+    # For initial setup, allow "already exists" errors (ON_ERROR_STOP=0)
+    # For migrations, fail on errors (ON_ERROR_STOP=1)
+    if [ "$allow_failures" = "true" ]; then
+        if psql -v ON_ERROR_STOP=0 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -f "$filepath" 2>&1; then
+            log_migration "$filename" "completed" "File executed"
+            echo "  SUCCESS"
+        else
+            echo "  WARNING: Some statements in $filename may have failed (likely 'already exists' errors)"
+            log_migration "$filename" "completed" "File executed with warnings"
+        fi
     else
-        echo "  WARNING: Some statements in $filename may have failed (likely 'already exists' errors)"
-        # Still log it as completed since we continue on errors for idempotency
-        psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
-            INSERT INTO migration_log (step_number, description, sql_executed, status)
-            SELECT COALESCE(MAX(step_number), 0) + 1, '$filename', 'File executed with warnings', 'completed'
-            FROM migration_log;
-EOSQL
+        # Strict mode - fail on any error
+        if psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" -f "$filepath" 2>&1; then
+            log_migration "$filename" "completed" "File executed"
+            echo "  SUCCESS"
+        else
+            local exit_code=$?
+            echo "  FAILED: $filename"
+            log_migration "$filename" "failed" "File execution failed"
+            return $exit_code
+        fi
     fi
+}
+
+# Function to log migration status
+log_migration() {
+    local filename=$1
+    local status=$2
+    local message=$3
+
+    psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-EOSQL
+        INSERT INTO migration_log (step_number, description, sql_executed, status)
+        SELECT COALESCE(MAX(step_number), 0) + 1, '$filename', '$message', '$status'
+        FROM migration_log;
+EOSQL
 }
 
 echo ""
 echo "Running initial setup files..."
 echo "------------------------------"
 for file in "${INITIAL_FILES[@]}"; do
-    run_sql_file "$file"
+    # Allow "already exists" errors for idempotent setup
+    run_sql_file "$file" "true"
 done
 
 echo ""
 echo "Running migration files..."
 echo "--------------------------"
 for file in "${MIGRATION_FILES[@]}"; do
-    run_sql_file "$file"
+    # Use strict error handling for migrations
+    # But allow "already exists" since migrations should be idempotent
+    run_sql_file "$file" "true"
 done
 
 echo ""

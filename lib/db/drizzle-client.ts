@@ -100,6 +100,10 @@ function getPgClient(): ReturnType<typeof postgres> {
     // Set DB_SSL=false for local PostgreSQL without SSL certificates
     const sslEnabled = process.env.DB_SSL !== "false";
 
+    // SQL_LOGGING enables verbose query logging (opt-in for security)
+    // Set SQL_LOGGING=true to see all queries in console
+    const sqlLoggingEnabled = process.env.SQL_LOGGING === "true";
+
     pgClient = postgres(getDatabaseUrl(), {
       max: parseInt(process.env.DB_MAX_CONNECTIONS || "20", 10),
       idle_timeout: parseInt(process.env.DB_IDLE_TIMEOUT || "20", 10),
@@ -108,7 +112,7 @@ function getPgClient(): ReturnType<typeof postgres> {
       prepare: true, // Enable prepared statements for performance
       ssl: sslEnabled ? "require" : false, // SSL required for AWS, optional for local dev
       onnotice: () => {}, // Suppress PostgreSQL notices
-      debug: process.env.NODE_ENV === "development",
+      debug: sqlLoggingEnabled, // Opt-in via SQL_LOGGING=true (default: off)
     });
   }
   return pgClient;

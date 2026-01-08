@@ -20,6 +20,7 @@
 import { execSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import { scriptLogger as log } from "./script-logger";
 
 const LOCAL_DB_URL =
   process.env.LOCAL_DATABASE_URL ||
@@ -34,6 +35,8 @@ const EXCLUDED_TABLES = [
 ];
 
 // Tables to sync (safe/anonymized data)
+// NOTE: These are hardcoded table names - SQL injection is not possible
+// since we only iterate over this known-safe list
 const TABLES_TO_SYNC = [
   "roles",
   "tools",
@@ -48,10 +51,7 @@ const TABLES_TO_SYNC = [
 ];
 
 async function main(): Promise<void> {
-  console.log("==========================================");
-  console.log("AI Studio - Sync Data from AWS Dev");
-  console.log("==========================================");
-  console.log("");
+  log.section("AI Studio - Sync Data from AWS Dev");
 
   // Check if AWS environment variables are set
   const awsHost = process.env.AWS_DEV_DB_HOST;
@@ -60,22 +60,18 @@ async function main(): Promise<void> {
   const awsDatabase = process.env.AWS_DEV_DB_NAME || "aistudio";
 
   if (!awsHost || !awsUser || !awsPassword) {
-    console.log("ERROR: AWS database credentials not configured.");
-    console.log("");
-    console.log("Required environment variables:");
-    console.log("  AWS_DEV_DB_HOST     - Aurora cluster endpoint");
-    console.log("  AWS_DEV_DB_USER     - Database username");
-    console.log("  AWS_DEV_DB_PASSWORD - Database password");
-    console.log("  AWS_DEV_DB_NAME     - Database name (default: aistudio)");
-    console.log("");
-    console.log("Options to connect to AWS Aurora:");
-    console.log("  1. Use AWS SSM Session Manager port forwarding");
-    console.log("  2. Connect from a bastion host with network access");
-    console.log("  3. Use AWS Client VPN");
-    console.log("");
-    console.log("For most development work, use seed data instead:");
-    console.log("  bun run db:seed");
-    console.log("");
+    log.error("AWS database credentials not configured.");
+    log.info("Required environment variables:");
+    log.info("  AWS_DEV_DB_HOST     - Aurora cluster endpoint");
+    log.info("  AWS_DEV_DB_USER     - Database username");
+    log.info("  AWS_DEV_DB_PASSWORD - Database password");
+    log.info("  AWS_DEV_DB_NAME     - Database name (default: aistudio)");
+    log.info("Options to connect to AWS Aurora:");
+    log.info("  1. Use AWS SSM Session Manager port forwarding");
+    log.info("  2. Connect from a bastion host with network access");
+    log.info("  3. Use AWS Client VPN");
+    log.info("For most development work, use seed data instead:");
+    log.info("  bun run db:seed");
     process.exit(1);
   }
 
@@ -87,28 +83,26 @@ async function main(): Promise<void> {
     fs.mkdirSync(tmpDir, { recursive: true });
   }
 
-  console.log("Syncing the following tables:");
-  TABLES_TO_SYNC.forEach((t) => console.log(`  - ${t}`));
-  console.log("");
-  console.log("Excluded tables (contain sensitive data):");
-  EXCLUDED_TABLES.forEach((t) => console.log(`  - ${t}`));
-  console.log("");
+  log.info("Syncing the following tables:");
+  TABLES_TO_SYNC.forEach((t) => log.info(`  - ${t}`));
+  log.info("Excluded tables (contain sensitive data):");
+  EXCLUDED_TABLES.forEach((t) => log.info(`  - ${t}`));
 
   for (const table of TABLES_TO_SYNC) {
     const dumpFile = path.join(tmpDir, `${table}.sql`);
 
-    console.log(`Syncing ${table}...`);
+    log.info(`Syncing ${table}...`);
 
     try {
       // Export from AWS
-      console.log(`  Exporting from AWS...`);
+      log.debug(`  Exporting from AWS...`);
       execSync(
         `pg_dump "${awsDbUrl}" --table=${table} --data-only --column-inserts --on-conflict-do-nothing > "${dumpFile}"`,
         { stdio: "pipe" }
       );
 
       // Import to local
-      console.log(`  Importing to local...`);
+      log.debug(`  Importing to local...`);
       execSync(`psql "${LOCAL_DB_URL}" -f "${dumpFile}"`, {
         stdio: "pipe",
       });
@@ -118,10 +112,10 @@ async function main(): Promise<void> {
         `psql "${LOCAL_DB_URL}" -t -c "SELECT COUNT(*) FROM ${table};"`,
         { encoding: "utf8" }
       );
-      console.log(`  Done (${countResult.trim()} rows)`);
+      log.success(`${table} (${countResult.trim()} rows)`);
     } catch (error: unknown) {
       const err = error as Error;
-      console.log(`  WARNING: Failed to sync ${table}: ${err.message}`);
+      log.warn(`Failed to sync ${table}: ${err.message}`);
     }
 
     // Clean up dump file
@@ -133,17 +127,12 @@ async function main(): Promise<void> {
   // Clean up temp directory
   fs.rmdirSync(tmpDir, { recursive: true });
 
-  console.log("");
-  console.log("==========================================");
-  console.log("Sync complete!");
-  console.log("==========================================");
-  console.log("");
-  console.log("Note: User data was NOT synced for privacy.");
-  console.log("Run 'bun run db:seed' to create local test users.");
-  console.log("");
+  log.section("Sync complete!");
+  log.info("Note: User data was NOT synced for privacy.");
+  log.info("Run 'bun run db:seed' to create local test users.");
 }
 
 main().catch((error) => {
-  console.error("Sync failed:", error);
+  log.error("Sync failed", { error: error.message });
   process.exit(1);
 });

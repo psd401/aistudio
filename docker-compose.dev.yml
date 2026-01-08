@@ -1,6 +1,11 @@
 # Docker Compose for Local Development
 # Issue #607 - Local Development Environment with PostgreSQL and Hot Reload
 #
+# ⚠️  SECURITY WARNING ⚠️
+# This configuration uses default credentials (postgres:postgres) and is
+# intended ONLY for local development. NEVER use these credentials or
+# expose this configuration in production environments.
+#
 # Usage:
 #   bun run db:up        # Start PostgreSQL only
 #   bun run dev:docker   # Start both app and database with hot reload
@@ -30,6 +35,8 @@ services:
       # Initialize database with schema on first run
       - ./scripts/db/init-local.sh:/docker-entrypoint-initdb.d/01-init-local.sh:ro
       - ./infra/database/schema:/docker-entrypoint-initdb.d/schema:ro
+      # Migration manifest (single source of truth)
+      - ./infra/database/migrations.json:/docker-entrypoint-initdb.d/migrations.json:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d aistudio"]
       interval: 5s
