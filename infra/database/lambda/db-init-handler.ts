@@ -4,7 +4,15 @@
  */
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
-import migrationsConfig from '../migrations.json';
+// migrations.json is copied to the Lambda package root during bundling
+// Using require for runtime resolution (file doesn't exist in source, only in Lambda package)
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const migrationsConfig = require('./migrations.json') as {
+  description: string;
+  schemaDir: string;
+  initialSetupFiles: string[];
+  migrationFiles: string[];
+};
 
 const rdsClient = new RDSDataClient({});
 const secretsClient = new SecretsManagerClient({});
