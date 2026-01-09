@@ -41,7 +41,7 @@ describe("SharedVPC Construct", () => {
       expect(Object.keys(subnets).length).toBeGreaterThan(4)
     })
 
-    test("uses NAT instances for cost optimization", () => {
+    test("uses NAT gateways for all environments", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
 
@@ -54,13 +54,13 @@ describe("SharedVPC Construct", () => {
       // Assert
       const template = Template.fromStack(stack)
 
-      // Dev should use EC2 instances for NAT (cheaper)
-      template.hasResourceProperties("AWS::EC2::Instance", {
-        InstanceType: "t3.nano",
+      // All environments now use NAT gateways (Issue #617 removed NAT instances)
+      template.hasResourceProperties("AWS::EC2::NatGateway", {
+        AllocationId: Match.anyValue(),
       })
     })
 
-    test("creates essential VPC endpoints", () => {
+    test("creates only gateway endpoints by default (cost optimization)", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
 
@@ -73,7 +73,7 @@ describe("SharedVPC Construct", () => {
       // Assert
       const template = Template.fromStack(stack)
 
-      // Gateway endpoints (S3, DynamoDB) - no cost
+      // Gateway endpoints (S3, DynamoDB) - FREE
       template.hasResourceProperties("AWS::EC2::VPCEndpoint", {
         ServiceName: Match.objectLike({
           "Fn::Join": Match.arrayWith([
@@ -82,9 +82,10 @@ describe("SharedVPC Construct", () => {
         }),
       })
 
-      // Interface endpoints should exist
+      // Only gateway endpoints should exist (S3 + DynamoDB = 2)
+      // Interface endpoints are disabled by default for cost optimization (Issue #617)
       const vpcEndpoints = template.findResources("AWS::EC2::VPCEndpoint")
-      expect(Object.keys(vpcEndpoints).length).toBeGreaterThan(5)
+      expect(Object.keys(vpcEndpoints).length).toBe(2)
     })
 
     test("enables VPC flow logs to S3", () => {
@@ -129,25 +130,6 @@ describe("SharedVPC Construct", () => {
         MaxAggregationInterval: 600, // 10 minutes
       })
     })
-
-    test("creates CloudWatch dashboard", () => {
-      // Arrange
-      const config = EnvironmentConfig.get("dev")
-
-      // Act
-      new SharedVPC(stack, "TestVPC", {
-        environment: "dev",
-        config,
-      })
-
-      // Assert
-      const template = Template.fromStack(stack)
-
-      // CloudWatch dashboard
-      template.hasResourceProperties("AWS::CloudWatch::Dashboard", {
-        DashboardName: "dev-vpc-metrics",
-      })
-    })
   })
 
   describe("Production Environment", () => {
@@ -170,7 +152,7 @@ describe("SharedVPC Construct", () => {
       })
     })
 
-    test("creates additional VPC endpoints for production", () => {
+    test("creates only gateway endpoints by default (cost optimization)", () => {
       // Arrange
       const config = EnvironmentConfig.get("prod")
 
@@ -183,9 +165,9 @@ describe("SharedVPC Construct", () => {
       // Assert
       const template = Template.fromStack(stack)
 
-      // Should have more VPC endpoints than dev (including Textract, Comprehend)
+      // Only gateway endpoints by default (Issue #617 - interface endpoints disabled)
       const vpcEndpoints = template.findResources("AWS::EC2::VPCEndpoint")
-      expect(Object.keys(vpcEndpoints).length).toBeGreaterThan(10)
+      expect(Object.keys(vpcEndpoints).length).toBe(2) // S3 + DynamoDB
     })
 
     test("enables CloudWatch Logs for rejected traffic", () => {
@@ -248,7 +230,96 @@ describe("SharedVPC Construct", () => {
   })
 
   describe("VPC Endpoints Configuration", () => {
-    test("can disable VPC endpoints", () => {
+    test("disables all endpoints when enableGatewayEndpoints is false", () => {
+      // Arrange
+      const config = EnvironmentConfig.get("dev")
+
+      // Act
+      new SharedVPC(stack, "TestVPC", {
+        environment: "dev",
+        config,
+        enableGatewayEndpoints: false,
+      })
+
+      // Assert
+      const template = Template.fromStack(stack)
+
+      // Should have no VPC endpoints
+      const vpcEndpoints = template.findResources("AWS::EC2::VPCEndpoint")
+      expect(Object.keys(vpcEndpoints).length).toBe(0)
+    })
+
+    test("creates interface endpoints when explicitly enabled", () => {
+      // Arrange
+      const config = EnvironmentConfig.get("dev")
+
+      // Act
+      new SharedVPC(stack, "TestVPC", {
+        environment: "dev",
+        config,
+        enableInterfaceEndpoints: true,
+      })
+
+      // Assert
+      const template = Template.fromStack(stack)
+
+      // Should have gateway + interface endpoints
+      const vpcEndpoints = template.findResources("AWS::EC2::VPCEndpoint")
+      expect(Object.keys(vpcEndpoints).length).toBeGreaterThan(10)
+
+      // Security group for interface endpoints
+      template.hasResourceProperties("AWS::EC2::SecurityGroup", {
+        GroupDescription: "Security group for VPC endpoints",
+        SecurityGroupIngress: [
+          {
+            CidrIp: Match.anyValue(),
+            IpProtocol: "tcp",
+            FromPort: 443,
+            ToPort: 443,
+          },
+        ],
+      })
+    })
+
+    test("production gets additional interface endpoints when enabled", () => {
+      // Arrange
+      const devConfig = EnvironmentConfig.get("dev")
+      const prodConfig = EnvironmentConfig.get("prod")
+
+      // Act
+      const devStack = new cdk.Stack(app, "DevStack", {
+        env: { account: "123456789012", region: "us-east-1" },
+      })
+      const prodStack = new cdk.Stack(app, "ProdStack", {
+        env: { account: "123456789012", region: "us-east-1" },
+      })
+
+      new SharedVPC(devStack, "DevVPC", {
+        environment: "dev",
+        config: devConfig,
+        enableInterfaceEndpoints: true,
+      })
+
+      new SharedVPC(prodStack, "ProdVPC", {
+        environment: "prod",
+        config: prodConfig,
+        enableInterfaceEndpoints: true,
+      })
+
+      // Assert
+      const devTemplate = Template.fromStack(devStack)
+      const prodTemplate = Template.fromStack(prodStack)
+
+      const devEndpoints = devTemplate.findResources("AWS::EC2::VPCEndpoint")
+      const prodEndpoints = prodTemplate.findResources("AWS::EC2::VPCEndpoint")
+
+      // Prod should have more endpoints (includes Textract, Comprehend)
+      expect(Object.keys(prodEndpoints).length).toBeGreaterThan(
+        Object.keys(devEndpoints).length
+      )
+    })
+
+    test("backwards compatibility: enableVpcEndpoints false disables all", () => {
       // Arrange
       const config = EnvironmentConfig.get("dev")
 
@@ -262,36 +333,9 @@ describe("SharedVPC Construct", () => {
       // Assert
       const template = Template.fromStack(stack)
 
-      // Should only have gateway endpoints (S3, DynamoDB)
+      // Should have no VPC endpoints
       const vpcEndpoints = template.findResources("AWS::EC2::VPCEndpoint")
-      expect(Object.keys(vpcEndpoints).length).toBeLessThan(5)
-    })
-
-    test("creates security group for VPC endpoints", () => {
-      // Arrange
-      const config = EnvironmentConfig.get("dev")
-
-      // Act
-      new SharedVPC(stack, "TestVPC", {
-        environment: "dev",
-        config,
-      })
-
-      // Assert
-      const template = Template.fromStack(stack)
-
-      // Security group for endpoints
-      template.hasResourceProperties("AWS::EC2::SecurityGroup", {
-        GroupDescription: "Security group for VPC endpoints",
-        SecurityGroupIngress: [
-          {
-            CidrIp: Match.anyValue(),
-            IpProtocol: "tcp",
-            FromPort: 443,
-            ToPort: 443,
-          },
-        ],
-      })
+      expect(Object.keys(vpcEndpoints).length).toBe(0)
     })
   })
 
@@ -395,6 +439,51 @@ describe("SharedVPC Construct", () => {
           ]),
         }),
       })
+    })
+  })
+
+  describe("Cost Optimization (Issue #617)", () => {
+    test("interface endpoints disabled by default saves ~$428/month", () => {
+      // Arrange
+      const devConfig = EnvironmentConfig.get("dev")
+      const prodConfig = EnvironmentConfig.get("prod")
+
+      // Act - Create VPCs with default settings
+      const devStack = new cdk.Stack(app, "CostDevStack", {
+        env: { account: "123456789012", region: "us-east-1" },
+      })
+      const prodStack = new cdk.Stack(app, "CostProdStack", {
+        env: { account: "123456789012", region: "us-east-1" },
+      })
+
+      new SharedVPC(devStack, "DevVPC", {
+        environment: "dev",
+        config: devConfig,
+      })
+
+      new SharedVPC(prodStack, "ProdVPC", {
+        environment: "prod",
+        config: prodConfig,
+      })
+
+      // Assert
+      const devTemplate = Template.fromStack(devStack)
+      const prodTemplate = Template.fromStack(prodStack)
+
+      // Both should only have 2 gateway endpoints (S3, DynamoDB)
+      const devEndpoints = devTemplate.findResources("AWS::EC2::VPCEndpoint")
+      const prodEndpoints = prodTemplate.findResources("AWS::EC2::VPCEndpoint")
+
+      expect(Object.keys(devEndpoints).length).toBe(2)
+      expect(Object.keys(prodEndpoints).length).toBe(2)
+
+      // No security groups for interface endpoints
+      const devSGs = devTemplate.findResources("AWS::EC2::SecurityGroup")
+      const sgCount = Object.values(devSGs).filter((sg: Record<string, unknown>) => {
+        const desc = (sg as { Properties?: { GroupDescription?: string } })?.Properties?.GroupDescription
+        return desc === "Security group for VPC endpoints"
+      }).length
+      expect(sgCount).toBe(0)
     })
   })
 })

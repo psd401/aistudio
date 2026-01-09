@@ -9,6 +9,24 @@ export interface SharedVPCProps {
   environment: "dev" | "staging" | "prod"
   config: IEnvironmentConfig
   enableFlowLogs?: boolean
+  /**
+   * Enable gateway VPC endpoints (S3, DynamoDB).
+   * These are FREE and recommended for all environments.
+   * @default true
+   */
+  enableGatewayEndpoints?: boolean
+  /**
+   * Enable interface VPC endpoints (ECR, Secrets Manager, etc.).
+   * These cost ~$7.30/month per endpoint per AZ.
+   * DISABLED by default for cost optimization (Issue #617).
+   * All AWS services work reliably through NAT gateways.
+   * @default false
+   */
+  enableInterfaceEndpoints?: boolean
+  /**
+   * @deprecated Use enableGatewayEndpoints and enableInterfaceEndpoints instead.
+   * For backwards compatibility: if true, enables gateway endpoints only.
+   */
   enableVpcEndpoints?: boolean
 }
 
@@ -16,26 +34,24 @@ export interface SharedVPCProps {
  * Shared VPC construct for AI Studio infrastructure.
  *
  * This construct creates a single, shared VPC with proper subnet segmentation,
- * comprehensive VPC endpoints, and flow logs for network visibility.
+ * gateway endpoints, and flow logs for network visibility.
  *
  * Features:
  * - Multi-AZ deployment for high availability
  * - Separate subnets for different workload types (public, private app, private data, isolated)
- * - Cost-optimized NAT gateway configuration (instance for dev, gateway for prod)
- * - Gateway endpoints for S3 and DynamoDB (no cost)
- * - Interface endpoints for AWS services (reduces data transfer costs)
+ * - NAT gateways for outbound internet access
+ * - Gateway endpoints for S3 and DynamoDB (FREE - always enabled)
  * - VPC flow logs to S3 for security monitoring
- * - CloudWatch metrics and dashboard
  *
- * Cost Optimization:
- * - Dev: Uses NAT instance instead of NAT gateway ($5/month vs $45/month)
- * - Prod: Strategic use of VPC endpoints reduces NAT gateway data transfer costs
+ * Cost Optimization (Issue #617):
+ * - Interface VPC endpoints DISABLED by default (saves ~$428/month)
+ * - All AWS services work reliably through NAT gateways
+ * - Gateway endpoints (S3, DynamoDB) are free and always created
  * - Flow logs to S3 with lifecycle policies (cheaper than CloudWatch Logs)
  *
  * Security:
  * - Private subnets for application and database workloads
  * - Isolated subnets for sensitive workloads
- * - VPC endpoints for private connectivity to AWS services
  * - Flow logs for network traffic analysis
  *
  * @see https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Scenario2.html
@@ -112,9 +128,19 @@ export class SharedVPC extends Construct {
     // Initialize VPC endpoints map
     this.vpcEndpoints = new Map<string, ec2.IInterfaceVpcEndpoint>()
 
-    // Add VPC Endpoints
-    if (props.enableVpcEndpoints !== false) {
-      this.createVpcEndpoints(environment, config)
+    // Gateway endpoints (S3, DynamoDB) - FREE, always recommended
+    // Enable by default unless explicitly disabled
+    const enableGateway = props.enableGatewayEndpoints !== false &&
+                          props.enableVpcEndpoints !== false
+    if (enableGateway) {
+      this.createGatewayEndpoints()
+    }
+
+    // Interface endpoints - PAID (~$7.30/month per endpoint per AZ)
+    // DISABLED by default for cost optimization (Issue #617)
+    // All AWS services work reliably through NAT gateways
+    if (props.enableInterfaceEndpoints === true) {
+      this.createInterfaceEndpoints(environment, config)
     }
 
     // Enable VPC Flow Logs
@@ -154,22 +180,47 @@ export class SharedVPC extends Construct {
   }
 
   /**
-   * Create VPC endpoints for AWS services.
+   * Create gateway VPC endpoints for S3 and DynamoDB.
    *
-   * Gateway Endpoints (no hourly cost, only data transfer):
-   * - S3: For object storage access
+   * Gateway endpoints are FREE (no hourly cost, only data transfer charges)
+   * and are recommended for all environments.
+   *
+   * - S3: For object storage access (ECR images, file uploads, etc.)
    * - DynamoDB: For NoSQL database access
-   *
-   * Interface Endpoints (~$7.20/month each, saves on NAT data transfer):
-   * - Secrets Manager, RDS Data API, ECR, CloudWatch Logs, SNS, SQS, etc.
-   *
-   * Interface endpoints are deployed selectively based on environment:
-   * - Dev: Only essential endpoints (Secrets Manager, RDS, ECR, Logs)
-   * - Prod: Comprehensive endpoints including Textract and Comprehend
    */
-  private createVpcEndpoints(
+  private createGatewayEndpoints(): void {
+    this.vpc.addGatewayEndpoint("S3Endpoint", {
+      service: ec2.GatewayVpcEndpointAwsService.S3,
+      subnets: [
+        { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
+      ],
+    })
+
+    this.vpc.addGatewayEndpoint("DynamoDBEndpoint", {
+      service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
+    })
+  }
+
+  /**
+   * Create interface VPC endpoints for AWS services.
+   *
+   * IMPORTANT: Interface endpoints cost ~$7.30/month per endpoint per AZ.
+   * This is DISABLED by default for cost optimization (Issue #617).
+   *
+   * All AWS services (ECR, Secrets Manager, CloudWatch, etc.) work reliably
+   * through NAT gateways. Interface endpoints are only needed for:
+   * - High-volume data transfer to specific services
+   * - Strict security requirements preventing NAT gateway usage
+   * - Very latency-sensitive applications
+   *
+   * For a typical K-12 school district application, NAT gateways are sufficient.
+   *
+   * To enable, set enableInterfaceEndpoints: true in SharedVPCProps.
+   */
+  private createInterfaceEndpoints(
     environment: string,
-    config: IEnvironmentConfig
+    _config: IEnvironmentConfig
   ): void {
     // Security group for VPC endpoints
     const endpointSg = new ec2.SecurityGroup(this, "VpcEndpointSg", {
@@ -183,19 +234,6 @@ export class SharedVPC extends Construct {
       ec2.Port.tcp(443),
       "Allow HTTPS from VPC"
     )
-
-    // Gateway endpoints (no cost, recommended for all environments)
-    this.vpc.addGatewayEndpoint("S3Endpoint", {
-      service: ec2.GatewayVpcEndpointAwsService.S3,
-      subnets: [
-        { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-        { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
-      ],
-    })
-
-    this.vpc.addGatewayEndpoint("DynamoDBEndpoint", {
-      service: ec2.GatewayVpcEndpointAwsService.DYNAMODB,
-    })
 
     // Interface endpoints configuration
     // Essential endpoints for all environments
