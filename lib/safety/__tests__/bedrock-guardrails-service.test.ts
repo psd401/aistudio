@@ -12,9 +12,11 @@ jest.mock('@aws-sdk/client-sns');
 
 describe('BedrockGuardrailsService', () => {
   let service: BedrockGuardrailsService;
+  const TEST_REGION = 'us-west-2';
 
   beforeEach(() => {
     service = new BedrockGuardrailsService({
+      region: TEST_REGION,
       guardrailId: 'test-guardrail-id',
       guardrailVersion: 'DRAFT',
     });
@@ -27,6 +29,7 @@ describe('BedrockGuardrailsService', () => {
 
     it('should return false when guardrail ID is not configured', () => {
       const disabledService = new BedrockGuardrailsService({
+        region: TEST_REGION,
         guardrailId: '',
       });
       expect(disabledService.isEnabled()).toBe(false);
@@ -36,6 +39,7 @@ describe('BedrockGuardrailsService', () => {
   describe('evaluateInput', () => {
     it('should pass through content when guardrails disabled', async () => {
       const disabledService = new BedrockGuardrailsService({
+        region: TEST_REGION,
         guardrailId: '',
       });
 
@@ -57,6 +61,7 @@ describe('BedrockGuardrailsService', () => {
   describe('evaluateOutput', () => {
     it('should pass through content when guardrails disabled', async () => {
       const disabledService = new BedrockGuardrailsService({
+        region: TEST_REGION,
         guardrailId: '',
       });
 
@@ -93,6 +98,46 @@ describe('BedrockGuardrailsService', () => {
       expect(config).toHaveProperty('enablePiiTokenization');
       expect(config).toHaveProperty('enableViolationNotifications');
       expect(config).not.toHaveProperty('violationTopicArn'); // Sensitive data excluded
+    });
+  });
+
+  describe('edge cases', () => {
+    it('should throw error when region not configured', () => {
+      // Save and clear env var
+      const originalRegion = process.env.AWS_REGION;
+      delete process.env.AWS_REGION;
+
+      expect(() => {
+        new BedrockGuardrailsService({
+          guardrailId: 'test-guardrail',
+          // No region provided
+        });
+      }).toThrow('AWS_REGION environment variable or config.region is required');
+
+      // Restore env var
+      if (originalRegion) {
+        process.env.AWS_REGION = originalRegion;
+      }
+    });
+
+    it('should handle empty string content gracefully', async () => {
+      const result = await service.evaluateInput('');
+      expect(result.allowed).toBe(true);
+      expect(result.processedContent).toBe('');
+    });
+
+    it('should handle whitespace-only content', async () => {
+      const result = await service.evaluateInput('   \n\t  ');
+      expect(result.allowed).toBe(true);
+      expect(result.processedContent).toBe('   \n\t  ');
+    });
+
+    it('should handle very long content', async () => {
+      const longContent = 'a'.repeat(100000);
+      const result = await service.evaluateInput(longContent);
+      // Graceful degradation when mocked - should not throw
+      expect(result.allowed).toBe(true);
+      expect(result.processedContent).toBe(longContent);
     });
   });
 });

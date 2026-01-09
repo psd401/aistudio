@@ -19,7 +19,7 @@ import {
 } from '@aws-sdk/client-bedrock-runtime';
 import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
 import { createLogger, generateRequestId } from '@/lib/logger';
-import { createHash } from 'node:crypto';
+import { createHmac } from 'node:crypto';
 import type {
   SafetyCheckResult,
   GuardrailCheckResult,
@@ -43,7 +43,12 @@ export class BedrockGuardrailsService {
   private log = createLogger({ module: 'BedrockGuardrailsService' });
 
   constructor(config?: Partial<GuardrailsConfig>) {
-    const region = config?.region || process.env.AWS_REGION || 'us-west-2';
+    const region = config?.region || process.env.AWS_REGION;
+
+    if (!region) {
+      this.log.error('AWS_REGION not configured - BedrockGuardrailsService requires region');
+      throw new Error('AWS_REGION environment variable or config.region is required for BedrockGuardrailsService');
+    }
 
     this.bedrockClient = new BedrockRuntimeClient({ region });
     this.snsClient = new SNSClient({ region });
@@ -389,10 +394,14 @@ export class BedrockGuardrailsService {
   }
 
   /**
-   * Hash a value for privacy (e.g., user ID)
+   * Hash a value for privacy (e.g., user ID) using HMAC-SHA256
+   *
+   * Uses a secret key to prevent rainbow table attacks on predictable values
+   * like session IDs. The secret should be set via GUARDRAIL_HASH_SECRET env var.
    */
   private hashValue(value: string): string {
-    return createHash('sha256').update(value).digest('hex').substring(0, 16);
+    const secret = process.env.GUARDRAIL_HASH_SECRET || this.config.hashSecret || 'aistudio-guardrail-default-secret';
+    return createHmac('sha256', secret).update(value).digest('hex').substring(0, 16);
   }
 
   /**

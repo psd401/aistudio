@@ -14,9 +14,11 @@ jest.mock('@aws-sdk/client-dynamodb');
 
 describe('ContentSafetyService', () => {
   let service: ContentSafetyService;
+  const TEST_REGION = 'us-west-2';
 
   beforeEach(() => {
     service = new ContentSafetyService({
+      region: TEST_REGION,
       guardrailId: 'test-guardrail',
       piiTokenTableName: 'test-table',
       enablePiiTokenization: true,
@@ -38,6 +40,7 @@ describe('ContentSafetyService', () => {
 
     it('should skip tokenization when disabled', async () => {
       const disabledService = new ContentSafetyService({
+        region: TEST_REGION,
         guardrailId: 'test-guardrail',
         enablePiiTokenization: false,
       });
@@ -68,6 +71,7 @@ describe('ContentSafetyService', () => {
 
     it('should skip detokenization when disabled', async () => {
       const disabledService = new ContentSafetyService({
+        region: TEST_REGION,
         guardrailId: 'test-guardrail',
         enablePiiTokenization: false,
       });
@@ -91,6 +95,7 @@ describe('ContentSafetyService', () => {
 
     it('should return true when guardrails service is configured', () => {
       const guardrailOnlyService = new ContentSafetyService({
+        region: TEST_REGION,
         guardrailId: 'test-guardrail',
         enablePiiTokenization: false,
       });

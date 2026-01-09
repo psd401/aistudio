@@ -110,7 +110,7 @@ export class UnifiedStreamingService {
           // Extract text content from message parts (AI SDK v5 format)
           const messageContent = this.extractTextFromMessage(lastUserMessage);
 
-          if (messageContent) {
+          if (messageContent && messageContent.trim()) {
             inputSafetyResult = await contentSafetyService.processInput(
               messageContent,
               request.sessionId || request.userId

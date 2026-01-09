@@ -12,9 +12,11 @@ jest.mock('@aws-sdk/client-dynamodb');
 
 describe('PIITokenizationService', () => {
   let service: PIITokenizationService;
+  const TEST_REGION = 'us-west-2';
 
   beforeEach(() => {
     service = new PIITokenizationService({
+      region: TEST_REGION,
       piiTokenTableName: 'test-table',
       tokenTtlSeconds: 3600,
       enablePiiTokenization: true,
@@ -28,6 +30,7 @@ describe('PIITokenizationService', () => {
 
     it('should return false when not configured', () => {
       const disabledService = new PIITokenizationService({
+        region: TEST_REGION,
         piiTokenTableName: undefined,
         enablePiiTokenization: false,
       });
@@ -38,6 +41,7 @@ describe('PIITokenizationService', () => {
   describe('tokenize', () => {
     it('should pass through content when disabled', async () => {
       const disabledService = new PIITokenizationService({
+        region: TEST_REGION,
         enablePiiTokenization: false,
       });
 
@@ -61,6 +65,7 @@ describe('PIITokenizationService', () => {
   describe('detokenize', () => {
     it('should pass through content when disabled', async () => {
       const disabledService = new PIITokenizationService({
+        region: TEST_REGION,
         enablePiiTokenization: false,
       });
 
@@ -94,6 +99,58 @@ describe('PIITokenizationService', () => {
       expect(config).toHaveProperty('enablePiiTokenization');
       expect(config.piiTokenTableName).toBe('test-table');
       expect(config.tokenTtlSeconds).toBe(3600);
+    });
+  });
+
+  describe('edge cases', () => {
+    it('should throw error when region not configured', () => {
+      // Save and clear env var
+      const originalRegion = process.env.AWS_REGION;
+      delete process.env.AWS_REGION;
+
+      expect(() => {
+        new PIITokenizationService({
+          piiTokenTableName: 'test-table',
+          enablePiiTokenization: true,
+          // No region provided
+        });
+      }).toThrow('AWS_REGION environment variable or config.region is required');
+
+      // Restore env var
+      if (originalRegion) {
+        process.env.AWS_REGION = originalRegion;
+      }
+    });
+
+    it('should handle empty string content', async () => {
+      const result = await service.tokenize('', 'session-123');
+      expect(result.tokenizedText).toBe('');
+      expect(result.hasPII).toBe(false);
+      expect(result.tokens).toEqual([]);
+    });
+
+    it('should handle whitespace-only content', async () => {
+      const result = await service.tokenize('   \n\t  ', 'session-123');
+      expect(result.tokenizedText).toBe('   \n\t  ');
+      expect(result.hasPII).toBe(false);
+    });
+
+    it('should handle very long content without hanging', async () => {
+      const longContent = 'Hello John '.repeat(10000);
+      const result = await service.tokenize(longContent, 'session-123');
+      // Graceful degradation when mocked - should not throw or hang
+      expect(result.tokenizedText).toBe(longContent);
+    });
+
+    it('should handle detokenize with no placeholders', async () => {
+      const result = await service.detokenize('No PII here', 'session-123');
+      expect(result).toBe('No PII here');
+    });
+
+    it('should handle invalid token format gracefully', async () => {
+      // Not a valid UUID format - should be left as-is
+      const result = await service.detokenize('[PII:invalid]', 'session-123');
+      expect(result).toBe('[PII:invalid]');
     });
   });
 });

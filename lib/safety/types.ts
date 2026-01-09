@@ -142,6 +142,8 @@ export interface GuardrailsConfig {
   enablePiiTokenization?: boolean;
   /** Enable violation notifications (default: true) */
   enableViolationNotifications?: boolean;
+  /** Secret key for HMAC hashing of user IDs in violation reports */
+  hashSecret?: string;
 }
 
 /**
