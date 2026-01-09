@@ -4,8 +4,93 @@ import { getTelemetryConfig } from './telemetry-service';
 import { getProviderAdapter, type ProviderCapabilities } from './provider-adapters';
 import { CircuitBreaker, CircuitBreakerOpenError } from './circuit-breaker';
 import { getContentSafetyService, type ContentSafetyResult } from '@/lib/safety';
+import type { TokenMapping } from '@/lib/safety/types';
 import type { StreamRequest, StreamResponse, StreamConfig, StreamingProgress, TelemetrySpan, TelemetryConfig } from './types';
 import { ContentSafetyBlockedError } from './types';
+
+/**
+ * Create a TransformStream that replaces PII tokens with original values in real-time.
+ * Handles tokens that may span chunk boundaries by buffering partial matches.
+ */
+function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformStream<Uint8Array, Uint8Array> {
+  // Build lookup map from token placeholder to original value
+  const tokenMap = new Map<string, string>();
+  for (const mapping of tokenMappings) {
+    tokenMap.set(mapping.placeholder, mapping.original);
+  }
+
+  // If no tokens to replace, return a pass-through transform
+  if (tokenMap.size === 0) {
+    return new TransformStream();
+  }
+
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffer = '';
+
+  // PII token pattern: [PII:uuid]
+  const TOKEN_START = '[PII:';
+  const TOKEN_END = ']';
+  const MAX_TOKEN_LENGTH = 50; // [PII: + 36 char UUID + ] = 43, give some buffer
+
+  return new TransformStream({
+    transform(chunk, controller) {
+      // Decode chunk and add to buffer
+      buffer += decoder.decode(chunk, { stream: true });
+
+      // Process buffer, keeping potential partial tokens at the end
+      let output = '';
+      let i = 0;
+
+      while (i < buffer.length) {
+        // Check if we're at the start of a potential token
+        if (buffer.slice(i).startsWith(TOKEN_START)) {
+          // Look for the end of the token
+          const endIdx = buffer.indexOf(TOKEN_END, i + TOKEN_START.length);
+
+          if (endIdx !== -1) {
+            // Complete token found
+            const token = buffer.slice(i, endIdx + 1);
+            const replacement = tokenMap.get(token);
+
+            if (replacement !== undefined) {
+              output += replacement;
+            } else {
+              // Unknown token, keep as-is
+              output += token;
+            }
+            i = endIdx + 1;
+          } else if (buffer.length - i < MAX_TOKEN_LENGTH) {
+            // Partial token at end of buffer, wait for more data
+            break;
+          } else {
+            // Token too long, not a valid token - output the start and continue
+            output += buffer[i];
+            i++;
+          }
+        } else {
+          output += buffer[i];
+          i++;
+        }
+      }
+
+      // Keep unprocessed portion in buffer
+      buffer = buffer.slice(i);
+
+      // Output processed text
+      if (output.length > 0) {
+        controller.enqueue(encoder.encode(output));
+      }
+    },
+
+    flush(controller) {
+      // Output any remaining buffer content
+      if (buffer.length > 0) {
+        controller.enqueue(encoder.encode(buffer));
+      }
+    }
+  });
+}
 import {
   isTextDeltaEvent,
   isTextStartEvent,
@@ -323,13 +408,70 @@ export class UnifiedStreamingService {
         
         // 7. Mark circuit breaker as successful
         circuitBreaker.recordSuccess();
-        
+
         log.info('Stream completed successfully', {
           provider: request.provider,
           modelId: request.modelId,
           source: request.source
         });
-        
+
+        // 8. If PII tokens were created, wrap the stream to detokenize in real-time
+        const tokenMappings = inputSafetyResult?.tokens || [];
+        if (tokenMappings.length > 0) {
+          log.info('Wrapping stream with PII detokenization transform', {
+            tokenCount: tokenMappings.length
+          });
+
+          // Wrap the result to transform the stream response
+          const wrappedResult = {
+            ...result,
+            toUIMessageStreamResponse: (options?: { headers?: Record<string, string> }) => {
+              const originalResponse = result.toUIMessageStreamResponse(options);
+
+              // If there's no body, return as-is
+              if (!originalResponse.body) {
+                return originalResponse;
+              }
+
+              // Pipe through the detokenization transform
+              const transformedStream = originalResponse.body.pipeThrough(
+                createPIIDetokenizeTransform(tokenMappings)
+              );
+
+              // Return new response with transformed stream
+              return new Response(transformedStream, {
+                status: originalResponse.status,
+                statusText: originalResponse.statusText,
+                headers: originalResponse.headers
+              });
+            },
+            toDataStreamResponse: (options?: { headers?: Record<string, string> }) => {
+              const originalResponse = result.toDataStreamResponse(options);
+
+              if (!originalResponse.body) {
+                return originalResponse;
+              }
+
+              const transformedStream = originalResponse.body.pipeThrough(
+                createPIIDetokenizeTransform(tokenMappings)
+              );
+
+              return new Response(transformedStream, {
+                status: originalResponse.status,
+                statusText: originalResponse.statusText,
+                headers: originalResponse.headers
+              });
+            }
+          };
+
+          return {
+            result: wrappedResult,
+            requestId,
+            capabilities,
+            telemetryConfig
+          };
+        }
+
         return {
           result,
           requestId,
