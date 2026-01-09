@@ -54,9 +54,22 @@ export class PIITokenizationService {
   constructor(config?: Partial<GuardrailsConfig>) {
     const region = config?.region || process.env.AWS_REGION;
 
+    // Graceful degradation for local development - disable if no region
+    // In production (ECS/Lambda), AWS_REGION is always set
     if (!region) {
-      this.log.error('AWS_REGION not configured - PIITokenizationService requires region');
-      throw new Error('AWS_REGION environment variable or config.region is required for PIITokenizationService');
+      this.log.warn('AWS_REGION not configured - PIITokenizationService disabled (local development mode)');
+      // Initialize with dummy region for client instantiation (won't be used)
+      this.comprehendClient = new ComprehendClient({ region: 'us-east-1' });
+      this.dynamoDBClient = new DynamoDBClient({ region: 'us-east-1' });
+      this.config = {
+        region: '',
+        guardrailId: '',
+        guardrailVersion: 'DRAFT',
+        piiTokenTableName: undefined,
+        tokenTtlSeconds: 3600,
+        enablePiiTokenization: false, // Disabled when no region
+      };
+      return;
     }
 
     this.comprehendClient = new ComprehendClient({ region });
@@ -382,8 +395,6 @@ export class PIITokenizationService {
     if (!tableName) {
       return [];
     }
-
-    const results: Array<{ token: string; original: string; type: string }> = [];
 
     // BatchGetItem supports up to 100 items per request
     const BATCH_SIZE = 100;

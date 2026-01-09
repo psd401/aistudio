@@ -98,6 +98,10 @@ export class UnifiedStreamingService {
         throw new Error('Messages array is required for streaming');
       }
 
+      // 4a. Create defensive copy of messages to prevent race conditions
+      // Since request is passed by reference, concurrent calls could cause message bleed
+      let messages = request.messages.map(m => ({ ...m }));
+
       // 5. K-12 Content Safety: Check user input before sending to AI
       const contentSafetyService = getContentSafetyService();
       const safetyEnabled = request.contentSafety?.enabled !== false;
@@ -105,7 +109,7 @@ export class UnifiedStreamingService {
 
       if (safetyEnabled && !request.contentSafety?.skipInputCheck && contentSafetyService.isEnabled()) {
         // Get the last user message for safety check
-        const lastUserMessage = [...request.messages].reverse().find(m => m.role === 'user');
+        const lastUserMessage = [...messages].reverse().find(m => m.role === 'user');
         if (lastUserMessage) {
           // Extract text content from message parts (AI SDK v5 format)
           const messageContent = this.extractTextFromMessage(lastUserMessage);
@@ -140,16 +144,12 @@ export class UnifiedStreamingService {
                 hasPII: inputSafetyResult.hasPII,
               });
               // Update the last user message with tokenized content (AI SDK v5 format)
-              // Create new array to avoid race condition
-              const lastIndex = request.messages.length - 1 - request.messages.slice().reverse().findIndex(m => m.role === 'user');
-              if (lastIndex >= 0 && lastIndex < request.messages.length) {
-                request.messages = [
-                  ...request.messages.slice(0, lastIndex),
-                  this.updateMessageText(
-                    request.messages[lastIndex],
-                    inputSafetyResult.processedContent
-                  ),
-                  ...request.messages.slice(lastIndex + 1)
+              const lastIndex = messages.length - 1 - messages.slice().reverse().findIndex(m => m.role === 'user');
+              if (lastIndex >= 0 && lastIndex < messages.length) {
+                messages = [
+                  ...messages.slice(0, lastIndex),
+                  this.updateMessageText(messages[lastIndex], inputSafetyResult.processedContent),
+                  ...messages.slice(lastIndex + 1)
                 ];
               }
             }
@@ -160,20 +160,20 @@ export class UnifiedStreamingService {
       // 6. Configure streaming with adaptive timeouts
       // Debug log the messages structure
       log.info('Messages structure before conversion', {
-        messageCount: request.messages.length,
-        firstMessage: JSON.stringify(request.messages[0]),
-        allMessages: JSON.stringify(request.messages)
+        messageCount: messages.length,
+        firstMessage: JSON.stringify(messages[0]),
+        allMessages: JSON.stringify(messages)
       });
-      
+
       let convertedMessages;
       try {
-        convertedMessages = await convertToModelMessages(request.messages);
+        convertedMessages = await convertToModelMessages(messages);
       } catch (conversionError) {
         const error = conversionError as Error;
         log.error('Failed to convert messages', {
           error: error.message,
           stack: error.stack,
-          messages: JSON.stringify(request.messages)
+          messages: JSON.stringify(messages)
         });
         throw new Error(`Message conversion failed: ${error.message}`);
       }

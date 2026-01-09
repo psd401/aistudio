@@ -103,18 +103,20 @@ describe('PIITokenizationService', () => {
   });
 
   describe('edge cases', () => {
-    it('should throw error when region not configured', () => {
+    it('should disable service when region not configured (local dev mode)', () => {
       // Save and clear env var
       const originalRegion = process.env.AWS_REGION;
       delete process.env.AWS_REGION;
 
-      expect(() => {
-        new PIITokenizationService({
-          piiTokenTableName: 'test-table',
-          enablePiiTokenization: true,
-          // No region provided
-        });
-      }).toThrow('AWS_REGION environment variable or config.region is required');
+      // Should not throw - gracefully degrade to disabled state
+      const localService = new PIITokenizationService({
+        piiTokenTableName: 'test-table',
+        enablePiiTokenization: true,
+        // No region provided
+      });
+
+      // Service should be disabled
+      expect(localService.isEnabled()).toBe(false);
 
       // Restore env var
       if (originalRegion) {

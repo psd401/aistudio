@@ -45,9 +45,22 @@ export class BedrockGuardrailsService {
   constructor(config?: Partial<GuardrailsConfig>) {
     const region = config?.region || process.env.AWS_REGION;
 
+    // Graceful degradation for local development - disable if no region
+    // In production (ECS/Lambda), AWS_REGION is always set
     if (!region) {
-      this.log.error('AWS_REGION not configured - BedrockGuardrailsService requires region');
-      throw new Error('AWS_REGION environment variable or config.region is required for BedrockGuardrailsService');
+      this.log.warn('AWS_REGION not configured - BedrockGuardrailsService disabled (local development mode)');
+      // Initialize with dummy region for client instantiation (won't be used)
+      this.bedrockClient = new BedrockRuntimeClient({ region: 'us-east-1' });
+      this.snsClient = new SNSClient({ region: 'us-east-1' });
+      this.config = {
+        region: '',
+        guardrailId: '', // Empty guardrailId disables the service
+        guardrailVersion: 'DRAFT',
+        enableViolationNotifications: false,
+        enablePiiTokenization: false,
+        tokenTtlSeconds: 3600,
+      };
+      return;
     }
 
     this.bedrockClient = new BedrockRuntimeClient({ region });
