@@ -335,6 +335,7 @@ if (baseDomain) {
   devFrontendStack.addDependency(devDbStack); // Need VPC from DB stack
   devFrontendStack.addDependency(devStorageStack); // Need bucket name
   devFrontendStack.addDependency(devAuthStack); // Need auth secret ARN export
+  devFrontendStack.addDependency(devGuardrailsStack); // Need guardrails config exports
   cdk.Tags.of(devFrontendStack).add('Environment', 'Dev');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devFrontendStack).add(key, value));
 
@@ -353,6 +354,7 @@ if (baseDomain) {
   prodFrontendStack.addDependency(prodDbStack); // Need VPC from DB stack
   prodFrontendStack.addDependency(prodStorageStack); // Need bucket name
   prodFrontendStack.addDependency(prodAuthStack); // Need auth secret ARN export
+  prodFrontendStack.addDependency(prodGuardrailsStack); // Need guardrails config exports
   cdk.Tags.of(prodFrontendStack).add('Environment', 'Prod');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodFrontendStack).add(key, value));
 

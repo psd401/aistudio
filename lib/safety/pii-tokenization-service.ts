@@ -25,6 +25,7 @@ import {
   DynamoDBClient,
   PutItemCommand,
   GetItemCommand,
+  BatchGetItemCommand,
 } from '@aws-sdk/client-dynamodb';
 import { v4 as uuidv4 } from 'uuid';
 import { createLogger, generateRequestId } from '@/lib/logger';
@@ -359,43 +360,113 @@ export class PIITokenizationService {
   }
 
   /**
-   * Batch get token mappings from DynamoDB using full token UUIDs
+   * Batch get token mappings from DynamoDB using BatchGetItem API
+   *
+   * Optimized to reduce API calls: BatchGetItem can fetch up to 100 items
+   * in a single request vs. individual GetItem calls for each token.
    */
   private async batchGetTokenMappings(
     tokens: string[],
     sessionId: string
   ): Promise<Array<{ token: string; original: string; type: string }>> {
+    if (tokens.length === 0) {
+      return [];
+    }
+
+    const tableName = this.config.piiTokenTableName;
+    if (!tableName) {
+      return [];
+    }
+
     const results: Array<{ token: string; original: string; type: string }> = [];
 
-    // Process in parallel for efficiency
-    const promises = tokens.map(async (token) => {
-      const command = new GetItemCommand({
-        TableName: this.config.piiTokenTableName,
-        Key: {
-          token: { S: token },
-          sessionId: { S: sessionId },
-        },
-      });
+    // BatchGetItem supports up to 100 items per request
+    const BATCH_SIZE = 100;
+    const batches = [];
+    for (let i = 0; i < tokens.length; i += BATCH_SIZE) {
+      batches.push(tokens.slice(i, i + BATCH_SIZE));
+    }
 
+    for (const batch of batches) {
       try {
-        const response = await this.dynamoDBClient.send(command);
-        if (response.Item) {
-          return {
-            token: response.Item.token?.S || '',
-            original: response.Item.original?.S || '',
-            type: response.Item.type?.S || '',
-          };
-        }
-      } catch {
-        // Token not found or expired
-      }
-      return null;
-    });
+        const command = new BatchGetItemCommand({
+          RequestItems: {
+            [tableName]: {
+              Keys: batch.map((token) => ({
+                token: { S: token },
+                sessionId: { S: sessionId },
+              })),
+            },
+          },
+        });
 
-    const responses = await Promise.all(promises);
-    for (const response of responses) {
-      if (response) {
-        results.push(response);
+        const response = await this.dynamoDBClient.send(command);
+        const items = response.Responses?.[tableName] || [];
+
+        for (const item of items) {
+          if (item.token?.S && item.original?.S) {
+            results.push({
+              token: item.token.S,
+              original: item.original.S,
+              type: item.type?.S || '',
+            });
+          }
+        }
+
+        // Handle unprocessed keys (throttling) with retry
+        if (response.UnprocessedKeys?.[tableName]?.Keys?.length) {
+          this.log.warn('BatchGetItem had unprocessed keys, falling back to individual GetItem', {
+            unprocessedCount: response.UnprocessedKeys[tableName].Keys.length,
+          });
+
+          // Fallback to individual GetItem for unprocessed keys
+          for (const key of response.UnprocessedKeys[tableName].Keys) {
+            const retryCommand = new GetItemCommand({
+              TableName: tableName,
+              Key: key,
+            });
+            try {
+              const retryResponse = await this.dynamoDBClient.send(retryCommand);
+              if (retryResponse.Item?.token?.S && retryResponse.Item?.original?.S) {
+                results.push({
+                  token: retryResponse.Item.token.S,
+                  original: retryResponse.Item.original.S,
+                  type: retryResponse.Item.type?.S || '',
+                });
+              }
+            } catch {
+              // Token not found or expired
+            }
+          }
+        }
+      } catch (error) {
+        this.log.error('BatchGetItem failed, falling back to individual GetItem', {
+          error: error instanceof Error ? error.message : String(error),
+          batchSize: batch.length,
+        });
+
+        // Fallback to individual GetItem on batch failure
+        for (const token of batch) {
+          try {
+            const command = new GetItemCommand({
+              TableName: tableName,
+              Key: {
+                token: { S: token },
+                sessionId: { S: sessionId },
+              },
+            });
+            const response = await this.dynamoDBClient.send(command);
+            if (response.Item?.token?.S && response.Item?.original?.S) {
+              results.push({
+                token: response.Item.token.S,
+                original: response.Item.original.S,
+                type: response.Item.type?.S || '',
+              });
+            }
+          } catch {
+            // Token not found or expired
+          }
+        }
       }
     }
 
