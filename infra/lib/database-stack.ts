@@ -247,7 +247,7 @@ export class DatabaseStack extends cdk.Stack {
             image: lambda.Runtime.NODEJS_20_X.bundlingImage,
             command: [
               'bash', '-c',
-              'npm install && npm run build && cp -r ../schema dist/ && cp -r dist/* /asset-output/'
+              'npm install && npm run build && cp -r ../schema dist/ && cp ../migrations.json dist/ && cp -r dist/* /asset-output/'
             ],
             environment: {
               NPM_CONFIG_CACHE: '/tmp/.npm',
@@ -265,6 +265,7 @@ export class DatabaseStack extends cdk.Stack {
                   // Copy built files to output directory
                   execSync(`cp -r ${path.join(lambdaDir, 'dist')}/* ${outputDir}/`, { stdio: 'inherit' });
                   execSync(`cp -r ${path.join(__dirname, '../database/schema')} ${outputDir}/`, { stdio: 'inherit' });
+                  execSync(`cp ${path.join(__dirname, '../database/migrations.json')} ${outputDir}/`, { stdio: 'inherit' });
 
                   return true;
                 } catch {
