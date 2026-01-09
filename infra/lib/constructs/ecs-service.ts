@@ -101,6 +101,21 @@ export interface EcsServiceConstructProps {
    * Internal API secret ARN from Secrets Manager (for scheduled execution authentication)
    */
   internalApiSecretArn: string;
+  /**
+   * K-12 Content Safety: Bedrock Guardrail ARN (from GuardrailsStack)
+   * If provided, enables precise IAM scoping instead of wildcard
+   */
+  guardrailArn?: string;
+  /**
+   * K-12 Content Safety: DynamoDB table ARN for PII tokens (from GuardrailsStack)
+   * Required for PII tokenization feature
+   */
+  piiTokenTableArn?: string;
+  /**
+   * K-12 Content Safety: SNS topic ARN for violation notifications (from GuardrailsStack)
+   * If provided, enables precise IAM scoping with tag conditions
+   */
+  violationTopicArn?: string;
 }
 
 /**
@@ -338,15 +353,16 @@ export class EcsServiceConstruct extends Construct {
               ],
             }),
             // K-12 Content Safety: Bedrock Guardrails API access
+            // Uses specific ARN from GuardrailsStack when provided, falls back to wildcard
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
               actions: [
                 'bedrock:ApplyGuardrail',
                 'bedrock:GetGuardrail',
               ],
-              resources: [
-                `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail/*`,
-              ],
+              resources: props.guardrailArn
+                ? [props.guardrailArn]
+                : [`arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail/*`],
             }),
             // K-12 Content Safety: Amazon Comprehend for PII detection
             new iam.PolicyStatement({
@@ -357,13 +373,37 @@ export class EcsServiceConstruct extends Construct {
               ],
               resources: ['*'], // Comprehend doesn't support resource-level permissions
             }),
+            // K-12 Content Safety: DynamoDB for PII token storage
+            ...(props.piiTokenTableArn ? [new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'dynamodb:GetItem',
+                'dynamodb:PutItem',
+                'dynamodb:BatchGetItem',
+              ],
+              resources: [props.piiTokenTableArn],
+              conditions: {
+                StringEquals: {
+                  'aws:ResourceTag/Environment': environment,
+                  'aws:ResourceTag/ManagedBy': 'cdk',
+                },
+              },
+            })] : []),
             // K-12 Content Safety: SNS for violation notifications
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
               actions: ['sns:Publish'],
-              resources: [
-                `arn:aws:sns:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:aistudio-${environment}-guardrail-violations`,
-              ],
+              resources: props.violationTopicArn
+                ? [props.violationTopicArn]
+                : [`arn:aws:sns:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:aistudio-${environment}-guardrail-violations`],
+              ...(props.violationTopicArn ? {
+                conditions: {
+                  StringEquals: {
+                    'aws:ResourceTag/Environment': environment,
+                    'aws:ResourceTag/ManagedBy': 'cdk',
+                  },
+                },
+              } : {}),
             }),
           ],
         }),

@@ -123,6 +123,11 @@ export class FrontendStackEcs extends cdk.Stack {
       authSecretArn: cdk.Fn.importValue(`${environment}-AuthSecretArn`),
       // Internal API secret (created above)
       internalApiSecretArn: internalApiSecret.secretArn,
+      // K-12 Content Safety: Guardrails resources from GuardrailsStack
+      // These enable precise IAM scoping and DynamoDB access for PII tokenization
+      guardrailArn: cdk.Fn.importValue(`${environment}-GuardrailArn`),
+      piiTokenTableArn: cdk.Fn.importValue(`${environment}-PIITokenTableArn`),
+      violationTopicArn: cdk.Fn.importValue(`${environment}-ViolationTopicArn`),
     });
 
     // ============================================================================

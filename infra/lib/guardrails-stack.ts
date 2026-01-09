@@ -256,6 +256,12 @@ export class GuardrailsStack extends cdk.Stack {
       exportName: `${props.environment}-PIITokenTableName`,
     });
 
+    new cdk.CfnOutput(this, 'PIITokenTableArn', {
+      value: this.piiTokenTable.tableArn,
+      description: 'DynamoDB table ARN for PII tokens',
+      exportName: `${props.environment}-PIITokenTableArn`,
+    });
+
     new cdk.CfnOutput(this, 'ViolationTopicArn', {
       value: this.violationTopic.topicArn,
       description: 'SNS topic for violations',
