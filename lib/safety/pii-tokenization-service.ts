@@ -179,7 +179,7 @@ export class PIITokenizationService {
       for (const entity of sortedEntities) {
         const token = uuidv4();
         const original = text.substring(entity.beginOffset, entity.endOffset);
-        const placeholder = `[PII:${token.substring(0, 8)}]`;
+        const placeholder = `[PII:${token}]`;
 
         // Store mapping in DynamoDB
         await this.storeTokenMapping(token, original, entity.type, sessionId);
@@ -238,8 +238,8 @@ export class PIITokenizationService {
 
     const requestId = generateRequestId();
 
-    // Find all token placeholders in the text
-    const tokenPattern = /\[PII:([a-f0-9]{8})\]/g;
+    // Find all token placeholders in the text (full UUID format)
+    const tokenPattern = /\[PII:([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\]/g;
     const matches = [...text.matchAll(tokenPattern)];
 
     if (matches.length === 0) {
@@ -260,19 +260,17 @@ export class PIITokenizationService {
       const tokenMappings = await this.batchGetTokenMappings(tokenIds, sessionId);
 
       for (const match of matches) {
-        const [placeholder, shortToken] = match;
+        const [placeholder, token] = match;
 
-        // Find matching token (we stored full UUID, match on prefix)
-        const fullToken = tokenMappings.find((t) =>
-          t.token.startsWith(shortToken)
-        );
+        // Find matching token by exact match
+        const tokenMapping = tokenMappings.find((t) => t.token === token);
 
-        if (fullToken) {
-          detokenizedText = detokenizedText.replace(placeholder, fullToken.original);
+        if (tokenMapping) {
+          detokenizedText = detokenizedText.replace(placeholder, tokenMapping.original);
         } else {
           this.log.warn('Token mapping not found', {
             requestId,
-            shortToken,
+            token,
             sessionId,
           });
           // Leave placeholder if token not found (may have expired)
@@ -361,32 +359,20 @@ export class PIITokenizationService {
   }
 
   /**
-   * Batch get token mappings from DynamoDB
+   * Batch get token mappings from DynamoDB using full token UUIDs
    */
   private async batchGetTokenMappings(
-    tokenPrefixes: string[],
+    tokens: string[],
     sessionId: string
   ): Promise<Array<{ token: string; original: string; type: string }>> {
-    // For short prefixes, we need to query each one individually
-    // DynamoDB doesn't support prefix matching in BatchGetItem
     const results: Array<{ token: string; original: string; type: string }> = [];
 
     // Process in parallel for efficiency
-    const promises = tokenPrefixes.map(async (prefix) => {
-      // Since we only have the 8-char prefix, we need to use a scan or query
-      // For now, we'll use GetItem with the session ID and hope the token is unique enough
-      // In a production system, we might want to store the short token as a GSI
-
-      // Actually, we stored the full token - the placeholder has the short version
-      // Let's try to get it with the prefix by scanning the session's tokens
-      // This is a simplification - in production, use a GSI for better performance
-
+    const promises = tokens.map(async (token) => {
       const command = new GetItemCommand({
         TableName: this.config.piiTokenTableName,
         Key: {
-          // We need the full token, which we don't have from the placeholder
-          // For now, let's make the placeholder include more of the token
-          token: { S: prefix }, // This won't work with just prefix
+          token: { S: token },
           sessionId: { S: sessionId },
         },
       });

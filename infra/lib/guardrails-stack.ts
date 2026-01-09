@@ -84,18 +84,11 @@ export class GuardrailsStack extends cdk.Stack {
         ],
       },
 
-      // Sensitive information policy - detect but don't mask (we handle masking separately with tokenization)
-      // This provides an additional layer of detection beyond our Comprehend-based tokenization
-      sensitiveInformationPolicyConfig: {
-        piiEntitiesConfig: [
-          { type: 'NAME', action: 'BLOCK' },
-          { type: 'EMAIL', action: 'BLOCK' },
-          { type: 'PHONE', action: 'BLOCK' },
-          { type: 'ADDRESS', action: 'BLOCK' },
-          { type: 'US_SOCIAL_SECURITY_NUMBER', action: 'BLOCK' },
-          { type: 'CREDIT_DEBIT_CARD_NUMBER', action: 'BLOCK' },
-        ],
-      },
+      // Note: sensitiveInformationPolicyConfig is intentionally NOT configured here
+      // because we handle PII detection and tokenization using Amazon Comprehend,
+      // which gives us more flexibility for educational use cases. Bedrock's PII
+      // blocking would reject legitimate educational content before our tokenization
+      // service has a chance to protect it.
 
       // Topic-based filtering for K-12 inappropriate topics
       topicPolicyConfig: {

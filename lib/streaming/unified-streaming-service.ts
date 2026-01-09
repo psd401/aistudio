@@ -140,12 +140,17 @@ export class UnifiedStreamingService {
                 hasPII: inputSafetyResult.hasPII,
               });
               // Update the last user message with tokenized content (AI SDK v5 format)
+              // Create new array to avoid race condition
               const lastIndex = request.messages.length - 1 - request.messages.slice().reverse().findIndex(m => m.role === 'user');
               if (lastIndex >= 0 && lastIndex < request.messages.length) {
-                request.messages[lastIndex] = this.updateMessageText(
-                  request.messages[lastIndex],
-                  inputSafetyResult.processedContent
-                );
+                request.messages = [
+                  ...request.messages.slice(0, lastIndex),
+                  this.updateMessageText(
+                    request.messages[lastIndex],
+                    inputSafetyResult.processedContent
+                  ),
+                  ...request.messages.slice(lastIndex + 1)
+                ];
               }
             }
           }

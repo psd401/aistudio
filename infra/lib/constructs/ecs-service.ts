@@ -480,6 +480,13 @@ export class EcsServiceConstruct extends Construct {
         // Cognito token configuration
         COGNITO_ACCESS_TOKEN_LIFETIME_SECONDS: '43200', // 12 hours
         COGNITO_JWKS_URL: `https://aistudio-${environment}.auth.${cdk.Stack.of(this).region}.amazoncognito.com/.well-known/jwks.json`,
+        // K-12 Content Safety - Bedrock Guardrails configuration
+        BEDROCK_GUARDRAIL_ID: cdk.Fn.importValue(`${environment}-GuardrailId`),
+        BEDROCK_GUARDRAIL_VERSION: 'DRAFT',
+        PII_TOKEN_TABLE_NAME: cdk.Fn.importValue(`${environment}-PIITokenTableName`),
+        GUARDRAIL_VIOLATION_TOPIC_ARN: cdk.Fn.importValue(`${environment}-ViolationTopicArn`),
+        CONTENT_SAFETY_ENABLED: 'true',
+        PII_TOKENIZATION_ENABLED: 'true',
       },
       // Secrets injected from Secrets Manager at runtime
       secrets: {
