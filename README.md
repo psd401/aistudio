@@ -22,6 +22,7 @@ AI Studio is a **self-hosted platform** deployed within your district infrastruc
 - **Cost Barriers**: Individual AI subscriptions cost $20-200/month per user—unsustainable for districts
 - **Access Inequality**: Students lack exposure to frontier models used in higher education and industry
 - **Data Privacy**: Third-party AI services raise concerns about student data protection
+- **Content Safety**: Consumer AI tools lack appropriate safeguards for K-12 environments
 - **Complexity**: Creating custom AI assistants requires coding expertise
 
 ### The Solution
@@ -29,6 +30,7 @@ AI Studio eliminates these barriers by:
 - **90% Cost Reduction**: Secure API architecture replaces expensive per-seat licenses
 - **Multi-Model Access**: Real-time switching between GPT-5, Claude Opus, and Google Gemini
 - **District-Level Security**: All data processed within your secure servers—nothing leaves your environment
+- **K-12 Content Safety**: Automatic content filtering and PII protection across all AI interactions
 - **No-Code Customization**: Design custom AI assistants using visual prompt chains
 - **Open Source**: MIT-licensed, fully self-hostable on your infrastructure
 
@@ -64,6 +66,14 @@ AI Studio eliminates these barriers by:
   - Role-based access control (RBAC)
   - Tool-level permissions
   - Audit logging
+
+- 🛡️ **K-12 Content Safety** - Purpose-built for educational environments
+  - **Content Filtering**: Blocks inappropriate content (violence, hate speech, sexual content) in both inputs and AI responses using Amazon Bedrock Guardrails
+  - **PII Protection**: Automatically detects and tokenizes student personal information (names, emails, phone numbers) before sending to AI providers
+  - **Compliance Ready**: Helps meet COPPA, FERPA, and CIPA requirements
+  - **Real-time Alerts**: SNS notifications for safety violations
+  - **Zero Configuration**: Works automatically across all AI providers
+  - See [K-12 Content Safety Documentation](./docs/features/k12-content-safety.md) for details
 
 - 💰 **Cost Control**
   - Transparent usage tracking
