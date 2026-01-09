@@ -3,7 +3,9 @@ import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { getTelemetryConfig } from './telemetry-service';
 import { getProviderAdapter, type ProviderCapabilities } from './provider-adapters';
 import { CircuitBreaker, CircuitBreakerOpenError } from './circuit-breaker';
+import { getContentSafetyService, type ContentSafetyResult } from '@/lib/safety';
 import type { StreamRequest, StreamResponse, StreamConfig, StreamingProgress, TelemetrySpan, TelemetryConfig } from './types';
+import { ContentSafetyBlockedError } from './types';
 import {
   isTextDeltaEvent,
   isTextStartEvent,
@@ -85,8 +87,7 @@ export class UnifiedStreamingService {
         throw new CircuitBreakerOpenError(request.provider, circuitState);
       }
       
-      // 4. Configure streaming with adaptive timeouts
-      // Validate messages before conversion
+      // 4. Validate messages
       if (!request.messages || !Array.isArray(request.messages)) {
         log.error('Messages invalid in streaming service', {
           messages: request.messages,
@@ -96,7 +97,62 @@ export class UnifiedStreamingService {
         });
         throw new Error('Messages array is required for streaming');
       }
-      
+
+      // 5. K-12 Content Safety: Check user input before sending to AI
+      const contentSafetyService = getContentSafetyService();
+      const safetyEnabled = request.contentSafety?.enabled !== false;
+      let inputSafetyResult: ContentSafetyResult | undefined;
+
+      if (safetyEnabled && !request.contentSafety?.skipInputCheck && contentSafetyService.isEnabled()) {
+        // Get the last user message for safety check
+        const lastUserMessage = [...request.messages].reverse().find(m => m.role === 'user');
+        if (lastUserMessage) {
+          // Extract text content from message parts (AI SDK v5 format)
+          const messageContent = this.extractTextFromMessage(lastUserMessage);
+
+          if (messageContent) {
+            inputSafetyResult = await contentSafetyService.processInput(
+              messageContent,
+              request.sessionId || request.userId
+            );
+
+            if (!inputSafetyResult.allowed) {
+              log.warn('Content blocked by safety guardrails (input)', {
+                requestId,
+                reason: inputSafetyResult.blockedReason,
+                categories: inputSafetyResult.blockedCategories,
+              });
+              throw new ContentSafetyBlockedError(
+                inputSafetyResult.blockedMessage || 'Content blocked by safety guardrails',
+                inputSafetyResult.blockedCategories || [],
+                'input',
+                request.provider,
+                request.modelId
+              );
+            }
+
+            // If PII was tokenized, update the message content in parts
+            if (inputSafetyResult.contentModified && inputSafetyResult.processedContent !== messageContent) {
+              log.info('PII tokenized in user message', {
+                requestId,
+                originalLength: messageContent.length,
+                processedLength: inputSafetyResult.processedContent.length,
+                hasPII: inputSafetyResult.hasPII,
+              });
+              // Update the last user message with tokenized content (AI SDK v5 format)
+              const lastIndex = request.messages.length - 1 - request.messages.slice().reverse().findIndex(m => m.role === 'user');
+              if (lastIndex >= 0 && lastIndex < request.messages.length) {
+                request.messages[lastIndex] = this.updateMessageText(
+                  request.messages[lastIndex],
+                  inputSafetyResult.processedContent
+                );
+              }
+            }
+          }
+        }
+      }
+
+      // 6. Configure streaming with adaptive timeouts
       // Debug log the messages structure
       log.info('Messages structure before conversion', {
         messageCount: request.messages.length,
@@ -179,10 +235,55 @@ export class UnifiedStreamingService {
           },
           onFinish: async (data) => {
             this.handleFinish(data, span, telemetryConfig, timer);
-            // Call user-provided onFinish callback
+
+            // K-12 Content Safety: Check AI output before saving/displaying
+            let processedData = data;
+            if (safetyEnabled && !request.contentSafety?.skipOutputCheck && contentSafetyService.isEnabled() && data.text) {
+              const outputSafetyResult = await contentSafetyService.processOutput(
+                data.text,
+                request.modelId,
+                request.provider,
+                request.sessionId || request.userId
+              );
+
+              if (!outputSafetyResult.allowed) {
+                log.warn('Content blocked by safety guardrails (output)', {
+                  requestId,
+                  reason: outputSafetyResult.blockedReason,
+                  categories: outputSafetyResult.blockedCategories,
+                  modelId: request.modelId,
+                  provider: request.provider,
+                });
+                // For output blocking, we replace the response text with the blocked message
+                // This is safer than throwing an error since the stream has already been sent
+                processedData = {
+                  ...data,
+                  text: outputSafetyResult.blockedMessage || 'The AI response was blocked for safety reasons.',
+                };
+                if (span) {
+                  span.setAttributes({
+                    'ai.safety.output.blocked': true,
+                    'ai.safety.output.categories': outputSafetyResult.blockedCategories?.join(',') || '',
+                  });
+                }
+              } else if (outputSafetyResult.contentModified) {
+                // PII was detokenized in the response
+                log.info('PII restored in AI output', {
+                  requestId,
+                  originalLength: data.text.length,
+                  processedLength: outputSafetyResult.processedContent.length,
+                });
+                processedData = {
+                  ...data,
+                  text: outputSafetyResult.processedContent,
+                };
+              }
+            }
+
+            // Call user-provided onFinish callback with processed data
             if (request.callbacks?.onFinish) {
               try {
-                await request.callbacks.onFinish(data);
+                await request.callbacks.onFinish(processedData);
               } catch (error) {
                 // Safely extract error details to avoid circular reference issues
                 const errorDetails = error instanceof Error ? {
@@ -439,6 +540,50 @@ export class UnifiedStreamingService {
       span.setStatus({ code: 2 }); // ERROR
     }
     circuitBreaker.recordFailure();
+  }
+
+  /**
+   * Extract text content from a UIMessage (AI SDK v5 format)
+   * Messages have 'parts' array instead of 'content' string
+   */
+  private extractTextFromMessage(message: { parts?: Array<{ type: string; text?: string }> }): string {
+    if (!message.parts || !Array.isArray(message.parts)) {
+      return '';
+    }
+    // Extract text from all text parts
+    return message.parts
+      .filter((part) => part.type === 'text' && part.text)
+      .map((part) => part.text)
+      .join('\n');
+  }
+
+  /**
+   * Update text content in a UIMessage (AI SDK v5 format)
+   * Creates a new message with updated text parts
+   */
+  private updateMessageText<T extends { parts?: Array<{ type: string; text?: string }> }>(
+    message: T,
+    newText: string
+  ): T {
+    if (!message.parts || !Array.isArray(message.parts)) {
+      return message;
+    }
+
+    // Find the first text part and update it with the new text
+    // Keep other parts (tool calls, reasoning, etc.) unchanged
+    let textPartFound = false;
+    const updatedParts = message.parts.map((part) => {
+      if (part.type === 'text' && !textPartFound) {
+        textPartFound = true;
+        return { ...part, text: newText };
+      }
+      return part;
+    });
+
+    return {
+      ...message,
+      parts: updatedParts,
+    };
   }
 }
 

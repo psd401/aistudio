@@ -337,6 +337,34 @@ export class EcsServiceConstruct extends Construct {
                 'arn:aws:bedrock:*:*:provisioned-model/*',
               ],
             }),
+            // K-12 Content Safety: Bedrock Guardrails API access
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'bedrock:ApplyGuardrail',
+                'bedrock:GetGuardrail',
+              ],
+              resources: [
+                `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail/*`,
+              ],
+            }),
+            // K-12 Content Safety: Amazon Comprehend for PII detection
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'comprehend:DetectPiiEntities',
+                'comprehend:ContainsPiiEntities',
+              ],
+              resources: ['*'], // Comprehend doesn't support resource-level permissions
+            }),
+            // K-12 Content Safety: SNS for violation notifications
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: ['sns:Publish'],
+              resources: [
+                `arn:aws:sns:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:aistudio-${environment}-guardrail-violations`,
+              ],
+            }),
           ],
         }),
       },
