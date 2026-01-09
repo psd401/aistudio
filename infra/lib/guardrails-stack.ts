@@ -46,7 +46,7 @@ export class GuardrailsStack extends cdk.Stack {
 
       // Blocked input/output messages shown to users
       blockedInputMessaging: 'This content is not appropriate for educational use. Please rephrase your question.',
-      blockedOutputMessaging: 'The AI response contained inappropriate content and has been blocked for your safety.',
+      blockedOutputsMessaging: 'The AI response contained inappropriate content and has been blocked for your safety.',
 
       // Content filtering policies - HIGH strength for K-12 protection
       contentPolicyConfig: {
