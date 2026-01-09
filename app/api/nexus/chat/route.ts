@@ -11,6 +11,7 @@ import { nexusConversations, nexusMessages } from '@/lib/db/schema';
 import { processMessagesWithAttachments, getAttachmentFromS3 } from '@/lib/services/attachment-storage-service';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import type { StreamRequest } from '@/lib/streaming/types';
+import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { getModelConfig } from '@/lib/ai/model-config';
 import { sanitizeTextForDatabase } from '@/lib/utils/text-sanitizer';
 import { safeJsonbStringify } from '@/lib/db/json-utils';
@@ -995,6 +996,24 @@ export async function POST(req: Request) {
     });
 
     timer({ status: 'error' });
+
+    // Handle content safety blocked errors with user-friendly message
+    if (error instanceof ContentSafetyBlockedError) {
+      return new Response(
+        JSON.stringify({
+          error: error.message, // User-friendly message from guardrails
+          code: 'CONTENT_BLOCKED',
+          requestId
+        }),
+        {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Request-Id': requestId
+          }
+        }
+      );
+    }
 
     // Return generic error response
     return new Response(
