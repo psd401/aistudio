@@ -9,8 +9,23 @@ import type { StreamRequest, StreamResponse, StreamConfig, StreamingProgress, Te
 import { ContentSafetyBlockedError } from './types';
 
 /**
+ * Replace PII tokens in text with original values.
+ * Helper function used by the stream transform.
+ */
+function replacePIITokens(text: string, tokenMap: Map<string, string>): string {
+  // Use regex to find all [PII:uuid] patterns and replace them
+  return text.replace(/\[PII:[a-f0-9-]{36}\]/g, (match) => {
+    return tokenMap.get(match) || match;
+  });
+}
+
+/**
  * Create a TransformStream that replaces PII tokens with original values in real-time.
- * Handles tokens that may span chunk boundaries by buffering partial matches.
+ * Handles the AI SDK's streaming protocol format where text is embedded in JSON chunks.
+ *
+ * AI SDK stream format examples:
+ * - Text delta: 0:{"type":"text-delta","textDelta":"Hello [PII:uuid]"}
+ * - Other events pass through unchanged
  */
 function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformStream<Uint8Array, Uint8Array> {
   // Build lookup map from token placeholder to original value
@@ -28,64 +43,97 @@ function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformS
   const encoder = new TextEncoder();
   let buffer = '';
 
-  // PII token pattern: [PII:uuid]
-  const TOKEN_START = '[PII:';
-  const TOKEN_END = ']';
-  const MAX_TOKEN_LENGTH = 50; // [PII: + 36 char UUID + ] = 43, give some buffer
-
   return new TransformStream({
     transform(chunk, controller) {
       // Decode chunk and add to buffer
       buffer += decoder.decode(chunk, { stream: true });
 
-      // Process buffer, keeping potential partial tokens at the end
-      let output = '';
-      let i = 0;
+      // Process complete lines (protocol messages end with newline)
+      const lines = buffer.split('\n');
 
-      while (i < buffer.length) {
-        // Check if we're at the start of a potential token
-        if (buffer.slice(i).startsWith(TOKEN_START)) {
-          // Look for the end of the token
-          const endIdx = buffer.indexOf(TOKEN_END, i + TOKEN_START.length);
+      // Keep the last incomplete line in buffer
+      buffer = lines.pop() || '';
 
-          if (endIdx !== -1) {
-            // Complete token found
-            const token = buffer.slice(i, endIdx + 1);
-            const replacement = tokenMap.get(token);
-
-            if (replacement !== undefined) {
-              output += replacement;
-            } else {
-              // Unknown token, keep as-is
-              output += token;
-            }
-            i = endIdx + 1;
-          } else if (buffer.length - i < MAX_TOKEN_LENGTH) {
-            // Partial token at end of buffer, wait for more data
-            break;
-          } else {
-            // Token too long, not a valid token - output the start and continue
-            output += buffer[i];
-            i++;
-          }
-        } else {
-          output += buffer[i];
-          i++;
+      for (const line of lines) {
+        if (!line.trim()) {
+          // Empty line, pass through
+          controller.enqueue(encoder.encode(line + '\n'));
+          continue;
         }
-      }
 
-      // Keep unprocessed portion in buffer
-      buffer = buffer.slice(i);
+        // AI SDK format: "0:{json}" or similar prefix patterns
+        // Look for JSON content after the prefix
+        const colonIndex = line.indexOf(':');
+        if (colonIndex === -1) {
+          // No colon, pass through unchanged
+          controller.enqueue(encoder.encode(line + '\n'));
+          continue;
+        }
 
-      // Output processed text
-      if (output.length > 0) {
-        controller.enqueue(encoder.encode(output));
+        const prefix = line.slice(0, colonIndex + 1);
+        const jsonPart = line.slice(colonIndex + 1);
+
+        // Try to parse and transform JSON content
+        try {
+          const parsed = JSON.parse(jsonPart);
+          let modified = false;
+
+          // Handle text-delta events (most common for streaming text)
+          if (parsed.textDelta && typeof parsed.textDelta === 'string') {
+            const original = parsed.textDelta;
+            parsed.textDelta = replacePIITokens(original, tokenMap);
+            modified = parsed.textDelta !== original;
+          }
+
+          // Handle text field (some events use 'text' instead of 'textDelta')
+          if (parsed.text && typeof parsed.text === 'string') {
+            const original = parsed.text;
+            parsed.text = replacePIITokens(original, tokenMap);
+            modified = modified || parsed.text !== original;
+          }
+
+          // Handle delta field (used in some formats)
+          if (parsed.delta && typeof parsed.delta === 'string') {
+            const original = parsed.delta;
+            parsed.delta = replacePIITokens(original, tokenMap);
+            modified = modified || parsed.delta !== original;
+          }
+
+          // Re-encode and output
+          const output = prefix + JSON.stringify(parsed) + '\n';
+          controller.enqueue(encoder.encode(output));
+        } catch {
+          // Not valid JSON or parse error, pass through unchanged
+          controller.enqueue(encoder.encode(line + '\n'));
+        }
       }
     },
 
     flush(controller) {
       // Output any remaining buffer content
       if (buffer.length > 0) {
+        // Try to process the final chunk
+        const colonIndex = buffer.indexOf(':');
+        if (colonIndex !== -1) {
+          const prefix = buffer.slice(0, colonIndex + 1);
+          const jsonPart = buffer.slice(colonIndex + 1);
+          try {
+            const parsed = JSON.parse(jsonPart);
+            if (parsed.textDelta) {
+              parsed.textDelta = replacePIITokens(parsed.textDelta, tokenMap);
+            }
+            if (parsed.text) {
+              parsed.text = replacePIITokens(parsed.text, tokenMap);
+            }
+            if (parsed.delta) {
+              parsed.delta = replacePIITokens(parsed.delta, tokenMap);
+            }
+            controller.enqueue(encoder.encode(prefix + JSON.stringify(parsed)));
+            return;
+          } catch {
+            // Fall through to output as-is
+          }
+        }
         controller.enqueue(encoder.encode(buffer));
       }
     }
