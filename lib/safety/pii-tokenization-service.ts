@@ -403,8 +403,9 @@ export class PIITokenizationService {
       batches.push(tokens.slice(i, i + BATCH_SIZE));
     }
 
-    // Process batches concurrently for better performance
-    const batchResults = await Promise.all(
+    // Process batches concurrently with resilience - use allSettled to avoid losing
+    // results from successful batches if one batch fails unexpectedly
+    const batchSettled = await Promise.allSettled(
       batches.map(async (batch) => {
         const batchItems: Array<{ token: string; original: string; type: string }> = [];
 
@@ -501,8 +502,14 @@ export class PIITokenizationService {
       })
     );
 
-    // Flatten results from all batches
-    return batchResults.flat();
+    // Extract successful batch results and flatten
+    const successfulBatches = batchSettled
+      .filter((result): result is PromiseFulfilledResult<Array<{ token: string; original: string; type: string }>> =>
+        result.status === 'fulfilled'
+      )
+      .map(result => result.value);
+
+    return successfulBatches.flat();
   }
 
   /**

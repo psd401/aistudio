@@ -49,14 +49,14 @@ function replacePIITokensWithRemainder(
   text: string,
   tokenMap: Map<string, string>
 ): { processed: string; remainder: string } {
-  // First, replace all complete tokens
-  let processed = text.replace(PII_TOKEN_REGEX, (match) => {
+  // Replace all complete tokens
+  const processed = text.replace(PII_TOKEN_REGEX, (match) => {
     const replacement = tokenMap.get(match);
     if (replacement) {
-      piiTransformLog.info('PII token replaced', { token: match, hasReplacement: true });
       return replacement;
     } else {
-      piiTransformLog.warn('PII token NOT found in map', { token: match, mapKeys: Array.from(tokenMap.keys()) });
+      // Log without exposing actual token patterns - just indicate a mismatch occurred
+      piiTransformLog.warn('PII token mismatch during detokenization', { tokenCount: tokenMap.size });
       return match;
     }
   });
@@ -64,13 +64,10 @@ function replacePIITokensWithRemainder(
   // Check if there's a partial token at the end that needs buffering
   const { hasPartial, startIndex } = hasPartialPIITokenAtEnd(processed);
   if (hasPartial && startIndex >= 0) {
-    const remainder = processed.slice(startIndex);
-    processed = processed.slice(0, startIndex);
-    piiTransformLog.info('Buffering partial PII token', {
-      remainder: remainder.substring(0, 20),
-      remainderLength: remainder.length
-    });
-    return { processed, remainder };
+    return {
+      processed: processed.slice(0, startIndex),
+      remainder: processed.slice(startIndex)
+    };
   }
 
   return { processed, remainder: '' };
@@ -132,12 +129,8 @@ function processSSEEventWithBuffer(
 
     // Non-delta events pass through unchanged
     return { output: SSE_DATA_PREFIX + JSON.stringify(parsed), newBuffer: textBuffer };
-  } catch (error) {
+  } catch {
     // Not valid JSON or parse error, pass through unchanged
-    piiTransformLog.warn('Failed to parse SSE event as JSON', {
-      error: error instanceof Error ? error.message : String(error),
-      jsonContent: jsonContent.substring(0, 100)
-    });
     return { output: event, newBuffer: textBuffer };
   }
 }
@@ -159,20 +152,8 @@ function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformS
     tokenMap.set(mapping.placeholder, mapping.original);
   }
 
-  piiTransformLog.info('PII detokenize transform initialized', {
-    mappingCount: tokenMappings.length,
-    mapSize: tokenMap.size,
-    placeholders: Array.from(tokenMap.keys()),
-    sampleMapping: tokenMappings.length > 0 ? {
-      placeholder: tokenMappings[0].placeholder,
-      type: tokenMappings[0].type,
-      hasOriginal: !!tokenMappings[0].original
-    } : null
-  });
-
   // If no tokens to replace, return a pass-through transform
   if (tokenMap.size === 0) {
-    piiTransformLog.warn('No tokens to replace, using pass-through transform');
     return new TransformStream();
   }
 
@@ -180,7 +161,6 @@ function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformS
   const encoder = new TextEncoder();
   let sseBuffer = '';      // Buffer for incomplete SSE events
   let textBuffer = '';     // Buffer for partial PII tokens across text-delta events
-  let eventCount = 0;
 
   // SSE format constants
   const SSE_EVENT_SEPARATOR = '\n\n';
@@ -197,7 +177,6 @@ function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformS
       while ((separatorIndex = sseBuffer.indexOf(SSE_EVENT_SEPARATOR)) !== -1) {
         const event = sseBuffer.slice(0, separatorIndex);
         sseBuffer = sseBuffer.slice(separatorIndex + SSE_EVENT_SEPARATOR.length);
-        eventCount++;
 
         // Process event with text buffering for cross-chunk PII tokens
         const { output, newBuffer } = processSSEEventWithBuffer(
@@ -213,28 +192,15 @@ function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformS
     },
 
     flush(controller) {
-      piiTransformLog.info('PII transform flush called', {
-        totalEvents: eventCount,
-        remainingSseBuffer: sseBuffer.length,
-        remainingTextBuffer: textBuffer.length
-      });
-
-      // If there's remaining text buffer, we need to output it
+      // If there's remaining text buffer, output it as a final text-delta event
       // This handles any partial token that was buffered but never completed
       if (textBuffer.length > 0) {
-        piiTransformLog.info('Flushing remaining text buffer', {
-          textBuffer: textBuffer.substring(0, 50)
-        });
-        // Create a synthetic text-delta event with the remaining buffer
         const finalEvent = { type: 'text-delta', delta: textBuffer, id: 'pii-flush' };
         controller.enqueue(encoder.encode(SSE_DATA_PREFIX + JSON.stringify(finalEvent) + SSE_EVENT_SEPARATOR));
       }
 
       // Output any remaining SSE buffer content (handles incomplete final event)
       if (sseBuffer.length > 0) {
-        piiTransformLog.warn('Flushing remaining SSE buffer content', {
-          sseBuffer: sseBuffer.substring(0, 100)
-        });
         const { output } = processSSEEventWithBuffer(sseBuffer, tokenMap, '', SSE_DATA_PREFIX);
         controller.enqueue(encoder.encode(output));
       }
@@ -333,9 +299,13 @@ export class UnifiedStreamingService {
         throw new Error('Messages array is required for streaming');
       }
 
-      // 4a. Create defensive copy of messages to prevent race conditions
+      // 4a. Create defensive deep copy of messages to prevent race conditions
       // Since request is passed by reference, concurrent calls could cause message bleed
-      let messages = request.messages.map(m => ({ ...m }));
+      // Deep copy includes parts array to prevent nested object mutation
+      let messages = request.messages.map(m => ({
+        ...m,
+        parts: m.parts ? [...m.parts] : []
+      }));
 
       // 5. K-12 Content Safety: Check user input before sending to AI
       const contentSafetyService = getContentSafetyService();
