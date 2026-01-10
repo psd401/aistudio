@@ -48,37 +48,39 @@ export class GuardrailsStack extends cdk.Stack {
       blockedInputMessaging: 'This content is not appropriate for educational use. Please rephrase your question.',
       blockedOutputsMessaging: 'The AI response contained inappropriate content and has been blocked for your safety.',
 
-      // Content filtering policies - HIGH strength for K-12 protection
+      // Content filtering policies - Balanced for K-12 educational use
+      // MEDIUM allows legitimate educational discussions (history, literature, health)
+      // HIGH reserved for sexual content and prompt attacks
       contentPolicyConfig: {
         filtersConfig: [
           {
             type: 'HATE',
-            inputStrength: 'HIGH',
-            outputStrength: 'HIGH',
+            inputStrength: 'MEDIUM', // Allows civil rights, Holocaust education
+            outputStrength: 'MEDIUM',
           },
           {
             type: 'VIOLENCE',
-            inputStrength: 'HIGH',
-            outputStrength: 'HIGH',
+            inputStrength: 'MEDIUM', // Allows history (wars), literature, biology
+            outputStrength: 'MEDIUM',
           },
           {
             type: 'SEXUAL',
-            inputStrength: 'HIGH',
+            inputStrength: 'HIGH', // Keep HIGH for K-12
             outputStrength: 'HIGH',
           },
           {
             type: 'INSULTS',
-            inputStrength: 'HIGH',
-            outputStrength: 'HIGH',
+            inputStrength: 'MEDIUM', // Allows character analysis in literature
+            outputStrength: 'MEDIUM',
           },
           {
             type: 'MISCONDUCT',
-            inputStrength: 'HIGH',
-            outputStrength: 'HIGH',
+            inputStrength: 'MEDIUM', // Allows legal system, drug education discussions
+            outputStrength: 'MEDIUM',
           },
           {
             type: 'PROMPT_ATTACK',
-            inputStrength: 'HIGH',
+            inputStrength: 'HIGH', // Keep HIGH to prevent jailbreaks
             outputStrength: 'NONE', // Only block on input
           },
         ],

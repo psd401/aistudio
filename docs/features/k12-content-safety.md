@@ -46,18 +46,20 @@ The content filtering system evaluates all messages against configurable safety 
 
 When content is blocked, users receive an age-appropriate message explaining that their request couldn't be processed, without revealing specific filtering details that could be used for circumvention.
 
-### PII Tokenization (Amazon Comprehend)
+### PII Tokenization (Amazon Comprehend + Custom Patterns)
 
-The PII protection system identifies and tokenizes sensitive information before it reaches AI providers:
+The PII protection system identifies and tokenizes sensitive information before it reaches AI providers. This includes both standard PII detected by Amazon Comprehend and custom patterns for district-specific identifiers:
 
-| PII Type | Example | Protection |
-|----------|---------|------------|
-| **Names** | "John Smith" | Replaced with `[PII:token]` |
-| **Email Addresses** | "student@school.edu" | Replaced with `[PII:token]` |
-| **Phone Numbers** | "(555) 123-4567" | Replaced with `[PII:token]` |
-| **Physical Addresses** | "123 Main St" | Replaced with `[PII:token]` |
-| **SSN** | Social Security Numbers | Replaced with `[PII:token]` |
-| **Dates/Ages** | Birth dates, student ages | Replaced with `[PII:token]` |
+| PII Type | Example | Source |
+|----------|---------|--------|
+| **Names** | "John Smith" | Amazon Comprehend |
+| **Email Addresses** | "student@school.edu" | Amazon Comprehend |
+| **Phone Numbers** | "(555) 123-4567" | Amazon Comprehend |
+| **Physical Addresses** | "123 Main St" | Amazon Comprehend |
+| **SSN** | Social Security Numbers | Amazon Comprehend |
+| **Dates/Ages** | Birth dates, student ages | Amazon Comprehend |
+| **Student IDs** | "2240393" (7 digits starting with 2) | Custom Pattern |
+| **Custom Identifiers** | Configurable per district | Custom Pattern |
 
 **How Tokenization Works:**
 
@@ -191,36 +193,102 @@ This creates:
 - SNS topic for violation notifications
 - Appropriate IAM roles with least-privilege access
 
-### Customizing Content Policies
+### Customizing Content Filter Strength
 
-The Bedrock Guardrail can be customized via the AWS Console or CDK:
+Content filters use strength levels (`NONE`, `LOW`, `MEDIUM`, `HIGH`) to balance safety with educational flexibility. The default configuration uses MEDIUM for most filters to allow legitimate educational discussions while keeping HIGH for sexual content and prompt attacks:
+
+| Filter | Default | Purpose | Educational Considerations |
+|--------|---------|---------|---------------------------|
+| **HATE** | MEDIUM | Blocks discrimination/prejudice | Allows civil rights, Holocaust education |
+| **VIOLENCE** | MEDIUM | Blocks graphic violence | Allows history (wars), literature, biology |
+| **SEXUAL** | HIGH | Blocks sexual content | Keep HIGH for K-12 environments |
+| **INSULTS** | MEDIUM | Blocks personal attacks | Allows character analysis in literature |
+| **MISCONDUCT** | MEDIUM | Blocks illegal activities | Allows legal system, drug education |
+| **PROMPT_ATTACK** | HIGH | Blocks jailbreak attempts | Keep HIGH to prevent bypasses |
+
+To customize filter strengths, edit `infra/lib/guardrails-stack.ts`:
 
 ```typescript
-// infra/lib/guardrails-stack.ts
-const guardrail = new bedrock.CfnGuardrail(this, 'K12Guardrail', {
-  contentPolicyConfig: {
-    filtersConfig: [
-      { type: 'HATE', inputStrength: 'HIGH', outputStrength: 'HIGH' },
-      { type: 'VIOLENCE', inputStrength: 'HIGH', outputStrength: 'HIGH' },
-      { type: 'SEXUAL', inputStrength: 'HIGH', outputStrength: 'HIGH' },
-      { type: 'SELF_HARM', inputStrength: 'HIGH', outputStrength: 'HIGH' },
-      { type: 'MISCONDUCT', inputStrength: 'HIGH', outputStrength: 'HIGH' },
-      { type: 'PROMPT_ATTACK', inputStrength: 'HIGH', outputStrength: 'HIGH' },
-    ],
-  },
-  // Add custom blocked topics for your district
-  topicPolicyConfig: {
-    topicsConfig: [
-      {
-        name: 'weapons',
-        definition: 'Instructions for creating weapons or explosives',
-        type: 'DENY',
-      },
-      // Add more custom topics as needed
-    ],
-  },
-});
+contentPolicyConfig: {
+  filtersConfig: [
+    { type: 'HATE', inputStrength: 'MEDIUM', outputStrength: 'MEDIUM' },
+    { type: 'VIOLENCE', inputStrength: 'MEDIUM', outputStrength: 'MEDIUM' },
+    { type: 'SEXUAL', inputStrength: 'HIGH', outputStrength: 'HIGH' },
+    // ... more filters
+  ],
+},
 ```
+
+After editing, redeploy:
+```bash
+cd infra && npx cdk deploy AIStudio-GuardrailsStack-Dev
+```
+
+### Customizing Topic Blocking
+
+You can block specific topics with examples:
+
+```typescript
+topicPolicyConfig: {
+  topicsConfig: [
+    {
+      name: 'Weapons',
+      definition: 'Content about weapons, firearms, or explosives',
+      type: 'DENY',
+      examples: ['How to build a bomb', 'Where to buy a gun'],
+    },
+    // Add more custom topics as needed
+  ],
+},
+```
+
+### Adding Custom PII Patterns
+
+Amazon Comprehend detects standard PII (names, emails, phone numbers), but you may need to protect district-specific identifiers like student IDs or employee numbers. Custom patterns are defined in `lib/safety/types.ts`:
+
+```typescript
+// lib/safety/types.ts
+export const CUSTOM_PII_PATTERNS: CustomPIIPattern[] = [
+  {
+    type: 'STUDENT_ID',
+    description: 'Student numbers - 7 digits starting with 2',
+    pattern: /\b2\d{6}\b/,
+    confidence: 1.0,
+  },
+  {
+    type: 'EMPLOYEE_ID',
+    description: 'Employee badge numbers - E followed by 5 digits',
+    pattern: /\bE\d{5}\b/i,
+    confidence: 1.0,
+  },
+];
+```
+
+**How to add a new pattern:**
+
+1. Open `lib/safety/types.ts`
+2. Add an entry to `CUSTOM_PII_PATTERNS` with:
+   - `type`: Unique identifier (e.g., `STUDENT_ID`)
+   - `description`: Human-readable explanation
+   - `pattern`: RegExp (without global flag - added automatically)
+   - `confidence`: Score 0-1 (use 1.0 for exact patterns)
+3. Deploy the application (no infrastructure changes needed)
+
+**Pattern tips:**
+- Use `\b` for word boundaries to avoid partial matches
+- Test with edge cases (embedded in text, multiple occurrences)
+- Consider false positives (numbers that match but aren't IDs)
+
+**Example patterns:**
+
+| Identifier | Pattern | Matches |
+|------------|---------|---------|
+| 7-digit student ID starting with 2 | `/\b2\d{6}\b/` | 2240393, 2123456 |
+| Employee badge (E + 5 digits) | `/\bE\d{5}\b/i` | E12345, e54321 |
+| Case number (CASE-NNNN) | `/\bCASE-\d{4}\b/i` | CASE-1234 |
+| Custom ID with prefix | `/\bPSD-\d{6}\b/` | PSD-123456 |
+
+Custom patterns are tokenized alongside Comprehend's PII detection, so the AI never sees the actual values.
 
 ## Local Development
 

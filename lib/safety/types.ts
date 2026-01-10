@@ -249,3 +249,54 @@ export const K12_PII_TYPES: ComprehendPIIType[] = [
   'DATE_TIME',
   'AGE',
 ];
+
+/**
+ * Custom PII pattern definition for district-specific identifiers
+ *
+ * Use this to define patterns that Amazon Comprehend doesn't detect,
+ * such as student IDs, employee numbers, or other district-specific formats.
+ */
+export interface CustomPIIPattern {
+  /** Unique identifier for this pattern (e.g., 'STUDENT_ID') */
+  type: string;
+  /** Human-readable description */
+  description: string;
+  /** Regular expression pattern (without global flag - added automatically) */
+  pattern: RegExp;
+  /** Minimum confidence score (0-1) - custom patterns default to 1.0 */
+  confidence?: number;
+}
+
+/**
+ * District-specific PII patterns
+ *
+ * Add custom patterns here for identifiers specific to your district.
+ * These are detected alongside Amazon Comprehend's built-in PII types.
+ *
+ * To add a new pattern:
+ * 1. Add a new entry to this array
+ * 2. Define the regex pattern (test it thoroughly!)
+ * 3. Deploy the application (no infrastructure changes needed)
+ *
+ * Pattern tips:
+ * - Use \b for word boundaries to avoid partial matches
+ * - Test with edge cases (embedded in text, at start/end, multiple occurrences)
+ * - Consider false positives (dates, phone numbers, etc.)
+ */
+export const CUSTOM_PII_PATTERNS: CustomPIIPattern[] = [
+  {
+    type: 'STUDENT_ID',
+    description: 'PSD401 student numbers - 7 digits starting with 2 (e.g., 2240393)',
+    // Matches: 2000000-2999999 (7 digits starting with 2)
+    // Word boundaries prevent matching within larger numbers
+    pattern: /\b2\d{6}\b/,
+    confidence: 1.0,
+  },
+  // Add more district-specific patterns below:
+  // {
+  //   type: 'EMPLOYEE_ID',
+  //   description: 'Employee badge numbers - E followed by 5 digits',
+  //   pattern: /\bE\d{5}\b/i,
+  //   confidence: 1.0,
+  // },
+];

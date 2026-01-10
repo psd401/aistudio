@@ -36,7 +36,7 @@ import type {
   PIITokenDynamoDBItem,
   GuardrailsConfig,
 } from './types';
-import { K12_PII_TYPES, type ComprehendPIIType } from './types';
+import { K12_PII_TYPES, CUSTOM_PII_PATTERNS, type ComprehendPIIType } from './types';
 
 /**
  * PIITokenizationService - Reversible PII protection for student data
@@ -146,6 +146,43 @@ export class PIITokenizationService {
   }
 
   /**
+   * Detect custom PII patterns using regex (e.g., student IDs, employee numbers)
+   *
+   * This runs alongside Amazon Comprehend to catch district-specific identifiers
+   * that Comprehend doesn't recognize. Patterns are defined in CUSTOM_PII_PATTERNS.
+   *
+   * @param text - Text to analyze for custom PII patterns
+   * @returns Array of detected PII entities
+   */
+  detectCustomPII(text: string): PIIEntity[] {
+    const entities: PIIEntity[] = [];
+
+    for (const pattern of CUSTOM_PII_PATTERNS) {
+      // Create a new RegExp with global flag to find all matches
+      const globalPattern = new RegExp(pattern.pattern.source, 'g');
+      let match: RegExpExecArray | null;
+
+      while ((match = globalPattern.exec(text)) !== null) {
+        entities.push({
+          type: pattern.type,
+          beginOffset: match.index,
+          endOffset: match.index + match[0].length,
+          score: pattern.confidence ?? 1.0,
+        });
+      }
+    }
+
+    if (entities.length > 0) {
+      this.log.debug('Custom PII patterns detected', {
+        entitiesFound: entities.length,
+        entityTypes: entities.map((e) => e.type),
+      });
+    }
+
+    return entities;
+  }
+
+  /**
    * Tokenize PII in text - replace PII with tokens and store mapping
    *
    * @param text - Text containing potential PII
@@ -169,16 +206,23 @@ export class PIITokenizationService {
     });
 
     try {
-      // Detect PII entities
-      const piiEntities = await this.detectPII(text);
+      // Detect PII entities from Amazon Comprehend
+      const comprehendEntities = await this.detectPII(text);
 
       // Filter to only K-12 relevant PII types
-      const relevantEntities = piiEntities.filter((entity) =>
+      const relevantComprehendEntities = comprehendEntities.filter((entity) =>
         K12_PII_TYPES.includes(entity.type as ComprehendPIIType)
       );
 
-      if (relevantEntities.length === 0) {
-        this.log.debug('No K-12 relevant PII found', { requestId });
+      // Detect custom PII patterns (e.g., student IDs)
+      const customEntities = this.detectCustomPII(text);
+
+      // Merge entities, removing duplicates based on position overlap
+      // Custom patterns take precedence if they overlap with Comprehend results
+      const allEntities = this.mergeEntities(relevantComprehendEntities, customEntities);
+
+      if (allEntities.length === 0) {
+        this.log.debug('No PII found (Comprehend or custom)', { requestId });
         return {
           tokenizedText: text,
           tokens: [],
@@ -188,7 +232,7 @@ export class PIITokenizationService {
 
       // Sort by position (reverse) to replace from end to start
       // This preserves positions during replacement
-      const sortedEntities = [...relevantEntities].sort(
+      const sortedEntities = [...allEntities].sort(
         (a, b) => b.beginOffset - a.beginOffset
       );
 
@@ -311,6 +355,40 @@ export class PIITokenizationService {
       // Return original text with placeholders if detokenization fails
       return text;
     }
+  }
+
+  /**
+   * Merge Comprehend and custom PII entities, removing overlaps
+   *
+   * When entities overlap, custom patterns take precedence because they
+   * represent district-specific identifiers that we want to handle precisely.
+   *
+   * @param comprehendEntities - Entities from Amazon Comprehend
+   * @param customEntities - Entities from custom regex patterns
+   * @returns Merged list with overlapping entities resolved
+   */
+  private mergeEntities(
+    comprehendEntities: PIIEntity[],
+    customEntities: PIIEntity[]
+  ): PIIEntity[] {
+    // Start with all custom entities (they take precedence)
+    const merged: PIIEntity[] = [...customEntities];
+
+    // Add Comprehend entities that don't overlap with custom ones
+    for (const comprehend of comprehendEntities) {
+      const overlaps = customEntities.some(
+        (custom) =>
+          // Check if ranges overlap
+          comprehend.beginOffset < custom.endOffset &&
+          comprehend.endOffset > custom.beginOffset
+      );
+
+      if (!overlaps) {
+        merged.push(comprehend);
+      }
+    }
+
+    return merged;
   }
 
   /**
