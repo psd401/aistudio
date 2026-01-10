@@ -11,89 +11,134 @@ import { ContentSafetyBlockedError } from './types';
 // Logger for PII transform debugging
 const piiTransformLog = createLogger({ module: 'pii-transform' });
 
+// PII token format: [PII:uuid] where uuid is 36 chars = 42 total chars
+const PII_TOKEN_REGEX = /\[PII:[\da-f-]{36}]/g;
+// Simple check for potential partial token at end of string
+// Looks for "[" followed by characters that could be part of "[PII:uuid]"
+function hasPartialPIITokenAtEnd(text: string): { hasPartial: boolean; startIndex: number } {
+  // Look for "[" in the last 42 characters (max PII token length)
+  const searchStart = Math.max(0, text.length - 42);
+  const lastBracket = text.lastIndexOf('[', text.length - 1);
+
+  if (lastBracket < searchStart) {
+    return { hasPartial: false, startIndex: -1 };
+  }
+
+  // Check if it looks like the start of a PII token using simple string checks
+  const suffix = text.slice(lastBracket);
+
+  // Valid partial patterns: "[", "[P", "[PI", "[PII", "[PII:", "[PII:xxx..."
+  if (suffix === '[' ||
+      suffix === '[P' ||
+      suffix === '[PI' ||
+      suffix === '[PII' ||
+      suffix === '[PII:' ||
+      (suffix.startsWith('[PII:') && suffix.length < 42 && !suffix.endsWith(']'))) {
+    return { hasPartial: true, startIndex: lastBracket };
+  }
+
+  return { hasPartial: false, startIndex: -1 };
+}
+
 /**
  * Replace PII tokens in text with original values.
- * Helper function used by the stream transform.
+ * Returns { processed: string, remainder: string } where remainder
+ * contains any partial token at the end that needs to be buffered.
  */
-function replacePIITokens(text: string, tokenMap: Map<string, string>): string {
-  const matches = text.match(/\[PII:[a-f0-9-]{36}\]/g);
-  if (matches) {
-    piiTransformLog.info('PII tokens found in text', {
-      matchCount: matches.length,
-      matches: matches.slice(0, 3),
-      tokenMapSize: tokenMap.size,
-      tokenMapKeys: Array.from(tokenMap.keys()).slice(0, 3)
-    });
-  }
-  return text.replace(/\[PII:[a-f0-9-]{36}\]/g, (match) => {
+function replacePIITokensWithRemainder(
+  text: string,
+  tokenMap: Map<string, string>
+): { processed: string; remainder: string } {
+  // First, replace all complete tokens
+  let processed = text.replace(PII_TOKEN_REGEX, (match) => {
     const replacement = tokenMap.get(match);
     if (replacement) {
       piiTransformLog.info('PII token replaced', { token: match, hasReplacement: true });
+      return replacement;
     } else {
       piiTransformLog.warn('PII token NOT found in map', { token: match, mapKeys: Array.from(tokenMap.keys()) });
+      return match;
     }
-    return replacement || match;
   });
+
+  // Check if there's a partial token at the end that needs buffering
+  const { hasPartial, startIndex } = hasPartialPIITokenAtEnd(processed);
+  if (hasPartial && startIndex >= 0) {
+    const remainder = processed.slice(startIndex);
+    processed = processed.slice(0, startIndex);
+    piiTransformLog.info('Buffering partial PII token', {
+      remainder: remainder.substring(0, 20),
+      remainderLength: remainder.length
+    });
+    return { processed, remainder };
+  }
+
+  return { processed, remainder: '' };
 }
 
 /**
  * Process a single SSE event and replace PII tokens if present.
- * Helper function for the stream transform.
+ * Uses textBuffer to handle tokens that span multiple events.
+ * Returns { output: string, newBuffer: string }
  */
-function processSSEEvent(event: string, tokenMap: Map<string, string>, SSE_DATA_PREFIX: string): string {
+function processSSEEventWithBuffer(
+  event: string,
+  tokenMap: Map<string, string>,
+  textBuffer: string,
+  SSE_DATA_PREFIX: string
+): { output: string; newBuffer: string } {
   // Empty or non-data events pass through unchanged
   if (!event.trim() || !event.startsWith(SSE_DATA_PREFIX)) {
-    piiTransformLog.info('Event skipped (empty or no data prefix)', {
-      eventLength: event.length,
-      startsWithData: event.startsWith(SSE_DATA_PREFIX),
-      eventPreview: event.substring(0, 50)
-    });
-    return event;
+    return { output: event, newBuffer: textBuffer };
   }
 
   const jsonContent = event.slice(SSE_DATA_PREFIX.length);
 
   // Handle [DONE] marker - pass through unchanged
   if (jsonContent === '[DONE]') {
-    return event;
+    return { output: event, newBuffer: textBuffer };
   }
 
   try {
     const parsed = JSON.parse(jsonContent);
 
-    // Log ALL parsed events to see what types are being processed
-    piiTransformLog.info('SSE event parsed', {
-      type: parsed.type,
-      hasDelta: !!parsed.delta,
-      deltaType: typeof parsed.delta,
-      deltaPreview: typeof parsed.delta === 'string' ? parsed.delta.substring(0, 100) : undefined,
-      hasMessage: !!parsed.message,
-      hasParts: !!(parsed.message?.parts),
-      allKeys: Object.keys(parsed)
-    });
-
     // Handle text-delta events (primary streaming text)
     if (parsed.type === 'text-delta' && parsed.delta && typeof parsed.delta === 'string') {
-      const original = parsed.delta;
-      parsed.delta = replacePIITokens(parsed.delta, tokenMap);
-      if (original !== parsed.delta) {
-        piiTransformLog.info('Text-delta modified by PII replacement');
-      }
+      // Prepend any buffered text from previous chunks
+      const fullText = textBuffer + parsed.delta;
+      const { processed, remainder } = replacePIITokensWithRemainder(fullText, tokenMap);
+
+      // Update the delta with processed text (may be empty if all buffered)
+      parsed.delta = processed;
+
+      // If delta is empty after processing, we might want to skip this event
+      // but that could mess up client state, so we send it anyway
+      return {
+        output: SSE_DATA_PREFIX + JSON.stringify(parsed),
+        newBuffer: remainder
+      };
     }
 
-    // Handle reasoning-delta events (for reasoning models like O1/O3)
+    // Handle reasoning-delta events similarly
     if (parsed.type === 'reasoning-delta' && parsed.delta && typeof parsed.delta === 'string') {
-      parsed.delta = replacePIITokens(parsed.delta, tokenMap);
+      const fullText = textBuffer + parsed.delta;
+      const { processed, remainder } = replacePIITokensWithRemainder(fullText, tokenMap);
+      parsed.delta = processed;
+      return {
+        output: SSE_DATA_PREFIX + JSON.stringify(parsed),
+        newBuffer: remainder
+      };
     }
 
-    return SSE_DATA_PREFIX + JSON.stringify(parsed);
+    // Non-delta events pass through unchanged
+    return { output: SSE_DATA_PREFIX + JSON.stringify(parsed), newBuffer: textBuffer };
   } catch (error) {
     // Not valid JSON or parse error, pass through unchanged
     piiTransformLog.warn('Failed to parse SSE event as JSON', {
       error: error instanceof Error ? error.message : String(error),
       jsonContent: jsonContent.substring(0, 100)
     });
-    return event;
+    return { output: event, newBuffer: textBuffer };
   }
 }
 
@@ -133,10 +178,9 @@ function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformS
 
   const decoder = new TextDecoder();
   const encoder = new TextEncoder();
-  let buffer = '';
-  let chunkCount = 0;
+  let sseBuffer = '';      // Buffer for incomplete SSE events
+  let textBuffer = '';     // Buffer for partial PII tokens across text-delta events
   let eventCount = 0;
-  let firstChunkLogged = false;
 
   // SSE format constants
   const SSE_EVENT_SEPARATOR = '\n\n';
@@ -144,63 +188,55 @@ function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformS
 
   return new TransformStream({
     transform(chunk, controller) {
-      chunkCount++;
-      // Decode chunk and add to buffer
+      // Decode chunk and add to SSE buffer
       const decoded = decoder.decode(chunk, { stream: true });
-      buffer += decoded;
-
-      // Log first chunk to see actual stream format
-      if (!firstChunkLogged) {
-        firstChunkLogged = true;
-        piiTransformLog.info('First stream chunk received', {
-          chunkLength: decoded.length,
-          chunkPreview: decoded.substring(0, 200),
-          hasDataPrefix: decoded.includes('data: '),
-          hasDoubleNewline: decoded.includes('\n\n'),
-          hasSingleNewline: decoded.includes('\n'),
-          rawBytes: Array.from(chunk.slice(0, 50)).map(b => b.toString(16).padStart(2, '0')).join(' ')
-        });
-      }
+      sseBuffer += decoded;
 
       // Process complete SSE events (terminated by \n\n)
       let separatorIndex: number;
-      while ((separatorIndex = buffer.indexOf(SSE_EVENT_SEPARATOR)) !== -1) {
-        const event = buffer.slice(0, separatorIndex);
-        buffer = buffer.slice(separatorIndex + SSE_EVENT_SEPARATOR.length);
+      while ((separatorIndex = sseBuffer.indexOf(SSE_EVENT_SEPARATOR)) !== -1) {
+        const event = sseBuffer.slice(0, separatorIndex);
+        sseBuffer = sseBuffer.slice(separatorIndex + SSE_EVENT_SEPARATOR.length);
         eventCount++;
 
-        // Log event extraction for first 5 events and periodically thereafter
-        if (eventCount <= 5 || eventCount % 50 === 0) {
-          piiTransformLog.info('SSE event extracted from buffer', {
-            eventCount,
-            eventLength: event.length,
-            eventPreview: event.substring(0, 150),
-            remainingBufferLength: buffer.length
-          });
-        }
+        // Process event with text buffering for cross-chunk PII tokens
+        const { output, newBuffer } = processSSEEventWithBuffer(
+          event,
+          tokenMap,
+          textBuffer,
+          SSE_DATA_PREFIX
+        );
+        textBuffer = newBuffer;
 
-        // Process and output the event with separator
-        const processedEvent = processSSEEvent(event, tokenMap, SSE_DATA_PREFIX);
-        controller.enqueue(encoder.encode(processedEvent + SSE_EVENT_SEPARATOR));
+        controller.enqueue(encoder.encode(output + SSE_EVENT_SEPARATOR));
       }
     },
 
     flush(controller) {
       piiTransformLog.info('PII transform flush called', {
-        totalChunks: chunkCount,
         totalEvents: eventCount,
-        remainingBufferLength: buffer.length,
-        remainingBufferPreview: buffer.substring(0, 100)
+        remainingSseBuffer: sseBuffer.length,
+        remainingTextBuffer: textBuffer.length
       });
 
-      // Output any remaining buffer content (handles incomplete final event)
-      if (buffer.length > 0) {
-        piiTransformLog.warn('Flushing remaining buffer content', {
-          bufferLength: buffer.length,
-          bufferContent: buffer.substring(0, 200)
+      // If there's remaining text buffer, we need to output it
+      // This handles any partial token that was buffered but never completed
+      if (textBuffer.length > 0) {
+        piiTransformLog.info('Flushing remaining text buffer', {
+          textBuffer: textBuffer.substring(0, 50)
         });
-        const processedEvent = processSSEEvent(buffer, tokenMap, SSE_DATA_PREFIX);
-        controller.enqueue(encoder.encode(processedEvent));
+        // Create a synthetic text-delta event with the remaining buffer
+        const finalEvent = { type: 'text-delta', delta: textBuffer, id: 'pii-flush' };
+        controller.enqueue(encoder.encode(SSE_DATA_PREFIX + JSON.stringify(finalEvent) + SSE_EVENT_SEPARATOR));
+      }
+
+      // Output any remaining SSE buffer content (handles incomplete final event)
+      if (sseBuffer.length > 0) {
+        piiTransformLog.warn('Flushing remaining SSE buffer content', {
+          sseBuffer: sseBuffer.substring(0, 100)
+        });
+        const { output } = processSSEEventWithBuffer(sseBuffer, tokenMap, '', SSE_DATA_PREFIX);
+        controller.enqueue(encoder.encode(output));
       }
     }
   });
