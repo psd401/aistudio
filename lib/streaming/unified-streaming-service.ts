@@ -13,19 +13,57 @@ import { ContentSafetyBlockedError } from './types';
  * Helper function used by the stream transform.
  */
 function replacePIITokens(text: string, tokenMap: Map<string, string>): string {
-  // Use regex to find all [PII:uuid] patterns and replace them
   return text.replace(/\[PII:[a-f0-9-]{36}\]/g, (match) => {
     return tokenMap.get(match) || match;
   });
 }
 
 /**
+ * Process a single SSE event and replace PII tokens if present.
+ * Helper function for the stream transform.
+ */
+function processSSEEvent(event: string, tokenMap: Map<string, string>, SSE_DATA_PREFIX: string): string {
+  // Empty or non-data events pass through unchanged
+  if (!event.trim() || !event.startsWith(SSE_DATA_PREFIX)) {
+    return event;
+  }
+
+  const jsonContent = event.slice(SSE_DATA_PREFIX.length);
+
+  // Handle [DONE] marker - pass through unchanged
+  if (jsonContent === '[DONE]') {
+    return event;
+  }
+
+  try {
+    const parsed = JSON.parse(jsonContent);
+
+    // Handle text-delta events (primary streaming text)
+    if (parsed.type === 'text-delta' && parsed.delta && typeof parsed.delta === 'string') {
+      parsed.delta = replacePIITokens(parsed.delta, tokenMap);
+    }
+
+    // Handle reasoning-delta events (for reasoning models like O1/O3)
+    if (parsed.type === 'reasoning-delta' && parsed.delta && typeof parsed.delta === 'string') {
+      parsed.delta = replacePIITokens(parsed.delta, tokenMap);
+    }
+
+    return SSE_DATA_PREFIX + JSON.stringify(parsed);
+  } catch {
+    // Not valid JSON or parse error, pass through unchanged
+    return event;
+  }
+}
+
+/**
  * Create a TransformStream that replaces PII tokens with original values in real-time.
- * Handles the AI SDK's streaming protocol format where text is embedded in JSON chunks.
+ * Handles the AI SDK UI Message Stream Protocol format (SSE with data: prefix).
  *
- * AI SDK stream format examples:
- * - Text delta: 0:{"type":"text-delta","textDelta":"Hello [PII:uuid]"}
- * - Other events pass through unchanged
+ * AI SDK stream format:
+ * - data: {"type":"text-delta","delta":"Hello [PII:uuid]"}\n\n
+ * - data: [DONE]\n\n
+ *
+ * @see https://sdk.vercel.ai/docs/ai-sdk-ui/stream-protocol
  */
 function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformStream<Uint8Array, Uint8Array> {
   // Build lookup map from token placeholder to original value
@@ -43,98 +81,32 @@ function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformS
   const encoder = new TextEncoder();
   let buffer = '';
 
+  // SSE format constants
+  const SSE_EVENT_SEPARATOR = '\n\n';
+  const SSE_DATA_PREFIX = 'data: ';
+
   return new TransformStream({
     transform(chunk, controller) {
       // Decode chunk and add to buffer
       buffer += decoder.decode(chunk, { stream: true });
 
-      // Process complete lines (protocol messages end with newline)
-      const lines = buffer.split('\n');
+      // Process complete SSE events (terminated by \n\n)
+      let separatorIndex: number;
+      while ((separatorIndex = buffer.indexOf(SSE_EVENT_SEPARATOR)) !== -1) {
+        const event = buffer.slice(0, separatorIndex);
+        buffer = buffer.slice(separatorIndex + SSE_EVENT_SEPARATOR.length);
 
-      // Keep the last incomplete line in buffer
-      buffer = lines.pop() || '';
-
-      for (const line of lines) {
-        if (!line.trim()) {
-          // Empty line, pass through
-          controller.enqueue(encoder.encode(line + '\n'));
-          continue;
-        }
-
-        // AI SDK format: "0:{json}" or similar prefix patterns
-        // Look for JSON content after the prefix
-        const colonIndex = line.indexOf(':');
-        if (colonIndex === -1) {
-          // No colon, pass through unchanged
-          controller.enqueue(encoder.encode(line + '\n'));
-          continue;
-        }
-
-        const prefix = line.slice(0, colonIndex + 1);
-        const jsonPart = line.slice(colonIndex + 1);
-
-        // Try to parse and transform JSON content
-        try {
-          const parsed = JSON.parse(jsonPart);
-          let modified = false;
-
-          // Handle text-delta events (most common for streaming text)
-          if (parsed.textDelta && typeof parsed.textDelta === 'string') {
-            const original = parsed.textDelta;
-            parsed.textDelta = replacePIITokens(original, tokenMap);
-            modified = parsed.textDelta !== original;
-          }
-
-          // Handle text field (some events use 'text' instead of 'textDelta')
-          if (parsed.text && typeof parsed.text === 'string') {
-            const original = parsed.text;
-            parsed.text = replacePIITokens(original, tokenMap);
-            modified = modified || parsed.text !== original;
-          }
-
-          // Handle delta field (used in some formats)
-          if (parsed.delta && typeof parsed.delta === 'string') {
-            const original = parsed.delta;
-            parsed.delta = replacePIITokens(original, tokenMap);
-            modified = modified || parsed.delta !== original;
-          }
-
-          // Re-encode and output
-          const output = prefix + JSON.stringify(parsed) + '\n';
-          controller.enqueue(encoder.encode(output));
-        } catch {
-          // Not valid JSON or parse error, pass through unchanged
-          controller.enqueue(encoder.encode(line + '\n'));
-        }
+        // Process and output the event with separator
+        const processedEvent = processSSEEvent(event, tokenMap, SSE_DATA_PREFIX);
+        controller.enqueue(encoder.encode(processedEvent + SSE_EVENT_SEPARATOR));
       }
     },
 
     flush(controller) {
-      // Output any remaining buffer content
+      // Output any remaining buffer content (handles incomplete final event)
       if (buffer.length > 0) {
-        // Try to process the final chunk
-        const colonIndex = buffer.indexOf(':');
-        if (colonIndex !== -1) {
-          const prefix = buffer.slice(0, colonIndex + 1);
-          const jsonPart = buffer.slice(colonIndex + 1);
-          try {
-            const parsed = JSON.parse(jsonPart);
-            if (parsed.textDelta) {
-              parsed.textDelta = replacePIITokens(parsed.textDelta, tokenMap);
-            }
-            if (parsed.text) {
-              parsed.text = replacePIITokens(parsed.text, tokenMap);
-            }
-            if (parsed.delta) {
-              parsed.delta = replacePIITokens(parsed.delta, tokenMap);
-            }
-            controller.enqueue(encoder.encode(prefix + JSON.stringify(parsed)));
-            return;
-          } catch {
-            // Fall through to output as-is
-          }
-        }
-        controller.enqueue(encoder.encode(buffer));
+        const processedEvent = processSSEEvent(buffer, tokenMap, SSE_DATA_PREFIX);
+        controller.enqueue(encoder.encode(processedEvent));
       }
     }
   });
