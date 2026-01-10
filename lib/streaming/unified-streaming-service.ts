@@ -3,7 +3,210 @@ import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { getTelemetryConfig } from './telemetry-service';
 import { getProviderAdapter, type ProviderCapabilities } from './provider-adapters';
 import { CircuitBreaker, CircuitBreakerOpenError } from './circuit-breaker';
+import { getContentSafetyService, type ContentSafetyResult } from '@/lib/safety';
+import type { TokenMapping } from '@/lib/safety/types';
 import type { StreamRequest, StreamResponse, StreamConfig, StreamingProgress, TelemetrySpan, TelemetryConfig } from './types';
+import { ContentSafetyBlockedError } from './types';
+
+// Logger for PII transform debugging
+const piiTransformLog = createLogger({ module: 'pii-transform' });
+
+// PII token format: [PII:uuid] where uuid is 36 chars = 42 total chars
+const PII_TOKEN_REGEX = /\[PII:[\da-f-]{36}]/g;
+// Simple check for potential partial token at end of string
+// Looks for "[" followed by characters that could be part of "[PII:uuid]"
+function hasPartialPIITokenAtEnd(text: string): { hasPartial: boolean; startIndex: number } {
+  // Look for "[" in the last 42 characters (max PII token length)
+  const searchStart = Math.max(0, text.length - 42);
+  const lastBracket = text.lastIndexOf('[', text.length - 1);
+
+  if (lastBracket < searchStart) {
+    return { hasPartial: false, startIndex: -1 };
+  }
+
+  // Check if it looks like the start of a PII token using simple string checks
+  const suffix = text.slice(lastBracket);
+
+  // Valid partial patterns: "[", "[P", "[PI", "[PII", "[PII:", "[PII:xxx..."
+  if (suffix === '[' ||
+      suffix === '[P' ||
+      suffix === '[PI' ||
+      suffix === '[PII' ||
+      suffix === '[PII:' ||
+      (suffix.startsWith('[PII:') && suffix.length < 42 && !suffix.endsWith(']'))) {
+    return { hasPartial: true, startIndex: lastBracket };
+  }
+
+  return { hasPartial: false, startIndex: -1 };
+}
+
+/**
+ * Replace PII tokens in text with original values.
+ * Returns { processed: string, remainder: string } where remainder
+ * contains any partial token at the end that needs to be buffered.
+ */
+function replacePIITokensWithRemainder(
+  text: string,
+  tokenMap: Map<string, string>
+): { processed: string; remainder: string } {
+  // Replace all complete tokens
+  const processed = text.replace(PII_TOKEN_REGEX, (match) => {
+    const replacement = tokenMap.get(match);
+    if (replacement) {
+      return replacement;
+    } else {
+      // Log without exposing actual token patterns - just indicate a mismatch occurred
+      piiTransformLog.warn('PII token mismatch during detokenization', { tokenCount: tokenMap.size });
+      return match;
+    }
+  });
+
+  // Check if there's a partial token at the end that needs buffering
+  const { hasPartial, startIndex } = hasPartialPIITokenAtEnd(processed);
+  if (hasPartial && startIndex >= 0) {
+    return {
+      processed: processed.slice(0, startIndex),
+      remainder: processed.slice(startIndex)
+    };
+  }
+
+  return { processed, remainder: '' };
+}
+
+/**
+ * Process a single SSE event and replace PII tokens if present.
+ * Uses textBuffer to handle tokens that span multiple events.
+ * Returns { output: string, newBuffer: string }
+ */
+function processSSEEventWithBuffer(
+  event: string,
+  tokenMap: Map<string, string>,
+  textBuffer: string,
+  SSE_DATA_PREFIX: string
+): { output: string; newBuffer: string } {
+  // Empty or non-data events pass through unchanged
+  if (!event.trim() || !event.startsWith(SSE_DATA_PREFIX)) {
+    return { output: event, newBuffer: textBuffer };
+  }
+
+  const jsonContent = event.slice(SSE_DATA_PREFIX.length);
+
+  // Handle [DONE] marker - pass through unchanged
+  if (jsonContent === '[DONE]') {
+    return { output: event, newBuffer: textBuffer };
+  }
+
+  try {
+    const parsed = JSON.parse(jsonContent);
+
+    // Handle text-delta events (primary streaming text)
+    if (parsed.type === 'text-delta' && parsed.delta && typeof parsed.delta === 'string') {
+      // Prepend any buffered text from previous chunks
+      const fullText = textBuffer + parsed.delta;
+      const { processed, remainder } = replacePIITokensWithRemainder(fullText, tokenMap);
+
+      // Update the delta with processed text (may be empty if all buffered)
+      parsed.delta = processed;
+
+      // If delta is empty after processing, we might want to skip this event
+      // but that could mess up client state, so we send it anyway
+      return {
+        output: SSE_DATA_PREFIX + JSON.stringify(parsed),
+        newBuffer: remainder
+      };
+    }
+
+    // Handle reasoning-delta events similarly
+    if (parsed.type === 'reasoning-delta' && parsed.delta && typeof parsed.delta === 'string') {
+      const fullText = textBuffer + parsed.delta;
+      const { processed, remainder } = replacePIITokensWithRemainder(fullText, tokenMap);
+      parsed.delta = processed;
+      return {
+        output: SSE_DATA_PREFIX + JSON.stringify(parsed),
+        newBuffer: remainder
+      };
+    }
+
+    // Non-delta events pass through unchanged
+    return { output: SSE_DATA_PREFIX + JSON.stringify(parsed), newBuffer: textBuffer };
+  } catch {
+    // Not valid JSON or parse error, pass through unchanged
+    return { output: event, newBuffer: textBuffer };
+  }
+}
+
+/**
+ * Create a TransformStream that replaces PII tokens with original values in real-time.
+ * Handles the AI SDK UI Message Stream Protocol format (SSE with data: prefix).
+ *
+ * AI SDK stream format:
+ * - data: {"type":"text-delta","delta":"Hello [PII:uuid]"}\n\n
+ * - data: [DONE]\n\n
+ *
+ * @see https://sdk.vercel.ai/docs/ai-sdk-ui/stream-protocol
+ */
+function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformStream<Uint8Array, Uint8Array> {
+  // Build lookup map from token placeholder to original value
+  const tokenMap = new Map<string, string>();
+  for (const mapping of tokenMappings) {
+    tokenMap.set(mapping.placeholder, mapping.original);
+  }
+
+  // If no tokens to replace, return a pass-through transform
+  if (tokenMap.size === 0) {
+    return new TransformStream();
+  }
+
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let sseBuffer = '';      // Buffer for incomplete SSE events
+  let textBuffer = '';     // Buffer for partial PII tokens across text-delta events
+
+  // SSE format constants
+  const SSE_EVENT_SEPARATOR = '\n\n';
+  const SSE_DATA_PREFIX = 'data: ';
+
+  return new TransformStream({
+    transform(chunk, controller) {
+      // Decode chunk and add to SSE buffer
+      const decoded = decoder.decode(chunk, { stream: true });
+      sseBuffer += decoded;
+
+      // Process complete SSE events (terminated by \n\n)
+      let separatorIndex: number;
+      while ((separatorIndex = sseBuffer.indexOf(SSE_EVENT_SEPARATOR)) !== -1) {
+        const event = sseBuffer.slice(0, separatorIndex);
+        sseBuffer = sseBuffer.slice(separatorIndex + SSE_EVENT_SEPARATOR.length);
+
+        // Process event with text buffering for cross-chunk PII tokens
+        const { output, newBuffer } = processSSEEventWithBuffer(
+          event,
+          tokenMap,
+          textBuffer,
+          SSE_DATA_PREFIX
+        );
+        textBuffer = newBuffer;
+
+        controller.enqueue(encoder.encode(output + SSE_EVENT_SEPARATOR));
+      }
+    },
+
+    flush(controller) {
+      // If there's remaining text buffer, output it as a final text-delta event
+      // This handles any partial token that was buffered but never completed
+      if (textBuffer.length > 0) {
+        const finalEvent = { type: 'text-delta', delta: textBuffer, id: 'pii-flush' };
+        controller.enqueue(encoder.encode(SSE_DATA_PREFIX + JSON.stringify(finalEvent) + SSE_EVENT_SEPARATOR));
+      }
+
+      // Output any remaining SSE buffer content (handles incomplete final event)
+      if (sseBuffer.length > 0) {
+        const { output } = processSSEEventWithBuffer(sseBuffer, tokenMap, '', SSE_DATA_PREFIX);
+        controller.enqueue(encoder.encode(output));
+      }
+    }
+  });
+}
 import {
   isTextDeltaEvent,
   isTextStartEvent,
@@ -85,8 +288,7 @@ export class UnifiedStreamingService {
         throw new CircuitBreakerOpenError(request.provider, circuitState);
       }
       
-      // 4. Configure streaming with adaptive timeouts
-      // Validate messages before conversion
+      // 4. Validate messages
       if (!request.messages || !Array.isArray(request.messages)) {
         log.error('Messages invalid in streaming service', {
           messages: request.messages,
@@ -96,23 +298,87 @@ export class UnifiedStreamingService {
         });
         throw new Error('Messages array is required for streaming');
       }
-      
+
+      // 4a. Create defensive deep copy of messages to prevent race conditions
+      // Since request is passed by reference, concurrent calls could cause message bleed
+      // Deep copy includes parts array to prevent nested object mutation
+      let messages = request.messages.map(m => ({
+        ...m,
+        parts: m.parts ? [...m.parts] : []
+      }));
+
+      // 5. K-12 Content Safety: Check user input before sending to AI
+      const contentSafetyService = getContentSafetyService();
+      const safetyEnabled = request.contentSafety?.enabled !== false;
+      let inputSafetyResult: ContentSafetyResult | undefined;
+
+      if (safetyEnabled && !request.contentSafety?.skipInputCheck && contentSafetyService.isEnabled()) {
+        // Get the last user message for safety check
+        const lastUserMessage = [...messages].reverse().find(m => m.role === 'user');
+        if (lastUserMessage) {
+          // Extract text content from message parts (AI SDK v5 format)
+          const messageContent = this.extractTextFromMessage(lastUserMessage);
+
+          if (messageContent && messageContent.trim()) {
+            inputSafetyResult = await contentSafetyService.processInput(
+              messageContent,
+              request.sessionId || request.userId
+            );
+
+            if (!inputSafetyResult.allowed) {
+              log.warn('Content blocked by safety guardrails (input)', {
+                requestId,
+                reason: inputSafetyResult.blockedReason,
+                categories: inputSafetyResult.blockedCategories,
+              });
+              throw new ContentSafetyBlockedError(
+                inputSafetyResult.blockedMessage || 'Content blocked by safety guardrails',
+                inputSafetyResult.blockedCategories || [],
+                'input',
+                request.provider,
+                request.modelId
+              );
+            }
+
+            // If PII was tokenized, update the message content in parts
+            if (inputSafetyResult.contentModified && inputSafetyResult.processedContent !== messageContent) {
+              log.info('PII tokenized in user message', {
+                requestId,
+                originalLength: messageContent.length,
+                processedLength: inputSafetyResult.processedContent.length,
+                hasPII: inputSafetyResult.hasPII,
+              });
+              // Update the last user message with tokenized content (AI SDK v5 format)
+              const lastIndex = messages.length - 1 - messages.slice().reverse().findIndex(m => m.role === 'user');
+              if (lastIndex >= 0 && lastIndex < messages.length) {
+                messages = [
+                  ...messages.slice(0, lastIndex),
+                  this.updateMessageText(messages[lastIndex], inputSafetyResult.processedContent),
+                  ...messages.slice(lastIndex + 1)
+                ];
+              }
+            }
+          }
+        }
+      }
+
+      // 6. Configure streaming with adaptive timeouts
       // Debug log the messages structure
       log.info('Messages structure before conversion', {
-        messageCount: request.messages.length,
-        firstMessage: JSON.stringify(request.messages[0]),
-        allMessages: JSON.stringify(request.messages)
+        messageCount: messages.length,
+        firstMessage: JSON.stringify(messages[0]),
+        allMessages: JSON.stringify(messages)
       });
-      
+
       let convertedMessages;
       try {
-        convertedMessages = await convertToModelMessages(request.messages);
+        convertedMessages = await convertToModelMessages(messages);
       } catch (conversionError) {
         const error = conversionError as Error;
         log.error('Failed to convert messages', {
           error: error.message,
           stack: error.stack,
-          messages: JSON.stringify(request.messages)
+          messages: JSON.stringify(messages)
         });
         throw new Error(`Message conversion failed: ${error.message}`);
       }
@@ -179,10 +445,55 @@ export class UnifiedStreamingService {
           },
           onFinish: async (data) => {
             this.handleFinish(data, span, telemetryConfig, timer);
-            // Call user-provided onFinish callback
+
+            // K-12 Content Safety: Check AI output before saving/displaying
+            let processedData = data;
+            if (safetyEnabled && !request.contentSafety?.skipOutputCheck && contentSafetyService.isEnabled() && data.text) {
+              const outputSafetyResult = await contentSafetyService.processOutput(
+                data.text,
+                request.modelId,
+                request.provider,
+                request.sessionId || request.userId
+              );
+
+              if (!outputSafetyResult.allowed) {
+                log.warn('Content blocked by safety guardrails (output)', {
+                  requestId,
+                  reason: outputSafetyResult.blockedReason,
+                  categories: outputSafetyResult.blockedCategories,
+                  modelId: request.modelId,
+                  provider: request.provider,
+                });
+                // For output blocking, we replace the response text with the blocked message
+                // This is safer than throwing an error since the stream has already been sent
+                processedData = {
+                  ...data,
+                  text: outputSafetyResult.blockedMessage || 'The AI response was blocked for safety reasons.',
+                };
+                if (span) {
+                  span.setAttributes({
+                    'ai.safety.output.blocked': true,
+                    'ai.safety.output.categories': outputSafetyResult.blockedCategories?.join(',') || '',
+                  });
+                }
+              } else if (outputSafetyResult.contentModified) {
+                // PII was detokenized in the response
+                log.info('PII restored in AI output', {
+                  requestId,
+                  originalLength: data.text.length,
+                  processedLength: outputSafetyResult.processedContent.length,
+                });
+                processedData = {
+                  ...data,
+                  text: outputSafetyResult.processedContent,
+                };
+              }
+            }
+
+            // Call user-provided onFinish callback with processed data
             if (request.callbacks?.onFinish) {
               try {
-                await request.callbacks.onFinish(data);
+                await request.callbacks.onFinish(processedData);
               } catch (error) {
                 // Safely extract error details to avoid circular reference issues
                 const errorDetails = error instanceof Error ? {
@@ -217,13 +528,70 @@ export class UnifiedStreamingService {
         
         // 7. Mark circuit breaker as successful
         circuitBreaker.recordSuccess();
-        
+
         log.info('Stream completed successfully', {
           provider: request.provider,
           modelId: request.modelId,
           source: request.source
         });
-        
+
+        // 8. If PII tokens were created, wrap the stream to detokenize in real-time
+        const tokenMappings = inputSafetyResult?.tokens || [];
+        if (tokenMappings.length > 0) {
+          log.info('Wrapping stream with PII detokenization transform', {
+            tokenCount: tokenMappings.length
+          });
+
+          // Wrap the result to transform the stream response
+          const wrappedResult = {
+            ...result,
+            toUIMessageStreamResponse: (options?: { headers?: Record<string, string> }) => {
+              const originalResponse = result.toUIMessageStreamResponse(options);
+
+              // If there's no body, return as-is
+              if (!originalResponse.body) {
+                return originalResponse;
+              }
+
+              // Pipe through the detokenization transform
+              const transformedStream = originalResponse.body.pipeThrough(
+                createPIIDetokenizeTransform(tokenMappings)
+              );
+
+              // Return new response with transformed stream
+              return new Response(transformedStream, {
+                status: originalResponse.status,
+                statusText: originalResponse.statusText,
+                headers: originalResponse.headers
+              });
+            },
+            toDataStreamResponse: (options?: { headers?: Record<string, string> }) => {
+              const originalResponse = result.toDataStreamResponse(options);
+
+              if (!originalResponse.body) {
+                return originalResponse;
+              }
+
+              const transformedStream = originalResponse.body.pipeThrough(
+                createPIIDetokenizeTransform(tokenMappings)
+              );
+
+              return new Response(transformedStream, {
+                status: originalResponse.status,
+                statusText: originalResponse.statusText,
+                headers: originalResponse.headers
+              });
+            }
+          };
+
+          return {
+            result: wrappedResult,
+            requestId,
+            capabilities,
+            telemetryConfig
+          };
+        }
+
         return {
           result,
           requestId,
@@ -439,6 +807,50 @@ export class UnifiedStreamingService {
       span.setStatus({ code: 2 }); // ERROR
     }
     circuitBreaker.recordFailure();
+  }
+
+  /**
+   * Extract text content from a UIMessage (AI SDK v5 format)
+   * Messages have 'parts' array instead of 'content' string
+   */
+  private extractTextFromMessage(message: { parts?: Array<{ type: string; text?: string }> }): string {
+    if (!message.parts || !Array.isArray(message.parts)) {
+      return '';
+    }
+    // Extract text from all text parts
+    return message.parts
+      .filter((part) => part.type === 'text' && part.text)
+      .map((part) => part.text)
+      .join('\n');
+  }
+
+  /**
+   * Update text content in a UIMessage (AI SDK v5 format)
+   * Creates a new message with updated text parts
+   */
+  private updateMessageText<T extends { parts?: Array<{ type: string; text?: string }> }>(
+    message: T,
+    newText: string
+  ): T {
+    if (!message.parts || !Array.isArray(message.parts)) {
+      return message;
+    }
+
+    // Find the first text part and update it with the new text
+    // Keep other parts (tool calls, reasoning, etc.) unchanged
+    let textPartFound = false;
+    const updatedParts = message.parts.map((part) => {
+      if (part.type === 'text' && !textPartFound) {
+        textPartFound = true;
+        return { ...part, text: newText };
+      }
+      return part;
+    });
+
+    return {
+      ...message,
+      parts: updatedParts,
+    };
   }
 }
 

@@ -12,6 +12,7 @@ const customJestConfig = {
   testEnvironment: 'jest-environment-jsdom',
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/$1',
+    '^uuid$': '<rootDir>/tests/mocks/uuid.js',
     'lucide-react': '<rootDir>/tests/mocks/lucide-react.js',
     'next-auth/react': '<rootDir>/tests/mocks/next-auth.js',
     'next/navigation': '<rootDir>/tests/mocks/next-navigation.js',

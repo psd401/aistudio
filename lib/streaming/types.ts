@@ -37,18 +37,30 @@ export interface StreamRequest {
     // Reasoning configuration
     reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
     responseMode?: 'standard' | 'flex' | 'priority';
-    
+
     // Background processing for long-running models
     backgroundMode?: boolean;
-    
+
     // Thinking configuration for Claude models
     thinkingBudget?: number; // 1024-6553 tokens
-    
+
     // Tool configuration
     enableWebSearch?: boolean;
     enableCodeInterpreter?: boolean;
     enableImageGeneration?: boolean;
     enabledTools?: string[];
+  };
+
+  // K-12 Content Safety Options
+  contentSafety?: {
+    /** Enable content safety filtering (default: true when guardrails configured) */
+    enabled?: boolean;
+    /** Enable PII tokenization (default: true when configured) */
+    enablePiiTokenization?: boolean;
+    /** Skip input safety check (not recommended) */
+    skipInputCheck?: boolean;
+    /** Skip output safety check (not recommended) */
+    skipOutputCheck?: boolean;
   };
   
   // Telemetry configuration
@@ -290,6 +302,27 @@ export class StreamTimeoutError extends StreamingError {
       provider,
       modelId
     );
+  }
+}
+
+/**
+ * Error thrown when content is blocked by safety guardrails
+ */
+export class ContentSafetyBlockedError extends StreamingError {
+  constructor(
+    public blockedMessage: string,
+    public blockedCategories: string[],
+    public source: 'input' | 'output',
+    provider?: string,
+    modelId?: string
+  ) {
+    super(
+      blockedMessage,
+      source === 'input' ? 'CONTENT_BLOCKED_INPUT' : 'CONTENT_BLOCKED_OUTPUT',
+      provider,
+      modelId
+    );
+    this.name = 'ContentSafetyBlockedError';
   }
 }
 

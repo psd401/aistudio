@@ -18,6 +18,7 @@ import { createEnhancedNexusAttachmentAdapter } from '@/lib/nexus/enhanced-attac
 import { validateConversationId } from '@/lib/nexus/conversation-navigation'
 import type { SelectAiModel } from '@/types'
 import { createLogger } from '@/lib/client-logger'
+import { toast } from 'sonner'
 
 const log = createLogger({ moduleName: 'nexus-page' })
 
@@ -60,8 +61,29 @@ function ConversationRuntimeProvider({
   }, [conversationId])
 
   // Custom fetch to intercept X-Conversation-Id header for conversation continuity
+  // and handle content safety blocked errors with user-friendly messages
   const customFetch = useCallback(async (input: RequestInfo | URL, init?: RequestInit) => {
     const response = await fetch(input, init)
+
+    // Handle content safety blocked errors (400 with CONTENT_BLOCKED code)
+    if (response.status === 400) {
+      try {
+        // Clone response to read body without consuming it
+        const clonedResponse = response.clone()
+        const errorData = await clonedResponse.json()
+        if (errorData.code === 'CONTENT_BLOCKED') {
+          // Show user-friendly toast notification
+          toast.error('Content Blocked', {
+            description: errorData.error || 'This content is not appropriate for educational use.',
+            duration: 6000
+          })
+          log.warn('Content blocked by safety guardrails', { error: errorData.error })
+        }
+      } catch {
+        // If we can't parse the error, let the default error handling occur
+        log.debug('Could not parse error response as JSON')
+      }
+    }
 
     // Extract conversation ID from response header (new conversations only)
     const newConversationId = response.headers.get('X-Conversation-Id')

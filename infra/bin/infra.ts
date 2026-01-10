@@ -12,6 +12,7 @@ import { SchedulerStack } from '../lib/scheduler-stack';
 import { EmailNotificationStack } from '../lib/email-notification-stack';
 import { PowerTuningStack } from '../lib/power-tuning-stack';
 import { SecretsManagerStack } from '../lib/secrets-manager-stack';
+import { GuardrailsStack } from '../lib/guardrails-stack';
 import { SecretValue } from 'aws-cdk-lib';
 import { PermissionBoundaryConstruct } from '../lib/constructs/security';
 import { AccessAnalyzerStack } from '../lib/stacks/access-analyzer-stack';
@@ -141,6 +142,16 @@ const devStorageStack = new StorageStack(app, 'AIStudio-StorageStack-Dev', {
 cdk.Tags.of(devStorageStack).add('Environment', 'Dev');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devStorageStack).add(key, value));
 
+// K-12 Content Safety: Guardrails Stack - Bedrock Guardrails + PII tokenization
+const guardrailNotificationEmail = app.node.tryGetContext('guardrailNotificationEmail') || alertEmail;
+const devGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-Dev', {
+  environment: 'dev',
+  notificationEmail: guardrailNotificationEmail,
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+cdk.Tags.of(devGuardrailsStack).add('Environment', 'Dev');
+Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devGuardrailsStack).add(key, value));
+
 const devProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-Dev', {
   environment: 'dev',
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
@@ -242,6 +253,15 @@ const prodStorageStack = new StorageStack(app, 'AIStudio-StorageStack-Prod', {
 cdk.Tags.of(prodStorageStack).add('Environment', 'Prod');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodStorageStack).add(key, value));
 
+// K-12 Content Safety: Guardrails Stack - Bedrock Guardrails + PII tokenization
+const prodGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-Prod', {
+  environment: 'prod',
+  notificationEmail: guardrailNotificationEmail,
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+cdk.Tags.of(prodGuardrailsStack).add('Environment', 'Prod');
+Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodGuardrailsStack).add(key, value));
+
 const prodProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-Prod', {
   environment: 'prod',
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
@@ -315,6 +335,7 @@ if (baseDomain) {
   devFrontendStack.addDependency(devDbStack); // Need VPC from DB stack
   devFrontendStack.addDependency(devStorageStack); // Need bucket name
   devFrontendStack.addDependency(devAuthStack); // Need auth secret ARN export
+  devFrontendStack.addDependency(devGuardrailsStack); // Need guardrails config exports
   cdk.Tags.of(devFrontendStack).add('Environment', 'Dev');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devFrontendStack).add(key, value));
 
@@ -333,6 +354,7 @@ if (baseDomain) {
   prodFrontendStack.addDependency(prodDbStack); // Need VPC from DB stack
   prodFrontendStack.addDependency(prodStorageStack); // Need bucket name
   prodFrontendStack.addDependency(prodAuthStack); // Need auth secret ARN export
+  prodFrontendStack.addDependency(prodGuardrailsStack); // Need guardrails config exports
   cdk.Tags.of(prodFrontendStack).add('Environment', 'Prod');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodFrontendStack).add(key, value));
 
