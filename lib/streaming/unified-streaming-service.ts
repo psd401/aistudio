@@ -18,17 +18,17 @@ const piiTransformLog = createLogger({ module: 'pii-transform' });
 function replacePIITokens(text: string, tokenMap: Map<string, string>): string {
   const matches = text.match(/\[PII:[a-f0-9-]{36}\]/g);
   if (matches) {
-    piiTransformLog.debug('PII tokens found in text', {
+    piiTransformLog.info('PII tokens found in text', {
       matchCount: matches.length,
-      matches: matches.slice(0, 3), // Log first 3 matches
+      matches: matches.slice(0, 3),
       tokenMapSize: tokenMap.size,
-      tokenMapKeys: Array.from(tokenMap.keys()).slice(0, 3) // Log first 3 keys
+      tokenMapKeys: Array.from(tokenMap.keys()).slice(0, 3)
     });
   }
   return text.replace(/\[PII:[a-f0-9-]{36}\]/g, (match) => {
     const replacement = tokenMap.get(match);
     if (replacement) {
-      piiTransformLog.debug('PII token replaced', { token: match, hasReplacement: true });
+      piiTransformLog.info('PII token replaced', { token: match, hasReplacement: true });
     } else {
       piiTransformLog.warn('PII token NOT found in map', { token: match, mapKeys: Array.from(tokenMap.keys()) });
     }
@@ -43,7 +43,7 @@ function replacePIITokens(text: string, tokenMap: Map<string, string>): string {
 function processSSEEvent(event: string, tokenMap: Map<string, string>, SSE_DATA_PREFIX: string): string {
   // Empty or non-data events pass through unchanged
   if (!event.trim() || !event.startsWith(SSE_DATA_PREFIX)) {
-    piiTransformLog.debug('Event skipped (empty or no data prefix)', {
+    piiTransformLog.info('Event skipped (empty or no data prefix)', {
       eventLength: event.length,
       startsWithData: event.startsWith(SSE_DATA_PREFIX),
       eventPreview: event.substring(0, 50)
@@ -61,11 +61,15 @@ function processSSEEvent(event: string, tokenMap: Map<string, string>, SSE_DATA_
   try {
     const parsed = JSON.parse(jsonContent);
 
-    piiTransformLog.debug('SSE event parsed', {
+    // Log ALL parsed events to see what types are being processed
+    piiTransformLog.info('SSE event parsed', {
       type: parsed.type,
       hasDelta: !!parsed.delta,
       deltaType: typeof parsed.delta,
-      deltaPreview: typeof parsed.delta === 'string' ? parsed.delta.substring(0, 100) : undefined
+      deltaPreview: typeof parsed.delta === 'string' ? parsed.delta.substring(0, 100) : undefined,
+      hasMessage: !!parsed.message,
+      hasParts: !!(parsed.message?.parts),
+      allKeys: Object.keys(parsed)
     });
 
     // Handle text-delta events (primary streaming text)
@@ -165,9 +169,9 @@ function createPIIDetokenizeTransform(tokenMappings: TokenMapping[]): TransformS
         buffer = buffer.slice(separatorIndex + SSE_EVENT_SEPARATOR.length);
         eventCount++;
 
-        // Log event extraction periodically
+        // Log event extraction for first 5 events and periodically thereafter
         if (eventCount <= 5 || eventCount % 50 === 0) {
-          piiTransformLog.debug('SSE event extracted from buffer', {
+          piiTransformLog.info('SSE event extracted from buffer', {
             eventCount,
             eventLength: event.length,
             eventPreview: event.substring(0, 150),
