@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, memo } from 'react'
+import { useState, useEffect, useCallback, useRef, memo } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   Popover,
@@ -86,6 +86,16 @@ export function ToolsPopover({
   const [isLoading, setIsLoading] = useState(false)
   const [open, setOpen] = useState(false)
 
+  // Refs to access current values without adding them as effect dependencies
+  const enabledToolsRef = useRef(enabledTools)
+  const onToolsChangeRef = useRef(onToolsChange)
+
+  // Keep refs in sync with props
+  useEffect(() => {
+    enabledToolsRef.current = enabledTools
+    onToolsChangeRef.current = onToolsChange
+  })
+
   // Load available tools when model changes
   useEffect(() => {
     if (!selectedModel) {
@@ -100,15 +110,16 @@ export function ToolsPopover({
 
         // Remove any enabled tools that are no longer available
         const availableToolNames = tools.map(t => t.name)
-        const validEnabledTools = enabledTools.filter(tool =>
+        const currentEnabledTools = enabledToolsRef.current
+        const validEnabledTools = currentEnabledTools.filter(tool =>
           availableToolNames.includes(tool)
         )
-        if (validEnabledTools.length !== enabledTools.length) {
-          onToolsChange(validEnabledTools)
+        if (validEnabledTools.length !== currentEnabledTools.length) {
+          onToolsChangeRef.current(validEnabledTools)
         }
       })
       .finally(() => setIsLoading(false))
-  }, [selectedModel?.modelId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedModel?.modelId])
 
   const handleToolToggle = useCallback((toolName: string) => {
     if (enabledTools.includes(toolName)) {
