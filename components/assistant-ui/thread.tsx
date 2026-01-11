@@ -8,8 +8,7 @@ import {
   useMessage,
 } from "@assistant-ui/react";
 import type { FC } from "react";
-import { createContext, useContext } from "react";
-import { useSession } from "next-auth/react";
+import { createContext, useContext, useMemo } from "react";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
@@ -37,36 +36,101 @@ import {
   UserMessageAttachments,
 } from "@/components/assistant-ui/attachment";
 import { PromptSaveButton } from "@/app/(protected)/nexus/_components/chat/prompt-save-button";
+import { ComposerControls } from "@/app/(protected)/nexus/_components/chat/composer-controls";
+import type { SelectAiModel } from "@/types";
 
 // Context for passing conversationId to message components
 const ConversationIdContext = createContext<string | null>(null);
 
 export const useConversationId = () => useContext(ConversationIdContext);
 
+// Pre-defined constants to avoid creating new objects/arrays on every render
+const EMPTY_MODELS_ARRAY: SelectAiModel[] = [];
+const EMPTY_TOOLS_ARRAY: string[] = [];
+
+const THREAD_ROOT_STYLE = {
+  ["--thread-max-width" as string]: "48rem",
+  ["--thread-padding-x" as string]: "1rem",
+};
+
+const ASSISTANT_MESSAGE_CONTENT_COMPONENTS = {
+  Text: MarkdownText,
+  ToolGroup: ToolGroup,
+  tools: { Fallback: ToolFallback },
+};
+
+const USER_MESSAGE_CONTENT_COMPONENTS = { Text: MarkdownText };
+
+const MOTION_FADE_IN = { y: 5, opacity: 0 };
+const MOTION_VISIBLE = { y: 0, opacity: 1 };
+
+const SUGGESTION_MOTION_INITIAL = { opacity: 0, y: 20 };
+const SUGGESTION_MOTION_ANIMATE = { opacity: 1, y: 0 };
+const SUGGESTION_MOTION_EXIT = { opacity: 0, y: 20 };
+
+const SUGGESTED_ACTIONS = [
+  {
+    title: "Help me create a lesson plan",
+    label: "for 5th grade math fractions",
+    action: "Help me create a lesson plan for 5th grade math fractions",
+  },
+  {
+    title: "Write a parent communication",
+    label: "email about upcoming field trip",
+    action: "Write a parent communication email about upcoming field trip",
+  },
+  {
+    title: "Generate discussion questions",
+    label: "for high school literature class",
+    action: "Generate discussion questions for high school literature class",
+  },
+  {
+    title: "Create a rubric",
+    label: "for evaluating student presentations",
+    action: "Create a rubric for evaluating student presentations",
+  },
+];
+
 interface ThreadProps {
   processingAttachments?: Set<string>;
   conversationId?: string | null;
+  // Model and tools for composer controls
+  models?: SelectAiModel[];
+  selectedModel?: SelectAiModel | null;
+  onModelChange?: (model: SelectAiModel) => void;
+  isLoadingModels?: boolean;
+  enabledTools?: string[];
+  onToolsChange?: (tools: string[]) => void;
 }
 
-export const Thread: FC<ThreadProps> = ({ processingAttachments, conversationId }) => {
+export const Thread: FC<ThreadProps> = ({
+  processingAttachments,
+  conversationId,
+  models = EMPTY_MODELS_ARRAY,
+  selectedModel,
+  onModelChange,
+  isLoadingModels = false,
+  enabledTools = EMPTY_TOOLS_ARRAY,
+  onToolsChange,
+}) => {
+  // Memoize message components to avoid recreation on every render
+  const messageComponents = useMemo(() => ({
+    UserMessage,
+    EditComposer,
+    AssistantMessage,
+  }), []);
+
   return (
     <ConversationIdContext.Provider value={conversationId || null}>
       <ThreadPrimitive.Root
         className="bg-white flex h-full flex-col"
-        style={{
-          ["--thread-max-width" as string]: "48rem",
-          ["--thread-padding-x" as string]: "1rem",
-        }}
+        style={THREAD_ROOT_STYLE}
       >
-        <ThreadPrimitive.Viewport className="relative flex min-w-0 flex-1 flex-col gap-6 overflow-y-scroll">
+        <ThreadPrimitive.Viewport className="relative flex min-w-0 flex-1 h-0 flex-col gap-6 overflow-y-auto">
           <ThreadWelcome conversationId={conversationId} />
 
           <ThreadPrimitive.Messages
-            components={{
-              UserMessage,
-              EditComposer,
-              AssistantMessage,
-            }}
+            components={messageComponents}
           />
 
           <ThreadPrimitive.If empty={false}>
@@ -74,7 +138,15 @@ export const Thread: FC<ThreadProps> = ({ processingAttachments, conversationId 
           </ThreadPrimitive.If>
         </ThreadPrimitive.Viewport>
 
-        <Composer processingAttachments={processingAttachments} />
+        <Composer
+          processingAttachments={processingAttachments}
+          models={models}
+          selectedModel={selectedModel}
+          onModelChange={onModelChange}
+          isLoadingModels={isLoadingModels}
+          enabledTools={enabledTools}
+          onToolsChange={onToolsChange}
+        />
       </ThreadPrimitive.Root>
     </ConversationIdContext.Provider>
   );
@@ -95,8 +167,6 @@ const ThreadScrollToBottom: FC = () => {
 };
 
 const ThreadWelcome: FC<{ conversationId?: string | null }> = ({ conversationId }) => {
-  const { data: session } = useSession();
-  
   // If we have a conversationId (loading existing conversation), show loading state
   if (conversationId) {
     return (
@@ -112,103 +182,61 @@ const ThreadWelcome: FC<{ conversationId?: string | null }> = ({ conversationId 
       </ThreadPrimitive.Empty>
     );
   }
-  
-  // Extract user name with fallback
-  const getUserName = () => {
-    if (session?.user?.name) {
-      return session.user.name.split(' ')[0];
-    }
-    if (session?.user?.email) {
-      return session.user.email.split('@')[0];
-    }
-    return null;
-  };
-  
-  const userName = getUserName();
-  
+
+  // For new conversations, we just show empty space
+  // The greeting is now in the input placeholder
+  return null;
+};
+
+// Extracted component to avoid inline transition object in map
+interface SuggestionItemProps {
+  suggestion: typeof SUGGESTED_ACTIONS[number];
+  index: number;
+}
+
+const SuggestionItem: FC<SuggestionItemProps> = ({ suggestion, index }) => {
+  const transition = useMemo(() => ({ delay: 0.05 * index }), [index]);
+
   return (
-    <ThreadPrimitive.Empty>
-      <div className="mx-auto flex w-full max-w-[var(--thread-max-width)] flex-grow flex-col px-[var(--thread-padding-x)]">
-        <div className="flex w-full flex-grow flex-col items-center justify-center">
-          <div className="flex size-full flex-col justify-center px-8 md:mt-20">
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 10 }}
-              transition={{ delay: 0.5 }}
-              className="text-2xl font-semibold"
-            >
-              Hello{userName ? ` ${userName}` : ''}!
-            </motion.div>
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: 10 }}
-              transition={{ delay: 0.6 }}
-              className="text-muted-foreground/65 text-2xl"
-            >
-              How can I help you today?
-            </motion.div>
-          </div>
-        </div>
-      </div>
-    </ThreadPrimitive.Empty>
+    <motion.div
+      initial={SUGGESTION_MOTION_INITIAL}
+      animate={SUGGESTION_MOTION_ANIMATE}
+      exit={SUGGESTION_MOTION_EXIT}
+      transition={transition}
+      className="[&:nth-child(n+3)]:hidden sm:[&:nth-child(n+3)]:block"
+    >
+      <ThreadPrimitive.Suggestion
+        prompt={suggestion.action}
+        method="replace"
+        autoSend
+        asChild
+      >
+        <Button
+          variant="ghost"
+          className="dark:hover:bg-accent/60 h-auto w-full flex-1 flex-wrap items-start justify-start gap-1 rounded-xl border px-4 py-3.5 text-left text-sm sm:flex-col"
+          aria-label={suggestion.action}
+        >
+          <span className="font-medium">
+            {suggestion.title}
+          </span>
+          <p className="text-muted-foreground">
+            {suggestion.label}
+          </p>
+        </Button>
+      </ThreadPrimitive.Suggestion>
+    </motion.div>
   );
 };
 
 const ThreadWelcomeSuggestions: FC = () => {
   return (
     <div className="grid w-full gap-2 sm:grid-cols-2">
-      {[
-        {
-          title: "Help me create a lesson plan",
-          label: "for 5th grade math fractions",
-          action: "Help me create a lesson plan for 5th grade math fractions",
-        },
-        {
-          title: "Write a parent communication",
-          label: "email about upcoming field trip",
-          action: "Write a parent communication email about upcoming field trip",
-        },
-        {
-          title: "Generate discussion questions",
-          label: "for high school literature class",
-          action: "Generate discussion questions for high school literature class",
-        },
-        {
-          title: "Create a rubric",
-          label: "for evaluating student presentations",
-          action: "Create a rubric for evaluating student presentations",
-        },
-      ].map((suggestedAction, index) => (
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: 20 }}
-          transition={{ delay: 0.05 * index }}
+      {SUGGESTED_ACTIONS.map((suggestedAction, index) => (
+        <SuggestionItem
           key={`suggested-action-${suggestedAction.title}-${index}`}
-          className="[&:nth-child(n+3)]:hidden sm:[&:nth-child(n+3)]:block"
-        >
-          <ThreadPrimitive.Suggestion
-            prompt={suggestedAction.action}
-            method="replace"
-            autoSend
-            asChild
-          >
-            <Button
-              variant="ghost"
-              className="dark:hover:bg-accent/60 h-auto w-full flex-1 flex-wrap items-start justify-start gap-1 rounded-xl border px-4 py-3.5 text-left text-sm sm:flex-col"
-              aria-label={suggestedAction.action}
-            >
-              <span className="font-medium">
-                {suggestedAction.title}
-              </span>
-              <p className="text-muted-foreground">
-                {suggestedAction.label}
-              </p>
-            </Button>
-          </ThreadPrimitive.Suggestion>
-        </motion.div>
+          suggestion={suggestedAction}
+          index={index}
+        />
       ))}
     </div>
   );
@@ -216,20 +244,45 @@ const ThreadWelcomeSuggestions: FC = () => {
 
 interface ComposerProps {
   processingAttachments?: Set<string>;
+  models?: SelectAiModel[];
+  selectedModel?: SelectAiModel | null;
+  onModelChange?: (model: SelectAiModel) => void;
+  isLoadingModels?: boolean;
+  enabledTools?: string[];
+  onToolsChange?: (tools: string[]) => void;
 }
 
-const Composer: FC<ComposerProps> = ({ processingAttachments }) => {
+const Composer: FC<ComposerProps> = ({
+  processingAttachments,
+  models = EMPTY_MODELS_ARRAY,
+  selectedModel,
+  onModelChange,
+  isLoadingModels = false,
+  enabledTools = EMPTY_TOOLS_ARRAY,
+  onToolsChange,
+}) => {
   return (
     <div className="bg-white relative mx-auto flex w-full max-w-[var(--thread-max-width)] flex-col gap-4 px-[var(--thread-padding-x)] pb-4 md:pb-6">
       <ThreadScrollToBottom />
       <ThreadPrimitive.Empty>
         <ThreadWelcomeSuggestions />
       </ThreadPrimitive.Empty>
-      <ComposerPrimitive.Root className="relative flex w-full flex-col rounded-2xl focus-within:ring-2 focus-within:ring-black focus-within:ring-offset-2 dark:focus-within:ring-white">
+      <ComposerPrimitive.Root className="relative flex w-full flex-col rounded-2xl border border-border focus-within:ring-2 focus-within:ring-black focus-within:ring-offset-2 dark:focus-within:ring-white overflow-hidden">
+        {/* Control dock for model, tools, skills, MCP */}
+        {onModelChange && onToolsChange && (
+          <ComposerControls
+            models={models}
+            selectedModel={selectedModel ?? null}
+            onModelChange={onModelChange}
+            isLoadingModels={isLoadingModels}
+            enabledTools={enabledTools}
+            onToolsChange={onToolsChange}
+          />
+        )}
         <ComposerAttachments processingAttachments={processingAttachments} />
         <ComposerPrimitive.Input
-          placeholder="Send a message..."
-          className="bg-muted border-border dark:border-muted-foreground/15 focus:outline-primary placeholder:text-muted-foreground max-h-[calc(50dvh)] min-h-16 w-full resize-none rounded-t-2xl border-x border-t px-4 pb-3 pt-2 text-base outline-none"
+          placeholder="How can I help you today?"
+          className="bg-muted dark:border-muted-foreground/15 focus:outline-primary placeholder:text-muted-foreground max-h-[calc(50dvh)] min-h-16 w-full resize-none px-4 pb-3 pt-2 text-base outline-none"
           rows={1}
           // eslint-disable-next-line jsx-a11y/no-autofocus -- Intentional: message input is primary interaction
           autoFocus
@@ -302,8 +355,8 @@ const AssistantMessage: FC = () => {
     <MessagePrimitive.Root asChild>
       <motion.div
         className="relative mx-auto grid w-full max-w-[var(--thread-max-width)] grid-cols-[auto_auto_1fr] grid-rows-[auto_1fr] px-[var(--thread-padding-x)] py-4"
-        initial={{ y: 5, opacity: 0 }}
-        animate={{ y: 0, opacity: 1 }}
+        initial={MOTION_FADE_IN}
+        animate={MOTION_VISIBLE}
         data-role="assistant"
       >
         <div className="ring-border bg-background col-start-1 row-start-1 flex size-8 shrink-0 items-center justify-center rounded-full ring-1">
@@ -312,11 +365,7 @@ const AssistantMessage: FC = () => {
 
         <div className="text-foreground col-span-2 col-start-2 row-start-1 ml-4 break-words leading-7">
           <MessagePrimitive.Content
-            components={{
-              Text: MarkdownText,
-              ToolGroup: ToolGroup,
-              tools: { Fallback: ToolFallback },
-            }}
+            components={ASSISTANT_MESSAGE_CONTENT_COMPONENTS}
           />
           <MessageError />
         </div>
@@ -371,16 +420,16 @@ const UserMessage: FC = () => {
     <MessagePrimitive.Root asChild>
       <motion.div
         className="mx-auto grid w-full max-w-[var(--thread-max-width)] auto-rows-auto grid-cols-[minmax(72px,1fr)_auto] gap-y-1 px-[var(--thread-padding-x)] py-4 [&:where(>*)]:col-start-2"
-        initial={{ y: 5, opacity: 0 }}
-        animate={{ y: 0, opacity: 1 }}
+        initial={MOTION_FADE_IN}
+        animate={MOTION_VISIBLE}
         data-role="user"
       >
         <UserActionBar />
-        
+
         <UserMessageAttachments />
 
         <div className="bg-muted text-foreground col-start-2 break-words rounded-3xl px-5 py-2.5">
-          <MessagePrimitive.Content components={{ Text: MarkdownText }} />
+          <MessagePrimitive.Content components={USER_MESSAGE_CONTENT_COMPONENTS} />
         </div>
 
         <BranchPicker className="col-span-full col-start-1 row-start-3 -mr-1 justify-end" />

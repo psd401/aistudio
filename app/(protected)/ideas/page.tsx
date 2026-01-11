@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from 'react';
 import { useToast } from '@/components/ui/use-toast';
 import { IconThumbUp, IconNote, IconCheck, IconTrash, IconEdit } from '@tabler/icons-react';
+import { PageBranding } from '@/components/ui/page-branding';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
@@ -300,9 +301,16 @@ export default function IdeasPage() {
 
   return (
     <>
-      <div className="flex justify-between items-center mb-6">
-        <h1 className="text-3xl font-bold">Ideas</h1>
-        <div className="flex items-center gap-4">
+      <div className="mb-6">
+        <PageBranding />
+        <div className="flex justify-between items-center">
+          <div>
+            <h1 className="text-2xl font-semibold text-gray-900">Ideas</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Share and vote on ideas for improving our tools
+            </p>
+          </div>
+          <div className="flex items-center gap-4">
           <Select onValueChange={(value) => setSortBy(value as 'newest' | 'priority' | 'votes')} value={sortBy}>
             <SelectTrigger className="w-[180px]">
               <SelectValue placeholder="Sort by" />
@@ -314,11 +322,14 @@ export default function IdeasPage() {
             </SelectContent>
           </Select>
           <Button onClick={() => setShowAddDialog(true)}>Add Idea</Button>
+          </div>
         </div>
       </div>
 
-      <ScrollArea className="h-[calc(100vh-200px)]">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <Card>
+        <CardContent className="pt-6">
+          <ScrollArea className="h-[calc(100vh-280px)]">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
           {sortIdeas(ideas).map((idea) => (
             <Card key={idea.id} className={`flex flex-col ${idea.status === 'completed' ? 'bg-gray-100' : ''}`}>
               <CardHeader>
@@ -362,9 +373,11 @@ export default function IdeasPage() {
                 </div>
               </CardFooter>
             </Card>
-          ))}
-        </div>
-      </ScrollArea>
+            ))}
+            </div>
+          </ScrollArea>
+        </CardContent>
+      </Card>
 
       <Dialog open={showAddDialog} onOpenChange={setShowAddDialog}>
         <DialogContent>

@@ -19,6 +19,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { toast } from "sonner"
 import { ArrowLeft, Save, Trash2 } from "lucide-react"
 import { TagInput } from "../_components/tag-input"
+import { PageBranding } from "@/components/ui/page-branding"
 import type { Prompt, PromptVisibility } from "@/lib/prompt-library/types"
 
 export default function PromptEditPage() {
@@ -122,19 +123,26 @@ export default function PromptEditPage() {
   return (
     <div className="mx-auto max-w-4xl p-6">
       {/* Header */}
-      <div className="mb-6 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => router.push('/prompt-library')}
-          >
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-          <h1 className="text-2xl font-semibold">Edit Prompt</h1>
-        </div>
+      <div className="mb-6">
+        <PageBranding />
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => router.push('/prompt-library')}
+            >
+              <ArrowLeft className="h-4 w-4" />
+            </Button>
+            <div>
+              <h1 className="text-2xl font-semibold text-gray-900">Edit Prompt</h1>
+              <p className="text-sm text-muted-foreground">
+                Modify your prompt details and settings
+              </p>
+            </div>
+          </div>
 
-        <div className="flex gap-2">
+          <div className="flex gap-2">
           <Button
             variant="outline"
             onClick={handleDelete}
@@ -150,6 +158,7 @@ export default function PromptEditPage() {
             <Save className="mr-2 h-4 w-4" />
             {isUpdating ? 'Saving...' : 'Save Changes'}
           </Button>
+          </div>
         </div>
       </div>
 

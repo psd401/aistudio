@@ -64,10 +64,10 @@ cd infra && npx cdk deploy AIStudio-FrontendStack-Dev     # Deploy single stack
 
 ## 🤖 AI Integration
 
-**AI SDK v5** with provider factory pattern:
-- Providers: OpenAI (GPT-5/4), Google (Gemini), Amazon Bedrock (Claude), Azure
+**AI SDK v6** with provider factory pattern:
+- Providers: OpenAI, Google (Gemini), Amazon Bedrock (Claude), Azure
 - Streaming: `streamText` for chat, SSE for assistant architect
-- Client: `@ai-sdk/react` v2 with `useChat` hook
+- Client: `@ai-sdk/react` with `useChat` hook
 
 **Provider Factory** (`/app/api/chat/lib/provider-factory.ts`):
 ```typescript
@@ -388,12 +388,10 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 
 ## 📦 Key Dependencies
 
-- `ai@5.0.0` - Vercel AI SDK core
-- `@ai-sdk/react@2.0.15` - React streaming hooks
-- `@ai-sdk/*` - Provider adapters (OpenAI, Google, Bedrock, Azure)
-- `next@15.2.3` - Next.js framework
-- `next-auth@5.0.0-beta.29` - Authentication
-- AWS SDK v3 clients for cloud services
+- Vercel AI SDK v6 (`ai`, `@ai-sdk/react`, `@ai-sdk/*` providers)
+- Next.js 16 App Router
+- NextAuth v5
+- AWS SDK v3 clients
 
 ## 🚨 Common Pitfalls
 

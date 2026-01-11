@@ -4,6 +4,7 @@ import { useState, useEffect } from "react"
 import { Plus, Calendar, AlertCircle } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
+import { PageBranding } from "@/components/ui/page-branding"
 import { toast } from "sonner"
 import { createLogger, generateRequestId } from "@/lib/client-logger"
 import type { Schedule } from "@/actions/db/schedule-actions"
@@ -124,8 +125,9 @@ export function SchedulesClient() {
       <div className="space-y-6">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-3xl font-bold mb-2">Schedule Management</h1>
-            <p className="text-muted-foreground">Manage your automated Assistant Architect executions</p>
+            <PageBranding />
+            <h1 className="text-2xl font-semibold text-gray-900">Schedule Management</h1>
+            <p className="text-sm text-muted-foreground mt-1">Manage your automated Assistant Architect executions</p>
           </div>
         </div>
 
@@ -153,8 +155,9 @@ export function SchedulesClient() {
       <div className="space-y-6">
         <div className="flex items-center justify-between">
           <div>
-            <h1 className="text-3xl font-bold mb-2">Schedule Management</h1>
-            <p className="text-muted-foreground">Manage your automated Assistant Architect executions</p>
+            <PageBranding />
+            <h1 className="text-2xl font-semibold text-gray-900">Schedule Management</h1>
+            <p className="text-sm text-muted-foreground mt-1">Manage your automated Assistant Architect executions</p>
           </div>
         </div>
 
@@ -183,8 +186,9 @@ export function SchedulesClient() {
       {/* Header */}
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-3xl font-bold mb-2">Schedule Management</h1>
-          <p className="text-muted-foreground">
+          <PageBranding />
+          <h1 className="text-2xl font-semibold text-gray-900">Schedule Management</h1>
+          <p className="text-sm text-muted-foreground mt-1">
             Manage your automated Assistant Architect executions
           </p>
         </div>

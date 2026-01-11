@@ -7,6 +7,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge"
 import { ArrowLeft, Download, Clock, Calendar, AlertCircle, CheckCircle, RotateCcw } from "lucide-react"
 import { toast } from "sonner"
+import { PageBranding } from "@/components/ui/page-branding"
 
 interface ExecutionResult {
   id: number
@@ -198,17 +199,19 @@ export function ExecutionResultClient({ resultId }: ExecutionResultClientProps) 
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Button variant="ghost" size="sm" onClick={() => router.back()}>
-            <ArrowLeft className="h-4 w-4 mr-2" />
-            Back
-          </Button>
-          <div>
-            <h1 className="text-2xl font-bold">{result.scheduleName}</h1>
-            <p className="text-muted-foreground">{result.assistantArchitectName}</p>
+      <div className="mb-6">
+        <PageBranding />
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <Button variant="ghost" size="sm" onClick={() => router.back()}>
+              <ArrowLeft className="h-4 w-4 mr-2" />
+              Back
+            </Button>
+            <div>
+              <h1 className="text-2xl font-semibold text-gray-900">{result.scheduleName}</h1>
+              <p className="text-sm text-muted-foreground">{result.assistantArchitectName}</p>
+            </div>
           </div>
-        </div>
         <div className="flex items-center gap-2">
           <Badge
             variant={result.status === 'success' ? 'default' :
@@ -222,6 +225,7 @@ export function ExecutionResultClient({ resultId }: ExecutionResultClientProps) 
             <Download className="h-4 w-4 mr-2" />
             Download
           </Button>
+          </div>
         </div>
       </div>
 

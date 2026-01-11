@@ -1,9 +1,20 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, memo } from 'react'
 import { Button } from '@/components/ui/button'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
-import { ArchiveIcon, MessageSquareIcon } from 'lucide-react'
+import { Trash2Icon, MessageSquareIcon } from 'lucide-react'
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from '@/components/ui/alert-dialog'
 import { createLogger } from '@/lib/client-logger'
 import { useRouter } from 'next/navigation'
 import { navigateToConversation } from '@/lib/nexus/conversation-navigation'
@@ -26,10 +37,130 @@ interface ConversationListProps {
   selectedConversationId?: string | null
 }
 
+// Helper function moved outside component to reduce function size
+function formatRelativeTime(dateString: string): string {
+  const date = new Date(dateString)
+  const now = new Date()
+  const diffMs = now.getTime() - date.getTime()
+  const diffHours = diffMs / (1000 * 60 * 60)
+  const diffDays = diffHours / 24
+
+  if (diffHours < 1) {
+    return 'Just now'
+  } else if (diffHours < 24) {
+    return `${Math.floor(diffHours)}h ago`
+  } else if (diffDays < 7) {
+    return `${Math.floor(diffDays)}d ago`
+  } else {
+    return date.toLocaleDateString()
+  }
+}
+
+// Extracted component for conversation row to avoid inline functions
+interface ConversationItemRowProps {
+  conversation: ConversationItem
+  isSelected: boolean
+  isDeleting: boolean
+  onSelect: (id: string) => void
+  onDelete: (id: string) => void
+}
+
+const ConversationItemRow = memo(function ConversationItemRow({
+  conversation,
+  isSelected,
+  isDeleting,
+  onSelect,
+  onDelete,
+}: ConversationItemRowProps) {
+  const handleClick = useCallback(() => {
+    onSelect(conversation.id)
+  }, [conversation.id, onSelect])
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      onSelect(conversation.id)
+    }
+  }, [conversation.id, onSelect])
+
+  const handleStopPropagation = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation()
+  }, [])
+
+  const handleDeleteClick = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation()
+    onDelete(conversation.id)
+  }, [conversation.id, onDelete])
+
+  return (
+    <div
+      className={`
+        flex items-center gap-2 rounded-lg transition-all cursor-pointer
+        hover:bg-muted focus-visible:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
+        ${isSelected ? 'bg-muted' : ''}
+      `}
+      onClick={handleClick}
+      role="button"
+      tabIndex={0}
+      onKeyDown={handleKeyDown}
+    >
+      <div className="flex-grow px-3 py-2 min-w-0">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium truncate">
+              {conversation.title}
+            </p>
+            <div className="flex items-center gap-2 mt-1">
+              <span className="text-xs text-muted-foreground">
+                {conversation.messageCount} message{conversation.messageCount !== 1 ? 's' : ''}
+              </span>
+              <span className="text-xs text-muted-foreground">
+                {formatRelativeTime(conversation.lastMessageAt || conversation.createdAt)}
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Delete Button */}
+      <AlertDialog>
+        <AlertDialogTrigger asChild>
+          <TooltipIconButton
+            className="text-destructive hover:text-destructive/80 ml-auto mr-1 size-4 p-4"
+            variant="ghost"
+            tooltip="Delete conversation"
+            onClick={handleStopPropagation}
+          >
+            <Trash2Icon className="h-4 w-4" />
+          </TooltipIconButton>
+        </AlertDialogTrigger>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete conversation?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This action cannot be undone. This will permanently delete this conversation and all its messages.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={handleDeleteClick}
+              disabled={isDeleting}
+            >
+              {isDeleting ? 'Deleting...' : 'Delete'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+    </div>
+  )
+})
+
 export function ConversationList({ selectedConversationId }: ConversationListProps) {
   const [conversations, setConversations] = useState<ConversationItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null)
   const router = useRouter()
   
 
@@ -116,74 +247,56 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
     navigateToConversation(conversationId)
   }, [])
 
-  // Handle archiving a conversation using server action with comprehensive error handling
-  const handleArchiveConversation = useCallback(async (conversationId: string, event: React.MouseEvent) => {
-    event.stopPropagation() // Prevent triggering conversation selection
-    
+  // Handle deleting a conversation using server action with comprehensive error handling
+  const handleDeleteConversation = useCallback(async (conversationId: string) => {
     try {
-      log.debug('Archiving conversation', { conversationId })
-      
+      log.debug('Deleting conversation', { conversationId })
+      setDeletingConversationId(conversationId)
+
       // Validate conversation ID before proceeding
       if (!conversationId || typeof conversationId !== 'string') {
         throw new Error('Invalid conversation ID')
       }
-      
+
       // Use server action instead of direct API call
       const { archiveConversationAction } = await import('@/actions/nexus/archive-conversation.actions')
       const result = await archiveConversationAction({ conversationId })
-      
+
       if (!result.isSuccess) {
-        const errorMessage = result.error instanceof Error ? result.error.message : 
-                           typeof result.error === 'string' ? result.error : 
-                           'Failed to archive conversation'
+        const errorMessage = result.error instanceof Error ? result.error.message :
+                           typeof result.error === 'string' ? result.error :
+                           'Failed to delete conversation'
         throw new Error(errorMessage)
       }
-      
+
       // Remove from local state
       setConversations(prev => prev.filter(conv => conv.id !== conversationId))
-      
+
       // If this was the selected conversation, navigate to new conversation
       if (selectedConversationId === conversationId) {
         router.push('/nexus')
       }
-      
-      log.debug('Conversation archived successfully', { conversationId })
-      
+
+      log.debug('Conversation deleted successfully', { conversationId })
+
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : 'Failed to archive conversation'
-      log.error('Failed to archive conversation', {
+      const errorMessage = err instanceof Error ? err.message : 'Failed to delete conversation'
+      log.error('Failed to delete conversation', {
         conversationId,
         error: errorMessage
       })
-      
-      // Show user-friendly error feedback (could be enhanced with toast notifications)
-      setError(`Archive failed: ${errorMessage}`)
-      
+
+      // Show user-friendly error feedback
+      setError(`Delete failed: ${errorMessage}`)
+
       // Clear error after a delay
       setTimeout(() => {
         setError(null)
       }, 5000)
+    } finally {
+      setDeletingConversationId(null)
     }
   }, [selectedConversationId, router])
-
-  // Format relative time
-  const formatRelativeTime = (dateString: string) => {
-    const date = new Date(dateString)
-    const now = new Date()
-    const diffMs = now.getTime() - date.getTime()
-    const diffHours = diffMs / (1000 * 60 * 60)
-    const diffDays = diffHours / 24
-    
-    if (diffHours < 1) {
-      return 'Just now'
-    } else if (diffHours < 24) {
-      return `${Math.floor(diffHours)}h ago`
-    } else if (diffDays < 7) {
-      return `${Math.floor(diffDays)}d ago`
-    } else {
-      return date.toLocaleDateString()
-    }
-  }
 
   if (loading) {
     return (
@@ -216,50 +329,14 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
       ) : (
         <>
           {conversations.map((conversation) => (
-            <div
+            <ConversationItemRow
               key={conversation.id}
-              className={`
-                flex items-center gap-2 rounded-lg transition-all cursor-pointer
-                hover:bg-muted focus-visible:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring
-                ${selectedConversationId === conversation.id ? 'bg-muted' : ''}
-              `}
-              onClick={() => handleConversationSelect(conversation.id)}
-              role="button"
-              tabIndex={0}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  handleConversationSelect(conversation.id)
-                }
-              }}
-            >
-              <div className="flex-grow px-3 py-2 min-w-0">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <p className="text-sm font-medium truncate">
-                      {conversation.title}
-                    </p>
-                    <div className="flex items-center gap-2 mt-1">
-                      <span className="text-xs text-muted-foreground">
-                        {conversation.messageCount} message{conversation.messageCount !== 1 ? 's' : ''}
-                      </span>
-                      <span className="text-xs text-muted-foreground">
-                        {formatRelativeTime(conversation.lastMessageAt || conversation.createdAt)}
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-              
-              {/* Archive Button */}
-              <TooltipIconButton
-                className="hover:text-foreground/60 text-foreground ml-auto mr-1 size-4 p-4"
-                variant="ghost"
-                tooltip="Archive conversation"
-                onClick={(e) => handleArchiveConversation(conversation.id, e)}
-              >
-                <ArchiveIcon className="h-4 w-4" />
-              </TooltipIconButton>
-            </div>
+              conversation={conversation}
+              isSelected={selectedConversationId === conversation.id}
+              isDeleting={deletingConversationId === conversation.id}
+              onSelect={handleConversationSelect}
+              onDelete={handleDeleteConversation}
+            />
           ))}
         </>
       )}

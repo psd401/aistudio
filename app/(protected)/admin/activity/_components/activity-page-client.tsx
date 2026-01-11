@@ -5,6 +5,7 @@ import { useToast } from "@/components/ui/use-toast"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { IconRefresh } from "@tabler/icons-react"
+import { PageBranding } from "@/components/ui/page-branding"
 
 import { ActivityStatsCards, ActivityStatsCardsSkeleton } from "./activity-stats-cards"
 import { ActivityFiltersComponent } from "./activity-filters"
@@ -236,17 +237,20 @@ export function ActivityPageClient() {
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">Activity Dashboard</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Monitor platform usage across Nexus, Assistant Architect, and Model Compare
-          </p>
+      <div className="mb-6">
+        <PageBranding />
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-gray-900">Activity Dashboard</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Monitor platform usage across Nexus, Assistant Architect, and Model Compare
+            </p>
+          </div>
+          <Button variant="outline" size="sm" onClick={handleRefresh}>
+            <IconRefresh className="h-4 w-4 mr-2" />
+            Refresh
+          </Button>
         </div>
-        <Button variant="outline" size="sm" onClick={handleRefresh}>
-          <IconRefresh className="h-4 w-4 mr-2" />
-          Refresh
-        </Button>
       </div>
 
       {/* Stats Cards */}

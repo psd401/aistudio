@@ -1,9 +1,9 @@
-import StandardPageLayout from "@/components/layouts/standard-page-layout"
+import { DashboardLayout as DashboardLayoutComponent } from "@/components/layouts/dashboard-layout"
 
 export default function DashboardLayout({
   children
 }: {
   children: React.ReactNode
 }) {
-  return <StandardPageLayout>{children}</StandardPageLayout>
+  return <DashboardLayoutComponent>{children}</DashboardLayoutComponent>
 } 

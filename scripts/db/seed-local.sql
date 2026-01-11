@@ -71,6 +71,42 @@ WHERE u.email = 'student@example.com' AND r.name = 'student'
 ON CONFLICT (user_id, role_id) DO NOTHING;
 
 -- ============================================================================
+-- Tools (ensuring all code-referenced tools exist)
+-- ============================================================================
+-- The codebase uses hasToolAccess() with these identifiers:
+-- - assistant-architect: schedules, execute API
+-- - model-compare: compare feature
+-- - knowledge-repositories: repositories, prompt library
+
+INSERT INTO tools (identifier, name, description, is_active) VALUES
+('assistant-architect', 'Assistant Architect', 'Build and schedule custom AI assistants', true),
+('model-compare', 'Model Compare', 'Compare AI model responses side-by-side', true),
+('knowledge-repositories', 'Knowledge Repositories', 'Manage knowledge bases for AI assistants', true)
+ON CONFLICT (identifier) DO UPDATE SET
+    name = EXCLUDED.name,
+    description = EXCLUDED.description,
+    is_active = EXCLUDED.is_active,
+    updated_at = CURRENT_TIMESTAMP;
+
+-- Grant these tools to administrator role
+INSERT INTO role_tools (role_id, tool_id)
+SELECT r.id, t.id
+FROM roles r
+CROSS JOIN tools t
+WHERE r.name = 'administrator'
+  AND t.identifier IN ('assistant-architect', 'model-compare', 'knowledge-repositories')
+ON CONFLICT (role_id, tool_id) DO NOTHING;
+
+-- Grant assistant-architect and model-compare to staff role
+INSERT INTO role_tools (role_id, tool_id)
+SELECT r.id, t.id
+FROM roles r
+CROSS JOIN tools t
+WHERE r.name = 'staff'
+  AND t.identifier IN ('assistant-architect', 'model-compare')
+ON CONFLICT (role_id, tool_id) DO NOTHING;
+
+-- ============================================================================
 -- Navigation Items
 -- ============================================================================
 -- Standard navigation structure for the application

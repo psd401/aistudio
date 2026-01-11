@@ -1,11 +1,5 @@
-import { FeaturesCards } from '@/components/features/features-cards';
-import { Faq } from '@/components/features/faq';
+import { DashboardHome } from '@/components/dashboard/dashboard-home';
 
 export default function DashboardPage() {
-  return (
-    <>
-      <FeaturesCards />
-      <Faq />
-    </>
-  );
+  return <DashboardHome />;
 } 
