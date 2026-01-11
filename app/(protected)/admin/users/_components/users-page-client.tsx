@@ -61,6 +61,7 @@ import {
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
 import { IconRefresh } from "@tabler/icons-react"
+import { PageBranding } from "@/components/ui/page-branding"
 
 import {
   StatsCards,
@@ -418,20 +419,21 @@ export function UsersPageClient({
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">User Management</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Manage users, roles, and permissions
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={loadData}>
-            <IconRefresh className="h-4 w-4 mr-2" />
-            Refresh
-          </Button>
-          {/* TODO: Add User functionality not yet implemented
-              Will require: user invitation flow, email template, permission setup */}
+      <div className="mb-6">
+        <PageBranding />
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-gray-900">User Management</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Manage users, roles, and permissions
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={loadData}>
+              <IconRefresh className="h-4 w-4 mr-2" />
+              Refresh
+            </Button>
+          </div>
         </div>
       </div>
 

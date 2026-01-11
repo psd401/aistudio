@@ -5,6 +5,7 @@ import { CompareInput } from "./compare-input"
 import { DualResponse } from "./dual-response"
 import { useToast } from "@/components/ui/use-toast"
 import { useModelsWithPersistence } from "@/lib/hooks/use-models"
+import { PageBranding } from "@/components/ui/page-branding"
 
 // Note: This component now uses native streaming instead of polling
 // The backend streams both model responses in parallel via Server-Sent Events
@@ -258,6 +259,7 @@ export function ModelCompare() {
     <div className="flex h-full flex-col">
       {/* Page Title */}
       <div className="mb-6">
+        <PageBranding />
         <h1 className="text-2xl font-semibold text-gray-900">Model Comparison</h1>
         <p className="text-sm text-muted-foreground mt-1">
           Compare how different AI models respond to the same prompt

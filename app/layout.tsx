@@ -1,6 +1,5 @@
 import '@/app/globals.css';
 import { Toaster } from 'sonner';
-import { GlobalHeader } from '@/components/layout/global-header';
 import AuthSessionProvider from "@/components/utilities/session-provider"
 import { NotificationProvider } from "@/contexts/notification-context";
 import { fontSans } from "@/lib/fonts"
@@ -31,7 +30,6 @@ export default function RootLayout({
       >
         <AuthSessionProvider>
           <NotificationProvider>
-            <GlobalHeader />
             {children}
             <Toaster />
           </NotificationProvider>

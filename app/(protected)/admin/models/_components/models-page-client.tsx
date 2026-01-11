@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo } from "react"
 import { useToast } from "@/components/ui/use-toast"
 import { Button } from "@/components/ui/button"
 import { IconRefresh, IconPlus, IconFileImport } from "@tabler/icons-react"
+import { PageBranding } from "@/components/ui/page-branding"
 import { ModelReplacementDialog } from "@/components/features/model-replacement-dialog"
 
 import { StatsCards, StatsCardsSkeleton, type ModelStats } from "./stats-cards"
@@ -635,30 +636,33 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
   return (
     <div className="p-6 space-y-6">
       {/* Header */}
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-2xl font-bold">AI Models Management</h1>
-          <p className="text-sm text-muted-foreground mt-1">
-            Manage AI models, providers, and availability settings
-          </p>
-        </div>
-        <div className="flex gap-2">
-          <Button variant="outline" size="sm" onClick={loadData} disabled={loading}>
-            <IconRefresh className="h-4 w-4 mr-2" />
-            Refresh
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setImportDialogOpen(true)}
-          >
-            <IconFileImport className="h-4 w-4 mr-2" />
-            Import JSON
-          </Button>
-          <Button size="sm" onClick={handleAddModel}>
-            <IconPlus className="h-4 w-4 mr-2" />
-            Add Model
-          </Button>
+      <div className="mb-6">
+        <PageBranding />
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-gray-900">AI Models Management</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Manage AI models, providers, and availability settings
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={loadData} disabled={loading}>
+              <IconRefresh className="h-4 w-4 mr-2" />
+              Refresh
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setImportDialogOpen(true)}
+            >
+              <IconFileImport className="h-4 w-4 mr-2" />
+              Import JSON
+            </Button>
+            <Button size="sm" onClick={handleAddModel}>
+              <IconPlus className="h-4 w-4 mr-2" />
+              Add Model
+            </Button>
+          </div>
         </div>
       </div>
 

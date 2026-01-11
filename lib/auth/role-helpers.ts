@@ -19,7 +19,7 @@ export async function requireRole(requiredRoles: string | string[]) {
   const hasRole = roles.some(role => userRoles.includes(role));
   
   if (!hasRole) {
-    redirect("/unauthorized");
+    redirect("/dashboard");
   }
   
   return result.data;

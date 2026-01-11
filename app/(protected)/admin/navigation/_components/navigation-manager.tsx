@@ -6,11 +6,12 @@ import { SortableContext, arrayMove, verticalListSortingStrategy } from "@dnd-ki
 import { NavigationItem } from "./navigation-item"
 import { NavigationItemForm } from "./navigation-item-form"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { Plus, Navigation, AlertCircle } from "lucide-react"
 import { Alert, AlertDescription } from "@/components/ui/alert"
 import { SelectNavigationItem } from "@/types/db-types"
+import { PageBranding } from "@/components/ui/page-branding"
 
 interface OrganizedItem extends SelectNavigationItem {
   children: OrganizedItem[]
@@ -204,17 +205,20 @@ export function NavigationManager() {
 
   if (isLoading) {
     return (
-      <Card>
-        <CardHeader>
+      <div className="space-y-6">
+        <div className="mb-6">
+          <PageBranding />
           <Skeleton className="h-8 w-48" />
           <Skeleton className="h-4 w-64 mt-2" />
-        </CardHeader>
-        <CardContent className="space-y-2">
-          <Skeleton className="h-10 w-full" />
-          <Skeleton className="h-10 w-full" />
-          <Skeleton className="h-10 w-full" />
-        </CardContent>
-      </Card>
+        </div>
+        <Card>
+          <CardContent className="pt-6 space-y-2">
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-full" />
+          </CardContent>
+        </Card>
+      </div>
     )
   }
 
@@ -224,33 +228,34 @@ export function NavigationManager() {
 
   return (
     <div className="space-y-6">
+      <div className="mb-6">
+        <PageBranding />
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-gray-900 flex items-center gap-2">
+              <Navigation className="h-5 w-5" />
+              Navigation Structure
+            </h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Drag and drop items to reorder them within their parent groups
+            </p>
+          </div>
+          <Button onClick={() => setIsFormOpen(true)}>
+            <Plus className="h-4 w-4 mr-2" />
+            Add Navigation Item
+          </Button>
+        </div>
+      </div>
+
       {error && (
         <Alert variant="destructive">
           <AlertCircle className="h-4 w-4" />
           <AlertDescription>{error}</AlertDescription>
         </Alert>
       )}
-      
+
       <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle className="flex items-center gap-2">
-                <Navigation className="h-5 w-5" />
-                Navigation Structure
-              </CardTitle>
-              <CardDescription className="mt-1">
-                Drag and drop items to reorder them within their parent groups
-              </CardDescription>
-            </div>
-            <Button onClick={() => setIsFormOpen(true)}>
-              <Plus className="h-4 w-4 mr-2" />
-              Add Navigation Item
-            </Button>
-          </div>
-        </CardHeader>
-        
-        <CardContent>
+        <CardContent className="pt-6">
           {items.length === 0 ? (
             <div className="text-center py-12">
               <Navigation className="h-12 w-12 text-muted-foreground mx-auto mb-4" />

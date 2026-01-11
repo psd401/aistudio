@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { ChevronLeft } from "lucide-react"
 import { useEffect, useState } from "react"
 import { getAssistantArchitectAction } from "@/actions/db/assistant-architect-actions"
+import { PageBranding } from "@/components/ui/page-branding"
 
 interface CreateLayoutProps {
   children: React.ReactNode
@@ -57,16 +58,17 @@ export function CreateLayout({ children, currentStep, assistantId, title }: Crea
   return (
     <div className="space-y-6">
       <div className="space-y-4">
-        <div className="flex items-center space-x-2 text-muted-foreground">
-          <Link 
-            href="/utilities/assistant-architect" 
+        <PageBranding />
+        <div className="flex items-center space-x-2 text-muted-foreground mb-1">
+          <Link
+            href="/utilities/assistant-architect"
             className="flex items-center hover:text-foreground transition-colors"
           >
             <ChevronLeft className="h-4 w-4 mr-1" />
             Back to Assistants
           </Link>
         </div>
-        <h1 className="text-3xl font-bold">
+        <h1 className="text-2xl font-semibold text-gray-900">
           Assistant Architect
           {assistantName && (
             <>: {assistantName}</>
