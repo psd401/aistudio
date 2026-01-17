@@ -1,5 +1,4 @@
 import { S3Client, PutObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand } from '@aws-sdk/client-s3';
-import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createLogger } from '@/lib/logger';
 import { Readable } from 'node:stream';
@@ -283,6 +282,10 @@ export async function uploadToS3(config: DirectUploadConfig): Promise<DirectUplo
       // Convert Web ReadableStream to Node.js Readable stream for streaming upload
       // This is memory-efficient for large files
       body = Readable.fromWeb(fileStream as WebReadableStream<Uint8Array>);
+
+      // Dynamic import to avoid Turbopack resolution issues with @aws-sdk/lib-storage
+      // (package lacks proper exports field, causing static import failures)
+      const { Upload } = await import('@aws-sdk/lib-storage');
 
       // Use Upload class for streaming (handles multipart automatically)
       const upload = new Upload({
