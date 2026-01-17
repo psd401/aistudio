@@ -63,7 +63,7 @@ const TOOL_REGISTRY: Record<string, ToolConfig> = {
     category: 'search'
   },
   codeInterpreter: {
-    name: 'codeInterpreter', 
+    name: 'codeInterpreter',
     tool: createPlaceholderTool('Execute code and perform data analysis'),
     requiredCapabilities: ['codeInterpreter', 'codeExecution'],
     displayName: 'Code Interpreter',
@@ -77,6 +77,14 @@ const TOOL_REGISTRY: Record<string, ToolConfig> = {
     displayName: 'Image Generation',
     description: 'Generate images from text descriptions using AI models like GPT-Image-1, DALL-E 3, and Imagen 4',
     category: 'media'
+  },
+  showChart: {
+    name: 'showChart',
+    tool: createPlaceholderTool('Display data as interactive charts and graphs'),
+    requiredCapabilities: [], // Available for all models (renders on client)
+    displayName: 'Chart Visualization',
+    description: 'Display data as interactive charts and graphs (bar, line, area, scatter, pie)',
+    category: 'analysis'
   }
 }
 
