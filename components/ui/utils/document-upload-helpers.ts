@@ -55,6 +55,7 @@ export function getButtonText(
   return defaultLabel
 }
 
+/** Supported MIME types for document upload */
 export const SUPPORTED_FILE_TYPES = [
   'application/pdf',
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -74,4 +75,14 @@ export const SUPPORTED_FILE_TYPES = [
   'text/x-yaml',
 ]
 
+/**
+ * Maximum file size for 'assistant' purpose (50MB).
+ *
+ * File size limits by purpose:
+ * - 'assistant': 50MB (this component) - for assistant context/knowledge
+ * - 'chat'/'repository': 500MB (lib/validation/document-upload.validation.ts Zod schema)
+ *
+ * The Zod schema enforces additional resource exhaustion protections
+ * (e.g., embeddings disabled >50MB, image extraction disabled >25MB).
+ */
 export const MAX_FILE_SIZE = 50 * 1024 * 1024

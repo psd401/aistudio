@@ -17,23 +17,25 @@ import { apiRateLimit } from '@/lib/rate-limit';
  */
 
 export const runtime = 'nodejs';
-// Increase max execution time to handle large file uploads; body size limits are configured elsewhere
+// Increase max execution time to handle large file uploads (500MB max)
+// Body size limits: next.config.mjs serverActions.bodySizeLimit (100mb for server actions)
+// Note: API routes use different limits; for multipart uploads, body parsing is handled by formData()
 export const maxDuration = 120;
+
+const DEFAULT_PROCESSING_OPTIONS = {
+  extractText: true,
+  convertToMarkdown: false,
+  extractImages: false,
+  generateEmbeddings: false,
+  ocrEnabled: true,
+};
 
 /**
  * Parse and validate processing options from form data
  */
 function parseProcessingOptions(processingOptionsRaw: string | null, log: ReturnType<typeof createLogger>) {
-  const defaults = {
-    extractText: true,
-    convertToMarkdown: false,
-    extractImages: false,
-    generateEmbeddings: false,
-    ocrEnabled: true,
-  };
-
   if (!processingOptionsRaw) {
-    return defaults;
+    return DEFAULT_PROCESSING_OPTIONS;
   }
 
   try {
@@ -47,14 +49,38 @@ function parseProcessingOptions(processingOptionsRaw: string | null, log: Return
     };
   } catch {
     log.warn('Invalid processingOptions JSON, using defaults');
-    return defaults;
+    return DEFAULT_PROCESSING_OPTIONS;
   }
+}
+
+/**
+ * Classify error and return user-friendly message with status code
+ */
+function classifyUploadError(errorMessage: string): { message: string; status: number } {
+  if (errorMessage.includes('size') || errorMessage.includes('Size')) {
+    return { message: 'File size exceeds maximum allowed', status: 413 };
+  }
+  if (errorMessage.includes('format') || errorMessage.includes('type')) {
+    return { message: 'Invalid file format', status: 415 };
+  }
+  if (errorMessage.includes('timeout') || errorMessage.includes('Timeout')) {
+    return { message: 'Upload timed out - please try again', status: 408 };
+  }
+  if (errorMessage.includes('S3') || errorMessage.includes('storage')) {
+    return { message: 'Storage service temporarily unavailable', status: 503 };
+  }
+  return { message: 'Failed to upload file', status: 500 };
 }
 
 async function uploadHandler(req: NextRequest) {
   const requestId = generateRequestId();
   const timer = startTimer('api.documents.v2.upload');
   const log = createLogger({ requestId, route: 'api.documents.v2.upload' });
+
+  // Track context for error reporting
+  let fileName: string | undefined;
+  let fileSize: number | undefined;
+  let userId: string | undefined;
 
   try {
     // Authentication
@@ -63,6 +89,7 @@ async function uploadHandler(req: NextRequest) {
       log.warn('Unauthorized request');
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }
+    userId = session.sub;
 
     // Parse multipart form data
     const formData = await req.formData();
@@ -78,8 +105,8 @@ async function uploadHandler(req: NextRequest) {
     // Parse processing options
     const processingOptions = parseProcessingOptions(processingOptionsRaw, log);
 
-    const fileName = file.name;
-    const fileSize = file.size;
+    fileName = file.name;
+    fileSize = file.size;
     const fileType = file.type;
 
     // Validate using shared Zod schema (ensures resource exhaustion protection)
@@ -172,13 +199,20 @@ async function uploadHandler(req: NextRequest) {
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorName = error instanceof Error ? error.name : 'Unknown';
-    log.error(`Server-side upload failed: ${errorMessage}`, { name: errorName });
+
+    log.error('Server-side upload failed', {
+      error: errorMessage,
+      name: errorName,
+      fileName,
+      fileSize,
+      userId,
+      requestId
+    });
+
     timer({ status: 'error' });
 
-    return NextResponse.json(
-      { error: 'Failed to upload file' },
-      { status: 500 }
-    );
+    const { message, status } = classifyUploadError(errorMessage);
+    return NextResponse.json({ error: message, requestId }, { status });
   }
 }
 

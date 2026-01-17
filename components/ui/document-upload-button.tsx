@@ -4,6 +4,7 @@ import { useRef, useState, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Loader2, FileUp, CheckCircle } from "lucide-react"
 import { toast } from "sonner"
+import { createLogger } from "@/lib/logger"
 import { useDocumentUploadPolling } from "./hooks/use-document-upload-polling"
 import {
   uploadViaServer,
@@ -13,9 +14,7 @@ import {
   MAX_FILE_SIZE
 } from "./utils/document-upload-helpers"
 
-const logError = (message: string, data?: Record<string, unknown>) => {
-  console.error(`[DocumentUploadButton] ${message}`, data)
-}
+const log = createLogger({ module: 'DocumentUploadButton' })
 
 interface DocumentUploadButtonProps {
   onContent: (content: string) => void
@@ -92,12 +91,11 @@ export default function DocumentUploadButton({
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : "Failed to process document."
 
-      logError('Upload error occurred', {
+      log.error('Upload error occurred', {
         error: err instanceof Error ? err.message : String(err),
         fileName: file.name,
         fileSize: file.size,
-        fileType: file.type,
-        errorMessage
+        fileType: file.type
       })
 
       toast.error(errorMessage)
