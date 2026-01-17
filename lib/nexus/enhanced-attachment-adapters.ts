@@ -133,22 +133,17 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
 
   private async processServerSide(attachment: PendingAttachment): Promise<CompleteAttachment> {
     try {
-      log.info('Processing document server-side', { 
-        fileName: attachment.name, 
-        fileSize: attachment.file.size 
+      log.info('Processing document server-side', {
+        fileName: attachment.name,
+        fileSize: attachment.file.size
       });
 
-      // Step 1: Initiate server upload
-      const uploadSession = await this.initiateUpload(attachment);
-      
-      // Step 2: Upload to S3 using presigned URL
-      await this.uploadToS3(attachment.file, uploadSession);
-      
-      // Step 3: Confirm upload completion
-      await this.confirmUpload(uploadSession);
-      
-      // Step 4: Poll for processing results
-      const processedContent = await this.pollForResults(uploadSession.jobId, attachment.name);
+      // Use server-side upload to bypass school network restrictions on S3 presigned URLs
+      // See: https://github.com/psd401/aistudio/issues/632
+      const uploadResult = await this.uploadViaServer(attachment);
+
+      // Poll for processing results
+      const processedContent = await this.pollForResults(uploadResult.jobId, attachment.name);
       
       // Step 5: Return in assistant-ui format
       return {
@@ -193,108 +188,47 @@ Please try re-uploading or contact support if the issue persists.`
     }
   }
 
-  private async initiateUpload(attachment: PendingAttachment) {
-    const response = await fetch('/api/documents/v2/initiate-upload', {
+  /**
+   * Upload file via server-side endpoint to bypass school network restrictions.
+   * School networks block direct S3 presigned URL uploads, but allow uploads
+   * to aistudio.psd401.ai domain which then proxies to S3.
+   *
+   * @see https://github.com/psd401/aistudio/issues/632
+   */
+  private async uploadViaServer(attachment: PendingAttachment): Promise<{ jobId: string }> {
+    const formData = new FormData();
+    formData.append('file', attachment.file);
+    formData.append('purpose', 'chat');
+    formData.append('processingOptions', JSON.stringify({
+      extractText: true,
+      convertToMarkdown: true,
+      extractImages: false, // Disable for chat to reduce processing time
+      ocrEnabled: true
+    }));
+
+    const response = await fetch('/api/documents/v2/upload', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        fileName: attachment.name,
-        fileSize: attachment.file.size,
-        fileType: attachment.contentType,
-        purpose: 'chat',
-        processingOptions: {
-          extractText: true,
-          convertToMarkdown: true,
-          extractImages: false, // Disable for chat to reduce processing time
-          ocrEnabled: true
-        }
-      })
+      body: formData, // No Content-Type header - browser sets it with boundary
     });
 
     if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Failed to initiate upload: ${error}`);
+      const errorData = await response.json().catch(() => ({ error: 'Upload failed' }));
+      throw new Error(errorData.error || `Upload failed: ${response.status}`);
     }
-    
-    return response.json();
-  }
 
-  private async uploadToS3(file: File, session: { uploadMethod?: string; uploadUrl?: string; partUrls?: { uploadUrl: string }[]; uploadId?: string; jobId?: string }) {
-    if (session.uploadMethod === 'multipart' && session.partUrls && session.uploadId && session.jobId) {
-      // Handle multipart upload for very large files
-      await this.multipartUpload(file, { partUrls: session.partUrls, uploadId: session.uploadId, jobId: session.jobId });
-    } else if (session.uploadUrl) {
-      // Direct upload for medium files
-      const response = await fetch(session.uploadUrl, {
-        method: 'PUT',
-        body: file,
-        headers: {
-          'Content-Type': file.type
-        }
-      });
-      
-      if (!response.ok) {
-        throw new Error(`Upload failed: ${response.status} ${response.statusText}`);
-      }
-    } else {
-      throw new Error('Invalid session: missing uploadUrl for direct upload or required multipart data');
-    }
-  }
+    const result = await response.json();
 
-  private async multipartUpload(file: File, session: { partUrls: { uploadUrl: string }[]; uploadId: string; jobId: string }) {
-    const partSize = 5 * 1024 * 1024; // 5MB chunks
-    const parts = [];
-    
-    for (let i = 0; i < session.partUrls.length; i++) {
-      const start = i * partSize;
-      const end = Math.min(start + partSize, file.size);
-      const chunk = file.slice(start, end);
-      
-      const response = await fetch(session.partUrls[i].uploadUrl, {
-        method: 'PUT',
-        body: chunk
-      });
-      
-      if (!response.ok) {
-        throw new Error(`Part upload failed: ${response.status}`);
-      }
-      
-      parts.push({
-        ETag: response.headers.get('ETag')?.replace(/"/g, ''),
-        PartNumber: i + 1
-      });
+    if (!result.jobId) {
+      throw new Error('Server upload response missing jobId');
     }
-    
-    // Complete multipart upload
-    const completeResponse = await fetch('/api/documents/v2/complete-multipart', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        uploadId: session.uploadId,
-        jobId: session.jobId,
-        parts
-      })
+
+    log.info('Server-side upload completed', {
+      attachmentId: attachment.id,
+      fileName: attachment.name,
+      jobId: result.jobId
     });
-    
-    if (!completeResponse.ok) {
-      throw new Error('Failed to complete multipart upload');
-    }
-  }
 
-  private async confirmUpload(session: { uploadId: string; jobId: string }) {
-    const response = await fetch('/api/documents/v2/confirm-upload', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        uploadId: session.uploadId,
-        jobId: session.jobId
-      })
-    });
-    
-    if (!response.ok) {
-      const error = await response.text();
-      throw new Error(`Failed to confirm upload: ${error}`);
-    }
+    return { jobId: result.jobId };
   }
 
   private async pollForResults(jobId: string, fileName: string, maxAttempts = 60) {

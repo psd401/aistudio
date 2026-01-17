@@ -184,66 +184,42 @@ export default function DocumentUploadButton({
     poll();
   }
 
-  const uploadToS3 = async (file: File, session: { uploadMethod?: string; uploadUrl?: string; partUrls?: { uploadUrl: string }[]; uploadId?: string; jobId?: string }) => {
-    if (session.uploadMethod === 'multipart' && session.partUrls && session.uploadId && session.jobId) {
-      // Handle multipart upload for very large files
-      await multipartUpload(file, { partUrls: session.partUrls, uploadId: session.uploadId, jobId: session.jobId });
-    } else if (session.uploadUrl) {
-      // Direct upload for medium files
-      const response = await fetch(session.uploadUrl, {
-        method: 'PUT',
-        body: file,
-        headers: {
-          'Content-Type': file.type
-        }
-      });
-      
-      if (!response.ok) {
-        throw new Error(`Upload failed: ${response.status} ${response.statusText}`);
-      }
-    } else {
-      throw new Error('Invalid session: missing uploadUrl for direct upload or required multipart data');
-    }
-  }
+  /**
+   * Upload file via server-side endpoint to bypass school network restrictions.
+   * School networks block direct S3 presigned URL uploads, but allow uploads
+   * to aistudio.psd401.ai domain which then proxies to S3.
+   *
+   * @see https://github.com/psd401/aistudio/issues/632
+   */
+  const uploadViaServer = async (file: File): Promise<{ jobId: string }> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('purpose', 'assistant');
+    formData.append('processingOptions', JSON.stringify({
+      extractText: true,
+      convertToMarkdown: true,
+      extractImages: false,
+      generateEmbeddings: false,
+      ocrEnabled: true
+    }));
 
-  const multipartUpload = async (file: File, session: { partUrls: { uploadUrl: string }[]; uploadId: string; jobId: string }) => {
-    const partSize = 5 * 1024 * 1024; // 5MB chunks
-    const parts = [];
-    
-    for (let i = 0; i < session.partUrls.length; i++) {
-      const start = i * partSize;
-      const end = Math.min(start + partSize, file.size);
-      const chunk = file.slice(start, end);
-      
-      const response = await fetch(session.partUrls[i].uploadUrl, {
-        method: 'PUT',
-        body: chunk
-      });
-      
-      if (!response.ok) {
-        throw new Error(`Part upload failed: ${response.status}`);
-      }
-      
-      parts.push({
-        ETag: response.headers.get('ETag')?.replace(/"/g, ''),
-        PartNumber: i + 1
-      });
-    }
-    
-    // Complete multipart upload
-    const completeResponse = await fetch('/api/documents/v2/complete-multipart', {
+    const response = await fetch('/api/documents/v2/upload', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        uploadId: session.uploadId,
-        jobId: session.jobId,
-        parts
-      })
+      body: formData, // No Content-Type header - browser sets it with boundary
     });
-    
-    if (!completeResponse.ok) {
-      throw new Error('Failed to complete multipart upload');
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({ error: 'Upload failed' }));
+      throw new Error(errorData.error || `Upload failed: ${response.status}`);
     }
+
+    const result = await response.json();
+
+    if (!result.jobId) {
+      throw new Error('Server upload response missing jobId');
+    }
+
+    return { jobId: result.jobId };
   }
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -274,65 +250,16 @@ export default function DocumentUploadButton({
 
     setIsLoading(true)
     setUploadedFileName(null)
-    setProcessingStatus("Preparing upload...")
-    
+    setProcessingStatus("Uploading...")
+
     try {
-      // Step 1: Initiate upload
-      const initiateResponse = await fetch("/api/documents/v2/initiate-upload", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          fileName: file.name,
-          fileSize: file.size,
-          fileType: file.type,
-          purpose: 'assistant',
-          processingOptions: {
-            extractText: true,
-            convertToMarkdown: true,
-            extractImages: false, // Keep false for text focus
-            generateEmbeddings: false, // Not needed for direct context
-            ocrEnabled: true // Enable for scanned documents
-          }
-        }),
-      })
-
-      if (!initiateResponse.ok) {
-        const errorData = await initiateResponse.json().catch(() => ({}))
-        throw new Error(errorData.error || `Failed to initiate upload: ${initiateResponse.status}`)
-      }
-
-      const initiateData = await initiateResponse.json()
-      const { jobId, uploadId } = initiateData
-
-      setProcessingStatus("Uploading...")
-
-      // Step 2: Upload file to S3
-      await uploadToS3(file, initiateData)
-
-      setProcessingStatus("Confirming upload...")
-
-      // Step 3: Confirm upload
-      const confirmResponse = await fetch("/api/documents/v2/confirm-upload", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          jobId,
-          uploadId,
-        }),
-      })
-
-      if (!confirmResponse.ok) {
-        const errorData = await confirmResponse.json().catch(() => ({}))
-        throw new Error(errorData.error || `Failed to confirm upload: ${confirmResponse.status}`)
-      }
+      // Use server-side upload to bypass school network restrictions on S3 presigned URLs
+      // See: https://github.com/psd401/aistudio/issues/632
+      const { jobId } = await uploadViaServer(file)
 
       setProcessingStatus("Processing document...")
 
-      // Step 4: Start polling for job status
+      // Poll for job status
       pollJobStatus(jobId, file.name)
       
     } catch (err) {
