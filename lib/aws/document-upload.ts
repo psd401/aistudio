@@ -3,6 +3,7 @@ import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createLogger } from '@/lib/logger';
 import { Readable } from 'node:stream';
+import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 
 const s3Client = new S3Client({});
 const log = createLogger({ service: 'document-upload' });
@@ -279,9 +280,9 @@ export async function uploadToS3(config: DirectUploadConfig): Promise<DirectUplo
     let body: Buffer | Readable;
 
     if (fileStream) {
-      // Convert ReadableStream to Node.js Readable stream for streaming upload
+      // Convert Web ReadableStream to Node.js Readable stream for streaming upload
       // This is memory-efficient for large files
-      body = Readable.fromWeb(fileStream as never);
+      body = Readable.fromWeb(fileStream as WebReadableStream<Uint8Array>);
 
       // Use Upload class for streaming (handles multipart automatically)
       const upload = new Upload({

@@ -28,9 +28,13 @@ function extractTextFromResult(result: JobResult['result']): string {
   throw new Error('No content extracted from document')
 }
 
-/** Calculate next poll interval with jitter (±10%) to prevent thundering herd */
+/**
+ * Calculate next poll interval with jitter to prevent thundering herd.
+ * Jitter multiplier is uniformly distributed in [0.9, 1.1) (i.e., -10% to +10%).
+ */
 function getNextInterval(currentInterval: number): { interval: number; jitteredInterval: number } {
   const nextInterval = Math.min(currentInterval * 1.2, 5000)
+  // Uniformly distributed in [0.9, 1.1): Math.random() * 0.2 gives [0, 0.2), + 0.9 gives [0.9, 1.1)
   const jitter = Math.random() * 0.2 + 0.9
   return { interval: nextInterval, jitteredInterval: nextInterval * jitter }
 }
@@ -78,7 +82,10 @@ export function useDocumentUploadPolling() {
     let attempts = 0
     let pollInterval = 1000
 
-    // Create new AbortController for this polling session
+    // Cancel any existing polling session to prevent leaking AbortControllers
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
+    }
     abortControllerRef.current = new AbortController()
 
     const handleJobCompleted = (job: JobResult) => {

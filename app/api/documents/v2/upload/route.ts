@@ -13,14 +13,29 @@ import { apiRateLimit } from '@/lib/rate-limit';
  * This endpoint bypasses school network restrictions that block direct S3 presigned URL uploads.
  * The flow is: Client → aistudio.psd401.ai/api/upload → S3
  *
+ * ## Body Size Limits
+ * - Validation allows up to 500MB (see UploadRequestSchema)
+ * - IMPORTANT: Actual upload limit depends on infrastructure configuration:
+ *   - ECS task memory allocation
+ *   - ALB request timeout/size limits
+ *   - Next.js formData() loads entire file into memory before streaming to S3
+ *
+ * ## Memory Considerations
+ * - req.formData() loads the file into memory (Next.js limitation)
+ * - 500MB file = 500MB+ memory per concurrent upload
+ * - Rate limit: 5 uploads/min/user helps control concurrent memory usage
+ * - ECS task memory should be ≥2GB for production deployments
+ * - Monitor CloudWatch ECS memory metrics after deployment
+ *
+ * ## Security Note
+ * - MIME type validation is string-based; actual file content validated by Lambda processor
+ * - Magic bytes validation could be added here for defense-in-depth
+ *
  * @see https://github.com/psd401/aistudio/issues/632
  */
 
 export const runtime = 'nodejs';
-// Increase max execution time to handle large file uploads (500MB max)
-// Body size limits: next.config.mjs serverActions.bodySizeLimit (100mb for server actions)
-// Note: API routes use different limits; for multipart uploads, body parsing is handled by formData()
-export const maxDuration = 120;
+export const maxDuration = 120; // 2 minutes for large file uploads
 
 const DEFAULT_PROCESSING_OPTIONS = {
   extractText: true,
@@ -53,22 +68,43 @@ function parseProcessingOptions(processingOptionsRaw: string | null, log: Return
   }
 }
 
+/** Error classification patterns with user-friendly messages */
+const ERROR_PATTERNS: Array<{ patterns: string[]; message: string; status: number }> = [
+  {
+    patterns: ['file size', 'exceeds'],
+    message: 'File size exceeds maximum allowed',
+    status: 413
+  },
+  {
+    patterns: ['file format', 'file type', 'unsupported format', 'invalid mime'],
+    message: 'Invalid file format',
+    status: 415
+  },
+  {
+    patterns: ['request timeout', 'upload timeout', 'timed out', 'etimedout'],
+    message: 'Upload timed out - please try again',
+    status: 408
+  },
+  {
+    patterns: ['s3', 'storage service', 'bucket'],
+    message: 'Storage service temporarily unavailable',
+    status: 503
+  }
+];
+
 /**
- * Classify error and return user-friendly message with status code
+ * Classify error and return user-friendly message with status code.
+ * Uses specific patterns to avoid misclassifying unrelated errors.
  */
 function classifyUploadError(errorMessage: string): { message: string; status: number } {
-  if (errorMessage.includes('size') || errorMessage.includes('Size')) {
-    return { message: 'File size exceeds maximum allowed', status: 413 };
+  const lowerMessage = errorMessage.toLowerCase();
+
+  for (const { patterns, message, status } of ERROR_PATTERNS) {
+    if (patterns.some(pattern => lowerMessage.includes(pattern))) {
+      return { message, status };
+    }
   }
-  if (errorMessage.includes('format') || errorMessage.includes('type')) {
-    return { message: 'Invalid file format', status: 415 };
-  }
-  if (errorMessage.includes('timeout') || errorMessage.includes('Timeout')) {
-    return { message: 'Upload timed out - please try again', status: 408 };
-  }
-  if (errorMessage.includes('S3') || errorMessage.includes('storage')) {
-    return { message: 'Storage service temporarily unavailable', status: 503 };
-  }
+
   return { message: 'Failed to upload file', status: 500 };
 }
 
@@ -81,13 +117,14 @@ async function uploadHandler(req: NextRequest) {
   let fileName: string | undefined;
   let fileSize: number | undefined;
   let userId: string | undefined;
+  let jobId: string | undefined;
 
   try {
     // Authentication
     const session = await getServerSession();
     if (!session?.sub) {
       log.warn('Unauthorized request');
-      return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+      return NextResponse.json({ error: 'Unauthorized', requestId }, { status: 401 });
     }
     userId = session.sub;
 
@@ -99,7 +136,7 @@ async function uploadHandler(req: NextRequest) {
 
     if (!file) {
       log.warn('No file provided');
-      return NextResponse.json({ error: 'No file provided' }, { status: 400 });
+      return NextResponse.json({ error: 'No file provided', requestId }, { status: 400 });
     }
 
     // Parse processing options
@@ -123,7 +160,8 @@ async function uploadHandler(req: NextRequest) {
       return NextResponse.json(
         {
           error: 'Invalid request data',
-          details: validationResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`)
+          details: validationResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`),
+          requestId
         },
         { status: 400 }
       );
@@ -148,8 +186,9 @@ async function uploadHandler(req: NextRequest) {
       userId: session.sub,
       processingOptions
     });
+    jobId = job.id;
 
-    log.info('Job created', { jobId: job.id });
+    log.info('Job created', { jobId });
 
     // Step 2: Upload file to S3 using SDK with streaming (memory-efficient)
     // Uses File.stream() to avoid loading entire file into memory
@@ -172,7 +211,7 @@ async function uploadHandler(req: NextRequest) {
     // Step 4: Send to processing queue (matching confirm-upload flow)
     if (process.env.NODE_ENV !== 'test' && !process.env.DOCUMENTS_BUCKET_NAME) {
       log.error('DOCUMENTS_BUCKET_NAME environment variable not configured');
-      return NextResponse.json({ error: 'Service configuration error' }, { status: 500 });
+      return NextResponse.json({ error: 'Service configuration error', requestId }, { status: 500 });
     }
 
     await sendToProcessingQueue({
@@ -199,13 +238,16 @@ async function uploadHandler(req: NextRequest) {
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     const errorName = error instanceof Error ? error.name : 'Unknown';
+    const errorStack = error instanceof Error ? error.stack : undefined;
 
     log.error('Server-side upload failed', {
       error: errorMessage,
       name: errorName,
+      stack: errorStack,
       fileName,
       fileSize,
       userId,
+      jobId,
       requestId
     });
 
