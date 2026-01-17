@@ -4,6 +4,8 @@ import { createDocumentJob, confirmDocumentUpload } from '@/lib/services/documen
 import { uploadToS3 } from '@/lib/aws/document-upload';
 import { sendToProcessingQueue } from '@/lib/aws/lambda-trigger';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+import { UploadRequestSchema } from '@/lib/validation/document-upload.validation';
+import { apiRateLimit } from '@/lib/rate-limit';
 
 /**
  * Server-side upload endpoint that proxies file uploads through the application server to S3.
@@ -14,38 +16,11 @@ import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
  * @see https://github.com/psd401/aistudio/issues/632
  */
 
-// Size limits based on purpose - matching initiate-upload limits
-const LIMITS = {
-  chat: 100 * 1024 * 1024,      // 100MB for chat
-  repository: 500 * 1024 * 1024, // 500MB for repositories
-  assistant: 50 * 1024 * 1024    // 50MB for assistant building
-} as const;
-
-// Supported file types - matching initiate-upload
-const SUPPORTED_TYPES = [
-  'application/pdf',
-  'application/vnd.openxmlformats-officedocument.wordprocessingml.document', // .docx
-  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
-  'application/vnd.openxmlformats-officedocument.presentationml.presentation', // .pptx
-  'application/msword', // .doc
-  'application/vnd.ms-excel', // .xls
-  'application/vnd.ms-powerpoint', // .ppt
-  'text/plain',
-  'text/markdown',
-  'text/csv',
-  'application/json',
-  'application/xml',
-  'text/xml',
-  'application/x-yaml',
-  'text/yaml',
-  'text/x-yaml',
-];
-
 export const runtime = 'nodejs';
-// Increase body size limit for file uploads (100MB max)
+// Increase max execution time to handle large file uploads; body size limits are configured elsewhere
 export const maxDuration = 120;
 
-export async function POST(req: NextRequest) {
+async function uploadHandler(req: NextRequest) {
   const requestId = generateRequestId();
   const timer = startTimer('api.documents.v2.upload');
   const log = createLogger({ requestId, route: 'api.documents.v2.upload' });
@@ -69,15 +44,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No file provided' }, { status: 400 });
     }
 
-    // Validate purpose
-    if (!['chat', 'repository', 'assistant'].includes(purpose)) {
-      log.warn('Invalid purpose', { purpose });
-      return NextResponse.json({ error: 'Invalid purpose' }, { status: 400 });
-    }
-
-    const validPurpose = purpose as 'chat' | 'repository' | 'assistant';
-
-    // Parse processing options with defaults
+    // Parse processing options
     let processingOptions = {
       extractText: true,
       convertToMarkdown: false,
@@ -105,36 +72,35 @@ export async function POST(req: NextRequest) {
     const fileSize = file.size;
     const fileType = file.type;
 
+    // Validate using shared Zod schema (ensures resource exhaustion protection)
+    const validationResult = UploadRequestSchema.safeParse({
+      fileName,
+      fileSize,
+      fileType,
+      purpose,
+      processingOptions,
+    });
+
+    if (!validationResult.success) {
+      log.warn('Validation failed', { errors: validationResult.error.issues });
+      return NextResponse.json(
+        {
+          error: 'Invalid request data',
+          details: validationResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`)
+        },
+        { status: 400 }
+      );
+    }
+
+    const validPurpose = validationResult.data.purpose;
+
     log.info('Server-side upload request', {
       fileName,
       fileSize,
       fileType,
       purpose: validPurpose,
-      userId: session.userId
+      userId: session.sub
     });
-
-    // Validate file size
-    const maxSize = LIMITS[validPurpose];
-    if (fileSize > maxSize) {
-      log.warn('File size exceeds limit', {
-        fileSize,
-        limit: maxSize,
-        purpose: validPurpose
-      });
-      return NextResponse.json(
-        { error: `File exceeds ${validPurpose} limit of ${maxSize / (1024*1024)}MB` },
-        { status: 400 }
-      );
-    }
-
-    // Validate file type
-    if (!SUPPORTED_TYPES.includes(fileType)) {
-      log.warn('Unsupported file type', { fileType });
-      return NextResponse.json(
-        { error: `Unsupported file type: ${fileType}` },
-        { status: 400 }
-      );
-    }
 
     // Step 1: Create job in DynamoDB
     const job = await createDocumentJob({
@@ -148,17 +114,22 @@ export async function POST(req: NextRequest) {
 
     log.info('Job created', { jobId: job.id });
 
-    // Step 2: Upload file to S3 using SDK (bypasses presigned URL)
+    // Step 2: Upload file to S3 using SDK with streaming (memory-efficient)
+    // Uses File.stream() to avoid loading entire file into memory
     const s3Result = await uploadToS3({
       jobId: job.id,
       fileName,
-      fileBuffer: Buffer.from(await file.arrayBuffer()),
+      fileStream: file.stream(),
       contentType: fileType,
     });
 
     log.info('File uploaded to S3', { jobId: job.id, s3Key: s3Result.s3Key });
 
     // Step 3: Confirm upload
+    // In the direct-upload flow there is no separate uploadId like in the presigned URL flow.
+    // We intentionally use job.id for both jobId and uploadId here. The confirmDocumentUpload
+    // function accepts both parameters to maintain API compatibility with the presigned URL flow,
+    // but in this server-side upload pattern, they are the same identifier.
     await confirmDocumentUpload(job.id, job.id);
 
     // Step 4: Send to processing queue (matching confirm-upload flow)
@@ -200,3 +171,6 @@ export async function POST(req: NextRequest) {
     );
   }
 }
+
+// Export rate-limited handler (5 uploads per minute per user)
+export const POST = apiRateLimit.upload(uploadHandler);

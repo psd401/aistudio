@@ -1,6 +1,8 @@
 import { S3Client, PutObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand } from '@aws-sdk/client-s3';
+import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createLogger } from '@/lib/logger';
+import { Readable } from 'node:stream';
 
 const s3Client = new S3Client({});
 const log = createLogger({ service: 'document-upload' });
@@ -246,7 +248,8 @@ export interface S3UploadResult {
 export interface DirectUploadConfig {
   jobId: string;
   fileName: string;
-  fileBuffer: Buffer;
+  fileBuffer?: Buffer;
+  fileStream?: ReadableStream<Uint8Array>;
   contentType: string;
 }
 
@@ -260,30 +263,67 @@ export interface DirectUploadResult {
  * Upload a file directly to S3 using the SDK (server-side).
  * This bypasses presigned URLs which can be blocked by school network proxies.
  *
+ * Supports both streaming and buffered uploads:
+ * - For streaming (memory-efficient): Use fileStream
+ * - For buffered (legacy): Use fileBuffer
+ *
  * @see https://github.com/psd401/aistudio/issues/632
  */
 export async function uploadToS3(config: DirectUploadConfig): Promise<DirectUploadResult> {
-  const { jobId, fileName, fileBuffer, contentType } = config;
+  const { jobId, fileName, fileBuffer, fileStream, contentType } = config;
   const sanitizedFileName = sanitizeFileName(fileName);
   const s3Key = `v2/uploads/${jobId}/${sanitizedFileName}`;
   const bucket = getDocumentsBucket();
 
   try {
-    const command = new PutObjectCommand({
-      Bucket: bucket,
-      Key: s3Key,
-      Body: fileBuffer,
-      ContentType: contentType,
-      Metadata: {
-        jobId,
-        originalFileName: fileName,
-        uploadTimestamp: Date.now().toString(),
-      },
-    });
+    let body: Buffer | Readable;
 
-    await s3Client.send(command);
+    if (fileStream) {
+      // Convert ReadableStream to Node.js Readable stream for streaming upload
+      // This is memory-efficient for large files
+      body = Readable.fromWeb(fileStream as never);
 
-    log.info('Direct S3 upload completed', { jobId, fileName, s3Key, size: fileBuffer.length });
+      // Use Upload class for streaming (handles multipart automatically)
+      const upload = new Upload({
+        client: s3Client,
+        params: {
+          Bucket: bucket,
+          Key: s3Key,
+          Body: body,
+          ContentType: contentType,
+          Metadata: {
+            jobId,
+            originalFileName: fileName,
+            uploadTimestamp: Date.now().toString(),
+          },
+        },
+        queueSize: 4, // Concurrent parts
+        partSize: 5 * 1024 * 1024, // 5MB chunks
+      });
+
+      await upload.done();
+
+      log.info('Direct S3 streaming upload completed', { jobId, fileName, s3Key, method: 'streaming' });
+    } else if (fileBuffer) {
+      // Legacy buffered upload (loads entire file in memory)
+      const command = new PutObjectCommand({
+        Bucket: bucket,
+        Key: s3Key,
+        Body: fileBuffer,
+        ContentType: contentType,
+        Metadata: {
+          jobId,
+          originalFileName: fileName,
+          uploadTimestamp: Date.now().toString(),
+        },
+      });
+
+      await s3Client.send(command);
+
+      log.info('Direct S3 buffered upload completed', { jobId, fileName, s3Key, size: fileBuffer.length, method: 'buffered' });
+    } else {
+      throw new Error('Either fileBuffer or fileStream must be provided');
+    }
 
     return {
       s3Key,
