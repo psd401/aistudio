@@ -16,7 +16,7 @@ const nextConfig = {
     ]
   },
   experimental: {
-    serverComponentsExternalPackages: ['mammoth', 'pdf-parse'], // Include pdf-parse for externalization
+    serverComponentsExternalPackages: ['mammoth', 'pdf-parse', '@aws-sdk/lib-storage'], // Server-only packages with Node.js dependencies
     serverActions: {
       bodySizeLimit: '100mb', // Match the file upload limit from settings
     },
