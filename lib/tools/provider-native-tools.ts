@@ -3,6 +3,7 @@ import { google } from '@ai-sdk/google'
 import { Settings } from '@/lib/settings-manager'
 import { createLogger } from '@/lib/logger'
 import type { ToolSet } from 'ai'
+import { createShowChartTool } from './show-chart-tool'
 
 const log = createLogger({ module: 'provider-native-tools' })
 
@@ -22,17 +23,45 @@ export async function createProviderNativeTools(
     enabledToolsCount: enabledTools.length
   });
 
+  // Start with universal tools that work with any provider
+  const tools: ToolSet = await createUniversalTools(enabledTools)
+
+  // Add provider-specific native tools
+  let providerTools: ToolSet = {}
   switch (provider.toLowerCase()) {
     case 'openai':
-      return await createOpenAINativeTools(enabledTools)
+      providerTools = await createOpenAINativeTools(enabledTools)
+      break
     case 'google':
-      return await createGoogleNativeTools(enabledTools)
+      providerTools = await createGoogleNativeTools(enabledTools)
+      break
     case 'amazon-bedrock':
-      return await createBedrockNativeTools(enabledTools)
+      providerTools = await createBedrockNativeTools(enabledTools)
+      break
     default:
       log.warn(`No native tools available for provider: ${provider}`)
-      return {}
   }
+
+  return { ...tools, ...providerTools }
+}
+
+/**
+ * Create universal tools that work with any provider
+ * These are custom tools implemented in AI Studio
+ */
+async function createUniversalTools(enabledTools: string[]): Promise<ToolSet> {
+  const tools: Record<string, unknown> = {}
+
+  // Chart visualization tool - works with any provider
+  const hasShowChart = enabledTools.some(t =>
+    ['showChart', 'show_chart'].includes(t)
+  )
+  if (hasShowChart) {
+    tools.show_chart = createShowChartTool()
+    log.debug('Added show_chart visualization tool')
+  }
+
+  return tools as ToolSet
 }
 
 /**
@@ -141,6 +170,11 @@ async function createBedrockNativeTools(enabledTools: string[]): Promise<ToolSet
  * Check if a provider supports native tools
  */
 export function providerSupportsNativeTools(provider: string, toolName: string): boolean {
+  // Universal tools work with any provider
+  if (['showChart', 'show_chart'].includes(toolName)) {
+    return true
+  }
+
   switch (provider.toLowerCase()) {
     case 'openai':
       return ['webSearch', 'codeInterpreter'].includes(toolName)
