@@ -231,98 +231,86 @@ Please try re-uploading or contact support if the issue persists.`
     return { jobId: result.jobId };
   }
 
+  private formatJobResult(result: { markdown?: string; text?: string; images?: unknown[] }, fileName: string) {
+    const content = []
+
+    if (result.markdown) {
+      content.push({
+        type: 'text' as const,
+        text: `\`\`\`document:${fileName}\n${result.markdown}\n\`\`\``
+      })
+    } else if (result.text) {
+      content.push({
+        type: 'text' as const,
+        text: `\`\`\`document:${fileName}\n${result.text}\n\`\`\``
+      })
+    } else {
+      content.push({
+        type: 'text' as const,
+        text: `\`\`\`document:${fileName}\n*Document processed but no text content was extracted.*\n\nThis might be because:\n- The document contains only images\n- The document is password protected\n- The document format is not fully supported\n\`\`\``
+      })
+    }
+
+    if (result.images && result.images.length > 0) {
+      content.push({
+        type: 'text' as const,
+        text: `\n**Extracted Images:** ${result.images.length} image(s) found`
+      })
+    }
+
+    return content
+  }
+
+  private async fetchJobStatus(jobId: string) {
+    const response = await fetch(`/api/documents/v2/jobs/${jobId}`)
+
+    if (!response.ok) {
+      throw new Error(`Failed to check job status: ${response.status}`)
+    }
+
+    return response.json()
+  }
+
   private async pollForResults(jobId: string, fileName: string, maxAttempts = 60) {
-    let attempts = 0;
-    let pollInterval = 1000; // Start with 1 second
-    
+    let attempts = 0
+    let pollInterval = 1000
+
     while (attempts < maxAttempts) {
       try {
-        const response = await fetch(`/api/documents/v2/jobs/${jobId}`);
-        
-        if (!response.ok) {
-          throw new Error(`Failed to check job status: ${response.status}`);
-        }
-      
-      const job = await response.json();
-      
-      if (job.status === 'completed') {
-        // Return content in assistant-ui format using code block for collapsible UI
-        const result = job.result;
-        const content = [];
+        const job = await this.fetchJobStatus(jobId)
 
-        if (result.markdown) {
-          content.push({
-            type: 'text' as const,
-            text: `\`\`\`document:${fileName}
-${result.markdown}
-\`\`\``
-          });
-        } else if (result.text) {
-          content.push({
-            type: 'text' as const,
-            text: `\`\`\`document:${fileName}
-${result.text}
-\`\`\``
-          });
-        } else {
-          content.push({
-            type: 'text' as const,
-            text: `\`\`\`document:${fileName}
-*Document processed but no text content was extracted.*
-
-This might be because:
-- The document contains only images
-- The document is password protected
-- The document format is not fully supported
-\`\`\``
-          });
+        if (job.status === 'completed') {
+          return this.formatJobResult(job.result, fileName)
+        } else if (job.status === 'failed') {
+          throw new Error(job.error || 'Server processing failed')
+        } else if (job.status === 'processing' && job.progress && job.processingStage) {
+          log.info('Processing progress', {
+            jobId,
+            progress: job.progress,
+            stage: job.processingStage
+          })
         }
 
-        // Add images if extracted
-        if (result.images && result.images.length > 0) {
-          content.push({
-            type: 'text' as const,
-            text: `\n**Extracted Images:** ${result.images.length} image(s) found`
-          });
-        }
-
-        return content;
-      } else if (job.status === 'failed') {
-        throw new Error(job.error || 'Server processing failed');
-      } else if (job.status === 'processing') {
-        // Show progress if available
-        if (job.progress && job.processingStage) {
-          log.info('Processing progress', { 
-            jobId, 
-            progress: job.progress, 
-            stage: job.processingStage 
-          });
-        }
-      }
-      
-        // Wait before next poll with exponential backoff
-        await new Promise(resolve => setTimeout(resolve, pollInterval));
-        pollInterval = Math.min(pollInterval * 1.2, 5000); // Max 5 seconds
-        attempts++;
+        await new Promise(resolve => setTimeout(resolve, pollInterval))
+        pollInterval = Math.min(pollInterval * 1.2, 5000)
+        attempts++
       } catch (error) {
-        // If fetch fails, log it but continue trying
         if (attempts < maxAttempts - 1) {
-          log.warn('Polling request failed, retrying', { 
-            error: error instanceof Error ? error.message : 'Unknown error', 
-            jobId, 
+          log.warn('Polling request failed, retrying', {
+            error: error instanceof Error ? error.message : 'Unknown error',
+            jobId,
             attempts,
-            nextRetryIn: pollInterval 
-          });
-          await new Promise(resolve => setTimeout(resolve, pollInterval));
-          attempts++;
-          continue;
+            nextRetryIn: pollInterval
+          })
+          await new Promise(resolve => setTimeout(resolve, pollInterval))
+          attempts++
+          continue
         }
-        // On final attempt, throw the error
-        throw error;
+        throw error
       }
     }
-    
-    throw new Error('Processing timeout - document processing took too long');
+
+    throw new Error('Processing timeout - document processing took too long')
   }
 
   private formatProcessingTime(startTime: string, endTime: string): string {
