@@ -20,6 +20,37 @@ export const runtime = 'nodejs';
 // Increase max execution time to handle large file uploads; body size limits are configured elsewhere
 export const maxDuration = 120;
 
+/**
+ * Parse and validate processing options from form data
+ */
+function parseProcessingOptions(processingOptionsRaw: string | null, log: ReturnType<typeof createLogger>) {
+  const defaults = {
+    extractText: true,
+    convertToMarkdown: false,
+    extractImages: false,
+    generateEmbeddings: false,
+    ocrEnabled: true,
+  };
+
+  if (!processingOptionsRaw) {
+    return defaults;
+  }
+
+  try {
+    const parsed = JSON.parse(processingOptionsRaw);
+    return {
+      extractText: parsed.extractText ?? true,
+      convertToMarkdown: parsed.convertToMarkdown ?? false,
+      extractImages: parsed.extractImages ?? false,
+      generateEmbeddings: parsed.generateEmbeddings ?? false,
+      ocrEnabled: parsed.ocrEnabled ?? true,
+    };
+  } catch {
+    log.warn('Invalid processingOptions JSON, using defaults');
+    return defaults;
+  }
+}
+
 async function uploadHandler(req: NextRequest) {
   const requestId = generateRequestId();
   const timer = startTimer('api.documents.v2.upload');
@@ -45,28 +76,7 @@ async function uploadHandler(req: NextRequest) {
     }
 
     // Parse processing options
-    let processingOptions = {
-      extractText: true,
-      convertToMarkdown: false,
-      extractImages: false,
-      generateEmbeddings: false,
-      ocrEnabled: true,
-    };
-
-    if (processingOptionsRaw) {
-      try {
-        const parsed = JSON.parse(processingOptionsRaw);
-        processingOptions = {
-          extractText: parsed.extractText ?? true,
-          convertToMarkdown: parsed.convertToMarkdown ?? false,
-          extractImages: parsed.extractImages ?? false,
-          generateEmbeddings: parsed.generateEmbeddings ?? false,
-          ocrEnabled: parsed.ocrEnabled ?? true,
-        };
-      } catch {
-        log.warn('Invalid processingOptions JSON, using defaults');
-      }
-    }
+    const processingOptions = parseProcessingOptions(processingOptionsRaw, log);
 
     const fileName = file.name;
     const fileSize = file.size;
