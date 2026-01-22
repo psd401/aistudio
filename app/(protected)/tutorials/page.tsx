@@ -48,8 +48,8 @@ const VIDEO_TUTORIALS: VideoTutorial[] = [
   },
   {
     id: 'video-2',
-    title: 'Introduction to Assistant Catalog',
-    duration: '5:30',
+    title: 'Intro to Reporting Bugs',
+    embedUrl: 'https://www.canva.com/design/DAG8Rogy5Cw/IA5mq1K1Cs0XLuvvtV0D8Q/watch?embed',
   },
   {
     id: 'video-3',
