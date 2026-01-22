@@ -39,17 +39,17 @@ const FEATURED_VIDEO: VideoTutorial = {
   featured: true,
 };
 
-// Placeholder video tutorials - replace embedUrl with actual video URLs when ready
+// Video tutorials - add embedUrl when videos are ready
 const VIDEO_TUTORIALS: VideoTutorial[] = [
   {
     id: 'video-1',
-    title: 'Introduction to Assistant Catalog',
-    duration: '5:30',
+    title: 'Intro to Prompt Library',
+    embedUrl: 'https://www.canva.com/design/DAG7PR_eCKM/0qGJbjZBlwGQfsuDzwkKow/watch?embed',
   },
   {
     id: 'video-2',
-    title: 'Creating Effective Prompts',
-    duration: '8:15',
+    title: 'Introduction to Assistant Catalog',
+    duration: '5:30',
   },
   {
     id: 'video-3',
@@ -195,10 +195,23 @@ function VideoCard({ video }: { video: VideoTutorial }) {
       className={cn(
         'bg-white rounded-2xl border border-border/40 shadow-sm overflow-hidden',
         'transition-all duration-200 ease-out',
-        'hover:shadow-lg hover:border-border/60 hover:-translate-y-0.5'
+        !video.embedUrl && 'hover:shadow-lg hover:border-border/60 hover:-translate-y-0.5'
       )}
     >
-      <VideoThumbnail video={video} />
+      {video.embedUrl ? (
+        <div className="relative w-full aspect-video">
+          <iframe
+            title={video.title}
+            loading="lazy"
+            className="absolute top-0 left-0 w-full h-full border-0"
+            src={video.embedUrl}
+            allowFullScreen
+            allow="fullscreen"
+          />
+        </div>
+      ) : (
+        <VideoThumbnail video={video} />
+      )}
       <div className="p-4">
         <h3 className="font-semibold text-foreground line-clamp-2">
           {video.title}
