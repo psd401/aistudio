@@ -237,11 +237,24 @@ export class DatabaseStack extends cdk.Stack {
         removalPolicy: props.environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
       });
 
+      // Create explicit role to avoid CDK's deprecated fromAwsManagedPolicyName
+      const dbInitLambdaRole = new iam.Role(this, 'DbInitLambdaRole', {
+        assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+        managedPolicies: [
+          iam.ManagedPolicy.fromManagedPolicyArn(
+            this,
+            'DbInitLambdaBasicExecPolicy',
+            'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+          ),
+        ],
+      });
+
       // Database initialization Lambda
       // Note: Lambda doesn't need to be in VPC since it uses RDS Data API
       const dbInitLambda = new lambda.Function(this, 'DbInitLambda', {
         runtime: lambda.Runtime.NODEJS_20_X,
         handler: 'index.handler',
+        role: dbInitLambdaRole,
         code: lambda.Code.fromAsset(path.join(__dirname, '../database/lambda'), {
           bundling: {
             image: lambda.Runtime.NODEJS_20_X.bundlingImage,
@@ -298,9 +311,22 @@ export class DatabaseStack extends cdk.Stack {
         removalPolicy: props.environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
       });
 
-      // Create Custom Resource Provider with explicit log group to avoid deprecation warning
+      // Create explicit role for the Provider's framework Lambda to avoid deprecated fromAwsManagedPolicyName
+      const dbInitProviderFrameworkRole = new iam.Role(this, 'DbInitProviderFrameworkRole', {
+        assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+        managedPolicies: [
+          iam.ManagedPolicy.fromManagedPolicyArn(
+            this,
+            'DbInitProviderFrameworkExecPolicy',
+            'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+          ),
+        ],
+      });
+
+      // Create Custom Resource Provider with explicit framework role to avoid deprecation warning
       const dbInitProvider = new cr.Provider(this, 'DbInitProvider', {
         onEventHandler: dbInitLambda,
+        frameworkOnEventRole: dbInitProviderFrameworkRole,
         logGroup: providerLogGroup,
       });
 

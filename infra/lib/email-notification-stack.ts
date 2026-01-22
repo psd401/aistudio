@@ -96,8 +96,21 @@ export class EmailNotificationStack extends cdk.Stack {
       removalPolicy: props.environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
+    // Create explicit role to avoid CDK's deprecated fromAwsManagedPolicyName
+    const notificationSenderRole = new iam.Role(this, 'NotificationSenderRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromManagedPolicyArn(
+          this,
+          'NotificationSenderLambdaBasicExecPolicy',
+          'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        ),
+      ],
+    });
+
     // Lambda function for sending email notifications
     this.notificationSenderFunction = new lambda.Function(this, 'NotificationSender', {
+      role: notificationSenderRole,
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../lambdas/notification-sender'), {

@@ -116,7 +116,11 @@ export class DocumentProcessingStack extends cdk.Stack {
     const processorRole = new iam.Role(this, 'ProcessorRole', {
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
       managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+        iam.ManagedPolicy.fromManagedPolicyArn(
+          this,
+          'ProcessorLambdaBasicExecPolicy',
+          'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        ),
       ],
       inlinePolicies: {
         ProcessorPolicy: new iam.PolicyDocument({

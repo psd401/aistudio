@@ -153,6 +153,7 @@ export class ProcessingStack extends cdk.Stack {
             }),
             // Textract permissions - requires wildcard (AWS Textract limitation)
             // See: https://docs.aws.amazon.com/textract/latest/dg/security_iam_service-with-iam.html
+            // Note: Textract doesn't support resource-level permissions or service-specific conditions
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
               actions: [

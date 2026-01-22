@@ -116,7 +116,11 @@ export class AuroraCostOptimizer extends Construct {
     const pauseResumeFunctionRole = new iam.Role(this, "PauseResumeFunctionRole", {
       assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
       managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"),
+        iam.ManagedPolicy.fromManagedPolicyArn(
+          this,
+          "PauseResumeLambdaBasicExecPolicy",
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        ),
       ],
     })
 
@@ -213,7 +217,11 @@ export class AuroraCostOptimizer extends Construct {
       const scalingFunctionRole = new iam.Role(this, "ScalingFunctionRole", {
         assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
         managedPolicies: [
-          iam.ManagedPolicy.fromAwsManagedPolicyName("service-role/AWSLambdaBasicExecutionRole"),
+          iam.ManagedPolicy.fromManagedPolicyArn(
+            this,
+            "ScalingLambdaBasicExecPolicy",
+            "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+          ),
         ],
       })
 
