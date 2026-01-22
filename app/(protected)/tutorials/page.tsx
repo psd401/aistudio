@@ -16,9 +16,9 @@ interface VideoTutorial {
   id: string;
   title: string;
   description?: string;
-  thumbnailUrl: string;
-  videoUrl: string;
-  duration: string;
+  thumbnailUrl?: string;
+  embedUrl?: string;
+  duration?: string;
   featured?: boolean;
 }
 
@@ -30,44 +30,35 @@ interface WrittenResource {
   url: string;
 }
 
-// Placeholder content - replace with actual content when ready
+// Featured video with actual Canva embed
 const FEATURED_VIDEO: VideoTutorial = {
   id: 'featured-1',
-  title: 'Mastering AI Lesson Planning with Nexus Chat',
+  title: 'AI Studio Tutorial - Intro to Nexus',
   description: 'Learn how to use Nexus Chat to create engaging lesson plans, generate classroom activities, and streamline your planning workflow.',
-  thumbnailUrl: '/tutorials/placeholder-video.jpg',
-  videoUrl: 'https://www.youtube.com/embed/dQw4w9WgXcQ', // Replace with actual video
-  duration: '12:45',
+  embedUrl: 'https://www.canva.com/design/DAG6qpryQo4/JWLRUS4gvagOLnA-xyi5uQ/watch?embed',
   featured: true,
 };
 
+// Placeholder video tutorials - replace embedUrl with actual video URLs when ready
 const VIDEO_TUTORIALS: VideoTutorial[] = [
   {
     id: 'video-1',
     title: 'Introduction to Assistant Catalog',
-    thumbnailUrl: '/tutorials/placeholder-video.jpg',
-    videoUrl: 'https://www.youtube.com/embed/dQw4w9WgXcQ', // Replace
     duration: '5:30',
   },
   {
     id: 'video-2',
     title: 'Creating Effective Prompts',
-    thumbnailUrl: '/tutorials/placeholder-video.jpg',
-    videoUrl: 'https://www.youtube.com/embed/dQw4w9WgXcQ', // Replace
     duration: '8:15',
   },
   {
     id: 'video-3',
     title: 'Using Model Compare for Feedback',
-    thumbnailUrl: '/tutorials/placeholder-video.jpg',
-    videoUrl: 'https://www.youtube.com/embed/dQw4w9WgXcQ', // Replace
     duration: '6:42',
   },
   {
     id: 'video-4',
     title: 'Getting Started with Assistant Architect',
-    thumbnailUrl: '/tutorials/placeholder-video.jpg',
-    videoUrl: 'https://www.youtube.com/embed/dQw4w9WgXcQ', // Replace
     duration: '10:20',
   },
 ];
@@ -152,10 +143,12 @@ function VideoThumbnail({ video, size = 'normal' }: { video: VideoTutorial; size
       </div>
 
       {/* Duration badge */}
-      <div className="absolute bottom-2 right-2 px-2 py-1 bg-black/70 rounded text-xs text-white font-medium flex items-center gap-1">
-        <IconClock size={12} />
-        {video.duration}
-      </div>
+      {video.duration && (
+        <div className="absolute bottom-2 right-2 px-2 py-1 bg-black/70 rounded text-xs text-white font-medium flex items-center gap-1">
+          <IconClock size={12} />
+          {video.duration}
+        </div>
+      )}
     </div>
   );
 }
@@ -164,7 +157,21 @@ function FeaturedVideoCard({ video }: { video: VideoTutorial }) {
   return (
     <div className="bg-white rounded-2xl border border-border/40 shadow-sm overflow-hidden mb-8">
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-0">
-        <VideoThumbnail video={video} size="featured" />
+        {/* Video Embed - aspect-video gives 16:9 ratio */}
+        <div className="relative w-full aspect-video">
+          {video.embedUrl ? (
+            <iframe
+              title={video.title}
+              loading="lazy"
+              className="absolute top-0 left-0 w-full h-full border-0"
+              src={video.embedUrl}
+              allowFullScreen
+              allow="fullscreen"
+            />
+          ) : (
+            <VideoThumbnail video={video} size="featured" />
+          )}
+        </div>
         <div className="p-6 lg:p-8 flex flex-col justify-center">
           <div className="inline-flex items-center gap-2 px-3 py-1 bg-[#E8927C]/15 text-[#E8927C] rounded-full text-sm font-medium w-fit mb-4">
             <IconPlayerPlay size={14} />
@@ -173,20 +180,9 @@ function FeaturedVideoCard({ video }: { video: VideoTutorial }) {
           <h2 className="text-xl lg:text-2xl font-bold text-[#1B365D] mb-3">
             {video.title}
           </h2>
-          <p className="text-muted-foreground leading-relaxed mb-6">
+          <p className="text-muted-foreground leading-relaxed">
             {video.description}
           </p>
-          <button
-            className={cn(
-              'inline-flex items-center gap-2 px-6 py-3 rounded-full',
-              'bg-[#1B365D] text-white text-sm font-medium',
-              'hover:bg-[#1B365D]/90 transition-colors',
-              'w-fit'
-            )}
-          >
-            <IconPlayerPlay size={18} />
-            Watch Tutorial
-          </button>
         </div>
       </div>
     </div>
