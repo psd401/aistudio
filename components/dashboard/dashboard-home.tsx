@@ -281,7 +281,7 @@ function ToolCardsGrid() {
         <ToolCard
           title="Tutorials"
           description="Learn how to use AI effectively."
-          href="#"
+          href="/tutorials"
           icon={TutorialsIcon}
           accentColor="green"
           ctaText="Start Learning"
