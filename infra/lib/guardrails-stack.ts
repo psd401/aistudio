@@ -182,7 +182,7 @@ export class GuardrailsStack extends cdk.Stack {
       // TTL for automatic token expiration
       timeToLiveAttribute: 'ttl',
       // Point-in-time recovery for compliance
-      pointInTimeRecovery: true,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       // Retain data on stack deletion for production
       removalPolicy: props.environment === 'prod'
         ? cdk.RemovalPolicy.RETAIN

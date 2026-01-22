@@ -63,6 +63,24 @@ export class SchedulerStack extends cdk.Stack {
       removalPolicy: props.environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     });
 
+    // Create explicit role to avoid CDK's deprecated fromAwsManagedPolicyName
+    const scheduleExecutorRole = new iam.Role(this, 'ScheduleExecutorRole', {
+      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+      managedPolicies: [
+        iam.ManagedPolicy.fromManagedPolicyArn(
+          this,
+          'ScheduleExecutorLambdaBasicExecPolicy',
+          'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+        ),
+        // VPC access for Lambda in private subnets
+        iam.ManagedPolicy.fromManagedPolicyArn(
+          this,
+          'ScheduleExecutorVpcAccessPolicy',
+          'arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole'
+        ),
+      ],
+    });
+
     // Lambda function for executing scheduled tasks
     // PowerTuning Result (2025-10-24): 2048MB → 512MB (75% reduction)
     this.scheduleExecutorFunction = new lambda.Function(this, 'ScheduleExecutor', {
@@ -72,6 +90,7 @@ export class SchedulerStack extends cdk.Stack {
       functionName: `aistudio-${props.environment}-schedule-executor`,
       timeout: cdk.Duration.minutes(15), // Full Lambda timeout for long-running Assistant Architect executions
       memorySize: 512, // Optimized via PowerTuning from 2GB
+      role: scheduleExecutorRole,
       // VPC configuration (required to reach internal ECS endpoint)
       vpc,
       vpcSubnets: {

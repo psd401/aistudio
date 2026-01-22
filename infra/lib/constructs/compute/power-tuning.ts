@@ -50,6 +50,22 @@ export class PowerTuningStateMachine extends Construct {
   public readonly stateMachine: sfn.StateMachine
   public readonly logGroup: logs.LogGroup
 
+  /**
+   * Create explicit Lambda role to avoid CDK's deprecated fromAwsManagedPolicyName
+   */
+  private createLambdaRole(id: string): iam.Role {
+    return new iam.Role(this, `${id}Role`, {
+      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        iam.ManagedPolicy.fromManagedPolicyArn(
+          this,
+          `${id}LambdaBasicExecPolicy`,
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        ),
+      ],
+    })
+  }
+
   constructor(
     scope: Construct,
     id: string,
@@ -135,6 +151,7 @@ export class PowerTuningStateMachine extends Construct {
       functionName: `power-tuning-initializer-${props.environment}`,
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: "index.handler",
+      role: this.createLambdaRole("Initializer"),
       code: lambda.Code.fromInline(`
         exports.handler = async (event) => {
           const {
@@ -203,6 +220,7 @@ export class PowerTuningStateMachine extends Construct {
       functionName: `power-tuning-executor-${props.environment}`,
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: "index.handler",
+      role: this.createLambdaRole("Executor"),
       code: lambda.Code.fromInline(`
         const { LambdaClient, InvokeCommand, UpdateFunctionConfigurationCommand, GetFunctionConfigurationCommand } = require('@aws-sdk/client-lambda');
         const lambda = new LambdaClient({});
@@ -387,6 +405,7 @@ export class PowerTuningStateMachine extends Construct {
       functionName: `power-tuning-cleaner-${props.environment}`,
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: "index.handler",
+      role: this.createLambdaRole("Cleaner"),
       code: lambda.Code.fromInline(`
         exports.handler = async (event) => {
           console.log('Cleaning up resources');
@@ -426,6 +445,7 @@ export class PowerTuningStateMachine extends Construct {
       functionName: `power-tuning-analyzer-${props.environment}`,
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: "index.handler",
+      role: this.createLambdaRole("Analyzer"),
       code: lambda.Code.fromInline(`
         exports.handler = async (event) => {
           const { strategy = 'balanced' } = event;
@@ -526,6 +546,7 @@ export class PowerTuningStateMachine extends Construct {
       functionName: `power-tuning-optimizer-${props.environment}`,
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: "index.handler",
+      role: this.createLambdaRole("Optimizer"),
       code: lambda.Code.fromInline(`
         const { LambdaClient, UpdateFunctionConfigurationCommand, TagResourceCommand } = require('@aws-sdk/client-lambda');
         const lambda = new LambdaClient({});
