@@ -49,8 +49,15 @@ export class GuardrailsStack extends cdk.Stack {
       blockedOutputsMessaging: 'The AI response contained inappropriate content and has been blocked for your safety.',
 
       // Content filtering policies - Balanced for K-12 educational use
-      // MEDIUM allows legitimate educational discussions (history, literature, health)
-      // HIGH reserved for sexual content and prompt attacks
+      //
+      // Filter strength rationale (Issue #639):
+      // - LOW: Allows professional educational discussions including behavior management,
+      //   teacher observations, and student incident documentation
+      // - MEDIUM: Allows civil rights, Holocaust, history, literature discussions
+      // - HIGH: Reserved for truly inappropriate K-12 content
+      //
+      // Note: Topic-based filtering (weapons, drugs, self-harm, bullying) and profanity
+      // word lists provide additional protection independent of these content filters.
       contentPolicyConfig: {
         filtersConfig: [
           {
@@ -69,14 +76,20 @@ export class GuardrailsStack extends cdk.Stack {
             outputStrength: 'HIGH',
           },
           {
+            // Issue #639: Lowered from MEDIUM to LOW
+            // MEDIUM was blocking legitimate teacher observation content discussing
+            // student behavioral challenges (e.g., "argued", classroom management)
             type: 'INSULTS',
-            inputStrength: 'MEDIUM', // Allows character analysis in literature
-            outputStrength: 'MEDIUM',
+            inputStrength: 'LOW', // Allows behavior discussions, character analysis
+            outputStrength: 'LOW',
           },
           {
+            // Issue #639: Lowered from MEDIUM to LOW
+            // MEDIUM was blocking legitimate educational content about behavior
+            // management, student consequences, and disciplinary discussions
             type: 'MISCONDUCT',
-            inputStrength: 'MEDIUM', // Allows legal system, drug education discussions
-            outputStrength: 'MEDIUM',
+            inputStrength: 'LOW', // Allows behavior management, legal/drug education
+            outputStrength: 'LOW',
           },
           {
             type: 'PROMPT_ATTACK',
