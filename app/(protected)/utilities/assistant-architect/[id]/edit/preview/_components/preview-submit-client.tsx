@@ -4,7 +4,6 @@ import { useState } from "react"
 import { useRouter } from "next/navigation"
 import { AssistantArchitectStreaming } from "@/components/features/assistant-architect/assistant-architect-streaming"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { submitAssistantArchitectForApprovalAction } from "@/actions/db/assistant-architect-actions"
 import { toast } from "sonner"
 import { AlertCircle, CheckCircle2 } from "lucide-react"
@@ -43,79 +42,61 @@ export function PreviewSubmitClient({
   const requirements = [
     {
       title: "Name",
-      isComplete: !!tool.name,
-      description: "A descriptive name for your assistant"
+      isComplete: !!tool.name
     },
     {
       title: "Description",
-      isComplete: !!tool.description,
-      description: "A clear description of what your assistant does"
+      isComplete: !!tool.description
     },
     {
       title: "Prompts",
-      isComplete: tool.prompts.length > 0,
-      description: "At least one prompt configured"
+      isComplete: tool.prompts.length > 0
     }
   ]
 
   const allRequirementsMet = requirements.every(req => req.isComplete)
 
   return (
-    <div className="grid grid-cols-1 xl:grid-cols-5 gap-6">
-      {/* Left Column: Assistant Preview (60%) */}
-      <div className="xl:col-span-3 space-y-4">
-        <Card>
-          <CardHeader>
-            <CardTitle>Test Your Assistant</CardTitle>
-            <CardDescription>
-              Try your assistant with the configured prompts to verify it works as expected.
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <div className="border rounded-lg p-4">
-              <AssistantArchitectStreaming tool={tool} />
-            </div>
-          </CardContent>
-        </Card>
+    <div className="space-y-8">
+      {/* Test Your Assistant Section */}
+      <div className="space-y-4">
+        <div>
+          <h3 className="text-lg font-medium">Test Your Assistant</h3>
+          <p className="text-sm text-muted-foreground">
+            Try your assistant with the configured prompts to verify it works as expected.
+          </p>
+        </div>
+        <div className="border rounded-lg p-4">
+          <AssistantArchitectStreaming tool={tool} />
+        </div>
       </div>
 
-      {/* Right Column: Readiness Checklist + Submit (40%) */}
-      <div className="xl:col-span-2">
-        <div className="xl:sticky xl:top-4 space-y-6">
-          <Card>
-            <CardHeader>
-              <CardTitle>Readiness Checklist</CardTitle>
-              <CardDescription>
-                Verify all required components are complete before submitting
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="space-y-2">
-                <div className="font-medium">Required Components</div>
-                <div className="space-y-1">
-                  {requirements.map((req) => (
-                    <RequirementItem
-                      key={req.title}
-                      title={req.title}
-                      isComplete={req.isComplete}
-                      description={req.description}
-                    />
-                  ))}
-                </div>
-              </div>
-            </CardContent>
-          </Card>
+      {/* Readiness Checklist + Submit Section */}
+      <div className="border-t pt-6 space-y-4">
+        <div>
+          <h3 className="text-lg font-medium">Readiness Checklist</h3>
+          <p className="text-sm text-muted-foreground">
+            Verify all required components are complete before submitting.
+          </p>
+        </div>
 
-          <div className="flex justify-end">
-            <Button
-              onClick={handleSubmit}
-              disabled={isLoading || !allRequirementsMet}
-              size="lg"
-              className="min-w-48"
-            >
-              {isLoading ? "Submitting..." : "Submit for Approval"}
-            </Button>
-          </div>
+        <div className="flex flex-wrap gap-4">
+          {requirements.map((req) => (
+            <RequirementItem
+              key={req.title}
+              title={req.title}
+              isComplete={req.isComplete}
+            />
+          ))}
+        </div>
+
+        <div className="flex justify-end pt-2">
+          <Button
+            onClick={handleSubmit}
+            disabled={isLoading || !allRequirementsMet}
+          >
+            {isLoading ? "Submitting..." : "Submit for Approval"}
+          </Button>
         </div>
       </div>
     </div>
@@ -125,21 +106,17 @@ export function PreviewSubmitClient({
 interface RequirementItemProps {
   title: string
   isComplete: boolean
-  description: string
 }
 
-function RequirementItem({ title, isComplete, description }: RequirementItemProps) {
+function RequirementItem({ title, isComplete }: RequirementItemProps) {
   return (
-    <div className="flex items-start gap-2">
+    <div className="flex items-center gap-2">
       {isComplete ? (
         <CheckCircle2 className="h-5 w-5 text-green-500 shrink-0" />
       ) : (
         <AlertCircle className="h-5 w-5 text-red-500 shrink-0" />
       )}
-      <div>
-        <div className="font-medium">{title}</div>
-        <div className="text-sm text-muted-foreground">{description}</div>
-      </div>
+      <span className="font-medium">{title}</span>
     </div>
   )
 }
