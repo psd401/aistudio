@@ -178,6 +178,16 @@ export interface StreamingProgress {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * Tool call data structure for persistence
+ */
+export interface ToolCallData {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  result?: unknown;  // Tool execution result for persistence
+}
+
 export interface StreamingCallbacks {
   onProgress?: (event: StreamingProgress) => void;
   onReasoning?: (reasoning: string) => void;
@@ -192,6 +202,8 @@ export interface StreamingCallbacks {
       totalCost?: number;
     };
     finishReason: string;
+    /** Tool calls made during this response (from all steps) */
+    toolCalls?: ToolCallData[];
   }) => void;
   onError?: (error: Error) => void;
 

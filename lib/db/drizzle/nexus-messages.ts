@@ -42,14 +42,22 @@ export interface TokenUsage {
 }
 
 /**
- * Message part types for AI SDK v5 format
+ * Message part types for AI SDK v5/v6 format
+ * Uses hyphenated type names (tool-call, tool-result) to match assistant-ui expectations
  */
 export interface MessagePart {
-  type: "text" | "image" | "tool_call" | "tool_result";
+  type: "text" | "image" | "tool-call" | "tool-result";
   text?: string;
   image?: string;
-  toolCall?: unknown;
-  toolResult?: unknown;
+  imageUrl?: string;
+  // Tool-call specific fields (flat structure for assistant-ui compatibility)
+  toolCallId?: string;
+  toolName?: string;
+  args?: unknown;
+  argsText?: string;  // JSON stringified args for display
+  // Tool-result specific fields
+  result?: unknown;
+  isError?: boolean;
 }
 
 /**

@@ -37,20 +37,67 @@ function NexusLoadingSpinner() {
 // Pre-rendered loading spinner to avoid JSX-as-prop lint warning
 const NEXUS_LOADING_FALLBACK = <NexusLoadingSpinner />
 
+// UIMessage part types for AI SDK v5
+// Static tool format: type is 'tool-{toolName}' (e.g., 'tool-show_chart')
+// AISDKMessageConverter extracts toolName via type.replace("tool-", "")
+type TextPart = { type: 'text'; text: string }
+type StaticToolPart = {
+  type: string;  // 'tool-{toolName}' format
+  toolCallId: string;
+  state: 'output-available' | 'output-error' | 'input-available';
+  input: Record<string, unknown>;
+  output?: unknown;
+  errorText?: string;
+}
+type UIMessagePart = TextPart | StaticToolPart
+
 // Helper to convert content parts to UIMessage parts format
+// Converts tool-call to static tool format (type: 'tool-{toolName}')
 function convertContentToParts(
   content?: Array<{ type: string; text?: string; [key: string]: unknown }> | string
-): Array<{ type: 'text'; text: string }> {
+): UIMessagePart[] {
   if (Array.isArray(content)) {
-    return content.map(part => ({
-      type: 'text' as const,
-      text: part.text || ''
-    }))
+    const parts: UIMessagePart[] = []
+
+    for (const part of content) {
+      // Convert tool-call to static tool format for AISDKMessageConverter
+      // type: 'tool-{toolName}' -> converter extracts toolName via type.replace("tool-", "")
+      if (part.type === 'tool-call' && part.toolName && part.toolCallId) {
+        const toolName = part.toolName as string
+        const args = (part.args as Record<string, unknown>) || {}
+        const hasResult = part.result !== undefined
+        const isError = part.isError === true
+
+        const toolPart: StaticToolPart = {
+          type: `tool-${toolName}`,  // e.g., 'tool-show_chart'
+          toolCallId: part.toolCallId as string,
+          state: isError ? 'output-error' : hasResult ? 'output-available' : 'input-available',
+          input: args,
+        }
+
+        if (hasResult && !isError) {
+          toolPart.output = part.result
+        }
+        if (isError) {
+          toolPart.errorText = typeof part.result === 'string' ? part.result : JSON.stringify(part.result)
+        }
+
+        parts.push(toolPart)
+      } else {
+        // Convert text parts
+        parts.push({
+          type: 'text',
+          text: part.text || ''
+        })
+      }
+    }
+
+    return parts
   }
   if (typeof content === 'string') {
-    return [{ type: 'text' as const, text: content }]
+    return [{ type: 'text', text: content }]
   }
-  return [{ type: 'text' as const, text: '' }]
+  return [{ type: 'text', text: '' }]
 }
 
 // Stable ConversationRuntime component using official AI SDK runtime

@@ -50,8 +50,8 @@ export interface ToolConfig {
 }
 
 /**
- * Registry of all available tools with their capability requirements
- * Note: Actual tool implementations now use provider-native tools
+ * Registry of tools that require manual selection
+ * Universal tools (like showChart) are always enabled - see provider-native-tools.ts
  */
 const TOOL_REGISTRY: Record<string, ToolConfig> = {
   webSearch: {
@@ -63,7 +63,7 @@ const TOOL_REGISTRY: Record<string, ToolConfig> = {
     category: 'search'
   },
   codeInterpreter: {
-    name: 'codeInterpreter', 
+    name: 'codeInterpreter',
     tool: createPlaceholderTool('Execute code and perform data analysis'),
     requiredCapabilities: ['codeInterpreter', 'codeExecution'],
     displayName: 'Code Interpreter',
@@ -78,6 +78,7 @@ const TOOL_REGISTRY: Record<string, ToolConfig> = {
     description: 'Generate images from text descriptions using AI models like GPT-Image-1, DALL-E 3, and Imagen 4',
     category: 'media'
   }
+  // Note: showChart is a universal tool that's always enabled - see provider-native-tools.ts
 }
 
 /**
@@ -146,10 +147,14 @@ export async function getAvailableToolsForModel(modelId: string): Promise<ToolCo
   if (!capabilities) {
     return []
   }
-  
+
   return Object.values(TOOL_REGISTRY).filter(toolConfig => {
+    // Tools with no required capabilities are universal (available for all models)
+    if (toolConfig.requiredCapabilities.length === 0) {
+      return true
+    }
     // Check if model has ANY of the required capabilities (OR logic)
-    return toolConfig.requiredCapabilities.some(capability => 
+    return toolConfig.requiredCapabilities.some(capability =>
       capabilities[capability] === true
     )
   })

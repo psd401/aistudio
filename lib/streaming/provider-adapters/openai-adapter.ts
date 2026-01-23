@@ -4,6 +4,7 @@ import { createLogger } from '@/lib/logger';
 import { Settings } from '@/lib/settings-manager';
 import { ErrorFactories } from '@/lib/error-utils';
 import { BaseProviderAdapter } from './base-adapter';
+import { createUniversalTools } from '@/lib/tools/provider-native-tools';
 import type { StreamingCallbacks, StreamConfig, ProviderCapabilities, StreamRequest } from '../types';
 
 const log = createLogger({ module: 'openai-adapter' });
@@ -51,14 +52,19 @@ export class OpenAIAdapter extends BaseProviderAdapter {
 
   /**
    * Create provider-native tools from stored OpenAI client instance
+   * Includes universal tools (like show_chart) that work with all providers
    */
   async createTools(enabledTools: string[]): Promise<ToolSet> {
+    // Start with universal tools (show_chart, etc.) that work with all providers
+    const universalTools = await createUniversalTools(enabledTools);
+
+    // If OpenAI client not initialized, return just universal tools
     if (!this.openaiClient) {
-      log.error('OpenAI client not initialized for tool creation');
-      return {};
+      log.warn('OpenAI client not initialized, returning only universal tools');
+      return universalTools;
     }
 
-    const tools: Record<string, unknown> = {};
+    const providerTools: Record<string, unknown> = {};
 
     try {
       // Map friendly tool names to OpenAI SDK tool methods
@@ -84,7 +90,7 @@ export class OpenAIAdapter extends BaseProviderAdapter {
           const toolKey = toolName === 'webSearch' ? 'web_search_preview' :
                          toolName === 'codeInterpreter' ? 'code_interpreter' :
                          toolName;
-          tools[toolKey] = creator();
+          providerTools[toolKey] = creator();
           log.debug(`Added OpenAI tool: ${toolKey}`);
         }
       }
@@ -95,7 +101,16 @@ export class OpenAIAdapter extends BaseProviderAdapter {
       });
     }
 
-    return tools as ToolSet;
+    // Merge universal tools with provider-specific tools
+    const allTools = { ...universalTools, ...providerTools };
+    log.info('Created tools for OpenAI', {
+      universalToolCount: Object.keys(universalTools).length,
+      providerToolCount: Object.keys(providerTools).length,
+      totalToolCount: Object.keys(allTools).length,
+      toolNames: Object.keys(allTools)
+    });
+
+    return allTools as ToolSet;
   }
 
   /**
@@ -370,6 +385,43 @@ export class OpenAIAdapter extends BaseProviderAdapter {
   }
   
   /**
+   * Handle a single stream part from Responses API
+   */
+  private handleStreamPart(
+    part: { type?: string; text?: string; toolName?: string; toolCallId?: string; totalUsage?: { reasoningTokens?: number; totalTokens?: number } },
+    callbacks: StreamingCallbacks,
+    logger: ReturnType<typeof createLogger>
+  ): void {
+    if (part.type === 'text-delta' && part.text?.includes('[REASONING]')) {
+      const reasoning = part.text.replace('[REASONING]', '').trim();
+      if (reasoning && callbacks.onReasoning) {
+        callbacks.onReasoning(reasoning);
+      }
+      return;
+    }
+
+    if (part.type === 'reasoning-delta' && part.text && callbacks.onReasoning) {
+      callbacks.onReasoning(part.text);
+      return;
+    }
+
+    if (part.type === 'tool-call') {
+      logger.debug('Tool call in reasoning model', {
+        toolName: part.toolName,
+        toolCallId: part.toolCallId
+      });
+      return;
+    }
+
+    if (part.type === 'finish' && part.totalUsage?.reasoningTokens) {
+      logger.info('Reasoning tokens used', {
+        reasoningTokens: part.totalUsage.reasoningTokens,
+        totalTokens: part.totalUsage.totalTokens
+      });
+    }
+  }
+
+  /**
    * Process Responses API stream to extract reasoning content
    */
   private async processResponsesAPIStream(
@@ -377,49 +429,15 @@ export class OpenAIAdapter extends BaseProviderAdapter {
     callbacks: StreamingCallbacks
   ): Promise<void> {
     const logger = createLogger({ module: 'openai-adapter.processResponsesAPIStream' });
-    
+
+    if (!result.fullStream) {
+      return;
+    }
+
     try {
-      // Process the full stream to extract reasoning
-      if (result.fullStream) {
-        for await (const part of result.fullStream) {
+      for await (const part of result.fullStream) {
         const typedPart = part as { type?: string; text?: string; toolName?: string; toolCallId?: string; totalUsage?: { reasoningTokens?: number; totalTokens?: number } };
-        switch (typedPart.type) {
-          case 'text-delta':
-            // Check if this is reasoning content
-            if (typedPart.text && typedPart.text.includes('[REASONING]')) {
-              const reasoning = typedPart.text.replace('[REASONING]', '').trim();
-              if (reasoning && callbacks.onReasoning) {
-                callbacks.onReasoning(reasoning);
-              }
-            }
-            break;
-            
-          case 'reasoning-delta':
-            // Native reasoning support (when AI SDK adds it)
-            if (typedPart.text && callbacks.onReasoning) {
-              callbacks.onReasoning(typedPart.text);
-            }
-            break;
-            
-          case 'tool-call':
-            // Handle tool calls in reasoning models
-            logger.debug('Tool call in reasoning model', {
-              toolName: typedPart.toolName,
-              toolCallId: typedPart.toolCallId
-            });
-            break;
-            
-          case 'finish':
-            // Extract final reasoning metrics
-            if (typedPart.totalUsage?.reasoningTokens) {
-              logger.info('Reasoning tokens used', {
-                reasoningTokens: typedPart.totalUsage.reasoningTokens,
-                totalTokens: typedPart.totalUsage.totalTokens
-              });
-            }
-            break;
-        }
-      }
+        this.handleStreamPart(typedPart, callbacks, logger);
       }
     } catch (error) {
       logger.error('Error processing Responses API stream', {

@@ -1,5 +1,8 @@
 import { useRef, useEffect, useCallback } from "react"
 import { toast } from "sonner"
+import { createLogger } from "@/lib/client-logger"
+
+const log = createLogger({ component: 'DocumentUploadPolling' })
 
 interface PollingOptions {
   /** Max polling attempts. Default 120 for large files (500MB may take 5+ minutes) */
@@ -136,8 +139,7 @@ export function useDocumentUploadPolling() {
         cancelPolling()
         const errorMessage = error instanceof Error ? error.message : "Failed to process document."
 
-        // Client-side error logging (server-side logger not available in client components)
-        console.error('[DocumentUploadPolling] Polling error:', {
+        log.error('Polling error', {
           error: error instanceof Error ? error.message : String(error),
           jobId,
           fileName,
