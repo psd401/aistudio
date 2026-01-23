@@ -56,23 +56,21 @@ export function CreateLayout({ children, currentStep, assistantId, title }: Crea
 
   return (
     <div className="space-y-6">
-      <div className="space-y-4">
+      <div className="space-y-2">
         <PageBranding />
-        <div className="flex items-center space-x-2 text-muted-foreground mb-1">
-          <Link
-            href="/utilities/assistant-architect"
-            className="flex items-center hover:text-foreground transition-colors"
-          >
-            <ChevronLeft className="h-4 w-4 mr-1" />
-            Back to Assistants
-          </Link>
-        </div>
         <h1 className="text-2xl font-semibold text-gray-900">
           Assistant Architect
           {assistantName && (
             <>: {assistantName}</>
           )}
         </h1>
+        <Link
+          href="/utilities/assistant-architect"
+          className="flex items-center text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <ChevronLeft className="h-4 w-4 mr-1" />
+          Back to Assistants
+        </Link>
       </div>
 
       <WizardSteps steps={updatedSteps} />
