@@ -14,7 +14,7 @@ export default async function CreateAssistantPage() {
   }
 
   return (
-    <CreateLayout currentStep={1} title="Create Assistant">
+    <CreateLayout currentStep={1} title="Setup & Inputs">
       <CreateForm />
     </CreateLayout>
   )

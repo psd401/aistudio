@@ -44,19 +44,21 @@ export default async function EditAssistantArchitectPage({ params }: Props) {
     redirect(`/utilities/assistant-architect/${id}`)
   }
 
+  const inputFields = tool.inputFields ?? []
+
   return (
-    <CreateLayout currentStep={1} assistantId={id} title="Edit Assistant">
+    <CreateLayout currentStep={1} assistantId={id} title="Setup & Inputs">
       <div className="space-y-6">
         {tool.status === "approved" && (
           <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-yellow-800">
             <p className="text-sm">
-              <strong>Note:</strong> This assistant is currently approved and in use. 
-              Any changes you make will require re-approval, and the assistant will be unavailable 
+              <strong>Note:</strong> This assistant is currently approved and in use.
+              Any changes you make will require re-approval, and the assistant will be unavailable
               until approved again.
             </p>
           </div>
         )}
-        <CreateForm initialData={tool} />
+        <CreateForm initialData={tool} initialInputFields={inputFields} />
       </div>
     </CreateLayout>
   )
