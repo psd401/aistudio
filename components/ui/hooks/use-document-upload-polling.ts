@@ -1,6 +1,6 @@
 import { useRef, useEffect, useCallback } from "react"
 import { toast } from "sonner"
-import { createLogger } from "@/lib/logger"
+import { createLogger } from "@/lib/client-logger"
 
 const log = createLogger({ module: 'DocumentUploadPolling' })
 

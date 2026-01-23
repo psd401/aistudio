@@ -4,7 +4,7 @@ import { useRef, useState, useCallback } from "react"
 import { Button } from "@/components/ui/button"
 import { Loader2, FileUp, CheckCircle } from "lucide-react"
 import { toast } from "sonner"
-import { createLogger } from "@/lib/logger"
+import { createLogger } from "@/lib/client-logger"
 import { useDocumentUploadPolling } from "./hooks/use-document-upload-polling"
 import {
   uploadViaServer,
