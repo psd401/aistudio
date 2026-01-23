@@ -8,10 +8,9 @@ import {
   startTimer
 } from "@/lib/logger"
 import { getServerSession } from "@/lib/auth/server-session"
-import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
 import { executeQuery } from "@/lib/db/drizzle-client"
-import { eq, and, inArray, desc } from "drizzle-orm"
-import { tools, roleTools, userRoles, assistantArchitects } from "@/lib/db/schema"
+import { eq, desc } from "drizzle-orm"
+import { assistantArchitects } from "@/lib/db/schema"
 
 /**
  * Represents an assistant for display in the catalog
@@ -70,8 +69,8 @@ function deriveCategory(name: string, description: string | null): CatalogAssist
 }
 
 /**
- * Gets all approved assistant architects that the current user has access to
- * This is optimized for the catalog view - returns only essential fields
+ * Gets all approved assistant architects for the catalog
+ * Shows all approved assistants - access control is handled at execution time
  */
 export async function getAssistantCatalogAction(): Promise<
   ActionState<CatalogAssistant[]>
@@ -91,44 +90,8 @@ export async function getAssistantCatalogAction(): Promise<
 
     log.debug("User authenticated", { userId: session.sub })
 
-    // Get current user ID
-    const currentUserResult = await getCurrentUserAction()
-    if (!currentUserResult.isSuccess || !currentUserResult.data) {
-      log.error("User not found in database")
-      throw ErrorFactories.dbRecordNotFound("users", session.sub)
-    }
-    const currentUserId = currentUserResult.data.user.id
-
-    // Get all tools the user has access to via role assignments
-    const userTools = await executeQuery(
-      (db) =>
-        db
-          .selectDistinct({ promptChainToolId: tools.promptChainToolId })
-          .from(tools)
-          .innerJoin(roleTools, eq(tools.id, roleTools.toolId))
-          .innerJoin(userRoles, eq(roleTools.roleId, userRoles.roleId))
-          .where(and(eq(userRoles.userId, currentUserId), eq(tools.isActive, true))),
-      "getUserAccessibleTools"
-    )
-
-    if (userTools.length === 0) {
-      log.info("No accessible tools found for user")
-      timer({ status: "success", count: 0 })
-      return createSuccess([], "No assistants found")
-    }
-
-    // Extract assistant architect IDs
-    const architectIds = userTools
-      .map(tool => tool.promptChainToolId)
-      .filter((id): id is number => id !== null)
-
-    if (architectIds.length === 0) {
-      log.info("No assistant architect IDs found")
-      timer({ status: "success", count: 0 })
-      return createSuccess([], "No assistants found")
-    }
-
-    // Fetch approved architects that the user has access to
+    // Fetch all approved architects
+    // Access control is handled at execution time, not catalog browsing
     const approvedArchitects = await executeQuery(
       (db) =>
         db
@@ -140,12 +103,7 @@ export async function getAssistantCatalogAction(): Promise<
             createdAt: assistantArchitects.createdAt
           })
           .from(assistantArchitects)
-          .where(
-            and(
-              eq(assistantArchitects.status, "approved"),
-              inArray(assistantArchitects.id, architectIds)
-            )
-          )
+          .where(eq(assistantArchitects.status, "approved"))
           .orderBy(desc(assistantArchitects.createdAt)),
       "getApprovedArchitectsForCatalog"
     )
