@@ -111,7 +111,7 @@ function AssistantCardComponent({ assistant }: AssistantCardProps) {
           </div>
 
           <div className="flex-1 min-w-0 pr-8">
-            <h3 className="font-semibold text-base line-clamp-1">{assistant.name}</h3>
+            <h3 className="font-semibold text-base">{assistant.name}</h3>
             <Badge
               variant="secondary"
               className={cn("mt-1 text-xs", colors.bg, colors.text)}
