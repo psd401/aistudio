@@ -385,6 +385,43 @@ export class OpenAIAdapter extends BaseProviderAdapter {
   }
   
   /**
+   * Handle a single stream part from Responses API
+   */
+  private handleStreamPart(
+    part: { type?: string; text?: string; toolName?: string; toolCallId?: string; totalUsage?: { reasoningTokens?: number; totalTokens?: number } },
+    callbacks: StreamingCallbacks,
+    logger: ReturnType<typeof createLogger>
+  ): void {
+    if (part.type === 'text-delta' && part.text?.includes('[REASONING]')) {
+      const reasoning = part.text.replace('[REASONING]', '').trim();
+      if (reasoning && callbacks.onReasoning) {
+        callbacks.onReasoning(reasoning);
+      }
+      return;
+    }
+
+    if (part.type === 'reasoning-delta' && part.text && callbacks.onReasoning) {
+      callbacks.onReasoning(part.text);
+      return;
+    }
+
+    if (part.type === 'tool-call') {
+      logger.debug('Tool call in reasoning model', {
+        toolName: part.toolName,
+        toolCallId: part.toolCallId
+      });
+      return;
+    }
+
+    if (part.type === 'finish' && part.totalUsage?.reasoningTokens) {
+      logger.info('Reasoning tokens used', {
+        reasoningTokens: part.totalUsage.reasoningTokens,
+        totalTokens: part.totalUsage.totalTokens
+      });
+    }
+  }
+
+  /**
    * Process Responses API stream to extract reasoning content
    */
   private async processResponsesAPIStream(
@@ -392,49 +429,15 @@ export class OpenAIAdapter extends BaseProviderAdapter {
     callbacks: StreamingCallbacks
   ): Promise<void> {
     const logger = createLogger({ module: 'openai-adapter.processResponsesAPIStream' });
-    
+
+    if (!result.fullStream) {
+      return;
+    }
+
     try {
-      // Process the full stream to extract reasoning
-      if (result.fullStream) {
-        for await (const part of result.fullStream) {
+      for await (const part of result.fullStream) {
         const typedPart = part as { type?: string; text?: string; toolName?: string; toolCallId?: string; totalUsage?: { reasoningTokens?: number; totalTokens?: number } };
-        switch (typedPart.type) {
-          case 'text-delta':
-            // Check if this is reasoning content
-            if (typedPart.text && typedPart.text.includes('[REASONING]')) {
-              const reasoning = typedPart.text.replace('[REASONING]', '').trim();
-              if (reasoning && callbacks.onReasoning) {
-                callbacks.onReasoning(reasoning);
-              }
-            }
-            break;
-            
-          case 'reasoning-delta':
-            // Native reasoning support (when AI SDK adds it)
-            if (typedPart.text && callbacks.onReasoning) {
-              callbacks.onReasoning(typedPart.text);
-            }
-            break;
-            
-          case 'tool-call':
-            // Handle tool calls in reasoning models
-            logger.debug('Tool call in reasoning model', {
-              toolName: typedPart.toolName,
-              toolCallId: typedPart.toolCallId
-            });
-            break;
-            
-          case 'finish':
-            // Extract final reasoning metrics
-            if (typedPart.totalUsage?.reasoningTokens) {
-              logger.info('Reasoning tokens used', {
-                reasoningTokens: typedPart.totalUsage.reasoningTokens,
-                totalTokens: typedPart.totalUsage.totalTokens
-              });
-            }
-            break;
-        }
-      }
+        this.handleStreamPart(typedPart, callbacks, logger);
       }
     } catch (error) {
       logger.error('Error processing Responses API stream', {
