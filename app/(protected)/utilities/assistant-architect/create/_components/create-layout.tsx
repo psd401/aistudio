@@ -16,10 +16,9 @@ interface CreateLayoutProps {
 }
 
 const steps = [
-  { number: 1, title: "Setup & Inputs", href: "/utilities/assistant-architect/create" },
-  { number: 2, title: "Add Prompts", href: "/utilities/assistant-architect/create/prompts" },
-  { number: 3, title: "Preview & Test", href: "/utilities/assistant-architect/create/preview" },
-  { number: 4, title: "Submit for Approval", href: "/utilities/assistant-architect/create/submit" }
+  { number: 1, title: "Setup", href: "/utilities/assistant-architect/create" },
+  { number: 2, title: "Prompts", href: "/utilities/assistant-architect/create/prompts" },
+  { number: 3, title: "Preview & Submit", href: "/utilities/assistant-architect/create/preview" }
 ]
 
 export function CreateLayout({ children, currentStep, assistantId, title }: CreateLayoutProps) {

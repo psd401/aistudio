@@ -1758,13 +1758,11 @@ export async function submitAssistantArchitectForApprovalAction(
       return { isSuccess: false, message: "Unauthorized" }
     }
 
-    // Fetch input fields and prompts for this tool
-    const [inputFields, prompts] = await Promise.all([
-      getToolInputFields(idInt),
-      getChainPrompts(idInt)
-    ]);
+    // Fetch prompts for validation. Input fields are now optional to support
+    // scheduled/automated assistants without user inputs (PR #651)
+    const prompts = await getChainPrompts(idInt);
 
-    if (!tool.name || !tool.description || inputFields.length === 0 || prompts.length === 0) {
+    if (!tool.name || !tool.description || prompts.length === 0) {
       return { isSuccess: false, message: "Assistant is incomplete" }
     }
 

@@ -1,5 +1,5 @@
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
-import { PreviewPageClient } from "./_components/preview-page-client"
+import { PreviewSubmitClient } from "./_components/preview-submit-client"
 import { CreateLayout } from "../../../create/_components/create-layout"
 import { redirect, notFound } from "next/navigation"
 import { getServerSession } from "@/lib/auth/server-session"
@@ -54,7 +54,7 @@ export default async function PreviewPage({ params }: PreviewPageProps) {
   })
 
   return (
-    <CreateLayout currentStep={3} assistantId={id} title="Preview & Test">
+    <CreateLayout currentStep={3} assistantId={id} title="Preview & Submit">
       <div className="space-y-6">
         {tool.status === "approved" && (
           <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-yellow-800">
@@ -65,22 +65,8 @@ export default async function PreviewPage({ params }: PreviewPageProps) {
             </p>
           </div>
         )}
-        <p className="text-muted-foreground">
-          Test your assistant with the configured input fields and prompts.
-        </p>
 
-        <PreviewPageClient assistantId={id} tool={toolForPreview} />
-      </div>
-
-      <div className="flex justify-end mt-8">
-        <a href={`/utilities/assistant-architect/${id}/edit/submit`}>
-          <button
-            type="button"
-            className="inline-flex items-center px-4 py-2 bg-primary text-primary-foreground rounded-md shadow-sm hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-primary/50 transition-colors"
-          >
-            Continue
-          </button>
-        </a>
+        <PreviewSubmitClient assistantId={id} tool={toolForPreview} />
       </div>
     </CreateLayout>
   )
