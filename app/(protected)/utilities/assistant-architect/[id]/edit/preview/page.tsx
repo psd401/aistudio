@@ -65,9 +65,6 @@ export default async function PreviewPage({ params }: PreviewPageProps) {
             </p>
           </div>
         )}
-        <p className="text-muted-foreground">
-          Test your assistant and submit for approval when ready.
-        </p>
 
         <PreviewSubmitClient assistantId={id} tool={toolForPreview} />
       </div>

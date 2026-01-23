@@ -57,29 +57,14 @@ export function PreviewSubmitClient({
   const allRequirementsMet = requirements.every(req => req.isComplete)
 
   return (
-    <div className="space-y-8">
-      {/* Test Your Assistant Section */}
-      <div className="space-y-4">
-        <div>
-          <h3 className="text-lg font-medium">Test Your Assistant</h3>
-          <p className="text-sm text-muted-foreground">
-            Try your assistant with the configured prompts to verify it works as expected.
-          </p>
-        </div>
-        <div className="border rounded-lg p-4">
-          <AssistantArchitectStreaming tool={tool} />
-        </div>
+    <div className="space-y-6">
+      {/* Assistant Testing Interface */}
+      <div className="border rounded-lg p-4">
+        <AssistantArchitectStreaming tool={tool} />
       </div>
 
-      {/* Readiness Checklist + Submit Section */}
-      <div className="border-t pt-6 space-y-4">
-        <div>
-          <h3 className="text-lg font-medium">Readiness Checklist</h3>
-          <p className="text-sm text-muted-foreground">
-            Verify all required components are complete before submitting.
-          </p>
-        </div>
-
+      {/* Submit Section */}
+      <div className="border-t pt-6 flex items-center justify-between">
         <div className="flex flex-wrap gap-4">
           {requirements.map((req) => (
             <RequirementItem
@@ -90,14 +75,12 @@ export function PreviewSubmitClient({
           ))}
         </div>
 
-        <div className="flex justify-end pt-2">
-          <Button
-            onClick={handleSubmit}
-            disabled={isLoading || !allRequirementsMet}
-          >
-            {isLoading ? "Submitting..." : "Submit for Approval"}
-          </Button>
-        </div>
+        <Button
+          onClick={handleSubmit}
+          disabled={isLoading || !allRequirementsMet}
+        >
+          {isLoading ? "Submitting..." : "Submit for Approval"}
+        </Button>
       </div>
     </div>
   )
