@@ -195,7 +195,7 @@ function FeaturedToolsHeader() {
     <div className="flex items-center justify-between mb-4">
       <h2 className="text-lg font-bold text-[#1B365D]">Featured Tools</h2>
       <Link
-        href="#"
+        href="/utilities/assistant-catalog"
         className="text-sm text-[#1B365D] hover:text-[#1B365D]/80 font-medium flex items-center gap-1"
       >
         View All
@@ -235,7 +235,7 @@ function ToolCardsGrid() {
         <ToolCard
           title="Assistant Catalog"
           description="Find ready-to-use specialized assistants."
-          href="#"
+          href="/utilities/assistant-catalog"
           icon={AssistantCatalogIcon}
           accentColor="coral"
         />
