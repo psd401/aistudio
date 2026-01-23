@@ -2,7 +2,6 @@
 
 import { memo, useState, useCallback } from "react"
 import { useRouter } from "next/navigation"
-import Image from "next/image"
 import { Card, CardContent, CardFooter, CardHeader } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
@@ -108,17 +107,7 @@ function AssistantCardComponent({ assistant }: AssistantCardProps) {
               colors.bg
             )}
           >
-            {assistant.imagePath ? (
-              <Image
-                src={assistant.imagePath}
-                alt=""
-                width={24}
-                height={24}
-                className="opacity-80"
-              />
-            ) : (
-              <Sparkles className="h-6 w-6" style={{ color: colors.icon }} />
-            )}
+            <Sparkles className="h-6 w-6" style={{ color: colors.icon }} />
           </div>
 
           <div className="flex-1 min-w-0 pr-8">
