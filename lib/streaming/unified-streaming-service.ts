@@ -387,9 +387,10 @@ export class UnifiedStreamingService {
       const model = await adapter.createModel(request.modelId, request.options);
 
       // Create tools from adapter (uses same client instance as model)
+      // Always call createTools to include universal tools like show_chart
       let tools = request.tools || {};
-      if (!request.tools && request.enabledTools && request.enabledTools.length > 0) {
-        tools = await adapter.createTools(request.enabledTools);
+      if (!request.tools) {
+        tools = await adapter.createTools(request.enabledTools || []);
       }
 
       const config: StreamConfig = {

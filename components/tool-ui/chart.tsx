@@ -5,6 +5,8 @@ import dynamic from 'next/dynamic'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { cn } from '@/lib/utils'
+// Cell imported synchronously - it's lightweight and required for per-item colors
+import { Cell } from 'recharts'
 
 // Lazy load Recharts components to reduce initial bundle size (~150KB)
 const LazyBarChart = dynamic(
@@ -67,10 +69,6 @@ const LazyScatter = dynamic(
 )
 const LazyPie = dynamic(
   () => import('recharts').then((mod) => ({ default: mod.Pie })),
-  { ssr: false }
-)
-const LazyCell = dynamic(
-  () => import('recharts').then((mod) => ({ default: mod.Cell })),
   { ssr: false }
 )
 const LazyResponsiveContainer = dynamic(
@@ -262,15 +260,28 @@ interface ChartRenderOptions {
 // Chart type renderers - using options object to reduce param count
 function renderBarChart(opts: ChartRenderOptions) {
   const { data, xKey, visibleSeries, showGrid, showLegend, legendContent, title } = opts
+  // Use multi-color mode for single series to make each bar a different color
+  const useMultiColor = visibleSeries.length === 1
+
   return (
     <LazyBarChart data={data} aria-label={`Bar chart: ${title}`}>
       {showGrid && <LazyCartesianGrid {...COMMON_GRID_PROPS} />}
       <LazyXAxis dataKey={xKey} {...COMMON_AXIS_PROPS} />
       <LazyYAxis {...COMMON_AXIS_PROPS} />
       <LazyTooltip contentStyle={TOOLTIP_STYLE} />
-      {showLegend && <LazyLegend content={legendContent} />}
+      {showLegend && !useMultiColor && <LazyLegend content={legendContent} />}
       {visibleSeries.map((s) => (
-        <LazyBar key={s.key} dataKey={s.key} name={s.label} fill={s.color} radius={BAR_RADIUS} />
+        <LazyBar
+          key={s.key}
+          dataKey={s.key}
+          name={s.label}
+          fill={useMultiColor ? undefined : s.color}
+          radius={BAR_RADIUS}
+        >
+          {useMultiColor && data.map((_, index) => (
+            <Cell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
+          ))}
+        </LazyBar>
       ))}
     </LazyBarChart>
   )
@@ -361,7 +372,7 @@ function renderPieChart(
         label={formatPieLabel}
       >
         {data.map((_, index) => (
-          <LazyCell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
+          <Cell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
         ))}
       </LazyPie>
       <LazyTooltip contentStyle={TOOLTIP_STYLE} />

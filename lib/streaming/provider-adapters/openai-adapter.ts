@@ -4,6 +4,7 @@ import { createLogger } from '@/lib/logger';
 import { Settings } from '@/lib/settings-manager';
 import { ErrorFactories } from '@/lib/error-utils';
 import { BaseProviderAdapter } from './base-adapter';
+import { createUniversalTools } from '@/lib/tools/provider-native-tools';
 import type { StreamingCallbacks, StreamConfig, ProviderCapabilities, StreamRequest } from '../types';
 
 const log = createLogger({ module: 'openai-adapter' });
@@ -51,14 +52,19 @@ export class OpenAIAdapter extends BaseProviderAdapter {
 
   /**
    * Create provider-native tools from stored OpenAI client instance
+   * Includes universal tools (like show_chart) that work with all providers
    */
   async createTools(enabledTools: string[]): Promise<ToolSet> {
+    // Start with universal tools (show_chart, etc.) that work with all providers
+    const universalTools = await createUniversalTools(enabledTools);
+
+    // If OpenAI client not initialized, return just universal tools
     if (!this.openaiClient) {
-      log.error('OpenAI client not initialized for tool creation');
-      return {};
+      log.warn('OpenAI client not initialized, returning only universal tools');
+      return universalTools;
     }
 
-    const tools: Record<string, unknown> = {};
+    const providerTools: Record<string, unknown> = {};
 
     try {
       // Map friendly tool names to OpenAI SDK tool methods
@@ -84,7 +90,7 @@ export class OpenAIAdapter extends BaseProviderAdapter {
           const toolKey = toolName === 'webSearch' ? 'web_search_preview' :
                          toolName === 'codeInterpreter' ? 'code_interpreter' :
                          toolName;
-          tools[toolKey] = creator();
+          providerTools[toolKey] = creator();
           log.debug(`Added OpenAI tool: ${toolKey}`);
         }
       }
@@ -95,7 +101,16 @@ export class OpenAIAdapter extends BaseProviderAdapter {
       });
     }
 
-    return tools as ToolSet;
+    // Merge universal tools with provider-specific tools
+    const allTools = { ...universalTools, ...providerTools };
+    log.info('Created tools for OpenAI', {
+      universalToolCount: Object.keys(universalTools).length,
+      providerToolCount: Object.keys(providerTools).length,
+      totalToolCount: Object.keys(allTools).length,
+      toolNames: Object.keys(allTools)
+    });
+
+    return allTools as ToolSet;
   }
 
   /**

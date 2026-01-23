@@ -47,14 +47,19 @@ export class GeminiAdapter extends BaseProviderAdapter {
 
   /**
    * Create provider-native tools from stored Google client instance
+   * Includes universal tools from base class
    */
   async createTools(enabledTools: string[]): Promise<ToolSet> {
+    // Get universal tools from base class (show_chart, etc.)
+    const universalTools = await super.createTools(enabledTools);
+
+    // If Google client not initialized, return just universal tools
     if (!this.googleClient) {
-      log.error('Google client not initialized for tool creation');
-      return {};
+      log.warn('Google client not initialized, returning only universal tools');
+      return universalTools;
     }
 
-    const tools: Record<string, unknown> = {};
+    const providerTools: Record<string, unknown> = {};
 
     try {
       // Map friendly tool names to Google SDK tool methods
@@ -69,7 +74,7 @@ export class GeminiAdapter extends BaseProviderAdapter {
         const creator = toolCreators[toolName];
         if (creator) {
           const toolKey = toolName === 'webSearch' ? 'google_search' : toolName;
-          tools[toolKey] = creator();
+          providerTools[toolKey] = creator();
           log.debug(`Added Google tool: ${toolKey}`);
         } else if (toolName === 'codeInterpreter' || toolName === 'code_interpreter') {
           log.debug('Code execution enabled - built into Gemini models');
@@ -82,7 +87,16 @@ export class GeminiAdapter extends BaseProviderAdapter {
       });
     }
 
-    return tools as ToolSet;
+    // Merge universal tools with provider-specific tools
+    const allTools = { ...universalTools, ...providerTools };
+    log.info('Created tools for Gemini', {
+      universalToolCount: Object.keys(universalTools).length,
+      providerToolCount: Object.keys(providerTools).length,
+      totalToolCount: Object.keys(allTools).length,
+      toolNames: Object.keys(allTools)
+    });
+
+    return allTools as ToolSet;
   }
 
   /**

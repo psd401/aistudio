@@ -60,13 +60,21 @@ export class ClaudeAdapter extends BaseProviderAdapter {
 
   /**
    * Create provider-native tools for Claude via Bedrock
-   * TODO: Implement when Bedrock tool support is needed
+   * Includes universal tools from base class
    */
   async createTools(enabledTools: string[]): Promise<ToolSet> {
-    // Anthropic Claude on Bedrock supports tool calling
-    // TODO: Implement when needed
-    log.info('Bedrock tool creation not yet implemented', { enabledTools });
-    return {};
+    // Get universal tools from base class (show_chart, etc.)
+    const universalTools = await super.createTools(enabledTools);
+
+    // TODO: Add Bedrock-specific tools when needed
+    // For now, return just universal tools
+    log.info('Created tools for Claude/Bedrock', {
+      enabledTools,
+      toolCount: Object.keys(universalTools).length,
+      toolNames: Object.keys(universalTools)
+    });
+
+    return universalTools;
   }
 
   /**

@@ -22,11 +22,18 @@ interface TokenUsage {
 }
 
 interface MessagePart {
-  type: "text" | "image" | "tool_call" | "tool_result";
+  type: "text" | "image" | "tool-call";
   text?: string;
   image?: string;
-  toolCall?: unknown;
-  toolResult?: unknown;
+  imageUrl?: string;
+  // Tool-call specific fields (flat structure for assistant-ui ToolCallMessagePart compatibility)
+  // Note: result is EMBEDDED in the tool-call part (not separate tool-result)
+  toolCallId?: string;
+  toolName?: string;
+  args?: unknown;
+  argsText?: string;  // JSON stringified args for display
+  result?: unknown;   // Tool execution result (embedded in tool-call)
+  isError?: boolean;  // Whether the tool execution resulted in an error
 }
 
 export const nexusMessages = pgTable("nexus_messages", {

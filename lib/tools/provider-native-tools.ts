@@ -47,19 +47,16 @@ export async function createProviderNativeTools(
 
 /**
  * Create universal tools that work with any provider
- * These are custom tools implemented in AI Studio
+ * These are custom tools implemented in AI Studio and are always available
+ * Exported so adapters can include these in their tool sets
  */
-async function createUniversalTools(enabledTools: string[]): Promise<ToolSet> {
+export async function createUniversalTools(_enabledTools: string[]): Promise<ToolSet> {
   const tools: Record<string, unknown> = {}
 
-  // Chart visualization tool - works with any provider
-  const hasShowChart = enabledTools.some(t =>
-    ['showChart', 'show_chart'].includes(t)
-  )
-  if (hasShowChart) {
-    tools.show_chart = createShowChartTool()
-    log.debug('Added show_chart visualization tool')
-  }
+  // Chart visualization tool - ALWAYS enabled for all providers
+  // This is a universal tool that renders on the client side
+  tools.show_chart = createShowChartTool()
+  log.debug('Added show_chart visualization tool (always enabled)')
 
   return tools as ToolSet
 }

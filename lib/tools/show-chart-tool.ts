@@ -1,5 +1,5 @@
-import { tool } from 'ai'
-import { z } from 'zod'
+import type { Tool } from 'ai'
+import { jsonSchema } from 'ai'
 import { createLogger } from '@/lib/logger'
 import { v4 as uuidv4 } from 'uuid'
 
@@ -20,32 +20,30 @@ import { v4 as uuidv4 } from 'uuid'
 
 const log = createLogger({ module: 'show-chart-tool' })
 
-// Chart series schema for multi-series charts
-const ChartSeriesSchema = z.object({
-  key: z.string().describe('Data key from the data array'),
-  label: z.string().describe('Display label for the series'),
-  color: z.string().optional().describe('Optional hex color (e.g., #2563eb)')
-})
+// TypeScript types for chart arguments
+export interface ChartSeries {
+  key: string
+  label: string
+  color?: string
+}
 
-// Main chart parameters schema
-const ShowChartSchema = z.object({
-  type: z.enum(['bar', 'line', 'area', 'scatter', 'pie']).describe(
-    'Chart type: bar (categorical comparisons), line (trends), area (cumulative), scatter (correlations), pie (proportions)'
-  ),
-  title: z.string().min(1).max(100).describe('Chart title'),
-  description: z.string().max(500).optional().describe('Optional chart description'),
-  data: z.array(z.record(z.string(), z.unknown())).min(1).max(1000).describe(
-    'Array of data points. Each object represents a data point with named values.'
-  ),
-  xKey: z.string().describe(
-    'Key in data objects to use for X-axis (e.g., "month", "category", "date")'
-  ),
-  series: z.array(ChartSeriesSchema).min(1).max(10).describe(
-    'Series configuration for the Y-axis values to display'
-  ),
-  showLegend: z.boolean().optional().default(true).describe('Show chart legend'),
-  showGrid: z.boolean().optional().default(true).describe('Show grid lines')
-})
+export interface ShowChartArgs {
+  type: 'bar' | 'line' | 'area' | 'scatter' | 'pie'
+  title: string
+  description?: string
+  data: Array<Record<string, string | number | boolean | null>>
+  xKey: string
+  series: ChartSeries[]
+  showLegend?: boolean
+  showGrid?: boolean
+}
+
+// Result type for chart tool execution
+export interface ChartToolResult {
+  id: string
+  success: boolean
+  error?: string
+}
 
 /**
  * Create the show_chart tool for AI SDK
@@ -53,26 +51,108 @@ const ShowChartSchema = z.object({
  * This tool returns a chart configuration that the frontend renders
  * using the ChartVisualizationUI component.
  */
-export function createShowChartTool(): unknown {
-  return tool({
-    description: `Display data as an interactive chart visualization. Use this when you have data that would benefit from visual representation. Supports bar charts (for comparing categories), line charts (for trends over time), area charts (for cumulative data), scatter plots (for correlations), and pie charts (for proportions). Always include clear titles and appropriate series labels.
+export function createShowChartTool(): Tool<ShowChartArgs, ChartToolResult> {
+  // Create JSON Schema compatible with OpenAI Responses API
+  const schema = jsonSchema<ShowChartArgs>({
+    type: 'object',
+    properties: {
+      type: {
+        type: 'string',
+        enum: ['bar', 'line', 'area', 'scatter', 'pie'],
+        description: 'Chart type: bar (categorical comparisons), line (trends), area (cumulative), scatter (correlations), pie (proportions)'
+      },
+      title: {
+        type: 'string',
+        description: 'Chart title',
+        minLength: 1,
+        maxLength: 100
+      },
+      description: {
+        type: 'string',
+        description: 'Optional chart description',
+        maxLength: 500
+      },
+      data: {
+        type: 'array',
+        description: 'Array of data points. Each object should have a key matching xKey for labels, and keys matching series[].key for numeric values. Example: [{month: "Jan", sales: 100}, {month: "Feb", sales: 150}]',
+        items: {
+          type: 'object',
+          additionalProperties: true
+        },
+        minItems: 1,
+        maxItems: 1000
+      },
+      xKey: {
+        type: 'string',
+        description: 'Key in data objects to use for X-axis labels (e.g., "month", "category", "date")'
+      },
+      series: {
+        type: 'array',
+        description: 'Series configuration. Each series.key must exist in data objects as numeric values.',
+        items: {
+          type: 'object',
+          properties: {
+            key: {
+              type: 'string',
+              description: 'Data key from the data array'
+            },
+            label: {
+              type: 'string',
+              description: 'Display label for the series'
+            },
+            color: {
+              type: 'string',
+              description: 'Optional hex color (e.g., #2563eb)'
+            }
+          },
+          required: ['key', 'label']
+        },
+        minItems: 1,
+        maxItems: 10
+      },
+      showLegend: {
+        type: 'boolean',
+        description: 'Show chart legend (default: true)'
+      },
+      showGrid: {
+        type: 'boolean',
+        description: 'Show grid lines (default: true)'
+      }
+    },
+    required: ['type', 'title', 'data', 'xKey', 'series']
+  })
 
-Example usage:
-- Show enrollment by grade level: Use bar chart with grades on x-axis
-- Show test scores over time: Use line chart with dates on x-axis
-- Show budget allocation: Use pie chart with categories
-- Show correlation between study time and grades: Use scatter plot`,
-    parameters: ShowChartSchema,
-    // @ts-expect-error - AI SDK v5 tool() function has complex type inference that doesn't match TypeScript's requirements
-    execute: async (args: z.infer<typeof ShowChartSchema>) => {
+  // Construct the tool object with proper typing
+  const chartTool: Tool<ShowChartArgs, ChartToolResult> = {
+    description: `Display data as an interactive chart visualization. Use this tool when you have numerical data that would benefit from visual representation.
+
+IMPORTANT: Always use this tool instead of text-based charts, ASCII art, or mermaid diagrams when visualizing data.
+
+Supported chart types:
+- bar: For comparing categories (e.g., enrollment by grade)
+- line: For trends over time (e.g., scores over months)
+- area: For cumulative trends
+- scatter: For correlations between variables
+- pie: For proportional data (e.g., budget allocation)
+
+Example: To show enrollment data, call with:
+{
+  "type": "bar",
+  "title": "Student Enrollment by Grade",
+  "data": [{"grade": "K", "students": 120}, {"grade": "1st", "students": 135}],
+  "xKey": "grade",
+  "series": [{"key": "students", "label": "Students"}]
+}`,
+    inputSchema: schema,
+    execute: async (args: ShowChartArgs): Promise<ChartToolResult> => {
       const chartId = uuidv4()
 
       log.info('Chart generation requested', {
         chartId,
         type: args.type,
         title: args.title,
-        dataPoints: args.data.length,
-        seriesCount: args.series.length
+        dataPoints: args.data?.length ?? 0,
+        seriesCount: args.series?.length ?? 0
       })
 
       try {
@@ -126,9 +206,7 @@ Example usage:
         }
       }
     }
-  }) as unknown
-}
+  }
 
-// Export types for use in components
-export type ChartSeries = z.infer<typeof ChartSeriesSchema>
-export type ShowChartArgs = z.infer<typeof ShowChartSchema>
+  return chartTool
+}

@@ -2,6 +2,7 @@
 
 const nextConfig = {
   output: 'standalone', // Required for ECS Fargate deployment
+  transpilePackages: ['recharts'], // Required for Turbopack to resolve recharts dynamic imports
   images: {
     remotePatterns: [
       // Add specific trusted domains for user avatars

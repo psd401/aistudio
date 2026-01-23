@@ -880,27 +880,75 @@ export async function POST(req: Request) {
         responseMode: validationResult.data.responseMode || 'standard'
       },
       callbacks: {
-        onFinish: async ({ text, usage, finishReason }) => {
+        onFinish: async ({ text, usage, finishReason, toolCalls }) => {
           log.info('Stream finished, saving assistant message', {
             conversationId,
             hasText: !!text,
             textLength: text?.length || 0,
             hasUsage: !!usage,
-            finishReason
+            finishReason,
+            toolCallCount: toolCalls?.length || 0
           });
 
           try {
             // Save assistant message to nexus_messages
-            if (!text || text.length === 0) {
-              log.warn('No text content to save for assistant message');
+            // Message is valid if it has text OR tool calls (tool-call-only responses have empty text)
+            const hasText = text && text.length > 0;
+            const hasToolCalls = toolCalls && toolCalls.length > 0;
+
+            if (!hasText && !hasToolCalls) {
+              log.warn('No text or tool calls to save for assistant message');
               return;
             }
 
-            // Sanitize assistant content to remove null bytes and invalid UTF-8 sequences
-            const sanitizedAssistantContent = sanitizeTextForDatabase(text);
+            // Sanitize assistant content (may be empty for tool-call-only responses)
+            const sanitizedAssistantContent = hasText ? sanitizeTextForDatabase(text) : '';
 
             const now = new Date();
-            const assistantParts = [{ type: 'text', text: sanitizedAssistantContent }];
+
+            // Build assistant message parts: text (if any) + tool calls with embedded results
+            // assistant-ui's ToolCallMessagePart expects result to be EMBEDDED in the tool-call,
+            // not as a separate tool-result part
+            const assistantParts: Array<{
+              type: string;
+              text?: string;
+              toolCallId?: string;
+              toolName?: string;
+              args?: Record<string, unknown>;
+              argsText?: string;
+              result?: unknown;
+              isError?: boolean;
+            }> = [];
+
+            // Only add text part if there's actual text content
+            if (sanitizedAssistantContent) {
+              assistantParts.push({ type: 'text', text: sanitizedAssistantContent });
+            }
+
+            // Add tool calls with embedded results (assistant-ui expects result ON the tool-call part)
+            if (toolCalls) {
+              for (const toolCall of toolCalls) {
+                assistantParts.push({
+                  type: 'tool-call',
+                  toolCallId: toolCall.toolCallId,
+                  toolName: toolCall.toolName,
+                  args: toolCall.args,
+                  argsText: JSON.stringify(toolCall.args),
+                  result: toolCall.result ?? { success: true },
+                  isError: false,
+                });
+              }
+            }
+
+            if (hasToolCalls) {
+              log.info('Including tool calls in assistant message', {
+                conversationId,
+                toolCallCount: toolCalls?.length || 0,
+                toolNames: toolCalls?.map(tc => tc.toolName) || [],
+                hasText
+              });
+            }
+
             const assistantTokenUsage = {
               promptTokens: usage?.promptTokens || 0,
               completionTokens: usage?.completionTokens || 0,

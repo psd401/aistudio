@@ -50,13 +50,21 @@ export class AzureAdapter extends BaseProviderAdapter {
 
   /**
    * Create provider-native tools for Azure OpenAI
-   * TODO: Implement when Azure tool support is needed
+   * Includes universal tools from base class
    */
   async createTools(enabledTools: string[]): Promise<ToolSet> {
-    // Azure OpenAI may support tools depending on deployment configuration
-    // TODO: Implement when needed
-    log.info('Azure tool creation not yet implemented', { enabledTools });
-    return {};
+    // Get universal tools from base class (show_chart, etc.)
+    const universalTools = await super.createTools(enabledTools);
+
+    // TODO: Add Azure-specific tools when needed
+    // For now, return just universal tools
+    log.info('Created tools for Azure', {
+      enabledTools,
+      toolCount: Object.keys(universalTools).length,
+      toolNames: Object.keys(universalTools)
+    });
+
+    return universalTools;
   }
 
   /**

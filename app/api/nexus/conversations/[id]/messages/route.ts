@@ -121,7 +121,7 @@ export async function GET(
       return content
     }
 
-    // Convert a part to text format, handling images as markdown
+    // Convert a part to content format, handling images as markdown and passing through tool parts
     // Note: Database parts can have various types beyond the strict MessagePart type
     const convertPartToTextContent = (part: MessagePart): ContentPart | null => {
       const partType = part.type as string // Database may have additional part types
@@ -139,6 +139,10 @@ export async function GET(
           return { type: 'text', text: `![Generated Image](${imageUrl})` }
         }
         return null
+      }
+      // Pass through tool-call and tool-result parts as-is for UI rendering (charts, etc.)
+      if (partType === 'tool-call' || partType === 'tool-result') {
+        return part as unknown as ContentPart
       }
       // Skip step-start, step-finish, and other control types
       if (partType === 'step-start' || partType === 'step-finish') {
