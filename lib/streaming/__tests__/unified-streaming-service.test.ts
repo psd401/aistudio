@@ -43,6 +43,7 @@ describe('UnifiedStreamingService', () => {
     
     mockAdapter = {
       createModel: jest.fn(),
+      createTools: jest.fn().mockResolvedValue({}),
       getCapabilities: jest.fn(),
       getProviderOptions: jest.fn(),
       streamWithEnhancements: jest.fn()
@@ -264,6 +265,7 @@ describe('UnifiedStreamingService', () => {
       // Create a failing adapter
       const failingAdapter = {
         createModel: (jest.fn() as jest.Mock<any>).mockResolvedValue({ id: 'gpt-4', provider: 'openai' }),
+        createTools: jest.fn().mockResolvedValue({}),
         getCapabilities: jest.fn().mockReturnValue({
           supportsReasoning: false,
           supportsThinking: false,
