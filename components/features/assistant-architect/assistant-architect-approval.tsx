@@ -168,7 +168,7 @@ export function AssistantArchitectApproval({
                       <TabsTrigger value="prompts">Prompts & Context</TabsTrigger>
                     </TabsList>
                     <TabsContent value="preview">
-                      <AssistantPreview assistantId={String(request.id)} tool={request} />
+                      <AssistantPreview tool={request} />
                     </TabsContent>
                     <TabsContent value="prompts">
                       <div className="space-y-6">

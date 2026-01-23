@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button"
 import { submitAssistantArchitectForApprovalAction } from "@/actions/db/assistant-architect-actions"
 import { toast } from "sonner"
 import { AlertCircle, CheckCircle2 } from "lucide-react"
+import { createLogger, generateRequestId } from "@/lib/client-logger"
 import type { AssistantArchitectWithRelations } from "@/types/assistant-architect-types"
 
 interface PreviewSubmitClientProps {
@@ -22,17 +23,24 @@ export function PreviewSubmitClient({
   const router = useRouter()
 
   const handleSubmit = async () => {
+    const requestId = generateRequestId()
+    const log = createLogger({ requestId, component: "PreviewSubmitClient" })
+
     try {
+      log.info("Submitting assistant for approval", { assistantId })
       setIsLoading(true)
       const result = await submitAssistantArchitectForApprovalAction(assistantId)
 
       if (result.isSuccess) {
+        log.info("Assistant submitted successfully", { assistantId })
         toast.success("Assistant submitted for approval")
         router.push(`/utilities/assistant-architect`)
       } else {
+        log.warn("Assistant submission failed", { assistantId, message: result.message })
         toast.error(result.message)
       }
-    } catch {
+    } catch (error) {
+      log.error("Failed to submit assistant", { assistantId, error })
       toast.error("Failed to submit assistant")
     } finally {
       setIsLoading(false)
@@ -50,7 +58,7 @@ export function PreviewSubmitClient({
     },
     {
       title: "Prompts",
-      isComplete: tool.prompts.length > 0
+      isComplete: (tool.prompts?.length ?? 0) > 0
     }
   ]
 
