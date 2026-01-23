@@ -12,6 +12,7 @@ import type { CatalogAssistant } from "@/actions/assistant-catalog.actions"
 
 interface AssistantCardProps {
   assistant: CatalogAssistant
+  isHydrated?: boolean
 }
 
 // Category colors matching the dashboard design
@@ -45,12 +46,13 @@ const CATEGORY_LABELS: Record<CatalogAssistant['category'], string> = {
   other: 'General'
 }
 
-function AssistantCardComponent({ assistant }: AssistantCardProps) {
+function AssistantCardComponent({ assistant, isHydrated = false }: AssistantCardProps) {
   const router = useRouter()
   const { toggleFavorite, isFavorite } = useAssistantCatalogStore()
   const [isHovered, setIsHovered] = useState(false)
 
-  const favorited = isFavorite(assistant.id)
+  // Only check favorites after hydration to avoid SSR mismatch
+  const favorited = isHydrated && isFavorite(assistant.id)
   const colors = CATEGORY_COLORS[assistant.category]
 
   const handleLaunch = useCallback(() => {
