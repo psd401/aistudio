@@ -691,15 +691,15 @@ export async function addToolInputFieldAction(
     position?: number;
     options?: ToolInputFieldOptions;
   }
-): Promise<ActionState<void>> {
+): Promise<ActionState<SelectToolInputField>> {
   const requestId = generateRequestId()
   const timer = startTimer("addToolInputField")
   const log = createLogger({ requestId, action: "addToolInputField" })
-  
+
   try {
     log.info("Action started: Adding tool input field", { architectId, fieldName: data.name })
 
-    await createToolInputField({
+    const createdField = await createToolInputField({
       assistantArchitectId: Number.parseInt(architectId, 10),
       name: data.name,
       label: data.label ?? data.name,
@@ -710,11 +710,11 @@ export async function addToolInputFieldAction(
 
     log.info("Tool input field added successfully", { architectId, fieldName: data.name })
     timer({ status: "success", architectId })
-    
+
     return {
       isSuccess: true,
       message: "Tool input field added successfully",
-      data: undefined
+      data: createdField
     }
   } catch (error) {
     timer({ status: "error" })
