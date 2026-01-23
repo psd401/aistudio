@@ -2,6 +2,7 @@ import type { Tool } from 'ai'
 import { jsonSchema } from 'ai'
 import { createLogger } from '@/lib/logger'
 import { v4 as uuidv4 } from 'uuid'
+import escapeHtml from 'escape-html'
 
 /**
  * Show Chart Tool for AI Assistants
@@ -46,14 +47,70 @@ export interface ChartToolResult {
 }
 
 /**
- * Create the show_chart tool for AI SDK
- *
- * This tool returns a chart configuration that the frontend renders
- * using the ChartVisualizationUI component.
+ * Validate chart arguments for required fields and data structure
  */
-export function createShowChartTool(): Tool<ShowChartArgs, ChartToolResult> {
-  // Create JSON Schema compatible with OpenAI Responses API
-  const schema = jsonSchema<ShowChartArgs>({
+function validateChartArgs(
+  args: ShowChartArgs,
+  chartId: string
+): ChartToolResult | null {
+  if (!args.data || args.data.length === 0) {
+    return { id: chartId, success: false, error: 'No data provided for chart' }
+  }
+
+  const firstDataPoint = args.data[0]
+  if (!(args.xKey in firstDataPoint)) {
+    return {
+      id: chartId,
+      success: false,
+      error: `X-axis key "${args.xKey}" not found in data`
+    }
+  }
+
+  for (const series of args.series) {
+    if (!(series.key in firstDataPoint)) {
+      return {
+        id: chartId,
+        success: false,
+        error: `Series key "${series.key}" not found in data`
+      }
+    }
+  }
+
+  return null // Validation passed
+}
+
+/**
+ * Sanitize chart arguments to prevent XSS attacks.
+ * AI-generated content must be escaped before rendering in the UI.
+ */
+function sanitizeChartArgs(args: ShowChartArgs): void {
+  args.title = escapeHtml(args.title)
+  if (args.description) {
+    args.description = escapeHtml(args.description)
+  }
+
+  args.series = args.series.map(s => ({
+    ...s,
+    key: escapeHtml(s.key),
+    label: escapeHtml(s.label)
+  }))
+
+  args.data = args.data.map(item => {
+    const sanitized: Record<string, string | number | boolean | null> = {}
+    for (const [key, value] of Object.entries(item)) {
+      sanitized[escapeHtml(key)] = typeof value === 'string' ? escapeHtml(value) : value
+    }
+    return sanitized
+  })
+
+  args.xKey = escapeHtml(args.xKey)
+}
+
+/**
+ * Create the JSON schema for chart tool input validation
+ */
+function createChartSchema() {
+  return jsonSchema<ShowChartArgs>({
     type: 'object',
     properties: {
       type: {
@@ -75,10 +132,7 @@ export function createShowChartTool(): Tool<ShowChartArgs, ChartToolResult> {
       data: {
         type: 'array',
         description: 'Array of data points. Each object should have a key matching xKey for labels, and keys matching series[].key for numeric values. Example: [{month: "Jan", sales: 100}, {month: "Feb", sales: 150}]',
-        items: {
-          type: 'object',
-          additionalProperties: true
-        },
+        items: { type: 'object', additionalProperties: true },
         minItems: 1,
         maxItems: 1000
       },
@@ -92,39 +146,23 @@ export function createShowChartTool(): Tool<ShowChartArgs, ChartToolResult> {
         items: {
           type: 'object',
           properties: {
-            key: {
-              type: 'string',
-              description: 'Data key from the data array'
-            },
-            label: {
-              type: 'string',
-              description: 'Display label for the series'
-            },
-            color: {
-              type: 'string',
-              description: 'Optional hex color (e.g., #2563eb)'
-            }
+            key: { type: 'string', description: 'Data key from the data array' },
+            label: { type: 'string', description: 'Display label for the series' },
+            color: { type: 'string', description: 'Optional hex color (e.g., #2563eb)' }
           },
           required: ['key', 'label']
         },
         minItems: 1,
         maxItems: 10
       },
-      showLegend: {
-        type: 'boolean',
-        description: 'Show chart legend (default: true)'
-      },
-      showGrid: {
-        type: 'boolean',
-        description: 'Show grid lines (default: true)'
-      }
+      showLegend: { type: 'boolean', description: 'Show chart legend (default: true)' },
+      showGrid: { type: 'boolean', description: 'Show grid lines (default: true)' }
     },
     required: ['type', 'title', 'data', 'xKey', 'series']
   })
+}
 
-  // Construct the tool object with proper typing
-  const chartTool: Tool<ShowChartArgs, ChartToolResult> = {
-    description: `Display data as an interactive chart visualization. Use this tool when you have numerical data that would benefit from visual representation.
+const CHART_TOOL_DESCRIPTION = `Display data as an interactive chart visualization. Use this tool when you have numerical data that would benefit from visual representation.
 
 IMPORTANT: Always use this tool instead of text-based charts, ASCII art, or mermaid diagrams when visualizing data.
 
@@ -142,8 +180,18 @@ Example: To show enrollment data, call with:
   "data": [{"grade": "K", "students": 120}, {"grade": "1st", "students": 135}],
   "xKey": "grade",
   "series": [{"key": "students", "label": "Students"}]
-}`,
-    inputSchema: schema,
+}`
+
+/**
+ * Create the show_chart tool for AI SDK
+ *
+ * This tool returns a chart configuration that the frontend renders
+ * using the ChartVisualizationUI component.
+ */
+export function createShowChartTool(): Tool<ShowChartArgs, ChartToolResult> {
+  const chartTool: Tool<ShowChartArgs, ChartToolResult> = {
+    description: CHART_TOOL_DESCRIPTION,
+    inputSchema: createChartSchema(),
     execute: async (args: ShowChartArgs): Promise<ChartToolResult> => {
       const chartId = uuidv4()
 
@@ -156,43 +204,15 @@ Example: To show enrollment data, call with:
       })
 
       try {
-        // Validate data structure
-        if (!args.data || args.data.length === 0) {
-          return {
-            id: chartId,
-            success: false,
-            error: 'No data provided for chart'
-          }
+        const validationError = validateChartArgs(args, chartId)
+        if (validationError) {
+          return validationError
         }
 
-        // Check that xKey exists in at least the first data point
-        const firstDataPoint = args.data[0]
-        if (!(args.xKey in firstDataPoint)) {
-          return {
-            id: chartId,
-            success: false,
-            error: `X-axis key "${args.xKey}" not found in data`
-          }
-        }
-
-        // Check that all series keys exist in data
-        for (const series of args.series) {
-          if (!(series.key in firstDataPoint)) {
-            return {
-              id: chartId,
-              success: false,
-              error: `Series key "${series.key}" not found in data`
-            }
-          }
-        }
+        sanitizeChartArgs(args)
 
         log.info('Chart generated successfully', { chartId, type: args.type })
-
-        // Return success - the frontend will render the chart from args
-        return {
-          id: chartId,
-          success: true
-        }
+        return { id: chartId, success: true }
       } catch (error) {
         log.error('Chart generation failed', {
           chartId,
