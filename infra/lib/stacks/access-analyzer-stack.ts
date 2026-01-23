@@ -109,6 +109,18 @@ export class AccessAnalyzerStack extends cdk.Stack {
   private createRemediationLambda(
     props: AccessAnalyzerStackProps
   ): lambda.Function {
+    // Create explicit role to avoid CDK's deprecated fromAwsManagedPolicyName
+    const remediationRole = new iam.Role(this, "RemediationLambdaRole", {
+      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        iam.ManagedPolicy.fromManagedPolicyArn(
+          this,
+          "RemediationLambdaBasicExecPolicy",
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        ),
+      ],
+    })
+
     const remediationFunction = new lambda.Function(this, "RemediationLambda", {
       runtime: lambda.Runtime.PYTHON_3_11,
       architecture: lambda.Architecture.ARM_64,
@@ -116,6 +128,7 @@ export class AccessAnalyzerStack extends cdk.Stack {
       code: lambda.Code.fromAsset("lambda/iam-remediation"),
       timeout: cdk.Duration.minutes(5),
       memorySize: 512,
+      role: remediationRole,
       environment: {
         ANALYZER_ARN: this.analyzer.attrArn,
         SNS_TOPIC_ARN: this.alertTopic.topicArn,

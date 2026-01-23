@@ -235,7 +235,11 @@ export class EcsServiceConstruct extends Construct {
     const taskExecutionRole = new iam.Role(this, 'TaskExecutionRole', {
       assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
       managedPolicies: [
-        iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AmazonECSTaskExecutionRolePolicy'),
+        iam.ManagedPolicy.fromManagedPolicyArn(
+          this,
+          'EcsTaskExecutionPolicy',
+          'arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy'
+        ),
       ],
     });
 

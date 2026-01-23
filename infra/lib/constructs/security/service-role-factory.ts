@@ -334,7 +334,8 @@ export class ServiceRoleFactory {
 
     return new iam.PolicyDocument({
       statements: [
-        // Object operations - no tag conditions (bucket-level tags provide isolation)
+        // Object operations - tag conditions check parent bucket tags for environment isolation
+        // Note: aws:ResourceTag on object ARNs checks the bucket's tags, not object tags
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,
           actions: [
@@ -344,6 +345,12 @@ export class ServiceRoleFactory {
             "s3:DeleteObject",
           ],
           resources: bucketArns.map((arn) => `${arn}/*`),
+          conditions: {
+            StringEquals: {
+              "aws:ResourceTag/Environment": props.environment,
+              "aws:ResourceTag/ManagedBy": "cdk",
+            },
+          },
         }),
         // Bucket operations - tag conditions enforce environment isolation
         new iam.PolicyStatement({

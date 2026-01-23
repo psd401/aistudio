@@ -142,4 +142,104 @@ describe('BedrockGuardrailsService', () => {
       expect(result.processedContent).toBe(longContent);
     });
   });
+
+  /**
+   * Educational Content Test Cases (Issue #639)
+   *
+   * These tests document the types of legitimate educational content that should
+   * be allowed through the guardrails. They use mocked clients so they test
+   * graceful degradation rather than actual filter behavior.
+   *
+   * The actual filter behavior is configured in:
+   * - infra/lib/guardrails-stack.ts (CDK configuration)
+   * - AWS Bedrock Guardrails console
+   *
+   * These tests serve as documentation and regression tests to ensure the
+   * service handles educational content gracefully.
+   */
+  describe('educational content (Issue #639)', () => {
+    // Sample teacher observation content that was blocked (conversation 12f266db)
+    const teacherObservationContent = `
+      as an expert, veteran principal in the state of washington, please look at the attached
+      observation notes to provide evidence coding for the criterion and components in the
+      attached 2022 danielson framework document.
+
+      Observation Notes:
+      Teacher working with one student on solving problems
+      Directed student's attention to "size of the problem" poster
+      Student chose to focus on the problem that happened during reading time
+      Teacher: "what is the problem in that situation?" Student: "it's a little problem"
+      Teacher: "one thing you're amazing at is identifying a problem"
+      Student: "i argued"
+      Teacher: "so you need the reminders?" Student: "yes"
+      Teacher discussed consequences about losing tickets
+      Student mentioned feeling nervous and experiencing anxiety
+    `;
+
+    it('should process teacher observation content without error', async () => {
+      // With mocked AWS client, this tests graceful degradation
+      const result = await service.evaluateInput(teacherObservationContent);
+
+      expect(result.allowed).toBe(true);
+      expect(result.processedContent).toBe(teacherObservationContent);
+    });
+
+    it('should process Danielson Framework evaluation requests', async () => {
+      const danielsonRequest = `
+        Please evaluate this lesson using the Danielson Framework criteria:
+        - Criterion 1: Centering instruction on high expectations
+        - Component 2b: Fostering a Culture for Learning
+        - Component 3a: Communicating About Purpose and Content
+
+        The teacher was working with a student who had behavioral challenges during
+        the reading instruction period. The student mentioned they "argued" and
+        discussed consequences for not showing expected behavior.
+      `;
+
+      const result = await service.evaluateInput(danielsonRequest);
+      expect(result.allowed).toBe(true);
+    });
+
+    it('should process behavior management discussions', async () => {
+      const behaviorContent = `
+        Student behavior report:
+        - Student argued with teacher about materials
+        - Discussed consequences: losing tickets
+        - Student expressed feeling nervous and anxious
+        - Teacher helped student identify problem-solving strategies
+        - Discussed "what ifs" thinking patterns related to anxiety
+      `;
+
+      const result = await service.evaluateInput(behaviorContent);
+      expect(result.allowed).toBe(true);
+    });
+
+    it('should process special education SEL lesson observations', async () => {
+      const selContent = `
+        SEL lesson observation for behavior special education:
+        - Teacher using "size of the problem" poster
+        - Student practicing problem-solving after incident in general ed classroom
+        - Discussion about appropriate vs inappropriate responses
+        - Student reflecting on why they made certain choices
+        - Teacher explaining snowball effect of not problem-solving in the moment
+      `;
+
+      const result = await service.evaluateInput(selContent);
+      expect(result.allowed).toBe(true);
+    });
+
+    it('should process classroom management discussions', async () => {
+      const classroomMgmtContent = `
+        Classroom management strategies observed:
+        - Token economy system (tickets for positive behavior)
+        - Consequences for not showing expected behavior
+        - Student reflection time for behavioral incidents
+        - Teacher reminders about expectations
+        - Discussion about intrinsic vs extrinsic motivation
+      `;
+
+      const result = await service.evaluateInput(classroomMgmtContent);
+      expect(result.allowed).toBe(true);
+    });
+  });
 });
