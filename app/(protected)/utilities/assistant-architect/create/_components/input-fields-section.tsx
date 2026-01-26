@@ -99,6 +99,7 @@ export function InputFieldsSection({
 
       {showFieldEditor && (
         <InputFieldEditor
+          key={editingField?.id ?? "new"}
           existingFields={inputFields}
           editingField={editingField}
           onSave={handleFieldSave}

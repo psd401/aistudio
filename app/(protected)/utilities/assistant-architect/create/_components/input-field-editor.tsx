@@ -45,6 +45,7 @@ export function InputFieldEditor({
   const [options, setOptions] = useState<{ label: string; value: string }[]>([])
   const isEditing = !!editingField
 
+  // Use conditional defaultValues - component remounts via key prop when editingField changes
   const form = useForm<FormValues>({
     resolver: zodResolver(
       baseFormSchema.refine(
@@ -54,30 +55,45 @@ export function InputFieldEditor({
         { message: "Name must be unique", path: ["name"] }
       )
     ),
-    defaultValues: { name: "", label: "", fieldType: "short_text", position: nextPosition }
+    defaultValues: editingField
+      ? {
+          name: editingField.name,
+          label: editingField.label ?? editingField.name,
+          fieldType: editingField.fieldType as FormValues["fieldType"],
+          position: editingField.position,
+        }
+      : { name: "", label: "", fieldType: "short_text", position: nextPosition }
   })
 
+  // Parse options on mount - form values handled by defaultValues via key remount
   useEffect(() => {
     if (editingField) {
       let parsedOptions: { label: string; value: string }[] = []
-      const opts = editingField.options as ToolInputFieldOptions | null
-      if (opts?.values && Array.isArray(opts.values)) {
-        parsedOptions = opts.values.map(val => ({ label: val, value: val }))
+      const opts = editingField.options
+
+      // Handle both storage formats:
+      // 1. New format: { values: ["val1", "val2"] } - from createToolInputField
+      // 2. Legacy/import format: [{ label: "Label", value: "val" }, ...] - from JSON imports
+      if (opts) {
+        if (Array.isArray(opts)) {
+          // Legacy format: array of {label, value} objects
+          parsedOptions = (opts as { label: string; value: string }[]).map(opt => ({
+            label: opt.label || opt.value,
+            value: opt.value
+          }))
+        } else if ((opts as ToolInputFieldOptions)?.values && Array.isArray((opts as ToolInputFieldOptions).values)) {
+          // New format: object with values array
+          parsedOptions = (opts as ToolInputFieldOptions).values!.map(val => ({ label: val, value: val }))
+        }
       }
-      form.reset({
-        name: editingField.name,
-        label: editingField.label ?? editingField.name,
-        fieldType: editingField.fieldType as FormValues["fieldType"],
-        position: editingField.position,
-      })
+
       setOptions(parsedOptions)
       setShowOptions(editingField.fieldType === "select" || editingField.fieldType === "multi_select")
     } else {
-      form.reset({ name: "", label: "", fieldType: "short_text", position: nextPosition })
       setOptions([])
       setShowOptions(false)
     }
-  }, [editingField, form, nextPosition])
+  }, [editingField])
 
   const handleTypeChange = useCallback((value: string) => {
     const shouldShow = value === "select" || value === "multi_select"
