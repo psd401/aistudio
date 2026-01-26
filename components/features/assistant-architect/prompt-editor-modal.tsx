@@ -832,7 +832,7 @@ function EditorColumn({
           <span className="text-xs text-muted-foreground">Markdown supported</span>
         </div>
       </div>
-      <div className="flex-1 rounded-md border bg-muted overflow-hidden flex flex-col">
+      <div className="flex-1 rounded-md border bg-muted overflow-hidden flex flex-col min-h-0">
         {/* MDXEditor with z-index override for toolbar and scroll fix */}
         {/* eslint-disable-next-line react/no-unknown-property */}
         <style jsx global>{`
@@ -847,22 +847,23 @@ function EditorColumn({
             z-index: 65 !important;
           }
           /* Fix: Enable mouse wheel scrolling in MDXEditor content area */
-          .prompt-editor-modal-mdx [class*="_editorWrapper_"] {
+          .prompt-editor-modal-mdx.mdxeditor {
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+          }
+          .prompt-editor-modal-mdx .mdxeditor-root-contenteditable {
             flex: 1;
             overflow-y: auto;
             overflow-x: hidden;
-          }
-          .prompt-editor-modal-mdx [class*="_editorRoot_"] {
-            display: flex;
-            flex-direction: column;
-            height: 100%;
+            min-height: 0;
           }
         `}</style>
         <MDXEditor
           ref={mdxEditorRef}
           markdown={promptContent}
           onChange={handleContentChange}
-          className="h-full bg-muted [&_.mdxeditor]:h-full prompt-editor-modal-mdx"
+          className="h-full bg-muted flex-1 min-h-0 prompt-editor-modal-mdx"
           contentEditableClassName="prose max-w-none p-4"
           placeholder="Enter your prompt content. Use ${variableName} for dynamic values."
           plugins={editorPlugins}
