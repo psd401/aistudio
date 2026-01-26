@@ -92,8 +92,14 @@ export class GuardrailsStack extends cdk.Stack {
             outputStrength: 'LOW',
           },
           {
+            // Issue #657: Lowered from HIGH to MEDIUM
+            // HIGH was blocking legitimate Assistant Architect prompts that contain
+            // instructional language (e.g., "WA School Legislation Radar" assistant).
+            // System prompts with detailed instructions triggered false positives.
+            // MEDIUM still provides protection against actual jailbreak attempts while
+            // allowing legitimate educational and administrative assistant content.
             type: 'PROMPT_ATTACK',
-            inputStrength: 'HIGH', // Keep HIGH to prevent jailbreaks
+            inputStrength: 'MEDIUM', // Allows legitimate instructional assistant prompts
             outputStrength: 'NONE', // Only block on input
           },
         ],
