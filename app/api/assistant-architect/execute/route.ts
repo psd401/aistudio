@@ -13,6 +13,7 @@ import { hasToolAccess, hasRole } from '@/utils/roles';
 import { ErrorFactories } from '@/lib/error-utils';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
 import type { StreamRequest } from '@/lib/streaming/types';
+import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { storeExecutionEvent } from '@/lib/assistant-architect/event-storage';
 
 // Allow streaming responses up to 15 minutes for long chains
@@ -98,7 +99,32 @@ export async function POST(req: Request) {
 
   try {
     // 1. Parse and validate request
-    const body = await req.json();
+    // Issue #657: Handle empty/malformed request body gracefully
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch (parseError) {
+      log.warn('Failed to parse request body', {
+        error: parseError instanceof Error ? parseError.message : String(parseError),
+        contentLength: req.headers.get('content-length'),
+        contentType: req.headers.get('content-type')
+      });
+      return new Response(
+        JSON.stringify({
+          error: 'Invalid request body',
+          message: 'Request body is empty or not valid JSON. Please try again.',
+          requestId
+        }),
+        {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Request-Id': requestId
+          }
+        }
+      );
+    }
+
     const validationResult = ExecuteRequestSchema.safeParse(body);
 
     if (!validationResult.success) {
@@ -372,6 +398,27 @@ export async function POST(req: Request) {
     });
 
     timer({ status: 'error' });
+
+    // Issue #657: Handle ContentSafetyBlockedError with proper 400 response
+    // This provides a user-friendly error message when guardrails block content
+    if (error instanceof ContentSafetyBlockedError) {
+      return new Response(
+        JSON.stringify({
+          error: error.message,
+          code: 'CONTENT_BLOCKED',
+          categories: error.blockedCategories,
+          source: error.source,
+          requestId
+        }),
+        {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Request-Id': requestId
+          }
+        }
+      );
+    }
 
     return new Response(
       JSON.stringify({

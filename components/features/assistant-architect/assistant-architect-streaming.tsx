@@ -185,10 +185,19 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
           }
         } else {
           // EXECUTION MODE: Initial assistant execution
+          // Issue #657: Validate inputsRef is initialized (empty inputs are valid)
+          const currentInputs = inputsRef.current ?? {}
+
           body = {
             toolId,
-            inputs: inputsRef.current
+            inputs: currentInputs
           }
+
+          log.debug('Execution request body prepared', {
+            toolId,
+            inputKeys: Object.keys(currentInputs),
+            bodySize: JSON.stringify(body).length
+          })
         }
 
         // Make the fetch request
