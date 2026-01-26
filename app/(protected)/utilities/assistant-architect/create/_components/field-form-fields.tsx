@@ -104,7 +104,7 @@ function FieldTypeFieldContent({
   return (
     <FormItem>
       <FormLabel>Field Type</FormLabel>
-      <Select onValueChange={handleChange} defaultValue={field.value} value={field.value}>
+      <Select onValueChange={handleChange} value={field.value || undefined}>
         <FormControl>
           <SelectTrigger>
             <SelectValue placeholder="Select type" />
