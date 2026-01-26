@@ -185,19 +185,10 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
           }
         } else {
           // EXECUTION MODE: Initial assistant execution
-          // Issue #657: Validate inputsRef is initialized (empty inputs are valid)
-          const currentInputs = inputsRef.current ?? {}
-
           body = {
             toolId,
-            inputs: currentInputs
+            inputs: inputsRef.current
           }
-
-          log.debug('Execution request body prepared', {
-            toolId,
-            inputKeys: Object.keys(currentInputs),
-            bodySize: JSON.stringify(body).length
-          })
         }
 
         // Make the fetch request
@@ -499,6 +490,15 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
         }
 
       } catch (error) {
+        // Handle AbortError gracefully - this occurs during React StrictMode unmount/remount
+        // or when the user navigates away. We should silently exit without showing an error.
+        if (error instanceof Error && error.name === 'AbortError') {
+          log.debug('Stream aborted (likely StrictMode or navigation)', {
+            mode: hasCompletedExecutionRef.current ? 'CONVERSATION' : 'EXECUTION'
+          })
+          return // Silently exit - the runtime will restart if needed
+        }
+
         const errorMode = hasCompletedExecutionRef.current ? 'CONVERSATION' : 'EXECUTION'
         log.error('Streaming adapter error', {
           error: error instanceof Error ? {
@@ -730,14 +730,23 @@ function AutoStartExecution({
     if (!hasStarted.current && !hasCompletedExecution) {
       hasStarted.current = true
 
-      // Append initial message to trigger execution
-      runtime.append({
-        role: 'user',
-        content: [{ type: 'text', text: `Execute ${tool.name}` }]
-      })
+      // Use setTimeout(0) to defer execution until after React StrictMode completes
+      // its unmount/remount cycle. This prevents the first request from being aborted.
+      const timeoutId = setTimeout(() => {
+        runtime.append({
+          role: 'user',
+          content: [{ type: 'text', text: `Execute ${tool.name}` }]
+        })
+        log.info('Execution started', { toolName: tool.name, inputKeys: Object.keys(inputs) })
+      }, 0)
 
-      log.info('Execution started', { toolName: tool.name, inputKeys: Object.keys(inputs) })
+      // Cleanup: clear timeout and reset hasStarted so StrictMode remount can restart
+      return () => {
+        clearTimeout(timeoutId)
+        hasStarted.current = false
+      }
     }
+
   // NOTE: inputs is intentionally NOT in the dependency array to prevent re-execution
   // if the parent component re-renders with a new inputs object reference. The inputs
   // are captured via inputsRef in the parent component and passed to the adapter.
