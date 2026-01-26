@@ -45,6 +45,7 @@ export function InputFieldEditor({
   const [options, setOptions] = useState<{ label: string; value: string }[]>([])
   const isEditing = !!editingField
 
+  // Use conditional defaultValues - component remounts via key prop when editingField changes
   const form = useForm<FormValues>({
     resolver: zodResolver(
       baseFormSchema.refine(
@@ -54,9 +55,17 @@ export function InputFieldEditor({
         { message: "Name must be unique", path: ["name"] }
       )
     ),
-    defaultValues: { name: "", label: "", fieldType: "short_text", position: nextPosition }
+    defaultValues: editingField
+      ? {
+          name: editingField.name,
+          label: editingField.label ?? editingField.name,
+          fieldType: editingField.fieldType as FormValues["fieldType"],
+          position: editingField.position,
+        }
+      : { name: "", label: "", fieldType: "short_text", position: nextPosition }
   })
 
+  // Parse options on mount - form values handled by defaultValues via key remount
   useEffect(() => {
     if (editingField) {
       let parsedOptions: { label: string; value: string }[] = []
@@ -78,20 +87,13 @@ export function InputFieldEditor({
         }
       }
 
-      form.reset({
-        name: editingField.name,
-        label: editingField.label ?? editingField.name,
-        fieldType: editingField.fieldType as FormValues["fieldType"],
-        position: editingField.position,
-      })
       setOptions(parsedOptions)
       setShowOptions(editingField.fieldType === "select" || editingField.fieldType === "multi_select")
     } else {
-      form.reset({ name: "", label: "", fieldType: "short_text", position: nextPosition })
       setOptions([])
       setShowOptions(false)
     }
-  }, [editingField, form, nextPosition])
+  }, [editingField])
 
   const handleTypeChange = useCallback((value: string) => {
     const shouldShow = value === "select" || value === "multi_select"

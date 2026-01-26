@@ -93,18 +93,17 @@ function FieldTypeFieldContent({
   field: ControllerRenderProps<FormValues, "fieldType">
   onTypeChange: (value: string) => void
 }) {
-  const handleChange = useCallback(
-    (value: string) => {
-      field.onChange(value)
-      onTypeChange(value)
-    },
-    [field, onTypeChange]
-  )
+  // Fresh handler each render - avoids stale closure with form.reset()
+  const handleChange = (value: string) => {
+    field.onChange(value)
+    onTypeChange(value)
+  }
 
   return (
     <FormItem>
       <FormLabel>Field Type</FormLabel>
-      <Select onValueChange={handleChange} value={field.value || undefined}>
+      {/* Use defaultValue instead of value for proper sync after form.reset() */}
+      <Select onValueChange={handleChange} defaultValue={field.value}>
         <FormControl>
           <SelectTrigger>
             <SelectValue placeholder="Select type" />
