@@ -282,10 +282,8 @@ export function GraphPageClient() {
   }, [])
 
   const handleDeleteNodeRequest = useCallback(
-    (row: NodeTableRow | SelectGraphNode) => {
-      const node = "nodeType" in row && "nodeClass" in row
-        ? nodes.find((n) => n.id === row.id) || null
-        : null
+    (row: NodeTableRow) => {
+      const node = nodes.find((n) => n.id === row.id)
       if (node) {
         setNodeToDelete(node)
         setDeleteNodeDialog(true)
