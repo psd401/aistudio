@@ -52,7 +52,7 @@ const INITIAL_SETUP_FILES = migrationsConfig.initialSetupFiles;
 
 export async function handler(event: CustomResourceEvent): Promise<any> {
   console.log('Database initialization event:', JSON.stringify(event, null, 2));
-  console.log('Handler version: 2025-12-24-v12 - Add CONCURRENTLY detection, fix migration 042');
+  console.log('Handler version: 2026-01-30-v13 - Add graph schema migration 050');
   
   // SAFETY CHECK: Log what mode we're in
   console.log(`🔍 Checking database state for safety...`);

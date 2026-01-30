@@ -191,3 +191,27 @@ export interface ScheduleConfig {
   cron?: string;
   [key: string]: unknown;
 }
+
+// ============================================
+// Context Graph JSONB Types
+// ============================================
+
+/**
+ * Metadata for graph nodes
+ * Flexible structure for storing node-specific properties
+ * Part of Context Graph Foundation epic (Issues #665, #666)
+ */
+export interface GraphNodeMetadata {
+  // Example fields - can be extended as needed
+  [key: string]: unknown;
+}
+
+/**
+ * Metadata for graph edges
+ * Flexible structure for storing edge-specific properties
+ * Part of Context Graph Foundation epic (Issues #665, #666)
+ */
+export interface GraphEdgeMetadata {
+  // Example fields - can be extended as needed
+  [key: string]: unknown;
+}

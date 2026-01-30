@@ -126,6 +126,12 @@ export * from "./tables/migration-log";
 export * from "./tables/migration-mappings";
 
 // ============================================
+// Context Graph
+// ============================================
+export * from "./tables/graph-nodes";
+export * from "./tables/graph-edges";
+
+// ============================================
 // Relations
 // ============================================
 export * from "./relations";

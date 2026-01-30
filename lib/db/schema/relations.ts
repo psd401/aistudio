@@ -86,6 +86,10 @@ import { navigationItemRoles } from "./tables/navigation-item-roles";
 import { modelComparisons } from "./tables/model-comparisons";
 import { modelReplacementAudit } from "./tables/model-replacement-audit";
 
+// Context Graph
+import { graphNodes } from "./tables/graph-nodes";
+import { graphEdges } from "./tables/graph-edges";
+
 // ============================================
 // User Relations
 // ============================================
@@ -115,6 +119,8 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   ideaNotes: many(ideaNotes),
   modelComparisons: many(modelComparisons),
   modelReplacementsPerformed: many(modelReplacementAudit),
+  graphNodes: many(graphNodes),
+  graphEdges: many(graphEdges),
   // One-to-one with nexus_user_preferences (user_id is the primary key)
   preferences: one(nexusUserPreferences, {
     fields: [users.id],
@@ -738,3 +744,33 @@ export const modelReplacementAuditRelations = relations(
     }),
   })
 );
+
+// ============================================
+// Context Graph Relations
+// ============================================
+
+export const graphNodesRelations = relations(graphNodes, ({ one, many }) => ({
+  createdByUser: one(users, {
+    fields: [graphNodes.createdBy],
+    references: [users.id],
+  }),
+  outgoingEdges: many(graphEdges, { relationName: "sourceNode" }),
+  incomingEdges: many(graphEdges, { relationName: "targetNode" }),
+}));
+
+export const graphEdgesRelations = relations(graphEdges, ({ one }) => ({
+  sourceNode: one(graphNodes, {
+    fields: [graphEdges.sourceNodeId],
+    references: [graphNodes.id],
+    relationName: "sourceNode",
+  }),
+  targetNode: one(graphNodes, {
+    fields: [graphEdges.targetNodeId],
+    references: [graphNodes.id],
+    relationName: "targetNode",
+  }),
+  createdByUser: one(users, {
+    fields: [graphEdges.createdBy],
+    references: [users.id],
+  }),
+}));
