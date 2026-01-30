@@ -92,6 +92,9 @@ import {
   // Migration
   migrationLog,
   migrationMappings,
+  // Context Graph
+  graphNodes,
+  graphEdges,
 } from "@/lib/db/schema";
 
 // ============================================
@@ -109,6 +112,8 @@ export type {
   NexusMcpAuditData,
   NexusTemplateVariable,
   ScheduleConfig,
+  GraphNodeMetadata,
+  GraphEdgeMetadata,
 } from "./jsonb";
 
 // ============================================
@@ -386,3 +391,15 @@ export type SelectMigrationMapping = InferSelectModel<typeof migrationMappings>;
 // ============================================
 export type InsertMigrationLog = InferInsertModel<typeof migrationLog>;
 export type InsertMigrationMapping = InferInsertModel<typeof migrationMappings>;
+
+// ============================================
+// Context Graph - Select Types
+// ============================================
+export type SelectGraphNode = InferSelectModel<typeof graphNodes>;
+export type SelectGraphEdge = InferSelectModel<typeof graphEdges>;
+
+// ============================================
+// Context Graph - Insert Types
+// ============================================
+export type InsertGraphNode = InferInsertModel<typeof graphNodes>;
+export type InsertGraphEdge = InferInsertModel<typeof graphEdges>;
