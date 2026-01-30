@@ -61,18 +61,11 @@ CREATE INDEX IF NOT EXISTS idx_graph_edges_edge_type ON graph_edges(edge_type);
 
 -- =====================================================
 -- TRIGGERS
+-- Uses shared update_updated_at_column() from migration 017
 -- =====================================================
-
-CREATE OR REPLACE FUNCTION update_graph_nodes_updated_at()
-RETURNS TRIGGER AS '
-BEGIN
-  NEW.updated_at = NOW();
-  RETURN NEW;
-END;
-' LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS trg_graph_nodes_updated_at ON graph_nodes;
 CREATE TRIGGER trg_graph_nodes_updated_at
   BEFORE UPDATE ON graph_nodes
   FOR EACH ROW
-  EXECUTE FUNCTION update_graph_nodes_updated_at();
+  EXECUTE FUNCTION update_updated_at_column();
