@@ -44,6 +44,7 @@
     "046-remove-nexus-capabilities-column.sql",
     "047-add-jsonb-defaults.sql",
     "048-remove-jsonb-not-null.sql",
-    "049-add-activity-dashboard-nav.sql"
+    "049-add-activity-dashboard-nav.sql",
+    "050-graph-schema.sql"
   ]
 }
