@@ -433,6 +433,51 @@ export async function createGraphEdge(
       )
     }
 
+    // Verify both nodes exist
+    const nodes = await executeQuery(
+      (db) =>
+        db
+          .select({ id: graphNodes.id })
+          .from(graphNodes)
+          .where(inArray(graphNodes.id, [input.sourceNodeId, input.targetNodeId])),
+      "createGraphEdge:validateNodes"
+    )
+
+    if (nodes.length !== 2) {
+      const missingId =
+        nodes.length === 0
+          ? input.sourceNodeId
+          : nodes[0].id === input.sourceNodeId
+            ? input.targetNodeId
+            : input.sourceNodeId
+      throw ErrorFactories.dbRecordNotFound("graph_nodes", missingId)
+    }
+
+    // Check for duplicate edge (unique constraint: source + target + type)
+    const [existingEdge] = await executeQuery(
+      (db) =>
+        db
+          .select({ id: graphEdges.id })
+          .from(graphEdges)
+          .where(
+            and(
+              eq(graphEdges.sourceNodeId, input.sourceNodeId),
+              eq(graphEdges.targetNodeId, input.targetNodeId),
+              eq(graphEdges.edgeType, input.edgeType.trim())
+            )
+          )
+          .limit(1),
+      "createGraphEdge:checkDuplicate"
+    )
+
+    if (existingEdge) {
+      throw ErrorFactories.invalidInput(
+        "edge",
+        `${input.sourceNodeId} → ${input.targetNodeId}`,
+        `Edge of type '${input.edgeType}' already exists between these nodes`
+      )
+    }
+
     const [newEdge] = await executeQuery(
       (db) =>
         db
