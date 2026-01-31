@@ -193,6 +193,25 @@ export interface ScheduleConfig {
 }
 
 // ============================================
+// User Profile JSONB Types
+// ============================================
+
+/**
+ * Extensible user profile data stored as JSONB
+ * Part of Epic #674 (External API Platform) - Issue #684
+ */
+export interface UserProfile {
+  yearsInDistrict?: number;
+  certificationAreas?: string[];
+  areasOfExpertise?: string[];
+  preferredName?: string;
+  pronouns?: string;
+  startDate?: string;
+  previousRoles?: string[];
+  [key: string]: unknown;
+}
+
+// ============================================
 // Context Graph JSONB Types
 // ============================================
 
