@@ -7,12 +7,17 @@
  * - Keys are 256-bit random (NIST recommended), formatted as `sk-` + 64 hex chars
  * - Stored as Argon2id hashes — plaintext never persisted
  * - Argon2id provides defense against GPU/ASIC brute-force attacks
+ * - Validation: Lookup by keyPrefix, verify with argon2.verify() (constant-time)
  * - Max 10 keys per user enforced atomically within transaction
  *
  * NOT IMPLEMENTED IN THIS LAYER (must be in API middleware):
  * - Rate limiting (use api_key_usage table)
  * - Audit logging (Phase 2)
  * - IP restrictions (Phase 2)
+ *
+ * Error Handling:
+ * - This is a service layer — throws errors for callers to handle.
+ * - Server actions should wrap calls with handleError() from error-utils.
  */
 
 import crypto from "node:crypto";
@@ -63,7 +68,7 @@ export interface ApiKeyInfo {
 const KEY_PREFIX = "sk-";
 const KEY_BYTES = 32; // 256 bits
 const KEY_HEX_LENGTH = KEY_BYTES * 2; // 64 hex chars
-const DISPLAY_PREFIX_LENGTH = 8; // first 8 hex chars stored for display
+const DISPLAY_PREFIX_LENGTH = 8; // first 8 hex chars stored for lookup + display
 const MAX_KEYS_PER_USER = 10;
 const MAX_KEY_NAME_LENGTH = 100;
 
@@ -80,15 +85,20 @@ const KEY_FORMAT_REGEX = new RegExp(`^sk-[0-9a-f]{${KEY_HEX_LENGTH}}$`);
 // ============================================
 
 /**
- * Hash API key using Argon2id (password hashing winner, OWASP recommended)
+ * Hash API key using Argon2id (password hashing winner, OWASP recommended).
  *
- * Argon2id configuration:
+ * IMPORTANT: Argon2id uses random salts, so calling this twice with the same
+ * input produces DIFFERENT outputs. You cannot look up keys by hash equality.
+ * Use argon2.verify() to compare a raw key against a stored hash.
+ *
+ * Configuration:
  * - memoryCost: 65536 (64 MB) - prevents GPU attacks
  * - timeCost: 3 iterations - balances security and performance
  * - parallelism: 4 threads - leverages multi-core CPUs
  * - hashLength: 32 bytes (256 bits)
  *
- * Performance: ~50-100ms per hash (acceptable for API key generation/validation)
+ * Output: ~97 char encoded string ($argon2id$v=19$m=...$salt$hash)
+ * Performance: ~50-100ms per hash
  */
 async function hashKey(rawKey: string): Promise<string> {
   return await argon2.hash(rawKey, {
@@ -101,7 +111,8 @@ async function hashKey(rawKey: string): Promise<string> {
 }
 
 /**
- * Verify API key against Argon2id hash using constant-time comparison
+ * Verify API key against Argon2id hash.
+ * Uses Argon2's built-in constant-time comparison.
  */
 async function verifyKey(rawKey: string, hash: string): Promise<boolean> {
   try {
@@ -112,11 +123,10 @@ async function verifyKey(rawKey: string, hash: string): Promise<boolean> {
 }
 
 /**
- * Validate and sanitize scope array
- *
+ * Validate and sanitize scope array.
  * - Removes empty strings
  * - Deduplicates
- * - Validates format
+ * - Rejects invalid wildcard ":*" (empty prefix)
  */
 function validateScopes(scopes: string[]): string[] {
   if (!Array.isArray(scopes) || scopes.length === 0) {
@@ -201,7 +211,9 @@ export async function generateApiKey(
     const keyHash = await hashKey(rawKey);
     const keyPrefix = randomHex.slice(0, DISPLAY_PREFIX_LENGTH);
 
-    // ATOMIC: Check quota + insert within transaction to prevent race conditions
+    // ATOMIC: Check quota + insert within transaction to prevent race conditions.
+    // Uses READ COMMITTED isolation (Drizzle default) — sufficient since count
+    // and insert are in the same transaction, preventing concurrent bypasses.
     const inserted = await executeTransaction(
       async (tx) => {
         // Count active keys for this user
@@ -259,10 +271,15 @@ export async function generateApiKey(
 /**
  * Validate an incoming API key and return auth context.
  *
- * - Validates key format
- * - Hashes and looks up by keyHash
- * - Uses Argon2id verify for constant-time comparison
- * - Checks isActive, expiration, revocation
+ * Lookup strategy:
+ * 1. Validate key format (sk- + 64 hex chars)
+ * 2. Extract keyPrefix (first 8 hex chars) for indexed DB lookup
+ * 3. Iterate candidate keys with argon2.verify() (constant-time)
+ * 4. Check isActive, expiration, revocation on matched key
+ *
+ * Performance: Worst case is 10 Argon2 verifications (~500-1000ms) when
+ * all of a user's keys share the same prefix. In practice, prefixes are
+ * 8 hex chars (4 billion combinations) so collisions are extremely rare.
  *
  * Returns null if key is invalid, expired, or revoked.
  */
@@ -278,11 +295,12 @@ export async function validateApiKey(
     return null;
   }
 
-  // Hash the incoming key
-  const keyHash = await hashKey(rawKey);
+  // Extract prefix for indexed lookup (first 8 hex chars after "sk-")
+  const hexPart = rawKey.slice(KEY_PREFIX.length);
+  const keyPrefix = hexPart.slice(0, DISPLAY_PREFIX_LENGTH);
 
-  // Lookup by hash (Argon2 outputs are unique, so this is safe to index)
-  const rows = await executeQuery(
+  // Find all candidate keys with matching prefix
+  const candidates = await executeQuery(
     (db) =>
       db
         .select({
@@ -295,59 +313,58 @@ export async function validateApiKey(
           revokedAt: apiKeys.revokedAt,
         })
         .from(apiKeys)
-        .where(eq(apiKeys.keyHash, keyHash))
-        .limit(1),
+        .where(eq(apiKeys.keyPrefix, keyPrefix)),
     "validateApiKey"
   );
 
-  if (rows.length === 0) {
-    // Fallback: Argon2 hashes are deterministic, but if migration from SHA-256 happened,
-    // we may need to iterate and verify. For now, simple lookup is sufficient.
-    log.debug("Key not found");
+  if (candidates.length === 0) {
+    log.debug("No keys found for prefix");
     return null;
   }
 
-  const key = rows[0];
+  // Iterate candidates and verify with Argon2
+  for (const key of candidates) {
+    const isValid = await verifyKey(rawKey, key.keyHash);
+    if (!isValid) continue;
 
-  // Verify key using Argon2's constant-time verification
-  const isValid = await verifyKey(rawKey, key.keyHash);
-  if (!isValid) {
-    log.warn("Hash verification failed");
-    return null;
+    // Key matched — now check status
+
+    // Check active status
+    if (!key.isActive) {
+      log.debug("Key is inactive", { keyId: key.id });
+      return null;
+    }
+
+    // Check revocation
+    if (key.revokedAt) {
+      log.debug("Key is revoked", { keyId: key.id });
+      return null;
+    }
+
+    // Check expiration
+    if (key.expiresAt && key.expiresAt < new Date()) {
+      log.debug("Key is expired", { keyId: key.id });
+      return null;
+    }
+
+    // Runtime validation: scopes must be string array
+    if (!Array.isArray(key.scopes) || !key.scopes.every((s) => typeof s === "string")) {
+      log.error("Invalid scopes data in database", { keyId: key.id });
+      return null;
+    }
+
+    log.debug("Key validated", { keyId: key.id, userId: key.userId });
+
+    return {
+      userId: key.userId,
+      scopes: key.scopes,
+      keyId: key.id,
+      authType: "api_key",
+    };
   }
 
-  // Runtime validation: scopes must be string array
-  if (!Array.isArray(key.scopes) || !key.scopes.every((s) => typeof s === "string")) {
-    log.error("Invalid scopes data in database", { keyId: key.id });
-    return null;
-  }
-
-  // Check active status
-  if (!key.isActive) {
-    log.debug("Key is inactive", { keyId: key.id });
-    return null;
-  }
-
-  // Check revocation
-  if (key.revokedAt) {
-    log.debug("Key is revoked", { keyId: key.id });
-    return null;
-  }
-
-  // Check expiration
-  if (key.expiresAt && key.expiresAt < new Date()) {
-    log.debug("Key is expired", { keyId: key.id });
-    return null;
-  }
-
-  log.debug("Key validated", { keyId: key.id, userId: key.userId });
-
-  return {
-    userId: key.userId,
-    scopes: key.scopes,
-    keyId: key.id,
-    authType: "api_key",
-  };
+  log.debug("No matching key found after verification");
+  return null;
 }
 
 /**
@@ -436,7 +453,7 @@ export async function listUserKeys(userId: number): Promise<ApiKeyInfo[]> {
 /**
  * Update lastUsedAt timestamp for a key.
  *
- * Non-blocking operation - callers should use `void` operator if not awaiting.
+ * Non-blocking operation — callers should use `void` operator if not awaiting.
  * Errors are logged but not thrown. Returns promise for optional tracking.
  */
 export async function updateKeyLastUsed(keyId: number): Promise<void> {
@@ -469,6 +486,9 @@ export async function updateKeyLastUsed(keyId: number): Promise<void> {
 /**
  * Check if a set of key scopes satisfies a required scope.
  *
+ * Assumes scopes have been validated via validateScopes() at key creation.
+ * Contains defensive guards for edge cases even if called with unvalidated data.
+ *
  * Supports:
  * - Exact match: `"chat:read"` matches `"chat:read"`
  * - Global wildcard: `"*"` matches everything
@@ -481,7 +501,7 @@ export function hasScope(keyScopes: string[], required: string): boolean {
     if (scope === "*") return true;
     if (scope.endsWith(":*")) {
       const prefix = scope.slice(0, -2); // "chat" from "chat:*"
-      // Guard against ":*" edge case (empty prefix)
+      // Defensive guard: ":*" with empty prefix should never match
       if (prefix.length === 0) return false;
       return required.startsWith(prefix + ":");
     }

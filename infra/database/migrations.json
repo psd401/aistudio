@@ -46,6 +46,7 @@
     "048-remove-jsonb-not-null.sql",
     "049-add-activity-dashboard-nav.sql",
     "050-graph-schema.sql",
-    "051-user-profile-and-api-keys.sql"
+    "051-user-profile-and-api-keys.sql",
+    "052-api-keys-argon2-migration.sql"
   ]
 }
