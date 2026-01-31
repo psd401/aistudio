@@ -90,6 +90,10 @@ import { modelReplacementAudit } from "./tables/model-replacement-audit";
 import { graphNodes } from "./tables/graph-nodes";
 import { graphEdges } from "./tables/graph-edges";
 
+// API Keys
+import { apiKeys } from "./tables/api-keys";
+import { apiKeyUsage } from "./tables/api-key-usage";
+
 // ============================================
 // User Relations
 // ============================================
@@ -121,6 +125,7 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   modelReplacementsPerformed: many(modelReplacementAudit),
   graphNodes: many(graphNodes),
   graphEdges: many(graphEdges),
+  apiKeys: many(apiKeys),
   // One-to-one with nexus_user_preferences (user_id is the primary key)
   preferences: one(nexusUserPreferences, {
     fields: [users.id],
@@ -772,5 +777,24 @@ export const graphEdgesRelations = relations(graphEdges, ({ one }) => ({
   createdByUser: one(users, {
     fields: [graphEdges.createdBy],
     references: [users.id],
+  }),
+}));
+
+// ============================================
+// API Key Relations
+// ============================================
+
+export const apiKeysRelations = relations(apiKeys, ({ one, many }) => ({
+  user: one(users, {
+    fields: [apiKeys.userId],
+    references: [users.id],
+  }),
+  usage: many(apiKeyUsage),
+}));
+
+export const apiKeyUsageRelations = relations(apiKeyUsage, ({ one }) => ({
+  apiKey: one(apiKeys, {
+    fields: [apiKeyUsage.apiKeyId],
+    references: [apiKeys.id],
   }),
 }));

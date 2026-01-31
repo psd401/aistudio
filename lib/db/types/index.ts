@@ -95,6 +95,9 @@ import {
   // Context Graph
   graphNodes,
   graphEdges,
+  // API Keys
+  apiKeys,
+  apiKeyUsage,
 } from "@/lib/db/schema";
 
 // ============================================
@@ -114,6 +117,7 @@ export type {
   ScheduleConfig,
   GraphNodeMetadata,
   GraphEdgeMetadata,
+  UserProfile,
 } from "./jsonb";
 
 // ============================================
@@ -403,3 +407,15 @@ export type SelectGraphEdge = InferSelectModel<typeof graphEdges>;
 // ============================================
 export type InsertGraphNode = InferInsertModel<typeof graphNodes>;
 export type InsertGraphEdge = InferInsertModel<typeof graphEdges>;
+
+// ============================================
+// API Keys - Select Types
+// ============================================
+export type SelectApiKey = InferSelectModel<typeof apiKeys>;
+export type SelectApiKeyUsage = InferSelectModel<typeof apiKeyUsage>;
+
+// ============================================
+// API Keys - Insert Types
+// ============================================
+export type InsertApiKey = InferInsertModel<typeof apiKeys>;
+export type InsertApiKeyUsage = InferInsertModel<typeof apiKeyUsage>;

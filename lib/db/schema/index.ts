@@ -132,6 +132,12 @@ export * from "./tables/graph-nodes";
 export * from "./tables/graph-edges";
 
 // ============================================
+// API Keys (External API Platform)
+// ============================================
+export * from "./tables/api-keys";
+export * from "./tables/api-key-usage";
+
+// ============================================
 // Relations
 // ============================================
 export * from "./relations";
