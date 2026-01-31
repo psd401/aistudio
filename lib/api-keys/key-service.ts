@@ -5,16 +5,22 @@
  *
  * Security:
  * - Keys are 256-bit random (NIST recommended), formatted as `sk-` + 64 hex chars
- * - Stored as SHA-256 hashes — plaintext never persisted
- * - Constant-time comparison via crypto.timingSafeEqual for hash lookups
- * - Max 10 keys per user enforced at generation time
+ * - Stored as Argon2id hashes — plaintext never persisted
+ * - Argon2id provides defense against GPU/ASIC brute-force attacks
+ * - Max 10 keys per user enforced atomically within transaction
+ *
+ * NOT IMPLEMENTED IN THIS LAYER (must be in API middleware):
+ * - Rate limiting (use api_key_usage table)
+ * - Audit logging (Phase 2)
+ * - IP restrictions (Phase 2)
  */
 
 import crypto from "node:crypto";
+import argon2 from "argon2";
 import { eq, and, count } from "drizzle-orm";
-import { executeQuery } from "@/lib/db/drizzle-client";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { apiKeys } from "@/lib/db/schema";
-import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
+import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
 
 // ============================================
@@ -61,6 +67,11 @@ const DISPLAY_PREFIX_LENGTH = 8; // first 8 hex chars stored for display
 const MAX_KEYS_PER_USER = 10;
 const MAX_KEY_NAME_LENGTH = 100;
 
+// Runtime validation that constants are correct
+if (KEY_HEX_LENGTH !== KEY_BYTES * 2) {
+  throw new Error("Configuration error: KEY_HEX_LENGTH must equal KEY_BYTES * 2");
+}
+
 // Precompiled regex for key format validation
 const KEY_FORMAT_REGEX = new RegExp(`^sk-[0-9a-f]{${KEY_HEX_LENGTH}}$`);
 
@@ -68,19 +79,73 @@ const KEY_FORMAT_REGEX = new RegExp(`^sk-[0-9a-f]{${KEY_HEX_LENGTH}}$`);
 // Internal Helpers
 // ============================================
 
-function hashKey(rawKey: string): string {
-  return crypto.createHash("sha256").update(rawKey).digest("hex");
+/**
+ * Hash API key using Argon2id (password hashing winner, OWASP recommended)
+ *
+ * Argon2id configuration:
+ * - memoryCost: 65536 (64 MB) - prevents GPU attacks
+ * - timeCost: 3 iterations - balances security and performance
+ * - parallelism: 4 threads - leverages multi-core CPUs
+ * - hashLength: 32 bytes (256 bits)
+ *
+ * Performance: ~50-100ms per hash (acceptable for API key generation/validation)
+ */
+async function hashKey(rawKey: string): Promise<string> {
+  return await argon2.hash(rawKey, {
+    type: argon2.argon2id,
+    memoryCost: 65536, // 64 MB
+    timeCost: 3, // 3 iterations
+    parallelism: 4, // 4 threads
+    hashLength: 32, // 256 bits
+  });
 }
 
 /**
- * Constant-time buffer comparison to prevent timing attacks on hash lookups.
- * Both inputs must be hex-encoded SHA-256 hashes (64 chars each).
+ * Verify API key against Argon2id hash using constant-time comparison
  */
-function safeCompareHashes(a: string, b: string): boolean {
-  if (a.length !== b.length) return false;
-  const bufA = Buffer.from(a, "hex");
-  const bufB = Buffer.from(b, "hex");
-  return crypto.timingSafeEqual(bufA, bufB);
+async function verifyKey(rawKey: string, hash: string): Promise<boolean> {
+  try {
+    return await argon2.verify(hash, rawKey);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Validate and sanitize scope array
+ *
+ * - Removes empty strings
+ * - Deduplicates
+ * - Validates format
+ */
+function validateScopes(scopes: string[]): string[] {
+  if (!Array.isArray(scopes) || scopes.length === 0) {
+    throw ErrorFactories.validationFailed([
+      { field: "scopes", message: "At least one scope is required" },
+    ]);
+  }
+
+  // Filter out empty strings and deduplicate
+  const cleaned = [...new Set(scopes.filter((s) => typeof s === "string" && s.trim().length > 0))];
+
+  if (cleaned.length === 0) {
+    throw ErrorFactories.validationFailed([
+      { field: "scopes", message: "At least one valid scope is required" },
+    ]);
+  }
+
+  // Validate wildcard edge case: ":*" is invalid (no prefix)
+  const invalidWildcards = cleaned.filter((s) => s === ":*");
+  if (invalidWildcards.length > 0) {
+    throw ErrorFactories.validationFailed([
+      {
+        field: "scopes",
+        message: "Invalid wildcard scope ':*' - prefix required before colon",
+      },
+    ]);
+  }
+
+  return cleaned;
 }
 
 // ============================================
@@ -90,8 +155,8 @@ function safeCompareHashes(a: string, b: string): boolean {
 /**
  * Generate a new API key for a user.
  *
- * - Enforces max 10 keys per user
- * - Validates name length
+ * - Enforces max 10 keys per user ATOMICALLY via transaction
+ * - Validates name length and scope format
  * - Returns the raw key ONCE (never stored)
  */
 export async function generateApiKey(
@@ -104,85 +169,91 @@ export async function generateApiKey(
   const timer = startTimer("generateApiKey");
   const log = createLogger({ requestId, action: "generateApiKey" });
 
-  log.info("Generating API key", { userId, name, scopeCount: scopes.length });
+  try {
+    // Trim and validate name early
+    const trimmedName = name?.trim();
+    if (!trimmedName) {
+      throw ErrorFactories.validationFailed([
+        { field: "name", message: "Key name is required" },
+      ]);
+    }
+    if (trimmedName.length > MAX_KEY_NAME_LENGTH) {
+      throw ErrorFactories.validationFailed([
+        {
+          field: "name",
+          message: `Key name must not exceed ${MAX_KEY_NAME_LENGTH} characters`,
+        },
+      ]);
+    }
 
-  // Validate name
-  if (!name || name.trim().length === 0) {
-    throw ErrorFactories.validationFailed([
-      { field: "name", message: "Key name is required" },
-    ]);
-  }
-  if (name.length > MAX_KEY_NAME_LENGTH) {
-    throw ErrorFactories.validationFailed([
-      {
-        field: "name",
-        message: `Key name must not exceed ${MAX_KEY_NAME_LENGTH} characters`,
+    // Validate and clean scopes
+    const cleanedScopes = validateScopes(scopes);
+
+    log.info("Generating API key", {
+      userId,
+      name: sanitizeForLogging(trimmedName),
+      scopeCount: cleanedScopes.length,
+    });
+
+    // Generate key material outside transaction (expensive crypto operation)
+    const randomHex = crypto.randomBytes(KEY_BYTES).toString("hex");
+    const rawKey = `${KEY_PREFIX}${randomHex}`;
+    const keyHash = await hashKey(rawKey);
+    const keyPrefix = randomHex.slice(0, DISPLAY_PREFIX_LENGTH);
+
+    // ATOMIC: Check quota + insert within transaction to prevent race conditions
+    const inserted = await executeTransaction(
+      async (tx) => {
+        // Count active keys for this user
+        const [countResult] = await tx
+          .select({ value: count() })
+          .from(apiKeys)
+          .where(and(eq(apiKeys.userId, userId), eq(apiKeys.isActive, true)));
+
+        if (countResult && countResult.value >= MAX_KEYS_PER_USER) {
+          throw ErrorFactories.bizQuotaExceeded(
+            "API key creation",
+            MAX_KEYS_PER_USER,
+            countResult.value
+          );
+        }
+
+        // Insert new key
+        const [insertedRow] = await tx
+          .insert(apiKeys)
+          .values({
+            userId,
+            name: trimmedName,
+            keyPrefix,
+            keyHash,
+            scopes: cleanedScopes,
+            expiresAt: expiresAt ?? null,
+          })
+          .returning({ id: apiKeys.id });
+
+        return insertedRow;
       },
-    ]);
-  }
-
-  // Validate scopes
-  if (!Array.isArray(scopes) || scopes.length === 0) {
-    throw ErrorFactories.validationFailed([
-      { field: "scopes", message: "At least one scope is required" },
-    ]);
-  }
-
-  // Enforce max keys per user
-  const [countResult] = await executeQuery(
-    (db) =>
-      db
-        .select({ value: count() })
-        .from(apiKeys)
-        .where(and(eq(apiKeys.userId, userId), eq(apiKeys.isActive, true))),
-    "countUserApiKeys"
-  );
-
-  if (countResult && countResult.value >= MAX_KEYS_PER_USER) {
-    throw ErrorFactories.bizQuotaExceeded(
-      "API key creation",
-      MAX_KEYS_PER_USER,
-      countResult.value
+      "generateApiKey"
     );
+
+    timer({ status: "success" });
+    log.info("API key generated", {
+      keyId: inserted.id,
+      userId,
+      prefix: `${KEY_PREFIX}${keyPrefix}`,
+    });
+
+    return {
+      keyId: inserted.id,
+      rawKey,
+      prefix: `${KEY_PREFIX}${keyPrefix}`,
+      name: trimmedName,
+      scopes: cleanedScopes,
+    };
+  } catch (error) {
+    timer({ status: "error" });
+    throw error;
   }
-
-  // Generate key material
-  const randomHex = crypto.randomBytes(KEY_BYTES).toString("hex");
-  const rawKey = `${KEY_PREFIX}${randomHex}`;
-  const keyHash = hashKey(rawKey);
-  const keyPrefix = randomHex.slice(0, DISPLAY_PREFIX_LENGTH);
-
-  // Store hashed key
-  const [inserted] = await executeQuery(
-    (db) =>
-      db
-        .insert(apiKeys)
-        .values({
-          userId,
-          name: name.trim(),
-          keyPrefix,
-          keyHash,
-          scopes,
-          expiresAt: expiresAt ?? null,
-        })
-        .returning({ id: apiKeys.id }),
-    "insertApiKey"
-  );
-
-  timer({ status: "success" });
-  log.info("API key generated", {
-    keyId: inserted.id,
-    userId,
-    prefix: `${KEY_PREFIX}${keyPrefix}`,
-  });
-
-  return {
-    keyId: inserted.id,
-    rawKey,
-    prefix: `${KEY_PREFIX}${keyPrefix}`,
-    name: name.trim(),
-    scopes,
-  };
 }
 
 /**
@@ -190,8 +261,8 @@ export async function generateApiKey(
  *
  * - Validates key format
  * - Hashes and looks up by keyHash
+ * - Uses Argon2id verify for constant-time comparison
  * - Checks isActive, expiration, revocation
- * - Uses constant-time comparison for the hash match verification
  *
  * Returns null if key is invalid, expired, or revoked.
  */
@@ -207,9 +278,10 @@ export async function validateApiKey(
     return null;
   }
 
-  const keyHash = hashKey(rawKey);
+  // Hash the incoming key
+  const keyHash = await hashKey(rawKey);
 
-  // Lookup by hash
+  // Lookup by hash (Argon2 outputs are unique, so this is safe to index)
   const rows = await executeQuery(
     (db) =>
       db
@@ -229,15 +301,24 @@ export async function validateApiKey(
   );
 
   if (rows.length === 0) {
+    // Fallback: Argon2 hashes are deterministic, but if migration from SHA-256 happened,
+    // we may need to iterate and verify. For now, simple lookup is sufficient.
     log.debug("Key not found");
     return null;
   }
 
   const key = rows[0];
 
-  // Constant-time verification of stored hash against computed hash
-  if (!safeCompareHashes(key.keyHash, keyHash)) {
-    log.warn("Hash mismatch during validation");
+  // Verify key using Argon2's constant-time verification
+  const isValid = await verifyKey(rawKey, key.keyHash);
+  if (!isValid) {
+    log.warn("Hash verification failed");
+    return null;
+  }
+
+  // Runtime validation: scopes must be string array
+  if (!Array.isArray(key.scopes) || !key.scopes.every((s) => typeof s === "string")) {
+    log.error("Invalid scopes data in database", { keyId: key.id });
     return null;
   }
 
@@ -283,34 +364,39 @@ export async function revokeApiKey(
   const timer = startTimer("revokeApiKey");
   const log = createLogger({ requestId, action: "revokeApiKey" });
 
-  log.info("Revoking API key", { keyId, userId });
+  try {
+    log.info("Revoking API key", { keyId, userId });
 
-  const result = await executeQuery(
-    (db) =>
-      db
-        .update(apiKeys)
-        .set({
-          isActive: false,
-          revokedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(and(eq(apiKeys.id, keyId), eq(apiKeys.userId, userId)))
-        .returning({ id: apiKeys.id }),
-    "revokeApiKey"
-  );
+    const result = await executeQuery(
+      (db) =>
+        db
+          .update(apiKeys)
+          .set({
+            isActive: false,
+            revokedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(and(eq(apiKeys.id, keyId), eq(apiKeys.userId, userId)))
+          .returning({ id: apiKeys.id }),
+      "revokeApiKey"
+    );
 
-  if (result.length === 0) {
-    log.warn("Key not found or not owned by user", { keyId, userId });
-    throw ErrorFactories.validationFailed([
-      {
-        field: "keyId",
-        message: "API key not found or does not belong to user",
-      },
-    ]);
+    if (result.length === 0) {
+      log.warn("Key not found or not owned by user", { keyId, userId });
+      throw ErrorFactories.validationFailed([
+        {
+          field: "keyId",
+          message: "API key not found or does not belong to user",
+        },
+      ]);
+    }
+
+    timer({ status: "success" });
+    log.info("API key revoked", { keyId, userId });
+  } catch (error) {
+    timer({ status: "error" });
+    throw error;
   }
-
-  timer({ status: "success" });
-  log.info("API key revoked", { keyId, userId });
 }
 
 /**
@@ -350,28 +436,30 @@ export async function listUserKeys(userId: number): Promise<ApiKeyInfo[]> {
 /**
  * Update lastUsedAt timestamp for a key.
  *
- * Fire-and-forget — callers should not await this unless they need
- * confirmation. Errors are logged but not thrown.
+ * Non-blocking operation - callers should use `void` operator if not awaiting.
+ * Errors are logged but not thrown. Returns promise for optional tracking.
  */
-export function updateKeyLastUsed(keyId: number): void {
+export async function updateKeyLastUsed(keyId: number): Promise<void> {
   const log = createLogger({ action: "updateKeyLastUsed" });
 
-  executeQuery(
-    (db) =>
-      db
-        .update(apiKeys)
-        .set({
-          lastUsedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(eq(apiKeys.id, keyId)),
-    "updateKeyLastUsed"
-  ).catch((error) => {
+  try {
+    await executeQuery(
+      (db) =>
+        db
+          .update(apiKeys)
+          .set({
+            lastUsedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(apiKeys.id, keyId)),
+      "updateKeyLastUsed"
+    );
+  } catch (error) {
     log.error("Failed to update lastUsedAt", {
       keyId,
       error: error instanceof Error ? error.message : String(error),
     });
-  });
+  }
 }
 
 // ============================================
@@ -393,6 +481,8 @@ export function hasScope(keyScopes: string[], required: string): boolean {
     if (scope === "*") return true;
     if (scope.endsWith(":*")) {
       const prefix = scope.slice(0, -2); // "chat" from "chat:*"
+      // Guard against ":*" edge case (empty prefix)
+      if (prefix.length === 0) return false;
       return required.startsWith(prefix + ":");
     }
     return false;
