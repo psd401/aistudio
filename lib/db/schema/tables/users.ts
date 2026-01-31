@@ -12,6 +12,7 @@ import {
   timestamp,
   varchar,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 import type { UserProfile } from "@/lib/db/types/jsonb";
 
 export const users = pgTable("users", {
@@ -31,5 +32,5 @@ export const users = pgTable("users", {
   building: varchar("building", { length: 255 }),
   gradeLevels: text("grade_levels").array(),
   bio: text("bio"),
-  profile: jsonb("profile").$type<UserProfile>().default({}),
+  profile: jsonb("profile").$type<UserProfile>().default(sql`'{}'::jsonb`),
 });

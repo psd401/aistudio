@@ -14,7 +14,7 @@ import {
 import { apiKeys } from "./api-keys";
 
 export const apiKeyUsage = pgTable("api_key_usage", {
-  id: bigserial("id", { mode: "bigint" }).primaryKey(),
+  id: bigserial("id", { mode: "number" }).primaryKey(),
   apiKeyId: integer("api_key_id")
     .notNull()
     .references(() => apiKeys.id, { onDelete: "cascade" }),

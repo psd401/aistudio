@@ -77,7 +77,7 @@ CREATE TABLE IF NOT EXISTS api_key_usage (
 -- =====================================================
 
 CREATE INDEX IF NOT EXISTS idx_api_keys_user_id ON api_keys(user_id);
-CREATE INDEX IF NOT EXISTS idx_api_keys_key_hash ON api_keys(key_hash);
+-- Note: key_hash has UNIQUE constraint (line 49) which already creates an index
 CREATE INDEX IF NOT EXISTS idx_api_keys_key_prefix ON api_keys(key_prefix);
 
 -- =====================================================
