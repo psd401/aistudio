@@ -594,7 +594,7 @@ function NavigationContent({ isExpanded }: { isExpanded: boolean }) {
           <SidebarNotifications isExpanded={isExpanded} />
           <SidebarMessages isExpanded={isExpanded} />
           <BugReportModal isExpanded={isExpanded} />
-          <SidebarLink href="#" icon={Settings} label="Settings" isExpanded={isExpanded} />
+          <SidebarLink href="/settings" icon={Settings} label="Settings" isExpanded={isExpanded} />
           {session && (
             <SidebarUserProfile
               isExpanded={isExpanded}
