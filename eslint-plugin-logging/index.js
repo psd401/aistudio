@@ -89,6 +89,7 @@ module.exports = {
         let hasGenerateRequestIdImport = false;
         let hasRequestIdGeneration = false;
         let usesWithErrorHandling = false;
+        let usesWithApiAuth = false;
         let usesCreateAuthHandlers = false;
         let isServerAction = false;
         let isApiRoute = false;
@@ -127,6 +128,15 @@ module.exports = {
                 }
               }
             }
+            // Check if using withApiAuth (generates requestId internally)
+            if (node.source.value === '@/lib/api' || node.source.value === '@/lib/api/with-api-auth') {
+              const specifiers = node.specifiers;
+              for (const spec of specifiers) {
+                if (spec.type === 'ImportSpecifier' && spec.imported && spec.imported.name === 'withApiAuth') {
+                  usesWithApiAuth = true;
+                }
+              }
+            }
             // Check if using createAuthHandlers (NextAuth)
             if (node.source.value === '@/auth') {
               const specifiers = node.specifiers;
@@ -153,6 +163,11 @@ module.exports = {
             
             // Skip if using withErrorHandling as it handles logging
             if (usesWithErrorHandling) {
+              return;
+            }
+
+            // Skip if using withApiAuth as it generates requestId internally
+            if (usesWithApiAuth) {
               return;
             }
             
