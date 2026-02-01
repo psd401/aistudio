@@ -21,7 +21,6 @@
  */
 
 import crypto from "node:crypto";
-import argon2 from "argon2";
 import { eq, and, count } from "drizzle-orm";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { apiKeys } from "@/lib/db/schema";
@@ -101,6 +100,8 @@ const KEY_FORMAT_REGEX = new RegExp(`^sk-[0-9a-f]{${KEY_HEX_LENGTH}}$`);
  * Performance: ~50-100ms per hash
  */
 async function hashKey(rawKey: string): Promise<string> {
+  // Dynamic import: argon2 is a native C++ addon that Turbopack cannot bundle
+  const argon2 = await import("argon2");
   return await argon2.hash(rawKey, {
     type: argon2.argon2id,
     memoryCost: 65536, // 64 MB
@@ -116,6 +117,8 @@ async function hashKey(rawKey: string): Promise<string> {
  */
 async function verifyKey(rawKey: string, hash: string): Promise<boolean> {
   try {
+    // Dynamic import: argon2 is a native C++ addon that Turbopack cannot bundle
+    const argon2 = await import("argon2");
     return await argon2.verify(hash, rawKey);
   } catch {
     return false;
