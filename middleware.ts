@@ -12,6 +12,7 @@ const PUBLIC_PATHS = [
   "/api/ping",
   "/api/auth/federated-signout",
   "/api/assistant-architect/execute/scheduled", // Internal JWT auth for scheduled executions
+  "/api/v1", // External API routes handle their own auth via Bearer token (#677)
   "/auth/error",
 ];
 
