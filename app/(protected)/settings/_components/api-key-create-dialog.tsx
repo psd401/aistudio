@@ -24,8 +24,11 @@ import {
   SelectValue,
 } from "@/components/ui/select"
 
+import { createLogger } from "@/lib/client-logger"
 import { createUserApiKey } from "@/actions/settings/user-settings.actions"
 import { API_SCOPES, getScopesForRoles, type ApiScope } from "@/lib/api-keys/scopes"
+
+const log = createLogger({ component: "ApiKeyCreateDialog" })
 
 // ============================================
 // Component
@@ -104,7 +107,8 @@ export function ApiKeyCreateDialog({
       } else {
         toast.error(result.message)
       }
-    } catch {
+    } catch (error) {
+      log.error("API key creation failed", { error: error instanceof Error ? error.message : String(error) })
       toast.error("Failed to create API key")
     } finally {
       setIsCreating(false)

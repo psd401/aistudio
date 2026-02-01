@@ -25,6 +25,7 @@ import {
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
 
+import { createLogger } from "@/lib/client-logger"
 import { ApiKeyCreateDialog } from "./api-key-create-dialog"
 import { ApiKeyCreatedDisplay } from "./api-key-created-display"
 import {
@@ -32,6 +33,8 @@ import {
   revokeUserApiKey,
 } from "@/actions/settings/user-settings.actions"
 import type { ApiKeyInfo } from "@/lib/api-keys/key-service"
+
+const log = createLogger({ component: "ApiKeysTab" })
 
 // ============================================
 // Component
@@ -64,10 +67,10 @@ export function ApiKeysTab({ initialKeys, userRoles }: ApiKeysTabProps) {
     }
   }
 
-  function handleKeyCreated(rawKey: string) {
+  async function handleKeyCreated(rawKey: string) {
     setShowCreateDialog(false)
     setCreatedKey(rawKey)
-    refreshKeys()
+    await refreshKeys()
   }
 
   async function handleRevoke() {
@@ -81,7 +84,8 @@ export function ApiKeysTab({ initialKeys, userRoles }: ApiKeysTabProps) {
       } else {
         toast.error(result.message)
       }
-    } catch {
+    } catch (error) {
+      log.error("API key revocation failed", { error: error instanceof Error ? error.message : String(error) })
       toast.error("Failed to revoke API key")
     } finally {
       setIsRevoking(false)

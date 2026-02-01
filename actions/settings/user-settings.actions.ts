@@ -38,6 +38,7 @@ import {
   type ApiKeyInfo,
 } from "@/lib/api-keys/key-service"
 import { getScopesForRoles } from "@/lib/api-keys/scopes"
+import { safeJsonbStringify } from "@/lib/db/json-utils"
 
 // ============================================
 // Types
@@ -144,8 +145,17 @@ export async function getUserProfile(): Promise<ActionState<UserProfileData>> {
 
 /**
  * Update the current user's profile fields and JSONB profile data.
- * Uses SQL jsonb concat (||) for partial JSONB merges so existing
- * keys not in the update payload are preserved.
+ * 
+ * SECURITY FIX (Issue #678 review): Uses application-layer merge instead of SQL-layer
+ * to prevent potential SQL injection vulnerabilities in JSONB operations.
+ * 
+ * Previous implementation used SQL: `COALESCE(profile, '{}') || ${JSON.stringify(input)}::jsonb`
+ * which had potential SQL injection risk despite parameterization.
+ * 
+ * New approach:
+ * 1. Fetch current profile value
+ * 2. Merge at application layer (TypeScript)
+ * 3. Update with complete merged object using safeJsonbStringify()
  */
 export async function updateUserProfile(
   input: UpdateProfileInput
@@ -170,11 +180,40 @@ export async function updateUserProfile(
       throw ErrorFactories.dbRecordNotFound("users", session.sub)
     }
 
-    // Validate bio length
+    // Validate field lengths (defense-in-depth: mirrors client-side validation)
+    const validationErrors: Array<{ field: string; message: string }> = []
+
+    if (input.jobTitle && input.jobTitle.length > 255) {
+      validationErrors.push({ field: "jobTitle", message: "Job title must be 255 characters or less" })
+    }
+    if (input.department && input.department.length > 255) {
+      validationErrors.push({ field: "department", message: "Department must be 255 characters or less" })
+    }
+    if (input.building && input.building.length > 255) {
+      validationErrors.push({ field: "building", message: "Building must be 255 characters or less" })
+    }
     if (input.bio && input.bio.length > 500) {
-      throw ErrorFactories.validationFailed([
-        { field: "bio", message: "Bio must be 500 characters or less" },
-      ])
+      validationErrors.push({ field: "bio", message: "Bio must be 500 characters or less" })
+    }
+
+    // Validate JSONB profile fields
+    if (input.profile) {
+      if (input.profile.yearsInDistrict !== undefined) {
+        const years = input.profile.yearsInDistrict
+        if (typeof years !== "number" || !Number.isFinite(years) || years < 0 || years > 100) {
+          validationErrors.push({ field: "yearsInDistrict", message: "Years in district must be between 0 and 100" })
+        }
+      }
+      if (input.profile.preferredName && input.profile.preferredName.length > 255) {
+        validationErrors.push({ field: "preferredName", message: "Preferred name must be 255 characters or less" })
+      }
+      if (input.profile.pronouns && input.profile.pronouns.length > 100) {
+        validationErrors.push({ field: "pronouns", message: "Pronouns must be 100 characters or less" })
+      }
+    }
+
+    if (validationErrors.length > 0) {
+      throw ErrorFactories.validationFailed(validationErrors)
     }
 
     // Build the set clause for standard columns
@@ -188,9 +227,30 @@ export async function updateUserProfile(
     if (input.gradeLevels !== undefined) setClause.gradeLevels = input.gradeLevels
     if (input.bio !== undefined) setClause.bio = input.bio
 
-    // JSONB partial merge: existing || new (new keys overwrite, existing keys preserved)
+    // JSONB partial merge: Application-layer merge for security
+    // Fetch current profile, merge with updates, then save complete object
     if (input.profile && Object.keys(input.profile).length > 0) {
-      setClause.profile = sql`COALESCE(${users.profile}, '{}'::jsonb) || ${JSON.stringify(input.profile)}::jsonb`
+      // Fetch current profile value
+      const [currentUser] = await executeQuery(
+        (db) =>
+          db
+            .select({ profile: users.profile })
+            .from(users)
+            .where(eq(users.id, userId))
+            .limit(1),
+        "getUserProfileForMerge"
+      )
+
+      // Merge at application layer: existing fields + new fields
+      // New fields overwrite, existing fields are preserved
+      const currentProfile = currentUser?.profile ?? {}
+      const mergedProfile: UserProfile = {
+        ...currentProfile,
+        ...input.profile,
+      }
+
+      // Use safeJsonbStringify for proper JSONB handling with parameterization
+      setClause.profile = sql`${safeJsonbStringify(mergedProfile)}::jsonb`
     }
 
     await executeQuery(

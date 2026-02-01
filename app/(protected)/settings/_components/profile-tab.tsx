@@ -23,11 +23,14 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible"
 import { cn } from "@/lib/utils"
+import { createLogger } from "@/lib/client-logger"
 
 import {
   updateUserProfile,
   type UserProfileData,
 } from "@/actions/settings/user-settings.actions"
+
+const log = createLogger({ component: "ProfileTab" })
 
 // ============================================
 // Types
@@ -164,7 +167,8 @@ export function ProfileTab({ data }: ProfileTabProps) {
       } else {
         toast.error(result.message)
       }
-    } catch {
+    } catch (error) {
+      log.error("Profile update failed", { error: error instanceof Error ? error.message : String(error) })
       toast.error("An unexpected error occurred")
     } finally {
       setIsSaving(false)
