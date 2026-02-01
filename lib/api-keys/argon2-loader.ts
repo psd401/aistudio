@@ -2,24 +2,32 @@
  * Argon2 Loader for Next.js with Turbopack
  *
  * Problem: argon2 is a native C++ addon that Turbopack cannot resolve at
- * compile time — not via static import, dynamic import(), or webpackIgnore.
- * Solution: Use Node.js require() at runtime which Turbopack does not trace.
+ * compile time — not via static import, dynamic import(), webpackIgnore,
+ * or require() with a literal string.
+ *
+ * Solution: Use createRequire with a variable module name so Turbopack's
+ * static analysis cannot determine the module at compile time.
  *
  * This file is server-only — never imported by client components.
  */
 
+import { createRequire } from "node:module";
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let argon2Module: any = null;
 
+// Module name stored in a variable to prevent Turbopack static analysis
+const ARGON2_MODULE = "argon2";
+
 /**
- * Lazy-load argon2 using Node.js require() at runtime.
- * Turbopack ignores require() calls, so the module is only loaded server-side.
+ * Lazy-load argon2 at runtime using createRequire with a non-literal module name.
+ * Turbopack can only trace literal strings — variable references bypass analysis.
  */
 function getArgon2() {
   if (argon2Module) return argon2Module;
 
-  // eslint-disable-next-line @typescript-eslint/no-require-imports
-  argon2Module = require("argon2");
+  const dynamicRequire = createRequire(__filename);
+  argon2Module = dynamicRequire(ARGON2_MODULE);
   return argon2Module;
 }
 
