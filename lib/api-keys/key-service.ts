@@ -26,6 +26,7 @@ import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { apiKeys } from "@/lib/db/schema";
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
+import { hashArgon2, verifyArgon2 } from "@/lib/api-keys/argon2-loader";
 
 // ============================================
 // Types
@@ -100,16 +101,7 @@ const KEY_FORMAT_REGEX = new RegExp(`^sk-[0-9a-f]{${KEY_HEX_LENGTH}}$`);
  * Performance: ~50-100ms per hash
  */
 async function hashKey(rawKey: string): Promise<string> {
-  // Dynamic import with webpackIgnore: argon2 is a native C++ addon that
-  // Turbopack cannot resolve at compile time, even with dynamic import()
-  const argon2 = await import(/* webpackIgnore: true */ "argon2");
-  return await argon2.hash(rawKey, {
-    type: argon2.argon2id,
-    memoryCost: 65536, // 64 MB
-    timeCost: 3, // 3 iterations
-    parallelism: 4, // 4 threads
-    hashLength: 32, // 256 bits
-  });
+  return await hashArgon2(rawKey);
 }
 
 /**
@@ -117,12 +109,7 @@ async function hashKey(rawKey: string): Promise<string> {
  * Uses Argon2's built-in constant-time comparison.
  */
 async function verifyKey(rawKey: string, hash: string): Promise<boolean> {
-  try {
-    const argon2 = await import(/* webpackIgnore: true */ "argon2");
-    return await argon2.verify(hash, rawKey);
-  } catch {
-    return false;
-  }
+  return await verifyArgon2(hash, rawKey);
 }
 
 /**
