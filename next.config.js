@@ -5,7 +5,7 @@ const nextConfig = {
   reactStrictMode: true,
   // Externalize Node.js-only packages from webpack bundling
   // winston uses 'os', 'fs' which aren't available in webpack context
-  serverExternalPackages: ['winston', 'logform', '@colors/colors'],
+  serverExternalPackages: ['winston', 'logform', '@colors/colors', 'argon2'],
   typescript: {
     ignoreBuildErrors: true,
   },
@@ -74,6 +74,7 @@ const nextConfig = {
         'logform': 'commonjs logform',
         '@colors/colors': 'commonjs @colors/colors',
         'postgres': 'commonjs postgres',
+        'argon2': 'commonjs argon2',
       });
     }
 
