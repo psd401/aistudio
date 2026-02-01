@@ -12,6 +12,8 @@ const PUBLIC_PATHS = [
   "/api/ping",
   "/api/auth/federated-signout",
   "/api/assistant-architect/execute/scheduled", // Internal JWT auth for scheduled executions
+  // SECURITY: All routes under /api/v1/* MUST use withApiAuth() wrapper.
+  // This bypass only skips NextAuth session checks — API routes handle their own auth.
   "/api/v1", // External API routes handle their own auth via Bearer token (#677)
   "/auth/error",
 ];
