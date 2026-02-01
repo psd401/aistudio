@@ -44,7 +44,8 @@ export function withApiAuth(
 
     // Step 1: Authenticate
     const authResult = await authenticateRequest(request);
-    if (authResult instanceof NextResponse) {
+    // Duck-type check: ApiAuthContext has userId, NextResponse does not
+    if (!("userId" in authResult)) {
       timer({ status: "auth_failed" });
       recordTimingHeader(authResult, requestId);
       return authResult;
