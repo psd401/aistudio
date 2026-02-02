@@ -142,9 +142,10 @@ export async function queryGraphNodes(
     conditions.push(eq(graphNodes.nodeClass, filters.nodeClass))
   }
   if (filters?.search) {
-    // Escape SQL wildcards and limit length to prevent SQL injection and DoS
+    // Escape ILIKE special characters: backslash first, then wildcards
     const sanitized = filters.search
-      .replace(/[%_]/g, '\\$&')  // Escape ILIKE wildcards
+      .replace(/\\/g, '\\\\')    // Escape backslashes first
+      .replace(/[%_]/g, '\\$&')  // Then escape ILIKE wildcards
       .slice(0, 100)              // Limit length
       .trim()
 
