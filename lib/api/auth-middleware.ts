@@ -6,7 +6,9 @@
  * Auth flow:
  *   Request → Has "Authorization: Bearer sk-..." header?
  *     Yes → SHA-256 prefix lookup → Argon2id verify → AuthContext { authType: "api_key" }
- *     No  → getServerSession() → AuthContext { authType: "session", scopes: ["*"] }
+ *     No  → Has "Authorization: Bearer <jwt>" (not sk- prefix)?
+ *       Yes → Verify JWT via JWKS → AuthContext { authType: "jwt" }
+ *       No  → getServerSession() → AuthContext { authType: "session", scopes: ["*"] }
  *     Neither → 401
  *
  * Security:
@@ -29,9 +31,10 @@ import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 export interface ApiAuthContext {
   userId: number;
   cognitoSub: string;
-  authType: "session" | "api_key";
+  authType: "session" | "api_key" | "jwt";
   scopes: string[];
   apiKeyId?: number;
+  oauthClientId?: string;
 }
 
 export interface ApiErrorResponse {
@@ -77,56 +80,91 @@ export async function authenticateRequest(
 
   const authHeader = request.headers.get("authorization");
 
-  // Path 1: Bearer token authentication
+  // Path 1: Bearer token authentication (API key or JWT)
   if (authHeader && authHeader.startsWith(BEARER_PREFIX)) {
     const token = authHeader.slice(BEARER_PREFIX.length).trim();
 
     if (!token) {
       timer({ status: "error" });
       log.warn("Empty Bearer token");
-      return createErrorResponse(requestId, 401, "INVALID_TOKEN", "Invalid API key");
+      return createErrorResponse(requestId, 401, "INVALID_TOKEN", "Invalid token");
     }
 
+    // Path 1a: API key (sk- prefix)
+    if (token.startsWith("sk-")) {
+      try {
+        const keyAuth = await validateApiKey(token);
+
+        if (!keyAuth) {
+          timer({ status: "error" });
+          log.warn("API key validation failed");
+          return createErrorResponse(requestId, 401, "INVALID_TOKEN", "Invalid API key");
+        }
+
+        // Look up cognitoSub for the key's userId
+        const cognitoSub = await getCognitoSubByUserId(keyAuth.userId);
+        if (!cognitoSub) {
+          timer({ status: "error" });
+          log.error("User lookup failed during API key auth", { keyId: keyAuth.keyId });
+          return createErrorResponse(requestId, 401, "INVALID_TOKEN", "Invalid API key");
+        }
+
+        // Fire-and-forget: update lastUsedAt
+        void updateKeyLastUsed(keyAuth.keyId);
+
+        timer({ status: "success" });
+        log.info("Authenticated via API key", {
+          userId: keyAuth.userId,
+          keyId: keyAuth.keyId,
+          authType: "api_key",
+        });
+
+        return {
+          userId: keyAuth.userId,
+          cognitoSub,
+          authType: "api_key",
+          scopes: keyAuth.scopes,
+          apiKeyId: keyAuth.keyId,
+        };
+      } catch (error) {
+        timer({ status: "error" });
+        log.error("API key authentication error", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return createErrorResponse(requestId, 500, "INTERNAL_ERROR", "Authentication failed");
+      }
+    }
+
+    // Path 1b: JWT token (non-sk- prefix Bearer token)
     try {
-      const keyAuth = await validateApiKey(token);
+      const jwtResult = await verifyJwtToken(token, log);
 
-      if (!keyAuth) {
+      if (!jwtResult) {
         timer({ status: "error" });
-        log.warn("API key validation failed");
-        return createErrorResponse(requestId, 401, "INVALID_TOKEN", "Invalid API key");
+        log.warn("JWT verification failed");
+        return createErrorResponse(requestId, 401, "INVALID_TOKEN", "Invalid token");
       }
-
-      // Look up cognitoSub for the key's userId
-      const cognitoSub = await getCognitoSubByUserId(keyAuth.userId);
-      if (!cognitoSub) {
-        timer({ status: "error" });
-        log.error("User lookup failed during API key auth", { keyId: keyAuth.keyId });
-        return createErrorResponse(requestId, 401, "INVALID_TOKEN", "Invalid API key");
-      }
-
-      // Fire-and-forget: update lastUsedAt
-      void updateKeyLastUsed(keyAuth.keyId);
 
       timer({ status: "success" });
-      log.info("Authenticated via API key", {
-        userId: keyAuth.userId,
-        keyId: keyAuth.keyId,
-        authType: "api_key",
+      log.info("Authenticated via JWT", {
+        userId: jwtResult.userId,
+        clientId: jwtResult.clientId,
+        authType: "jwt",
       });
 
       return {
-        userId: keyAuth.userId,
-        cognitoSub,
-        authType: "api_key",
-        scopes: keyAuth.scopes,
-        apiKeyId: keyAuth.keyId,
+        userId: jwtResult.userId,
+        cognitoSub: jwtResult.cognitoSub,
+        authType: "jwt",
+        scopes: jwtResult.scopes,
+        oauthClientId: jwtResult.clientId,
       };
     } catch (error) {
       timer({ status: "error" });
-      log.error("API key authentication error", {
+      log.error("JWT authentication error", {
         error: error instanceof Error ? error.message : String(error),
       });
-      return createErrorResponse(requestId, 500, "INTERNAL_ERROR", "Authentication failed");
+      return createErrorResponse(requestId, 401, "INVALID_TOKEN", "Invalid token");
     }
   }
 
@@ -295,6 +333,64 @@ export function createApiResponse<T>(
 // ============================================
 // Internal Helpers
 // ============================================
+
+// ============================================
+// JWT Verification
+// ============================================
+
+interface JwtAuthResult {
+  userId: number;
+  cognitoSub: string;
+  scopes: string[];
+  clientId: string;
+}
+
+/**
+ * Verify a JWT Bearer token issued by the OIDC provider.
+ * Uses jose library for JWKS-based verification.
+ */
+async function verifyJwtToken(
+  token: string,
+  log: ReturnType<typeof createLogger>
+): Promise<JwtAuthResult | null> {
+  try {
+    const { jwtVerify } = await import("jose");
+    const { getJwksKeySet } = await import("@/lib/oauth/jwks-cache");
+
+    const jwks = await getJwksKeySet();
+    const { payload } = await jwtVerify(token, jwks);
+
+    // Extract user ID from sub claim
+    const userId = Number.parseInt(payload.sub ?? "", 10);
+    if (Number.isNaN(userId)) {
+      log.warn("JWT missing or invalid sub claim");
+      return null;
+    }
+
+    // Look up cognitoSub for the user
+    const cognitoSub = await getCognitoSubByUserId(userId);
+    if (!cognitoSub) {
+      log.warn("JWT user not found in database", { userId });
+      return null;
+    }
+
+    // Extract scopes from the token
+    const scopeStr = (payload.scope as string) ?? "";
+    const scopes = scopeStr ? scopeStr.split(" ") : [];
+
+    return {
+      userId,
+      cognitoSub,
+      scopes,
+      clientId: (payload.client_id as string) ?? (payload.azp as string) ?? "unknown",
+    };
+  } catch (error) {
+    log.warn("JWT verification error", {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
+}
 
 /**
  * Look up a user's cognitoSub by their numeric userId.
