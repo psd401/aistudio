@@ -19,6 +19,8 @@ export const API_SCOPES = {
   "models:read": "List available AI models",
   "documents:read": "Read documents and attachments",
   "documents:write": "Upload and manage documents",
+  "graph:read": "Read context graph nodes and edges",
+  "graph:write": "Create, update, and delete graph nodes and edges",
 } as const;
 
 export type ApiScope = keyof typeof API_SCOPES;
@@ -37,6 +39,7 @@ export const ROLE_SCOPES: Record<string, ApiScope[]> = {
     "assistants:read",
     "models:read",
     "documents:read",
+    "graph:read",
   ],
   administrator: ALL_SCOPES,
 };
