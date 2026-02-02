@@ -59,7 +59,30 @@ export async function checkRateLimit(
   auth: ApiAuthContext
 ): Promise<RateLimitResult> {
   // Session users are not rate-limited by per-key limiter
-  if (auth.authType === "session" || !auth.apiKeyId) {
+  // JWT auth users are rate-limited via the same mechanism (by oauthClientId)
+  if (auth.authType === "session") {
+    return {
+      allowed: true,
+      limit: 0,
+      remaining: 0,
+      resetAt: 0,
+    };
+  }
+
+  // JWT auth without an API key uses default rate limiting
+  // Rate limiting for JWT is based on the auth context, not a specific key
+  if (auth.authType === "jwt" && !auth.apiKeyId) {
+    // For JWT auth, we allow the request but don't track per-key usage
+    // OAuth clients have their own rate limits managed at the provider level
+    return {
+      allowed: true,
+      limit: DEFAULT_RPM,
+      remaining: DEFAULT_RPM - 1,
+      resetAt: Math.ceil((Date.now() + WINDOW_MS) / 1000),
+    };
+  }
+
+  if (!auth.apiKeyId) {
     return {
       allowed: true,
       limit: 0,

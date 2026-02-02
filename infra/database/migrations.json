@@ -47,6 +47,8 @@
     "049-add-activity-dashboard-nav.sql",
     "050-graph-schema.sql",
     "051-user-profile-and-api-keys.sql",
-    "052-api-keys-argon2-migration.sql"
+    "052-api-keys-argon2-migration.sql",
+    "053-oauth-provider-tables.sql",
+    "054-oauth-consent-decisions.sql"
   ]
 }
