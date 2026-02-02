@@ -19,6 +19,7 @@
 export {
   authenticateRequest,
   requireScope,
+  requireAssistantScope,
   createErrorResponse,
   createApiResponse,
   type ApiAuthContext,
