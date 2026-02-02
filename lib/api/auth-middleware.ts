@@ -100,7 +100,7 @@ export async function authenticateRequest(
       const cognitoSub = await getCognitoSubByUserId(keyAuth.userId);
       if (!cognitoSub) {
         timer({ status: "error" });
-        log.error("User not found for API key", { userId: keyAuth.userId, keyId: keyAuth.keyId });
+        log.error("User lookup failed during API key auth", { keyId: keyAuth.keyId });
         return createErrorResponse(requestId, 401, "INVALID_TOKEN", "Invalid API key");
       }
 
@@ -203,6 +203,44 @@ export function requireScope(
   });
 
   return createErrorResponse(rid, 403, "INSUFFICIENT_SCOPE", `Missing required scope: ${scope}`);
+}
+
+/**
+ * Check if the auth context has permission to execute a specific assistant.
+ * Accepts any of: `assistants:execute`, `assistants:*`, `assistant:{id}:execute`, or `*`.
+ * Returns a 403 NextResponse if denied, or null if allowed.
+ */
+export function requireAssistantScope(
+  auth: ApiAuthContext,
+  assistantId: number,
+  requestId?: string
+): NextResponse | null {
+  // Check broad scope first: assistants:execute or assistants:*
+  if (hasScope(auth.scopes, "assistants:execute")) {
+    return null
+  }
+
+  // Check per-assistant scope: assistant:{id}:execute
+  const perAssistantScope = `assistant:${assistantId}:execute`
+  if (auth.scopes.includes(perAssistantScope)) {
+    return null
+  }
+
+  const rid = requestId || generateRequestId()
+  const log = createLogger({ requestId: rid, action: "requireAssistantScope" })
+  log.warn("Assistant scope check failed", {
+    userId: auth.userId,
+    authType: auth.authType,
+    assistantId,
+    apiKeyId: auth.apiKeyId,
+  })
+
+  return createErrorResponse(
+    rid,
+    403,
+    "INSUFFICIENT_SCOPE",
+    `Missing required scope: assistants:execute or assistant:${assistantId}:execute`
+  )
 }
 
 // ============================================

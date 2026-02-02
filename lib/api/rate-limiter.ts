@@ -129,18 +129,19 @@ export async function checkRateLimit(
       resetAt,
     };
   } catch (error) {
-    // On rate limit check failure, allow the request (fail open)
-    // but log the error for investigation
-    log.error("Rate limit check failed, allowing request", {
+    // Fail closed: deny requests when rate limit check fails.
+    // This prevents attackers from bypassing rate limits by causing DB errors.
+    log.error("Rate limit check failed, denying request", {
       apiKeyId: auth.apiKeyId,
       error: error instanceof Error ? error.message : String(error),
     });
 
     return {
-      allowed: true,
+      allowed: false,
       limit: DEFAULT_RPM,
-      remaining: DEFAULT_RPM,
-      resetAt: 0,
+      remaining: 0,
+      resetAt: Math.ceil((Date.now() + WINDOW_MS) / 1000),
+      retryAfterSeconds: 60,
     };
   }
 }

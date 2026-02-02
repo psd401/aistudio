@@ -19,6 +19,7 @@
 export {
   authenticateRequest,
   requireScope,
+  requireAssistantScope,
   createErrorResponse,
   createApiResponse,
   type ApiAuthContext,
@@ -34,3 +35,12 @@ export {
 } from "./rate-limiter";
 
 export { withApiAuth } from "./with-api-auth";
+
+export {
+  extractNumericParam,
+  extractStringParam,
+  isAdminByUserId,
+  verifyAssistantAccess,
+  parseRequestBody,
+  isErrorResponse,
+} from "./route-helpers";
