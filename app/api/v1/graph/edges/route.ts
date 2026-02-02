@@ -20,7 +20,7 @@ import { createLogger } from "@/lib/logger"
 // ============================================
 
 const listQuerySchema = z.object({
-  edgeType: z.string().optional(),
+  edgeType: z.string().max(100).optional(),
   sourceNodeId: z.string().uuid().optional(),
   targetNodeId: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),

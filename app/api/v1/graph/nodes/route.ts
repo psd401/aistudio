@@ -19,9 +19,9 @@ import { createLogger } from "@/lib/logger"
 // ============================================
 
 const listQuerySchema = z.object({
-  nodeType: z.string().optional(),
-  nodeClass: z.string().optional(),
-  search: z.string().optional(),
+  nodeType: z.string().max(100).optional(),
+  nodeClass: z.string().max(100).optional(),
+  search: z.string().min(1).max(100).optional(),
   limit: z.coerce.number().int().min(1).max(100).optional(),
   cursor: z.string().optional(),
 })

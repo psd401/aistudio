@@ -6,6 +6,7 @@
  */
 
 import { executeQuery } from "@/lib/db/drizzle-client"
+import { createLogger } from "@/lib/logger"
 import { eq, or, ilike, and, desc, lt, inArray, type SQL } from "drizzle-orm"
 import { graphNodes, graphEdges } from "@/lib/db/schema"
 import type {
@@ -94,12 +95,21 @@ function encodeCursor(createdAt: Date | string, id: string): string {
 }
 
 function decodeCursor(cursor: string): CursorPayload | null {
+  const log = createLogger({ action: "decodeCursor" })
+
   try {
     const json = Buffer.from(cursor, "base64url").toString("utf-8")
     const parsed = JSON.parse(json) as CursorPayload
-    if (!parsed.createdAt || !parsed.id) return null
+    if (!parsed.createdAt || !parsed.id) {
+      log.warn("Invalid cursor payload", { cursorPrefix: cursor.substring(0, 20) })
+      return null
+    }
     return parsed
-  } catch {
+  } catch (error) {
+    log.warn("Cursor decode failed", {
+      error: error instanceof Error ? error.message : "unknown",
+      cursorPrefix: cursor.substring(0, 20),
+    })
     return null
   }
 }
@@ -132,12 +142,20 @@ export async function queryGraphNodes(
     conditions.push(eq(graphNodes.nodeClass, filters.nodeClass))
   }
   if (filters?.search) {
-    conditions.push(
-      or(
-        ilike(graphNodes.name, `%${filters.search}%`),
-        ilike(graphNodes.description, `%${filters.search}%`)
-      )!
-    )
+    // Escape SQL wildcards and limit length to prevent SQL injection and DoS
+    const sanitized = filters.search
+      .replace(/[%_]/g, '\\$&')  // Escape ILIKE wildcards
+      .slice(0, 100)              // Limit length
+      .trim()
+
+    if (sanitized.length > 0) {
+      conditions.push(
+        or(
+          ilike(graphNodes.name, `%${sanitized}%`),
+          ilike(graphNodes.description, `%${sanitized}%`)
+        )!
+      )
+    }
   }
 
   // Cursor condition: fetch rows older than cursor (descending order)
@@ -408,25 +426,25 @@ export async function removeGraphEdge(
 export async function queryNodeConnections(
   nodeId: string
 ): Promise<NodeConnection[]> {
-  // Get outgoing edges (this node is source)
-  const outgoingEdges = await executeQuery(
-    (db) =>
-      db
-        .select()
-        .from(graphEdges)
-        .where(eq(graphEdges.sourceNodeId, nodeId)),
-    "queryNodeConnections:outgoing"
-  )
-
-  // Get incoming edges (this node is target)
-  const incomingEdges = await executeQuery(
-    (db) =>
-      db
-        .select()
-        .from(graphEdges)
-        .where(eq(graphEdges.targetNodeId, nodeId)),
-    "queryNodeConnections:incoming"
-  )
+  // Fetch outgoing and incoming edges in parallel for better performance
+  const [outgoingEdges, incomingEdges] = await Promise.all([
+    executeQuery(
+      (db) =>
+        db
+          .select()
+          .from(graphEdges)
+          .where(eq(graphEdges.sourceNodeId, nodeId)),
+      "queryNodeConnections:outgoing"
+    ),
+    executeQuery(
+      (db) =>
+        db
+          .select()
+          .from(graphEdges)
+          .where(eq(graphEdges.targetNodeId, nodeId)),
+      "queryNodeConnections:incoming"
+    ),
+  ])
 
   // Collect unique connected node IDs
   const connectedNodeIds = new Set<string>()
