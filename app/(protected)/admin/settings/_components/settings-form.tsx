@@ -51,6 +51,7 @@ interface SettingsFormProps {
 }
 
 const categories = [
+  { value: "ai", label: "AI Configuration" },
   { value: "ai_providers", label: "AI Providers" },
   { value: "storage", label: "Storage" },
   { value: "external_services", label: "External Services" },
