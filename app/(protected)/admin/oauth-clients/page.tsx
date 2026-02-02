@@ -16,6 +16,7 @@ export default async function OAuthClientsPage() {
 
   const clientsResult = await listOAuthClients()
   const clients = clientsResult.isSuccess ? (clientsResult.data ?? []) : []
+  const fetchError = !clientsResult.isSuccess ? (clientsResult.message ?? "Failed to load OAuth clients") : null
 
   return (
     <div className="p-6">
@@ -26,6 +27,12 @@ export default async function OAuthClientsPage() {
           Manage OAuth2/OIDC client applications for external service authentication
         </p>
       </div>
+
+      {fetchError && (
+        <div className="mb-4 rounded-md border border-destructive/50 bg-destructive/10 p-3">
+          <p className="text-sm text-destructive">{fetchError}</p>
+        </div>
+      )}
 
       <Suspense fallback={<Skeleton className="h-64 w-full" />}>
         <OAuthClientsPageClient initialClients={clients} />

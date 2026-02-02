@@ -55,6 +55,17 @@ function sha256(value: string): string {
 }
 
 // ============================================
+// JSONB Validation Helpers
+// ============================================
+
+function asStringArray(val: unknown): string[] {
+  if (Array.isArray(val) && val.every((v) => typeof v === "string")) {
+    return val
+  }
+  return []
+}
+
+// ============================================
 // Adapter Implementation
 // ============================================
 
@@ -133,14 +144,25 @@ class DrizzleAdapter implements Adapter {
     switch (this.model) {
       case "AuthorizationCode": {
         const hash = sha256(id)
-        await executeQuery(
+        const consumed = await executeQuery(
           (db) =>
             db
               .update(oauthAuthorizationCodes)
               .set({ consumedAt: new Date() })
-              .where(eq(oauthAuthorizationCodes.codeHash, hash)),
+              .where(
+                and(
+                  eq(oauthAuthorizationCodes.codeHash, hash),
+                  isNull(oauthAuthorizationCodes.consumedAt)
+                )
+              )
+              .returning({ id: oauthAuthorizationCodes.id }),
           "oidcAdapter.consumeAuthCode"
         )
+        if (consumed.length === 0) {
+          this.log.warn("Authorization code already consumed or not found", {
+            codeHash: hash.slice(0, 8),
+          })
+        }
         break
       }
       default: {
@@ -213,10 +235,10 @@ class DrizzleAdapter implements Adapter {
       client_id: client.clientId,
       client_name: client.clientName,
       client_secret: client.clientSecretHash ?? undefined,
-      redirect_uris: client.redirectUris as string[],
-      grant_types: client.grantTypes as string[],
-      response_types: (client.responseTypes as string[]) as ("code" | "id_token" | "none")[],
-      scope: (client.allowedScopes as string[]).join(" "),
+      redirect_uris: asStringArray(client.redirectUris),
+      grant_types: asStringArray(client.grantTypes),
+      response_types: asStringArray(client.responseTypes) as ("code" | "id_token" | "none")[],
+      scope: asStringArray(client.allowedScopes).join(" "),
       token_endpoint_auth_method: client.tokenEndpointAuthMethod as "none" | "client_secret_post" | "client_secret_basic",
     }
   }
@@ -268,7 +290,7 @@ class DrizzleAdapter implements Adapter {
       accountId: String(code.userId),
       clientId: code.clientId,
       redirectUri: code.redirectUri,
-      scope: (code.scopes as string[]).join(" "),
+      scope: asStringArray(code.scopes).join(" "),
       codeChallenge: code.codeChallenge ?? undefined,
       codeChallengeMethod: code.codeChallengeMethod ?? undefined,
       nonce: code.nonce ?? undefined,
@@ -316,7 +338,7 @@ class DrizzleAdapter implements Adapter {
       jti: token.jti,
       accountId: String(token.userId),
       clientId: token.clientId,
-      scope: (token.scopes as string[]).join(" "),
+      scope: asStringArray(token.scopes).join(" "),
       expiresAt: token.expiresAt,
     }
   }
@@ -369,7 +391,7 @@ class DrizzleAdapter implements Adapter {
     return {
       accountId: String(token.userId),
       clientId: token.clientId,
-      scope: (token.scopes as string[]).join(" "),
+      scope: asStringArray(token.scopes).join(" "),
       expiresAt: token.expiresAt,
       consumed: token.rotatedAt ? Math.floor(token.rotatedAt.getTime() / 1000) : undefined,
     }

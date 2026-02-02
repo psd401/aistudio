@@ -8,15 +8,14 @@
 
 import { NextResponse } from "next/server"
 import { createLogger } from "@/lib/logger"
+import { getIssuerUrl } from "@/lib/oauth/issuer-config"
+import { ALL_OAUTH_SCOPES } from "@/lib/oauth/oauth-scopes"
 
 export async function GET(): Promise<NextResponse> {
   const log = createLogger({ action: "oidc.discovery" })
 
   try {
-    const issuer =
-      process.env.NEXTAUTH_URL ??
-      process.env.NEXT_PUBLIC_APP_URL ??
-      "http://localhost:3000"
+    const issuer = getIssuerUrl()
 
     const discovery = {
       issuer,
@@ -32,7 +31,7 @@ export async function GET(): Promise<NextResponse> {
       subject_types_supported: ["public"],
       id_token_signing_alg_values_supported: ["RS256"],
       token_endpoint_auth_methods_supported: ["none", "client_secret_post"],
-      scopes_supported: ["openid", "profile", "email", "offline_access"],
+      scopes_supported: ALL_OAUTH_SCOPES,
       claims_supported: ["sub", "email", "name"],
     }
 

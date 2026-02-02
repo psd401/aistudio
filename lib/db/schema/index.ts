@@ -145,6 +145,7 @@ export * from "./tables/oauth-authorization-codes";
 export * from "./tables/oauth-access-tokens";
 export * from "./tables/oauth-refresh-tokens";
 export * from "./tables/jwks-keys";
+export * from "./tables/oauth-consent-decisions";
 
 // ============================================
 // Relations

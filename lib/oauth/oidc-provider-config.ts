@@ -8,6 +8,8 @@
 import Provider from "oidc-provider"
 import { DrizzleOidcAdapter } from "./drizzle-adapter"
 import { getJwtSigner } from "./jwt-signer"
+import { getIssuerUrl } from "./issuer-config"
+import { ALL_OAUTH_SCOPES } from "./oauth-scopes"
 import { createLogger } from "@/lib/logger"
 
 // ============================================
@@ -31,11 +33,7 @@ export async function getOidcProvider(
 
   const log = createLogger({ action: "oidcProvider.init" })
 
-  const issuer =
-    options?.issuer ??
-    process.env.NEXTAUTH_URL ??
-    process.env.NEXT_PUBLIC_APP_URL ??
-    "http://localhost:3000"
+  const issuer = getIssuerUrl(options?.issuer)
 
   const signer = await getJwtSigner()
   const jwk = await signer.getPublicKeyJwk()
@@ -108,7 +106,7 @@ export async function getOidcProvider(
     // ==========================================
     // Scopes
     // ==========================================
-    scopes: ["openid", "profile", "email", "offline_access"],
+    scopes: ALL_OAUTH_SCOPES,
 
     // ==========================================
     // Interactions — custom consent UI
@@ -166,11 +164,19 @@ export async function getOidcProvider(
     // Cookies
     // ==========================================
     cookies: {
-      keys: [
-        process.env.OIDC_COOKIE_SECRET ??
-          process.env.NEXTAUTH_SECRET ??
-          "dev-oidc-cookie-secret-change-in-production",
-      ],
+      keys: (() => {
+        const secret = process.env.OIDC_COOKIE_SECRET ?? process.env.NEXTAUTH_SECRET
+        if (!secret) {
+          if (process.env.NODE_ENV === "production") {
+            throw new Error(
+              "OIDC_COOKIE_SECRET or NEXTAUTH_SECRET must be set in production. " +
+              "Generate with: openssl rand -base64 32"
+            )
+          }
+          return ["dev-oidc-cookie-secret-change-in-production"]
+        }
+        return [secret]
+      })(),
     },
   })
 

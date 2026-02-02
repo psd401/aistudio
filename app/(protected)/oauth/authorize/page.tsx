@@ -6,6 +6,7 @@
 
 import { redirect } from "next/navigation"
 import { ConsentForm } from "./_components/consent-form"
+import { getScopeLabel } from "@/lib/oauth/oauth-scopes"
 
 interface OAuthAuthorizePageProps {
   searchParams: Promise<{ uid?: string }>
@@ -88,11 +89,5 @@ export default async function OAuthAuthorizePage({
 }
 
 function scopeLabel(scope: string): string {
-  const labels: Record<string, string> = {
-    openid: "Verify your identity",
-    profile: "Access your profile information",
-    email: "Access your email address",
-    offline_access: "Stay connected (refresh tokens)",
-  }
-  return labels[scope] ?? scope
+  return getScopeLabel(scope)
 }

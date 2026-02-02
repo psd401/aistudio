@@ -7,7 +7,7 @@
 "use server"
 
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
-import { handleError, createSuccess } from "@/lib/error-utils"
+import { handleError, createSuccess, ErrorFactories } from "@/lib/error-utils"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { getServerSession } from "@/lib/auth/server-session"
 import { getUserIdByCognitoSubAsNumber } from "@/lib/db/drizzle/utils"
@@ -113,6 +113,53 @@ export async function listOAuthClients(): Promise<ActionState<OAuthClientRow[]>>
 // Create OAuth Client
 // ============================================
 
+// ============================================
+// Redirect URI Validation
+// ============================================
+
+function validateRedirectUris(uris: string[]): { valid: boolean; errors: string[] } {
+  const errors: string[] = []
+  const isProduction = process.env.NODE_ENV === "production"
+
+  for (const uri of uris) {
+    let parsed: URL
+    try {
+      parsed = new URL(uri)
+    } catch {
+      errors.push(`Invalid URL format: ${uri}`)
+      continue
+    }
+
+    if (!["http:", "https:"].includes(parsed.protocol)) {
+      errors.push(`Invalid protocol (must be http/https): ${uri}`)
+      continue
+    }
+
+    // Production: enforce HTTPS except localhost
+    if (isProduction && parsed.protocol === "http:") {
+      if (!["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname)) {
+        errors.push(`Production requires HTTPS: ${uri}`)
+      }
+    }
+
+    // No wildcards in hostname
+    if (parsed.hostname.includes("*")) {
+      errors.push(`Wildcards not allowed in hostname: ${uri}`)
+    }
+
+    // Fragment not allowed per OAuth spec
+    if (parsed.hash) {
+      errors.push(`Fragments not allowed in redirect URI: ${uri}`)
+    }
+  }
+
+  return { valid: errors.length === 0, errors }
+}
+
+// ============================================
+// Create OAuth Client
+// ============================================
+
 export async function createOAuthClient(
   input: CreateOAuthClientInput
 ): Promise<ActionState<CreateOAuthClientResult>> {
@@ -127,6 +174,20 @@ export async function createOAuthClient(
     const userId = session?.sub ? await getUserIdByCognitoSubAsNumber(session.sub) : null
 
     log.info("Creating OAuth client", { name: sanitizeForLogging(input.clientName) })
+
+    // Validate redirect URIs
+    if (input.redirectUris.length === 0) {
+      throw ErrorFactories.invalidInput("redirectUris", input.redirectUris, "At least one redirect URI is required")
+    }
+    const uriValidation = validateRedirectUris(input.redirectUris)
+    if (!uriValidation.valid) {
+      log.warn("Invalid redirect URIs", { errors: uriValidation.errors })
+      throw ErrorFactories.invalidInput(
+        "redirectUris",
+        input.redirectUris,
+        uriValidation.errors.join("; ")
+      )
+    }
 
     const clientId = randomUUID()
     const isConfidential = input.tokenEndpointAuthMethod === "client_secret_post"

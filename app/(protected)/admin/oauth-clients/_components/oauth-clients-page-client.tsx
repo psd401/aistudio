@@ -52,17 +52,25 @@ interface Props {
 export function OAuthClientsPageClient({ initialClients }: Props) {
   const [clients, setClients] = useState(initialClients)
   const [sheetOpen, setSheetOpen] = useState(false)
+  const [error, setError] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     const result = await listOAuthClients()
     if (result.isSuccess && result.data) {
       setClients(result.data)
+      setError(null)
+    } else {
+      setError(result.message || "Failed to load OAuth clients")
     }
   }, [])
 
   const handleRevoke = useCallback(
     async (clientId: string) => {
-      await revokeOAuthClient(clientId)
+      const result = await revokeOAuthClient(clientId)
+      if (!result.isSuccess) {
+        setError(result.message || "Failed to revoke client")
+        return
+      }
       await refresh()
     },
     [refresh]
@@ -95,6 +103,12 @@ export function OAuthClientsPageClient({ initialClients }: Props) {
           </SheetContent>
         </Sheet>
       </div>
+
+      {error && (
+        <div className="mb-4 rounded-md border border-destructive/50 bg-destructive/10 p-3">
+          <p className="text-sm text-destructive">{error}</p>
+        </div>
+      )}
 
       {clients.length === 0 ? (
         <div className="text-center py-12 text-muted-foreground">

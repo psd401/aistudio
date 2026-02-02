@@ -6,6 +6,8 @@
  * Since oidc-provider requires Node.js req/res for interactionResult,
  * these actions store the consent decision and redirect back to the
  * provider's interaction endpoint which reads the stored decision.
+ *
+ * Consent decisions are stored in the database for multi-instance safety.
  */
 
 "use server"
@@ -13,10 +15,15 @@
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
 import { getServerSession } from "@/lib/auth/server-session"
+import { getUserIdByCognitoSubAsNumber } from "@/lib/db/drizzle/utils"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { oauthConsentDecisions } from "@/lib/db/schema"
+import { eq, and, gt } from "drizzle-orm"
+import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import type { ActionState } from "@/types/actions-types"
 
 // ============================================
-// In-Memory Consent Store (ephemeral)
+// Types
 // ============================================
 
 interface ConsentDecision {
@@ -26,142 +33,127 @@ interface ConsentDecision {
   createdAt: number
 }
 
-const consentDecisions = new Map<string, ConsentDecision>()
-
-// Cleanup expired decisions (older than 5 min)
-function cleanupDecisions(): void {
-  const now = Date.now()
-  for (const [key, decision] of consentDecisions) {
-    if (now - decision.createdAt > 5 * 60 * 1000) {
-      consentDecisions.delete(key)
-    }
-  }
-}
-
-export function getConsentDecision(uid: string): ConsentDecision | undefined {
-  cleanupDecisions()
-  const decision = consentDecisions.get(uid)
-  if (decision) {
-    consentDecisions.delete(uid) // consume once
-  }
-  return decision
-}
-
-// ============================================
-// Types
-// ============================================
-
 interface ConsentResult {
   redirectTo: string
 }
 
 // ============================================
-// Approve Consent
+// Consent Decision Persistence (Database)
+// ============================================
+
+/**
+ * Retrieve and consume a consent decision from the database.
+ * Returns undefined if not found or expired. Deletes after reading (consume-once).
+ */
+export async function getConsentDecision(uid: string): Promise<ConsentDecision | undefined> {
+  const [decision] = await executeQuery(
+    (db) =>
+      db
+        .select()
+        .from(oauthConsentDecisions)
+        .where(
+          and(
+            eq(oauthConsentDecisions.uid, uid),
+            gt(oauthConsentDecisions.expiresAt, new Date())
+          )
+        )
+        .limit(1),
+    "getConsentDecision"
+  )
+
+  if (!decision) return undefined
+
+  // Consume once — delete after reading
+  await executeQuery(
+    (db) =>
+      db.delete(oauthConsentDecisions).where(eq(oauthConsentDecisions.uid, uid)),
+    "deleteConsentDecision"
+  )
+
+  return {
+    approved: decision.approved,
+    userId: decision.userId,
+    scopes: decision.scopes as string[],
+    createdAt: decision.createdAt.getTime(),
+  }
+}
+
+// ============================================
+// Core Consent Processing
+// ============================================
+
+async function processConsent(
+  interactionUid: string,
+  approved: boolean,
+  grantedScopes: string[] = []
+): Promise<ActionState<ConsentResult>> {
+  const actionName = approved ? "approveConsent" : "denyConsent"
+  const requestId = generateRequestId()
+  const timer = startTimer(actionName)
+  const log = createLogger({ requestId, action: actionName })
+
+  try {
+    const session = await getServerSession()
+    if (!session?.sub) {
+      throw ErrorFactories.authNoSession()
+    }
+
+    log.info(`Processing consent ${approved ? "approval" : "denial"}`, { interactionUid })
+
+    const userId = await getUserIdByCognitoSubAsNumber(session.sub)
+    if (!userId) {
+      throw ErrorFactories.authNoSession()
+    }
+
+    // Store consent decision in database (5 min TTL)
+    await executeQuery(
+      (db) =>
+        db
+          .insert(oauthConsentDecisions)
+          .values({
+            uid: interactionUid,
+            userId,
+            approved,
+            scopes: grantedScopes,
+            expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+          }),
+      "storeConsentDecision"
+    )
+
+    const issuer = getIssuerUrl()
+    const path = approved ? "login" : "abort"
+    const redirectTo = `${issuer}/api/oauth/interaction/${interactionUid}/${path}`
+
+    timer({ status: "success" })
+    log.info(`Consent ${approved ? "approved" : "denied"}`, { interactionUid, userId })
+
+    return createSuccess(
+      { redirectTo },
+      approved ? "Authorization granted" : "Authorization denied"
+    )
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, `Failed to process consent`, {
+      context: actionName,
+      requestId,
+      operation: actionName,
+    })
+  }
+}
+
+// ============================================
+// Public Actions
 // ============================================
 
 export async function approveConsent(
   interactionUid: string,
   grantedScopes: string[]
 ): Promise<ActionState<ConsentResult>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("approveConsent")
-  const log = createLogger({ requestId, action: "approveConsent" })
-
-  try {
-    const session = await getServerSession()
-    if (!session?.sub) {
-      throw ErrorFactories.authNoSession()
-    }
-
-    log.info("Processing consent approval", { interactionUid })
-
-    // Look up userId from cognitoSub
-    const { getUserIdByCognitoSubAsNumber } = await import("@/lib/db/drizzle/utils")
-    const userId = await getUserIdByCognitoSubAsNumber(session.sub)
-    if (!userId) {
-      throw ErrorFactories.authNoSession()
-    }
-
-    // Store the consent decision
-    consentDecisions.set(interactionUid, {
-      approved: true,
-      userId,
-      scopes: grantedScopes,
-      createdAt: Date.now(),
-    })
-
-    // Redirect back to the OIDC interaction endpoint
-    const issuer =
-      process.env.NEXTAUTH_URL ??
-      process.env.NEXT_PUBLIC_APP_URL ??
-      "http://localhost:3000"
-
-    const redirectTo = `${issuer}/api/oauth/interaction/${interactionUid}/login`
-
-    timer({ status: "success" })
-    log.info("Consent approved", { interactionUid, userId })
-
-    return createSuccess({ redirectTo }, "Authorization granted")
-  } catch (error) {
-    timer({ status: "error" })
-    return handleError(error, "Failed to process consent", {
-      context: "approveConsent",
-      requestId,
-      operation: "approveConsent",
-    })
-  }
+  return processConsent(interactionUid, true, grantedScopes)
 }
-
-// ============================================
-// Deny Consent
-// ============================================
 
 export async function denyConsent(
   interactionUid: string
 ): Promise<ActionState<ConsentResult>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("denyConsent")
-  const log = createLogger({ requestId, action: "denyConsent" })
-
-  try {
-    const session = await getServerSession()
-    if (!session?.sub) {
-      throw ErrorFactories.authNoSession()
-    }
-
-    log.info("Processing consent denial", { interactionUid })
-
-    const { getUserIdByCognitoSubAsNumber } = await import("@/lib/db/drizzle/utils")
-    const userId = await getUserIdByCognitoSubAsNumber(session.sub)
-    if (!userId) {
-      throw ErrorFactories.authNoSession()
-    }
-
-    // Store the denial decision
-    consentDecisions.set(interactionUid, {
-      approved: false,
-      userId,
-      scopes: [],
-      createdAt: Date.now(),
-    })
-
-    const issuer =
-      process.env.NEXTAUTH_URL ??
-      process.env.NEXT_PUBLIC_APP_URL ??
-      "http://localhost:3000"
-
-    const redirectTo = `${issuer}/api/oauth/interaction/${interactionUid}/abort`
-
-    timer({ status: "success" })
-    log.info("Consent denied", { interactionUid })
-
-    return createSuccess({ redirectTo }, "Authorization denied")
-  } catch (error) {
-    timer({ status: "error" })
-    return handleError(error, "Failed to process denial", {
-      context: "denyConsent",
-      requestId,
-      operation: "denyConsent",
-    })
-  }
+  return processConsent(interactionUid, false)
 }

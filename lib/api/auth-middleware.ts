@@ -382,7 +382,13 @@ async function verifyJwtToken(
       userId,
       cognitoSub,
       scopes,
-      clientId: (payload.client_id as string) ?? (payload.azp as string) ?? "unknown",
+      clientId: (() => {
+        const cid = (payload.client_id as string) ?? (payload.azp as string)
+        if (!cid) {
+          log.warn("JWT missing client_id and azp claims")
+        }
+        return cid ?? "unknown"
+      })(),
     };
   } catch (error) {
     log.warn("JWT verification error", {

@@ -51,6 +51,7 @@ export function ClientFormSheet({ onSuccess }: Props) {
   const [authMethod, setAuthMethod] = useState<"none" | "client_secret_post">("none")
   const [selectedScopes, setSelectedScopes] = useState<string[]>([])
   const [isSubmitting, setIsSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   const [createdSecret, setCreatedSecret] = useState<string | null>(null)
   const [createdClientId, setCreatedClientId] = useState<string | null>(null)
 
@@ -63,6 +64,7 @@ export function ClientFormSheet({ onSuccess }: Props) {
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setIsSubmitting(true)
+    setError(null)
 
     try {
       const redirectUris = redirectUri
@@ -85,7 +87,11 @@ export function ClientFormSheet({ onSuccess }: Props) {
           setCreatedClientId(result.data.client.clientId)
           onSuccess()
         }
+      } else {
+        setError(result.message || "Failed to create OAuth client")
       }
+    } catch {
+      setError("An unexpected error occurred")
     } finally {
       setIsSubmitting(false)
     }
@@ -200,6 +206,12 @@ export function ClientFormSheet({ onSuccess }: Props) {
           ))}
         </div>
       </div>
+
+      {error && (
+        <div className="rounded-md border border-destructive/50 bg-destructive/10 p-3">
+          <p className="text-sm text-destructive">{error}</p>
+        </div>
+      )}
 
       <Button type="submit" disabled={isSubmitting || !clientName} className="w-full">
         {isSubmitting ? "Creating..." : "Create Client"}
