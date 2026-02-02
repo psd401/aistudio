@@ -1,9 +1,10 @@
 openapi: 3.1.0
 info:
-  title: AI Studio Context Graph API
+  title: AI Studio API
   version: "1.0"
   description: |
-    RESTful API for managing context graph nodes and edges.
+    RESTful API for AI Studio. Includes context graph management,
+    assistant execution, and multi-turn conversations.
     Part of the AI Studio External API Platform (Epic #674).
 
     ## Authentication
@@ -52,6 +53,10 @@ tags:
     description: Context graph node operations
   - name: Edges
     description: Context graph edge operations
+  - name: Assistants
+    description: Assistant listing, execution, and multi-turn conversations
+  - name: Jobs
+    description: Async job polling and cancellation
 
 # ============================================
 # Paths
@@ -491,6 +496,351 @@ paths:
         "500":
           $ref: "#/components/responses/InternalError"
 
+  # ============================================
+  # Assistants
+  # ============================================
+
+  /assistants:
+    get:
+      operationId: listAssistants
+      tags: [Assistants]
+      summary: List accessible assistants
+      description: Returns assistants the authenticated user can access (own, admin, or approved).
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, pending_approval, approved, rejected, disabled]
+        - name: search
+          in: query
+          schema:
+            type: string
+            maxLength: 100
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of assistants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AssistantListItem"
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      limit:
+                        type: integer
+                      nextCursor:
+                        type: string
+                        nullable: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /assistants/{id}:
+    get:
+      operationId: getAssistant
+      tags: [Assistants]
+      summary: Get assistant details
+      description: Returns full assistant details including input fields.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Assistant details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AssistantDetail"
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /assistants/{id}/execute:
+    post:
+      operationId: executeAssistant
+      tags: [Assistants]
+      summary: Execute an assistant
+      description: |
+        Execute an assistant with the given inputs.
+        - `Accept: text/event-stream` (default) returns an SSE stream
+        - `Accept: application/json` returns 202 with a jobId for async polling
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: Accept
+          in: header
+          schema:
+            type: string
+            enum: [text/event-stream, application/json]
+            default: text/event-stream
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                inputs:
+                  type: object
+                  additionalProperties: true
+                  description: Key-value pairs matching the assistant's input fields
+      responses:
+        "200":
+          description: SSE streaming response (when Accept is text/event-stream)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "202":
+          description: Job created for async execution (when Accept is application/json)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      jobId:
+                        type: string
+                        format: uuid
+                      status:
+                        type: string
+                        enum: [pending]
+                      pollUrl:
+                        type: string
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /assistants/{id}/conversations:
+    post:
+      operationId: startConversation
+      tags: [Assistants]
+      summary: Start a conversation with an assistant
+      description: Creates a new conversation, executes the assistant, and returns the SSE stream.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                inputs:
+                  type: object
+                  additionalProperties: true
+                title:
+                  type: string
+                  maxLength: 500
+      responses:
+        "200":
+          description: SSE stream with X-Conversation-Id header
+          headers:
+            X-Conversation-Id:
+              schema:
+                type: string
+                format: uuid
+
+  /assistants/{id}/conversations/{cid}/messages:
+    post:
+      operationId: sendMessage
+      tags: [Assistants]
+      summary: Send a follow-up message
+      description: Sends a message in an existing conversation. Preserves assistant context.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: cid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message:
+                  type: string
+                  minLength: 1
+                  maxLength: 100000
+      responses:
+        "200":
+          description: SSE stream with assistant response
+
+  /assistants/{id}/conversations/{cid}:
+    get:
+      operationId: getConversation
+      tags: [Assistants]
+      summary: Get conversation history
+      description: Returns conversation metadata and messages.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: cid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Conversation with messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      conversation:
+                        $ref: "#/components/schemas/ConversationSummary"
+                      messages:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/ConversationMessage"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ============================================
+  # Jobs
+  # ============================================
+
+  /jobs/{jobId}:
+    get:
+      operationId: pollJob
+      tags: [Jobs]
+      summary: Poll job status
+      description: Returns current job status, partial content, and final response data.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Job status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStatus"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: cancelJob
+      tags: [Jobs]
+      summary: Cancel a running job
+      description: Cancels a job in a non-terminal state (pending, processing, streaming).
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Job cancelled
+        "409":
+          description: Job cannot be cancelled (already completed/failed)
+
 # ============================================
 # Components
 # ============================================
@@ -585,6 +935,157 @@ components:
 
   # ---- Schemas ----
   schemas:
+    # -- Assistants --
+    AssistantListItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [draft, pending_approval, approved, rejected, disabled]
+        inputFieldCount:
+          type: integer
+        promptCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    AssistantDetail:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        status:
+          type: string
+        timeoutSeconds:
+          type: integer
+          nullable: true
+        inputFields:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssistantInputField"
+        promptCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    AssistantInputField:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        label:
+          type: string
+        fieldType:
+          type: string
+          enum: [short_text, long_text, select, multi_select, file_upload]
+        position:
+          type: integer
+        options:
+          type: object
+          nullable: true
+
+    ConversationSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        provider:
+          type: string
+        messageCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ConversationMessage:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content:
+          type: string
+          nullable: true
+        parts:
+          type: array
+          items:
+            type: object
+        createdAt:
+          type: string
+          format: date-time
+
+    # -- Jobs --
+    JobStatus:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            jobId:
+              type: string
+              format: uuid
+            status:
+              type: string
+              enum: [pending, processing, streaming, completed, failed, cancelled]
+            createdAt:
+              type: string
+              format: date-time
+            completedAt:
+              type: string
+              format: date-time
+              nullable: true
+            partialContent:
+              type: string
+            responseData:
+              type: object
+              nullable: true
+              description: Final response (only when status is completed)
+            errorMessage:
+              type: string
+              nullable: true
+              description: Error details (only when status is failed)
+            pollingInterval:
+              type: integer
+              description: Recommended polling interval in milliseconds
+            shouldContinuePolling:
+              type: boolean
+        meta:
+          type: object
+          properties:
+            requestId:
+              type: string
+
     # -- Health --
     HealthResponse:
       type: object
