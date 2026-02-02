@@ -23,6 +23,11 @@ export const API_SCOPES = {
   "documents:write": "Upload and manage documents",
   "graph:read": "Read context graph nodes and edges",
   "graph:write": "Create, update, and delete graph nodes and edges",
+  "mcp:search_decisions": "Search decision graph nodes via MCP",
+  "mcp:capture_decision": "Create decision graph nodes and edges via MCP",
+  "mcp:execute_assistant": "Execute an assistant via MCP",
+  "mcp:list_assistants": "List available assistants via MCP",
+  "mcp:get_decision_graph": "Get decision node details and connections via MCP",
 } as const;
 
 export type ApiScope = keyof typeof API_SCOPES;
@@ -44,6 +49,9 @@ export const ROLE_SCOPES: Record<string, ApiScope[]> = {
     "models:read",
     "documents:read",
     "graph:read",
+    "mcp:search_decisions",
+    "mcp:list_assistants",
+    "mcp:get_decision_graph",
   ],
   administrator: ALL_SCOPES,
 };
