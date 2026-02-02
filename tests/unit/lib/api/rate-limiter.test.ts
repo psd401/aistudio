@@ -218,14 +218,15 @@ describe("Rate Limiter", () => {
       expect(mockExecuteQuery).not.toHaveBeenCalled()
     })
 
-    it("should fail open when database errors", async () => {
+    it("should fail closed when database errors", async () => {
       mockExecuteQuery.mockRejectedValueOnce(new Error("DB connection failed"))
 
       const result = await checkRateLimit(createApiKeyAuth())
 
-      // Should allow the request despite error
-      expect(result.allowed).toBe(true)
-      expect(result.limit).toBe(60) // default
+      // Should deny the request on error (fail-closed for security)
+      expect(result.allowed).toBe(false)
+      expect(result.remaining).toBe(0)
+      expect(result.retryAfterSeconds).toBe(60)
     })
 
     it("should handle empty key config result", async () => {
