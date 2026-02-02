@@ -110,12 +110,12 @@ export const DECISION_EDGE_TYPE_DESCRIPTIONS: Record<DecisionEdgeType, string> =
 // Type Guards
 // ============================================
 
-export function isDecisionNodeType(value: string): value is DecisionNodeType {
-  return (DECISION_NODE_TYPES as readonly string[]).includes(value)
+export function isDecisionNodeType(value: unknown): value is DecisionNodeType {
+  return typeof value === "string" && (DECISION_NODE_TYPES as readonly string[]).includes(value)
 }
 
-export function isDecisionEdgeType(value: string): value is DecisionEdgeType {
-  return (DECISION_EDGE_TYPES as readonly string[]).includes(value)
+export function isDecisionEdgeType(value: unknown): value is DecisionEdgeType {
+  return typeof value === "string" && (DECISION_EDGE_TYPES as readonly string[]).includes(value)
 }
 
 // ============================================
@@ -223,11 +223,11 @@ export function validateDecisionCompleteness(
 // ============================================
 
 /**
- * Natural-language prompt fragment describing the decision framework.
- * Include this in system prompts for conversational and MCP-based capture channels
- * so the LLM understands the vocabulary and completeness requirements.
+ * Reference copy of the decision framework prompt.
+ * The authoritative version lives in the settings table (key: DECISION_FRAMEWORK_PROMPT).
+ * Use getDecisionFrameworkPrompt() at runtime — this constant is exported for tests only.
  */
-export const DECISION_FRAMEWORK_PROMPT = `You are helping capture decisions in a structured context graph. Every decision should be recorded with enough context to understand it later.
+export const DEFAULT_DECISION_FRAMEWORK_PROMPT = `You are helping capture decisions in a structured context graph. Every decision should be recorded with enough context to understand it later.
 
 ## Node Types
 Use these node types when creating graph nodes for decisions:
@@ -273,3 +273,13 @@ When capturing a decision, proactively ask about any missing elements. For examp
 - "Who proposed or approved this?"
 - "What data or constraints informed this choice?"
 - "Under what conditions should this decision be revisited?"` as const
+
+/**
+ * Retrieve the decision framework prompt from the settings table.
+ * Uses the settings-manager cache (5-minute TTL) so repeated calls are cheap.
+ * Requires the DECISION_FRAMEWORK_PROMPT setting to exist in the database.
+ */
+export async function getDecisionFrameworkPrompt(): Promise<string> {
+  const { getRequiredSetting } = await import("@/lib/settings-manager")
+  return getRequiredSetting("DECISION_FRAMEWORK_PROMPT")
+}

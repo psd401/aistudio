@@ -4,7 +4,7 @@ import {
   DECISION_NODE_TYPE_DESCRIPTIONS,
   DECISION_EDGE_TYPES,
   DECISION_EDGE_TYPE_DESCRIPTIONS,
-  DECISION_FRAMEWORK_PROMPT,
+  DEFAULT_DECISION_FRAMEWORK_PROMPT,
   isDecisionNodeType,
   isDecisionEdgeType,
   validateDecisionCompleteness,
@@ -103,6 +103,15 @@ describe("isDecisionNodeType", () => {
     expect(isDecisionNodeType("DECISION")).toBe(false)
     expect(isDecisionNodeType("node")).toBe(false)
   })
+
+  it("should return false for non-string values", () => {
+    expect(isDecisionNodeType(null)).toBe(false)
+    expect(isDecisionNodeType(undefined)).toBe(false)
+    expect(isDecisionNodeType(42)).toBe(false)
+    expect(isDecisionNodeType(true)).toBe(false)
+    expect(isDecisionNodeType({})).toBe(false)
+    expect(isDecisionNodeType([])).toBe(false)
+  })
 })
 
 describe("isDecisionEdgeType", () => {
@@ -118,6 +127,15 @@ describe("isDecisionEdgeType", () => {
     expect(isDecisionEdgeType("")).toBe(false)
     expect(isDecisionEdgeType("informed")).toBe(false) // case-sensitive
     expect(isDecisionEdgeType("DECIDES")).toBe(false)
+  })
+
+  it("should return false for non-string values", () => {
+    expect(isDecisionEdgeType(null)).toBe(false)
+    expect(isDecisionEdgeType(undefined)).toBe(false)
+    expect(isDecisionEdgeType(42)).toBe(false)
+    expect(isDecisionEdgeType(true)).toBe(false)
+    expect(isDecisionEdgeType({})).toBe(false)
+    expect(isDecisionEdgeType([])).toBe(false)
   })
 })
 
@@ -320,6 +338,56 @@ describe("validateDecisionCompleteness", () => {
     )
   })
 
+  it("should handle nodes with empty string nodeType", () => {
+    const nodes: DecisionSubgraphNode[] = [
+      { id: "d1", nodeType: "" },
+      { id: "p1", nodeType: "" },
+    ]
+    const edges: DecisionSubgraphEdge[] = []
+    const result = validateDecisionCompleteness(nodes, edges)
+
+    expect(result.complete).toBe(false)
+    expect(result.missing).toHaveLength(4)
+  })
+
+  it("should handle duplicate node IDs gracefully (last wins in map)", () => {
+    const nodes: DecisionSubgraphNode[] = [
+      { id: "d1", nodeType: "person" },
+      { id: "d1", nodeType: "decision" }, // same id, different type — last wins
+      { id: "p1", nodeType: "person" },
+      { id: "e1", nodeType: "evidence" },
+      { id: "c1", nodeType: "condition" },
+    ]
+    const edges: DecisionSubgraphEdge[] = [
+      { sourceNodeId: "p1", targetNodeId: "d1", edgeType: "PROPOSED" },
+      { sourceNodeId: "e1", targetNodeId: "d1", edgeType: "INFORMED" },
+      { sourceNodeId: "c1", targetNodeId: "d1", edgeType: "CONDITION" },
+    ]
+    const result = validateDecisionCompleteness(nodes, edges)
+
+    // d1 ends up as "decision" since it was inserted last
+    expect(result.complete).toBe(true)
+  })
+
+  it("should handle edges with empty edgeType", () => {
+    const nodes: DecisionSubgraphNode[] = [
+      { id: "d1", nodeType: "decision" },
+      { id: "p1", nodeType: "person" },
+      { id: "e1", nodeType: "evidence" },
+      { id: "c1", nodeType: "condition" },
+    ]
+    const edges: DecisionSubgraphEdge[] = [
+      { sourceNodeId: "p1", targetNodeId: "d1", edgeType: "" },
+      { sourceNodeId: "e1", targetNodeId: "d1", edgeType: "" },
+      { sourceNodeId: "c1", targetNodeId: "d1", edgeType: "" },
+    ]
+    const result = validateDecisionCompleteness(nodes, edges)
+
+    expect(result.complete).toBe(false)
+    // Has decision node, but no valid edge types match
+    expect(result.missing).toHaveLength(3)
+  })
+
   it("should handle a rich subgraph with multiple nodes per type", () => {
     const nodes: DecisionSubgraphNode[] = [
       { id: "d1", nodeType: "decision" },
@@ -357,29 +425,29 @@ describe("validateDecisionCompleteness", () => {
 // LLM Prompt Fragment
 // ============================================
 
-describe("DECISION_FRAMEWORK_PROMPT", () => {
+describe("DEFAULT_DECISION_FRAMEWORK_PROMPT", () => {
   it("should be a non-empty string", () => {
-    expect(typeof DECISION_FRAMEWORK_PROMPT).toBe("string")
-    expect(DECISION_FRAMEWORK_PROMPT.length).toBeGreaterThan(0)
+    expect(typeof DEFAULT_DECISION_FRAMEWORK_PROMPT).toBe("string")
+    expect(DEFAULT_DECISION_FRAMEWORK_PROMPT.length).toBeGreaterThan(0)
   })
 
   it("should mention all node types", () => {
     for (const nodeType of DECISION_NODE_TYPES) {
-      expect(DECISION_FRAMEWORK_PROMPT).toContain(`**${nodeType}**`)
+      expect(DEFAULT_DECISION_FRAMEWORK_PROMPT).toContain(`**${nodeType}**`)
     }
   })
 
   it("should mention all edge types", () => {
     for (const edgeType of DECISION_EDGE_TYPES) {
-      expect(DECISION_FRAMEWORK_PROMPT).toContain(`**${edgeType}**`)
+      expect(DEFAULT_DECISION_FRAMEWORK_PROMPT).toContain(`**${edgeType}**`)
     }
   })
 
   it("should describe the completeness criteria", () => {
-    expect(DECISION_FRAMEWORK_PROMPT).toContain("Completeness")
-    expect(DECISION_FRAMEWORK_PROMPT).toContain("decision")
-    expect(DECISION_FRAMEWORK_PROMPT).toContain("person")
-    expect(DECISION_FRAMEWORK_PROMPT).toContain("evidence")
-    expect(DECISION_FRAMEWORK_PROMPT).toContain("condition")
+    expect(DEFAULT_DECISION_FRAMEWORK_PROMPT).toContain("Completeness")
+    expect(DEFAULT_DECISION_FRAMEWORK_PROMPT).toContain("decision")
+    expect(DEFAULT_DECISION_FRAMEWORK_PROMPT).toContain("person")
+    expect(DEFAULT_DECISION_FRAMEWORK_PROMPT).toContain("evidence")
+    expect(DEFAULT_DECISION_FRAMEWORK_PROMPT).toContain("condition")
   })
 })
