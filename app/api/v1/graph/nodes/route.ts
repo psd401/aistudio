@@ -26,12 +26,17 @@ const listQuerySchema = z.object({
   cursor: z.string().optional(),
 })
 
+const metadataSchema = z.record(z.string(), z.unknown()).refine(
+  (val) => JSON.stringify(val).length <= 10_240,
+  { message: "Metadata must be 10KB or less when serialized" }
+)
+
 const createNodeSchema = z.object({
-  name: z.string().min(1).max(500),
-  nodeType: z.string().min(1).max(100),
-  nodeClass: z.string().min(1).max(100),
+  name: z.string().trim().min(1).max(500),
+  nodeType: z.string().trim().min(1).max(100),
+  nodeClass: z.string().trim().min(1).max(100),
   description: z.string().max(5000).nullable().optional(),
-  metadata: z.record(z.string(), z.unknown()).optional(),
+  metadata: metadataSchema.optional(),
 })
 
 // ============================================

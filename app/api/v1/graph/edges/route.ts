@@ -27,11 +27,16 @@ const listQuerySchema = z.object({
   cursor: z.string().optional(),
 })
 
+const metadataSchema = z.record(z.string(), z.unknown()).refine(
+  (val) => JSON.stringify(val).length <= 10_240,
+  { message: "Metadata must be 10KB or less when serialized" }
+)
+
 const createEdgeSchema = z.object({
   sourceNodeId: z.string().uuid("Invalid sourceNodeId format"),
   targetNodeId: z.string().uuid("Invalid targetNodeId format"),
-  edgeType: z.string().min(1).max(100),
-  metadata: z.record(z.string(), z.unknown()).optional(),
+  edgeType: z.string().trim().min(1).max(100),
+  metadata: metadataSchema.optional(),
 }).refine(
   (data) => data.sourceNodeId !== data.targetNodeId,
   { message: "sourceNodeId and targetNodeId must be different", path: ["targetNodeId"] }

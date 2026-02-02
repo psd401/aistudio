@@ -381,20 +381,34 @@ export async function insertGraphEdge(
     )
   }
 
-  const [newEdge] = await executeQuery(
-    (db) =>
-      db
-        .insert(graphEdges)
-        .values({
-          sourceNodeId: input.sourceNodeId,
-          targetNodeId: input.targetNodeId,
-          edgeType: input.edgeType.trim(),
-          metadata: input.metadata ?? {},
-          createdBy,
-        })
-        .returning(),
-    "insertGraphEdge"
-  )
+  let newEdge: SelectGraphEdge
+  try {
+    const [inserted] = await executeQuery(
+      (db) =>
+        db
+          .insert(graphEdges)
+          .values({
+            sourceNodeId: input.sourceNodeId,
+            targetNodeId: input.targetNodeId,
+            edgeType: input.edgeType.trim(),
+            metadata: input.metadata ?? {},
+            createdBy,
+          })
+          .returning(),
+      "insertGraphEdge"
+    )
+    newEdge = inserted
+  } catch (error: unknown) {
+    // Catch unique constraint violation (race condition between check and insert)
+    const pgError = error as { code?: string }
+    if (pgError.code === "23505") {
+      throw new GraphServiceError(
+        `Edge of type '${input.edgeType}' already exists between these nodes`,
+        "DUPLICATE_EDGE"
+      )
+    }
+    throw error
+  }
   return newEdge
 }
 
