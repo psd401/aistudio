@@ -5,11 +5,38 @@
  * Part of Issue #685 - Assistant Execution API (Phase 2)
  */
 
-import { NextRequest } from "next/server"
-import { withApiAuth, createApiResponse, createErrorResponse } from "@/lib/api"
+import { NextRequest, NextResponse } from "next/server"
+import {
+  withApiAuth,
+  createApiResponse,
+  createErrorResponse,
+  extractStringParam,
+} from "@/lib/api"
 import { jobManagementService } from "@/lib/streaming/job-management-service"
 import type { UniversalPollingStatus } from "@/lib/streaming/job-management-service"
 import { createLogger } from "@/lib/logger"
+
+// ============================================
+// Shared Helper
+// ============================================
+
+async function getJobWithOwnershipCheck(
+  jobId: string,
+  userId: number,
+  requestId: string
+) {
+  const job = await jobManagementService.getJob(jobId)
+  if (!job) {
+    return createErrorResponse(requestId, 404, "NOT_FOUND", `Job not found: ${jobId}`)
+  }
+
+  // Verify ownership — returns 404 to prevent job ID enumeration
+  if (job.userId !== userId) {
+    return createErrorResponse(requestId, 404, "NOT_FOUND", `Job not found: ${jobId}`)
+  }
+
+  return job
+}
 
 // ============================================
 // GET — Poll Job Status
@@ -18,21 +45,15 @@ import { createLogger } from "@/lib/logger"
 export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => {
   const log = createLogger({ requestId, route: "api.v1.jobs.poll" })
 
-  const jobId = extractJobId(request.url)
+  const jobId = extractStringParam(request.url, "jobs")
   if (!jobId) {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid job ID")
   }
 
   try {
-    const job = await jobManagementService.getJob(jobId)
-    if (!job) {
-      return createErrorResponse(requestId, 404, "NOT_FOUND", `Job not found: ${jobId}`)
-    }
-
-    // Verify ownership
-    if (job.userId !== auth.userId) {
-      return createErrorResponse(requestId, 404, "NOT_FOUND", `Job not found: ${jobId}`)
-    }
+    const result = await getJobWithOwnershipCheck(jobId, auth.userId, requestId)
+    if (result instanceof NextResponse) return result
+    const job = result
 
     const pollingInterval = await jobManagementService.getOptimalPollingInterval(
       job.modelId,
@@ -75,21 +96,15 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
 export const DELETE = withApiAuth(async (request: NextRequest, auth, requestId) => {
   const log = createLogger({ requestId, route: "api.v1.jobs.cancel" })
 
-  const jobId = extractJobId(request.url)
+  const jobId = extractStringParam(request.url, "jobs")
   if (!jobId) {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid job ID")
   }
 
   try {
-    const job = await jobManagementService.getJob(jobId)
-    if (!job) {
-      return createErrorResponse(requestId, 404, "NOT_FOUND", `Job not found: ${jobId}`)
-    }
-
-    // Verify ownership
-    if (job.userId !== auth.userId) {
-      return createErrorResponse(requestId, 404, "NOT_FOUND", `Job not found: ${jobId}`)
-    }
+    const result = await getJobWithOwnershipCheck(jobId, auth.userId, requestId)
+    if (result instanceof NextResponse) return result
+    const job = result
 
     // Check if job can be cancelled
     const cancellableStates: UniversalPollingStatus[] = ["pending", "processing", "streaming"]
@@ -132,14 +147,3 @@ export const DELETE = withApiAuth(async (request: NextRequest, auth, requestId) 
     return createErrorResponse(requestId, 500, "INTERNAL_ERROR", "Failed to cancel job")
   }
 })
-
-// ============================================
-// URL Helper
-// ============================================
-
-function extractJobId(url: string): string | null {
-  const segments = new URL(url).pathname.split("/")
-  const jobsIdx = segments.indexOf("jobs")
-  const jobId = segments[jobsIdx + 1]
-  return jobId || null
-}

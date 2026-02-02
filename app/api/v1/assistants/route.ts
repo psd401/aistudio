@@ -5,9 +5,8 @@
  */
 
 import { z } from "zod"
-import { withApiAuth, requireScope, createApiResponse, createErrorResponse } from "@/lib/api"
+import { withApiAuth, requireScope, createApiResponse, createErrorResponse, isAdminByUserId } from "@/lib/api"
 import { listAccessibleAssistants } from "@/lib/api/assistant-service"
-import { hasRole } from "@/utils/roles"
 import { createLogger } from "@/lib/logger"
 
 // ============================================
@@ -40,7 +39,7 @@ export const GET = withApiAuth(async (request, auth, requestId) => {
   }
 
   try {
-    const isAdmin = await hasRole("administrator")
+    const isAdmin = await isAdminByUserId(auth.userId)
 
     const result = await listAccessibleAssistants(auth.userId, isAdmin, {
       limit: parsed.data.limit,

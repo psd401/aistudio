@@ -5,9 +5,15 @@
  */
 
 import { NextRequest } from "next/server"
-import { withApiAuth, requireScope, createApiResponse, createErrorResponse } from "@/lib/api"
-import { getAssistantById, getAssistantForAccessCheck, validateAssistantAccess } from "@/lib/api/assistant-service"
-import { hasRole } from "@/utils/roles"
+import {
+  withApiAuth,
+  requireScope,
+  createApiResponse,
+  createErrorResponse,
+  extractNumericParam,
+  verifyAssistantAccess,
+} from "@/lib/api"
+import { getAssistantById } from "@/lib/api/assistant-service"
 import { createLogger } from "@/lib/logger"
 
 // ============================================
@@ -20,24 +26,14 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
 
   const log = createLogger({ requestId, route: "api.v1.assistants.get" })
 
-  const id = extractIdFromUrl(request.url)
-  const assistantId = Number.parseInt(id, 10)
-  if (Number.isNaN(assistantId) || assistantId <= 0) {
+  const assistantId = extractNumericParam(request.url, "assistants")
+  if (!assistantId) {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid assistant ID")
   }
 
   try {
-    // Check access first (lightweight query)
-    const accessRow = await getAssistantForAccessCheck(assistantId)
-    if (!accessRow) {
-      return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
-    }
-
-    const isAdmin = await hasRole("administrator")
-    const access = validateAssistantAccess(accessRow, auth.userId, isAdmin)
-    if (!access.allowed) {
-      return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
-    }
+    const accessError = await verifyAssistantAccess(assistantId, auth, requestId)
+    if (accessError) return accessError
 
     // Load full details
     const assistant = await getAssistantById(assistantId)
@@ -61,13 +57,3 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
     return createErrorResponse(requestId, 500, "INTERNAL_ERROR", "Failed to retrieve assistant")
   }
 })
-
-// ============================================
-// URL Helper
-// ============================================
-
-function extractIdFromUrl(url: string): string {
-  const segments = new URL(url).pathname.split("/")
-  const assistantsIdx = segments.indexOf("assistants")
-  return segments[assistantsIdx + 1] ?? ""
-}

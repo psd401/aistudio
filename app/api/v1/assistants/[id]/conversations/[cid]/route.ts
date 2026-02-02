@@ -11,6 +11,7 @@ import {
   requireScope,
   createApiResponse,
   createErrorResponse,
+  extractStringParam,
 } from "@/lib/api"
 import { getConversationById } from "@/lib/db/drizzle/nexus-conversations"
 import { getMessagesByConversation } from "@/lib/db/drizzle/nexus-messages"
@@ -25,6 +26,15 @@ const querySchema = z.object({
   offset: z.coerce.number().int().min(0).optional(),
 })
 
+// Runtime validation for DB message rows
+const messageRowSchema = z.object({
+  id: z.string(),
+  role: z.string(),
+  content: z.string().nullable(),
+  parts: z.unknown(),
+  createdAt: z.date(),
+})
+
 // ============================================
 // GET — Get Conversation History
 // ============================================
@@ -35,7 +45,7 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
 
   const log = createLogger({ requestId, route: "api.v1.assistants.conversations.get" })
 
-  const { conversationId } = extractIds(request.url)
+  const conversationId = extractStringParam(request.url, "conversations")
   if (!conversationId) {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid conversation ID")
   }
@@ -61,14 +71,21 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
       offset: parsed.data.offset ?? 0,
     })
 
-    // Map messages to API response shape
-    const responseMessages = (messages as Array<{ id: string; role: string; content: string | null; parts: unknown; createdAt: Date }>).map((msg) => ({
-      id: msg.id,
-      role: msg.role,
-      content: msg.content,
-      parts: msg.parts,
-      createdAt: msg.createdAt.toISOString(),
-    }))
+    // Validate and map messages to API response shape
+    const responseMessages = (messages as unknown[]).map((msg) => {
+      const validated = messageRowSchema.safeParse(msg)
+      if (!validated.success) {
+        log.warn("Invalid message format in conversation", { conversationId, error: validated.error.message })
+        return null
+      }
+      return {
+        id: validated.data.id,
+        role: validated.data.role,
+        content: validated.data.content,
+        parts: validated.data.parts,
+        createdAt: validated.data.createdAt.toISOString(),
+      }
+    }).filter((m): m is NonNullable<typeof m> => m !== null)
 
     log.info("Retrieved conversation history", {
       conversationId,
@@ -103,23 +120,3 @@ export const GET = withApiAuth(async (request: NextRequest, auth, requestId) => 
     return createErrorResponse(requestId, 500, "INTERNAL_ERROR", "Failed to retrieve conversation")
   }
 })
-
-// ============================================
-// URL Helper
-// ============================================
-
-function extractIds(url: string): { assistantId: number | null; conversationId: string | null } {
-  const segments = new URL(url).pathname.split("/")
-  const conversationsIdx = segments.indexOf("conversations")
-  const conversationId = segments[conversationsIdx + 1] || null
-
-  const assistantsIdx = segments.indexOf("assistants")
-  const assistantIdStr = segments[assistantsIdx + 1]
-  let assistantId: number | null = null
-  if (assistantIdStr) {
-    const parsed = Number.parseInt(assistantIdStr, 10)
-    assistantId = Number.isNaN(parsed) || parsed <= 0 ? null : parsed
-  }
-
-  return { assistantId, conversationId }
-}

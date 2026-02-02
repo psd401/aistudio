@@ -590,6 +590,10 @@ paths:
                     properties:
                       requestId:
                         type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -660,6 +664,10 @@ paths:
                         type: string
         "400":
           $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 
@@ -699,6 +707,14 @@ paths:
               schema:
                 type: string
                 format: uuid
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /assistants/{id}/conversations/{cid}/messages:
     post:
@@ -736,6 +752,14 @@ paths:
       responses:
         "200":
           description: SSE stream with assistant response
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /assistants/{id}/conversations/{cid}:
     get:
@@ -788,6 +812,10 @@ paths:
                         type: array
                         items:
                           $ref: "#/components/schemas/ConversationMessage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
 

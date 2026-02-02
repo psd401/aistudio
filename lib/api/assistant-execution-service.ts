@@ -103,27 +103,25 @@ export function validateExecutionInputs(
 }
 
 // ============================================
-// Core Execution
+// Shared Execution Setup
 // ============================================
 
+interface ExecutionSetup {
+  prompts: ChainPrompt[]
+  context: PromptExecutionContext
+  executionId: number
+  log: ReturnType<typeof createLogger>
+}
+
 /**
- * Execute an assistant and return an SSE stream response.
- *
- * Caller is responsible for:
- * - Authentication and authorization
- * - Input validation (call validateExecutionInputs first)
- *
- * This function:
- * 1. Loads the assistant configuration
- * 2. Creates a tool_executions record
- * 3. Executes the prompt chain with streaming
- * 4. Returns the SSE stream response
+ * Shared setup for assistant execution: loads assistant, validates prompts,
+ * creates execution record, and emits start event.
+ * Used by both streaming and job completion modes.
  */
-export async function executeAssistant(
+async function prepareAssistantExecution(
   params: ExecuteAssistantParams
-): Promise<ExecuteAssistantResult> {
+): Promise<ExecutionSetup> {
   const { assistantId, inputs, userId, cognitoSub, requestId } = params
-  const timer = startTimer("assistantExecution")
   const log = createLogger({ requestId, action: "executeAssistant" })
 
   log.info("Starting assistant execution", { assistantId, userId })
@@ -185,7 +183,7 @@ export async function executeAssistant(
     toolName: architect.name,
   })
 
-  // 4. Execute prompt chain
+  // 4. Build execution context
   const context: PromptExecutionContext = {
     previousOutputs: new Map(),
     accumulatedMessages: [],
@@ -196,12 +194,58 @@ export async function executeAssistant(
     executionStartTime: Date.now(),
   }
 
+  return { prompts: prompts as ChainPrompt[], context, executionId, log }
+}
+
+/**
+ * Handle execution failure: update DB record and emit error event.
+ */
+async function handleExecutionFailure(
+  executionId: number,
+  error: unknown,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const errMsg = error instanceof Error ? error.message : String(error)
+  await executeQuery(
+    (db) => db.execute(sql`
+      UPDATE tool_executions
+      SET status = 'failed', error_message = ${errMsg}, completed_at = ${new Date().toISOString()}::timestamp
+      WHERE id = ${executionId}
+    `),
+    "updateToolExecutionFailed"
+  )
+
+  await storeExecutionEvent(executionId, "execution-error", {
+    executionId,
+    error: errMsg,
+    recoverable: false,
+  }).catch((err) => log.error("Failed to store execution-error event", { error: err }))
+}
+
+// ============================================
+// Core Execution
+// ============================================
+
+/**
+ * Execute an assistant and return an SSE stream response.
+ *
+ * Caller is responsible for:
+ * - Authentication and authorization
+ * - Input validation (call validateExecutionInputs first)
+ */
+export async function executeAssistant(
+  params: ExecuteAssistantParams
+): Promise<ExecuteAssistantResult> {
+  const timer = startTimer("assistantExecution")
+  const setup = await prepareAssistantExecution(params)
+  const { prompts, context, executionId, log } = setup
+
   try {
     const streamResponse = await executePromptChain(
-      prompts as ChainPrompt[],
-      inputs,
+      prompts,
+      params.inputs,
       context,
-      requestId,
+      params.requestId,
       log
     )
 
@@ -210,36 +254,20 @@ export async function executeAssistant(
     }
 
     timer({ status: "success" })
-    log.info("Execution streaming started", { executionId, assistantId })
+    log.info("Execution streaming started", { executionId, assistantId: params.assistantId })
 
     const response = streamResponse.result.toUIMessageStreamResponse({
       headers: {
         "X-Execution-Id": executionId.toString(),
-        "X-Assistant-Id": assistantId.toString(),
+        "X-Assistant-Id": params.assistantId.toString(),
         "X-Prompt-Count": prompts.length.toString(),
-        "X-Request-Id": requestId,
+        "X-Request-Id": params.requestId,
       },
     })
 
     return { streamResponse: response, executionId }
   } catch (executionError) {
-    // Update execution status to failed
-    const errMsg = executionError instanceof Error ? executionError.message : String(executionError)
-    await executeQuery(
-      (db) => db.execute(sql`
-        UPDATE tool_executions
-        SET status = 'failed', error_message = ${errMsg}, completed_at = ${new Date().toISOString()}::timestamp
-        WHERE id = ${executionId}
-      `),
-      "updateToolExecutionFailed"
-    )
-
-    await storeExecutionEvent(executionId, "execution-error", {
-      executionId,
-      error: errMsg,
-      recoverable: false,
-    }).catch((err) => log.error("Failed to store execution-error event", { error: err }))
-
+    await handleExecutionFailure(executionId, executionError, log)
     timer({ status: "error" })
     throw executionError
   }
@@ -252,98 +280,21 @@ export async function executeAssistant(
 export async function executeAssistantForJobCompletion(
   params: ExecuteAssistantParams
 ): Promise<{ text: string; executionId: number; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } }> {
-  const { assistantId, inputs, userId, cognitoSub, requestId } = params
-  const log = createLogger({ requestId, action: "executeAssistantForJob" })
-
-  log.info("Starting assistant execution for job", { assistantId, userId })
-
-  // Load assistant
-  const architectResult = await getAssistantArchitectByIdAction(assistantId.toString())
-  if (!architectResult.isSuccess || !architectResult.data) {
-    throw ErrorFactories.dbRecordNotFound("assistant_architects", assistantId)
-  }
-
-  const architect = architectResult.data
-  const prompts = (architect.prompts || []).sort((a, b) => a.position - b.position)
-
-  if (!prompts || prompts.length === 0) {
-    throw ErrorFactories.validationFailed([{
-      field: "prompts",
-      message: "No prompts configured for this assistant",
-    }])
-  }
-
-  if (prompts.length > MAX_PROMPT_CHAIN_LENGTH) {
-    throw ErrorFactories.validationFailed([{
-      field: "prompts",
-      message: `Prompt chain too long (${prompts.length}, maximum ${MAX_PROMPT_CHAIN_LENGTH})`,
-    }])
-  }
-
-  // Create execution record
-  const inputData = Object.keys(inputs).length > 0 ? inputs : { __no_inputs: true }
-  const inputDataJson = JSON.stringify(inputData)
-
-  const executionResult = await executeQuery(
-    (db) => db.execute(sql`
-      INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
-      VALUES (${userId}, ${inputDataJson}::jsonb, 'running', ${new Date().toISOString()}::timestamp, ${assistantId})
-      RETURNING id
-    `),
-    "createToolExecution"
-  )
-
-  const rows = executionResult as unknown as Array<{ id: number }>
-  if (!rows || rows.length === 0 || !rows[0]?.id) {
-    throw ErrorFactories.sysInternalError("Failed to create execution record")
-  }
-
-  const executionId = Number(rows[0].id)
-
-  await storeExecutionEvent(executionId, "execution-start", {
-    executionId,
-    totalPrompts: prompts.length,
-    toolName: architect.name,
-  })
-
-  const context: PromptExecutionContext = {
-    previousOutputs: new Map(),
-    accumulatedMessages: [],
-    executionId,
-    userCognitoSub: cognitoSub,
-    assistantOwnerSub: architect.userId ? String(architect.userId) : undefined,
-    userId,
-    executionStartTime: Date.now(),
-  }
+  const setup = await prepareAssistantExecution(params)
+  const { prompts, context, executionId, log } = setup
 
   try {
-    // Execute prompts and collect the final text from the last prompt
     const result = await executePromptChainForText(
-      prompts as ChainPrompt[],
-      inputs,
+      prompts,
+      params.inputs,
       context,
-      requestId,
+      params.requestId,
       log
     )
 
     return { text: result.text, executionId, usage: result.usage }
   } catch (executionError) {
-    const errMsg = executionError instanceof Error ? executionError.message : String(executionError)
-    await executeQuery(
-      (db) => db.execute(sql`
-        UPDATE tool_executions
-        SET status = 'failed', error_message = ${errMsg}, completed_at = ${new Date().toISOString()}::timestamp
-        WHERE id = ${executionId}
-      `),
-      "updateToolExecutionFailed"
-    )
-
-    await storeExecutionEvent(executionId, "execution-error", {
-      executionId,
-      error: errMsg,
-      recoverable: false,
-    }).catch((err) => log.error("Failed to store execution-error event", { error: err }))
-
+    await handleExecutionFailure(executionId, executionError, log)
     throw executionError
   }
 }
@@ -626,12 +577,11 @@ async function executeSinglePromptWithCompletion(
                 repositoryContext: repositoryContext ? "included" : "none",
               }
               const inputDataJson = JSON.stringify(promptInputData)
-              const escapedInputJson = inputDataJson.replace(/'/g, "''")
 
               await executeQuery(
                 (db) => db.execute(sql`
                   INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, started_at, completed_at, execution_time_ms)
-                  VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedInputJson}'::jsonb`)}, ${text || ""}, ${sql.raw("'completed'::execution_status")}, ${startedAt.toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
+                  VALUES (${context.executionId}, ${prompt.id}, ${inputDataJson}::jsonb, ${text || ""}, 'completed'::execution_status, ${startedAt.toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
                 `),
                 "savePromptResult"
               )
@@ -725,13 +675,12 @@ async function executeSinglePromptWithCompletion(
     const now = new Date()
     const failedInputData = { prompt: prompt.content }
     const failedInputJson = JSON.stringify(failedInputData)
-    const escapedFailedJson = failedInputJson.replace(/'/g, "''")
     const errorMsg = promptError instanceof Error ? promptError.message : String(promptError)
 
     await executeQuery(
       (db) => db.execute(sql`
         INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, error_message, started_at, completed_at)
-        VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedFailedJson}'::jsonb`)}, '', ${sql.raw("'failed'::execution_status")}, ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
+        VALUES (${context.executionId}, ${prompt.id}, ${failedInputJson}::jsonb, '', 'failed'::execution_status, ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
       `),
       "saveFailedPromptResult"
     )
@@ -855,12 +804,11 @@ async function executeSinglePromptCollectText(
                 repositoryContext: repositoryContext ? "included" : "none",
               }
               const inputDataJson = JSON.stringify(promptInputData)
-              const escapedInputJson = inputDataJson.replace(/'/g, "''")
 
               await executeQuery(
                 (db) => db.execute(sql`
                   INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, started_at, completed_at, execution_time_ms)
-                  VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedInputJson}'::jsonb`)}, ${text || ""}, ${sql.raw("'completed'::execution_status")}, ${startedAt.toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
+                  VALUES (${context.executionId}, ${prompt.id}, ${inputDataJson}::jsonb, ${text || ""}, 'completed'::execution_status, ${startedAt.toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
                 `),
                 "savePromptResult"
               )

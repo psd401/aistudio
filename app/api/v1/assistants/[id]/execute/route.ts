@@ -15,20 +15,19 @@ import {
   requireAssistantScope,
   createApiResponse,
   createErrorResponse,
+  extractNumericParam,
+  verifyAssistantAccess,
+  parseRequestBody,
+  isErrorResponse,
 } from "@/lib/api"
-import {
-  getAssistantForAccessCheck,
-  validateAssistantAccess,
-} from "@/lib/api/assistant-service"
 import {
   executeAssistant,
   executeAssistantForJobCompletion,
   validateExecutionInputs,
   isContentSafetyBlocked,
 } from "@/lib/api/assistant-execution-service"
-import { hasRole } from "@/utils/roles"
 import { jobManagementService } from "@/lib/streaming/job-management-service"
-import { createLogger } from "@/lib/logger"
+import { createLogger, startTimer } from "@/lib/logger"
 
 // Allow streaming responses up to 15 minutes for long chains
 export const maxDuration = 900
@@ -49,7 +48,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   const log = createLogger({ requestId, route: "api.v1.assistants.execute" })
 
   // 1. Extract assistant ID from URL
-  const assistantId = extractAssistantId(request.url)
+  const assistantId = extractNumericParam(request.url, "assistants")
   if (!assistantId) {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid assistant ID")
   }
@@ -59,31 +58,13 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   if (scopeError) return scopeError
 
   // 3. Verify assistant exists and user has access
-  const accessRow = await getAssistantForAccessCheck(assistantId)
-  if (!accessRow) {
-    return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
-  }
-
-  const isAdmin = await hasRole("administrator")
-  const access = validateAssistantAccess(accessRow, auth.userId, isAdmin)
-  if (!access.allowed) {
-    return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
-  }
+  const accessError = await verifyAssistantAccess(assistantId, auth, requestId)
+  if (accessError) return accessError
 
   // 4. Parse and validate request body
-  let body: unknown
-  try {
-    body = await request.json()
-  } catch {
-    return createErrorResponse(requestId, 400, "INVALID_JSON", "Request body must be valid JSON")
-  }
-
-  const parsed = executeBodySchema.safeParse(body)
-  if (!parsed.success) {
-    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.issues)
-  }
-
-  const { inputs } = parsed.data
+  const result = await parseRequestBody(request, executeBodySchema, requestId)
+  if (isErrorResponse(result)) return result
+  const { inputs } = result.data
 
   // Validate input sizes
   const inputErrors = validateExecutionInputs(inputs)
@@ -109,7 +90,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     }
 
     // Streaming mode: return SSE response
-    const result = await executeAssistant({
+    const execResult = await executeAssistant({
       assistantId,
       inputs,
       userId: auth.userId,
@@ -118,9 +99,9 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     })
 
     // Cast to NextResponse — streaming Response is compatible at runtime
-    return new NextResponse(result.streamResponse.body, {
-      status: result.streamResponse.status,
-      headers: Object.fromEntries(result.streamResponse.headers.entries()),
+    return new NextResponse(execResult.streamResponse.body, {
+      status: execResult.streamResponse.status,
+      headers: Object.fromEntries(execResult.streamResponse.headers.entries()),
     })
   } catch (error) {
     if (isContentSafetyBlocked(error)) {
@@ -170,7 +151,9 @@ async function handleAsyncExecution(
 
   log.info("Created async job for assistant execution", { jobId, assistantId })
 
-  // Fire-and-forget: execute in background
+  // Execute in background with error monitoring
+  const jobTimer = startTimer("background_job_execution")
+
   void (async () => {
     try {
       const result = await executeAssistantForJobCompletion({
@@ -191,13 +174,29 @@ async function handleAsyncExecution(
         finishReason: "stop",
       })
 
+      jobTimer({ status: "success", assistantId: String(assistantId) })
       log.info("Async assistant execution completed", { jobId, assistantId })
     } catch (error) {
       const errMsg = error instanceof Error ? error.message : String(error)
-      await jobManagementService.failJob(jobId, errMsg).catch((e) =>
-        log.error("Failed to mark job as failed", { jobId, error: e })
-      )
-      log.error("Async assistant execution failed", { jobId, assistantId, error: errMsg })
+
+      try {
+        await jobManagementService.failJob(jobId, errMsg)
+      } catch (failJobError) {
+        // Critical: if we can't mark the job as failed, it will be stuck in pending
+        log.error("CRITICAL: Failed to mark job as failed — job stuck in pending", {
+          jobId,
+          originalError: errMsg,
+          failJobError: failJobError instanceof Error ? failJobError.message : String(failJobError),
+        })
+      }
+
+      jobTimer({ status: "error", assistantId: String(assistantId) })
+      log.error("Async assistant execution failed", {
+        jobId,
+        assistantId,
+        error: errMsg,
+        userId: auth.userId,
+      })
     }
   })()
 
@@ -213,17 +212,4 @@ async function handleAsyncExecution(
     requestId,
     202
   )
-}
-
-// ============================================
-// URL Helper
-// ============================================
-
-function extractAssistantId(url: string): number | null {
-  const segments = new URL(url).pathname.split("/")
-  const assistantsIdx = segments.indexOf("assistants")
-  const idStr = segments[assistantsIdx + 1]
-  if (!idStr) return null
-  const id = Number.parseInt(idStr, 10)
-  return Number.isNaN(id) || id <= 0 ? null : id
 }

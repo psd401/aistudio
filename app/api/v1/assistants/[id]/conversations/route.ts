@@ -14,12 +14,12 @@ import {
   withApiAuth,
   requireAssistantScope,
   createErrorResponse,
+  extractNumericParam,
+  verifyAssistantAccess,
+  parseRequestBody,
+  isErrorResponse,
 } from "@/lib/api"
-import {
-  getAssistantForAccessCheck,
-  validateAssistantAccess,
-  getAssistantById,
-} from "@/lib/api/assistant-service"
+import { getAssistantById } from "@/lib/api/assistant-service"
 import {
   executeAssistant,
   validateExecutionInputs,
@@ -27,7 +27,6 @@ import {
 } from "@/lib/api/assistant-execution-service"
 import { createConversation } from "@/lib/db/drizzle/nexus-conversations"
 import { createMessageWithStats } from "@/lib/db/drizzle/nexus-messages"
-import { hasRole } from "@/utils/roles"
 import { createLogger } from "@/lib/logger"
 
 export const maxDuration = 900
@@ -49,7 +48,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   const log = createLogger({ requestId, route: "api.v1.assistants.conversations.start" })
 
   // 1. Extract assistant ID
-  const assistantId = extractAssistantId(request.url)
+  const assistantId = extractNumericParam(request.url, "assistants")
   if (!assistantId) {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid assistant ID")
   }
@@ -59,31 +58,13 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   if (scopeError) return scopeError
 
   // 3. Verify access
-  const accessRow = await getAssistantForAccessCheck(assistantId)
-  if (!accessRow) {
-    return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
-  }
-
-  const isAdmin = await hasRole("administrator")
-  const access = validateAssistantAccess(accessRow, auth.userId, isAdmin)
-  if (!access.allowed) {
-    return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
-  }
+  const accessError = await verifyAssistantAccess(assistantId, auth, requestId)
+  if (accessError) return accessError
 
   // 4. Parse body
-  let body: unknown
-  try {
-    body = await request.json()
-  } catch {
-    return createErrorResponse(requestId, 400, "INVALID_JSON", "Request body must be valid JSON")
-  }
-
-  const parsed = startConversationSchema.safeParse(body)
-  if (!parsed.success) {
-    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.issues)
-  }
-
-  const { inputs, title } = parsed.data
+  const result = await parseRequestBody(request, startConversationSchema, requestId)
+  if (isErrorResponse(result)) return result
+  const { inputs, title } = result.data
 
   const inputErrors = validateExecutionInputs(inputs)
   if (inputErrors) {
@@ -131,7 +112,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     })
 
     // 8. Execute the assistant
-    const result = await executeAssistant({
+    const execResult = await executeAssistant({
       assistantId,
       inputs,
       userId: auth.userId,
@@ -140,10 +121,10 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     })
 
     // Return SSE stream with conversation ID in headers
-    return new NextResponse(result.streamResponse.body, {
-      status: result.streamResponse.status,
+    return new NextResponse(execResult.streamResponse.body, {
+      status: execResult.streamResponse.status,
       headers: {
-        ...Object.fromEntries(result.streamResponse.headers.entries()),
+        ...Object.fromEntries(execResult.streamResponse.headers.entries()),
         "X-Conversation-Id": conversation.id,
         "X-Request-Id": requestId,
       },
@@ -163,16 +144,3 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     return createErrorResponse(requestId, 500, "EXECUTION_ERROR", "Failed to start conversation")
   }
 })
-
-// ============================================
-// URL Helper
-// ============================================
-
-function extractAssistantId(url: string): number | null {
-  const segments = new URL(url).pathname.split("/")
-  const assistantsIdx = segments.indexOf("assistants")
-  const idStr = segments[assistantsIdx + 1]
-  if (!idStr) return null
-  const id = Number.parseInt(idStr, 10)
-  return Number.isNaN(id) || id <= 0 ? null : id
-}

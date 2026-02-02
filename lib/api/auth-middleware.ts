@@ -100,7 +100,7 @@ export async function authenticateRequest(
       const cognitoSub = await getCognitoSubByUserId(keyAuth.userId);
       if (!cognitoSub) {
         timer({ status: "error" });
-        log.error("User not found for API key", { userId: keyAuth.userId, keyId: keyAuth.keyId });
+        log.error("User lookup failed during API key auth", { keyId: keyAuth.keyId });
         return createErrorResponse(requestId, 401, "INVALID_TOKEN", "Invalid API key");
       }
 

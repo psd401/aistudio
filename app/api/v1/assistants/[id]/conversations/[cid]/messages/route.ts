@@ -14,17 +14,17 @@ import {
   withApiAuth,
   requireAssistantScope,
   createErrorResponse,
+  extractNumericParam,
+  extractStringParam,
+  verifyAssistantAccess,
+  parseRequestBody,
+  isErrorResponse,
 } from "@/lib/api"
-import {
-  getAssistantForAccessCheck,
-  validateAssistantAccess,
-} from "@/lib/api/assistant-service"
 import { getAssistantArchitectByIdAction } from "@/actions/db/assistant-architect-actions"
 import { getConversationById } from "@/lib/db/drizzle/nexus-conversations"
 import { getMessagesByConversation, createMessageWithStats } from "@/lib/db/drizzle/nexus-messages"
 import { getAIModelById } from "@/lib/db/drizzle"
 import { unifiedStreamingService } from "@/lib/streaming/unified-streaming-service"
-import { hasRole } from "@/utils/roles"
 import { createLogger } from "@/lib/logger"
 import type { UIMessage } from "ai"
 import type { StreamRequest } from "@/lib/streaming/types"
@@ -39,6 +39,14 @@ const sendMessageSchema = z.object({
   message: z.string().min(1).max(100000),
 })
 
+// Runtime validation for DB message rows
+const messageRowSchema = z.object({
+  id: z.string(),
+  role: z.string(),
+  content: z.string().nullable(),
+  parts: z.unknown(),
+})
+
 // ============================================
 // POST — Send Message
 // ============================================
@@ -47,7 +55,8 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   const log = createLogger({ requestId, route: "api.v1.assistants.conversations.messages" })
 
   // 1. Extract IDs from URL
-  const { assistantId, conversationId } = extractIds(request.url)
+  const assistantId = extractNumericParam(request.url, "assistants")
+  const conversationId = extractStringParam(request.url, "conversations")
   if (!assistantId) {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid assistant ID")
   }
@@ -60,16 +69,8 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   if (scopeError) return scopeError
 
   // 3. Verify assistant access
-  const accessRow = await getAssistantForAccessCheck(assistantId)
-  if (!accessRow) {
-    return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
-  }
-
-  const isAdmin = await hasRole("administrator")
-  const access = validateAssistantAccess(accessRow, auth.userId, isAdmin)
-  if (!access.allowed) {
-    return createErrorResponse(requestId, 404, "NOT_FOUND", `Assistant not found: ${assistantId}`)
-  }
+  const accessError = await verifyAssistantAccess(assistantId, auth, requestId)
+  if (accessError) return accessError
 
   // 4. Verify conversation exists and belongs to user
   const conversation = await getConversationById(conversationId, auth.userId)
@@ -78,19 +79,9 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   }
 
   // 5. Parse body
-  let body: unknown
-  try {
-    body = await request.json()
-  } catch {
-    return createErrorResponse(requestId, 400, "INVALID_JSON", "Request body must be valid JSON")
-  }
-
-  const parsed = sendMessageSchema.safeParse(body)
-  if (!parsed.success) {
-    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.issues)
-  }
-
-  const { message: userMessageText } = parsed.data
+  const bodyResult = await parseRequestBody(request, sendMessageSchema, requestId)
+  if (isErrorResponse(bodyResult)) return bodyResult
+  const { message: userMessageText } = bodyResult.data
 
   try {
     // 6. Load assistant to get model and system prompt
@@ -118,14 +109,20 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
       includeModel: false,
     })
 
-    // Convert to UIMessage format for the AI SDK
-    const historyMessages: UIMessage[] = (existingMessages as Array<{ id: string; role: string; content: string | null; parts: unknown }>).map((msg) => ({
-      id: msg.id,
-      role: msg.role as "user" | "assistant",
-      parts: Array.isArray(msg.parts) && msg.parts.length > 0
-        ? msg.parts as UIMessage["parts"]
-        : [{ type: "text" as const, text: msg.content || "" }],
-    }))
+    // Convert to UIMessage format with runtime validation
+    const historyMessages: UIMessage[] = (existingMessages as unknown[])
+      .map((msg) => {
+        const validated = messageRowSchema.safeParse(msg)
+        if (!validated.success) return null
+        return {
+          id: validated.data.id,
+          role: validated.data.role as UIMessage["role"],
+          parts: Array.isArray(validated.data.parts) && (validated.data.parts as unknown[]).length > 0
+            ? validated.data.parts as UIMessage["parts"]
+            : [{ type: "text" as const, text: validated.data.content || "" }],
+        } as UIMessage
+      })
+      .filter((m): m is UIMessage => m !== null)
 
     // 8. Save user message to conversation
     await createMessageWithStats({
@@ -225,24 +222,3 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     return createErrorResponse(requestId, 500, "EXECUTION_ERROR", "Failed to send message")
   }
 })
-
-// ============================================
-// URL Helper
-// ============================================
-
-function extractIds(url: string): { assistantId: number | null; conversationId: string | null } {
-  const segments = new URL(url).pathname.split("/")
-  const assistantsIdx = segments.indexOf("assistants")
-  const conversationsIdx = segments.indexOf("conversations")
-
-  const assistantIdStr = segments[assistantsIdx + 1]
-  const conversationId = segments[conversationsIdx + 1] || null
-
-  let assistantId: number | null = null
-  if (assistantIdStr) {
-    const parsed = Number.parseInt(assistantIdStr, 10)
-    assistantId = Number.isNaN(parsed) || parsed <= 0 ? null : parsed
-  }
-
-  return { assistantId, conversationId }
-}

@@ -21,6 +21,20 @@ All endpoints require authentication via:
 | `assistant:{id}:execute` | Execute a specific assistant only |
 | `assistants:*` | All assistant operations |
 
+## Response Modes
+
+Choose between streaming (SSE) and async (polling) based on your use case:
+
+**Use Streaming (SSE)** when:
+- Building interactive UIs with real-time output
+- Client can maintain persistent connections
+- You need immediate token-by-token responses
+
+**Use Async (Polling)** when:
+- Integration with webhook-based systems
+- Client cannot maintain long connections (e.g., serverless functions)
+- Batch processing multiple assistants
+
 ## Endpoints
 
 ### List Assistants
@@ -171,6 +185,18 @@ GET /api/v1/jobs/:jobId
 }
 ```
 
+**Polling Best Practices**:
+- Use `pollingInterval` (milliseconds) from the response to set your next poll delay
+- Stop polling when `shouldContinuePolling` is `false`
+- Implement exponential backoff on 5xx errors
+
+**Status Values**:
+- `pending` — Job queued, execution not started
+- `processing` — Actively generating response
+- `completed` — Successful, `responseData` available
+- `failed` — Execution error, see `errorMessage`
+- `cancelled` — Cancelled via DELETE /jobs/:jobId
+
 ### Cancel Job
 
 ```
@@ -288,13 +314,66 @@ All errors follow this format:
 | Status | Code | Description |
 |--------|------|-------------|
 | 400 | VALIDATION_ERROR | Invalid request parameters |
+| 400 | INVALID_JSON | Request body is not valid JSON |
 | 400 | CONTENT_BLOCKED | Content safety guardrails triggered |
+| 400 | CONFIGURATION_ERROR | Assistant misconfiguration |
 | 401 | UNAUTHORIZED | Authentication required |
-| 403 | INSUFFICIENT_SCOPE | Missing required scope |
-| 404 | NOT_FOUND | Resource not found or access denied |
-| 409 | CONFLICT | Job cannot be cancelled |
-| 429 | RATE_LIMITED | Rate limit exceeded |
+| 403 | INSUFFICIENT_SCOPE | Missing required API key scope |
+| 403 | FORBIDDEN | Insufficient permissions for this assistant |
+| 404 | NOT_FOUND | Resource does not exist |
+| 409 | CONFLICT | Job cannot be cancelled (already terminal) |
+| 429 | RATE_LIMIT_EXCEEDED | Rate limit exceeded |
 | 500 | INTERNAL_ERROR | Server error |
+| 500 | EXECUTION_ERROR | Assistant execution failed |
+
+### Error Examples
+
+**Validation Error** (invalid input size):
+```json
+{
+  "error": {
+    "code": "VALIDATION_ERROR",
+    "message": "Invalid inputs",
+    "details": [
+      {
+        "code": "too_big",
+        "path": ["inputs"],
+        "message": "Input data exceeds maximum size of 100000 bytes"
+      }
+    ]
+  },
+  "requestId": "req-abc123"
+}
+```
+
+**Content Safety Block**:
+```json
+{
+  "error": {
+    "code": "CONTENT_BLOCKED",
+    "message": "Content contains prohibited material",
+    "details": {
+      "categories": ["violence"],
+      "source": "user_input"
+    }
+  },
+  "requestId": "req-def456"
+}
+```
+
+**Insufficient Permissions**:
+```json
+{
+  "error": {
+    "code": "FORBIDDEN",
+    "message": "You do not have permission to access this assistant",
+    "details": {
+      "requiredConditions": ["owner", "admin", "approved status"]
+    }
+  },
+  "requestId": "req-ghi789"
+}
+```
 
 ## Access Control
 
@@ -303,4 +382,4 @@ Assistants are accessible if any of these conditions is met:
 2. **Admin** — User has administrator role (any assistant)
 3. **Approved** — Assistant has "approved" status (any authenticated user)
 
-For security, 404 is returned instead of 403 when an assistant exists but the user lacks access.
+Access denied returns 403 FORBIDDEN with guidance on required conditions.
