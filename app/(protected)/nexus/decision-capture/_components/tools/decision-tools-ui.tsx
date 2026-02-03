@@ -12,84 +12,19 @@ import { CheckCircle2, AlertCircle, Search, GitBranch, Loader2, XCircle } from '
  * - search_graph_nodes: Search results from the context graph
  * - propose_decision: Proposed decision subgraph with completeness status
  * - commit_decision: Commit confirmation
- * - validate_completeness: Completeness check results
  *
  * Part of Epic #675 (Context Graph Decision Capture Layer) - Issue #681
  */
 
-// ============================================================================
-// Type Definitions
-// ============================================================================
+import type {
+  SearchGraphNodesArgs,
+  SearchGraphNodesResult,
+  ProposeDecisionArgs,
+  ProposeDecisionResult,
+  CommitDecisionArgs,
+  CommitDecisionResult,
+} from '@/lib/tools/decision-capture-types'
 
-interface SearchGraphNodesArgs {
-  query: string
-  nodeType?: string
-  limit?: number
-}
-
-interface SearchGraphNodesResult {
-  nodes: Array<{
-    id: string
-    name: string
-    nodeType: string
-    nodeClass: string
-    description: string | null
-  }>
-  total: number
-}
-
-interface ProposedNode {
-  tempId: string
-  name: string
-  nodeType: string
-  description: string | null
-  existingNodeId?: string
-}
-
-interface ProposedEdge {
-  sourceTempId: string
-  targetTempId: string
-  edgeType: string
-}
-
-interface ProposeDecisionArgs {
-  nodes: ProposedNode[]
-  edges: ProposedEdge[]
-  summary: string
-}
-
-interface ProposeDecisionResult {
-  summary: string
-  nodes: ProposedNode[]
-  edges: ProposedEdge[]
-  completeness: {
-    complete: boolean
-    missing: string[]
-  }
-}
-
-interface CommitDecisionArgs {
-  nodes: ProposedNode[]
-  edges: ProposedEdge[]
-  summary: string
-}
-
-interface CommitDecisionResult {
-  success: boolean
-  committedNodeIds: string[]
-  committedEdgeIds: string[]
-  error?: string
-}
-
-interface ValidateCompletenessArgs {
-  nodes: Array<{ id: string; nodeType: string }>
-  edges: Array<{ sourceNodeId: string; targetNodeId: string; edgeType: string }>
-}
-
-interface ValidateCompletenessResult {
-  complete: boolean
-  missing: string[]
-}
 
 // ============================================================================
 // Node Type Colors
@@ -412,67 +347,6 @@ export const CommittedDecisionUI = makeAssistantToolUI<CommitDecisionArgs, Commi
 })
 
 // ============================================================================
-// Validate Completeness UI
-// ============================================================================
-
-const ValidateCompletenessRenderer = ({
-  result,
-  status,
-}: {
-  args: ValidateCompletenessArgs
-  result?: ValidateCompletenessResult
-  status: ToolCallMessagePartStatus
-}) => {
-  if (status.type === 'running' || status.type === 'requires-action') {
-    return (
-      <div className="rounded-lg border border-gray-200 bg-gray-50/50 p-3">
-        <div className="flex items-center gap-2">
-          <Loader2 className="h-4 w-4 text-gray-600 animate-spin" />
-          <span className="text-sm text-gray-900">Validating completeness...</span>
-        </div>
-      </div>
-    )
-  }
-
-  if (!result) return null
-
-  const isComplete = result.complete
-
-  return (
-    <div className={`rounded-lg border p-3 ${
-      isComplete
-        ? 'border-green-200 bg-green-50/50'
-        : 'border-yellow-200 bg-yellow-50/50'
-    }`}>
-      <div className="flex items-center gap-2 mb-1">
-        {isComplete ? (
-          <CheckCircle2 className="h-4 w-4 text-green-600" />
-        ) : (
-          <AlertCircle className="h-4 w-4 text-yellow-600" />
-        )}
-        <span className={`text-sm font-medium ${
-          isComplete ? 'text-green-900' : 'text-yellow-900'
-        }`}>
-          {isComplete ? 'Decision is complete' : 'Decision is incomplete'}
-        </span>
-      </div>
-      {!isComplete && result.missing.length > 0 && (
-        <ul className="space-y-0.5 ml-6 mt-1">
-          {result.missing.map((item, idx) => (
-            <li key={idx} className="text-xs text-yellow-700 list-disc">{item}</li>
-          ))}
-        </ul>
-      )}
-    </div>
-  )
-}
-
-export const ValidateCompletenessUI = makeAssistantToolUI<ValidateCompletenessArgs, ValidateCompletenessResult>({
-  toolName: 'validate_completeness',
-  render: ValidateCompletenessRenderer,
-})
-
-// ============================================================================
 // Wrapper Component
 // ============================================================================
 
@@ -482,7 +356,6 @@ export function DecisionToolUIs() {
       <SearchGraphNodesUI />
       <ProposedDecisionUI />
       <CommittedDecisionUI />
-      <ValidateCompletenessUI />
     </>
   )
 }

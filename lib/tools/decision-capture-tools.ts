@@ -22,83 +22,31 @@ import {
 } from '@/lib/graph/decision-framework'
 import { executeTransaction } from '@/lib/db/drizzle-client'
 import { graphNodes, graphEdges } from '@/lib/db/schema'
-import { inArray } from 'drizzle-orm'
+import { eq } from 'drizzle-orm'
+
+import type {
+  SearchGraphNodesArgs,
+  SearchGraphNodesResult,
+  ProposeDecisionArgs,
+  ProposeDecisionResult,
+  CommitDecisionArgs,
+  CommitDecisionResult,
+} from './decision-capture-types'
+
+// Re-export types for consumers
+export type {
+  SearchGraphNodesArgs,
+  SearchGraphNodesResult,
+  ProposedNode,
+  ProposedEdge,
+  ProposeDecisionArgs,
+  ProposeDecisionResult,
+  CommitDecisionArgs,
+  CommitDecisionResult,
+} from './decision-capture-types'
 
 const log = createLogger({ module: 'decision-capture-tools' })
 
-// ============================================
-// Tool Argument & Result Types
-// ============================================
-
-export interface SearchGraphNodesArgs {
-  query: string
-  nodeType?: string
-  limit?: number
-}
-
-export interface SearchGraphNodesResult {
-  nodes: Array<{
-    id: string
-    name: string
-    nodeType: string
-    nodeClass: string
-    description: string | null
-  }>
-  total: number
-}
-
-export interface ProposedNode {
-  tempId: string
-  name: string
-  nodeType: string
-  description: string | null
-  existingNodeId?: string
-}
-
-export interface ProposedEdge {
-  sourceTempId: string
-  targetTempId: string
-  edgeType: string
-}
-
-export interface ProposeDecisionArgs {
-  nodes: ProposedNode[]
-  edges: ProposedEdge[]
-  summary: string
-}
-
-export interface ProposeDecisionResult {
-  summary: string
-  nodes: ProposedNode[]
-  edges: ProposedEdge[]
-  completeness: {
-    complete: boolean
-    missing: string[]
-  }
-}
-
-export interface CommitDecisionArgs {
-  nodes: ProposedNode[]
-  edges: ProposedEdge[]
-  summary: string
-}
-
-export interface CommitDecisionResult {
-  success: boolean
-  committedNodeIds: string[]
-  committedEdgeIds: string[]
-  error?: string
-}
-
-export interface ValidateCompletenessArgs {
-  nodes: Array<{ id: string; nodeType: string }>
-  edges: Array<{ sourceNodeId: string; targetNodeId: string; edgeType: string }>
-}
-
-export interface ValidateCompletenessResult {
-  complete: boolean
-  missing: string[]
-}
 
 // ============================================
 // Tool Implementations
@@ -302,7 +250,7 @@ function createCommitDecisionTool(userId: number): Tool<CommitDecisionArgs, Comm
               const existing = await tx
                 .select({ id: graphNodes.id })
                 .from(graphNodes)
-                .where(inArray(graphNodes.id, [node.existingNodeId]))
+                .where(eq(graphNodes.id, node.existingNodeId))
                 .limit(1)
 
               if (existing.length === 0) {
@@ -338,18 +286,28 @@ function createCommitDecisionTool(userId: number): Tool<CommitDecisionArgs, Comm
               )
             }
 
-            const [newEdge] = await tx
-              .insert(graphEdges)
-              .values({
-                sourceNodeId: sourceId,
-                targetNodeId: targetId,
-                edgeType: edge.edgeType.trim(),
-                metadata: { source: 'decision-capture' },
-                createdBy: userId,
-              })
-              .returning({ id: graphEdges.id })
+            try {
+              const [newEdge] = await tx
+                .insert(graphEdges)
+                .values({
+                  sourceNodeId: sourceId,
+                  targetNodeId: targetId,
+                  edgeType: edge.edgeType.trim(),
+                  metadata: { source: 'decision-capture' },
+                  createdBy: userId,
+                })
+                .returning({ id: graphEdges.id })
 
-            committedEdgeIds.push(newEdge.id)
+              committedEdgeIds.push(newEdge.id)
+            } catch (edgeError: unknown) {
+              const pgError = edgeError as { code?: string }
+              if (pgError.code === '23503') {
+                throw new Error(
+                  `Foreign key constraint: referenced node no longer exists (source: ${edge.sourceTempId}, target: ${edge.targetTempId})`
+                )
+              }
+              throw edgeError
+            }
           }
         }, 'commitDecision')
 
@@ -379,51 +337,6 @@ function createCommitDecisionTool(userId: number): Tool<CommitDecisionArgs, Comm
   }
 }
 
-function createValidateCompletenessTool(): Tool<ValidateCompletenessArgs, ValidateCompletenessResult> {
-  return {
-    description: `Check whether a decision subgraph meets the completeness criteria. A complete decision needs: (1) at least one decision node, (2) a person connected via PROPOSED or APPROVED_BY, (3) evidence or constraint connected via INFORMED or CONSTRAINED, (4) a condition connected via CONDITION.`,
-    inputSchema: jsonSchema<ValidateCompletenessArgs>({
-      type: 'object',
-      properties: {
-        nodes: {
-          type: 'array',
-          description: 'Nodes to validate',
-          items: {
-            type: 'object',
-            properties: {
-              id: { type: 'string' },
-              nodeType: { type: 'string' },
-            },
-            required: ['id', 'nodeType'],
-          },
-        },
-        edges: {
-          type: 'array',
-          description: 'Edges to validate',
-          items: {
-            type: 'object',
-            properties: {
-              sourceNodeId: { type: 'string' },
-              targetNodeId: { type: 'string' },
-              edgeType: { type: 'string' },
-            },
-            required: ['sourceNodeId', 'targetNodeId', 'edgeType'],
-          },
-        },
-      },
-      required: ['nodes', 'edges'],
-    }),
-    execute: async (args: ValidateCompletenessArgs): Promise<ValidateCompletenessResult> => {
-      log.info('Validating decision completeness', {
-        nodeCount: args.nodes.length,
-        edgeCount: args.edges.length,
-      })
-
-      return validateDecisionCompleteness(args.nodes, args.edges)
-    },
-  }
-}
-
 // ============================================
 // Public Factory
 // ============================================
@@ -437,6 +350,5 @@ export function createDecisionCaptureTools(userId: number): Record<string, Tool>
     search_graph_nodes: createSearchGraphNodesTool(),
     propose_decision: createProposeDecisionTool(),
     commit_decision: createCommitDecisionTool(userId),
-    validate_completeness: createValidateCompletenessTool(),
   }
 }

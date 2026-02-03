@@ -17,7 +17,6 @@ const DIRECT_RENDER_TOOLS = [
   'search_graph_nodes',
   'propose_decision',
   'commit_decision',
-  'validate_completeness',
 ]
 
 /**

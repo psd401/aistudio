@@ -66,7 +66,11 @@ export default function DecisionCapturePage() {
   const [processingAttachments, setProcessingAttachments] = useState<Set<string>>(new Set())
 
   const handleAttachmentProcessingStart = useCallback((attachmentId: string) => {
-    setProcessingAttachments(prev => new Set([...prev, attachmentId]))
+    setProcessingAttachments(prev => {
+      const next = new Set(prev)
+      next.add(attachmentId)
+      return next
+    })
   }, [])
 
   const handleAttachmentProcessingComplete = useCallback((attachmentId: string) => {

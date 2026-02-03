@@ -50,6 +50,7 @@
     "052-api-keys-argon2-migration.sql",
     "053-oauth-provider-tables.sql",
     "054-oauth-consent-decisions.sql",
-    "055-seed-decision-framework-prompt.sql"
+    "055-seed-decision-framework-prompt.sql",
+    "056-graph-nodes-search-indexes.sql"
   ]
 }
