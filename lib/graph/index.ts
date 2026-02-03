@@ -44,3 +44,18 @@ export {
   type DecisionSubgraphEdge,
   type DecisionCompletenessResult,
 } from "./decision-framework"
+
+/**
+ * Decision API Translator - Issue #683
+ * Structured decision payload → graph nodes + edges + completeness scoring.
+ */
+export {
+  translatePayloadToGraph,
+  computeRuleBasedScore,
+  computeLlmScore,
+  type DecisionApiPayload,
+  type TranslatedNode,
+  type TranslatedEdge,
+  type TranslatedDecision,
+  type CompletenessResult,
+} from "./decision-api-translator"

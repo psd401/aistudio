@@ -53,6 +53,8 @@ tags:
     description: Context graph node operations
   - name: Edges
     description: Context graph edge operations
+  - name: Decisions
+    description: High-level decision capture (creates nodes + edges in one call)
   - name: Assistants
     description: Assistant listing, execution, and multi-turn conversations
   - name: Jobs
@@ -491,6 +493,56 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ============================================
+  # Decisions
+  # ============================================
+
+  /graph/decisions:
+    post:
+      operationId: createDecision
+      tags: [Decisions]
+      summary: Create a decision subgraph
+      description: |
+        Accepts a structured decision payload and creates the appropriate
+        nodes, edges, and relationships in the context graph. Returns the
+        decision node ID, counts of created resources, and a completeness score.
+        Requires `graph:write` scope.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDecisionRequest"
+      responses:
+        "201":
+          description: Decision subgraph created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DecisionResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "429":
           $ref: "#/components/responses/RateLimited"
         "500":
@@ -1256,6 +1308,108 @@ components:
         metadata:
           type: object
           additionalProperties: true
+
+    # -- Decision --
+    CreateDecisionRequest:
+      type: object
+      required: [decision, decidedBy]
+      properties:
+        decision:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          description: What was decided
+        decidedBy:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Who proposed or made the decision
+        reasoning:
+          type: string
+          maxLength: 5000
+          description: Rationale behind the decision
+        evidence:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 2000
+          description: Data or observations that informed the decision
+        constraints:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 2000
+          description: Limiting factors (budget, timeline, policy, etc.)
+        conditions:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 2000
+          description: Future triggers that would cause revisiting
+        alternatives_considered:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 2000
+          description: Rejected alternatives
+        relatedTo:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+            format: uuid
+          description: Existing node IDs to link via CONTEXT edges
+        agentId:
+          type: string
+          maxLength: 200
+          description: External agent identifier (sets source to "agent")
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Arbitrary key-value pairs attached to the decision node
+
+    DecisionResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          required: [decisionNodeId, nodesCreated, edgesCreated, completenessScore]
+          properties:
+            decisionNodeId:
+              type: string
+              format: uuid
+              description: UUID of the primary decision node
+            nodesCreated:
+              type: integer
+              description: Total number of nodes created
+            edgesCreated:
+              type: integer
+              description: Total number of edges created
+            completenessScore:
+              type: integer
+              minimum: 0
+              maximum: 100
+              description: "Completeness score (0-100). 25 points per criterion: decision node, person, evidence/constraint, condition."
+            warnings:
+              type: array
+              items:
+                type: string
+              description: Completeness warnings (missing elements). Omitted when empty.
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
 
     # -- Connection --
     NodeConnection:

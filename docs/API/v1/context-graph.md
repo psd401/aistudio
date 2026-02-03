@@ -469,3 +469,92 @@ Delete a single edge. Requires `graph:write`.
 - Unique constraint on `(sourceNodeId, targetNodeId, edgeType)` — multiple edge types between the same pair are allowed
 - Check constraint prevents self-referencing edges (`sourceNodeId != targetNodeId`)
 - Cascade delete: deleting a node removes all its edges
+
+---
+
+### Decisions
+
+#### `POST /api/v1/graph/decisions`
+
+Create a structured decision subgraph from a single payload. Requires `graph:write`.
+
+This is a high-level endpoint that accepts a structured decision and automatically creates the appropriate nodes, edges, and relationships in the context graph. It also runs completeness validation (rule-based, with optional LLM enhancement).
+
+**Request body:**
+
+| Field | Type | Required | Constraints |
+|-------|------|----------|-------------|
+| `decision` | string | yes | 1-2000 chars — what was decided |
+| `decidedBy` | string | yes | 1-500 chars — who proposed/made the decision |
+| `reasoning` | string | no | max 5000 chars — rationale behind the decision |
+| `evidence` | string[] | no | max 20 items, each 1-2000 chars |
+| `constraints` | string[] | no | max 20 items, each 1-2000 chars |
+| `conditions` | string[] | no | max 20 items — triggers to revisit |
+| `alternatives_considered` | string[] | no | max 20 items — rejected alternatives |
+| `relatedTo` | UUID[] | no | max 50 — existing node IDs to link via CONTEXT edges |
+| `agentId` | string | no | max 200 chars — external agent identifier |
+| `metadata` | object | no | Arbitrary key-value pairs (attached to decision node) |
+
+**Graph mapping:**
+
+| Input field | Node type | Edge type | Direction |
+|------------|-----------|-----------|-----------|
+| `decision` | `decision` | — | (root node) |
+| `decidedBy` | `person` | `PROPOSED` | person → decision |
+| `evidence[i]` | `evidence` | `INFORMED` | evidence → decision |
+| `constraints[i]` | `constraint` | `CONSTRAINED` | constraint → decision |
+| `reasoning` | `reasoning` | `PART_OF` | reasoning → decision |
+| `conditions[i]` | `condition` | `CONDITION` | condition → decision |
+| `alternatives_considered[i]` | `decision` (metadata: `{rejected: true}`) | `REJECTED` + `COMPARED_AGAINST` | person → alt (REJECTED), alt → decision (COMPARED_AGAINST) |
+| `relatedTo[i]` | (existing node) | `CONTEXT` | related → decision |
+
+All created nodes have `nodeClass: "decision"`. When `agentId` is provided, nodes include `metadata.source: "agent"` and `metadata.agentId`; otherwise `metadata.source: "api"`.
+
+**Completeness scoring:**
+
+The response includes a `completenessScore` (0-100) based on four criteria (25 points each):
+1. At least one `decision` node
+2. At least one `person` connected via `PROPOSED` or `APPROVED_BY`
+3. At least one `evidence` or `constraint` connected via `INFORMED` or `CONSTRAINED`
+4. At least one `condition` connected via `CONDITION`
+
+If the `DECISION_CAPTURE_MODEL` setting is configured, an LLM-enhanced score may replace the rule-based score (with warnings). The scoring method is not guaranteed — always check `warnings` for actionable feedback.
+
+**Example request:**
+
+```bash
+curl -X POST -H "Authorization: Bearer sk-your-key" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "decision": "Adopt Chromebooks for 1:1 student devices",
+    "decidedBy": "Technology Committee",
+    "evidence": ["TCO analysis showed 40% savings", "Staff survey preferred Chrome OS"],
+    "constraints": ["$2M annual budget cap", "Must support state testing platform"],
+    "conditions": ["Revisit if per-unit cost exceeds $400"],
+    "alternatives_considered": ["Windows laptops", "iPads"],
+    "agentId": "meeting-bot-v2"
+  }' \
+  "https://your-domain/api/v1/graph/decisions"
+```
+
+**Response `201`**
+
+```json
+{
+  "data": {
+    "decisionNodeId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+    "nodesCreated": 9,
+    "edgesCreated": 10,
+    "completenessScore": 100,
+    "warnings": []
+  },
+  "meta": {
+    "requestId": "req_abc123"
+  }
+}
+```
+
+**Response `400`** — Validation error (Zod issues) or missing `relatedTo` UUIDs.
+**Response `401`** — Missing or invalid API key.
+**Response `403`** — API key lacks `graph:write` scope.
+**Response `500`** — Internal error.
