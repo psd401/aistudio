@@ -13,10 +13,25 @@
  */
 
 import { createRequire } from "node:module";
-import path from "node:path";
+import * as path from "node:path";
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let argon2Module: any = null;
+// ============================================
+// Types
+// ============================================
+
+interface Argon2Module {
+  hash(password: string, options?: {
+    type?: number;
+    memoryCost?: number;
+    timeCost?: number;
+    parallelism?: number;
+    hashLength?: number;
+  }): Promise<string>;
+  verify(hash: string, password: string): Promise<boolean>;
+  argon2id: number;
+}
+
+let argon2Module: Argon2Module | null = null;
 
 // Module name stored in a variable to prevent Turbopack static analysis
 const ARGON2_MODULE = "argon2";
@@ -25,12 +40,12 @@ const ARGON2_MODULE = "argon2";
  * Lazy-load argon2 at runtime using createRequire anchored to the real
  * project root (process.cwd()), bypassing Turbopack's virtual __filename.
  */
-function getArgon2() {
+function getArgon2(): Argon2Module {
   if (argon2Module) return argon2Module;
 
   const realEntry = path.join(process.cwd(), "node_modules", ".package-lock.json");
   const dynamicRequire = createRequire(realEntry);
-  argon2Module = dynamicRequire(ARGON2_MODULE);
+  argon2Module = dynamicRequire(ARGON2_MODULE) as Argon2Module;
   return argon2Module;
 }
 

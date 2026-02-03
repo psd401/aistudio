@@ -159,7 +159,7 @@ export function ApiKeyCreateDialog({
                 No API scopes are available for your role.
               </p>
             ) : (
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {availableScopes.map((scope) => (
                   <label
                     key={scope}
