@@ -1,5 +1,6 @@
 import { getAssistantArchitectAction } from "@/actions/db/assistant-architect-actions"
 import { AssistantArchitectStreaming } from "@/components/features/assistant-architect/assistant-architect-streaming"
+import { PastConversations } from "@/components/features/assistant-architect/past-conversations"
 import { Card, CardContent } from "@/components/ui/card"
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
 import { Button } from "@/components/ui/button"
@@ -83,6 +84,8 @@ export default async function AssistantArchitectToolPage({
           <AssistantArchitectStreaming tool={tool} />
         </CardContent>
       </Card>
+
+      <PastConversations toolId={tool.id} />
     </div>
   )
 } 
