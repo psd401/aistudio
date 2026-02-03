@@ -14,7 +14,7 @@ import {
   IconLoader2,
 } from "@tabler/icons-react"
 import type { SelectGraphNode } from "@/lib/db/types"
-import type { NodeConnection } from "@/actions/graph.actions"
+import type { NodeConnection } from "@/lib/graph"
 
 interface NodeDetailSheetProps {
   open: boolean
