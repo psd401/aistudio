@@ -2,171 +2,18 @@
  * Graph Decisions Collection Endpoint
  * POST /api/v1/graph/decisions — Create a structured decision subgraph
  * Part of Epic #674 (External API Platform) - Issue #683
+ *
+ * Delegates to shared decision-capture-service (Issue #708).
  */
 
 import { NextRequest } from "next/server"
-import { z } from "zod"
-import { inArray } from "drizzle-orm"
 import { withApiAuth, requireScope, createApiResponse, createErrorResponse } from "@/lib/api"
 import {
-  translatePayloadToGraph,
-  computeLlmScore,
-  type DecisionApiPayload,
-  type TranslatedDecision,
-} from "@/lib/graph/decision-api-translator"
-import { ErrorFactories } from "@/lib/error-utils"
+  captureStructuredDecision,
+  createDecisionSchema,
+} from "@/lib/graph/decision-capture-service"
 import { isValidationError } from "@/types/error-types"
-import { executeTransaction } from "@/lib/db/drizzle-client"
-import { graphNodes, graphEdges } from "@/lib/db/schema"
-import { createLogger, sanitizeForLogging } from "@/lib/logger"
-
-// ============================================
-// Constants
-// ============================================
-
-const METADATA_MAX_BYTES = 10_240
-
-// ============================================
-// Validation Schema
-// ============================================
-
-const metadataSchema = z.record(z.string(), z.unknown()).refine(
-  (val) => JSON.stringify(val).length <= METADATA_MAX_BYTES,
-  { message: `Metadata must be ${METADATA_MAX_BYTES} bytes or less when serialized` }
-)
-
-const createDecisionSchema = z.object({
-  decision: z.string().trim().min(1, "Decision text is required").max(2000),
-  decidedBy: z.string().trim().min(1, "decidedBy is required").max(500),
-  reasoning: z.string().trim().max(5000).optional(),
-  evidence: z.array(z.string().trim().min(1).max(2000)).max(20).optional(),
-  constraints: z.array(z.string().trim().min(1).max(2000)).max(20).optional(),
-  conditions: z.array(z.string().trim().min(1).max(2000)).max(20).optional(),
-  alternatives_considered: z.array(z.string().trim().min(1).max(2000)).max(20).optional(),
-  relatedTo: z.array(z.string().uuid("Each relatedTo must be a valid UUID")).max(50).optional(),
-  agentId: z.string().trim().max(200).optional(),
-  metadata: metadataSchema.optional(),
-})
-
-type ValidatedPayload = z.infer<typeof createDecisionSchema>
-
-// ============================================
-// Transaction Helper
-// ============================================
-
-interface PersistResult {
-  decisionNodeId: string
-  committedNodeIds: string[]
-  committedEdgeIds: string[]
-}
-
-async function persistDecisionSubgraph(
-  translated: TranslatedDecision,
-  payload: ValidatedPayload,
-  source: string,
-  userId: number,
-  requestId: string
-): Promise<PersistResult> {
-  let decisionNodeId = ""
-  const committedNodeIds: string[] = []
-  const committedEdgeIds: string[] = []
-  const log = createLogger({ requestId, operation: "persistDecisionSubgraph" })
-
-  await executeTransaction(async (tx) => {
-    // Validate relatedTo inside transaction to prevent race conditions
-    // (nodes could be deleted between a pre-check and edge creation)
-    if (payload.relatedTo && payload.relatedTo.length > 0) {
-      const existingNodes = await tx
-        .select({ id: graphNodes.id })
-        .from(graphNodes)
-        .where(inArray(graphNodes.id, payload.relatedTo))
-      const foundIds = new Set(existingNodes.map((n) => n.id))
-      const missingIds = payload.relatedTo.filter((id) => !foundIds.has(id))
-      if (missingIds.length > 0) {
-        throw ErrorFactories.validationFailed([{
-          field: "relatedTo",
-          message: `Referenced nodes do not exist: ${missingIds.join(", ")}`,
-        }])
-      }
-    }
-
-    const tempIdToRealId = new Map<string, string>()
-
-    // Create nodes
-    for (const node of translated.nodes) {
-      // Only merge user-provided metadata onto the primary decision node (temp-1)
-      // Other nodes (evidence, constraints, etc.) only get internal metadata (source, agentId)
-      const nodeMetadata = node.tempId === "temp-1" && payload.metadata
-        ? { ...node.metadata, ...payload.metadata }
-        : node.metadata
-
-      const [newNode] = await tx
-        .insert(graphNodes)
-        .values({
-          name: node.name.trim(),
-          nodeType: node.nodeType.trim(),
-          nodeClass: "decision",
-          description: node.description,
-          metadata: nodeMetadata,
-          createdBy: userId,
-        })
-        .returning({ id: graphNodes.id })
-
-      tempIdToRealId.set(node.tempId, newNode.id)
-      committedNodeIds.push(newNode.id)
-      if (node.tempId === "temp-1") decisionNodeId = newNode.id
-    }
-
-    // Resolve temp IDs to real IDs for all edges, then batch insert
-    const resolvedEdgeValues = translated.edges.map((edge) => {
-      const sourceId = tempIdToRealId.get(edge.sourceTempId)
-      const targetId = tempIdToRealId.get(edge.targetTempId)
-      if (!sourceId || !targetId) {
-        throw ErrorFactories.validationFailed([{
-          field: "edges",
-          message: `Edge references unknown tempId: source=${edge.sourceTempId}, target=${edge.targetTempId}`,
-        }])
-      }
-      return {
-        sourceNodeId: sourceId,
-        targetNodeId: targetId,
-        edgeType: edge.edgeType.trim(),
-        metadata: { source },
-        createdBy: userId,
-      }
-    })
-
-    // CONTEXT edges for relatedTo (all nodes validated above)
-    if (payload.relatedTo && payload.relatedTo.length > 0) {
-      for (const relatedNodeId of payload.relatedTo) {
-        resolvedEdgeValues.push({
-          sourceNodeId: relatedNodeId,
-          targetNodeId: decisionNodeId,
-          edgeType: "CONTEXT",
-          metadata: { source },
-          createdBy: userId,
-        })
-      }
-    }
-
-    // Batch insert all edges at once
-    if (resolvedEdgeValues.length > 0) {
-      const insertedEdges = await tx
-        .insert(graphEdges)
-        .values(resolvedEdgeValues)
-        .returning({ id: graphEdges.id })
-
-      committedEdgeIds.push(...insertedEdges.map((e) => e.id))
-    }
-
-    log.info("Transaction committed", {
-      nodesCreated: committedNodeIds.length,
-      edgesCreated: committedEdgeIds.length,
-    })
-  }, "createDecisionSubgraph")
-
-  return { decisionNodeId, committedNodeIds, committedEdgeIds }
-}
+import { createLogger } from "@/lib/logger"
 
 // ============================================
 // POST — Create Decision Subgraph
@@ -186,73 +33,47 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     return createErrorResponse(requestId, 400, "INVALID_JSON", "Request body must be valid JSON")
   }
 
-  // 2. Validate with Zod
+  // 2. Validate with shared Zod schema
   const parsed = createDecisionSchema.safeParse(body)
   if (!parsed.success) {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.issues)
   }
 
-  const payload = parsed.data
-  log.info("Decision capture request validated", {
-    decision: sanitizeForLogging(payload.decision),
-    decidedBy: sanitizeForLogging(payload.decidedBy),
-    relatedToCount: payload.relatedTo?.length ?? 0,
-    hasMetadata: !!payload.metadata,
-    userId: auth.userId,
-  })
-
-  // 3. Translate payload to graph nodes + edges
-  const source = payload.agentId ? "agent" : "api"
-  const apiPayload: DecisionApiPayload = {
-    decision: payload.decision,
-    decidedBy: payload.decidedBy,
-    reasoning: payload.reasoning,
-    evidence: payload.evidence,
-    constraints: payload.constraints,
-    conditions: payload.conditions,
-    alternatives_considered: payload.alternatives_considered,
-    relatedTo: payload.relatedTo,
-    agentId: payload.agentId,
-  }
-  const translated = translatePayloadToGraph(apiPayload, source)
-
-  // 4. Persist in transaction (includes relatedTo validation atomically)
-  let result: PersistResult
+  // 3. Delegate to shared service
   try {
-    result = await persistDecisionSubgraph(translated, payload, source, auth.userId, requestId)
+    const result = await captureStructuredDecision(parsed.data, auth.userId, requestId)
+
+    log.info("Decision subgraph created via REST API", {
+      decisionNodeId: result.decisionNodeId,
+      nodesCreated: result.nodesCreated,
+      edgesCreated: result.edgesCreated,
+      completenessScore: result.completenessScore,
+      completenessMethod: result.completenessMethod,
+      userId: auth.userId,
+    })
+
+    return createApiResponse(
+      {
+        data: {
+          decisionNodeId: result.decisionNodeId,
+          nodesCreated: result.nodesCreated,
+          edgesCreated: result.edgesCreated,
+          completenessScore: result.completenessScore,
+          ...(result.warnings.length > 0 && { warnings: result.warnings }),
+        },
+        meta: { requestId },
+      },
+      requestId,
+      201
+    )
   } catch (error) {
     if (isValidationError(error)) {
       log.warn("Decision subgraph validation failed", { error: error.message })
       return createErrorResponse(requestId, 400, "VALIDATION_ERROR", error.message)
     }
-    log.error("Failed to create decision subgraph", { error: error instanceof Error ? error.message : String(error) })
+    log.error("Failed to create decision subgraph", {
+      error: error instanceof Error ? error.message : String(error),
+    })
     return createErrorResponse(requestId, 500, "INTERNAL_ERROR", "Failed to create decision")
   }
-
-  // 5. Compute completeness score (LLM-enhanced with rule-based fallback)
-  const completeness = await computeLlmScore(apiPayload, translated.nodes, translated.edges, log)
-
-  log.info("Decision subgraph created", {
-    decisionNodeId: result.decisionNodeId,
-    nodesCreated: result.committedNodeIds.length,
-    edgesCreated: result.committedEdgeIds.length,
-    completenessScore: completeness.score,
-    completenessMethod: completeness.method,
-    userId: auth.userId,
-  })
-
-  return createApiResponse(
-    {
-      data: {
-        decisionNodeId: result.decisionNodeId,
-        nodesCreated: result.committedNodeIds.length,
-        edgesCreated: result.committedEdgeIds.length,
-        completenessScore: completeness.score,
-        ...(completeness.warnings.length > 0 && { warnings: completeness.warnings }),
-      },
-      meta: { requestId },
-    },
-    requestId,
-    201
-  )
 })
