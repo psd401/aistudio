@@ -6,6 +6,7 @@ import { Separator } from "@/components/ui/separator"
 import { PlusCircle } from "lucide-react"
 import { getAssistantArchitectsAction } from "@/actions/db/assistant-architect-actions"
 import { getServerSession } from "@/lib/auth/server-session"
+import { PageBranding } from "@/components/ui/page-branding"
 
 export default async function AssistantArchitectsPage() {
   // Get current user session
@@ -40,14 +41,22 @@ export default async function AssistantArchitectsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex items-center justify-between">
-        <h1 className="text-3xl font-bold">Assistant Architect</h1>
-        <Button asChild>
-          <Link href="/utilities/assistant-architect/create">
-            <PlusCircle className="mr-2 h-4 w-4" />
-            Create New Assistant
-          </Link>
-        </Button>
+      <div className="mb-6">
+        <PageBranding />
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-gray-900">Assistant Architect</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Create and manage custom AI assistants
+            </p>
+          </div>
+          <Button asChild>
+            <Link href="/utilities/assistant-architect/create">
+              <PlusCircle className="mr-2 h-4 w-4" />
+              Create New Assistant
+            </Link>
+          </Button>
+        </div>
       </div>
 
       <Separator />

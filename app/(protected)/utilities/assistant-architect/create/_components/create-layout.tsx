@@ -6,6 +6,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { ChevronLeft } from "lucide-react"
 import { useEffect, useState } from "react"
 import { getAssistantArchitectAction } from "@/actions/db/assistant-architect-actions"
+import { PageBranding } from "@/components/ui/page-branding"
 
 interface CreateLayoutProps {
   children: React.ReactNode
@@ -15,11 +16,9 @@ interface CreateLayoutProps {
 }
 
 const steps = [
-  { number: 1, title: "Create Assistant", href: "/utilities/assistant-architect/create" },
-  { number: 2, title: "Add Input Fields", href: "/utilities/assistant-architect/create/input-fields" },
-  { number: 3, title: "Add Prompts", href: "/utilities/assistant-architect/create/prompts" },
-  { number: 4, title: "Preview & Test", href: "/utilities/assistant-architect/create/preview" },
-  { number: 5, title: "Submit for Approval", href: "/utilities/assistant-architect/create/submit" }
+  { number: 1, title: "Setup", href: "/utilities/assistant-architect/create" },
+  { number: 2, title: "Prompts", href: "/utilities/assistant-architect/create/prompts" },
+  { number: 3, title: "Preview & Submit", href: "/utilities/assistant-architect/create/preview" }
 ]
 
 export function CreateLayout({ children, currentStep, assistantId, title }: CreateLayoutProps) {
@@ -56,22 +55,21 @@ export function CreateLayout({ children, currentStep, assistantId, title }: Crea
 
   return (
     <div className="space-y-6">
-      <div className="space-y-4">
-        <div className="flex items-center space-x-2 text-muted-foreground">
-          <Link 
-            href="/utilities/assistant-architect" 
-            className="flex items-center hover:text-foreground transition-colors"
-          >
-            <ChevronLeft className="h-4 w-4 mr-1" />
-            Back to Assistants
-          </Link>
-        </div>
-        <h1 className="text-3xl font-bold">
+      <div className="space-y-2">
+        <PageBranding />
+        <h1 className="text-2xl font-semibold text-gray-900">
           Assistant Architect
           {assistantName && (
             <>: {assistantName}</>
           )}
         </h1>
+        <Link
+          href="/utilities/assistant-architect"
+          className="flex items-center text-muted-foreground hover:text-foreground transition-colors"
+        >
+          <ChevronLeft className="h-4 w-4 mr-1" />
+          Back to Assistants
+        </Link>
       </div>
 
       <WizardSteps steps={updatedSteps} />

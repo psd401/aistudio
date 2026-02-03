@@ -34,7 +34,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import type { Setting } from "@/actions/db/settings-actions"
 
 const formSchema = z.object({
-  key: z.string().min(1, "Key is required").regex(/^[A-Z_]+$/, "Key must be uppercase with underscores only"),
+  key: z.string().min(1, "Key is required").regex(/^[A-Z][A-Z0-9_]*$/, "Key must start with uppercase letter, and contain only uppercase letters, numbers, and underscores"),
   value: z.string().nullable(),
   description: z.string().nullable(),
   category: z.string().nullable(),
@@ -51,6 +51,7 @@ interface SettingsFormProps {
 }
 
 const categories = [
+  { value: "ai", label: "AI Configuration" },
   { value: "ai_providers", label: "AI Providers" },
   { value: "storage", label: "Storage" },
   { value: "external_services", label: "External Services" },
@@ -98,7 +99,7 @@ export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFo
         value: value,
         description: setting.description,
         category: setting.category,
-        isSecret: setting.isSecret
+        isSecret: setting.isSecret ?? false
       })
     } else {
       form.reset({
@@ -197,7 +198,7 @@ export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFo
                     />
                   </FormControl>
                   <FormDescription>
-                    Uppercase with underscores only (e.g., API_KEY)
+                    Uppercase letters, numbers, underscores (e.g., API_KEY, S3_BUCKET)
                   </FormDescription>
                   <FormMessage />
                 </FormItem>

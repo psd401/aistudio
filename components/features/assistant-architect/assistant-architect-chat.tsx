@@ -32,19 +32,19 @@ interface ExecutionContext {
   promptResults: PromptResult[]
 }
 
-// Extended prompt result type that includes additional fields from the execution
+// Extended prompt result type that matches the actual database schema
 interface ExtendedPromptResult {
   id: number;
-  toolExecutionId: number;
-  chainPromptId: number;
-  result: string;
-  aiModelId: number | null;
-  createdAt: Date;
-  updatedAt: Date;
-  inputData?: Record<string, unknown>;
-  outputData?: string;
-  status?: string;
-  userFeedback?: 'like' | 'dislike';
+  executionId: number | null;
+  promptId: number | null;
+  inputData: Record<string, unknown>;
+  outputData: string | null;
+  status: string;
+  errorMessage: string | null;
+  startedAt: Date;
+  completedAt: Date | null;
+  executionTimeMs: number | null;
+  userFeedback: string | null;
 }
 
 interface AssistantArchitectChatProps {
@@ -101,9 +101,9 @@ export const AssistantArchitectChat = memo(function AssistantArchitectChat({
       promptResults: (execution.promptResults || []).map(result => {
         const extendedResult = result as ExtendedPromptResult;
         return {
-          promptId: extendedResult.chainPromptId || extendedResult.id || 0,
+          promptId: extendedResult.promptId || extendedResult.id || 0,
           input: extendedResult.inputData || {},
-          output: extendedResult.outputData || extendedResult.result || '',
+          output: extendedResult.outputData || '',
           status: extendedResult.status || 'completed'
         }
       })

@@ -2,14 +2,14 @@ import { NextResponse } from "next/server"
 import { requireAdmin } from "@/lib/auth/admin-check"
 import { getServerSession } from "@/lib/auth/server-session"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
-import { 
-  getAssistantArchitects, 
-  createAssistantArchitect, 
-  updateAssistantArchitect, 
+import {
+  getAssistantArchitects,
+  createAssistantArchitectByCognitoSub,
+  updateAssistantArchitect,
   deleteAssistantArchitect,
   approveAssistantArchitect,
   rejectAssistantArchitect
-} from "@/lib/db/data-api-adapter"
+} from "@/lib/db/drizzle"
 
 export async function GET() {
   const requestId = generateRequestId();
@@ -130,10 +130,10 @@ export async function POST(request: Request) {
     }
 
     // Otherwise, create new assistant
-    const assistant = await createAssistantArchitect({
+    const assistant = await createAssistantArchitectByCognitoSub({
       name: body.name,
       description: body.description,
-      userId: session.sub,
+      cognitoSub: session.sub,
       status: body.status || 'draft'
     })
 

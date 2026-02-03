@@ -102,20 +102,17 @@ export function withLogging<TParams, TResult>(
         })
         
         // Import role checking utilities
-        const { checkUserRole, getUserIdByCognitoSub, getUserRolesByCognitoSub } = await import("@/lib/db/data-api-adapter")
-        
+        const { getUserRolesByCognitoSub } = await import("@/lib/db/drizzle")
+        const { hasRole } = await import("@/utils/roles")
+
         // Get user's actual roles
         const userRoles = await getUserRolesByCognitoSub(session.sub)
         log.debug("User roles retrieved", { userRoles })
-        
+
         // Check if user has any of the required roles
         const hasRequiredRole = await Promise.all(
-          options.requireRoles.map(async (role) => {
-            const userDbId = await getUserIdByCognitoSub(session.sub)
-            if (!userDbId) return false
-            return checkUserRole(Number(userDbId), role)
-          })
-        ).then(results => results.some(hasRole => hasRole))
+          options.requireRoles.map(role => hasRole(role))
+        ).then(results => results.some(roleCheck => roleCheck))
         
         if (!hasRequiredRole) {
           log.warn("Authorization failed - insufficient permissions", {

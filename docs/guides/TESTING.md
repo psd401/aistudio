@@ -60,9 +60,10 @@ describe('myAction', () => {
 ### Mocking Dependencies
 
 ```typescript
-// Mock database calls
-jest.mock('@/lib/db/data-api-adapter', () => ({
-  executeSQL: jest.fn().mockResolvedValue([{ id: 1 }])
+// Mock database calls (Drizzle ORM)
+jest.mock('@/lib/db/drizzle-client', () => ({
+  executeQuery: jest.fn().mockResolvedValue([{ id: 1 }]),
+  executeTransaction: jest.fn().mockImplementation((fn) => fn(mockDb))
 }))
 
 // Mock authentication
@@ -84,33 +85,38 @@ jest.mock('@/app/api/chat/lib/provider-factory', () => ({
 ### Database Operations
 
 ```typescript
-import { executeSQL } from '@/lib/db/data-api-adapter'
+import { executeQuery } from '@/lib/db/drizzle-client'
+import { eq, like } from 'drizzle-orm'
+import { users } from '@/lib/db/schema'
 
 describe('Database Integration', () => {
   beforeEach(async () => {
     // Clean test data
-    await executeSQL("DELETE FROM test_table WHERE email LIKE '%@test.com'")
+    await executeQuery(
+      (db) => db.delete(users).where(like(users.email, '%@test.com')),
+      "cleanTestData"
+    )
   })
-  
+
   it('should perform CRUD operations', async () => {
     // Create
-    const created = await executeSQL(
-      "INSERT INTO users (email) VALUES (:email) RETURNING *",
-      [{ name: "email", value: { stringValue: "test@test.com" } }]
+    const [created] = await executeQuery(
+      (db) => db.insert(users).values({ email: "test@test.com" }).returning(),
+      "createUser"
     )
-    expect(created[0].id).toBeDefined()
-    
+    expect(created.id).toBeDefined()
+
     // Read
-    const found = await executeSQL(
-      "SELECT * FROM users WHERE id = :id",
-      [{ name: "id", value: { longValue: created[0].id } }]
+    const [found] = await executeQuery(
+      (db) => db.select().from(users).where(eq(users.id, created.id)),
+      "findUser"
     )
-    expect(found[0].email).toBe("test@test.com")
-    
+    expect(found.email).toBe("test@test.com")
+
     // Cleanup
-    await executeSQL(
-      "DELETE FROM users WHERE id = :id",
-      [{ name: "id", value: { longValue: created[0].id } }]
+    await executeQuery(
+      (db) => db.delete(users).where(eq(users.id, created.id)),
+      "deleteUser"
     )
   })
 })

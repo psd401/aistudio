@@ -1,19 +1,21 @@
 import { Suspense } from "react"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import { AssistantsTable } from "./_components/assistants-table"
+import { PageBranding } from "@/components/ui/page-branding"
 
 export default async function AssistantsPage() {
   return (
     <div className="container mx-auto px-6 py-8">
+      <div className="mb-6">
+        <PageBranding />
+        <h1 className="text-2xl font-semibold text-gray-900">AI Assistants</h1>
+        <p className="text-sm text-muted-foreground mt-1">
+          Manage AI assistants created with the Assistant Architect
+        </p>
+      </div>
       <Card>
-        <CardHeader>
-          <CardTitle>AI Assistants</CardTitle>
-          <CardDescription>
-            Manage AI assistants created with the Assistant Architect
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
+        <CardContent className="pt-6">
           <Suspense fallback={<AssistantsTableSkeleton />}>
             <AssistantsTableContent />
           </Suspense>

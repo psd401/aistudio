@@ -11,9 +11,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   Card,
   CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle
+  CardHeader
 } from "@/components/ui/card"
 import {
   LayoutGrid,
@@ -30,6 +28,7 @@ import { SearchFilterBar } from "./search-filter-bar"
 import { BulkActionsBar } from "./bulk-actions-bar"
 import { EmptyState } from "./empty-state"
 import type { PromptListItem as PromptListItemType } from "@/lib/prompt-library/types"
+import { PageBranding } from "@/components/ui/page-branding"
 
 export function PromptLibraryClient() {
   const router = useRouter()
@@ -104,16 +103,17 @@ export function PromptLibraryClient() {
   })
 
   return (
-    <Card>
-      <CardHeader>
+    <>
+      {/* Page Header */}
+      <div className="mb-6">
+        <PageBranding />
         <div className="flex items-center justify-between">
           <div>
-            <CardTitle>Prompt Library</CardTitle>
-            <CardDescription>
+            <h1 className="text-2xl font-semibold text-gray-900">Prompt Library</h1>
+            <p className="text-sm text-muted-foreground mt-1">
               Manage and organize your saved prompts
-            </CardDescription>
+            </p>
           </div>
-
           <div className="flex items-center gap-2">
             <Button
               variant="outline"
@@ -128,9 +128,12 @@ export function PromptLibraryClient() {
             </Button>
           </div>
         </div>
+      </div>
 
-        {/* Search and View Toggle */}
-        <div className="mt-4 flex items-center gap-4">
+      <Card>
+        <CardHeader>
+          {/* Search and View Toggle */}
+          <div className="flex items-center gap-4">
           <div className="relative flex-1">
             <Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
             <Input
@@ -212,5 +215,6 @@ export function PromptLibraryClient() {
         </div>
       </CardContent>
     </Card>
+    </>
   )
 }

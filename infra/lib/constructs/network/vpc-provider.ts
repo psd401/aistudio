@@ -196,12 +196,25 @@ export class VPCProvider {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
     })
 
+    // Create explicit role to avoid CDK's deprecated fromAwsManagedPolicyName
+    const cleanupLambdaRole = new iam.Role(scope, "SSMCleanupLambdaRole", {
+      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        iam.ManagedPolicy.fromManagedPolicyArn(
+          scope,
+          "SSMCleanupLambdaBasicExecPolicy",
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        ),
+      ],
+    })
+
     // Lambda function to delete SSM parameters on stack deletion
     const cleanupLambda = new lambda.Function(scope, "SSMCleanupLambda", {
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: "index.handler",
       timeout: cdk.Duration.minutes(2),
       logGroup,
+      role: cleanupLambdaRole,
       code: lambda.Code.fromInline(`
         const { SSMClient, DeleteParameterCommand, GetParametersByPathCommand } = require('@aws-sdk/client-ssm');
 
@@ -261,9 +274,22 @@ export class VPCProvider {
       })
     )
 
-    // Create custom resource provider
+    // Create explicit role for the Provider's framework Lambda to avoid deprecated fromAwsManagedPolicyName
+    const providerFrameworkRole = new iam.Role(scope, "SSMCleanupProviderFrameworkRole", {
+      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        iam.ManagedPolicy.fromManagedPolicyArn(
+          scope,
+          "SSMCleanupProviderFrameworkExecPolicy",
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        ),
+      ],
+    })
+
+    // Create custom resource provider with explicit framework role
     const provider = new cr.Provider(scope, "SSMCleanupProvider", {
       onEventHandler: cleanupLambda,
+      frameworkOnEventRole: providerFrameworkRole,
       logGroup: new logs.LogGroup(scope, "SSMCleanupProviderLogGroup", {
         logGroupName: `/aws/lambda/vpc-ssm-cleanup-provider-${environment}`,
         retention: logs.RetentionDays.ONE_WEEK,

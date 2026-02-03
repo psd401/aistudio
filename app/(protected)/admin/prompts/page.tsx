@@ -3,6 +3,7 @@ import { redirect } from 'next/navigation'
 import { getServerSession } from '@/lib/auth/server-session'
 import { hasRole } from '@/utils/roles'
 import { ModerationDashboard } from './_components/moderation-dashboard'
+import { PageBranding } from "@/components/ui/page-branding"
 
 export const metadata: Metadata = {
   title: 'Prompt Moderation | Admin',
@@ -23,9 +24,10 @@ export default async function AdminPromptsPage() {
 
   return (
     <div className="container mx-auto py-8">
-      <div className="mb-8">
-        <h1 className="text-3xl font-bold">Prompt Library Moderation</h1>
-        <p className="text-muted-foreground mt-2">
+      <div className="mb-6">
+        <PageBranding />
+        <h1 className="text-2xl font-semibold text-gray-900">Prompt Library Moderation</h1>
+        <p className="text-sm text-muted-foreground mt-1">
           Review and moderate public prompt submissions
         </p>
       </div>

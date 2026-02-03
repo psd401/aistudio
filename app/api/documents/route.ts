@@ -1,13 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { z } from 'zod';
 import { getDocumentSignedUrl, deleteDocument } from '@/lib/aws/s3-client';
-import { 
-  getDocumentsByConversationId, 
-  getDocumentById, 
-  deleteDocumentById 
+import {
+  getDocumentsByConversationId,
+  getDocumentById,
+  deleteDocumentById
 } from '@/lib/db/queries/documents';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+
+// Query parameter validation schemas
+// Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
+const GetDocumentByIdSchema = z.object({
+  id: z.string().regex(/^\d+$/, 'Invalid document ID').transform(Number)
+});
+
+const GetDocumentsByConversationSchema = z.object({
+  conversationId: z.string().uuid({ message: 'Invalid conversation ID format (expected UUID)' })
+});
+
 export async function GET(request: NextRequest) {
   const requestId = generateRequestId();
   const timer = startTimer("api.documents.get");
@@ -48,7 +60,22 @@ export async function GET(request: NextRequest) {
   try {
     // If documentId is provided, fetch single document
     if (documentId) {
-      const document = await getDocumentById({ id: Number.parseInt(documentId, 10) });
+      // Validate document ID format
+      const validationResult = GetDocumentByIdSchema.safeParse({ id: documentId });
+      if (!validationResult.success) {
+        const firstError = validationResult.error.issues[0];
+        log.warn("Invalid document ID format", { documentId, error: firstError });
+        timer({ status: "error", reason: "invalid_id" });
+        return NextResponse.json(
+          {
+            success: false,
+            error: firstError.message
+          },
+          { status: 400, headers: { "X-Request-Id": requestId } }
+        );
+      }
+
+      const document = await getDocumentById({ id: validationResult.data.id });
       
       if (!document) {
         log.warn("Document not found", { documentId });
@@ -111,23 +138,25 @@ export async function GET(request: NextRequest) {
     }
     
     // If conversationId is provided, fetch documents for conversation
+    // Note: conversationId is a UUID string linking to nexus_conversations.id (Issue #549)
     if (conversationId) {
-      const parsedConversationId = Number.parseInt(conversationId, 10);
-      
-      if (Number.isNaN(parsedConversationId)) {
-        log.warn("Invalid conversation ID", { conversationId });
+      // Validate UUID format using schema
+      const validationResult = GetDocumentsByConversationSchema.safeParse({ conversationId });
+      if (!validationResult.success) {
+        const firstError = validationResult.error.issues[0];
+        log.warn("Invalid conversation ID format", { conversationId, error: firstError });
         timer({ status: "error", reason: "invalid_id" });
         return NextResponse.json(
-          { 
-            success: false, 
-            error: 'Invalid conversation ID' 
-          }, 
+          {
+            success: false,
+            error: firstError.message
+          },
           { status: 400, headers: { "X-Request-Id": requestId } }
         );
       }
-      
-      const documents = await getDocumentsByConversationId({ 
-        conversationId: parsedConversationId 
+
+      const documents = await getDocumentsByConversationId({
+        conversationId: validationResult.data.conversationId
       });
       
       // Get fresh signed URLs for all documents
@@ -227,26 +256,30 @@ export async function DELETE(request: NextRequest) {
     log.warn("Missing document ID in delete request");
     timer({ status: "error", reason: "missing_id" });
     return NextResponse.json(
-      { 
-        success: false, 
-        error: 'Document ID is required' 
-      }, 
+      {
+        success: false,
+        error: 'Document ID is required'
+      },
       { status: 400, headers: { "X-Request-Id": requestId } }
     );
   }
 
-  const docId = Number.parseInt(documentId, 10);
-  if (Number.isNaN(docId)) {
-    log.warn("Invalid document ID format", { documentId });
+  // Validate document ID format
+  const validationResult = GetDocumentByIdSchema.safeParse({ id: documentId });
+  if (!validationResult.success) {
+    const firstError = validationResult.error.issues[0];
+    log.warn("Invalid document ID format", { documentId, error: firstError });
     timer({ status: "error", reason: "invalid_id" });
     return NextResponse.json(
-      { 
-        success: false, 
-        error: 'Invalid document ID' 
-      }, 
+      {
+        success: false,
+        error: firstError.message
+      },
       { status: 400, headers: { "X-Request-Id": requestId } }
     );
   }
+
+  const docId = validationResult.data.id;
 
   try {
     // First check if the document exists and belongs to the user
@@ -288,7 +321,7 @@ export async function DELETE(request: NextRequest) {
     }
     
     // Delete the document from the database
-    await deleteDocumentById({ id: docId.toString() });
+    await deleteDocumentById({ id: docId });
     
     log.info("Document deleted successfully", { documentId: docId });
     timer({ status: "success" });

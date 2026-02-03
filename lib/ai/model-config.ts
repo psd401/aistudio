@@ -1,64 +1,38 @@
-import { executeSQL } from '@/lib/db/data-api-adapter';
+import { getAIModelById, getAIModelByModelId } from '@/lib/db/drizzle';
 import { createLogger } from '@/lib/logger';
-import { ensureRDSNumber, ensureRDSString } from '@/lib/type-helpers';
-import type { SqlParameter } from "@aws-sdk/client-rds-data";
 
 const log = createLogger({ module: 'model-config' });
 
 /**
  * Get model configuration from database
+ * Used by: Nexus chat, Model Compare
+ * Validates that model is active AND nexusEnabled
  */
 export async function getModelConfig(modelId: string | number) {
   log.info('getModelConfig called', { modelId, type: typeof modelId });
 
   const isNumericId = typeof modelId === 'number' || /^\d+$/.test(String(modelId));
 
-  let query: string;
-  let parameters: SqlParameter[];
+  const model = isNumericId
+    ? await getAIModelById(Number(modelId))
+    : await getAIModelByModelId(String(modelId));
 
-  if (isNumericId) {
-    query = `
-      SELECT id, name, provider, model_id
-      FROM ai_models
-      WHERE id = :modelId AND active = true AND chat_enabled = true
-      LIMIT 1
-    `;
-    parameters = [
-      { name: 'modelId', value: { longValue: Number(modelId) } }
-    ];
-  } else {
-    query = `
-      SELECT id, name, provider, model_id
-      FROM ai_models
-      WHERE model_id = :modelId AND active = true AND chat_enabled = true
-      LIMIT 1
-    `;
-    parameters = [
-      { name: 'modelId', value: { stringValue: String(modelId) } }
-    ];
-  }
-
-  // The RDS Data API adapter converts snake_case to camelCase
-  const result = await executeSQL<{ id: number; name: string; provider: string; modelId: string }>(query, parameters);
-
-  if (result.length === 0) {
-    log.error('Model not found', { modelId });
+  if (!model || !model.active || !model.nexusEnabled) {
+    log.error('Model not found or not enabled for Nexus', { modelId, found: !!model });
     return null;
   }
 
-  const rawResult = result[0];
-
   log.info('Model found in database', {
-    id: rawResult.id,
-    name: rawResult.name,
-    provider: rawResult.provider,
-    modelId: rawResult.modelId
+    id: model.id,
+    name: model.name,
+    provider: model.provider,
+    modelId: model.modelId
   });
 
   return {
-    id: ensureRDSNumber(rawResult.id),
-    name: ensureRDSString(rawResult.name),
-    provider: ensureRDSString(rawResult.provider),
-    model_id: ensureRDSString(rawResult.modelId)
+    id: model.id,
+    name: model.name,
+    provider: model.provider,
+    model_id: model.modelId
   };
 }

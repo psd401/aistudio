@@ -177,6 +177,10 @@ export function SettingsClient({ initialSettings }: SettingsClientProps) {
   }, [handleRefresh, toast])
 
   const categoryInfo: Record<string, { title: string; description: string }> = {
+    ai: {
+      title: "AI Configuration",
+      description: "AI prompts, embeddings, and model configuration"
+    },
     ai_providers: {
       title: "AI Providers",
       description: "API keys and configuration for AI model providers"

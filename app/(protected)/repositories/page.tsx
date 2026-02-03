@@ -8,9 +8,5 @@ export default async function RepositoriesPage() {
     redirect("/sign-in")
   }
 
-  return (
-    <div className="container mx-auto py-6">
-      <RepositoryList />
-    </div>
-  )
+  return <RepositoryList />
 }

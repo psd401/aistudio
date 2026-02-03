@@ -211,23 +211,19 @@ Update the AI models table to include the new provider:
 
 ```sql
 -- Add new models to the ai_models table
+-- Note: capabilities are stored as JSON array in TEXT field
 INSERT INTO ai_models (
   provider,
   model_id,
-  display_name,
+  name,
   description,
   input_cost_per_1k_tokens,
   output_cost_per_1k_tokens,
   max_tokens,
-  context_window,
-  supports_tools,
-  supports_vision,
-  supports_streaming,
-  chat_enabled,
-  assistant_enabled,
-  compare_enabled,
   active,
-  nexus_capabilities
+  nexus_enabled,
+  architect_enabled,
+  capabilities
 ) VALUES
 (
   'mistral',
@@ -237,15 +233,10 @@ INSERT INTO ai_models (
   0.002,
   0.006,
   8192,
-  32000,
-  true,
-  false,
   true,
   true,
   true,
-  true,
-  true,
-  '{"supportsReasoning": false, "supportsThinking": false, "supportedTools": ["function_calling"]}'::jsonb
+  '["chat"]'
 ),
 (
   'mistral',
@@ -255,15 +246,10 @@ INSERT INTO ai_models (
   0.001,
   0.003,
   8192,
-  32000,
-  true,
-  false,
   true,
   true,
   true,
-  false,
-  true,
-  '{"supportsReasoning": false, "supportsThinking": false, "supportedTools": ["function_calling", "code_interpreter"]}'::jsonb
+  '["chat","code_interpreter","code_execution"]'
 );
 ```
 

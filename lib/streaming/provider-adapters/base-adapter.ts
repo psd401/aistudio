@@ -1,11 +1,12 @@
-import { streamText, type LanguageModel, type CoreMessage, type ToolSet } from 'ai';
+import { streamText, stepCountIs, type LanguageModel, type ModelMessage, type ToolSet } from 'ai';
 import { createLogger } from '@/lib/logger';
-import type { 
-  ProviderAdapter, 
-  ProviderCapabilities, 
-  StreamConfig, 
+import { createUniversalTools } from '@/lib/tools/provider-native-tools';
+import type {
+  ProviderAdapter,
+  ProviderCapabilities,
+  StreamConfig,
   StreamingCallbacks,
-  StreamRequest 
+  StreamRequest
 } from '../types';
 
 const log = createLogger({ module: 'base-provider-adapter' });
@@ -55,12 +56,18 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
 
   /**
    * Create provider-native tools from stored client instance
-   * Override in subclasses to implement provider-specific tools
+   * Base implementation returns universal tools (show_chart, etc.)
+   * Override in subclasses to add provider-specific tools
    */
   async createTools(enabledTools: string[]): Promise<ToolSet> {
-    // Base implementation returns empty - providers override this
-    log.debug(`No tools available for ${this.providerName}`, { enabledTools });
-    return {};
+    // Base implementation returns universal tools that work with all providers
+    const universalTools = await createUniversalTools(enabledTools);
+    log.debug(`Created universal tools for ${this.providerName}`, {
+      enabledTools,
+      toolCount: Object.keys(universalTools).length,
+      toolNames: Object.keys(universalTools)
+    });
+    return universalTools;
   }
 
   /**
@@ -109,21 +116,27 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       hasModel: !!config.model,
       messageCount: config.messages.length,
       hasSystem: !!config.system,
-      hasTelemetry: !!config.experimental_telemetry?.isEnabled
+      hasTelemetry: !!config.experimental_telemetry?.isEnabled,
+      maxSteps: config.maxSteps || 'not set'
     });
     
     try {
       // Create enhanced configuration
       const enhancedConfig = this.enhanceStreamConfig(config);
 
+      // Accumulate tool calls from steps (captured via onStepFinish)
+      // Includes result field for persistence (required for assistant-ui to render completed tool calls)
+      const accumulatedToolCalls: Array<{ toolCallId: string; toolName: string; args: Record<string, unknown>; result?: unknown }> = [];
+
       // Start streaming with AI SDK
       const result = streamText({
         model: enhancedConfig.model,
-        messages: enhancedConfig.messages as CoreMessage[],
+        messages: enhancedConfig.messages as ModelMessage[],
         system: enhancedConfig.system,
         tools: enhancedConfig.tools,
         toolChoice: enhancedConfig.toolChoice,
         temperature: enhancedConfig.temperature,
+        ...(enhancedConfig.maxSteps && { stopWhen: stepCountIs(enhancedConfig.maxSteps) }),
         ...(enhancedConfig.experimental_telemetry && enhancedConfig.experimental_telemetry.isEnabled && {
           experimental_telemetry: {
             isEnabled: enhancedConfig.experimental_telemetry.isEnabled,
@@ -131,15 +144,67 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
             metadata: enhancedConfig.experimental_telemetry.metadata
           }
         }),
+        // Capture tool calls as each step finishes (AI SDK v6)
+        onStepFinish: (event) => {
+          logger.info('onStepFinish called', {
+            provider: this.providerName,
+            hasToolCalls: !!event.toolCalls,
+            toolCallCount: event.toolCalls?.length || 0,
+            hasToolResults: !!(event as { toolResults?: unknown[] }).toolResults,
+            toolResultCount: ((event as { toolResults?: unknown[] }).toolResults)?.length || 0,
+            finishReason: event.finishReason
+          });
+
+          // Capture tool calls
+          if (event.toolCalls && Array.isArray(event.toolCalls)) {
+            for (const tc of event.toolCalls) {
+              // AI SDK v6 uses "input" for tool arguments, not "args"
+              const toolCall = tc as { toolCallId: string; toolName: string; args?: unknown; input?: unknown };
+              const toolArgs = (toolCall.input || toolCall.args || {}) as Record<string, unknown>;
+
+              accumulatedToolCalls.push({
+                toolCallId: toolCall.toolCallId,
+                toolName: toolCall.toolName,
+                args: toolArgs
+              });
+              logger.debug('Tool call captured from step', {
+                provider: this.providerName,
+                toolCallId: toolCall.toolCallId,
+                toolName: toolCall.toolName,
+                hasArgs: Object.keys(toolArgs).length > 0
+              });
+            }
+          }
+
+          // Capture tool results (required for assistant-ui makeAssistantToolUI to render completed tools)
+          // AI SDK v6 uses 'output' for the result, not 'result'
+          const toolResults = (event as unknown as { toolResults?: Array<{ toolCallId: string; output: unknown }> }).toolResults;
+          if (toolResults && Array.isArray(toolResults)) {
+            for (const tr of toolResults) {
+              // Find the matching tool call and attach the result
+              const existingToolCall = accumulatedToolCalls.find(tc => tc.toolCallId === tr.toolCallId);
+              if (existingToolCall) {
+                existingToolCall.result = tr.output;
+                logger.debug('Tool result captured from step', {
+                  provider: this.providerName,
+                  toolCallId: tr.toolCallId,
+                  hasResult: tr.output !== undefined
+                });
+              }
+            }
+          }
+        },
         onFinish: async (event) => {
           logger.info('streamText onFinish triggered', {
             provider: this.providerName,
             hasText: !!event.text,
             hasUsage: !!event.usage,
             finishReason: event.finishReason,
-            textLength: event.text?.length || 0
+            textLength: event.text?.length || 0,
+            toolCallCount: accumulatedToolCalls.length,
+            toolNames: accumulatedToolCalls.map(tc => tc.toolName)
           });
-          
+
           // Define proper type for usage
           interface StreamUsage {
             promptTokens?: number;
@@ -147,7 +212,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
             totalTokens?: number;
             reasoningTokens?: number;
           }
-          
+
           // Transform to our expected format
           const usage = event.usage as StreamUsage;
           const transformedData = {
@@ -157,17 +222,19 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
               completionTokens: usage.completionTokens || 0,
               totalTokens: usage.totalTokens || 0
             } : undefined,
-            finishReason: event.finishReason || 'stop'
+            finishReason: event.finishReason || 'stop',
+            toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined
           };
-          
+
           // Call provider-specific finish handler
           await this.handleFinish(transformedData, callbacks);
-          
+
           // Call user's finish callback
           if (callbacks.onFinish) {
-            logger.info('Calling user onFinish callback from streamText', { 
+            logger.info('Calling user onFinish callback from streamText', {
               hasCallback: true,
-              textLength: event.text?.length || 0 
+              textLength: event.text?.length || 0,
+              toolCallCount: accumulatedToolCalls.length
             });
             await callbacks.onFinish(transformedData);
           }
@@ -194,11 +261,11 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       this.handleStreamProgress(result, callbacks);
       
       return {
-        toDataStreamResponse: (options?: { headers?: Record<string, string> }) => 
+        toDataStreamResponse: (options?: { headers?: Record<string, string> }) =>
           result.toUIMessageStreamResponse ? result.toUIMessageStreamResponse(options) : result.toTextStreamResponse(options),
-        toUIMessageStreamResponse: (options?: { headers?: Record<string, string> }) => 
+        toUIMessageStreamResponse: (options?: { headers?: Record<string, string> }) =>
           result.toUIMessageStreamResponse ? result.toUIMessageStreamResponse(options) : result.toTextStreamResponse(options),
-        usage: result.usage
+        usage: Promise.resolve(result.usage)
       };
       
     } catch (error) {
@@ -226,6 +293,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       messages: config.messages,
       system: config.system,
       maxTokens: config.maxTokens,
+      maxSteps: config.maxSteps,
       temperature: config.temperature,
       tools: config.tools,
       toolChoice: config.toolChoice,

@@ -106,6 +106,18 @@ export class ComplianceAuditor extends Construct {
   private createAuditorFunction(props: ComplianceAuditorProps): lambda.Function {
     const functionName = `${this.projectName}-${props.deploymentEnvironment}-secret-compliance-auditor`
 
+    // Create explicit role to avoid CDK's deprecated fromAwsManagedPolicyName
+    const auditorRole = new iam.Role(this, "AuditorRole", {
+      assumedBy: new iam.ServicePrincipal("lambda.amazonaws.com"),
+      managedPolicies: [
+        iam.ManagedPolicy.fromManagedPolicyArn(
+          this,
+          "AuditorLambdaBasicExecPolicy",
+          "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+        ),
+      ],
+    })
+
     const auditorFunction = new lambda.Function(this, "AuditorFunction", {
       functionName,
       runtime: lambda.Runtime.PYTHON_3_11,
@@ -114,6 +126,7 @@ export class ComplianceAuditor extends Construct {
       timeout: cdk.Duration.minutes(15),
       memorySize: 512,
       architecture: lambda.Architecture.ARM_64,
+      role: auditorRole,
       logGroup: new logs.LogGroup(this, "AuditorLogGroup", {
         logGroupName: `/aws/lambda/${functionName}`,
         retention: props.config.monitoring.logRetention,

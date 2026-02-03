@@ -1,11 +1,11 @@
 "use server"
 
-import { 
-  getNavigationItems, 
-  createNavigationItem, 
-  updateNavigationItem, 
+import {
+  getNavigationItems,
+  createNavigationItem,
+  updateNavigationItem,
   deleteNavigationItem
-} from "@/lib/db/data-api-adapter"
+} from "@/lib/db/drizzle"
 import { ActionState } from "@/types"
 import type { InsertNavigationItem, SelectNavigationItem } from "@/types/db-types"
 import { getServerSession } from "@/lib/auth/server-session"
@@ -47,8 +47,24 @@ export async function getNavigationItemsAction(): Promise<ActionState<SelectNavi
     })
     
     timer({ status: "success", count: items.length })
-    
-    return createSuccess(items as unknown as SelectNavigationItem[], "Navigation items retrieved successfully")
+
+    // Transform to SelectNavigationItem type
+    const transformedItems: SelectNavigationItem[] = items.map(item => ({
+      id: item.id,
+      label: item.label,
+      icon: item.icon,
+      link: item.link ?? null,
+      description: item.description ?? null,
+      type: item.type,
+      parentId: item.parentId ?? null,
+      toolId: item.toolId ?? null,
+      requiresRole: item.requiresRole ?? null,
+      position: item.position,
+      isActive: item.isActive,
+      createdAt: item.createdAt
+    }))
+
+    return createSuccess(transformedItems, "Navigation items retrieved successfully")
   } catch (error) {
     timer({ status: "error" })
     
@@ -88,14 +104,33 @@ export async function createNavigationItemAction(
       isActive: data.isActive ?? true
     })
     
+    // Validate numeric conversions
+    let parentId: number | undefined
+    if (data.parentId !== undefined && data.parentId !== null) {
+      const numParentId = Number(data.parentId)
+      if (Number.isNaN(numParentId)) {
+        throw ErrorFactories.invalidInput('parentId', data.parentId, 'Must be a valid number')
+      }
+      parentId = numParentId
+    }
+
+    let toolId: number | undefined
+    if (data.toolId !== undefined && data.toolId !== null) {
+      const numToolId = Number(data.toolId)
+      if (Number.isNaN(numToolId)) {
+        throw ErrorFactories.invalidInput('toolId', data.toolId, 'Must be a valid number')
+      }
+      toolId = numToolId
+    }
+
     const newItem = await createNavigationItem({
       label: data.label,
       icon: data.icon,
       link: data.link ?? undefined,
       description: data.description ?? undefined,
       type: data.type || 'page',
-      parentId: data.parentId ? Number(data.parentId) : undefined,
-      toolId: data.toolId ? Number(data.toolId) : undefined,
+      parentId,
+      toolId,
       requiresRole: data.requiresRole ?? undefined,
       position: data.position,
       isActive: data.isActive ?? true
@@ -107,8 +142,24 @@ export async function createNavigationItemAction(
     })
     
     timer({ status: "success", itemId: newItem.id })
-    
-    return createSuccess(newItem as unknown as SelectNavigationItem, "Navigation item created successfully")
+
+    // Transform to SelectNavigationItem type
+    const transformedItem: SelectNavigationItem = {
+      id: newItem.id,
+      label: newItem.label,
+      icon: newItem.icon,
+      link: newItem.link ?? null,
+      description: newItem.description ?? null,
+      type: newItem.type,
+      parentId: newItem.parentId ?? null,
+      toolId: newItem.toolId ?? null,
+      requiresRole: newItem.requiresRole ?? null,
+      position: newItem.position,
+      isActive: newItem.isActive,
+      createdAt: newItem.createdAt
+    }
+
+    return createSuccess(transformedItem, "Navigation item created successfully")
   } catch (error) {
     timer({ status: "error" })
     
@@ -148,7 +199,7 @@ export async function updateNavigationItemAction(
       icon: string;
       link: string;
       description: string;
-      type: string;
+      type: "link" | "section" | "page";
       parentId: number;
       toolId: number;
       requiresRole: string;
@@ -160,7 +211,7 @@ export async function updateNavigationItemAction(
     if (data.icon !== undefined) updateData.icon = data.icon
     if (data.link !== undefined && data.link !== null) updateData.link = data.link
     if (data.description !== undefined && data.description !== null) updateData.description = data.description
-    if (data.type !== undefined) updateData.type = data.type
+    if (data.type !== undefined && (data.type === "link" || data.type === "section" || data.type === "page")) updateData.type = data.type
     if (data.parentId !== undefined && data.parentId !== null) updateData.parentId = data.parentId
     if (data.toolId !== undefined && data.toolId !== null) updateData.toolId = data.toolId
     if (data.requiresRole !== undefined && data.requiresRole !== null) updateData.requiresRole = data.requiresRole
@@ -171,8 +222,14 @@ export async function updateNavigationItemAction(
       itemId: id,
       fieldsUpdated: Object.keys(updateData).length
     })
-    
-    const updatedItem = await updateNavigationItem(Number(id), updateData)
+
+    // Validate ID conversion
+    const numericId = Number(id)
+    if (Number.isNaN(numericId)) {
+      throw ErrorFactories.invalidInput('id', id, 'Must be a valid number')
+    }
+
+    const updatedItem = await updateNavigationItem(numericId, updateData)
     
     log.info("Navigation item updated successfully", {
       itemId: updatedItem.id,
@@ -180,8 +237,24 @@ export async function updateNavigationItemAction(
     })
     
     timer({ status: "success", itemId: updatedItem.id })
-    
-    return createSuccess(updatedItem as unknown as SelectNavigationItem, "Navigation item updated successfully")
+
+    // Transform to SelectNavigationItem type
+    const transformedUpdatedItem: SelectNavigationItem = {
+      id: updatedItem.id,
+      label: updatedItem.label,
+      icon: updatedItem.icon,
+      link: updatedItem.link ?? null,
+      description: updatedItem.description ?? null,
+      type: updatedItem.type,
+      parentId: updatedItem.parentId ?? null,
+      toolId: updatedItem.toolId ?? null,
+      requiresRole: updatedItem.requiresRole ?? null,
+      position: updatedItem.position,
+      isActive: updatedItem.isActive,
+      createdAt: updatedItem.createdAt
+    }
+
+    return createSuccess(transformedUpdatedItem, "Navigation item updated successfully")
   } catch (error) {
     timer({ status: "error" })
     
@@ -211,9 +284,15 @@ export async function deleteNavigationItemAction(
     }
     
     log.debug("User authenticated", { userId: session.sub })
-    
+
+    // Validate ID conversion
+    const numericId = Number(id)
+    if (Number.isNaN(numericId)) {
+      throw ErrorFactories.invalidInput('id', id, 'Must be a valid number')
+    }
+
     log.info("Deleting navigation item from database", { itemId: id })
-    await deleteNavigationItem(Number(id))
+    await deleteNavigationItem(numericId)
     
     log.info("Navigation item deleted successfully", { itemId: id })
     

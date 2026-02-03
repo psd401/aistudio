@@ -69,10 +69,14 @@ export function ModelReplacementDialog({
     const replacement = replacementOptions.find(m => m.id === Number(value));
     
     if (replacement) {
-      if (modelToDelete.chatEnabled && !replacement.chatEnabled) {
-        warnings.push('The selected replacement model does not have chat enabled, but the original model does.');
+      if (modelToDelete.nexusEnabled && !replacement.nexusEnabled) {
+        warnings.push('The selected replacement model is not Nexus-enabled, but the original model is.');
       }
-      
+
+      if (modelToDelete.architectEnabled && !replacement.architectEnabled) {
+        warnings.push('The selected replacement model is not Architect-enabled, but the original model is.');
+      }
+
       if (modelToDelete.provider !== replacement.provider) {
         warnings.push(`Provider mismatch: Original uses ${modelToDelete.provider}, replacement uses ${replacement.provider}.`);
       }
@@ -160,8 +164,9 @@ export function ModelReplacementDialog({
             </Select>
             {selectedModel && (
               <p className="text-xs text-muted-foreground">
-                Provider: {selectedModel.provider} | 
-                Chat: {selectedModel.chatEnabled ? 'Enabled' : 'Disabled'}
+                Provider: {selectedModel.provider} |
+                Nexus: {selectedModel.nexusEnabled ? 'Enabled' : 'Disabled'} |
+                Architect: {selectedModel.architectEnabled ? 'Enabled' : 'Disabled'}
               </p>
             )}
           </div>

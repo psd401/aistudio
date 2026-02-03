@@ -6,7 +6,29 @@
 
 import winston, { Logger } from "winston"
 import { nanoid } from "nanoid"
-import { AsyncLocalStorage } from "node:async_hooks"
+
+// Conditionally import AsyncLocalStorage only in Node.js runtime
+// Edge Runtime doesn't support node:async_hooks
+type AsyncLocalStorageType<T> = {
+  getStore(): T | undefined
+  enterWith(store: T): void
+  run<R>(store: T, fn: () => R): R
+}
+
+let asyncLocalStorageModule: AsyncLocalStorageType<LogContext> | null = null
+
+// Only import in Node.js runtime (not Edge)
+// EdgeRuntime is defined in Edge Runtime environments
+if (typeof (globalThis as { EdgeRuntime?: unknown }).EdgeRuntime === 'undefined') {
+  try {
+    // Dynamic require to avoid bundling in Edge Runtime
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const { AsyncLocalStorage } = require('node:async_hooks')
+    asyncLocalStorageModule = new AsyncLocalStorage() as AsyncLocalStorageType<LogContext>
+  } catch {
+    // Silently fail - Edge Runtime or environment without async_hooks
+  }
+}
 
 // Security: CodeQL-compliant log sanitization that breaks taint flow completely
 // Enhanced with circular reference detection and depth limiting to prevent stack overflow
@@ -104,8 +126,7 @@ function sanitizeForLoggerInternal(data: unknown, maxDepth: number, seen: WeakSe
 const isProd = process.env.NODE_ENV === "production"
 const isTest = process.env.NODE_ENV === "test"
 
-// AsyncLocalStorage for request context propagation
-const asyncLocalStorage = new AsyncLocalStorage<LogContext>()
+// asyncLocalStorageModule is initialized at the top of the file conditionally
 
 // Log context interface for structured metadata
 export interface LogContext {
@@ -291,27 +312,32 @@ export function generateRequestId(): string {
 
 /**
  * Get the current log context from AsyncLocalStorage
+ * Returns empty context in Edge Runtime where AsyncLocalStorage is unavailable
  */
 export function getLogContext(): LogContext {
-  return asyncLocalStorage.getStore() || {}
+  return asyncLocalStorageModule?.getStore() || {}
 }
 
 /**
  * Set or update the log context
+ * No-op in Edge Runtime where AsyncLocalStorage is unavailable
  */
 export function setLogContext(context: LogContext): void {
+  if (!asyncLocalStorageModule) return
   const currentContext = getLogContext()
-  asyncLocalStorage.enterWith({ ...currentContext, ...context })
+  asyncLocalStorageModule.enterWith({ ...currentContext, ...context })
 }
 
 /**
  * Run a function with a specific log context
+ * Falls back to direct execution in Edge Runtime
  */
 export async function withLogContext<T>(
   context: LogContext,
   fn: () => T | Promise<T>
 ): Promise<T> {
-  return asyncLocalStorage.run(context, fn)
+  if (!asyncLocalStorageModule) return fn()
+  return asyncLocalStorageModule.run(context, fn)
 }
 
 /**

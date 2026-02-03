@@ -1,5 +1,18 @@
+/**
+ * Database Initialization Handler - Version 2026-01-07-10:00
+ * Updated to import migrations from single source of truth (migrations.json)
+ */
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
 import { GetSecretValueCommand, SecretsManagerClient } from '@aws-sdk/client-secrets-manager';
+// migrations.json is copied to the Lambda package root during bundling
+// Using require for runtime resolution (file doesn't exist in source, only in Lambda package)
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const migrationsConfig = require('./migrations.json') as {
+  description: string;
+  schemaDir: string;
+  initialSetupFiles: string[];
+  migrationFiles: string[];
+};
 
 const rdsClient = new RDSDataClient({});
 const secretsClient = new SecretsManagerClient({});
@@ -28,52 +41,18 @@ interface CustomResourceEvent {
  * @see /docs/database-restoration/DATABASE-MIGRATIONS.md for full details
  */
 
-// Migration files that should ALWAYS run (additive only)
-// These files should ONLY create new objects, never modify existing ones
-const MIGRATION_FILES = [
-  '010-knowledge-repositories.sql',
-  '11_textract_jobs.sql',
-  '12_textract_usage.sql',
-  '013-add-knowledge-repositories-tool.sql',
-  '014-model-comparisons.sql',
-  '015-add-model-compare-tool.sql',
-  '016-assistant-architect-repositories.sql',
-  '017-add-user-roles-updated-at.sql',
-  '018-model-replacement-audit.sql',
-  '019-fix-navigation-role-display.sql',
-  '020-add-user-role-version.sql',
-  '023-navigation-multi-roles.sql',
-  '024-model-role-restrictions.sql',
-  '026-add-model-compare-source.sql',
-  '027-messages-model-tracking.sql',
-  '028-nexus-schema.sql',
-  '029-ai-models-nexus-enhancements.sql',
-  '030-nexus-provider-metrics.sql',
-  '031-nexus-messages.sql',
-  '032-remove-nexus-provider-constraint.sql',
-  '033-ai-streaming-jobs.sql',
-  '034-assistant-architect-enabled-tools.sql',
-  '035-schedule-management-schema.sql',
-  '036-remove-legacy-chat-tables.sql',
-  '037-assistant-architect-events.sql',
-  '039-prompt-library-schema.sql',
-  '040-update-model-replacement-audit.sql'
-  // ADD NEW MIGRATIONS HERE - they will run once and be tracked
-];
+// Import migration lists from single source of truth
+// See /infra/database/migrations.json for the complete list
+// ADD NEW MIGRATIONS to migrations.json - they will run once and be tracked
+const MIGRATION_FILES = migrationsConfig.migrationFiles;
 
 // Initial setup files (only run on empty database)
 // WARNING: These must EXACTLY match existing database structure!
-const INITIAL_SETUP_FILES = [
-  '001-enums.sql',      // Creates enum types
-  '002-tables.sql',     // Creates all core tables
-  '003-constraints.sql', // Adds foreign key constraints
-  '004-indexes.sql',     // Creates performance indexes
-  '005-initial-data.sql' // Inserts required seed data
-];
+const INITIAL_SETUP_FILES = migrationsConfig.initialSetupFiles;
 
 export async function handler(event: CustomResourceEvent): Promise<any> {
   console.log('Database initialization event:', JSON.stringify(event, null, 2));
-  console.log('Handler version: 2025-10-26-v9 - Latimer AI migration 040');
+  console.log('Handler version: 2026-01-30-v13 - Add graph schema migration 050');
   
   // SAFETY CHECK: Log what mode we're in
   console.log(`🔍 Checking database state for safety...`);
@@ -274,6 +253,48 @@ async function recordMigration(
 }
 
 /**
+ * Validate SQL statements for RDS Data API incompatibilities
+ *
+ * Detects patterns that cannot run properly through RDS Data API:
+ * - CREATE INDEX CONCURRENTLY (requires autocommit, multi-transaction)
+ * - DROP INDEX CONCURRENTLY
+ * - REINDEX CONCURRENTLY
+ *
+ * @throws Error if incompatible pattern detected
+ */
+function validateStatements(statements: string[], filename: string): void {
+  for (const statement of statements) {
+    // Check for CONCURRENTLY keyword (incompatible with RDS Data API)
+    if (/\bCONCURRENTLY\b/i.test(statement)) {
+      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.error('❌ RDS Data API Incompatibility Detected');
+      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+      console.error(`File: ${filename}`);
+      console.error(`Statement: ${statement.substring(0, 150)}...`);
+      console.error('');
+      console.error('ISSUE: CONCURRENTLY operations cannot run through RDS Data API');
+      console.error('REASON: CONCURRENTLY requires autocommit mode and uses multiple');
+      console.error('        internal transactions, which is incompatible with Data API');
+      console.error('');
+      console.error('SOLUTION: Remove CONCURRENTLY keyword from the statement:');
+      console.error('  - Use: CREATE INDEX IF NOT EXISTS idx_name ON table (column);');
+      console.error('  - This will briefly lock writes but works with Data API');
+      console.error('');
+      console.error('FOR ZERO-DOWNTIME INDEX CREATION:');
+      console.error('  - Use psql directly during maintenance window');
+      console.error('  - Consider a separate maintenance script outside Lambda');
+      console.error('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+
+      throw new Error(
+        `Migration ${filename} contains CONCURRENTLY keyword which is incompatible ` +
+        `with RDS Data API. Use 'CREATE INDEX IF NOT EXISTS' instead. ` +
+        `For zero-downtime index creation on large tables, use psql directly.`
+      );
+    }
+  }
+}
+
+/**
  * Execute all statements in a SQL file
  */
 async function executeFileStatements(
@@ -284,7 +305,10 @@ async function executeFileStatements(
 ): Promise<void> {
   const sql = await getSqlContent(filename);
   const statements = splitSqlStatements(sql);
-  
+
+  // Validate statements before execution - detect incompatible patterns
+  validateStatements(statements, filename);
+
   for (const statement of statements) {
     if (statement.trim()) {
       try {

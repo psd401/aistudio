@@ -1,9 +1,8 @@
 import { getServerSession } from '@/lib/auth/server-session';
 import { NextResponse } from 'next/server';
-import { executeSQL } from '@/lib/db/data-api-adapter';
+import { getUserIdByCognitoSub, updateIdeaStatus } from '@/lib/db/drizzle';
 import { hasRole } from '@/utils/roles';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
-import { SqlParameter } from '@aws-sdk/client-rds-data';
 export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
   const requestId = generateRequestId();
   const timer = startTimer("api.ideas.status.update");
@@ -36,31 +35,21 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       return new NextResponse('Missing status', { status: 400 });
     }
 
-    let sql = 'UPDATE ideas SET status = :status, updated_at = NOW()';
-    const params: SqlParameter[] = [
-      { name: 'status', value: { stringValue: status } },
-      { name: 'ideaId', value: { longValue: ideaId } },
-    ];
-
+    let completedBy: string | undefined;
     if (status === 'completed') {
       // Get the user's numeric ID from their cognito_sub
-      const userSql = 'SELECT id FROM users WHERE cognito_sub = :cognitoSub';
-      const userResult = await executeSQL(userSql, [{ name: 'cognitoSub', value: { stringValue: session.sub } }]);
-      
-      if (!userResult || userResult.length === 0) {
+      const userIdString = await getUserIdByCognitoSub(session.sub);
+
+      if (!userIdString) {
         return new NextResponse('User not found', { status: 404 });
       }
-      
-      const userId = userResult[0].id;
-      sql += ', completed_by = :completedBy, completed_at = NOW()';
-      params.push({ name: 'completedBy', value: { stringValue: String(userId || '') } });
+
+      completedBy = userIdString;
     }
 
-    sql += ' WHERE id = :ideaId RETURNING *';
-    
-    const result = await executeSQL(sql, params);
+    const result = await updateIdeaStatus(ideaId, status, completedBy);
 
-    return NextResponse.json(result[0]);
+    return NextResponse.json(result);
   } catch (error) {
     log.error('Error updating idea status:', error);
     return new NextResponse('Internal Server Error', { status: 500 });

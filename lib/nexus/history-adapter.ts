@@ -29,28 +29,109 @@ type MessageData = {
   [key: string]: unknown
 }
 
+// Helper to convert a content part to text format
+// Handles text, image, and other part types by converting to displayable text
+const convertPartToText = (part: { type: string; text?: string; imageUrl?: string; [key: string]: unknown }): string => {
+  if (part.type === 'text') {
+    return part.text || ''
+  }
+  if (part.type === 'image' && part.imageUrl) {
+    // Convert image parts to markdown image syntax
+    return `![Generated Image](${part.imageUrl})`
+  }
+  // Skip step-start, step-finish, and other control types
+  if (part.type === 'step-start' || part.type === 'step-finish') {
+    return ''
+  }
+  return ''
+}
+
+// JSON object type for tool arguments (matches assistant-ui's ReadonlyJSONObject)
+type JSONObject = { readonly [key: string]: JSONValue }
+type JSONValue = string | number | boolean | null | JSONObject | readonly JSONValue[]
+
+// AI SDK v5 static tool state types
+type StaticToolState = 'input-available' | 'output-available' | 'output-error'
+
+// Type for assistant-ui content parts
+// Static tool format: type is 'tool-{toolName}' (e.g., 'tool-show_chart')
+// AISDKMessageConverter extracts toolName via type.replace("tool-", "")
+type ContentPartLike =
+  | { type: 'text'; text: string }
+  | {
+      type: string;  // 'tool-{toolName}' format
+      toolCallId: string;
+      state: StaticToolState;
+      input: JSONObject;
+      output?: unknown;
+      errorText?: string;
+    }
+
 // We'll use a simple implementation since ExportedMessageRepository.fromArray may not be accessible
 const createExportedMessageRepository = (messages: MessageData[]): ExportedMessageRepository => ({
   messages: messages.map((msg, index) => {
     // Ensure content is in the correct format for assistant-ui
-    let content: Array<{ type: 'text'; text: string }> = []
-    
+    // Content can include text parts and static tool parts for UI rendering
+    let content: ContentPartLike[] = []
+
     if (Array.isArray(msg.content)) {
-      content = msg.content.map(part => ({
-        type: 'text' as const,
-        text: part.text || ''
-      }))
+      // Process each part - text becomes text, tool-call converts to static tool, images become markdown
+      const processedParts = msg.content
+        .map((part): ContentPartLike | null => {
+          const partData = part as { type: string; text?: string; imageUrl?: string; toolCallId?: string; toolName?: string; args?: unknown; argsText?: string; result?: unknown; isError?: boolean }
+
+          if (partData.type === 'text') {
+            return { type: 'text', text: partData.text || '' }
+          }
+          if (partData.type === 'tool-call' && partData.toolName && partData.toolCallId) {
+            // Convert to static tool format: type: 'tool-{toolName}'
+            // AISDKMessageConverter extracts toolName via type.replace("tool-", "")
+            const args = (partData.args as JSONObject) || {}
+            const hasResult = partData.result !== undefined
+            const isError = partData.isError === true
+
+            const toolPart: ContentPartLike = {
+              type: `tool-${partData.toolName}`,  // e.g., 'tool-show_chart'
+              toolCallId: partData.toolCallId,
+              state: isError ? 'output-error' : hasResult ? 'output-available' : 'input-available',
+              input: args,
+            }
+
+            if (hasResult && !isError) {
+              (toolPart as { output?: unknown }).output = partData.result
+            }
+            if (isError) {
+              (toolPart as { errorText?: string }).errorText = typeof partData.result === 'string' ? partData.result : JSON.stringify(partData.result)
+            }
+
+            return toolPart
+          }
+          if (partData.type === 'image' && partData.imageUrl) {
+            return { type: 'text', text: `![Generated Image](${partData.imageUrl})` }
+          }
+          // Skip step-start, step-finish, tool-result (legacy), and other control types
+          return null
+        })
+        .filter((part): part is ContentPartLike => part !== null)
+
+      content = processedParts
+
+      // Ensure at least one content part
+      if (content.length === 0) {
+        content = [{ type: 'text', text: '' }]
+      }
     } else if (typeof msg.content === 'string') {
       content = [{ type: 'text', text: msg.content }]
     } else {
       content = [{ type: 'text', text: '' }]
     }
-    
+
     return {
+      // Cast content to unknown to allow tool-result parts (assistant-ui handles them internally)
       message: INTERNAL.fromThreadMessageLike({
         id: msg.id,
         role: msg.role,
-        content,
+        content: content as unknown as string,  // Cast needed for tool-result parts
         ...(msg.createdAt && { createdAt: new Date(msg.createdAt) }),
       }, msg.id, { type: 'complete', reason: 'unknown' }),
       parentId: index === 0 ? null : messages[index - 1]?.id || null
@@ -199,18 +280,28 @@ export function createNexusHistoryAdapter(conversationId: string | null): Thread
 
           // Encode the message to storage format
           const encoded = formatAdapter.encode(item);
+          // Parts may include AI SDK v5 control types (step-start, step-finish) that need filtering
           const encodedAny = encoded as {
             role: 'user' | 'assistant' | 'system';
-            parts: Array<{ type: 'text'; text: string }>;
+            parts: Array<{ type: string; text?: string }>;
             createdAt?: Date;
           };
 
           // Convert storage format back to ThreadMessage format
           // Storage has .parts, ThreadMessage expects .content
+          // Convert all parts to text format (handles images as markdown, filters control types)
+          const textParts = encodedAny.parts
+            .map(part => convertPartToText(part as { type: string; text?: string; imageUrl?: string }))
+            .filter(text => text.length > 0)
+            .map(text => ({ type: 'text' as const, text }))
+
+          // Ensure at least one content part
+          const content = textParts.length > 0 ? textParts : [{ type: 'text' as const, text: '' }]
+
           const threadMessage = INTERNAL.fromThreadMessageLike({
             id: formatAdapter.getId(item.message),
             role: encodedAny.role,
-            content: encodedAny.parts, // Convert .parts → .content
+            content,
             ...(encodedAny.createdAt && {
               createdAt: encodedAny.createdAt
             }),

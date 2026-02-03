@@ -1,5 +1,6 @@
 import type { ToolSet } from 'ai'
-import { executeSQL } from '@/lib/db/data-api-adapter'
+import { getAIModelByModelId } from '@/lib/db/drizzle'
+import { parseCapabilities, type CapabilityKey } from '@/lib/ai/capability-utils'
 
 // Note: Logger removed to avoid browser compatibility issues when imported client-side
 
@@ -49,8 +50,8 @@ export interface ToolConfig {
 }
 
 /**
- * Registry of all available tools with their capability requirements
- * Note: Actual tool implementations now use provider-native tools
+ * Registry of tools that require manual selection
+ * Universal tools (like showChart) are always enabled - see provider-native-tools.ts
  */
 const TOOL_REGISTRY: Record<string, ToolConfig> = {
   webSearch: {
@@ -62,7 +63,7 @@ const TOOL_REGISTRY: Record<string, ToolConfig> = {
     category: 'search'
   },
   codeInterpreter: {
-    name: 'codeInterpreter', 
+    name: 'codeInterpreter',
     tool: createPlaceholderTool('Execute code and perform data analysis'),
     requiredCapabilities: ['codeInterpreter', 'codeExecution'],
     displayName: 'Code Interpreter',
@@ -77,10 +78,14 @@ const TOOL_REGISTRY: Record<string, ToolConfig> = {
     description: 'Generate images from text descriptions using AI models like GPT-Image-1, DALL-E 3, and Imagen 4',
     category: 'media'
   }
+  // Note: showChart is a universal tool that's always enabled - see provider-native-tools.ts
 }
 
 /**
  * Get model capabilities from database (SERVER-SIDE ONLY)
+ *
+ * Reads from the unified `capabilities` text/JSON array field.
+ * Part of Issue #594 - Migrate from nexus_capabilities JSONB to capabilities array.
  */
 export async function getModelCapabilities(modelId: string): Promise<ModelCapabilities | null> {
   // Server-side only guard
@@ -93,30 +98,38 @@ export async function getModelCapabilities(modelId: string): Promise<ModelCapabi
     if (!modelId || typeof modelId !== 'string' || !/^[\w.\-]+$/.test(modelId)) {
       return null
     }
-    
-    const result = await executeSQL(
-      `SELECT nexus_capabilities 
-       FROM ai_models 
-       WHERE model_id = :modelId 
-       AND active = true 
-       LIMIT 1`,
-      [{ name: 'modelId', value: { stringValue: modelId } }]
-    )
-    
-    if (result.length === 0) {
+
+    const model = await getAIModelByModelId(modelId)
+
+    if (!model || !model.active) {
       return null
     }
-    
-    const capabilities = result[0].nexusCapabilities || result[0].nexus_capabilities
-    
-    // JSONB fields should come back as objects, but handle string case too
-    if (typeof capabilities === 'string') {
-      return JSON.parse(capabilities) as ModelCapabilities
+
+    // Parse capabilities from the unified capabilities field (text/JSON array)
+    const capabilitySet = parseCapabilities(model.capabilities)
+
+    // Helper function to check if a capability exists in the set
+    const has = (key: CapabilityKey): boolean => capabilitySet.has(key)
+
+    // Map to ModelCapabilities interface
+    return {
+      webSearch: has('webSearch'),
+      codeInterpreter: has('codeInterpreter'),
+      codeExecution: has('codeExecution'),
+      grounding: has('grounding'),
+      workspaceTools: has('workspaceTools'),
+      canvas: has('canvas'),
+      artifacts: has('artifacts'),
+      thinking: has('thinking'),
+      reasoning: has('reasoning'),
+      computerUse: has('computerUse'),
+      responsesAPI: has('responsesAPI'),
+      promptCaching: has('promptCaching'),
+      contextCaching: has('contextCaching'),
+      imageGeneration: has('imageGeneration')
     }
-    
-    return capabilities as unknown as ModelCapabilities
   } catch {
-    // Return null on error - error details available through proper logging 
+    // Return null on error - error details available through proper logging
     // in calling functions (server actions, API routes) that have access to logger
     return null
   }
@@ -134,10 +147,14 @@ export async function getAvailableToolsForModel(modelId: string): Promise<ToolCo
   if (!capabilities) {
     return []
   }
-  
+
   return Object.values(TOOL_REGISTRY).filter(toolConfig => {
+    // Tools with no required capabilities are universal (available for all models)
+    if (toolConfig.requiredCapabilities.length === 0) {
+      return true
+    }
     // Check if model has ANY of the required capabilities (OR logic)
-    return toolConfig.requiredCapabilities.some(capability => 
+    return toolConfig.requiredCapabilities.some(capability =>
       capabilities[capability] === true
     )
   })

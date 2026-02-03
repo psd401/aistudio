@@ -61,13 +61,30 @@ Step-by-step provider integration guide for adding new AI providers.
 #### [guides/secrets-management-quickstart.md](./guides/secrets-management-quickstart.md)
 AWS Secrets Manager integration and best practices.
 
-### Library Documentation ⭐ **NEW**
+### Database Documentation ⭐ **NEW**
+
+#### [database/drizzle-migration-guide.md](./database/drizzle-migration-guide.md)
+Complete guide for creating and managing database migrations with Drizzle ORM.
+
+#### [database/drizzle-patterns.md](./database/drizzle-patterns.md)
+Common query patterns and best practices for Drizzle ORM.
+
+#### [database/drizzle-troubleshooting.md](./database/drizzle-troubleshooting.md)
+Common issues and solutions when working with Drizzle ORM.
+
+#### [database/drizzle-migration-workflow.md](./database/drizzle-migration-workflow.md)
+Quick reference for the hybrid Drizzle-kit to Lambda migration workflow.
+
+#### [database/migration-history.md](./database/migration-history.md)
+Tracking the RDS Data API to Drizzle ORM migration progress.
+
+### Library Documentation
 
 #### [/lib/README.md](../lib/README.md)
 Overview of library directory structure and common utilities.
 
 #### [/lib/db/README.md](../lib/db/README.md)
-Database access layer using RDS Data API with field transformation patterns.
+Database access layer using Drizzle ORM with RDS Data API.
 
 #### [/lib/streaming/README.md](../lib/streaming/README.md)
 Unified streaming service, provider adapters, and circuit breaker implementation.
@@ -145,6 +162,9 @@ Server-Sent Events for Assistant Architect execution.
 #### [features/assistant-architect-tools.md](./features/assistant-architect-tools.md)
 Tool integration for Assistant Architect prompts.
 
+#### [features/assistant-architect-json-import-spec.md](./features/assistant-architect-json-import-spec.md)
+**Complete JSON import specification** for generating valid assistant import files. Includes schema reference, field types, variable substitution, execution patterns, and comprehensive examples.
+
 #### [features/DOCUMENT_PROCESSING_SETUP.md](./features/DOCUMENT_PROCESSING_SETUP.md)
 Document processing infrastructure setup.
 
@@ -198,7 +218,7 @@ Database-first configuration with environment fallback. See [ARCHITECTURE.md#set
 Direct ECS execution for real-time AI streaming with HTTP/2 support. See [diagrams/09-streaming-architecture.md](./diagrams/09-streaming-architecture.md) and [/lib/streaming/README.md](../lib/streaming/README.md).
 
 ### Database Access
-RDS Data API with field transformation (snake_case ↔ camelCase). See [/lib/db/README.md](../lib/db/README.md) and [diagrams/04-database-erd.md](./diagrams/04-database-erd.md).
+Drizzle ORM with RDS Data API driver and circuit breaker. See [database/drizzle-patterns.md](./database/drizzle-patterns.md), [/lib/db/README.md](../lib/db/README.md), and [diagrams/04-database-erd.md](./diagrams/04-database-erd.md).
 
 ## 🔧 Common Tasks
 

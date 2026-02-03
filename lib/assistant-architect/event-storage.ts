@@ -7,10 +7,13 @@
  * @module lib/assistant-architect/event-storage
  */
 
-import { executeSQL } from '@/lib/db/data-api-adapter';
+import {
+  storeExecutionEvent as drizzleStoreEvent,
+  getExecutionEvents as drizzleGetEvents,
+  getExecutionEventsByType as drizzleGetEventsByType,
+} from '@/lib/db/drizzle';
 import type { SSEEventType, SSEEventMap } from '@/types/sse-events';
 import { createLogger } from '@/lib/logger';
-import { transformSnakeToCamel } from '@/lib/db/field-mapper';
 
 const log = createLogger({ module: 'event-storage' });
 
@@ -32,25 +35,7 @@ export async function storeExecutionEvent<K extends SSEEventType>(
   eventData: Omit<SSEEventMap[K], 'timestamp' | 'eventId'>
 ): Promise<void> {
   try {
-    // Add timestamp to event data
-    const fullEventData = {
-      ...eventData,
-      timestamp: new Date().toISOString()
-    };
-
-    await executeSQL(
-      `INSERT INTO assistant_architect_events (
-        execution_id, event_type, event_data
-      ) VALUES (
-        :executionId, :eventType::assistant_event_type, :eventData::jsonb
-      )`,
-      [
-        { name: 'executionId', value: { longValue: executionId } },
-        { name: 'eventType', value: { stringValue: eventType } },
-        { name: 'eventData', value: { stringValue: JSON.stringify(fullEventData) } }
-      ]
-    );
-
+    await drizzleStoreEvent(executionId, eventType, eventData);
     log.debug('Event stored', { executionId, eventType });
   } catch (error) {
     // Log error but don't throw - event storage shouldn't break execution
@@ -77,34 +62,7 @@ export async function getExecutionEvents(
   createdAt: string;
 }>> {
   try {
-    const results = await executeSQL<{
-      id: number;
-      event_type: string;
-      event_data: string;
-      created_at: string;
-    }>(
-      `SELECT id, event_type, event_data, created_at
-       FROM assistant_architect_events
-       WHERE execution_id = :executionId
-       ORDER BY created_at ASC`,
-      [{ name: 'executionId', value: { longValue: executionId } }]
-    );
-
-    return results.map(row => {
-      const transformed = transformSnakeToCamel<{
-        id: number;
-        eventType: string;
-        eventData: string;
-        createdAt: string;
-      }>(row);
-
-      return {
-        id: transformed.id,
-        eventType: transformed.eventType as SSEEventType,
-        eventData: JSON.parse(transformed.eventData) as SSEEventMap[SSEEventType],
-        createdAt: transformed.createdAt
-      };
-    });
+    return await drizzleGetEvents(executionId);
   } catch (error) {
     log.error('Failed to retrieve execution events', {
       error: error instanceof Error ? error.message : String(error),
@@ -130,35 +88,7 @@ export async function getExecutionEventsByType<K extends SSEEventType>(
   createdAt: string;
 }>> {
   try {
-    const results = await executeSQL<{
-      id: number;
-      event_data: string;
-      created_at: string;
-    }>(
-      `SELECT id, event_data, created_at
-       FROM assistant_architect_events
-       WHERE execution_id = :executionId
-         AND event_type = :eventType::assistant_event_type
-       ORDER BY created_at ASC`,
-      [
-        { name: 'executionId', value: { longValue: executionId } },
-        { name: 'eventType', value: { stringValue: eventType } }
-      ]
-    );
-
-    return results.map(row => {
-      const transformed = transformSnakeToCamel<{
-        id: number;
-        eventData: string;
-        createdAt: string;
-      }>(row);
-
-      return {
-        id: transformed.id,
-        eventData: JSON.parse(transformed.eventData) as SSEEventMap[K],
-        createdAt: transformed.createdAt
-      };
-    });
+    return await drizzleGetEventsByType(executionId, eventType);
   } catch (error) {
     log.error('Failed to retrieve execution events by type', {
       error: error instanceof Error ? error.message : String(error),

@@ -1,4 +1,5 @@
-import { executeSQL } from "@/lib/db/data-api-adapter"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { sql } from "drizzle-orm"
 import { generateEmbedding } from "@/lib/ai-helpers"
 
 export interface SearchResult {
@@ -33,50 +34,60 @@ export async function vectorSearch(
   // Build the SQL query using pgvector
   // Convert embedding array to pgvector format string: '[1,2,3]'
   const embeddingString = `[${queryEmbedding.join(',')}]`
-  
-  let sql = `
-    SELECT 
-      c.id as chunk_id,
-      c.item_id,
-      i.name as item_name,
-      c.content,
-      c.chunk_index,
-      c.metadata,
-      1 - (c.embedding <=> :queryVector::vector) as similarity
-    FROM repository_item_chunks c
-    JOIN repository_items i ON i.id = c.item_id
-    WHERE c.embedding IS NOT NULL
-  `
-  
-  const params = []
-  
-  if (repositoryId) {
-    sql += ' AND i.repository_id = :repositoryId'
-    params.push({ name: 'repositoryId', value: { longValue: repositoryId } })
-  }
-  
-  sql += `
-    AND 1 - (c.embedding <=> :queryVector::vector) >= :threshold
-    ORDER BY similarity DESC
-    LIMIT :limit
-  `
-  
-  params.push(
-    { name: 'queryVector', value: { stringValue: embeddingString } },
-    { name: 'threshold', value: { doubleValue: threshold } },
-    { name: 'limit', value: { longValue: limit } }
+
+  // Use Drizzle with raw SQL for pgvector operators
+  const results = await executeQuery(
+    (db) => {
+      if (repositoryId) {
+        return db.execute(sql`
+          SELECT
+            c.id as chunk_id,
+            c.item_id,
+            i.name as item_name,
+            c.content,
+            c.chunk_index,
+            c.metadata,
+            1 - (c.embedding <=> ${embeddingString}::vector) as similarity
+          FROM repository_item_chunks c
+          JOIN repository_items i ON i.id = c.item_id
+          WHERE c.embedding IS NOT NULL
+            AND i.repository_id = ${repositoryId}
+            AND 1 - (c.embedding <=> ${embeddingString}::vector) >= ${threshold}
+          ORDER BY similarity DESC
+          LIMIT ${limit}
+        `)
+      } else {
+        return db.execute(sql`
+          SELECT
+            c.id as chunk_id,
+            c.item_id,
+            i.name as item_name,
+            c.content,
+            c.chunk_index,
+            c.metadata,
+            1 - (c.embedding <=> ${embeddingString}::vector) as similarity
+          FROM repository_item_chunks c
+          JOIN repository_items i ON i.id = c.item_id
+          WHERE c.embedding IS NOT NULL
+            AND 1 - (c.embedding <=> ${embeddingString}::vector) >= ${threshold}
+          ORDER BY similarity DESC
+          LIMIT ${limit}
+        `)
+      }
+    },
+    "vectorSearch"
   )
-  
-  const results = await executeSQL(sql, params)
-  
-  return results.map(row => ({
-    chunkId: Number(row.chunkId) || 0,
-    itemId: Number(row.itemId) || 0,
-    itemName: String(row.itemName || ''),
+
+  // postgres.js returns result directly as array-like object (no .rows property)
+  const rows = results as unknown as Array<Record<string, unknown>>
+  return rows.map((row) => ({
+    chunkId: Number(row.chunk_id) || 0,
+    itemId: Number(row.item_id) || 0,
+    itemName: String(row.item_name || ''),
     content: String(row.content || ''),
     similarity: Number(row.similarity) || 0,
-    chunkIndex: Number(row.chunkIndex) || 0,
-    metadata: row.metadata ? JSON.parse(row.metadata as string) : {}
+    chunkIndex: Number(row.chunk_index) || 0,
+    metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata as Record<string, unknown> || {})
   }))
 }
 
@@ -88,43 +99,58 @@ export async function keywordSearch(
   options: SearchOptions = {}
 ): Promise<SearchResult[]> {
   const { limit = 10, repositoryId } = options
-  
-  const sql = `
-    SELECT 
-      c.id as chunk_id,
-      c.item_id,
-      i.name as item_name,
-      c.content,
-      c.chunk_index,
-      c.metadata,
-      ts_rank(to_tsvector('english', c.content), plainto_tsquery('english', :query)) as rank
-    FROM repository_item_chunks c
-    JOIN repository_items i ON i.id = c.item_id
-    WHERE to_tsvector('english', c.content) @@ plainto_tsquery('english', :query)
-      ${repositoryId ? 'AND i.repository_id = :repositoryId' : ''}
-    ORDER BY rank DESC
-    LIMIT :limit
-  `
-  
-  const params = [
-    { name: 'query', value: { stringValue: query } },
-    { name: 'limit', value: { longValue: limit } }
-  ]
-  
-  if (repositoryId) {
-    params.push({ name: 'repositoryId', value: { longValue: repositoryId } })
-  }
-  
-  const results = await executeSQL(sql, params)
-  
-  return results.map(row => ({
-    chunkId: Number(row.chunkId) || 0,
-    itemId: Number(row.itemId) || 0,
-    itemName: String(row.itemName || ''),
+
+  // Use Drizzle with raw SQL for full-text search operators
+  const results = await executeQuery(
+    (db) => {
+      if (repositoryId) {
+        return db.execute(sql`
+          SELECT
+            c.id as chunk_id,
+            c.item_id,
+            i.name as item_name,
+            c.content,
+            c.chunk_index,
+            c.metadata,
+            ts_rank(to_tsvector('english', c.content), plainto_tsquery('english', ${query})) as rank
+          FROM repository_item_chunks c
+          JOIN repository_items i ON i.id = c.item_id
+          WHERE to_tsvector('english', c.content) @@ plainto_tsquery('english', ${query})
+            AND i.repository_id = ${repositoryId}
+          ORDER BY rank DESC
+          LIMIT ${limit}
+        `)
+      } else {
+        return db.execute(sql`
+          SELECT
+            c.id as chunk_id,
+            c.item_id,
+            i.name as item_name,
+            c.content,
+            c.chunk_index,
+            c.metadata,
+            ts_rank(to_tsvector('english', c.content), plainto_tsquery('english', ${query})) as rank
+          FROM repository_item_chunks c
+          JOIN repository_items i ON i.id = c.item_id
+          WHERE to_tsvector('english', c.content) @@ plainto_tsquery('english', ${query})
+          ORDER BY rank DESC
+          LIMIT ${limit}
+        `)
+      }
+    },
+    "keywordSearch"
+  )
+
+  // postgres.js returns result directly as array-like object (no .rows property)
+  const rows = results as unknown as Array<Record<string, unknown>>
+  return rows.map((row) => ({
+    chunkId: Number(row.chunk_id) || 0,
+    itemId: Number(row.item_id) || 0,
+    itemName: String(row.item_name || ''),
     content: String(row.content || ''),
     similarity: Number(row.rank) || 0, // Use rank as similarity score
-    chunkIndex: Number(row.chunkIndex) || 0,
-    metadata: row.metadata ? JSON.parse(row.metadata as string) : {}
+    chunkIndex: Number(row.chunk_index) || 0,
+    metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : (row.metadata as Record<string, unknown> || {})
   }))
 }
 
@@ -184,19 +210,21 @@ export async function getChunkContext(
   chunkIndex: number,
   contextSize: number = 1
 ): Promise<string> {
-  const sql = `
-    SELECT content
-    FROM repository_item_chunks
-    WHERE item_id = :itemId
-      AND chunk_index BETWEEN :startIndex AND :endIndex
-    ORDER BY chunk_index
-  `
-  
-  const results = await executeSQL(sql, [
-    { name: 'itemId', value: { longValue: itemId } },
-    { name: 'startIndex', value: { longValue: Math.max(0, chunkIndex - contextSize) } },
-    { name: 'endIndex', value: { longValue: chunkIndex + contextSize } }
-  ])
-  
-  return results.map(row => row.content).join('\n\n')
+  const startIndex = Math.max(0, chunkIndex - contextSize)
+  const endIndex = chunkIndex + contextSize
+
+  const results = await executeQuery(
+    (db) => db.execute(sql`
+      SELECT content
+      FROM repository_item_chunks
+      WHERE item_id = ${itemId}
+        AND chunk_index BETWEEN ${startIndex} AND ${endIndex}
+      ORDER BY chunk_index
+    `),
+    "getChunkContext"
+  )
+
+  // postgres.js returns result directly as array-like object (no .rows property)
+  const rows = results as unknown as Array<{ content: string }>
+  return rows.map(row => row.content).join('\n\n')
 }

@@ -1,20 +1,21 @@
 import { NextResponse } from 'next/server';
-import { getAIModels, createAIModel, updateAIModel, deleteAIModel, getRoles } from '@/lib/db/data-api-adapter';
+import { getAIModels, createAIModel, updateAIModel, deleteAIModel, getRoles } from '@/lib/db/drizzle';
 import { requireAdmin } from '@/lib/auth/admin-check';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+import { normalizeBoolean } from '@/lib/validations/api-schemas';
 
 /**
  * Validate and sanitize allowedRoles field
  * @param allowedRoles - The roles to validate (can be string or array)
  * @param log - Logger instance for warnings
- * @returns Validated JSON string of roles or null
+ * @returns Validated array of role names or null (Drizzle handles serialization)
  */
 async function validateAllowedRoles(
-  allowedRoles: unknown, 
+  allowedRoles: unknown,
   log: ReturnType<typeof createLogger>
-): Promise<string | null> {
+): Promise<string[] | null> {
   if (!allowedRoles) return null;
-  
+
   try {
     // Parse if string
     let roles: unknown;
@@ -29,36 +30,36 @@ async function validateAllowedRoles(
     } else {
       roles = allowedRoles;
     }
-    
+
     // Validate it's an array of strings
     if (!Array.isArray(roles)) {
       log.warn('Invalid allowedRoles format - not an array', { allowedRoles });
       return null;
     }
-    
+
     const validRoles = roles.filter(r => typeof r === 'string' && r.trim().length > 0);
-    
+
     if (validRoles.length === 0) {
       return null;
     }
-    
+
     // Validate against existing roles in the system
     const existingRoles = await getRoles();
     const existingRoleNames = existingRoles.map(r => r.name);
     const filteredRoles = validRoles.filter(r => existingRoleNames.includes(r));
-    
+
     if (filteredRoles.length !== validRoles.length) {
       const invalidRoles = validRoles.filter(r => !existingRoleNames.includes(r));
-      log.warn('Some roles do not exist in the system', { 
+      log.warn('Some roles do not exist in the system', {
         invalidRoles,
-        validRoles: filteredRoles 
+        validRoles: filteredRoles
       });
     }
-    
-    // Return validated roles as JSON string
-    return filteredRoles.length > 0 ? JSON.stringify(filteredRoles) : null;
+
+    // Return validated roles as array - Drizzle handles serialization
+    return filteredRoles.length > 0 ? filteredRoles : null;
   } catch (error) {
-    log.warn('Failed to validate allowedRoles', { 
+    log.warn('Failed to validate allowedRoles', {
       allowedRoles,
       error: error instanceof Error ? error.message : 'Unknown error'
     });
@@ -179,9 +180,37 @@ export async function POST(request: Request) {
     }
 
     const body = await request.json();
-    
+
+    // Validate required fields
+    if (!body.name?.trim()) {
+      log.warn("Model creation failed - missing name");
+      timer({ status: "error", reason: "validation" });
+      return NextResponse.json(
+        { isSuccess: false, message: "Model name is required" },
+        { status: 400 }
+      );
+    }
+
+    if (!body.modelId?.trim()) {
+      log.warn("Model creation failed - missing modelId");
+      timer({ status: "error", reason: "validation" });
+      return NextResponse.json(
+        { isSuccess: false, message: "Model ID is required" },
+        { status: 400 }
+      );
+    }
+
+    if (!body.provider) {
+      log.warn("Model creation failed - missing provider");
+      timer({ status: "error", reason: "validation" });
+      return NextResponse.json(
+        { isSuccess: false, message: "Provider is required" },
+        { status: 400 }
+      );
+    }
+
     log.debug("Creating model", { modelName: body.name, provider: body.provider });
-    
+
     // Validate and sanitize capabilities and allowedRoles
     const validatedCapabilities = validateCapabilities(body.capabilities, log);
     const validatedAllowedRoles = await validateAllowedRoles(body.allowedRoles, log);
@@ -194,8 +223,9 @@ export async function POST(request: Request) {
       capabilities: validatedCapabilities || undefined,
       allowedRoles: validatedAllowedRoles || undefined,
       maxTokens: body.maxTokens ? Number.parseInt(body.maxTokens) : undefined,
-      isActive: body.active ?? true,
-      chatEnabled: body.chatEnabled ?? false,
+      active: body.active ?? true,
+      nexusEnabled: body.nexusEnabled ?? true,
+      architectEnabled: body.architectEnabled ?? true,
       // Pricing fields
       inputCostPer1kTokens: body.inputCostPer1kTokens || undefined,
       outputCostPer1kTokens: body.outputCostPer1kTokens || undefined,
@@ -205,8 +235,7 @@ export async function POST(request: Request) {
       averageLatencyMs: body.averageLatencyMs || undefined,
       maxConcurrency: body.maxConcurrency || undefined,
       supportsBatching: body.supportsBatching ?? undefined,
-      // JSONB fields - these are already objects from the frontend
-      nexusCapabilities: body.nexusCapabilities || undefined,
+      // JSONB fields - providerMetadata only (nexusCapabilities removed in #594)
       providerMetadata: body.providerMetadata || undefined
     };
 
@@ -269,14 +298,20 @@ export async function PUT(request: Request) {
       updates.maxTokens = updates.maxTokens ? Number.parseInt(updates.maxTokens) : null;
     }
 
-    // Handle JSONB fields - stringify if they're objects
-    if (updates.nexusCapabilities && typeof updates.nexusCapabilities === 'object') {
-      updates.nexusCapabilities = JSON.stringify(updates.nexusCapabilities);
+    // Handle boolean fields - ensure proper type (frontend may send as string)
+    // Uses normalizeBoolean utility to handle "false", "0", 0, false correctly
+    if ('active' in updates) {
+      updates.active = normalizeBoolean(updates.active);
     }
-    
-    if (updates.providerMetadata && typeof updates.providerMetadata === 'object') {
-      updates.providerMetadata = JSON.stringify(updates.providerMetadata);
+    if ('nexusEnabled' in updates) {
+      updates.nexusEnabled = normalizeBoolean(updates.nexusEnabled);
     }
+    if ('architectEnabled' in updates) {
+      updates.architectEnabled = normalizeBoolean(updates.architectEnabled);
+    }
+
+    // JSONB fields - pass as objects, Drizzle serializes automatically via .$type<T>()
+    // No manual JSON.stringify needed - consistent with POST handler
 
     // Handle Date fields
     if (updates.pricingUpdatedAt && updates.pricingUpdatedAt instanceof Date) {

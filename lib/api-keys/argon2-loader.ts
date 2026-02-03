@@ -1,0 +1,85 @@
+/**
+ * Argon2 Loader for Next.js with Turbopack
+ *
+ * Problem: argon2 is a native C++ addon that Turbopack cannot resolve at
+ * compile time — not via static import, dynamic import(), webpackIgnore,
+ * or require() with a literal string.
+ *
+ * Solution: Use createRequire anchored to process.cwd() (the real app root)
+ * rather than __filename, which Turbopack rewrites to a virtual "/ROOT/..."
+ * path that breaks module resolution.
+ *
+ * This file is server-only — never imported by client components.
+ */
+
+import { createRequire } from "node:module";
+import * as path from "node:path";
+
+// ============================================
+// Types
+// ============================================
+
+interface Argon2Module {
+  hash(password: string, options?: {
+    type?: number;
+    memoryCost?: number;
+    timeCost?: number;
+    parallelism?: number;
+    hashLength?: number;
+  }): Promise<string>;
+  verify(hash: string, password: string): Promise<boolean>;
+  argon2id: number;
+}
+
+let argon2Module: Argon2Module | null = null;
+
+// Module name stored in a variable to prevent Turbopack static analysis
+const ARGON2_MODULE = "argon2";
+
+/**
+ * Lazy-load argon2 at runtime using createRequire anchored to the real
+ * project root (process.cwd()), bypassing Turbopack's virtual __filename.
+ */
+function getArgon2(): Argon2Module {
+  if (argon2Module) return argon2Module;
+
+  const realEntry = path.join(process.cwd(), "node_modules", ".package-lock.json");
+  const dynamicRequire = createRequire(realEntry);
+  argon2Module = dynamicRequire(ARGON2_MODULE) as Argon2Module;
+  return argon2Module;
+}
+
+/**
+ * Hash a string using Argon2id with secure defaults.
+ *
+ * Configuration:
+ * - memoryCost: 65536 (64 MB) - prevents GPU attacks
+ * - timeCost: 3 iterations - balances security and performance
+ * - parallelism: 4 threads - leverages multi-core CPUs
+ * - hashLength: 32 bytes (256 bits)
+ *
+ * Output: ~97 char encoded string ($argon2id$v=19$m=...$salt$hash)
+ */
+export async function hashArgon2(input: string): Promise<string> {
+  const argon2 = getArgon2();
+  return await argon2.hash(input, {
+    type: argon2.argon2id,
+    memoryCost: 65536,
+    timeCost: 3,
+    parallelism: 4,
+    hashLength: 32,
+  });
+}
+
+/**
+ * Verify a string against an Argon2id hash.
+ * Uses Argon2's built-in constant-time comparison.
+ */
+export async function verifyArgon2(hash: string, input: string): Promise<boolean> {
+  try {
+    const argon2 = getArgon2();
+    return await argon2.verify(hash, input);
+  } catch {
+    return false;
+  }
+}

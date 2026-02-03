@@ -1,6 +1,6 @@
 'use client'
 
-import { type PropsWithChildren, useState } from 'react'
+import { type PropsWithChildren, useState, useMemo, useCallback } from 'react'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { ChevronDown, ChevronUp, Search, Loader2 } from 'lucide-react'
@@ -11,21 +11,55 @@ interface ToolGroupProps {
   endIndex: number
 }
 
+// Tools that should render directly without the collapsible wrapper
+const DIRECT_RENDER_TOOLS = [
+  'show_chart',
+  'search_graph_nodes',
+  'propose_decision',
+  'commit_decision',
+]
+
 /**
  * ToolGroup component for consolidating multiple consecutive tool calls
  * Automatically used by assistant-ui when consecutive tool calls are detected
+ *
+ * Behavior:
+ * - Charts (show_chart): Render directly without wrapper
+ * - Web searches: Render in collapsible "Web Searches" card
+ * - Other tools: Render directly without wrapper
  */
 export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<ToolGroupProps>) {
   const [isExpanded, setIsExpanded] = useState(false)
   const message = useMessage()
 
-  // Check if ANY tool in this group is still running (no result yet)
-  const isSearching = message.content
-    .slice(startIndex, endIndex + 1)
-    .some(part =>
-      part.type === 'tool-call' &&
-      ('result' in part && part.result === undefined)
+  // Memoized toggle handler to avoid creating new function on each render
+  const toggleExpanded = useCallback(() => {
+    setIsExpanded(prev => !prev)
+  }, [])
+
+  // Get all tool calls in this group
+  const toolCalls = useMemo(() => {
+    return message.content
+      .slice(startIndex, endIndex + 1)
+      .filter(part => part.type === 'tool-call')
+  }, [message.content, startIndex, endIndex])
+
+  // If this group contains ONLY direct-render tools (like charts), render children directly
+  const allDirectRender = useMemo(() => {
+    return toolCalls.every(part =>
+      'toolName' in part && DIRECT_RENDER_TOOLS.includes(part.toolName as string)
     )
+  }, [toolCalls])
+
+  if (allDirectRender) {
+    // Render charts and similar tools directly without any wrapper
+    return <div className="space-y-4">{children}</div>
+  }
+
+  // For web searches and mixed groups, use the collapsible card
+  const isSearching = toolCalls.some(part =>
+    'result' in part && part.result === undefined
+  )
 
   const toolCount = endIndex - startIndex + 1
 
@@ -51,7 +85,7 @@ export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setIsExpanded(!isExpanded)}
+            onClick={toggleExpanded}
             className="h-8 text-blue-700 hover:text-blue-900 hover:bg-blue-100"
           >
             {isExpanded ? (

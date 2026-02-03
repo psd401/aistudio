@@ -69,8 +69,8 @@ describe('S3 Upload API Integration Tests', () => {
       mockGetCurrentUserAction.mockResolvedValue({
         isSuccess: true,
         message: 'Success',
-        data: { 
-          user: { id: 123, email: 'test@example.com', cognitoSub: 'test-sub-123', firstName: 'Test', lastName: 'User', lastSignInAt: new Date(), createdAt: new Date(), updatedAt: new Date() },
+        data: {
+          user: { id: 123, email: 'test@example.com', cognitoSub: 'test-sub-123', firstName: 'Test', lastName: 'User', lastSignInAt: new Date(), createdAt: new Date(), updatedAt: new Date(), oldClerkId: null, roleVersion: null, jobTitle: null, department: null, building: null, gradeLevels: null, bio: null, profile: null },
           roles: [{ id: 1, name: 'student', description: 'Student role' }]
         }
       })
@@ -121,8 +121,8 @@ describe('S3 Upload API Integration Tests', () => {
       mockGetCurrentUserAction.mockResolvedValue({
         isSuccess: true,
         message: 'Success',
-        data: { 
-          user: { id: 123, email: 'test@example.com', cognitoSub: 'test-sub-123', firstName: 'Test', lastName: 'User', lastSignInAt: new Date(), createdAt: new Date(), updatedAt: new Date() },
+        data: {
+          user: { id: 123, email: 'test@example.com', cognitoSub: 'test-sub-123', firstName: 'Test', lastName: 'User', lastSignInAt: new Date(), createdAt: new Date(), updatedAt: new Date(), oldClerkId: null, roleVersion: null, jobTitle: null, department: null, building: null, gradeLevels: null, bio: null, profile: null },
           roles: [{ id: 1, name: 'student', description: 'Student role' }]
         }
       })
@@ -163,8 +163,8 @@ describe('S3 Upload API Integration Tests', () => {
       mockGetCurrentUserAction.mockResolvedValue({
         isSuccess: true,
         message: 'Success',
-        data: { 
-          user: { id: 123, email: 'test@example.com', cognitoSub: 'test-sub-123', firstName: 'Test', lastName: 'User', lastSignInAt: new Date(), createdAt: new Date(), updatedAt: new Date() },
+        data: {
+          user: { id: 123, email: 'test@example.com', cognitoSub: 'test-sub-123', firstName: 'Test', lastName: 'User', lastSignInAt: new Date(), createdAt: new Date(), updatedAt: new Date(), oldClerkId: null, roleVersion: null, jobTitle: null, department: null, building: null, gradeLevels: null, bio: null, profile: null },
           roles: [{ id: 1, name: 'student', description: 'Student role' }]
         }
       })
@@ -197,11 +197,12 @@ describe('S3 Upload API Integration Tests', () => {
         userId: 123,
         conversationId: null,
         metadata: {},
-        createdAt: new Date()
+        createdAt: new Date(),
+        updatedAt: new Date()
       })
       mockBatchInsertDocumentChunks.mockResolvedValue([
-        { id: 1, documentId: 456, content: 'chunk1', chunkIndex: 0, metadata: {}, createdAt: new Date() },
-        { id: 2, documentId: 456, content: 'chunk2', chunkIndex: 1, metadata: {}, createdAt: new Date() }
+        { id: 1, documentId: 456, content: 'chunk1', chunkIndex: 0, metadata: {}, createdAt: new Date(), updatedAt: new Date(), embedding: null, pageNumber: null },
+        { id: 2, documentId: 456, content: 'chunk2', chunkIndex: 1, metadata: {}, createdAt: new Date(), updatedAt: new Date(), embedding: null, pageNumber: null }
       ])
 
       // Create request
@@ -248,8 +249,8 @@ describe('S3 Upload API Integration Tests', () => {
       mockGetCurrentUserAction.mockResolvedValue({
         isSuccess: true,
         message: 'Success',
-        data: { 
-          user: { id: 123, email: 'test@example.com', cognitoSub: 'test-sub-123', firstName: 'Test', lastName: 'User', lastSignInAt: new Date(), createdAt: new Date(), updatedAt: new Date() },
+        data: {
+          user: { id: 123, email: 'test@example.com', cognitoSub: 'test-sub-123', firstName: 'Test', lastName: 'User', lastSignInAt: new Date(), createdAt: new Date(), updatedAt: new Date(), oldClerkId: null, roleVersion: null, jobTitle: null, department: null, building: null, gradeLevels: null, bio: null, profile: null },
           roles: [{ id: 1, name: 'student', description: 'Student role' }]
         }
       })
@@ -290,8 +291,8 @@ describe('S3 Upload API Integration Tests', () => {
       mockGetCurrentUserAction.mockResolvedValue({
         isSuccess: true,
         message: 'Success',
-        data: { 
-          user: { id: 123, email: 'test@example.com', cognitoSub: 'test-sub-123', firstName: 'Test', lastName: 'User', lastSignInAt: new Date(), createdAt: new Date(), updatedAt: new Date() },
+        data: {
+          user: { id: 123, email: 'test@example.com', cognitoSub: 'test-sub-123', firstName: 'Test', lastName: 'User', lastSignInAt: new Date(), createdAt: new Date(), updatedAt: new Date(), oldClerkId: null, roleVersion: null, jobTitle: null, department: null, building: null, gradeLevels: null, bio: null, profile: null },
           roles: [{ id: 1, name: 'student', description: 'Student role' }]
         }
       })

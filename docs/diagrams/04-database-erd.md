@@ -67,12 +67,18 @@ erDiagram
         text model_id UK
         text capabilities
         int max_tokens
-        boolean chat_enabled
+        boolean active
+        boolean nexus_enabled
+        boolean architect_enabled
         jsonb allowed_roles
         numeric input_cost_per_1k_tokens
         numeric output_cost_per_1k_tokens
+        numeric cached_input_cost_per_1k_tokens
+        timestamp pricing_updated_at
         int average_latency_ms
-        jsonb nexus_capabilities
+        int max_concurrency
+        boolean supports_batching
+        jsonb provider_metadata
     }
 
     model_comparisons {

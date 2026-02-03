@@ -9,7 +9,7 @@ import {
   type RepositoryWithOwner 
 } from "@/actions/admin/repositories.actions"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { Card, CardContent } from "@/components/ui/card"
 import {
   Table,
   TableBody,
@@ -36,6 +36,7 @@ import {
   Package
 } from "lucide-react"
 import { useToast } from "@/components/ui/use-toast"
+import { PageBranding } from "@/components/ui/page-branding"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -107,11 +108,15 @@ export function RepositoriesAdminClient() {
 
   return (
     <>
+      <div className="mb-6">
+        <PageBranding />
+        <h1 className="text-2xl font-semibold text-gray-900">Repository Management</h1>
+        <p className="text-sm text-muted-foreground mt-1">
+          View and manage all knowledge repositories across the platform
+        </p>
+      </div>
       <Card>
-        <CardHeader>
-          <CardTitle>Repository Management</CardTitle>
-        </CardHeader>
-        <CardContent>
+        <CardContent className="pt-6">
           <div className="rounded-md border">
             <Table>
               <TableHeader>

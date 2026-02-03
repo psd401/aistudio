@@ -8,8 +8,8 @@ import { useSession } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
 import { useEffect, useMemo, useCallback, useState, useRef, Suspense } from 'react'
 import { NexusShell } from './_components/layout/nexus-shell'
+import { NexusLayout } from './_components/layout/nexus-layout'
 import { ErrorBoundary } from './_components/error-boundary'
-import { ConversationPanel } from './_components/conversation-panel'
 import { PromptAutoLoader } from './_components/prompt-auto-loader'
 import { useConversationContext, createNexusHistoryAdapter } from '@/lib/nexus/history-adapter'
 import { MultiProviderToolUIs } from './_components/tools/multi-provider-tools'
@@ -18,8 +18,87 @@ import { createEnhancedNexusAttachmentAdapter } from '@/lib/nexus/enhanced-attac
 import { validateConversationId } from '@/lib/nexus/conversation-navigation'
 import type { SelectAiModel } from '@/types'
 import { createLogger } from '@/lib/client-logger'
+import { toast } from 'sonner'
 
 const log = createLogger({ moduleName: 'nexus-page' })
+
+// Loading spinner component for Suspense fallback
+function NexusLoadingSpinner() {
+  return (
+    <div className="flex h-screen items-center justify-center">
+      <div className="text-center">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent mx-auto mb-4" />
+        <div className="text-lg text-muted-foreground">Loading Nexus...</div>
+      </div>
+    </div>
+  )
+}
+
+// Pre-rendered loading spinner to avoid JSX-as-prop lint warning
+const NEXUS_LOADING_FALLBACK = <NexusLoadingSpinner />
+
+// UIMessage part types for AI SDK v5
+// Static tool format: type is 'tool-{toolName}' (e.g., 'tool-show_chart')
+// AISDKMessageConverter extracts toolName via type.replace("tool-", "")
+type TextPart = { type: 'text'; text: string }
+type StaticToolPart = {
+  type: string;  // 'tool-{toolName}' format
+  toolCallId: string;
+  state: 'output-available' | 'output-error' | 'input-available';
+  input: Record<string, unknown>;
+  output?: unknown;
+  errorText?: string;
+}
+type UIMessagePart = TextPart | StaticToolPart
+
+// Helper to convert content parts to UIMessage parts format
+// Converts tool-call to static tool format (type: 'tool-{toolName}')
+function convertContentToParts(
+  content?: Array<{ type: string; text?: string; [key: string]: unknown }> | string
+): UIMessagePart[] {
+  if (Array.isArray(content)) {
+    const parts: UIMessagePart[] = []
+
+    for (const part of content) {
+      // Convert tool-call to static tool format for AISDKMessageConverter
+      // type: 'tool-{toolName}' -> converter extracts toolName via type.replace("tool-", "")
+      if (part.type === 'tool-call' && part.toolName && part.toolCallId) {
+        const toolName = part.toolName as string
+        const args = (part.args as Record<string, unknown>) || {}
+        const hasResult = part.result !== undefined
+        const isError = part.isError === true
+
+        const toolPart: StaticToolPart = {
+          type: `tool-${toolName}`,  // e.g., 'tool-show_chart'
+          toolCallId: part.toolCallId as string,
+          state: isError ? 'output-error' : hasResult ? 'output-available' : 'input-available',
+          input: args,
+        }
+
+        if (hasResult && !isError) {
+          toolPart.output = part.result
+        }
+        if (isError) {
+          toolPart.errorText = typeof part.result === 'string' ? part.result : JSON.stringify(part.result)
+        }
+
+        parts.push(toolPart)
+      } else {
+        // Convert text parts
+        parts.push({
+          type: 'text',
+          text: part.text || ''
+        })
+      }
+    }
+
+    return parts
+  }
+  if (typeof content === 'string') {
+    return [{ type: 'text', text: content }]
+  }
+  return [{ type: 'text', text: '' }]
+}
 
 // Stable ConversationRuntime component using official AI SDK runtime
 interface ConversationRuntimeProviderProps {
@@ -60,8 +139,29 @@ function ConversationRuntimeProvider({
   }, [conversationId])
 
   // Custom fetch to intercept X-Conversation-Id header for conversation continuity
+  // and handle content safety blocked errors with user-friendly messages
   const customFetch = useCallback(async (input: RequestInfo | URL, init?: RequestInit) => {
     const response = await fetch(input, init)
+
+    // Handle content safety blocked errors (400 with CONTENT_BLOCKED code)
+    if (response.status === 400) {
+      try {
+        // Clone response to read body without consuming it
+        const clonedResponse = response.clone()
+        const errorData = await clonedResponse.json()
+        if (errorData.code === 'CONTENT_BLOCKED') {
+          // Show user-friendly toast notification
+          toast.error('Content Blocked', {
+            description: errorData.error || 'This content is not appropriate for educational use.',
+            duration: 6000
+          })
+          log.warn('Content blocked by safety guardrails', { error: errorData.error })
+        }
+      } catch {
+        // If we can't parse the error, let the default error handling occur
+        log.debug('Could not parse error response as JSON')
+      }
+    }
 
     // Extract conversation ID from response header (new conversations only)
     const newConversationId = response.headers.get('X-Conversation-Id')
@@ -152,14 +252,7 @@ function ConversationInitializer({
         }) => ({
           id: msg.id,
           role: msg.role,
-          parts: Array.isArray(msg.content)
-            ? msg.content.map(part => ({
-                type: part.type as 'text',
-                text: part.text || ''
-              }))
-            : typeof msg.content === 'string'
-            ? [{ type: 'text' as const, text: msg.content }]
-            : [{ type: 'text' as const, text: '' }]
+          parts: convertContentToParts(msg.content)
         }))
 
         setMessages(threadMessages)
@@ -339,50 +432,51 @@ function NexusPageContent() {
 
   return (
     <ErrorBoundary>
-      <NexusShell
-        selectedModel={selectedModel}
-        onModelChange={setSelectedModel}
-        models={models}
-        isLoadingModels={isLoadingModels}
-        enabledTools={enabledTools}
-        onToolsChange={onToolsChange}
-      >
-        <div className="relative h-full">
-          {selectedModel ? (
-            <ConversationInitializer conversationId={stableConversationId}>
-              {(initialMessages) => (
-                <ConversationRuntimeProvider
-                  conversationId={conversationId}
-                  selectedModel={selectedModel}
-                  enabledTools={enabledTools}
-                  attachmentAdapter={attachmentAdapter}
-                  initialMessages={initialMessages}
-                  onConversationIdChange={handleConversationIdChange}
-                >
-                  {/* Register tool UI components for all providers */}
-                  <MultiProviderToolUIs />
+      <NexusLayout conversationId={conversationId}>
+        <NexusShell>
+          <div className="relative h-full">
+            {selectedModel ? (
+              <ConversationInitializer conversationId={stableConversationId}>
+                {(initialMessages) => (
+                  <ConversationRuntimeProvider
+                    conversationId={conversationId}
+                    selectedModel={selectedModel}
+                    enabledTools={enabledTools}
+                    attachmentAdapter={attachmentAdapter}
+                    initialMessages={initialMessages}
+                    onConversationIdChange={handleConversationIdChange}
+                  >
+                    {/* Register tool UI components for all providers */}
+                    <MultiProviderToolUIs />
 
-                  {/* Auto-load prompts from Prompt Library */}
-                  <PromptAutoLoader />
+                    {/* Auto-load prompts from Prompt Library */}
+                    <PromptAutoLoader />
 
-                  <div className="flex h-full flex-col">
-                    <Thread processingAttachments={processingAttachments} conversationId={conversationId} />
-                  </div>
-                  <ConversationPanel
-                    selectedConversationId={conversationId}
-                  />
-                </ConversationRuntimeProvider>
-              )}
-            </ConversationInitializer>
-          ) : (
-            <div className="flex h-full items-center justify-center">
-              <div className="text-center">
-                <div className="text-lg text-muted-foreground">Please select a model to start chatting</div>
+                    <div className="flex h-full flex-col">
+                      <Thread
+                        processingAttachments={processingAttachments}
+                        conversationId={conversationId}
+                        models={models}
+                        selectedModel={selectedModel}
+                        onModelChange={setSelectedModel}
+                        isLoadingModels={isLoadingModels}
+                        enabledTools={enabledTools}
+                        onToolsChange={onToolsChange}
+                      />
+                    </div>
+                  </ConversationRuntimeProvider>
+                )}
+              </ConversationInitializer>
+            ) : (
+              <div className="flex h-full items-center justify-center">
+                <div className="text-center">
+                  <div className="text-lg text-muted-foreground">Please select a model to start chatting</div>
+                </div>
               </div>
-            </div>
-          )}
-        </div>
-      </NexusShell>
+            )}
+          </div>
+        </NexusShell>
+      </NexusLayout>
     </ErrorBoundary>
   )
 }
@@ -390,14 +484,7 @@ function NexusPageContent() {
 // Main component with Suspense boundary for useSearchParams
 export default function NexusPage() {
   return (
-    <Suspense fallback={
-      <div className="flex h-screen items-center justify-center">
-        <div className="text-center">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-primary border-t-transparent mx-auto mb-4" />
-          <div className="text-lg text-muted-foreground">Loading Nexus...</div>
-        </div>
-      </div>
-    }>
+    <Suspense fallback={NEXUS_LOADING_FALLBACK}>
       <NexusPageContent />
     </Suspense>
   )

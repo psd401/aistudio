@@ -1,7 +1,6 @@
 "use server"
 
-import { executeSQL, createParameter, hasToolAccess } from "@/lib/db/data-api-adapter"
-import { transformSnakeToCamel } from "@/lib/db/field-mapper"
+import { hasToolAccess } from "@/lib/db/drizzle"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
 import { getServerSession } from "@/lib/auth/server-session"
@@ -17,7 +16,17 @@ import {
   ScheduleState
 } from "@aws-sdk/client-scheduler"
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda"
-import type { SqlParameter } from "@aws-sdk/client-rds-data"
+// Drizzle ORM operations
+import {
+  getScheduleByIdForUser,
+  getSchedulesByUserId,
+  checkAssistantArchitectOwnership,
+  createSchedule as drizzleCreateSchedule,
+  updateSchedule as drizzleUpdateSchedule,
+  deleteSchedule as drizzleDeleteSchedule,
+  getScheduleUserIdByCognitoSub,
+  type ScheduleConfig as DrizzleScheduleConfig,
+} from "@/lib/db/drizzle"
 
 // Types for Schedule Management
 export interface ScheduleConfig {
@@ -669,28 +678,18 @@ export async function createScheduleAction(params: CreateScheduleRequest): Promi
     }
     log.info("Input data validation passed")
 
-    // Get user ID from sub
-    const userResult = await executeSQL<{ id: number }>(`
-      SELECT id FROM users WHERE cognito_sub = :cognitoSub
-    `, [createParameter('cognitoSub', session.sub)])
+    // Get user ID from sub using Drizzle
+    const userId = await getScheduleUserIdByCognitoSub(session.sub)
 
-    if (!userResult || userResult.length === 0) {
+    if (!userId) {
       log.warn("User not found")
       throw ErrorFactories.authzResourceNotFound("user", session.sub)
     }
 
-    const userId = userResult[0].id
+    // Check if assistant architect exists and user has access using Drizzle
+    const hasArchitectAccess = await checkAssistantArchitectOwnership(cleanArchitectId, userId)
 
-    // Check if assistant architect exists and user has access
-    const architectResult = await executeSQL<{ id: number; name: string }>(`
-      SELECT id, name FROM assistant_architects
-      WHERE id = :architectId AND user_id = :userId
-    `, [
-      createParameter('architectId', cleanArchitectId),
-      createParameter('userId', userId)
-    ])
-
-    if (!architectResult || architectResult.length === 0) {
+    if (!hasArchitectAccess) {
       log.warn("Assistant architect not found or no access")
       throw ErrorFactories.authzInsufficientPermissions("assistant architect")
     }
@@ -699,27 +698,21 @@ export async function createScheduleAction(params: CreateScheduleRequest): Promi
 
     // Note: Duplicate name check removed - users can have multiple schedules with the same name
 
-    // Create the schedule
-    const result = await executeSQL<{ id: number }>(`
-      INSERT INTO scheduled_executions (
-        user_id, assistant_architect_id, name, schedule_config, input_data, updated_by
-      ) VALUES (
-        :userId, :assistantArchitectId, :name, :scheduleConfig::jsonb, :inputData::jsonb, :updatedBy
-      ) RETURNING id
-    `, [
-      createParameter('userId', userId),
-      createParameter('assistantArchitectId', cleanArchitectId),
-      createParameter('name', sanitizedName),
-      createParameter('scheduleConfig', JSON.stringify(scheduleConfig)),
-      createParameter('inputData', JSON.stringify(inputData)),
-      createParameter('updatedBy', session.sub)
-    ])
+    // Create the schedule using Drizzle
+    const createdSchedule = await drizzleCreateSchedule({
+      userId,
+      assistantArchitectId: cleanArchitectId,
+      name: sanitizedName,
+      scheduleConfig: scheduleConfig as DrizzleScheduleConfig,
+      inputData: inputData as Record<string, string>,
+      updatedBy: session.sub,
+    })
 
-    if (!result || result.length === 0) {
+    if (!createdSchedule) {
       throw ErrorFactories.dbQueryFailed("INSERT INTO scheduled_executions", new Error("Failed to create schedule"))
     }
 
-    const scheduleId = result[0].id
+    const scheduleId = createdSchedule.id
 
     // Try to create EventBridge schedule
     let scheduleArn: string | undefined
@@ -797,97 +790,47 @@ export async function getSchedulesAction(): Promise<ActionState<Schedule[]>> {
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
     }
 
-    // Get user ID from sub
-    const userResult = await executeSQL<{ id: number }>(`
-      SELECT id FROM users WHERE cognito_sub = :cognitoSub
-    `, [createParameter('cognitoSub', session.sub)])
+    // Get user ID from sub using Drizzle
+    const userId = await getScheduleUserIdByCognitoSub(session.sub)
 
-    if (!userResult || userResult.length === 0) {
+    if (!userId) {
       log.warn("User not found")
       throw ErrorFactories.authzResourceNotFound("user", session.sub)
     }
 
-    const userId = userResult[0].id
+    // Get schedules with last execution info using Drizzle
+    const drizzleSchedules = await getSchedulesByUserId(userId)
 
-    // Get schedules with last execution info
-    const result = await executeSQL<Record<string, unknown>>(`
-      SELECT
-        se.id,
-        se.name,
-        se.user_id,
-        se.assistant_architect_id,
-        se.schedule_config,
-        se.input_data,
-        se.active,
-        se.created_at,
-        se.updated_at,
-        er.executed_at as last_executed_at,
-        er.status as last_execution_status
-      FROM scheduled_executions se
-      LEFT JOIN LATERAL (
-        SELECT executed_at, status
-        FROM execution_results
-        WHERE scheduled_execution_id = se.id
-        ORDER BY executed_at DESC
-        LIMIT 1
-      ) er ON true
-      WHERE se.user_id = :userId
-      ORDER BY se.created_at DESC
-    `, [createParameter('userId', userId)])
-
-    // Transform results
-    const schedules: Schedule[] = result.map(row => {
-      const transformed = transformSnakeToCamel<{
-        id: number
-        userId: number
-        assistantArchitectId: number
-        name: string
-        scheduleConfig: ScheduleConfig | string
-        inputData: Record<string, string> | string
-        active: boolean
-        createdAt: string
-        updatedAt: string
-        lastExecutedAt: string | null
-        lastExecutionStatus: string | null
-      }>(row)
-
-      // Parse JSONB fields
-      let scheduleConfig: ScheduleConfig
-      let inputData: Record<string, unknown>
-
-      try {
-        scheduleConfig = typeof transformed.scheduleConfig === 'string'
-          ? JSON.parse(transformed.scheduleConfig)
-          : transformed.scheduleConfig
-      } catch {
-        scheduleConfig = { frequency: 'daily', time: '09:00' }
-      }
-
-      try {
-        inputData = typeof transformed.inputData === 'string'
-          ? JSON.parse(transformed.inputData)
-          : transformed.inputData
-      } catch {
-        inputData = {}
-      }
-
-      const schedule: Schedule = {
-        id: transformed.id,
-        name: transformed.name,
-        userId: transformed.userId,
-        assistantArchitectId: transformed.assistantArchitectId,
-        scheduleConfig,
-        inputData,
-        active: transformed.active,
-        createdAt: transformed.createdAt,
-        updatedAt: transformed.updatedAt
-      }
+    // Transform results to action Schedule format, filtering out invalid records
+    const schedules: Schedule[] = drizzleSchedules
+      .filter(drizzleSchedule => {
+        // Log and filter out records with null createdAt (data integrity issue)
+        if (drizzleSchedule.createdAt === null) {
+          log.error("Schedule has null createdAt - data integrity issue", {
+            scheduleId: drizzleSchedule.id
+          })
+          return false
+        }
+        return true
+      })
+      .map(drizzleSchedule => {
+        const schedule: Schedule = {
+          id: drizzleSchedule.id,
+          name: drizzleSchedule.name,
+          userId: drizzleSchedule.userId,
+          assistantArchitectId: drizzleSchedule.assistantArchitectId,
+          scheduleConfig: drizzleSchedule.scheduleConfig as ScheduleConfig,
+          inputData: drizzleSchedule.inputData,
+          active: drizzleSchedule.active ?? true,
+          createdAt: drizzleSchedule.createdAt!.toISOString(),
+          updatedAt: drizzleSchedule.updatedAt.toISOString()
+        }
 
       // Add last execution info if available
-      if (transformed.lastExecutedAt && transformed.lastExecutionStatus) {
+      if (drizzleSchedule.lastExecutedAt && drizzleSchedule.lastExecutionStatus) {
         schedule.lastExecution = {
-          executedAt: transformed.lastExecutedAt ? new Date(transformed.lastExecutedAt + ' UTC').toISOString() : '',
-          status: (transformed.lastExecutionStatus as 'success' | 'failed')
+          executedAt: drizzleSchedule.lastExecutedAt.toISOString(),
+          status: drizzleSchedule.lastExecutionStatus as 'success' | 'failed'
         }
       }
 
@@ -934,42 +877,35 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
     }
 
-    // Get user ID from sub
-    const userResult = await executeSQL<{ id: number }>(`
-      SELECT id FROM users WHERE cognito_sub = :cognitoSub
-    `, [createParameter('cognitoSub', session.sub)])
+    // Get user ID from sub using Drizzle
+    const userId = await getScheduleUserIdByCognitoSub(session.sub)
 
-    if (!userResult || userResult.length === 0) {
+    if (!userId) {
       log.warn("User not found")
       throw ErrorFactories.authzResourceNotFound("user", session.sub)
     }
 
-    const userId = userResult[0].id
+    // Check if schedule exists and user owns it using Drizzle
+    const existingSchedule = await getScheduleByIdForUser(id, userId)
 
-    // Check if schedule exists and user owns it
-    const existingResult = await executeSQL<Record<string, unknown>>(`
-      SELECT id, name, user_id, assistant_architect_id, schedule_config, input_data, active, created_at, updated_at
-      FROM scheduled_executions
-      WHERE id = :id AND user_id = :userId
-    `, [
-      createParameter('id', id),
-      createParameter('userId', userId)
-    ])
-
-    if (!existingResult || existingResult.length === 0) {
+    if (!existingSchedule) {
       log.warn("Schedule not found or no access")
       throw ErrorFactories.authzResourceNotFound("schedule", id.toString())
     }
 
     // Schedule exists and user has access, proceed with update
 
-    // Build update query dynamically
-    const updates: string[] = []
-    const parameters: SqlParameter[] = [
-      createParameter('id', id),
-      createParameter('userId', userId),
-      createParameter('updatedBy', session.sub)
-    ]
+    // Build update data object
+    const updateData: {
+      name?: string;
+      assistantArchitectId?: number;
+      scheduleConfig?: DrizzleScheduleConfig;
+      inputData?: Record<string, string>;
+      active?: boolean;
+      updatedBy?: string;
+    } = {
+      updatedBy: session.sub
+    }
 
     if (params.name !== undefined) {
       // Validate and sanitize name
@@ -979,12 +915,7 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
           nameValidation.errors.map(error => ({ field: 'name', message: error }))
         )
       }
-      const sanitizedName = nameValidation.sanitizedName
-
-      // Note: Duplicate name check removed - users can have multiple schedules with the same name
-
-      updates.push('name = :name')
-      parameters.push(createParameter('name', sanitizedName))
+      updateData.name = nameValidation.sanitizedName
     }
 
     if (params.assistantArchitectId !== undefined) {
@@ -1006,21 +937,14 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
         }])
       }
 
-      // Check if assistant architect exists and user has ownership access
-      const architectResult = await executeSQL<{ id: number }>(`
-        SELECT id FROM assistant_architects
-        WHERE id = :architectId AND user_id = :userId
-      `, [
-        createParameter('architectId', cleanArchitectId),
-        createParameter('userId', userId)
-      ])
+      // Check if assistant architect exists and user has ownership access using Drizzle
+      const hasArchitectAccess = await checkAssistantArchitectOwnership(cleanArchitectId, userId)
 
-      if (!architectResult || architectResult.length === 0) {
+      if (!hasArchitectAccess) {
         throw ErrorFactories.authzInsufficientPermissions("assistant architect")
       }
 
-      updates.push('assistant_architect_id = :assistantArchitectId')
-      parameters.push(createParameter('assistantArchitectId', cleanArchitectId))
+      updateData.assistantArchitectId = cleanArchitectId
     }
 
     if (params.scheduleConfig !== undefined) {
@@ -1032,8 +956,7 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
         )
       }
 
-      updates.push('schedule_config = :scheduleConfig::jsonb')
-      parameters.push(createParameter('scheduleConfig', JSON.stringify(params.scheduleConfig)))
+      updateData.scheduleConfig = params.scheduleConfig as DrizzleScheduleConfig
     }
 
     if (params.inputData !== undefined) {
@@ -1045,86 +968,41 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
         )
       }
 
-      updates.push('input_data = :inputData::jsonb')
-      parameters.push(createParameter('inputData', JSON.stringify(params.inputData)))
+      updateData.inputData = params.inputData as Record<string, string>
     }
 
     if (params.active !== undefined) {
-      updates.push('active = :active')
-      parameters.push(createParameter('active', params.active))
+      updateData.active = params.active
     }
 
-    if (updates.length === 0) {
+    // Check if there's anything to update besides updatedBy
+    const hasUpdates = Object.keys(updateData).some(k => k !== 'updatedBy')
+    if (!hasUpdates) {
       throw ErrorFactories.validationFailed([{ field: 'general', message: 'No fields to update' }])
     }
 
-    // Add updated_at and updated_by
-    updates.push('updated_at = NOW()', 'updated_by = :updatedBy')
+    // Execute update using Drizzle
+    const updatedSchedule = await drizzleUpdateSchedule(id, userId, updateData)
 
-    // Execute update
-    const updateResult = await executeSQL<{
-      id: number
-      name: string
-      user_id: number
-      assistant_architect_id: number
-      schedule_config: ScheduleConfig | string
-      input_data: Record<string, string> | string
-      active: boolean
-      created_at: Date
-      updated_at: Date
-    }>(`
-      UPDATE scheduled_executions
-      SET ${updates.join(', ')}
-      WHERE id = :id AND user_id = :userId
-      RETURNING id, name, user_id, assistant_architect_id, schedule_config, input_data, active, created_at, updated_at
-    `, parameters)
-
-    if (!updateResult || updateResult.length === 0) {
+    if (!updatedSchedule) {
       throw ErrorFactories.dbQueryFailed("UPDATE scheduled_executions", new Error("Failed to update schedule"))
     }
 
-    // Transform and return updated schedule
-    const updated = transformSnakeToCamel<{
-      id: number
-      name: string
-      userId: number
-      assistantArchitectId: number
-      scheduleConfig: ScheduleConfig | string
-      inputData: Record<string, string> | string
-      active: boolean
-      createdAt: Date
-      updatedAt: Date
-    }>(updateResult[0])
-
-    let scheduleConfig: ScheduleConfig
-    let inputData: Record<string, unknown>
-
-    try {
-      scheduleConfig = typeof updated.scheduleConfig === 'string'
-        ? JSON.parse(updated.scheduleConfig)
-        : updated.scheduleConfig
-    } catch {
-      scheduleConfig = { frequency: 'daily', time: '09:00' }
-    }
-
-    try {
-      inputData = typeof updated.inputData === 'string'
-        ? JSON.parse(updated.inputData)
-        : updated.inputData
-    } catch {
-      inputData = {}
+    if (!updatedSchedule.createdAt) {
+      log.error("Updated schedule has null createdAt - data integrity issue", { scheduleId: id })
+      throw ErrorFactories.dbQueryFailed("UPDATE scheduled_executions", new Error("Invalid schedule record"))
     }
 
     const schedule: Schedule = {
-      id: updated.id,
-      name: updated.name,
-      userId: updated.userId,
-      assistantArchitectId: updated.assistantArchitectId,
-      scheduleConfig,
-      inputData,
-      active: updated.active,
-      createdAt: updated.createdAt.toISOString(),
-      updatedAt: updated.updatedAt.toISOString()
+      id: updatedSchedule.id,
+      name: updatedSchedule.name,
+      userId: updatedSchedule.userId,
+      assistantArchitectId: updatedSchedule.assistantArchitectId,
+      scheduleConfig: updatedSchedule.scheduleConfig as ScheduleConfig,
+      inputData: updatedSchedule.inputData,
+      active: updatedSchedule.active ?? true,
+      createdAt: updatedSchedule.createdAt.toISOString(),
+      updatedAt: updatedSchedule.updatedAt.toISOString()
     }
 
     // Try to update EventBridge schedule if schedule-related fields changed
@@ -1201,43 +1079,26 @@ export async function deleteScheduleAction(id: number): Promise<ActionState<{ su
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
     }
 
-    // Get user ID from sub
-    const userResult = await executeSQL<{ id: number }>(`
-      SELECT id FROM users WHERE cognito_sub = :cognitoSub
-    `, [createParameter('cognitoSub', session.sub)])
+    // Get user ID from sub using Drizzle
+    const userId = await getScheduleUserIdByCognitoSub(session.sub)
 
-    if (!userResult || userResult.length === 0) {
+    if (!userId) {
       log.warn("User not found")
       throw ErrorFactories.authzResourceNotFound("user", session.sub)
     }
 
-    const userId = userResult[0].id
+    // Check if schedule exists and user owns it using Drizzle
+    const existingSchedule = await getScheduleByIdForUser(id, userId)
 
-    // Check if schedule exists and user owns it
-    const existingResult = await executeSQL<{ id: number }>(`
-      SELECT id FROM scheduled_executions
-      WHERE id = :id AND user_id = :userId
-    `, [
-      createParameter('id', id),
-      createParameter('userId', userId)
-    ])
-
-    if (!existingResult || existingResult.length === 0) {
+    if (!existingSchedule) {
       log.warn("Schedule not found or no access")
       throw ErrorFactories.authzResourceNotFound("schedule", id.toString())
     }
 
-    // Delete the schedule (cascade will handle related records)
-    const deleteResult = await executeSQL<{ id: number }>(`
-      DELETE FROM scheduled_executions
-      WHERE id = :id AND user_id = :userId
-      RETURNING id
-    `, [
-      createParameter('id', id),
-      createParameter('userId', userId)
-    ])
+    // Delete the schedule using Drizzle (cascade will handle related records)
+    const deleted = await drizzleDeleteSchedule(id, userId)
 
-    if (!deleteResult || deleteResult.length === 0) {
+    if (!deleted) {
       throw ErrorFactories.dbQueryFailed("DELETE FROM scheduled_executions", new Error("Failed to delete schedule"))
     }
 
@@ -1294,116 +1155,44 @@ export async function getScheduleAction(id: number): Promise<ActionState<Schedul
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
     }
 
-    // Get user ID from sub
-    const userResult = await executeSQL<{ id: number }>(`
-      SELECT id FROM users WHERE cognito_sub = :cognitoSub
-    `, [createParameter('cognitoSub', session.sub)])
+    // Get user ID from sub using Drizzle
+    const userId = await getScheduleUserIdByCognitoSub(session.sub)
 
-    if (!userResult || userResult.length === 0) {
+    if (!userId) {
       log.warn("User not found")
       throw ErrorFactories.authzResourceNotFound("user", session.sub)
     }
 
-    const userId = userResult[0].id
+    // Get schedule with last execution info using Drizzle
+    const drizzleSchedule = await getScheduleByIdForUser(id, userId)
 
-    // Get schedule with last execution info
-    const result = await executeSQL<{
-      id: number
-      name: string
-      user_id: number
-      assistant_architect_id: number
-      schedule_config: ScheduleConfig | string
-      input_data: Record<string, string> | string
-      active: boolean
-      created_at: Date
-      updated_at: Date
-      last_executed_at: Date | null
-      last_execution_status: string | null
-    }>(`
-      SELECT
-        se.id,
-        se.name,
-        se.user_id,
-        se.assistant_architect_id,
-        se.schedule_config,
-        se.input_data,
-        se.active,
-        se.created_at,
-        se.updated_at,
-        er.executed_at as last_executed_at,
-        er.status as last_execution_status
-      FROM scheduled_executions se
-      LEFT JOIN LATERAL (
-        SELECT executed_at, status
-        FROM execution_results
-        WHERE scheduled_execution_id = se.id
-        ORDER BY executed_at DESC
-        LIMIT 1
-      ) er ON true
-      WHERE se.id = :id AND se.user_id = :userId
-    `, [
-      createParameter('id', id),
-      createParameter('userId', userId)
-    ])
-
-    if (!result || result.length === 0) {
+    if (!drizzleSchedule) {
       log.warn("Schedule not found or no access")
       throw ErrorFactories.authzResourceNotFound("schedule", id.toString())
     }
 
-    // Transform result
-    const row = result[0]
-    const transformed = transformSnakeToCamel<{
-      id: number
-      name: string
-      userId: number
-      assistantArchitectId: number
-      scheduleConfig: ScheduleConfig | string
-      inputData: Record<string, string> | string
-      active: boolean
-      createdAt: Date
-      updatedAt: Date
-      lastExecutedAt: Date | null
-      lastExecutionStatus: string | null
-    }>(row)
-
-    // Parse JSONB fields
-    let scheduleConfig: ScheduleConfig
-    let inputData: Record<string, unknown>
-
-    try {
-      scheduleConfig = typeof transformed.scheduleConfig === 'string'
-        ? JSON.parse(transformed.scheduleConfig)
-        : transformed.scheduleConfig
-    } catch {
-      scheduleConfig = { frequency: 'daily', time: '09:00' }
-    }
-
-    try {
-      inputData = typeof transformed.inputData === 'string'
-        ? JSON.parse(transformed.inputData)
-        : transformed.inputData
-    } catch {
-      inputData = {}
+    if (!drizzleSchedule.createdAt) {
+      log.error("Schedule has null createdAt - data integrity issue", { scheduleId: id })
+      throw ErrorFactories.dbQueryFailed("SELECT scheduled_executions", new Error("Invalid schedule record"))
     }
 
     const schedule: Schedule = {
-      id: transformed.id,
-      name: transformed.name,
-      userId: transformed.userId,
-      assistantArchitectId: transformed.assistantArchitectId,
-      scheduleConfig,
-      inputData,
-      active: transformed.active,
-      createdAt: transformed.createdAt.toISOString(),
-      updatedAt: transformed.updatedAt.toISOString()
+      id: drizzleSchedule.id,
+      name: drizzleSchedule.name,
+      userId: drizzleSchedule.userId,
+      assistantArchitectId: drizzleSchedule.assistantArchitectId,
+      scheduleConfig: drizzleSchedule.scheduleConfig as ScheduleConfig,
+      inputData: drizzleSchedule.inputData,
+      active: drizzleSchedule.active ?? true,
+      createdAt: drizzleSchedule.createdAt.toISOString(),
+      updatedAt: drizzleSchedule.updatedAt.toISOString()
     }
 
     // Add last execution info if available
-    if (transformed.lastExecutedAt && transformed.lastExecutionStatus) {
+    if (drizzleSchedule.lastExecutedAt && drizzleSchedule.lastExecutionStatus) {
       schedule.lastExecution = {
-        executedAt: transformed.lastExecutedAt ? new Date(transformed.lastExecutedAt + ' UTC').toISOString() : '',
-        status: (transformed.lastExecutionStatus as 'success' | 'failed')
+        executedAt: drizzleSchedule.lastExecutedAt.toISOString(),
+        status: drizzleSchedule.lastExecutionStatus as 'success' | 'failed'
       }
     }
 

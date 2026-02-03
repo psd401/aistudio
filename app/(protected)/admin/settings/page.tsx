@@ -3,19 +3,21 @@ import { SettingsClient } from "./_components/settings-client"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { getSettingsAction } from "@/actions/db/settings-actions"
 import { Skeleton } from "@/components/ui/skeleton"
+import { PageBranding } from "@/components/ui/page-branding"
 
 export default async function SettingsPage() {
   await requireRole("administrator")
-  
+
   // Fetch settings from the database
   const settingsResult = await getSettingsAction()
   const settings = settingsResult.isSuccess ? settingsResult.data : []
-  
+
   return (
     <div className="p-6">
       <div className="mb-6">
-        <h1 className="text-2xl font-bold">System Settings</h1>
-        <p className="text-muted-foreground mt-1">
+        <PageBranding />
+        <h1 className="text-2xl font-semibold text-gray-900">System Settings</h1>
+        <p className="text-sm text-muted-foreground mt-1">
           Manage API keys and configuration values for the application
         </p>
       </div>

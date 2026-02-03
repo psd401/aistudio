@@ -3,6 +3,7 @@
 import { useState, useCallback, useEffect, useRef } from "react"
 import { Button } from "@/components/ui/button"
 import { toast } from "sonner"
+import { createLogger } from "@/lib/client-logger"
 import { addChainPromptAction, deletePromptAction, updatePromptAction, getAssistantArchitectByIdAction, setPromptPositionsAction } from "@/actions/db/assistant-architect-actions"
 import { PlusIcon, Pencil, Trash2, Play, Globe, Code2, Image as ImageIcon } from "lucide-react"
 import {
@@ -25,206 +26,33 @@ import {
   Panel
 } from '@xyflow/react'
 import "@xyflow/react/dist/style.css"
-// Dialog components removed - using Sheet instead
-import { Label } from "@/components/ui/label"
-import { Input } from "@/components/ui/input"
-import { ModelSelectorFormAdapter } from "@/components/features/model-selector/model-selector-form-adapter"
-
 import { Badge } from "@/components/ui/badge"
-import { Switch } from "@/components/ui/switch"
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible"
-import { ChevronDown, ChevronRight } from "lucide-react"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import type { SelectAiModel, SelectChainPrompt, SelectToolInputField } from "@/types"
 import React from "react"
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-  SheetDescription,
-  SheetFooter
-} from "@/components/ui/sheet"
-import dynamic from "next/dynamic"
-import {
-  toolbarPlugin,
-  markdownShortcutPlugin,
-  listsPlugin,
-  headingsPlugin,
-  quotePlugin,
-  thematicBreakPlugin,
-  linkPlugin,
-  linkDialogPlugin,
-  UndoRedo,
-  BoldItalicUnderlineToggles,
-  BlockTypeSelect,
-  ListsToggle,
-  Separator,
-  CreateLink
-} from "@mdxeditor/editor"
-import DocumentUploadButton from "@/components/ui/document-upload-button"
-import { RepositoryBrowser } from "@/components/features/assistant-architect/repository-browser"
-import { ToolSelectionSection } from "@/components/features/assistant-architect/tool-selection-section"
-const MDXEditor = dynamic(() => import("@mdxeditor/editor").then(mod => mod.MDXEditor), { ssr: false })
+import { PromptEditorModal } from "@/components/features/assistant-architect/prompt-editor-modal"
 
+// Parallel group multiplier constant - supports up to 1000 nodes per position level
+// Used to encode position into parallel group ID: (position * MULTIPLIER + index)
+const PARALLEL_GROUP_MULTIPLIER = 1000;
 
-
+// Client-side logger for this component
+const log = createLogger({ component: "PromptsPageClient" })
 
 interface PromptsPageClientProps {
   assistantId: string
   prompts: SelectChainPrompt[]
   models: SelectAiModel[]
   inputFields: SelectToolInputField[]
-}
-
-interface KnowledgeSectionProps {
-  useExternalKnowledge: boolean
-  setUseExternalKnowledge: (value: boolean) => void
-  systemContext: string
-  setSystemContext: (value: string) => void
-  selectedRepositoryIds: number[]
-  setSelectedRepositoryIds: (ids: number[]) => void
-  isPdfContentCollapsed: boolean
-  setIsPdfContentCollapsed: (value: boolean) => void
-  contextTokens: number
-}
-
-function KnowledgeSection({
-  useExternalKnowledge,
-  setUseExternalKnowledge,
-  systemContext,
-  setSystemContext,
-  selectedRepositoryIds,
-  setSelectedRepositoryIds,
-  isPdfContentCollapsed,
-  setIsPdfContentCollapsed,
-  contextTokens
-}: KnowledgeSectionProps) {
-  const [isRepositoryBrowserOpen, setIsRepositoryBrowserOpen] = useState(false)
-  
-  return (
-    <div className="space-y-4">
-      {/* Toggle for external knowledge */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <Switch
-            id="external-knowledge"
-            checked={useExternalKnowledge}
-            onCheckedChange={setUseExternalKnowledge}
-          />
-          <Label htmlFor="external-knowledge" className="cursor-pointer">
-            Add external knowledge to your prompt
-          </Label>
-        </div>
-      </div>
-
-      {/* Show knowledge options when toggled on */}
-      {useExternalKnowledge && (
-        <div className="space-y-4 pl-4 border-l-2 border-muted">
-          {/* Repository selector */}
-          <div className="space-y-2">
-            <Label>Knowledge Repositories</Label>
-            <div className="flex items-center gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                onClick={() => setIsRepositoryBrowserOpen(true)}
-              >
-                Browse Repositories
-              </Button>
-              {selectedRepositoryIds.length > 0 && (
-                <span className="text-sm text-muted-foreground">
-                  {selectedRepositoryIds.length} selected
-                </span>
-              )}
-            </div>
-            {/* Display selected repositories as badges */}
-            {selectedRepositoryIds.length > 0 && (
-              <div className="flex flex-wrap gap-2">
-                {selectedRepositoryIds.map(id => (
-                  <Badge key={id} variant="secondary">
-                    Repository {id}
-                    <button
-                      type="button"
-                      onClick={() => setSelectedRepositoryIds(selectedRepositoryIds.filter(rid => rid !== id))}
-                      className="ml-1 text-xs hover:text-destructive"
-                    >
-                      ×
-                    </button>
-                  </Badge>
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* PDF upload and content section */}
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label>Direct Knowledge Input</Label>
-              <DocumentUploadButton 
-                onContent={(doc: string) => {
-                  const currentContext = systemContext || ""
-                  const merged = (!currentContext || currentContext.trim() === "") ? doc : currentContext + "\n\n" + doc
-                  setSystemContext(merged)
-                  setIsPdfContentCollapsed(false)
-                }}
-                onError={err => {
-                  if (err?.status === 413) {
-                    toast.error("File too large. Please upload a file smaller than 50MB.")
-                  } else {
-                    toast.error("Upload failed: " + (err?.message || "Unknown error"))
-                  }
-                }}
-              />
-            </div>
-            
-            {/* Collapsible content area */}
-            <Collapsible open={!isPdfContentCollapsed} onOpenChange={(open) => setIsPdfContentCollapsed(!(open ?? false))}>
-              <CollapsibleTrigger asChild>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  className="w-full justify-between p-2 h-auto"
-                >
-                  <span className="text-sm">
-                    {systemContext ? "View/Edit content" : "Add custom content"}
-                  </span>
-                  <div className="flex items-center gap-2">
-                    {systemContext && (
-                      <span className="text-xs text-muted-foreground">{contextTokens} tokens</span>
-                    )}
-                    {isPdfContentCollapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-                  </div>
-                </Button>
-              </CollapsibleTrigger>
-              <CollapsibleContent>
-                <div className="rounded-md border bg-muted h-[320px] overflow-y-auto mt-2">
-                  <textarea
-                    value={systemContext}
-                    onChange={(e) => setSystemContext(e.target.value)}
-                    placeholder="Enter system instructions, persona, or background knowledge for the AI model."
-                    className="w-full h-full p-4 bg-[#e5e1d6] resize-none border-none outline-none font-mono text-sm"
-                  />
-                </div>
-                <div className="text-xs text-muted-foreground mt-2">
-                  You can reference the knowledge in your prompt by saying things like &quot;Given the above context&quot; or &quot;Based on the provided information...&quot;
-                </div>
-              </CollapsibleContent>
-            </Collapsible>
-          </div>
-        </div>
-      )}
-      
-      {/* Repository Browser Dialog */}
-      <RepositoryBrowser
-        open={isRepositoryBrowserOpen}
-        onOpenChange={setIsRepositoryBrowserOpen}
-        selectedIds={selectedRepositoryIds}
-        onSelectionChange={setSelectedRepositoryIds}
-      />
-    </div>
-  )
 }
 
 // Start Node Component
@@ -251,22 +79,25 @@ interface PromptNodeData {
   onDelete: (id: string) => void;
 }
 
-// Custom Node Component
+// Custom Node Component with proper typing
+// Note: ReactFlow NodeProps data is typed as Record<string, unknown>
+// We use type assertion since we control the data shape when creating nodes
 function PromptNode({ data, id }: NodeProps) {
-  // Type guard to ensure data has the expected properties
-  const nodeData = data as unknown as PromptNodeData;
-  
-  const handleEdit = () => {
+  // Type assertion - ReactFlow's generic typing doesn't support custom data shapes well
+  // The data shape is guaranteed by initializeFlowFromPrompts which creates the nodes
+  const nodeData = data as unknown as PromptNodeData
+
+  const handleEdit = useCallback(() => {
     if (nodeData.onEdit && nodeData.prompt) {
       nodeData.onEdit(nodeData.prompt)
     }
-  }
+  }, [nodeData])
 
-  const handleDelete = () => {
+  const handleDelete = useCallback(() => {
     if (nodeData.onDelete && id) {
       nodeData.onDelete(id)
     }
-  }
+  }, [nodeData, id])
 
   return (
     <div className="min-w-[200px] shadow-lg rounded-lg bg-background border">
@@ -340,20 +171,247 @@ interface FlowHandle {
   savePositions: () => Promise<void>;
 }
 
-// Convert Flow to a forwardRef component
-const Flow = React.forwardRef<FlowHandle, {
-  assistantId: string,
+interface FlowProps {
+  assistantId: string
   prompts: SelectChainPrompt[]
   models: SelectAiModel[]
   onEdit: (prompt: SelectChainPrompt) => void
   onDelete: (id: string) => void
-}>(({ 
+}
+
+// Helper to create edges for branching (one to many)
+function createBranchingEdges(sourceId: string, targetPrompts: SelectChainPrompt[]): Edge[] {
+  return targetPrompts.map(targetPrompt => ({
+    id: `e-${sourceId}-${String(targetPrompt.id)}`,
+    source: sourceId,
+    target: String(targetPrompt.id),
+    type: 'smoothstep'
+  }))
+}
+
+// Helper to create edges for merging (many to one)
+function createMergingEdges(sourcePrompts: SelectChainPrompt[], targetId: string): Edge[] {
+  return sourcePrompts.map(sourcePrompt => ({
+    id: `e-${String(sourcePrompt.id)}-${targetId}`,
+    source: String(sourcePrompt.id),
+    target: targetId,
+    type: 'smoothstep'
+  }))
+}
+
+// Helper to create edges for parallel paths using parallel groups
+function createParallelEdges(
+  currentPrompts: SelectChainPrompt[],
+  nextPrompts: SelectChainPrompt[],
+  useParallelGroups: boolean
+): Edge[] {
+  const edges: Edge[] = []
+
+  if (useParallelGroups) {
+    for (const sourcePrompt of currentPrompts) {
+      const sourceGroupIndex = sourcePrompt.parallelGroup !== null
+        ? (sourcePrompt.parallelGroup % PARALLEL_GROUP_MULTIPLIER)
+        : -1
+      for (const targetPrompt of nextPrompts) {
+        const targetGroupIndex = targetPrompt.parallelGroup !== null
+          ? (targetPrompt.parallelGroup % PARALLEL_GROUP_MULTIPLIER)
+          : -1
+        if (sourceGroupIndex !== -1 && sourceGroupIndex === targetGroupIndex) {
+          edges.push({
+            id: `e-${String(sourcePrompt.id)}-${String(targetPrompt.id)}`,
+            source: String(sourcePrompt.id),
+            target: String(targetPrompt.id),
+            type: 'smoothstep'
+          })
+        }
+      }
+    }
+  } else {
+    // Fallback: connect all to all
+    for (const sourcePrompt of currentPrompts) {
+      for (const targetPrompt of nextPrompts) {
+        edges.push({
+          id: `e-${String(sourcePrompt.id)}-${String(targetPrompt.id)}`,
+          source: String(sourcePrompt.id),
+          target: String(targetPrompt.id),
+          type: 'smoothstep'
+        })
+      }
+    }
+  }
+
+  return edges
+}
+
+// Helper to calculate execution order from graph structure
+function calculateGraphExecutionOrder(
+  nodes: Node[],
+  edges: Edge[]
+): { id: string; position: number; parallelGroup: number | null }[] {
+  const startNode = nodes.find(n => n.type === 'start')
+  if (!startNode) return []
+
+  const nodeLevels = new Map<string, number>()
+  const visited = new Set<string>()
+  const getOutgoingEdges = (nodeId: string) => edges.filter(e => e.source === nodeId)
+
+  // BFS to calculate levels
+  const queue = [{ id: 'start', level: -1 }]
+  while (queue.length > 0) {
+    const { id, level } = queue.shift()!
+
+    if (visited.has(id)) {
+      nodeLevels.set(id, Math.max(level, nodeLevels.get(id) || 0))
+      continue
+    }
+
+    visited.add(id)
+    nodeLevels.set(id, level)
+
+    for (const edge of getOutgoingEdges(id)) {
+      queue.push({ id: edge.target, level: level + 1 })
+    }
+  }
+
+  // Group nodes by position
+  const nodesByPosition = new Map<number, string[]>()
+  for (const [id, level] of nodeLevels.entries()) {
+    if (id === 'start') continue
+    if (!nodesByPosition.has(level)) nodesByPosition.set(level, [])
+    nodesByPosition.get(level)?.push(id)
+  }
+
+  // Calculate parallel groups
+  const nodeParallelGroups = new Map<string, number | null>()
+  for (const [position, nodeIds] of nodesByPosition.entries()) {
+    if (nodeIds.length === 1) {
+      nodeParallelGroups.set(nodeIds[0], null)
+    } else {
+      const nodesWithEdgeInfo = nodeIds.map(nodeId => {
+        const incomingEdges = edges.filter(e => e.target === nodeId)
+        return { nodeId, sourceIds: incomingEdges.map(e => e.source).sort().join(',') }
+      })
+      nodesWithEdgeInfo.sort((a, b) =>
+        a.sourceIds !== b.sourceIds
+          ? a.sourceIds.localeCompare(b.sourceIds)
+          : a.nodeId.localeCompare(b.nodeId)
+      )
+      for (const [i, element] of nodesWithEdgeInfo.entries()) {
+        nodeParallelGroups.set(element.nodeId, position * PARALLEL_GROUP_MULTIPLIER + i)
+      }
+    }
+  }
+
+  return Array.from(nodeLevels.entries())
+    .filter(([id]) => id !== 'start')
+    .map(([id, level]) => ({
+      id,
+      position: level,
+      parallelGroup: nodeParallelGroups.get(id) ?? null
+    }))
+}
+
+// Helper to initialize flow nodes and edges from prompts
+interface InitializeFlowResult {
+  nodes: Node[]
+  edges: Edge[]
+}
+
+function initializeFlowFromPrompts(
+  prompts: SelectChainPrompt[],
+  models: SelectAiModel[],
+  onEdit: (prompt: SelectChainPrompt) => void,
+  onDelete: (id: string) => void
+): InitializeFlowResult {
+  const startNode: Node = {
+    id: 'start',
+    type: 'start',
+    position: { x: 250, y: 0 },
+    data: {}
+  }
+
+  if (prompts.length === 0) {
+    return { nodes: [startNode], edges: [] }
+  }
+
+  // Group by position
+  const promptsByPosition = prompts.reduce((acc, prompt) => {
+    const position = prompt.position || 0
+    if (!acc[position]) acc[position] = []
+    acc[position].push(prompt)
+    return acc
+  }, {} as Record<number, SelectChainPrompt[]>)
+
+  const positions = Object.keys(promptsByPosition).map(Number).sort((a, b) => a - b)
+  const horizontalSpacing = 300
+  const verticalSpacing = 150
+
+  // Create nodes
+  const promptNodes: Node[] = []
+  for (const [rowIndex, position] of positions.entries()) {
+    const promptsAtPosition = promptsByPosition[position]
+    const rowY = (rowIndex + 1) * verticalSpacing
+    for (const [colIndex, prompt] of promptsAtPosition.entries()) {
+      const centerOffset = ((promptsAtPosition.length - 1) * horizontalSpacing) / 2
+      promptNodes.push({
+        id: String(prompt.id),
+        type: 'prompt' as const,
+        position: { x: 250 + (colIndex * horizontalSpacing) - centerOffset, y: rowY },
+        data: {
+          name: prompt.name,
+          content: prompt.content,
+          modelName: models.find(m => m.id === prompt.modelId)?.name || 'None',
+          systemContext: prompt.systemContext,
+          modelId: prompt.modelId,
+          inputMapping: prompt.inputMapping,
+          enabledTools: prompt.enabledTools,
+          prompt,
+          onEdit,
+          onDelete
+        }
+      })
+    }
+  }
+
+  // Create edges
+  const newEdges: Edge[] = []
+  if (promptsByPosition[0]) {
+    for (const prompt of promptsByPosition[0]) {
+      newEdges.push({
+        id: `e-start-${String(prompt.id)}`,
+        source: 'start',
+        target: String(prompt.id),
+        type: 'smoothstep'
+      })
+    }
+  }
+
+  for (let i = 0; i < positions.length - 1; i++) {
+    const currentPrompts = promptsByPosition[positions[i]]
+    const nextPrompts = promptsByPosition[positions[i + 1]]
+    const hasParallelInfo = currentPrompts.some(p => p.parallelGroup !== null) &&
+                            nextPrompts.some(p => p.parallelGroup !== null)
+
+    if (currentPrompts.length === 1 && nextPrompts.length > 1) {
+      newEdges.push(...createBranchingEdges(String(currentPrompts[0].id), nextPrompts))
+    } else if (currentPrompts.length > 1 && nextPrompts.length === 1) {
+      newEdges.push(...createMergingEdges(currentPrompts, String(nextPrompts[0].id)))
+    } else {
+      newEdges.push(...createParallelEdges(currentPrompts, nextPrompts, hasParallelInfo))
+    }
+  }
+
+  return { nodes: [startNode, ...promptNodes], edges: newEdges }
+}
+
+// Convert Flow to a forwardRef component using function declaration
+function FlowComponent({
   assistantId,
-  prompts, 
-  models, 
-  onEdit, 
+  prompts,
+  models,
+  onEdit,
   onDelete
-}, ref) => {
+}: FlowProps, ref: React.ForwardedRef<FlowHandle>) {
   const initialNodes: Node[] = []
   const initialEdges: Edge[] = []
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
@@ -367,55 +425,14 @@ const Flow = React.forwardRef<FlowHandle, {
   React.useImperativeHandle(ref, () => ({
     getNodes: () => reactFlowInstance.getNodes(),
     getEdges: () => reactFlowInstance.getEdges(),
-    setNodes: (nodes: Node[]) => reactFlowInstance.setNodes(nodes),
-    setEdges: (edges: Edge[]) => reactFlowInstance.setEdges(edges),
+    setNodes: (newNodes: Node[]) => reactFlowInstance.setNodes(newNodes),
+    setEdges: (newEdges: Edge[]) => reactFlowInstance.setEdges(newEdges),
     savePositions: () => savePositions()
   }));
 
-  // Calculate execution order based on graph structure
-  const calculateExecutionOrder = useCallback((): { id: string; position: number }[] => {
-    const nodes = reactFlowInstance.getNodes();
-    const edges = reactFlowInstance.getEdges();
-    const startNode = nodes.find(n => n.type === 'start');
-    if (!startNode) return [];
-
-    // Track nodes and their levels
-    const nodeLevels = new Map<string, number>();
-    const visited = new Set<string>();
-    
-
-    // Helper function to get outgoing edges from a node
-    const getOutgoingEdges = (nodeId: string) =>
-      edges.filter(e => e.source === nodeId);
-
-    // First, calculate levels for all nodes using BFS
-    const queue = [{ id: 'start', level: -1 }]; // Start node at level -1 so first real nodes are at 0
-    while (queue.length > 0) {
-      const { id, level } = queue.shift()!;
-      
-      if (visited.has(id)) {
-        // If we've seen this node before, update its level to be the maximum
-        nodeLevels.set(id, Math.max(level, nodeLevels.get(id) || 0));
-        continue;
-      }
-      
-      visited.add(id);
-      nodeLevels.set(id, level);
-      
-      // Add all target nodes of outgoing edges to queue
-      const outgoingEdges = getOutgoingEdges(id);
-      for (const edge of outgoingEdges) {
-        queue.push({ id: edge.target, level: level + 1 });
-      }
-    }
-
-    // Build array of {id, position}
-    const result = Array.from(nodeLevels.entries())
-      .filter(([id]) => id !== 'start')
-      .map(([id, level]) => ({ id, position: level }));
-
-
-    return result;
+  // Calculate execution order using extracted helper
+  const calculateExecutionOrder = useCallback(() => {
+    return calculateGraphExecutionOrder(reactFlowInstance.getNodes(), reactFlowInstance.getEdges())
   }, [reactFlowInstance]);
 
   // Save positions to database
@@ -423,11 +440,14 @@ const Flow = React.forwardRef<FlowHandle, {
     setIsSaving(true);
     try {
       const order = calculateExecutionOrder();
-      if (order.length === 0) { setIsSaving(false); return; }
+      if (order.length === 0) return  // finally block will handle cleanup
       // Transaction update
       await setPromptPositionsAction(assistantId, order);
       toast.success("Graph structure saved");
-    } catch { toast.error("Failed to save graph structure"); }
+    } catch (error) {
+      log.error("Failed to save graph structure", { error })
+      toast.error("Failed to save graph structure")
+    }
     finally { setIsSaving(false);} 
   }, [calculateExecutionOrder, assistantId]);
 
@@ -455,146 +475,18 @@ const Flow = React.forwardRef<FlowHandle, {
   // Initialize nodes and edges on first load only
   useEffect(() => {
     if (initialPositionsSet.current) return
-    
-    // If no prompts, just set up the start node
-    if (prompts.length === 0) {
-      const startNode: Node = {
-        id: 'start',
-        type: 'start',
-        position: { x: 250, y: 0 },
-        data: {}
-      }
-      setNodes([startNode])
-      setEdges([])
-      initialPositionsSet.current = true
-      return
-    }
 
-    // Create the prompt nodes with their initial positions
-    const startNode: Node = {
-      id: 'start',
-      type: 'start',
-      position: { x: 250, y: 0 },
-      data: {}
-    }
+    const { nodes: initializedNodes, edges: initializedEdges } = initializeFlowFromPrompts(
+      prompts,
+      models,
+      onEdit,
+      onDelete
+    )
 
-    // Group prompts by position to identify parallel execution paths
-    const promptsByPosition = prompts.reduce((acc, prompt) => {
-      const position = prompt.position || 0;
-      if (!acc[position]) acc[position] = [];
-      acc[position].push(prompt);
-      return acc;
-    }, {} as Record<number, SelectChainPrompt[]>);
-    
-    // Sort positions to ensure deterministic layout
-    const positions = Object.keys(promptsByPosition).map(Number).sort((a, b) => a - b);
-    
-    // Create nodes with proper positioning based on execution paths
-    const promptNodes: Node[] = [];
-    const horizontalSpacing = 300;
-    const verticalSpacing = 150;
-    
-    for (const [rowIndex, position] of positions.entries()) {
-      const promptsAtPosition = promptsByPosition[position];
-      const rowY = (rowIndex + 1) * verticalSpacing;
-      
-      // For parallel nodes (more than one at the same position)
-      // arrange them horizontally
-      for (const [colIndex, prompt] of promptsAtPosition.entries()) {
-        const centerOffset = ((promptsAtPosition.length - 1) * horizontalSpacing) / 2;
-        const xPos = 250 + (colIndex * horizontalSpacing) - centerOffset;
-        
-        promptNodes.push({
-          id: String(prompt.id),
-          type: 'prompt' as const,
-          position: { x: xPos, y: rowY },
-          data: {
-            name: prompt.name,
-            content: prompt.content,
-            modelName: models.find(m => m.id === prompt.modelId)?.name || 'None',
-            systemContext: prompt.systemContext,
-            modelId: prompt.modelId,
-            inputMapping: prompt.inputMapping,
-            enabledTools: prompt.enabledTools,
-            prompt,
-            onEdit,
-            onDelete
-          }
-        });
-      }
-    }
-
-    // Create edges based on positions and execution flow
-    const newEdges: Edge[] = [];
-    
-    // First, connect start node to all position 0 prompts
-    if (promptsByPosition[0]) {
-      for (const prompt of promptsByPosition[0]) {
-        newEdges.push({
-          id: `e-start-${String(prompt.id)}`,
-          source: 'start',
-          target: String(prompt.id),
-          type: 'smoothstep'
-        });
-      }
-    }
-    
-    // Then connect each prompt to the next position's prompts
-    for (let i = 0; i < positions.length - 1; i++) {
-      const currentPosition = positions[i];
-      const nextPosition = positions[i + 1];
-      
-      const currentPrompts = promptsByPosition[currentPosition];
-      const nextPrompts = promptsByPosition[nextPosition];
-      
-      // If there's one prompt at current position and multiple at next position,
-      // connect the current to each of the next (branching)
-      if (currentPrompts.length === 1 && nextPrompts.length > 1) {
-        const sourceId = String(currentPrompts[0].id);
-        for (const targetPrompt of nextPrompts) {
-          newEdges.push({
-            id: `e-${sourceId}-${String(targetPrompt.id)}`,
-            source: sourceId,
-            target: String(targetPrompt.id),
-            type: 'smoothstep'
-          });
-        }
-      }
-      // If there are multiple prompts at current position and one at next position,
-      // connect each current to the next (merging)
-      else if (currentPrompts.length > 1 && nextPrompts.length === 1) {
-        const targetId = String(nextPrompts[0].id);
-        for (const sourcePrompt of currentPrompts) {
-          newEdges.push({
-            id: `e-${String(sourcePrompt.id)}-${targetId}`,
-            source: String(sourcePrompt.id),
-            target: targetId,
-            type: 'smoothstep'
-          });
-        }
-      }
-      // Otherwise, connect each current to each next
-      else {
-        // Default behavior: connect each node to all nodes in the next position
-        // This is a simplification - you might want to improve this logic
-        for (const sourcePrompt of currentPrompts) {
-          for (const targetPrompt of nextPrompts) {
-            newEdges.push({
-              id: `e-${String(sourcePrompt.id)}-${String(targetPrompt.id)}`,
-              source: String(sourcePrompt.id),
-              target: String(targetPrompt.id),
-              type: 'smoothstep'
-            });
-          }
-        }
-      }
-    }
-
-    
-    setNodes([startNode, ...promptNodes])
-    setEdges(newEdges)
+    setNodes(initializedNodes)
+    setEdges(initializedEdges)
     initialPositionsSet.current = true
-    
+
     // After a short delay, we're no longer in initial render state
     setTimeout(() => {
       isInitialRender.current = false
@@ -628,234 +520,187 @@ const Flow = React.forwardRef<FlowHandle, {
       </Panel>
     </ReactFlow>
   )
-});
-
-Flow.displayName = 'Flow';
-
-// Simple heuristic: 1 token ~ 4 characters (OpenAI guideline)
-function estimateTokens(text: string): number {
-  if (!text) return 0
-  return Math.ceil(text.length / 4)
 }
 
-// Add slugify utility at the top
-function slugify(str: string): string {
-  return str
-    .toLowerCase()
-    .replace(/[^\da-z]+/g, '-')
-    .replace(/(^-|-$)+/g, '');
-}
+const Flow = React.forwardRef(FlowComponent)
+Flow.displayName = 'Flow'
 
-// Custom Variable Insert Dropdown for MDXEditor toolbar
-interface MDXEditorHandle {
-  insertMarkdown: (text: string) => void;
-  getMarkdown: () => string;
-  setMarkdown: (markdown: string) => void;
-  focus: () => void;
-}
-
-function VariableInsertDropdown({ variables, editorRef }: { variables: string[], editorRef: React.RefObject<MDXEditorHandle | null> }) {
-  return (
-    <select
-      className="border rounded px-2 py-1 text-xs bg-muted mr-2"
-      defaultValue=""
-      onChange={e => {
-        const value = e.target.value;
-        if (!value) return;
-        if (editorRef.current && typeof editorRef.current.insertMarkdown === 'function') {
-          editorRef.current.insertMarkdown(value);
-        }
-        e.target.value = "";
-      }}
-    >
-      <option value="" disabled>
-        Insert variable
-      </option>
-      {variables.map(v => (
-        <option key={v} value={`$\u007B${v}\u007D`}>{`$\u007B${v}\u007D`}</option>
-      ))}
-    </select>
-  );
-}
-
-export function PromptsPageClient({ assistantId, prompts: initialPrompts, models, inputFields }: PromptsPageClientProps) {
-  const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
-  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
-  const [isLoading, setIsLoading] = useState(false)
+// Custom hook for prompt form state management
+function usePromptFormState() {
   const [promptName, setPromptName] = useState("")
   const [promptContent, setPromptContent] = useState("")
   const [systemContext, setSystemContext] = useState("")
   const [modelId, setModelId] = useState<string | null>(null)
-  const [editingPrompt, setEditingPrompt] = useState<SelectChainPrompt | null>(null)
-  const [prompts, setPrompts] = useState<SelectChainPrompt[]>(initialPrompts)
-  const reactFlowInstanceRef = useRef<FlowHandle>(null);
-  const [contextTokens, setContextTokens] = useState(0)
   const [useExternalKnowledge, setUseExternalKnowledge] = useState(false)
   const [selectedRepositoryIds, setSelectedRepositoryIds] = useState<number[]>([])
-  const [isPdfContentCollapsed, setIsPdfContentCollapsed] = useState(true)
-  const [promptTokens, setPromptTokens] = useState(0)
-  const [flowKey, setFlowKey] = useState(0)
   const [enabledTools, setEnabledTools] = useState<string[]>([])
-  const mdxEditorRef = useRef<MDXEditorHandle>(null);
+  const [editingPrompt, setEditingPrompt] = useState<SelectChainPrompt | null>(null)
 
-  // When initialPrompts changes (from server), update our local state
-  useEffect(() => {
-    setPrompts(initialPrompts);
-  }, [initialPrompts]);
+  const resetFormState = useCallback(() => {
+    setPromptName("")
+    setPromptContent("")
+    setSystemContext("")
+    setModelId(null)
+    setUseExternalKnowledge(false)
+    setSelectedRepositoryIds([])
+    setEnabledTools([])
+    setEditingPrompt(null)
+  }, [])
 
-  useEffect(() => {
-    setContextTokens(estimateTokens(systemContext))
-  }, [systemContext])
+  const populateFromPrompt = useCallback((prompt: SelectChainPrompt) => {
+    setPromptName(prompt.name)
+    setPromptContent(prompt.content)
+    setSystemContext(prompt.systemContext || "")
+    setModelId(prompt.modelId ? prompt.modelId.toString() : null)
+    setUseExternalKnowledge(Boolean(prompt.repositoryIds && prompt.repositoryIds.length > 0))
+    setSelectedRepositoryIds(prompt.repositoryIds || [])
+    setEnabledTools(prompt.enabledTools || [])
+    setEditingPrompt(prompt)
+  }, [])
 
-  useEffect(() => {
-    setPromptTokens(estimateTokens(promptContent))
-  }, [promptContent])
+  return {
+    promptName, setPromptName,
+    promptContent, setPromptContent,
+    systemContext, setSystemContext,
+    modelId, setModelId,
+    useExternalKnowledge, setUseExternalKnowledge,
+    selectedRepositoryIds, setSelectedRepositoryIds,
+    enabledTools, setEnabledTools,
+    editingPrompt, setEditingPrompt,
+    resetFormState, populateFromPrompt
+  }
+}
 
-  const handleAddPrompt = async (e: React.FormEvent) => {
+// Return type for usePromptFormState
+type PromptFormState = ReturnType<typeof usePromptFormState>
+
+// Props for usePromptHandlers
+interface UsePromptHandlersProps {
+  assistantId: string
+  form: PromptFormState
+  prompts: SelectChainPrompt[]
+  setPrompts: React.Dispatch<React.SetStateAction<SelectChainPrompt[]>>
+  setFlowKey: React.Dispatch<React.SetStateAction<number>>
+  setIsAddDialogOpen: React.Dispatch<React.SetStateAction<boolean>>
+  setIsEditDialogOpen: React.Dispatch<React.SetStateAction<boolean>>
+  setIsLoading: React.Dispatch<React.SetStateAction<boolean>>
+  reactFlowInstanceRef: React.RefObject<FlowHandle | null>
+  setDeletePromptId: React.Dispatch<React.SetStateAction<string | null>>
+  setShowDeleteDialog: React.Dispatch<React.SetStateAction<boolean>>
+}
+
+// Custom hook for prompt CRUD handlers
+function usePromptHandlers({
+  assistantId, form, prompts, setPrompts, setFlowKey,
+  setIsAddDialogOpen, setIsEditDialogOpen, setIsLoading, reactFlowInstanceRef,
+  setDeletePromptId, setShowDeleteDialog
+}: UsePromptHandlersProps) {
+  const handleAddPrompt = useCallback(async (e: React.FormEvent) => {
     e.preventDefault()
     setIsLoading(true)
-
     try {
-      if (!modelId) {
-        toast.error("You must select a model for the prompt.");
-        setIsLoading(false);
-        return;
+      if (!form.modelId) {
+        toast.error("You must select a model for the prompt.")
+        setIsLoading(false)
+        return
       }
-      // Create the new prompt
-      const result = await addChainPromptAction(
-        assistantId,
-        {
-          name: promptName,
-          content: promptContent,
-          systemContext: systemContext || undefined,
-          modelId: Number.parseInt(modelId as string),
-          position: typeof prompts.length === 'number' ? prompts.length : 0,
-          repositoryIds: useExternalKnowledge ? selectedRepositoryIds : [],
-          enabledTools: enabledTools,
-        }
-      )
-
+      const result = await addChainPromptAction(assistantId, {
+        name: form.promptName,
+        content: form.promptContent,
+        systemContext: form.systemContext || undefined,
+        modelId: Number.parseInt(form.modelId),
+        position: prompts.length,
+        repositoryIds: form.useExternalKnowledge ? form.selectedRepositoryIds : [],
+        enabledTools: form.enabledTools,
+      })
       if (result.isSuccess) {
         toast.success("Prompt added successfully")
         setIsAddDialogOpen(false)
-        setPromptName("")
-        setPromptContent("")
-        setSystemContext("")
-        setModelId(null)
-        setUseExternalKnowledge(false)
-        setSelectedRepositoryIds([])
-        setIsPdfContentCollapsed(true)
-        setEnabledTools([])
-        
-        // Get the updated prompts
-        const updatedResult = await getAssistantArchitectByIdAction(assistantId);
+        form.resetFormState()
+        const updatedResult = await getAssistantArchitectByIdAction(assistantId)
         if (updatedResult.isSuccess && updatedResult.data?.prompts) {
-          setPrompts(updatedResult.data.prompts as SelectChainPrompt[]);
-          setFlowKey(k => k + 1); // Force Flow remount
+          setPrompts(updatedResult.data.prompts as SelectChainPrompt[])
+          setFlowKey(k => k + 1)
         }
-      } else {
-        toast.error(result.message)
-      }
-    } catch {
+      } else { toast.error(result.message) }
+    } catch (error) {
+      log.error("Failed to add prompt", { error, assistantId })
       toast.error("Failed to add prompt")
-    } finally {
-      setIsLoading(false)
-    }
-  }
+    } finally { setIsLoading(false) }
+  }, [assistantId, form, prompts.length, setIsLoading, setIsAddDialogOpen, setPrompts, setFlowKey])
 
-  const handleEditPrompt = async (e: React.FormEvent) => {
+  const handleEditPrompt = useCallback(async (e: React.FormEvent) => {
     e.preventDefault()
-    if (!editingPrompt) return
-    
+    if (!form.editingPrompt) return
     setIsLoading(true)
-
     try {
-      if (!modelId) {
-        toast.error("You must select a model for the prompt.");
-        setIsLoading(false);
-        return;
+      if (!form.modelId) {
+        toast.error("You must select a model for the prompt.")
+        setIsLoading(false)
+        return
       }
-      const updateData = {
-        name: promptName,
-        content: promptContent,
-        systemContext: systemContext || undefined,
-        modelId: Number.parseInt(modelId),
-        repositoryIds: useExternalKnowledge && selectedRepositoryIds.length > 0
-          ? selectedRepositoryIds.filter(id => id !== undefined && id !== null)
-          : [], // Send empty array to clear repositories, not undefined
-        enabledTools: enabledTools,
-      };
-      
-      const result = await updatePromptAction(editingPrompt.id.toString(), updateData)
-
+      const result = await updatePromptAction(form.editingPrompt.id.toString(), {
+        name: form.promptName,
+        content: form.promptContent,
+        systemContext: form.systemContext || undefined,
+        modelId: Number.parseInt(form.modelId),
+        repositoryIds: form.useExternalKnowledge && form.selectedRepositoryIds.length > 0
+          ? form.selectedRepositoryIds.filter(id => id !== undefined && id !== null) : [],
+        enabledTools: form.enabledTools,
+      })
       if (result.isSuccess) {
         toast.success("Prompt updated successfully")
         setIsEditDialogOpen(false)
-        setEditingPrompt(null)
-        
-        // Update the prompts in our local state
         setPrompts(currentPrompts =>
           currentPrompts.map(p =>
-            p.id === editingPrompt.id && result.data ? (result.data as SelectChainPrompt) : p
+            p.id === form.editingPrompt?.id && result.data ? (result.data as SelectChainPrompt) : p
           )
         )
-        setFlowKey(k => k + 1); // Force Flow remount
-      } else {
-        toast.error(result.message)
-      }
-    } catch {
+        setFlowKey(k => k + 1)
+        form.resetFormState()
+      } else { toast.error(result.message) }
+    } catch (error) {
+      log.error("Failed to update prompt", { error, promptId: form.editingPrompt?.id })
       toast.error("Failed to update prompt")
-    } finally {
-      setIsLoading(false)
-    }
-  }
+    } finally { setIsLoading(false) }
+  }, [form, setIsLoading, setIsEditDialogOpen, setPrompts, setFlowKey])
 
-  const handleDeletePrompt = async (promptId: string) => {
-    if (!window.confirm("Are you sure you want to delete this prompt?")) {
-      return;
-    }
-    
+  // Show delete confirmation dialog (non-blocking)
+  const handleDeletePrompt = useCallback((promptId: string) => {
+    setDeletePromptId(promptId)
+    setShowDeleteDialog(true)
+  }, [setDeletePromptId, setShowDeleteDialog])
+
+  // Actually perform the delete after user confirms
+  const confirmDeletePrompt = useCallback(async (promptId: string) => {
     try {
-      // Use the string ID directly for the API call
       const result = await deletePromptAction(promptId)
-
       if (result.isSuccess) {
         toast.success("Prompt deleted successfully")
-        
-        // Remove the deleted prompt from our local state
-        const promptIdInt = Number.parseInt(promptId, 10);
+        const promptIdInt = Number.parseInt(promptId, 10)
         setPrompts(current => current.filter(p => p.id !== promptIdInt))
-        
-        // Update the graph with the latest execution order
         if (reactFlowInstanceRef.current) {
-          const graphInstance = reactFlowInstanceRef.current;
-          setTimeout(() => {
-            // Remove the node
-            const updatedNodes = graphInstance.getNodes().filter(n => n.id !== promptId);
-            graphInstance.setNodes(updatedNodes);
-            
-            // Remove edges connected to this node
-            const updatedEdges = graphInstance.getEdges().filter(
+          const graphInstance = reactFlowInstanceRef.current
+          // Use requestAnimationFrame to wait for React state to settle
+          requestAnimationFrame(() => {
+            graphInstance.setNodes(graphInstance.getNodes().filter(n => n.id !== promptId))
+            graphInstance.setEdges(graphInstance.getEdges().filter(
               e => e.source !== promptId && e.target !== promptId
-            );
-            graphInstance.setEdges(updatedEdges);
-            
-            // Save the new structure
-            const savePositionsFunc = reactFlowInstanceRef.current?.savePositions;
-            if (typeof savePositionsFunc === 'function') {
-              setTimeout(savePositionsFunc, 100);
-            }
-          }, 100);
+            ))
+            // Second frame to ensure graph updates are applied before saving
+            requestAnimationFrame(() => {
+              reactFlowInstanceRef.current?.savePositions()
+            })
+          })
         }
-      } else {
-        toast.error(result.message)
-      }
-    } catch {
+      } else { toast.error(result.message) }
+    } catch (error) {
+      log.error("Failed to delete prompt", { error, promptId })
       toast.error("Failed to delete prompt")
     }
-  }
+  }, [setPrompts, reactFlowInstanceRef])
 
-  const openEditDialog = async (prompt: SelectChainPrompt) => {
+  const openEditDialog = useCallback(async (prompt: SelectChainPrompt) => {
     setIsLoading(true)
     try {
       const result = await getAssistantArchitectByIdAction(assistantId)
@@ -864,34 +709,70 @@ export function PromptsPageClient({ assistantId, prompts: initialPrompts, models
         const found = result.data.prompts.find((p: SelectChainPrompt) => p.id === prompt.id)
         if (found) latestPrompt = found
       }
-      setEditingPrompt(latestPrompt)
-      setPromptName(latestPrompt.name)
-      setPromptContent(latestPrompt.content)
-      setSystemContext(latestPrompt.systemContext || "")
-      setModelId(latestPrompt.modelId ? latestPrompt.modelId.toString() : null)
-      setUseExternalKnowledge(Boolean(latestPrompt.repositoryIds && latestPrompt.repositoryIds.length > 0))
-      setSelectedRepositoryIds(latestPrompt.repositoryIds || [])
-      setEnabledTools(latestPrompt.enabledTools || [])
-      setIsPdfContentCollapsed(true)
+      form.populateFromPrompt(latestPrompt)
       setIsEditDialogOpen(true)
-    } catch {
+    } catch (error) {
+      log.error("Failed to fetch latest prompt data", { error, assistantId, promptId: prompt.id })
       toast.error("Failed to fetch latest prompt data")
       setIsEditDialogOpen(true)
-    } finally {
-      setIsLoading(false)
-    }
-  }
+    } finally { setIsLoading(false) }
+  }, [assistantId, form, setIsLoading, setIsEditDialogOpen])
 
+  return { handleAddPrompt, handleEditPrompt, handleDeletePrompt, confirmDeletePrompt, openEditDialog }
+}
+
+export function PromptsPageClient({ assistantId, prompts: initialPrompts, models, inputFields }: PromptsPageClientProps) {
+  const [isAddDialogOpen, setIsAddDialogOpen] = useState(false)
+  const [isEditDialogOpen, setIsEditDialogOpen] = useState(false)
+  const [isLoading, setIsLoading] = useState(false)
+  const [prompts, setPrompts] = useState<SelectChainPrompt[]>(initialPrompts)
+  const [flowKey, setFlowKey] = useState(0)
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false)
+  const [deletePromptId, setDeletePromptId] = useState<string | null>(null)
+  const reactFlowInstanceRef = useRef<FlowHandle>(null)
+  const form = usePromptFormState()
+
+  useEffect(() => { setPrompts(initialPrompts) }, [initialPrompts])
+
+  const { handleAddPrompt, handleEditPrompt, handleDeletePrompt, confirmDeletePrompt, openEditDialog } = usePromptHandlers({
+    assistantId, form, prompts, setPrompts, setFlowKey,
+    setIsAddDialogOpen, setIsEditDialogOpen, setIsLoading, reactFlowInstanceRef,
+    setDeletePromptId, setShowDeleteDialog
+  })
+
+  const handleAddButtonClick = useCallback(() => {
+    form.resetFormState()
+    setIsAddDialogOpen(true)
+  }, [form])
+  const handleAddDialogOpenChange = useCallback((open: boolean) => {
+    setIsAddDialogOpen(open)
+    if (!open) form.resetFormState()
+  }, [form])
+  const handleEditDialogOpenChange = useCallback((open: boolean) => {
+    setIsEditDialogOpen(open)
+    if (!open) form.resetFormState()
+  }, [form])
+
+  const handleDeleteDialogOpenChange = useCallback((open: boolean) => {
+    setShowDeleteDialog(open)
+    if (!open) setDeletePromptId(null)
+  }, [])
+
+  const handleConfirmDelete = useCallback(() => {
+    if (deletePromptId) {
+      confirmDeletePrompt(deletePromptId)
+    }
+    setShowDeleteDialog(false)
+    setDeletePromptId(null)
+  }, [deletePromptId, confirmDeletePrompt])
+
+  const handleCancelDelete = useCallback(() => {
+    setShowDeleteDialog(false)
+    setDeletePromptId(null)
+  }, [])
 
   return (
     <div className="space-y-8">
-      <div className="space-y-4">
-        <div className="flex items-center justify-between">
-          <div>
-          </div>
-        </div>
-      </div>
-
       <div className="h-[600px] border rounded-lg">
         <ReactFlowProvider>
           <Flow
@@ -906,311 +787,80 @@ export function PromptsPageClient({ assistantId, prompts: initialPrompts, models
         </ReactFlowProvider>
       </div>
 
-      <Button onClick={() => {
-        setPromptName("");
-        setPromptContent("");
-        setSystemContext("");
-        setModelId(null);
-        setUseExternalKnowledge(false);
-        setSelectedRepositoryIds([]);
-        setEnabledTools([]);
-        setIsPdfContentCollapsed(true);
-        setIsAddDialogOpen(true);
-      }}>
+      <Button onClick={handleAddButtonClick}>
         <PlusIcon className="h-4 w-4 mr-2" />
         Add Prompt
       </Button>
-      <Sheet open={isAddDialogOpen} onOpenChange={open => { if (!open) setIsAddDialogOpen(false) }}>
-        <SheetContent
-          position="right"
-          size="content"
-          className="w-[60vw] max-w-none h-screen p-0 flex flex-col"
-          onInteractOutside={e => e.preventDefault()} // Prevent closing by clicking outside
-          onEscapeKeyDown={e => e.preventDefault()} // Prevent closing by escape
-        >
-          <form onSubmit={handleAddPrompt} className="flex flex-col h-full">
-            <SheetHeader className="p-6 pb-0">
-              <SheetTitle>Add Prompt</SheetTitle>
-              <SheetDescription>
-                Create a new prompt for your Assistant Architect.
-              </SheetDescription>
-            </SheetHeader>
-            <div className="flex-1 overflow-y-auto p-6 pt-2 space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor="name">Prompt Name</Label>
-                <Input
-                  id="name"
-                  value={promptName}
-                  onChange={(e) => setPromptName(e.target.value)}
-                  placeholder="Enter a prompt name"
-                  required
-                  className="bg-muted"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="model">AI Model</Label>
-                <ModelSelectorFormAdapter
-                  models={models}
-                  value={modelId}
-                  onValueChange={setModelId}
-                  placeholder="Select an AI model"
-                  className="bg-muted"
-                  requiredCapabilities={["chat"]}
-                  hideRoleRestricted={true}
-                  hideCapabilityMissing={true}
-                />
-              </div>
-              <ToolSelectionSection
-                selectedModelId={modelId && !Number.isNaN(Number.parseInt(modelId)) ? Number.parseInt(modelId) : null}
-                enabledTools={enabledTools}
-                onToolsChange={setEnabledTools}
-                models={models}
-                disabled={isLoading}
-              />
-              <KnowledgeSection
-                useExternalKnowledge={useExternalKnowledge}
-                setUseExternalKnowledge={setUseExternalKnowledge}
-                systemContext={systemContext}
-                setSystemContext={setSystemContext}
-                selectedRepositoryIds={selectedRepositoryIds}
-                setSelectedRepositoryIds={setSelectedRepositoryIds}
-                isPdfContentCollapsed={isPdfContentCollapsed}
-                setIsPdfContentCollapsed={setIsPdfContentCollapsed}
-                contextTokens={contextTokens}
-              />
-              <div className="space-y-2">
-                <Label htmlFor="content">Prompt Content</Label>
-                <div className="rounded-md border bg-muted h-[320px] overflow-y-auto">
-                  <MDXEditor
-                    ref={mdxEditorRef}
-                    markdown={promptContent}
-                    onChange={v => setPromptContent(v ?? "")}
-                    className="min-h-full bg-[#e5e1d6]"
-                    contentEditableClassName="prose"
-                    placeholder="Enter your prompt content. Use ${variableName} for dynamic values."
-                    plugins={[
-                      toolbarPlugin({
-                        toolbarContents: () => (
-                          <>
-                            <VariableInsertDropdown
-                              variables={[
-                                ...inputFields.map(f => f.name),
-                                ...prompts
-                                  .filter((p, idx) => !editingPrompt ? true : prompts.findIndex(pp => pp.id === editingPrompt.id) > idx)
-                                  .map(prevPrompt => slugify(prevPrompt.name))
-                              ]}
-                              editorRef={mdxEditorRef}
-                            />
-                            <UndoRedo />
-                            <Separator />
-                            <BoldItalicUnderlineToggles />
-                            <Separator />
-                            <BlockTypeSelect />
-                            <Separator />
-                            <ListsToggle />
-                            <Separator />
-                            <CreateLink />
-                          </>
-                        )
-                      }),
-                      markdownShortcutPlugin(),
-                      listsPlugin(),
-                      headingsPlugin(),
-                      quotePlugin(),
-                      thematicBreakPlugin(),
-                      linkPlugin(),
-                      linkDialogPlugin()
-                    ]}
-                  />
-                </div>
-                <div className="text-xs text-muted-foreground mt-1">
-                  {promptTokens} tokens
-                </div>
-              </div>
-              <div className="space-y-2">
-                <Label>Available Variables</Label>
-                <div className="flex flex-wrap gap-2">
-                  {inputFields.map(field => (
-                    <span key={field.id} className="px-2 py-1 rounded bg-muted text-xs font-mono border">
-                      {field.name}
-                    </span>
-                  ))}
-                  {/* Show previous prompt names (slugified) */}
-                  {prompts
-                    .filter((p, idx) => !editingPrompt ? true : prompts.findIndex(pp => pp.id === editingPrompt.id) > idx)
-                    .map(prevPrompt => (
-                      <span key={prevPrompt.id} className="px-2 py-1 rounded bg-muted text-xs font-mono border">
-                        {slugify(prevPrompt.name)}
-                      </span>
-                    ))}
-                </div>
-                <div className="text-sm text-muted-foreground mt-2">
-                  Use these variables in your prompt with $&#123;variableName&#125;
-                </div>
-              </div>
-            </div>
-            <SheetFooter className="p-6 pt-4 bg-[#f6f5ee] border-t flex gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                onClick={() => setIsAddDialogOpen(false)}
-                disabled={isLoading}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" disabled={isLoading}>
-                {isLoading ? "Adding..." : "Add Prompt"}
-              </Button>
-            </SheetFooter>
-          </form>
-        </SheetContent>
-      </Sheet>
 
-      {editingPrompt && (
-        <Sheet open={isEditDialogOpen} onOpenChange={open => { if (!open) setIsEditDialogOpen(false) }}>
-          <SheetContent
-            position="right"
-            size="content"
-            className="w-[60vw] max-w-none h-screen p-0 flex flex-col"
-            onInteractOutside={e => e.preventDefault()} // Prevent closing by clicking outside
-            onEscapeKeyDown={e => e.preventDefault()} // Prevent closing by escape
-          >
-            <form onSubmit={handleEditPrompt} className="flex flex-col h-full">
-              <SheetHeader className="p-6 pb-0">
-                <SheetTitle>Edit Prompt</SheetTitle>
-                <SheetDescription>Update the prompt configuration.</SheetDescription>
-              </SheetHeader>
-              <div className="flex-1 overflow-y-auto p-6 pt-2 space-y-4">
-                <div className="space-y-2">
-                  <Label htmlFor="edit-name">Prompt Name</Label>
-                  <Input
-                    id="edit-name"
-                    value={promptName}
-                    onChange={(e) => setPromptName(e.target.value)}
-                    placeholder="Enter a prompt name"
-                    required
-                    className="bg-muted"
-                  />
-                </div>
-                <div className="space-y-2">
-                  <Label htmlFor="edit-model">AI Model</Label>
-                  <ModelSelectorFormAdapter
-                    models={models}
-                    value={modelId}
-                    onValueChange={setModelId}
-                    placeholder="Select an AI model"
-                    className="bg-muted"
-                    requiredCapabilities={["chat"]}
-                    hideRoleRestricted={true}
-                    hideCapabilityMissing={true}
-                  />
-                </div>
-                <ToolSelectionSection
-                  selectedModelId={modelId && !Number.isNaN(Number.parseInt(modelId)) ? Number.parseInt(modelId) : null}
-                  enabledTools={enabledTools}
-                  onToolsChange={setEnabledTools}
-                  models={models}
-                  disabled={isLoading}
-                />
-                <KnowledgeSection
-                  useExternalKnowledge={useExternalKnowledge}
-                  setUseExternalKnowledge={setUseExternalKnowledge}
-                  systemContext={systemContext}
-                  setSystemContext={setSystemContext}
-                  selectedRepositoryIds={selectedRepositoryIds}
-                  setSelectedRepositoryIds={setSelectedRepositoryIds}
-                  isPdfContentCollapsed={isPdfContentCollapsed}
-                  setIsPdfContentCollapsed={setIsPdfContentCollapsed}
-                  contextTokens={contextTokens}
-                />
-                <div className="space-y-2">
-                  <Label htmlFor="edit-content">Prompt Content</Label>
-                  <div className="rounded-md border bg-muted h-[320px] overflow-y-auto">
-                    <MDXEditor
-                      ref={mdxEditorRef}
-                      markdown={promptContent}
-                      onChange={v => setPromptContent(v ?? "")}
-                      className="min-h-full bg-[#e5e1d6]"
-                      contentEditableClassName="prose"
-                      placeholder="Enter your prompt content. Use ${variableName} for dynamic values."
-                      plugins={[
-                        toolbarPlugin({
-                          toolbarContents: () => (
-                            <>
-                              <VariableInsertDropdown
-                                variables={[
-                                  ...inputFields.map(f => f.name),
-                                  ...prompts
-                                    .filter((p, idx) => !editingPrompt ? true : prompts.findIndex(pp => pp.id === editingPrompt.id) > idx)
-                                    .map(prevPrompt => slugify(prevPrompt.name))
-                                ]}
-                                editorRef={mdxEditorRef}
-                              />
-                              <UndoRedo />
-                              <Separator />
-                              <BoldItalicUnderlineToggles />
-                              <Separator />
-                              <BlockTypeSelect />
-                              <Separator />
-                              <ListsToggle />
-                              <Separator />
-                              <CreateLink />
-                            </>
-                          )
-                        }),
-                        markdownShortcutPlugin(),
-                        listsPlugin(),
-                        headingsPlugin(),
-                        quotePlugin(),
-                        thematicBreakPlugin(),
-                        linkPlugin(),
-                        linkDialogPlugin()
-                      ]}
-                    />
-                  </div>
-                  <div className="text-xs text-muted-foreground mt-1">
-                    {promptTokens} tokens
-                  </div>
-                </div>
-                <div className="space-y-2">
-                  <Label>Available Variables</Label>
-                  <div className="flex flex-wrap gap-2">
-                    {inputFields.map(field => (
-                      <span key={field.id} className="px-2 py-1 rounded bg-muted text-xs font-mono border">
-                        {field.name}
-                      </span>
-                    ))}
-                    {/* Show previous prompt names (slugified) */}
-                    {prompts
-                      .filter((p, idx) => !editingPrompt ? true : prompts.findIndex(pp => pp.id === editingPrompt.id) > idx)
-                      .map(prevPrompt => (
-                        <span key={prevPrompt.id} className="px-2 py-1 rounded bg-muted text-xs font-mono border">
-                          {slugify(prevPrompt.name)}
-                        </span>
-                      ))}
-                  </div>
-                  <div className="text-sm text-muted-foreground mt-2">
-                    Use these variables in your prompt with $&#123;variableName&#125;
-                  </div>
-                </div>
-              </div>
-              <SheetFooter className="p-6 pt-4 bg-[#f6f5ee] border-t flex gap-2">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => setIsEditDialogOpen(false)}
-                  disabled={isLoading}
-                >
-                  Cancel
-                </Button>
-                <Button type="submit" disabled={isLoading} onClick={() => {}}>
-                  {isLoading ? "Saving..." : "Save Changes"}
-                </Button>
-              </SheetFooter>
-            </form>
-          </SheetContent>
-        </Sheet>
-      )}
+      {/* Add Prompt Modal */}
+      <PromptEditorModal
+        open={isAddDialogOpen}
+        onOpenChange={handleAddDialogOpenChange}
+        mode="add"
+        promptName={form.promptName}
+        setPromptName={form.setPromptName}
+        promptContent={form.promptContent}
+        setPromptContent={form.setPromptContent}
+        systemContext={form.systemContext}
+        setSystemContext={form.setSystemContext}
+        modelId={form.modelId}
+        setModelId={form.setModelId}
+        enabledTools={form.enabledTools}
+        setEnabledTools={form.setEnabledTools}
+        useExternalKnowledge={form.useExternalKnowledge}
+        setUseExternalKnowledge={form.setUseExternalKnowledge}
+        selectedRepositoryIds={form.selectedRepositoryIds}
+        setSelectedRepositoryIds={form.setSelectedRepositoryIds}
+        models={models}
+        inputFields={inputFields}
+        prompts={prompts}
+        editingPrompt={null}
+        onSubmit={handleAddPrompt}
+        isLoading={isLoading}
+      />
+
+      {/* Edit Prompt Modal */}
+      <PromptEditorModal
+        open={isEditDialogOpen}
+        onOpenChange={handleEditDialogOpenChange}
+        mode="edit"
+        promptName={form.promptName}
+        setPromptName={form.setPromptName}
+        promptContent={form.promptContent}
+        setPromptContent={form.setPromptContent}
+        systemContext={form.systemContext}
+        setSystemContext={form.setSystemContext}
+        modelId={form.modelId}
+        setModelId={form.setModelId}
+        enabledTools={form.enabledTools}
+        setEnabledTools={form.setEnabledTools}
+        useExternalKnowledge={form.useExternalKnowledge}
+        setUseExternalKnowledge={form.setUseExternalKnowledge}
+        selectedRepositoryIds={form.selectedRepositoryIds}
+        setSelectedRepositoryIds={form.setSelectedRepositoryIds}
+        models={models}
+        inputFields={inputFields}
+        prompts={prompts}
+        editingPrompt={form.editingPrompt}
+        onSubmit={handleEditPrompt}
+        isLoading={isLoading}
+      />
+
+      {/* Delete Confirmation Dialog */}
+      <AlertDialog open={showDeleteDialog} onOpenChange={handleDeleteDialogOpenChange}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete Prompt</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete this prompt? This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel onClick={handleCancelDelete}>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleConfirmDelete}>Delete</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 } 

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
-import { getNavigationItems as getNavigationItemsViaDataAPI, executeSQL } from "@/lib/db/data-api-adapter"
+import { getNavigationItems, getAllNavigationItemRoles, getToolsByIds } from "@/lib/db/drizzle"
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger'
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
 import { hasToolAccess } from "@/utils/roles";
@@ -54,40 +54,27 @@ export async function GET() {
     
     log.debug("User authenticated", { userId: session.sub });
     
-    // Check if Data API is configured
-    const missingEnvVars = [];
-    if (!process.env.RDS_RESOURCE_ARN) missingEnvVars.push('RDS_RESOURCE_ARN');
-    if (!process.env.RDS_SECRET_ARN) missingEnvVars.push('RDS_SECRET_ARN');
-    
-    // AWS Amplify provides AWS_REGION and AWS_DEFAULT_REGION at runtime
-    // We should check NEXT_PUBLIC_AWS_REGION as a fallback
-    const region = process.env.AWS_REGION || 
-                   process.env.AWS_DEFAULT_REGION || 
-                   process.env.NEXT_PUBLIC_AWS_REGION;
-    
-    if (!region) missingEnvVars.push('NEXT_PUBLIC_AWS_REGION');
-    
-    if (missingEnvVars.length > 0) {
-      log.error("Missing required environment variables:", {
-        missing: missingEnvVars,
-        RDS_RESOURCE_ARN: process.env.RDS_RESOURCE_ARN ? 'set' : 'missing',
-        RDS_SECRET_ARN: process.env.RDS_SECRET_ARN ? 'set' : 'missing',
-        AWS_REGION: process.env.AWS_REGION || 'not set (provided by Amplify)',
-        AWS_DEFAULT_REGION: process.env.AWS_DEFAULT_REGION || 'not set (provided by Amplify)',
-        NEXT_PUBLIC_AWS_REGION: process.env.NEXT_PUBLIC_AWS_REGION || 'not set',
-        availableEnvVars: Object.keys(process.env).filter(k => 
-          k.includes('AWS') || k.includes('RDS')).join(', ')
+    // Check if database is configured (postgres.js driver - Issue #603)
+    // Either DATABASE_URL (local dev) or DB_HOST (AWS ECS) must be set
+    const hasDatabaseUrl = !!process.env.DATABASE_URL;
+    const hasAwsDbConfig = !!process.env.DB_HOST;
+
+    if (!hasDatabaseUrl && !hasAwsDbConfig) {
+      log.error("Database configuration incomplete:", {
+        DATABASE_URL: hasDatabaseUrl ? 'set' : 'missing',
+        DB_HOST: hasAwsDbConfig ? 'set' : 'missing',
+        hint: 'Set DATABASE_URL for local dev or DB_HOST for AWS ECS'
       });
-      
+
       timer({ status: "error", reason: "missing_config" });
       return NextResponse.json(
         {
           isSuccess: false,
-          message: `Database configuration incomplete. Missing: ${missingEnvVars.join(', ')}`,
+          message: `Database configuration incomplete. Set DATABASE_URL (local) or DB_HOST (AWS)`,
           debug: process.env.NODE_ENV !== 'production' ? {
-            missing: missingEnvVars,
-            availableEnvVars: Object.keys(process.env).filter(k => 
-              k.includes('AWS') || k.includes('RDS'))
+            hasDatabaseUrl,
+            hasAwsDbConfig,
+            hint: 'For local dev: set DATABASE_URL. For AWS: DB_HOST is injected from Secrets Manager'
           } : undefined
         },
         { status: 500, headers: { "X-Request-Id": requestId } }
@@ -95,36 +82,22 @@ export async function GET() {
     }
     
     try {
-      const navItems = await getNavigationItemsViaDataAPI();
-      
+      const navItems = await getNavigationItems(true); // Get active items only
+
       // Get current user's roles
       const userResult = await getCurrentUserAction();
-      const userRoles = userResult.isSuccess && userResult.data 
+      const userRoles = userResult.isSuccess && userResult.data
         ? userResult.data.roles.map(r => r.name)
         : [];
-      
-      log.debug("User roles for navigation filtering", { 
+
+      log.debug("User roles for navigation filtering", {
         userId: session.sub,
-        roles: userRoles 
+        roles: userRoles
       });
 
       // Get navigation item roles from the junction table
-      const navItemRolesQuery = await executeSQL(
-        'SELECT navigation_item_id, role_name FROM navigation_item_roles'
-      );
-      
-      // Create a map of navigation item IDs to their required roles
-      const navItemRolesMap = new Map<number, string[]>();
-      for (const row of navItemRolesQuery) {
-        const itemId = row.navigation_item_id as number;
-        const roleName = row.role_name as string;
-        
-        if (!navItemRolesMap.has(itemId)) {
-          navItemRolesMap.set(itemId, []);
-        }
-        navItemRolesMap.get(itemId)?.push(roleName);
-      }
-      
+      const navItemRolesMap = await getAllNavigationItemRoles();
+
       // Collect all tool IDs that need to be looked up
       const toolIdsToLookup = new Set<number>();
       for (const item of navItems) {
@@ -135,26 +108,11 @@ export async function GET() {
           }
         }
       }
-      
-      // Batch fetch all tool identifiers in a single query
-      const toolsMap = new Map<number, string>();
-      if (toolIdsToLookup.size > 0) {
-        const toolIds = Array.from(toolIdsToLookup);
-        const placeholders = toolIds.map((_, index) => `:id${index}`).join(', ');
-        const params = toolIds.map((id, index) => ({
-          name: `id${index}`,
-          value: { longValue: id }
-        }));
-        
-        const toolsQuery = await executeSQL(
-          `SELECT id, identifier FROM tools WHERE id IN (${placeholders})`,
-          params
-        );
-        
-        for (const tool of toolsQuery) {
-          toolsMap.set(tool.id as number, tool.identifier as string);
-        }
-      }
+
+      // Batch fetch all tool identifiers using Drizzle
+      const toolsMap = toolIdsToLookup.size > 0
+        ? await getToolsByIds(Array.from(toolIdsToLookup))
+        : new Map<number, string>();
 
       // Filter navigation items based on user permissions
       const filteredNavItems = [];

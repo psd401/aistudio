@@ -11,6 +11,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { IconPlus, IconEdit, IconTrash, IconChevronRight } from '@tabler/icons-react';
 import type { SelectAiModel, NexusCapabilities, ProviderMetadata } from '@/types';
 import { MultiSelect, type MultiSelectOption } from '@/components/ui/multi-select';
+import { capabilitiesToNexusCapabilities } from '@/lib/ai/capability-utils';
 import { Badge } from '@/components/ui/badge';
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from '@/components/ui/collapsible';
 import {
@@ -79,46 +80,69 @@ const ModelForm = React.memo(function ModelForm({
   const handleMaxTokensChange = (e: React.ChangeEvent<HTMLInputElement>) => 
     setModelData({ ...modelData, maxTokens: Number.parseInt(e.target.value) || 4096 });
     
-  const handleActiveChange = (checked: boolean) => 
+  const handleActiveChange = (checked: boolean) =>
     setModelData({ ...modelData, active: checked });
-    
-  const handleChatEnabledChange = (checked: boolean) => 
-    setModelData({ ...modelData, chatEnabled: checked });
+
+  const handleNexusEnabledChange = (checked: boolean) =>
+    setModelData({ ...modelData, nexusEnabled: checked });
+
+  const handleArchitectEnabledChange = (checked: boolean) =>
+    setModelData({ ...modelData, architectEnabled: checked });
 
   // Pricing field handlers with validation
+  // Note: Cost fields are stored as strings in DB for precision (PostgreSQL numeric type)
   const handleInputCostChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
+    // Empty input sets null in database (not empty string)
     if (!value) {
       setModelData({ ...modelData, inputCostPer1kTokens: null });
       return;
     }
+    // Validate entire string is a valid decimal number (prevents "0.00abc" type inputs)
+    const numericPattern = /^-?\d*\.?\d+$/;
+    if (!numericPattern.test(value)) {
+      // Silently reject invalid inputs (don't update state)
+      return;
+    }
     const parsed = Number.parseFloat(value);
     if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
-      setModelData({ ...modelData, inputCostPer1kTokens: parsed });
+      setModelData({ ...modelData, inputCostPer1kTokens: value });
     }
   };
-    
+
   const handleOutputCostChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
+    // Empty input sets null in database (not empty string)
     if (!value) {
       setModelData({ ...modelData, outputCostPer1kTokens: null });
       return;
     }
-    const parsed = Number.parseFloat(value);
-    if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
-      setModelData({ ...modelData, outputCostPer1kTokens: parsed });
-    }
-  };
-    
-  const handleCachedInputCostChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const value = e.target.value;
-    if (!value) {
-      setModelData({ ...modelData, cachedInputCostPer1kTokens: null });
+    // Validate entire string is a valid decimal number
+    const numericPattern = /^-?\d*\.?\d+$/;
+    if (!numericPattern.test(value)) {
       return;
     }
     const parsed = Number.parseFloat(value);
     if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
-      setModelData({ ...modelData, cachedInputCostPer1kTokens: parsed });
+      setModelData({ ...modelData, outputCostPer1kTokens: value });
+    }
+  };
+
+  const handleCachedInputCostChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value;
+    // Empty input sets null in database (not empty string)
+    if (!value) {
+      setModelData({ ...modelData, cachedInputCostPer1kTokens: null });
+      return;
+    }
+    // Validate entire string is a valid decimal number
+    const numericPattern = /^-?\d*\.?\d+$/;
+    if (!numericPattern.test(value)) {
+      return;
+    }
+    const parsed = Number.parseFloat(value);
+    if (!Number.isNaN(parsed) && parsed >= 0 && parsed <= 1000) {
+      setModelData({ ...modelData, cachedInputCostPer1kTokens: value });
     }
   };
 
@@ -280,22 +304,32 @@ const ModelForm = React.memo(function ModelForm({
           </div>
         </div>
 
-        <div className="flex items-center space-x-4">
-          <div className="flex items-center space-x-2">
-            <Switch
-              id="model-active"
-              checked={modelData.active}
-              onCheckedChange={handleActiveChange}
-            />
-            <label htmlFor="model-active" className="text-sm font-medium">Active</label>
-          </div>
-          <div className="flex items-center space-x-2">
-            <Switch
-              id="model-chat-enabled"
-              checked={modelData.chatEnabled}
-              onCheckedChange={handleChatEnabledChange}
-            />
-            <label htmlFor="model-chat-enabled" className="text-sm font-medium">Chat Enabled</label>
+        <div className="space-y-4">
+          <div className="flex items-center space-x-4">
+            <div className="flex items-center space-x-2">
+              <Switch
+                id="model-active"
+                checked={modelData.active}
+                onCheckedChange={handleActiveChange}
+              />
+              <label htmlFor="model-active" className="text-sm font-medium">Active</label>
+            </div>
+            <div className="flex items-center space-x-2">
+              <Switch
+                id="model-nexus-enabled"
+                checked={modelData.nexusEnabled ?? true}
+                onCheckedChange={handleNexusEnabledChange}
+              />
+              <label htmlFor="model-nexus-enabled" className="text-sm font-medium">Nexus Enabled</label>
+            </div>
+            <div className="flex items-center space-x-2">
+              <Switch
+                id="model-architect-enabled"
+                checked={modelData.architectEnabled ?? true}
+                onCheckedChange={handleArchitectEnabledChange}
+              />
+              <label htmlFor="model-architect-enabled" className="text-sm font-medium">Architect Enabled</label>
+            </div>
           </div>
         </div>
       </div>
@@ -507,13 +541,14 @@ type ModelFormData = {
   capabilities: string;
   maxTokens: number;
   active: boolean;
-  chatEnabled: boolean;
+  nexusEnabled: boolean;
+  architectEnabled: boolean;
   allowedRoles: string[];
   capabilitiesList: string[];
-  // Pricing fields
-  inputCostPer1kTokens: number | null;
-  outputCostPer1kTokens: number | null;
-  cachedInputCostPer1kTokens: number | null;
+  // Pricing fields - stored as string in DB (PostgreSQL numeric) for precision
+  inputCostPer1kTokens: string | null;
+  outputCostPer1kTokens: string | null;
+  cachedInputCostPer1kTokens: string | null;
   // Performance fields
   averageLatencyMs: number | null;
   maxConcurrency: number | null;
@@ -523,22 +558,6 @@ type ModelFormData = {
   providerMetadata: ProviderMetadata;
 };
 
-const DEFAULT_NEXUS_CAPABILITIES: NexusCapabilities = {
-  canvas: false,
-  thinking: false,
-  artifacts: false,
-  grounding: false,
-  reasoning: false,
-  webSearch: false,
-  computerUse: false,
-  responsesAPI: false,
-  codeExecution: false,
-  promptCaching: false,
-  contextCaching: false,
-  workspaceTools: false,
-  codeInterpreter: false
-} as const;
-
 const emptyModel: ModelFormData = {
   name: '',
   provider: '',
@@ -547,7 +566,8 @@ const emptyModel: ModelFormData = {
   capabilities: '',
   maxTokens: 4096,
   active: true,
-  chatEnabled: false,
+  nexusEnabled: true,
+  architectEnabled: true,
   allowedRoles: [],
   capabilitiesList: [],
   // Pricing fields
@@ -559,7 +579,7 @@ const emptyModel: ModelFormData = {
   maxConcurrency: null,
   supportsBatching: false,
   // Capability/Metadata fields
-  nexusCapabilities: { ...DEFAULT_NEXUS_CAPABILITIES },
+  nexusCapabilities: capabilitiesToNexusCapabilities(''),
   providerMetadata: {}
 };
 
@@ -753,19 +773,11 @@ export const AiModelsTable = React.memo(function AiModelsTable({
       }
     }
     
-    // Parse allowed roles if it's a JSON string
+    // allowedRoles is now string[] | null from Drizzle JSONB type
     let allowedRoles: string[] = [];
     if (model.allowedRoles) {
-      try {
-        const parsed = typeof model.allowedRoles === 'string' 
-          ? JSON.parse(model.allowedRoles) 
-          : model.allowedRoles;
-        if (Array.isArray(parsed)) {
-          allowedRoles = parsed;
-        }
-      } catch {
-        // If not valid JSON, treat as empty
-        allowedRoles = [];
+      if (Array.isArray(model.allowedRoles)) {
+        allowedRoles = model.allowedRoles;
       }
     }
     
@@ -779,7 +791,8 @@ export const AiModelsTable = React.memo(function AiModelsTable({
       allowedRoles,
       maxTokens: model.maxTokens || 4096,
       active: model.active,
-      chatEnabled: model.chatEnabled || false,
+      nexusEnabled: model.nexusEnabled ?? true,
+      architectEnabled: model.architectEnabled ?? true,
       // Pricing fields
       inputCostPer1kTokens: model.inputCostPer1kTokens || null,
       outputCostPer1kTokens: model.outputCostPer1kTokens || null,
@@ -788,19 +801,8 @@ export const AiModelsTable = React.memo(function AiModelsTable({
       averageLatencyMs: model.averageLatencyMs || null,
       maxConcurrency: model.maxConcurrency || null,
       supportsBatching: model.supportsBatching || false,
-      // Capability/Metadata fields - parse JSON strings if needed
-      nexusCapabilities: (() => {
-        if (!model.nexusCapabilities) {
-          return { ...DEFAULT_NEXUS_CAPABILITIES };
-        }
-        try {
-          return typeof model.nexusCapabilities === 'string' 
-            ? JSON.parse(model.nexusCapabilities) 
-            : model.nexusCapabilities;
-        } catch {
-          return { ...DEFAULT_NEXUS_CAPABILITIES };
-        }
-      })(),
+      // Capability/Metadata fields - convert from capabilities to nexusCapabilities for UI
+      nexusCapabilities: capabilitiesToNexusCapabilities(model.capabilities),
       providerMetadata: (() => {
         if (!model.providerMetadata) return {};
         try {
@@ -967,21 +969,23 @@ export const AiModelsTable = React.memo(function AiModelsTable({
   });
 
   const handleSubmit = useCallback(() => {
-    // Convert arrays to JSON strings for database storage
+    // Prepare data for database storage
+    // Note: allowedRoles is JSONB (string[]), capabilities is text (JSON string)
     const dataToSubmit = {
       ...modelData,
-      capabilities: modelData.capabilitiesList.length > 0 
-        ? JSON.stringify(modelData.capabilitiesList) 
+      capabilities: modelData.capabilitiesList.length > 0
+        ? JSON.stringify(modelData.capabilitiesList)
         : null,
-      allowedRoles: modelData.allowedRoles.length > 0 
-        ? JSON.stringify(modelData.allowedRoles) 
+      // allowedRoles is JSONB type - pass array directly, not as JSON string
+      allowedRoles: modelData.allowedRoles.length > 0
+        ? modelData.allowedRoles
         : null,
       // Include all the new fields
-      nexusCapabilities: Object.keys(modelData.nexusCapabilities).length > 0 
-        ? modelData.nexusCapabilities 
+      nexusCapabilities: Object.keys(modelData.nexusCapabilities).length > 0
+        ? modelData.nexusCapabilities
         : null,
-      providerMetadata: Object.keys(modelData.providerMetadata).length > 0 
-        ? modelData.providerMetadata 
+      providerMetadata: Object.keys(modelData.providerMetadata).length > 0
+        ? modelData.providerMetadata
         : null
     };
     
@@ -990,8 +994,9 @@ export const AiModelsTable = React.memo(function AiModelsTable({
     const { capabilitiesList, ...dbData } = dataToSubmit;
     const finalData = {
       ...dbData,
-      // Use explicit chatEnabled value (maintains backward compatibility by defaulting to capability-based inference)
-      chatEnabled: modelData.chatEnabled,
+      // Feature-specific availability flags
+      nexusEnabled: modelData.nexusEnabled,
+      architectEnabled: modelData.architectEnabled,
       // Ensure pricing fields are properly set
       inputCostPer1kTokens: modelData.inputCostPer1kTokens,
       outputCostPer1kTokens: modelData.outputCostPer1kTokens,

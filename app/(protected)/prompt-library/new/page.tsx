@@ -19,6 +19,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { toast } from "sonner"
 import { ArrowLeft, Save } from "lucide-react"
 import { TagInput } from "../_components/tag-input"
+import { PageBranding } from "@/components/ui/page-branding"
 import type { PromptVisibility } from "@/lib/prompt-library/types"
 import { createPromptSchema } from "@/lib/prompt-library/validation"
 
@@ -72,25 +73,33 @@ export default function NewPromptPage() {
   return (
     <div className="mx-auto max-w-4xl p-6">
       {/* Header */}
-      <div className="mb-6 flex items-center justify-between">
-        <div className="flex items-center gap-4">
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => router.push('/prompt-library')}
-          >
-            <ArrowLeft className="h-4 w-4" />
-          </Button>
-          <h1 className="text-2xl font-semibold">Create New Prompt</h1>
-        </div>
+      <div className="mb-6">
+        <PageBranding />
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => router.push('/prompt-library')}
+            >
+              <ArrowLeft className="h-4 w-4" />
+            </Button>
+            <div>
+              <h1 className="text-2xl font-semibold text-gray-900">Create New Prompt</h1>
+              <p className="text-sm text-muted-foreground">
+                Add a new prompt to your library
+              </p>
+            </div>
+          </div>
 
-        <Button
+          <Button
           onClick={handleCreate}
           disabled={isCreating}
         >
           <Save className="mr-2 h-4 w-4" />
           {isCreating ? 'Creating...' : 'Create Prompt'}
         </Button>
+        </div>
       </div>
 
       {/* Form */}

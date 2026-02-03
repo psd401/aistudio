@@ -15,9 +15,6 @@ import {
 import {
   Card,
   CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
 } from "@/components/ui/card"
 import {
   AlertDialog,
@@ -34,6 +31,7 @@ import { Plus, Trash2, FolderOpen, Globe, Lock, Loader2 } from "lucide-react"
 import { format } from "date-fns"
 import { Badge } from "@/components/ui/badge"
 import { useToast } from "@/components/ui/use-toast"
+import { PageBranding } from "@/components/ui/page-branding"
 
 export function RepositoryList() {
   const router = useRouter()
@@ -84,21 +82,24 @@ export function RepositoryList() {
 
   return (
     <>
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <div>
-              <CardTitle>Knowledge Repositories</CardTitle>
-              <CardDescription>
-                Manage knowledge bases for AI assistants
-              </CardDescription>
-            </div>
-            <Button onClick={() => router.push("/repositories/new")}>
-              <Plus className="mr-2 h-4 w-4" />
-              New Repository
-            </Button>
+      {/* Page Header */}
+      <div className="mb-6">
+        <PageBranding />
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-2xl font-semibold text-gray-900">Knowledge Repositories</h1>
+            <p className="text-sm text-muted-foreground mt-1">
+              Manage knowledge bases for AI assistants
+            </p>
           </div>
-        </CardHeader>
+          <Button onClick={() => router.push("/repositories/new")}>
+            <Plus className="mr-2 h-4 w-4" />
+            New Repository
+          </Button>
+        </div>
+      </div>
+
+      <Card>
         <CardContent>
           {loading ? (
             <div className="flex justify-center py-8">

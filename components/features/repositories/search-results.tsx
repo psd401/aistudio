@@ -58,7 +58,7 @@ export function SearchResults({ results, query, isLoading }: SearchResultsProps)
   // Helper to highlight matching text (simple approach)
   const highlightText = (text: string, query: string) => {
     // Escape regex special characters to prevent ReDoS
-    const escapedQuery = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const escapedQuery = query.replace(/[$()*+.?[\\\]^{|}]/g, '\\$&')
     // eslint-disable-next-line security/detect-non-literal-regexp -- escapedQuery is sanitized via regex escape above
     const parts = text.split(new RegExp(`(${escapedQuery})`, 'gi'))
     return parts.map((part, i) =>

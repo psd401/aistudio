@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAdmin } from '@/lib/auth/admin-check';
-import { executeSQL } from '@/lib/db/data-api-adapter';
+import { getUserById } from '@/lib/db/drizzle';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
 export async function GET(
@@ -23,34 +23,25 @@ export async function GET(
   }
 
   try {
-    log.debug("Fetching user details", { userId: params.userId });
-    
-    // Get user details from database
-    const query = `
-      SELECT id, cognito_sub, email, first_name, last_name
-      FROM users
-      WHERE id = :userId
-    `;
-    const parameters = [
-      { name: 'userId', value: { stringValue: params.userId } }
-    ];
-    
-    const result = await executeSQL(query, parameters);
-    
-    if (!result || result.length === 0) {
-      log.warn("User not found", { userId: params.userId });
-      timer({ status: "error", reason: "user_not_found" });
-      return new NextResponse('User not found', { status: 404, headers: { "X-Request-Id": requestId } });
+    const userId = Number.parseInt(params.userId, 10);
+
+    if (Number.isNaN(userId)) {
+      log.warn("Invalid user ID", { userIdString: params.userId });
+      timer({ status: "error", reason: "invalid_user_id" });
+      return new NextResponse('Invalid user ID', { status: 400, headers: { "X-Request-Id": requestId } });
     }
-    
-    const user = result[0];
-    
-    log.info("User details fetched successfully", { userId: params.userId });
+
+    log.debug("Fetching user details", { userId });
+
+    // Get user details from database
+    const user = await getUserById(userId);
+
+    log.info("User details fetched successfully", { userId });
     timer({ status: "success" });
-    
+
     return NextResponse.json({
-      firstName: user.first_name,
-      lastName: user.last_name,
+      firstName: user.firstName,
+      lastName: user.lastName,
       emailAddresses: [{ emailAddress: user.email }]
     }, { headers: { "X-Request-Id": requestId } });
   } catch (error) {

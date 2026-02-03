@@ -8,6 +8,8 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import * as path from 'path';
+import * as crypto from 'crypto';
+import * as fs from 'fs';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import {
   AuroraCostOptimizer,
@@ -237,17 +239,49 @@ export class DatabaseStack extends cdk.Stack {
         removalPolicy: props.environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
       });
 
+      // Create explicit role to avoid CDK's deprecated fromAwsManagedPolicyName
+      const dbInitLambdaRole = new iam.Role(this, 'DbInitLambdaRole', {
+        assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+        managedPolicies: [
+          iam.ManagedPolicy.fromManagedPolicyArn(
+            this,
+            'DbInitLambdaBasicExecPolicy',
+            'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+          ),
+        ],
+      });
+
+      // Compute asset hash that includes migrations.json and schema files
+      // CDK's default hash only covers infra/database/lambda/, but the bundler
+      // copies in schema/ and migrations.json from the parent directory.
+      // Without this, CDK reuses stale Lambda assets when only migrations change.
+      const migrationsPath = path.join(__dirname, '../database/migrations.json');
+      const schemaDir = path.join(__dirname, '../database/schema');
+      const externalHash = crypto.createHash('sha256');
+      externalHash.update(fs.readFileSync(migrationsPath, 'utf8'));
+      const schemaFiles = fs.readdirSync(schemaDir).sort();
+      for (const f of schemaFiles) {
+        const filePath = path.join(schemaDir, f);
+        if (fs.statSync(filePath).isFile()) {
+          externalHash.update(fs.readFileSync(filePath, 'utf8'));
+        }
+      }
+      const migrationAssetHash = externalHash.digest('hex').substring(0, 16);
+
       // Database initialization Lambda
       // Note: Lambda doesn't need to be in VPC since it uses RDS Data API
       const dbInitLambda = new lambda.Function(this, 'DbInitLambda', {
         runtime: lambda.Runtime.NODEJS_20_X,
         handler: 'index.handler',
+        role: dbInitLambdaRole,
         code: lambda.Code.fromAsset(path.join(__dirname, '../database/lambda'), {
+          assetHashType: cdk.AssetHashType.CUSTOM,
+          assetHash: migrationAssetHash,
           bundling: {
             image: lambda.Runtime.NODEJS_20_X.bundlingImage,
             command: [
               'bash', '-c',
-              'npm install && npm run build && cp -r ../schema dist/ && cp -r dist/* /asset-output/'
+              'npm install && npm run build && cp -r ../schema dist/ && cp ../migrations.json dist/ && cp -r dist/* /asset-output/'
             ],
             environment: {
               NPM_CONFIG_CACHE: '/tmp/.npm',
@@ -265,6 +299,7 @@ export class DatabaseStack extends cdk.Stack {
                   // Copy built files to output directory
                   execSync(`cp -r ${path.join(lambdaDir, 'dist')}/* ${outputDir}/`, { stdio: 'inherit' });
                   execSync(`cp -r ${path.join(__dirname, '../database/schema')} ${outputDir}/`, { stdio: 'inherit' });
+                  execSync(`cp ${path.join(__dirname, '../database/migrations.json')} ${outputDir}/`, { stdio: 'inherit' });
 
                   return true;
                 } catch {
@@ -297,9 +332,22 @@ export class DatabaseStack extends cdk.Stack {
         removalPolicy: props.environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
       });
 
-      // Create Custom Resource Provider with explicit log group to avoid deprecation warning
+      // Create explicit role for the Provider's framework Lambda to avoid deprecated fromAwsManagedPolicyName
+      const dbInitProviderFrameworkRole = new iam.Role(this, 'DbInitProviderFrameworkRole', {
+        assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
+        managedPolicies: [
+          iam.ManagedPolicy.fromManagedPolicyArn(
+            this,
+            'DbInitProviderFrameworkExecPolicy',
+            'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole'
+          ),
+        ],
+      });
+
+      // Create Custom Resource Provider with explicit framework role to avoid deprecation warning
       const dbInitProvider = new cr.Provider(this, 'DbInitProvider', {
         onEventHandler: dbInitLambda,
+        frameworkOnEventRole: dbInitProviderFrameworkRole,
         logGroup: providerLogGroup,
       });
 
@@ -357,6 +405,28 @@ export class DatabaseStack extends cdk.Stack {
       stringValue: this.databaseSecretArn,
       description: 'Secrets Manager ARN for DB credentials',
     });
+
+    // Issue #603: Add direct PostgreSQL connection parameters for postgres.js driver
+    // These enable ECS tasks to connect directly to Aurora without Data API
+    if (!restoreFromSnapshot && this.cluster instanceof rds.DatabaseCluster) {
+      new ssm.StringParameter(this, 'DbHostParam', {
+        parameterName: `/aistudio/${props.environment}/db-host`,
+        stringValue: this.cluster.clusterEndpoint.hostname,
+        description: 'Aurora cluster endpoint hostname for direct PostgreSQL connection',
+      });
+
+      new ssm.StringParameter(this, 'DbPortParam', {
+        parameterName: `/aistudio/${props.environment}/db-port`,
+        stringValue: '5432',
+        description: 'Aurora cluster port for PostgreSQL connection',
+      });
+
+      new ssm.StringParameter(this, 'DbNameParam', {
+        parameterName: `/aistudio/${props.environment}/db-name`,
+        stringValue: 'aistudio',
+        description: 'Database name',
+      });
+    }
 
     // Keep CloudFormation outputs for backward compatibility and monitoring
     new cdk.CfnOutput(this, 'ClusterArn', {

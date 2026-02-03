@@ -5,7 +5,15 @@ AI Studio codebase guidance for Claude Code. Optimized for token efficiency and 
 ## 🚀 Quick Reference
 
 ```bash
-# Development
+# Local Development (Issue #607)
+npm run db:up              # Start local PostgreSQL (Docker)
+npm run dev:local          # Run Next.js with local database
+npm run db:studio          # Open Drizzle Studio to inspect DB
+npm run db:psql            # Connect to local DB via psql
+npm run db:seed            # Create test users (admin/staff/student)
+npm run db:reset           # Reset database (destroys all data)
+
+# Development (without Docker)
 npm run dev                # Start dev server (port 3000)
 npm run build              # Build for production
 npm run lint               # MUST pass before commit
@@ -25,6 +33,7 @@ cd infra && npx cdk deploy AIStudio-FrontendStack-Dev     # Deploy single stack
 4. **Git Flow**: PRs target `dev` branch, never `main`. Write detailed commit messages.
 5. **Testing**: Add E2E tests for new features. Use Playwright MCP during development.
 6. **Nexus Conversations**: MUST read `/docs/features/nexus-conversation-architecture.md` before modifying conversation code. This system has broken multiple times - follow documented patterns exactly.
+7. **API Documentation**: When adding or modifying `/api/v1/` endpoints, update both `docs/API/v1/openapi.yaml` (OpenAPI spec) and `docs/API/v1/context-graph.md` (human-readable reference). Include request/response examples, error codes, and auth/scope requirements.
 
 ## 🏗️ Architecture
 
@@ -32,7 +41,7 @@ cd infra && npx cdk deploy AIStudio-FrontendStack-Dev     # Deploy single stack
 
 **Core Patterns**:
 - Server Actions return `ActionState<T>`
-- RDS Data API for all DB operations
+- Drizzle ORM for all DB operations (executeQuery/executeTransaction)
 - JWT sessions via NextAuth v5
 - Layered architecture (presentation → application → infrastructure)
 - **Reusable CDK constructs** for infrastructure consistency
@@ -56,10 +65,10 @@ cd infra && npx cdk deploy AIStudio-FrontendStack-Dev     # Deploy single stack
 
 ## 🤖 AI Integration
 
-**AI SDK v5** with provider factory pattern:
-- Providers: OpenAI (GPT-5/4), Google (Gemini), Amazon Bedrock (Claude), Azure
+**AI SDK v6** with provider factory pattern:
+- Providers: OpenAI, Google (Gemini), Amazon Bedrock (Claude), Azure
 - Streaming: `streamText` for chat, SSE for assistant architect
-- Client: `@ai-sdk/react` v2 with `useChat` hook
+- Client: `@ai-sdk/react` with `useChat` hook
 
 **Provider Factory** (`/app/api/chat/lib/provider-factory.ts`):
 ```typescript
@@ -79,7 +88,78 @@ createProviderModel(provider: string, modelId: string): Promise<LanguageModel>
 
 ## 🗄️ Database Operations
 
-**Always use MCP tools to verify structure**:
+**ORM**: Drizzle ORM with postgres.js driver (direct PostgreSQL connection)
+
+**Always use Drizzle queries** - Import from `@/lib/db/drizzle` for type-safe operations:
+
+```typescript
+import { eq, and, desc } from "drizzle-orm";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
+import { users, userRoles, roles } from "@/lib/db/schema";
+
+// SELECT with type safety
+const user = await executeQuery(
+  (db) => db.select().from(users).where(eq(users.id, userId)).limit(1),
+  "getUserById"
+);
+
+// INSERT with returning
+const [newUser] = await executeQuery(
+  (db) => db.insert(users).values({ email, firstName }).returning(),
+  "createUser"
+);
+
+// UPDATE
+await executeQuery(
+  (db) => db.update(users).set({ firstName }).where(eq(users.id, userId)),
+  "updateUser"
+);
+
+// DELETE
+await executeQuery(
+  (db) => db.delete(users).where(eq(users.id, userId)),
+  "deleteUser"
+);
+```
+
+**Transactions** (automatic rollback on error):
+```typescript
+await executeTransaction(
+  async (tx) => {
+    await tx.delete(userRoles).where(eq(userRoles.userId, userId));
+    await tx.insert(userRoles).values(roleIds.map(id => ({ userId, roleId: id })));
+    // Side effects (emails, etc.) should be AFTER transaction, not inside
+  },
+  "updateUserRoles"
+);
+```
+
+**⚠️ CRITICAL - Transaction Pattern**:
+- ✅ Use `executeTransaction()` directly for multi-statement transactions
+- ✅ Transaction isolation levels are supported (serializable, repeatable read, etc.)
+- ❌ NEVER nest `db.transaction()` inside `executeQuery()`
+- See `/docs/database/drizzle-patterns.md` and `drizzle-client.ts` JSDoc
+
+**JSONB Columns** (type-safe via `.$type<T>()`):
+```typescript
+import type { UserSettings } from "@/lib/db/types/jsonb";
+
+// Schema definition
+settings: jsonb("settings").$type<UserSettings>(),
+
+// Query - TypeScript knows the shape
+user.settings.theme;  // "light" | "dark" | "system"
+```
+
+**Migrations** (see `/docs/database/drizzle-migration-guide.md`):
+```bash
+npm run drizzle:generate        # Generate from schema changes
+npm run migration:prepare       # Format for Lambda
+npm run migration:list          # List all migrations
+# Then add to MIGRATION_FILES in db-init-handler.ts
+```
+
+**MCP tools for schema verification**:
 ```bash
 mcp__awslabs_postgres-mcp-server__get_table_schema
 mcp__awslabs_postgres-mcp-server__run_query
@@ -88,21 +168,61 @@ mcp__awslabs_postgres-mcp-server__run_query
 **Aurora Serverless v2 Configuration**:
 - **Dev**: Auto-pause enabled (scales to 0 ACU when idle, saves ~$44/month)
 - **Prod**: Min 2 ACU, Max 8 ACU, always-on for reliability
-- **Connection**: RDS Data API (no connection pooling needed)
+- **Connection**: postgres.js driver with connection pooling (max: 20, idle_timeout: 20s)
 - **Backups**: Automated daily snapshots, 7-day retention (dev), 30-day (prod)
 
-**Data API Parameters**:
-- `stringValue`, `longValue`, `booleanValue`, `doubleValue`, `isNull`
+**Connection Management** (Issue #603):
+- Use `DATABASE_URL` for local dev (set in .env.local)
+- Use `DB_HOST/DB_USER/DB_PASSWORD` for ECS (auto-injected from Secrets Manager)
+- Connection pool auto-manages connections (max: 20 per container)
+- Graceful shutdown: Handled automatically via `instrumentation.ts`
+- Connection warmup: Pools are pre-initialized on server startup
 
-**Field Transformation** (DB returns snake_case, app uses camelCase):
-```typescript
-import { transformSnakeToCamel } from "@/lib/db/field-mapper"
+**Local Development Setup** (Issue #607):
+```bash
+# Quick Start (first time)
+npm run db:up              # Start PostgreSQL container
+npm run db:seed            # Create test users
+npm run dev:local          # Start Next.js with local DB
 
-// Database returns: { user_id: 1, created_at: "2025-01-01" }
-// App expects: { userId: 1, createdAt: "2025-01-01" }
-const results = await executeSQL("SELECT user_id, created_at FROM users")
-const transformed = results.map(row => transformSnakeToCamel<UserType>(row))
+# Daily workflow
+npm run db:up && npm run dev:local   # Start everything
+
+# Reset if database gets corrupted
+npm run db:reset           # Destroys all data, re-runs migrations
+npm run db:seed            # Re-create test users
 ```
+
+**Local vs AWS Configuration**:
+| Environment | DATABASE_URL | DB_SSL |
+|-------------|--------------|--------|
+| Local Docker | `postgresql://postgres:postgres@localhost:5432/aistudio` | `false` |
+| AWS Aurora | `postgresql://user:pass@aurora-cluster:5432/aistudio` | `true` (default) |
+
+**Test Users** (after `npm run db:seed`):
+- `test@example.com` - administrator role
+- `staff@example.com` - staff role
+- `student@example.com` - student role
+
+**Raw SQL Results** (postgres.js driver):
+```typescript
+import { toPgRows, executeQuery } from "@/lib/db/drizzle-client";
+import { sql } from "drizzle-orm";
+
+// Raw SQL returns array-like object (no .rows property)
+const result = await executeQuery(
+  (db) => db.execute(sql`SELECT id, name FROM users WHERE active = true`),
+  "getActiveUsers"
+);
+const users = toPgRows<{ id: number; name: string }>(result);
+```
+
+**Troubleshooting**:
+- "Connection refused": Check VPC security groups allow traffic from ECS to Aurora
+- "Too many connections": Increase Aurora max_connections or reduce `DB_MAX_CONNECTIONS` per task
+- "SSL required": Ensure connection string includes `?sslmode=require` (auto-added by drizzle-client)
+- "Connection timeout": Check `DB_CONNECT_TIMEOUT` env var (default: 10s)
+- First request slow: Connection pool warmup happens on startup; check logs for "warmed up successfully"
 
 ## 📝 Server Action Template
 
@@ -111,29 +231,35 @@ const transformed = results.map(row => transformSnakeToCamel<UserType>(row))
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
 import { getServerSession } from "@/lib/auth/server-session"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { eq } from "drizzle-orm"
+import { users } from "@/lib/db/schema"
 
 export async function actionName(params: ParamsType): Promise<ActionState<ReturnType>> {
   const requestId = generateRequestId()
   const timer = startTimer("actionName")
   const log = createLogger({ requestId, action: "actionName" })
-  
+
   try {
     log.info("Action started", { params: sanitizeForLogging(params) })
-    
+
     // Auth check
     const session = await getServerSession()
     if (!session) {
       log.warn("Unauthorized")
       throw ErrorFactories.authNoSession()
     }
-    
-    // Business logic
-    const result = await executeSQL("SELECT * FROM ...", params)
-    
+
+    // Business logic - use Drizzle ORM executeQuery
+    const result = await executeQuery(
+      (db) => db.select().from(users).where(eq(users.id, params.userId)),
+      "actionName"
+    )
+
     timer({ status: "success" })
     log.info("Action completed")
     return createSuccess(result, "Success message")
-    
+
   } catch (error) {
     timer({ status: "error" })
     return handleError(error, "User-friendly error", {
@@ -263,12 +389,10 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 
 ## 📦 Key Dependencies
 
-- `ai@5.0.0` - Vercel AI SDK core
-- `@ai-sdk/react@2.0.15` - React streaming hooks
-- `@ai-sdk/*` - Provider adapters (OpenAI, Google, Bedrock, Azure)
-- `next@15.2.3` - Next.js framework
-- `next-auth@5.0.0-beta.29` - Authentication
-- AWS SDK v3 clients for cloud services
+- Vercel AI SDK v6 (`ai`, `@ai-sdk/react`, `@ai-sdk/*` providers)
+- Next.js 16 App Router
+- NextAuth v5
+- AWS SDK v3 clients
 
 ## 🚨 Common Pitfalls
 

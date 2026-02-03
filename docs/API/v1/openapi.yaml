@@ -1,0 +1,1644 @@
+openapi: 3.1.0
+info:
+  title: AI Studio API
+  version: "1.0"
+  description: |
+    RESTful API for AI Studio. Includes context graph management,
+    assistant execution, and multi-turn conversations.
+    Part of the AI Studio External API Platform (Epic #674).
+
+    ## Authentication
+
+    All endpoints under `/api/v1/graph/` require authentication via one of:
+
+    - **API Key**: `Authorization: Bearer sk-...`
+    - **Session**: Browser session cookie (for logged-in users)
+
+    API keys are created in the AI Studio Settings > API Keys page.
+    Each key has scoped permissions (`graph:read`, `graph:write`).
+    Session-authenticated users receive full access for their role.
+
+    ## Rate Limiting
+
+    API key requests are rate-limited using a sliding window counter.
+    Default: **60 requests per minute** per API key (configurable per key).
+    Session-authenticated requests are not subject to per-key rate limiting.
+
+    Rate limit headers are included on every response:
+    - `X-RateLimit-Limit` — Maximum requests per window
+    - `X-RateLimit-Remaining` — Remaining requests in current window
+    - `X-RateLimit-Reset` — Unix timestamp (seconds) when the window resets
+
+    When rate-limited, a `429` response includes a `Retry-After` header (seconds).
+
+    ## Pagination
+
+    List endpoints use cursor-based pagination. Pass `cursor` from the
+    previous response's `meta.nextCursor` to fetch the next page.
+    Cursors are opaque base64url-encoded strings. Do not construct them manually.
+
+  contact:
+    name: AI Studio Team
+  license:
+    name: Proprietary
+
+servers:
+  - url: /api/v1
+    description: API v1 base path
+
+tags:
+  - name: Health
+    description: Service health check
+  - name: Nodes
+    description: Context graph node operations
+  - name: Edges
+    description: Context graph edge operations
+  - name: Decisions
+    description: High-level decision capture (creates nodes + edges in one call)
+  - name: Assistants
+    description: Assistant listing, execution, and multi-turn conversations
+  - name: Jobs
+    description: Async job polling and cancellation
+
+# ============================================
+# Paths
+# ============================================
+
+paths:
+  /health:
+    get:
+      operationId: getHealth
+      tags: [Health]
+      summary: Health check
+      description: Public endpoint. Returns service status. No authentication required.
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+
+  /graph/nodes:
+    get:
+      operationId: listNodes
+      tags: [Nodes]
+      summary: List nodes
+      description: |
+        Returns a paginated list of graph nodes.
+        Supports filtering by `nodeType`, `nodeClass`, and full-text `search`
+        (searches `name` and `description` fields via case-insensitive match).
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - $ref: "#/components/parameters/nodeTypeFilter"
+        - $ref: "#/components/parameters/nodeClassFilter"
+        - $ref: "#/components/parameters/searchFilter"
+        - $ref: "#/components/parameters/limitParam"
+        - $ref: "#/components/parameters/cursorParam"
+      responses:
+        "200":
+          description: Paginated list of nodes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeListResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: createNode
+      tags: [Nodes]
+      summary: Create a node
+      description: Creates a new graph node. Requires `graph:write` scope.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateNodeRequest"
+      responses:
+        "201":
+          description: Node created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeSingleResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /graph/nodes/{nodeId}:
+    parameters:
+      - $ref: "#/components/parameters/nodeIdPath"
+
+    get:
+      operationId: getNode
+      tags: [Nodes]
+      summary: Get a node
+      description: Returns a single graph node by ID. Requires `graph:read` scope.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      responses:
+        "200":
+          description: Node details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeSingleResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    patch:
+      operationId: updateNode
+      tags: [Nodes]
+      summary: Update a node
+      description: |
+        Partially updates a graph node. At least one field must be provided.
+        Requires `graph:write` scope.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateNodeRequest"
+      responses:
+        "200":
+          description: Node updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/NodeSingleResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    delete:
+      operationId: deleteNode
+      tags: [Nodes]
+      summary: Delete a node
+      description: |
+        Deletes a graph node. All connected edges are cascade-deleted.
+        Requires `graph:write` scope.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      responses:
+        "200":
+          description: Node deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /graph/nodes/{nodeId}/connections:
+    parameters:
+      - $ref: "#/components/parameters/nodeIdPath"
+
+    get:
+      operationId: getNodeConnections
+      tags: [Nodes]
+      summary: Get node connections
+      description: |
+        Returns all edges connected to a node (both incoming and outgoing)
+        along with the connected node's summary info. Requires `graph:read` scope.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      responses:
+        "200":
+          description: List of connections
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectionListResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /graph/edges:
+    get:
+      operationId: listEdges
+      tags: [Edges]
+      summary: List edges
+      description: |
+        Returns a paginated list of graph edges.
+        Supports filtering by `edgeType`, `sourceNodeId`, and `targetNodeId`.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: edgeType
+          in: query
+          description: Filter by edge type (exact match)
+          schema:
+            type: string
+            maxLength: 100
+        - name: sourceNodeId
+          in: query
+          description: Filter by source node UUID
+          schema:
+            type: string
+            format: uuid
+        - name: targetNodeId
+          in: query
+          description: Filter by target node UUID
+          schema:
+            type: string
+            format: uuid
+        - $ref: "#/components/parameters/limitParam"
+        - $ref: "#/components/parameters/cursorParam"
+      responses:
+        "200":
+          description: Paginated list of edges
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeListResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      operationId: createEdge
+      tags: [Edges]
+      summary: Create an edge
+      description: |
+        Creates a new edge between two existing nodes.
+        Self-referencing edges (same source and target) are rejected.
+        Duplicate edges (same source, target, and type) return `409`.
+        Requires `graph:write` scope.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateEdgeRequest"
+      responses:
+        "201":
+          description: Edge created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EdgeSingleResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "409":
+          description: Duplicate edge
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /graph/edges/{edgeId}:
+    parameters:
+      - name: edgeId
+        in: path
+        required: true
+        description: Edge UUID
+        schema:
+          type: string
+          format: uuid
+
+    delete:
+      operationId: deleteEdge
+      tags: [Edges]
+      summary: Delete an edge
+      description: Deletes a single edge by ID. Requires `graph:write` scope.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      responses:
+        "200":
+          description: Edge deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ============================================
+  # Decisions
+  # ============================================
+
+  /graph/decisions:
+    post:
+      operationId: createDecision
+      tags: [Decisions]
+      summary: Create a decision subgraph
+      description: |
+        Accepts a structured decision payload and creates the appropriate
+        nodes, edges, and relationships in the context graph. Returns the
+        decision node ID, counts of created resources, and a completeness score.
+        Requires `graph:write` scope.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateDecisionRequest"
+      responses:
+        "201":
+          description: Decision subgraph created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DecisionResponse"
+          headers:
+            X-Request-Id:
+              $ref: "#/components/headers/X-Request-Id"
+            X-RateLimit-Limit:
+              $ref: "#/components/headers/X-RateLimit-Limit"
+            X-RateLimit-Remaining:
+              $ref: "#/components/headers/X-RateLimit-Remaining"
+            X-RateLimit-Reset:
+              $ref: "#/components/headers/X-RateLimit-Reset"
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  # ============================================
+  # Assistants
+  # ============================================
+
+  /assistants:
+    get:
+      operationId: listAssistants
+      tags: [Assistants]
+      summary: List accessible assistants
+      description: Returns assistants the authenticated user can access (own, admin, or approved).
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [draft, pending_approval, approved, rejected, disabled]
+        - name: search
+          in: query
+          schema:
+            type: string
+            maxLength: 100
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: cursor
+          in: query
+          schema:
+            type: string
+      responses:
+        "200":
+          description: List of assistants
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AssistantListItem"
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+                      limit:
+                        type: integer
+                      nextCursor:
+                        type: string
+                        nullable: true
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "429":
+          $ref: "#/components/responses/RateLimited"
+
+  /assistants/{id}:
+    get:
+      operationId: getAssistant
+      tags: [Assistants]
+      summary: Get assistant details
+      description: Returns full assistant details including input fields.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      responses:
+        "200":
+          description: Assistant details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/AssistantDetail"
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /assistants/{id}/execute:
+    post:
+      operationId: executeAssistant
+      tags: [Assistants]
+      summary: Execute an assistant
+      description: |
+        Execute an assistant with the given inputs.
+        - `Accept: text/event-stream` (default) returns an SSE stream
+        - `Accept: application/json` returns 202 with a jobId for async polling
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: Accept
+          in: header
+          schema:
+            type: string
+            enum: [text/event-stream, application/json]
+            default: text/event-stream
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                inputs:
+                  type: object
+                  additionalProperties: true
+                  description: Key-value pairs matching the assistant's input fields
+      responses:
+        "200":
+          description: SSE streaming response (when Accept is text/event-stream)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+        "202":
+          description: Job created for async execution (when Accept is application/json)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      jobId:
+                        type: string
+                        format: uuid
+                      status:
+                        type: string
+                        enum: [pending]
+                      pollUrl:
+                        type: string
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /assistants/{id}/conversations:
+    post:
+      operationId: startConversation
+      tags: [Assistants]
+      summary: Start a conversation with an assistant
+      description: Creates a new conversation, executes the assistant, and returns the SSE stream.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                inputs:
+                  type: object
+                  additionalProperties: true
+                title:
+                  type: string
+                  maxLength: 500
+      responses:
+        "200":
+          description: SSE stream with X-Conversation-Id header
+          headers:
+            X-Conversation-Id:
+              schema:
+                type: string
+                format: uuid
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /assistants/{id}/conversations/{cid}/messages:
+    post:
+      operationId: sendMessage
+      tags: [Assistants]
+      summary: Send a follow-up message
+      description: Sends a message in an existing conversation. Preserves assistant context.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: cid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message:
+                  type: string
+                  minLength: 1
+                  maxLength: 100000
+      responses:
+        "200":
+          description: SSE stream with assistant response
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /assistants/{id}/conversations/{cid}:
+    get:
+      operationId: getConversation
+      tags: [Assistants]
+      summary: Get conversation history
+      description: Returns conversation metadata and messages.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+        - name: cid
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        "200":
+          description: Conversation with messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      conversation:
+                        $ref: "#/components/schemas/ConversationSummary"
+                      messages:
+                        type: array
+                        items:
+                          $ref: "#/components/schemas/ConversationMessage"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  # ============================================
+  # Jobs
+  # ============================================
+
+  /jobs/{jobId}:
+    get:
+      operationId: pollJob
+      tags: [Jobs]
+      summary: Poll job status
+      description: Returns current job status, partial content, and final response data.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Job status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/JobStatus"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      operationId: cancelJob
+      tags: [Jobs]
+      summary: Cancel a running job
+      description: Cancels a job in a non-terminal state (pending, processing, streaming).
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: jobId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Job cancelled
+        "409":
+          description: Job cannot be cancelled (already completed/failed)
+
+# ============================================
+# Components
+# ============================================
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      description: "API key token (prefix: `sk-`)"
+    SessionAuth:
+      type: apiKey
+      in: cookie
+      name: next-auth.session-token
+      description: Browser session cookie (NextAuth)
+
+  # ---- Parameters ----
+  parameters:
+    nodeIdPath:
+      name: nodeId
+      in: path
+      required: true
+      description: Node UUID
+      schema:
+        type: string
+        format: uuid
+
+    nodeTypeFilter:
+      name: nodeType
+      in: query
+      description: Filter by node type (exact match)
+      schema:
+        type: string
+        maxLength: 100
+
+    nodeClassFilter:
+      name: nodeClass
+      in: query
+      description: Filter by node class (exact match)
+      schema:
+        type: string
+        maxLength: 100
+
+    searchFilter:
+      name: search
+      in: query
+      description: Case-insensitive search across name and description
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 100
+
+    limitParam:
+      name: limit
+      in: query
+      description: "Maximum items per page (default: 50, max: 100)"
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 50
+
+    cursorParam:
+      name: cursor
+      in: query
+      description: Opaque pagination cursor from a previous response's `meta.nextCursor`
+      schema:
+        type: string
+
+  # ---- Headers ----
+  headers:
+    X-Request-Id:
+      description: Unique request identifier for tracing
+      schema:
+        type: string
+        example: req_abc123def456
+    X-RateLimit-Limit:
+      description: Maximum requests allowed per 1-minute window
+      schema:
+        type: integer
+        example: 60
+    X-RateLimit-Remaining:
+      description: Requests remaining in current window
+      schema:
+        type: integer
+        example: 57
+    X-RateLimit-Reset:
+      description: Unix timestamp (seconds) when the rate limit window resets
+      schema:
+        type: integer
+        example: 1706832060
+
+  # ---- Schemas ----
+  schemas:
+    # -- Assistants --
+    AssistantListItem:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [draft, pending_approval, approved, rejected, disabled]
+        inputFieldCount:
+          type: integer
+        promptCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    AssistantDetail:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        status:
+          type: string
+        timeoutSeconds:
+          type: integer
+          nullable: true
+        inputFields:
+          type: array
+          items:
+            $ref: "#/components/schemas/AssistantInputField"
+        promptCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    AssistantInputField:
+      type: object
+      properties:
+        id:
+          type: integer
+        name:
+          type: string
+        label:
+          type: string
+        fieldType:
+          type: string
+          enum: [short_text, long_text, select, multi_select, file_upload]
+        position:
+          type: integer
+        options:
+          type: object
+          nullable: true
+
+    ConversationSummary:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        provider:
+          type: string
+        messageCount:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    ConversationMessage:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [user, assistant, system]
+        content:
+          type: string
+          nullable: true
+        parts:
+          type: array
+          items:
+            type: object
+        createdAt:
+          type: string
+          format: date-time
+
+    # -- Jobs --
+    JobStatus:
+      type: object
+      properties:
+        data:
+          type: object
+          properties:
+            jobId:
+              type: string
+              format: uuid
+            status:
+              type: string
+              enum: [pending, processing, streaming, completed, failed, cancelled]
+            createdAt:
+              type: string
+              format: date-time
+            completedAt:
+              type: string
+              format: date-time
+              nullable: true
+            partialContent:
+              type: string
+            responseData:
+              type: object
+              nullable: true
+              description: Final response (only when status is completed)
+            errorMessage:
+              type: string
+              nullable: true
+              description: Error details (only when status is failed)
+            pollingInterval:
+              type: integer
+              description: Recommended polling interval in milliseconds
+            shouldContinuePolling:
+              type: boolean
+        meta:
+          type: object
+          properties:
+            requestId:
+              type: string
+
+    # -- Health --
+    HealthResponse:
+      type: object
+      required: [status, version, timestamp]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        version:
+          type: string
+          example: v1
+        timestamp:
+          type: string
+          format: date-time
+
+    # -- Node --
+    GraphNode:
+      type: object
+      required: [id, nodeType, nodeClass, name, metadata, createdAt, updatedAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        nodeType:
+          type: string
+          description: "Category of the node (e.g. `decision`, `person`, `document`)"
+        nodeClass:
+          type: string
+          description: "Sub-classification (e.g. `policy`, `budget`, `hiring`)"
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Arbitrary key-value metadata
+        createdBy:
+          type: integer
+          nullable: true
+          description: User ID of the creator
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    CreateNodeRequest:
+      type: object
+      required: [name, nodeType, nodeClass]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 500
+        nodeType:
+          type: string
+          minLength: 1
+          maxLength: 100
+        nodeClass:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 5000
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+
+    UpdateNodeRequest:
+      type: object
+      description: At least one field must be provided.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 500
+        nodeType:
+          type: string
+          minLength: 1
+          maxLength: 100
+        nodeClass:
+          type: string
+          minLength: 1
+          maxLength: 100
+        description:
+          type: string
+          maxLength: 5000
+          nullable: true
+        metadata:
+          type: object
+          additionalProperties: true
+
+    # -- Edge --
+    GraphEdge:
+      type: object
+      required: [id, sourceNodeId, targetNodeId, edgeType, metadata, createdAt]
+      properties:
+        id:
+          type: string
+          format: uuid
+        sourceNodeId:
+          type: string
+          format: uuid
+        targetNodeId:
+          type: string
+          format: uuid
+        edgeType:
+          type: string
+          description: "Relationship type (e.g. `informed_by`, `related_to`)"
+        metadata:
+          type: object
+          additionalProperties: true
+        createdBy:
+          type: integer
+          nullable: true
+        createdAt:
+          type: string
+          format: date-time
+
+    CreateEdgeRequest:
+      type: object
+      required: [sourceNodeId, targetNodeId, edgeType]
+      properties:
+        sourceNodeId:
+          type: string
+          format: uuid
+        targetNodeId:
+          type: string
+          format: uuid
+          description: Must differ from sourceNodeId
+        edgeType:
+          type: string
+          minLength: 1
+          maxLength: 100
+        metadata:
+          type: object
+          additionalProperties: true
+
+    # -- Decision --
+    CreateDecisionRequest:
+      type: object
+      required: [decision, decidedBy]
+      properties:
+        decision:
+          type: string
+          minLength: 1
+          maxLength: 2000
+          description: What was decided
+        decidedBy:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Who proposed or made the decision
+        reasoning:
+          type: string
+          maxLength: 5000
+          description: Rationale behind the decision
+        evidence:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 2000
+          description: Data or observations that informed the decision
+        constraints:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 2000
+          description: Limiting factors (budget, timeline, policy, etc.)
+        conditions:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 2000
+          description: Future triggers that would cause revisiting
+        alternatives_considered:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            minLength: 1
+            maxLength: 2000
+          description: Rejected alternatives
+        relatedTo:
+          type: array
+          maxItems: 50
+          items:
+            type: string
+            format: uuid
+          description: Existing node IDs to link via CONTEXT edges
+        agentId:
+          type: string
+          maxLength: 200
+          description: External agent identifier (sets source to "agent")
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Arbitrary key-value pairs attached to the decision node
+
+    DecisionResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          required: [decisionNodeId, nodesCreated, edgesCreated, completenessScore]
+          properties:
+            decisionNodeId:
+              type: string
+              format: uuid
+              description: UUID of the primary decision node
+            nodesCreated:
+              type: integer
+              description: Total number of nodes created
+            edgesCreated:
+              type: integer
+              description: Total number of edges created
+            completenessScore:
+              type: integer
+              minimum: 0
+              maximum: 100
+              description: "Completeness score (0-100). 25 points per criterion: decision node, person, evidence/constraint, condition."
+            warnings:
+              type: array
+              items:
+                type: string
+              description: Completeness warnings (missing elements). Omitted when empty.
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
+    # -- Connection --
+    NodeConnection:
+      type: object
+      required: [edge, connectedNode, direction]
+      properties:
+        edge:
+          $ref: "#/components/schemas/GraphEdge"
+        connectedNode:
+          type: object
+          required: [id, name, nodeType, nodeClass]
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            nodeType:
+              type: string
+            nodeClass:
+              type: string
+        direction:
+          type: string
+          enum: [outgoing, incoming]
+
+    # -- Response Wrappers --
+    NodeListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphNode"
+        meta:
+          type: object
+          required: [requestId, limit, nextCursor]
+          properties:
+            requestId:
+              type: string
+            limit:
+              type: integer
+            nextCursor:
+              type: string
+              nullable: true
+
+    NodeSingleResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/GraphNode"
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
+    EdgeListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphEdge"
+        meta:
+          type: object
+          required: [requestId, limit, nextCursor]
+          properties:
+            requestId:
+              type: string
+            limit:
+              type: integer
+            nextCursor:
+              type: string
+              nullable: true
+
+    EdgeSingleResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          $ref: "#/components/schemas/GraphEdge"
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
+    ConnectionListResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: array
+          items:
+            $ref: "#/components/schemas/NodeConnection"
+        meta:
+          type: object
+          required: [requestId, total]
+          properties:
+            requestId:
+              type: string
+            total:
+              type: integer
+
+    DeleteResponse:
+      type: object
+      required: [data, meta]
+      properties:
+        data:
+          type: object
+          required: [deletedId]
+          properties:
+            deletedId:
+              type: string
+              format: uuid
+        meta:
+          type: object
+          required: [requestId]
+          properties:
+            requestId:
+              type: string
+
+    # -- Error --
+    ErrorResponse:
+      type: object
+      required: [error, requestId]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+            message:
+              type: string
+            details:
+              description: Validation issue details (Zod format)
+        requestId:
+          type: string
+
+  # ---- Reusable Responses ----
+  responses:
+    ValidationError:
+      description: Invalid request parameters or body
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+
+    Unauthorized:
+      description: Missing or invalid authentication
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: INVALID_TOKEN
+              message: Invalid API key
+            requestId: req_abc123
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+
+    Forbidden:
+      description: Insufficient scope for this operation
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: INSUFFICIENT_SCOPE
+              message: "Missing required scope: graph:write"
+            requestId: req_abc123
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+
+    RateLimited:
+      description: Rate limit exceeded
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+          example:
+            error:
+              code: RATE_LIMIT_EXCEEDED
+              message: Too many requests. Please try again later.
+            requestId: req_abc123
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"
+        Retry-After:
+          description: Seconds to wait before retrying
+          schema:
+            type: integer
+            example: 60
+        X-RateLimit-Limit:
+          $ref: "#/components/headers/X-RateLimit-Limit"
+        X-RateLimit-Remaining:
+          $ref: "#/components/headers/X-RateLimit-Remaining"
+        X-RateLimit-Reset:
+          $ref: "#/components/headers/X-RateLimit-Reset"
+
+    InternalError:
+      description: Unexpected server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+      headers:
+        X-Request-Id:
+          $ref: "#/components/headers/X-Request-Id"

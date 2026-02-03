@@ -4,13 +4,16 @@ import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { getAssistantArchitectByIdAction } from '@/actions/db/assistant-architect-actions';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
-import { executeSQL, checkUserRoleByCognitoSub } from '@/lib/db/data-api-adapter';
+import { getAIModelById } from '@/lib/db/drizzle';
+import { executeQuery } from '@/lib/db/drizzle-client';
+import { sql } from 'drizzle-orm';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from '@/lib/assistant-architect/knowledge-retrieval';
-import { hasToolAccess } from '@/utils/roles';
+import { hasToolAccess, hasRole } from '@/utils/roles';
 import { ErrorFactories } from '@/lib/error-utils';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
 import type { StreamRequest } from '@/lib/streaming/types';
+import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { storeExecutionEvent } from '@/lib/assistant-architect/event-storage';
 
 // Allow streaming responses up to 15 minutes for long chains
@@ -96,7 +99,32 @@ export async function POST(req: Request) {
 
   try {
     // 1. Parse and validate request
-    const body = await req.json();
+    // Issue #657: Handle empty/malformed request body gracefully
+    let body: unknown;
+    try {
+      body = await req.json();
+    } catch (parseError) {
+      log.warn('Failed to parse request body', {
+        error: parseError instanceof Error ? parseError.message : String(parseError),
+        contentLength: req.headers.get('content-length'),
+        contentType: req.headers.get('content-type')
+      });
+      return new Response(
+        JSON.stringify({
+          error: 'Invalid request body',
+          message: 'Request body is empty or not valid JSON. Please try again.',
+          requestId
+        }),
+        {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Request-Id': requestId
+          }
+        }
+      );
+    }
+
     const validationResult = ExecuteRequestSchema.safeParse(body);
 
     if (!validationResult.success) {
@@ -179,7 +207,7 @@ export async function POST(req: Request) {
     // 2. User is an admin (can execute any assistant)
     // 3. The assistant is approved (any user with assistant-architect access can execute)
     const isOwner = architect.userId === userId;
-    const isAdmin = await checkUserRoleByCognitoSub(session.sub, 'administrator');
+    const isAdmin = await hasRole('administrator');
     const isApproved = architect.status === 'approved';
 
     // Determine access reason for logging
@@ -256,22 +284,25 @@ export async function POST(req: Request) {
     }));
 
     // 6. Create tool_execution record
-    const executionResult = await executeSQL<{ id: number }>(
-      `INSERT INTO tool_executions (
-        assistant_architect_id, user_id, input_data,
-        status, started_at
-      ) VALUES (
-        :toolId, :userId, :inputData::jsonb,
-        'running', NOW()
-      ) RETURNING id`,
-      [
-        { name: 'toolId', value: { longValue: toolId } },
-        { name: 'userId', value: { longValue: userId } },
-        { name: 'inputData', value: { stringValue: JSON.stringify(inputs) } }
-      ]
+    // CRITICAL: Drizzle's AWS Data API driver doesn't properly serialize JSONB.
+    // The driver bypasses customType.toDriver() and passes objects directly,
+    // causing RDS Data API to fail. We must use raw SQL to work around this.
+    // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+    const inputData = Object.keys(inputs).length > 0 ? inputs : { __no_inputs: true };
+    const inputDataJson = JSON.stringify(inputData);
+
+    const executionResult = await executeQuery(
+      (db) => db.execute(sql`
+        INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
+        VALUES (${userId}, ${inputDataJson}::jsonb, 'running', ${new Date().toISOString()}::timestamp, ${toolId})
+        RETURNING id
+      `),
+      'createToolExecution'
     );
 
-    if (!executionResult || executionResult.length === 0 || !executionResult[0]?.id) {
+    // postgres.js returns result directly as array-like object (no .rows property - Issue #603)
+    const rows = executionResult as unknown as Array<{ id: number }>;
+    if (!rows || rows.length === 0 || !rows[0]?.id) {
       log.error('Failed to create tool execution', { toolId });
       return new Response(
         JSON.stringify({
@@ -282,7 +313,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const executionId = Number(executionResult[0].id);
+    const executionId = Number(rows[0].id);
     log.info('Tool execution created', { executionId, toolId });
 
     // 7. Emit execution-start event
@@ -333,18 +364,17 @@ export async function POST(req: Request) {
 
     } catch (executionError) {
       // Update execution status to failed
-      await executeSQL(
-        `UPDATE tool_executions
-         SET status = 'failed',
-             error_message = :errorMessage,
-             completed_at = NOW()
-         WHERE id = :executionId`,
-        [
-          { name: 'executionId', value: { longValue: executionId } },
-          { name: 'errorMessage', value: {
-            stringValue: executionError instanceof Error ? executionError.message : String(executionError)
-          }}
-        ]
+      // CRITICAL: Drizzle's AWS Data API driver has issues with timestamp serialization.
+      // Must use raw SQL with db.execute() for reliable parameter binding.
+      // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+      const errMsg = executionError instanceof Error ? executionError.message : String(executionError);
+      await executeQuery(
+        (db) => db.execute(sql`
+          UPDATE tool_executions
+          SET status = 'failed', error_message = ${errMsg}, completed_at = ${new Date().toISOString()}::timestamp
+          WHERE id = ${executionId}
+        `),
+        'updateToolExecutionFailed'
       );
 
       // Emit execution-error event
@@ -368,6 +398,27 @@ export async function POST(req: Request) {
     });
 
     timer({ status: 'error' });
+
+    // Issue #657: Handle ContentSafetyBlockedError with proper 400 response
+    // This provides a user-friendly error message when guardrails block content
+    if (error instanceof ContentSafetyBlockedError) {
+      return new Response(
+        JSON.stringify({
+          error: error.message,
+          code: 'CONTENT_BLOCKED',
+          categories: error.blockedCategories,
+          source: error.source,
+          requestId
+        }),
+        {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Request-Id': requestId
+          }
+        }
+      );
+    }
 
     return new Response(
       JSON.stringify({
@@ -723,22 +774,16 @@ async function executeSinglePromptWithCompletion(
     const messages = [...context.accumulatedMessages, userMessage];
 
     // 4. Get AI model configuration
-    // Note: RDS Data API adapter returns camelCase field names
-    const modelResult = await executeSQL<{ modelId: string; provider: string }>(
-      `SELECT model_id, provider FROM ai_models WHERE id = :modelId LIMIT 1`,
-      [{ name: 'modelId', value: { longValue: prompt.modelId } }]
-    );
+    const modelData = await getAIModelById(prompt.modelId);
 
-    if (!modelResult || modelResult.length === 0) {
+    if (!modelData) {
       throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
         details: { promptId: prompt.id, modelId: prompt.modelId }
       });
     }
 
-    // Validate query results to ensure correct types
-    // Note: RDS Data API adapter transforms snake_case to camelCase
-    const modelData = modelResult[0];
-    if (!modelData?.modelId || !modelData?.provider) {
+    // Validate model data
+    if (!modelData.modelId || !modelData.provider) {
       throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
         details: { promptId: prompt.id, modelId: prompt.modelId, reason: 'Invalid model data' }
       });
@@ -826,25 +871,27 @@ async function executeSinglePromptWithCompletion(
                 log.warn('No text content from prompt execution', { promptId: prompt.id });
               }
 
-              await executeSQL(
-                `INSERT INTO prompt_results (
-                  execution_id, prompt_id, input_data, output_data,
-                  status, started_at, completed_at, execution_time_ms
-                ) VALUES (
-                  :executionId, :promptId, :inputData::jsonb, :outputData,
-                  'completed', NOW() - INTERVAL '1 millisecond' * :executionTimeMs, NOW(), :executionTimeMs
-                )`,
-                [
-                  { name: 'executionId', value: { longValue: context.executionId } },
-                  { name: 'promptId', value: { longValue: prompt.id } },
-                  { name: 'inputData', value: { stringValue: JSON.stringify({
-                    originalContent: prompt.content,
-                    processedContent,
-                    repositoryContext: repositoryContext ? 'included' : 'none'
-                  }) } },
-                  { name: 'outputData', value: { stringValue: text || '' } },
-                  { name: 'executionTimeMs', value: { longValue: executionTimeMs } }
-                ]
+              const startedAt = new Date(Date.now() - executionTimeMs);
+
+              // CRITICAL: Drizzle's AWS Data API driver corrupts JSONB values during parameter binding.
+              // Must use sql.raw() to embed stringified JSON directly in SQL, bypassing parameter binding.
+              // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+              const promptInputData = {
+                originalContent: prompt.content,
+                processedContent,
+                repositoryContext: repositoryContext ? 'included' : 'none'
+              };
+              const inputDataJson = JSON.stringify(promptInputData);
+              // Only escape single quotes for SQL string literal (PostgreSQL treats backslashes literally)
+              const escapedInputJson = inputDataJson.replace(/'/g, "''");
+              // CRITICAL: Use sql.raw() for ENUM values - RDS Data API driver corrupts ENUM parameter binding
+              // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+              await executeQuery(
+                (db) => db.execute(sql`
+                  INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, started_at, completed_at, execution_time_ms)
+                  VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedInputJson}'::jsonb`)}, ${text || ''}, ${sql.raw("'completed'::execution_status")}, ${startedAt.toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
+                `),
+                'savePromptResult'
               );
 
               // Store output for next prompt's variable substitution
@@ -874,13 +921,17 @@ async function executeSinglePromptWithCompletion(
               }).catch(err => log.error('Failed to store prompt-complete event', { error: err }));
 
               // If this is the last prompt, update execution status to completed
+              // CRITICAL: Drizzle's AWS Data API driver has issues with timestamp serialization.
+              // Must use raw SQL with db.execute() for reliable parameter binding.
+              // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
               if (isLastPrompt) {
-                await executeSQL(
-                  `UPDATE tool_executions
-                   SET status = 'completed',
-                       completed_at = NOW()
-                   WHERE id = :executionId`,
-                  [{ name: 'executionId', value: { longValue: context.executionId } }]
+                await executeQuery(
+                  (db) => db.execute(sql`
+                    UPDATE tool_executions
+                    SET status = 'completed', completed_at = ${new Date().toISOString()}::timestamp
+                    WHERE id = ${context.executionId}
+                  `),
+                  'updateToolExecutionCompleted'
                 );
 
                 // Emit execution-complete event
@@ -993,23 +1044,22 @@ async function executeSinglePromptWithCompletion(
     }).catch(err => log.error('Failed to store prompt error event', { error: err }));
 
     // Save failed prompt result
-    await executeSQL(
-      `INSERT INTO prompt_results (
-        execution_id, prompt_id, input_data, output_data,
-        status, error_message, started_at, completed_at
-      ) VALUES (
-        :executionId, :promptId, :inputData::jsonb, :outputData,
-        'failed', :errorMessage, NOW(), NOW()
-      )`,
-      [
-        { name: 'executionId', value: { longValue: context.executionId } },
-        { name: 'promptId', value: { longValue: prompt.id } },
-        { name: 'inputData', value: { stringValue: JSON.stringify({ prompt: prompt.content }) } },
-        { name: 'outputData', value: { stringValue: '' } },
-        { name: 'errorMessage', value: {
-          stringValue: promptError instanceof Error ? promptError.message : String(promptError)
-        }}
-      ]
+    // CRITICAL: Drizzle's AWS Data API driver corrupts JSONB values during parameter binding.
+    // Must use sql.raw() to embed stringified JSON directly in SQL, bypassing parameter binding.
+    // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+    const now = new Date();
+    const failedInputData = { prompt: prompt.content };
+    const failedInputJson = JSON.stringify(failedInputData);
+    // Only escape single quotes for SQL string literal (PostgreSQL treats backslashes literally)
+    const escapedFailedJson = failedInputJson.replace(/'/g, "''");
+    const errorMsg = promptError instanceof Error ? promptError.message : String(promptError);
+    // CRITICAL: Use sql.raw() for ENUM values - RDS Data API driver corrupts ENUM parameter binding
+    await executeQuery(
+      (db) => db.execute(sql`
+        INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, error_message, started_at, completed_at)
+        VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedFailedJson}'::jsonb`)}, '', ${sql.raw("'failed'::execution_status")}, ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
+      `),
+      'saveFailedPromptResult'
     );
 
     // For now, stop execution on first error

@@ -1,8 +1,15 @@
 "use server"
 
 import { getServerSession } from "@/lib/auth/server-session"
-import { executeSQL, executeTransaction } from "@/lib/db/data-api-adapter"
-import { transformSnakeToCamel } from "@/lib/db/field-mapper"
+import {
+  incrementViewCount,
+  trackUsageEvent,
+  moderatePrompt as drizzleModeratePrompt,
+  getPromptUsageStats as drizzleGetPromptUsageStats,
+  getPendingPrompts as drizzleGetPendingPrompts,
+  usePromptAndCreateConversation,
+  getPromptById
+} from "@/lib/db/drizzle"
 import { type ActionState } from "@/types/actions-types"
 import {
   handleError,
@@ -56,66 +63,22 @@ export async function usePrompt(
     }
 
     // Get prompt content
-    const promptResults = await executeSQL<{
-      title: string
-      content: string
-      user_id: number
-    }>(
-      `SELECT title, content, user_id
-       FROM prompt_library
-       WHERE id = :promptId AND deleted_at IS NULL`,
-      [{ name: "promptId", value: { stringValue: promptId } }]
-    )
-
-    if (promptResults.length === 0) {
+    const prompt = await getPromptById(promptId)
+    if (!prompt) {
       throw ErrorFactories.dbRecordNotFound("prompt_library", promptId)
     }
 
-    const prompt = promptResults[0]
-
-    // Create conversation - this is the critical operation that needs to succeed
-    const conversationResults = await executeSQL<{ id: string }>(
-      `INSERT INTO nexus_conversations
-       (user_id, provider, title, metadata)
-       VALUES (:userId, 'openai', :title, :metadata)
-       RETURNING id`,
-      [
-        { name: "userId", value: { longValue: userId } },
-        { name: "title", value: { stringValue: `From prompt: ${prompt.title}` } },
-        {
-          name: "metadata",
-          value: {
-            stringValue: JSON.stringify({
-              fromPromptId: promptId,
-              initialPrompt: prompt.content
-            })
-          }
-        }
-      ]
+    // Use Drizzle function that handles:
+    // 1. Create conversation
+    // 2. Track usage event
+    // 3. Increment use count
+    // All in a single transaction
+    const conversationId = await usePromptAndCreateConversation(
+      promptId,
+      userId,
+      prompt.title,
+      prompt.content
     )
-
-    const conversationId = conversationResults[0].id
-
-    // Track usage event and increment counter as batch transaction
-    // These are less critical and grouped together for atomicity
-    await executeTransaction([
-      {
-        sql: `INSERT INTO prompt_usage_events
-              (prompt_id, user_id, event_type, conversation_id)
-              VALUES (:promptId, :userId, 'use', :conversationId)`,
-        parameters: [
-          { name: "promptId", value: { stringValue: promptId } },
-          { name: "userId", value: { longValue: userId } },
-          { name: "conversationId", value: { stringValue: conversationId } }
-        ]
-      },
-      {
-        sql: `UPDATE prompt_library
-              SET use_count = use_count + 1
-              WHERE id = :promptId`,
-        parameters: [{ name: "promptId", value: { stringValue: promptId } }]
-      }
-    ])
 
     timer({ status: "success" })
     log.info("Prompt used successfully", { promptId, conversationId })
@@ -162,24 +125,9 @@ export async function viewPrompt(promptId: string): Promise<ActionState<void>> {
       throw ErrorFactories.authzResourceNotFound("Prompt", promptId)
     }
 
-    // Track view event
-    await executeSQL(
-      `INSERT INTO prompt_usage_events
-       (prompt_id, user_id, event_type)
-       VALUES (:promptId, :userId, 'view')`,
-      [
-        { name: "promptId", value: { stringValue: promptId } },
-        { name: "userId", value: { longValue: userId } }
-      ]
-    )
-
-    // Increment view count
-    await executeSQL(
-      `UPDATE prompt_library
-       SET view_count = view_count + 1
-       WHERE id = :promptId`,
-      [{ name: "promptId", value: { stringValue: promptId } }]
-    )
+    // Track view event and increment count via Drizzle
+    await trackUsageEvent(promptId, userId, 'view')
+    await incrementViewCount(promptId)
 
     timer({ status: "success" })
     log.debug("Prompt view tracked", { promptId })
@@ -232,26 +180,17 @@ export async function moderatePrompt(
     // Validate input
     const validated = moderatePromptSchema.parse(input)
 
-    // Update moderation status
-    await executeSQL(
-      `UPDATE prompt_library
-       SET moderation_status = :status,
-           moderated_by = :userId,
-           moderated_at = CURRENT_TIMESTAMP,
-           moderation_notes = :notes
-       WHERE id = :promptId AND deleted_at IS NULL`,
-      [
-        { name: "status", value: { stringValue: validated.status } },
-        { name: "userId", value: { longValue: userId } },
-        {
-          name: "notes",
-          value: validated.notes
-            ? { stringValue: validated.notes }
-            : { isNull: true }
-        },
-        { name: "promptId", value: { stringValue: promptId } }
-      ]
+    // Update moderation status via Drizzle
+    const moderated = await drizzleModeratePrompt(
+      promptId,
+      validated.status,
+      userId,
+      validated.notes ?? undefined
     )
+
+    if (!moderated) {
+      throw ErrorFactories.dbRecordNotFound("prompt_library", promptId)
+    }
 
     timer({ status: "success" })
     log.info("Prompt moderated successfully", {
@@ -302,17 +241,13 @@ export async function getPromptUsageStats(
 
     const userId = await getUserIdFromSession(session.sub)
 
-    // Check if user owns the prompt or is admin
-    const promptResults = await executeSQL<{ user_id: number }>(
-      `SELECT user_id FROM prompt_library WHERE id = :promptId AND deleted_at IS NULL`,
-      [{ name: "promptId", value: { stringValue: promptId } }]
-    )
-
-    if (promptResults.length === 0) {
+    // Check ownership first (get prompt to verify)
+    const prompt = await getPromptById(promptId)
+    if (!prompt) {
       throw ErrorFactories.dbRecordNotFound("prompt_library", promptId)
     }
 
-    const isOwner = promptResults[0].user_id === userId
+    const isOwner = prompt.userId === userId
     const isAdmin = await canModeratePrompts(userId)
 
     if (!isOwner && !isAdmin) {
@@ -320,40 +255,23 @@ export async function getPromptUsageStats(
       throw ErrorFactories.authzOwnerRequired("view usage statistics")
     }
 
-    // Get counts from prompt table
-    const statsResults = await executeSQL<{
-      view_count: number
-      use_count: number
-    }>(
-      `SELECT view_count, use_count
-       FROM prompt_library
-       WHERE id = :promptId`,
-      [{ name: "promptId", value: { stringValue: promptId } }]
-    )
-
-    const stats = statsResults[0]
-
-    // Get recent events
-    const eventResults = await executeSQL<PromptUsageEvent>(
-      `SELECT *
-       FROM prompt_usage_events
-       WHERE prompt_id = :promptId
-       ORDER BY created_at DESC
-       LIMIT 50`,
-      [{ name: "promptId", value: { stringValue: promptId } }]
-    )
-
-    const recentEvents = eventResults.map(e =>
-      transformSnakeToCamel<PromptUsageEvent>(e)
-    )
+    // Get stats via Drizzle
+    const stats = await drizzleGetPromptUsageStats(promptId)
 
     timer({ status: "success" })
     log.info("Usage stats retrieved", { promptId })
 
     return createSuccess({
-      totalViews: stats.view_count,
-      totalUses: stats.use_count,
-      recentEvents
+      totalViews: stats.totalViews,
+      totalUses: stats.totalUses,
+      recentEvents: stats.recentEvents.map(e => ({
+        id: e.id,
+        promptId: e.promptId,
+        userId: e.userId,
+        eventType: e.eventType as 'view' | 'use' | 'share',
+        conversationId: e.conversationId,
+        createdAt: e.createdAt?.toISOString() ?? new Date().toISOString()
+      }))
     })
   } catch (error) {
     timer({ status: "error" })
@@ -401,36 +319,8 @@ export async function getPendingPrompts(): Promise<
       throw ErrorFactories.authzAdminRequired("view pending prompts")
     }
 
-    // Get pending prompts
-    const results = await executeSQL<{
-      id: string
-      title: string
-      description: string | null
-      owner_name: string
-      created_at: Date
-    }>(
-      `SELECT
-         p.id,
-         p.title,
-         p.description,
-         u.full_name as owner_name,
-         p.created_at
-       FROM prompt_library p
-       JOIN users u ON p.user_id = u.id
-       WHERE p.visibility = 'public'
-         AND p.moderation_status = 'pending'
-         AND p.deleted_at IS NULL
-       ORDER BY p.created_at ASC`,
-      []
-    )
-
-    const prompts = results.map(r => transformSnakeToCamel<{
-      id: string
-      title: string
-      description: string | null
-      ownerName: string
-      createdAt: Date
-    }>(r))
+    // Get pending prompts via Drizzle
+    const prompts = await drizzleGetPendingPrompts()
 
     timer({ status: "success" })
     log.info("Pending prompts retrieved", { count: prompts.length })

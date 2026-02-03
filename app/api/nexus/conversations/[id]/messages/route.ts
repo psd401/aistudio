@@ -1,31 +1,166 @@
 import { getServerSession } from '@/lib/auth/server-session'
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger'
-import { executeSQL } from '@/lib/streaming/nexus/db-helpers'
-import { transformSnakeToCamel } from '@/lib/db/field-mapper'
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action'
 import { NextRequest } from 'next/server'
+import {
+  getMessagesByConversation,
+  getMessageCount,
+  getConversationById,
+  DEFAULT_MESSAGE_LIMIT,
+  MAX_MESSAGE_LIMIT,
+  type MessagePart,
+} from '@/lib/db/drizzle'
 
-interface NexusMessage {
+// Broader content type for API response (less strict than MessagePart)
+type ContentPart = { type: string; text?: string; [key: string]: unknown }
+
+interface NexusMessageResponse {
   id: string
-  conversationId: string
   role: 'user' | 'assistant' | 'system'
-  content: string
-  parts?: Array<{ type: string; text?: string; [key: string]: unknown }>
-  modelId?: number
-  reasoningContent?: string
-  tokenUsage?: {
-    promptTokens?: number
-    completionTokens?: number
-    totalTokens?: number
-  }
-  finishReason?: string
+  content: ContentPart[]
+  createdAt: Date
   metadata?: Record<string, unknown>
-  createdAt: string
-  updatedAt: string
+}
+
+// Content size limits
+const MAX_CONTENT_LENGTH = 50000
+
+/**
+ * Truncate content to prevent memory issues
+ */
+function truncateContent(content: string): string {
+  if (typeof content === 'string' && content.length > MAX_CONTENT_LENGTH) {
+    return content.substring(0, MAX_CONTENT_LENGTH) + '...[content truncated for size]'
+  }
+  return content
+}
+
+/**
+ * Convert a part to content format, handling images as markdown and passing through tool parts
+ */
+function convertPartToTextContent(part: MessagePart): ContentPart | null {
+  const partType = part.type as string
+
+  if (partType === 'text') {
+    const text = part.text && typeof part.text === 'string' && part.text.length > MAX_CONTENT_LENGTH
+      ? part.text.substring(0, MAX_CONTENT_LENGTH) + '...[content truncated for size]'
+      : part.text || ''
+    return { type: 'text', text }
+  }
+
+  if (partType === 'image') {
+    const imageUrl = (part as unknown as { imageUrl?: string }).imageUrl
+    return imageUrl ? { type: 'text', text: `![Generated Image](${imageUrl})` } : null
+  }
+
+  // Pass through tool-call and tool-result parts as-is for UI rendering
+  if (partType === 'tool-call' || partType === 'tool-result') {
+    return part as unknown as ContentPart
+  }
+
+  // Skip control types
+  if (partType === 'step-start' || partType === 'step-finish') {
+    return null
+  }
+
+  // For other types, try to extract text if available
+  return part.text ? { type: 'text', text: part.text } : null
+}
+
+/**
+ * Truncate parts content and ensure at least one part
+ */
+function truncatePartsContent(parts: MessagePart[]): ContentPart[] {
+  const converted = parts
+    .map(part => convertPartToTextContent(part))
+    .filter((part): part is ContentPart => part !== null)
+  return converted.length > 0 ? converted : [{ type: 'text', text: '' }]
+}
+
+/**
+ * Validate pagination parameters
+ */
+function validatePagination(limitParam: string, offsetParam: string): {
+  valid: boolean
+  limit: number
+  offset: number
+} {
+  const parsedLimit = Number.parseInt(limitParam, 10)
+  const parsedOffset = Number.parseInt(offsetParam, 10)
+
+  const isValid = !Number.isNaN(parsedLimit) && !Number.isNaN(parsedOffset) &&
+    limitParam === parsedLimit.toString() && offsetParam === parsedOffset.toString()
+
+  const limit = Math.min(Math.max(Number.isNaN(parsedLimit) ? DEFAULT_MESSAGE_LIMIT : parsedLimit, 1), MAX_MESSAGE_LIMIT)
+  const offset = Math.max(Number.isNaN(parsedOffset) ? 0 : parsedOffset, 0)
+
+  return { valid: isValid, limit, offset }
+}
+
+/**
+ * Determine error response details
+ */
+function getErrorDetails(error: unknown): { statusCode: number; errorCode: string; errorMessage: string } {
+  let statusCode = 500
+  let errorCode = 'MESSAGES_FETCH_ERROR'
+  let errorMessage = 'Failed to retrieve messages'
+
+  if (error instanceof Error) {
+    if (error.message.includes('invalid input syntax for type uuid')) {
+      statusCode = 400
+      errorCode = 'INVALID_CONVERSATION_ID'
+      errorMessage = 'Invalid conversation ID format'
+    } else if (error.message.includes('connection')) {
+      errorCode = 'DATABASE_CONNECTION_ERROR'
+      errorMessage = 'Database connection error'
+    } else if (error.message.includes('timeout')) {
+      errorCode = 'REQUEST_TIMEOUT'
+      errorMessage = 'Request timed out'
+    }
+  }
+
+  return { statusCode, errorCode, errorMessage }
+}
+
+/**
+ * Convert message to AI SDK format
+ */
+function convertMessageToAiSdk(msg: {
+  id: string
+  role: string
+  content?: string | null
+  parts?: MessagePart[] | null
+  createdAt?: Date | null
+  metadata?: Record<string, unknown> | null
+}): NexusMessageResponse {
+  const truncatedContent = msg.content ? truncateContent(msg.content) : null
+  let truncatedParts: ContentPart[] | null = null
+
+  if (msg.parts && Array.isArray(msg.parts)) {
+    truncatedParts = truncatePartsContent(msg.parts)
+  }
+
+  const baseMessage = {
+    id: msg.id,
+    role: msg.role as 'user' | 'assistant' | 'system',
+    createdAt: msg.createdAt || new Date(),
+    ...(msg.metadata && { metadata: msg.metadata })
+  }
+
+  if (truncatedParts && truncatedParts.length > 0) {
+    return { ...baseMessage, content: truncatedParts }
+  }
+  if (truncatedContent) {
+    return { ...baseMessage, content: [{ type: 'text', text: truncatedContent }] }
+  }
+  return { ...baseMessage, content: [{ type: 'text', text: '' }] }
 }
 
 /**
  * GET /api/nexus/conversations/[id]/messages - Get messages for a conversation
+ *
+ * Migrated to Drizzle ORM as part of Epic #526
+ * Issue #534 - Migrate Nexus Messages & Artifacts to Drizzle ORM
  */
 export async function GET(
   req: NextRequest,
@@ -34,15 +169,15 @@ export async function GET(
   const requestId = generateRequestId()
   const timer = startTimer('nexus.conversations.messages.get')
   const log = createLogger({ requestId, route: 'nexus.conversations.messages.get' })
-  
+
   let conversationId: string | undefined
-  
+
   try {
     const resolvedParams = await params
     conversationId = resolvedParams.id
-    
+
     log.info('GET /api/nexus/conversations/[id]/messages', { conversationId })
-  
+
     // Authenticate user
     const session = await getServerSession()
     if (!session) {
@@ -50,181 +185,57 @@ export async function GET(
       timer({ status: 'error', reason: 'unauthorized' })
       return new Response('Unauthorized', { status: 401 })
     }
-    
-    // Get current user with integer ID
+
     const currentUser = await getCurrentUserAction()
     if (!currentUser.isSuccess) {
       log.error('Failed to get current user')
       timer({ status: 'error', reason: 'user_lookup_failed' })
       return new Response('Unauthorized', { status: 401 })
     }
-    
+
     const userId = currentUser.data.user.id
-    
-    // Verify user owns this conversation
-    const conversationQuery = `
-      SELECT id, title FROM nexus_conversations 
-      WHERE id = $1::uuid AND user_id = $2
-    `
-    const conversationResult = await executeSQL(conversationQuery, [
-      conversationId,
-      userId
-    ])
-    
-    if (conversationResult.length === 0) {
+    const conversation = await getConversationById(conversationId, userId)
+
+    if (!conversation) {
       log.warn('Conversation not found or access denied', { conversationId, userId })
       timer({ status: 'error', reason: 'not_found' })
       return new Response('Conversation not found', { status: 404 })
     }
-    
-    // Parse and validate query parameters
+
+    // Parse and validate pagination parameters
     const url = new URL(req.url)
-    const limitParam = url.searchParams.get('limit') || '50'
+    const limitParam = url.searchParams.get('limit') || String(DEFAULT_MESSAGE_LIMIT)
     const offsetParam = url.searchParams.get('offset') || '0'
-    
-    // Validate and bound limit parameter (1-1000)
-    const parsedLimit = Number.parseInt(limitParam, 10)
-    const limit = Math.min(Math.max(Number.isNaN(parsedLimit) ? 50 : parsedLimit, 1), 1000)
-    
-    // Validate and bound offset parameter (0 or positive)
-    const parsedOffset = Number.parseInt(offsetParam, 10)
-    const offset = Math.max(Number.isNaN(parsedOffset) ? 0 : parsedOffset, 0)
-    
-    // Additional validation to prevent potential abuse
-    if (Number.isNaN(parsedLimit) || Number.isNaN(parsedOffset) || 
-        limitParam !== parsedLimit.toString() || 
-        offsetParam !== parsedOffset.toString()) {
-      log.warn('Invalid pagination parameters', { 
-        limitParam, 
-        offsetParam, 
-        conversationId 
-      })
+    const pagination = validatePagination(limitParam, offsetParam)
+
+    if (!pagination.valid) {
+      log.warn('Invalid pagination parameters', { limitParam, offsetParam, conversationId })
       return new Response(
-        JSON.stringify({ error: 'Invalid pagination parameters' }), 
-        { 
-          status: 400,
-          headers: { 'Content-Type': 'application/json' }
-        }
+        JSON.stringify({ error: 'Invalid pagination parameters' }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
       )
     }
-    
-    // Query messages
-    const query = `
-      SELECT 
-        id,
-        conversation_id,
-        role,
-        content,
-        parts,
-        model_id,
-        reasoning_content,
-        token_usage,
-        finish_reason,
-        metadata,
-        created_at,
-        updated_at
-      FROM nexus_messages
-      WHERE conversation_id = $1::uuid
-      ORDER BY created_at ASC
-      LIMIT $2 OFFSET $3
-    `
-    
-    const result = await executeSQL(query, [
-      conversationId,
-      limit,
-      offset
-    ])
-    
-    // Helper function to truncate content to prevent memory issues
-    const MAX_CONTENT_LENGTH = 50000 // 50KB per content field
-    const truncateContent = (content: string): string => {
-      if (typeof content === 'string' && content.length > MAX_CONTENT_LENGTH) {
-        return content.substring(0, MAX_CONTENT_LENGTH) + '...[content truncated for size]'
-      }
-      return content
-    }
-    
-    const truncatePartsContent = (parts: Array<{ type: string; text?: string; [key: string]: unknown }>): Array<{ type: string; text?: string; [key: string]: unknown }> => {
-      return parts.map(part => {
-        if (part.text && typeof part.text === 'string' && part.text.length > MAX_CONTENT_LENGTH) {
-          return {
-            ...part,
-            text: part.text.substring(0, MAX_CONTENT_LENGTH) + '...[content truncated for size]'
-          }
-        }
-        return part
-      })
-    }
 
-    // Transform snake_case to camelCase and format for AI SDK with content size limits
-    const messages: NexusMessage[] = result.map(row => {
-      const transformed = transformSnakeToCamel<NexusMessage>(row)
-      
-      // Apply content truncation to prevent memory issues
-      if (transformed.content) {
-        transformed.content = truncateContent(transformed.content)
-      }
-      
-      if (transformed.reasoningContent) {
-        transformed.reasoningContent = truncateContent(transformed.reasoningContent)
-      }
-      
-      if (transformed.parts && Array.isArray(transformed.parts)) {
-        transformed.parts = truncatePartsContent(transformed.parts)
-      }
-      
-      return transformed
+    // Query messages and total count
+    const messages = await getMessagesByConversation(conversationId, {
+      limit: pagination.limit,
+      offset: pagination.offset,
+      includeModel: false,
     })
-    
+    const totalCount = await getMessageCount(conversationId)
+
     // Convert to AI SDK format
-    const aiSdkMessages = messages.map(msg => {
-      const baseMessage = {
-        id: msg.id,
-        role: msg.role,
-        createdAt: new Date(msg.createdAt),
-        ...(msg.metadata && { metadata: msg.metadata })
-      }
-      
-      // Handle content format - prefer parts over plain content
-      if (msg.parts && Array.isArray(msg.parts)) {
-        return {
-          ...baseMessage,
-          content: msg.parts
-        }
-      } else if (msg.content) {
-        return {
-          ...baseMessage,
-          content: [{ type: 'text', text: msg.content }]
-        }
-      } else {
-        return {
-          ...baseMessage,
-          content: [{ type: 'text', text: '' }]
-        }
-      }
-    })
-    
+    const aiSdkMessages = messages.map(convertMessageToAiSdk)
+
     timer({ status: 'success' })
-    log.info('Messages retrieved', {
-      requestId,
-      conversationId,
-      userId,
-      messageCount: messages.length
-    })
-    
+    log.info('Messages retrieved', { conversationId, userId, messageCount: messages.length })
+
     return Response.json({
       messages: aiSdkMessages,
-      conversation: {
-        id: conversationResult[0].id,
-        title: conversationResult[0].title
-      },
-      pagination: {
-        limit,
-        offset,
-        total: messages.length
-      }
+      conversation: { id: conversation.id, title: conversation.title },
+      pagination: { limit: pagination.limit, offset: pagination.offset, total: totalCount }
     })
-    
+
   } catch (error) {
     timer({ status: 'error' })
     log.error('Failed to get messages', {
@@ -233,37 +244,12 @@ export async function GET(
       conversationId,
       requestId
     })
-    
-    // Determine error type and appropriate response
-    let statusCode = 500
-    let errorCode = 'MESSAGES_FETCH_ERROR'
-    let errorMessage = 'Failed to retrieve messages'
-    
-    if (error instanceof Error) {
-      // Handle specific error types
-      if (error.message.includes('invalid input syntax for type uuid')) {
-        statusCode = 400
-        errorCode = 'INVALID_CONVERSATION_ID'
-        errorMessage = 'Invalid conversation ID format'
-      } else if (error.message.includes('connection')) {
-        errorCode = 'DATABASE_CONNECTION_ERROR'
-        errorMessage = 'Database connection error'
-      } else if (error.message.includes('timeout')) {
-        errorCode = 'REQUEST_TIMEOUT'
-        errorMessage = 'Request timed out'
-      }
-    }
-    
+
+    const { statusCode, errorCode, errorMessage } = getErrorDetails(error)
+
     return new Response(
-      JSON.stringify({
-        error: errorMessage,
-        code: errorCode,
-        requestId
-      }),
-      {
-        status: statusCode,
-        headers: { 'Content-Type': 'application/json' }
-      }
+      JSON.stringify({ error: errorMessage, code: errorCode, requestId }),
+      { status: statusCode, headers: { 'Content-Type': 'application/json' } }
     )
   }
 }

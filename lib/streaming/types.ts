@@ -1,4 +1,4 @@
-import type { UIMessage, LanguageModel, CoreMessage, ToolSet } from 'ai';
+import type { UIMessage, LanguageModel, ModelMessage, ToolSet } from 'ai';
 import type { SSEEventEmitter } from '@/types/sse-events';
 import type { SSEEvent } from './sse-event-types';
 
@@ -31,24 +31,37 @@ export interface StreamRequest {
   // Tools configuration
   tools?: ToolSet;
   enabledTools?: string[]; // Tool names to enable (tools will be created by adapter)
+  maxSteps?: number; // Max tool-use round-trips (default: 1, set higher for multi-step tool use)
 
   // Advanced model options
   options?: {
     // Reasoning configuration
     reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high';
     responseMode?: 'standard' | 'flex' | 'priority';
-    
+
     // Background processing for long-running models
     backgroundMode?: boolean;
-    
+
     // Thinking configuration for Claude models
     thinkingBudget?: number; // 1024-6553 tokens
-    
+
     // Tool configuration
     enableWebSearch?: boolean;
     enableCodeInterpreter?: boolean;
     enableImageGeneration?: boolean;
     enabledTools?: string[];
+  };
+
+  // K-12 Content Safety Options
+  contentSafety?: {
+    /** Enable content safety filtering (default: true when guardrails configured) */
+    enabled?: boolean;
+    /** Enable PII tokenization (default: true when configured) */
+    enablePiiTokenization?: boolean;
+    /** Skip input safety check (not recommended) */
+    skipInputCheck?: boolean;
+    /** Skip output safety check (not recommended) */
+    skipOutputCheck?: boolean;
   };
   
   // Telemetry configuration
@@ -81,9 +94,10 @@ export interface StreamResponse {
 
 export interface StreamConfig {
   model: LanguageModel;
-  messages: CoreMessage[];
+  messages: ModelMessage[];
   system?: string;
   maxTokens?: number;
+  maxSteps?: number;
   temperature?: number;
   timeout?: number;
   tools?: ToolSet;
@@ -166,6 +180,16 @@ export interface StreamingProgress {
   metadata?: Record<string, unknown>;
 }
 
+/**
+ * Tool call data structure for persistence
+ */
+export interface ToolCallData {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  result?: unknown;  // Tool execution result for persistence
+}
+
 export interface StreamingCallbacks {
   onProgress?: (event: StreamingProgress) => void;
   onReasoning?: (reasoning: string) => void;
@@ -180,6 +204,8 @@ export interface StreamingCallbacks {
       totalCost?: number;
     };
     finishReason: string;
+    /** Tool calls made during this response (from all steps) */
+    toolCalls?: ToolCallData[];
   }) => void;
   onError?: (error: Error) => void;
 
@@ -290,6 +316,27 @@ export class StreamTimeoutError extends StreamingError {
       provider,
       modelId
     );
+  }
+}
+
+/**
+ * Error thrown when content is blocked by safety guardrails
+ */
+export class ContentSafetyBlockedError extends StreamingError {
+  constructor(
+    public blockedMessage: string,
+    public blockedCategories: string[],
+    public source: 'input' | 'output',
+    provider?: string,
+    modelId?: string
+  ) {
+    super(
+      blockedMessage,
+      source === 'input' ? 'CONTENT_BLOCKED_INPUT' : 'CONTENT_BLOCKED_OUTPUT',
+      provider,
+      modelId
+    );
+    this.name = 'ContentSafetyBlockedError';
   }
 }
 
