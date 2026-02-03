@@ -15,17 +15,24 @@ import {
   type TranslatedDecision,
 } from "@/lib/graph/decision-api-translator"
 import { ErrorFactories } from "@/lib/error-utils"
+import { isValidationError } from "@/types/error-types"
 import { executeTransaction } from "@/lib/db/drizzle-client"
 import { graphNodes, graphEdges } from "@/lib/db/schema"
-import { createLogger } from "@/lib/logger"
+import { createLogger, sanitizeForLogging } from "@/lib/logger"
+
+// ============================================
+// Constants
+// ============================================
+
+const METADATA_MAX_BYTES = 10_240
 
 // ============================================
 // Validation Schema
 // ============================================
 
 const metadataSchema = z.record(z.string(), z.unknown()).refine(
-  (val) => JSON.stringify(val).length <= 10_240,
-  { message: "Metadata must be 10KB or less when serialized" }
+  (val) => JSON.stringify(val).length <= METADATA_MAX_BYTES,
+  { message: `Metadata must be ${METADATA_MAX_BYTES} bytes or less when serialized` }
 )
 
 const createDecisionSchema = z.object({
@@ -57,11 +64,13 @@ async function persistDecisionSubgraph(
   translated: TranslatedDecision,
   payload: ValidatedPayload,
   source: string,
-  userId: number
+  userId: number,
+  requestId: string
 ): Promise<PersistResult> {
   let decisionNodeId = ""
   const committedNodeIds: string[] = []
   const committedEdgeIds: string[] = []
+  const log = createLogger({ requestId, operation: "persistDecisionSubgraph" })
 
   await executeTransaction(async (tx) => {
     // Validate relatedTo inside transaction to prevent race conditions
@@ -108,8 +117,8 @@ async function persistDecisionSubgraph(
       if (node.tempId === "temp-1") decisionNodeId = newNode.id
     }
 
-    // Create edges
-    for (const edge of translated.edges) {
+    // Resolve temp IDs to real IDs for all edges, then batch insert
+    const resolvedEdgeValues = translated.edges.map((edge) => {
       const sourceId = tempIdToRealId.get(edge.sourceTempId)
       const targetId = tempIdToRealId.get(edge.targetTempId)
       if (!sourceId || !targetId) {
@@ -118,38 +127,42 @@ async function persistDecisionSubgraph(
           message: `Edge references unknown tempId: source=${edge.sourceTempId}, target=${edge.targetTempId}`,
         }])
       }
+      return {
+        sourceNodeId: sourceId,
+        targetNodeId: targetId,
+        edgeType: edge.edgeType.trim(),
+        metadata: { source },
+        createdBy: userId,
+      }
+    })
 
-      const [newEdge] = await tx
-        .insert(graphEdges)
-        .values({
-          sourceNodeId: sourceId,
-          targetNodeId: targetId,
-          edgeType: edge.edgeType.trim(),
+    // CONTEXT edges for relatedTo (all nodes validated above)
+    if (payload.relatedTo && payload.relatedTo.length > 0) {
+      for (const relatedNodeId of payload.relatedTo) {
+        resolvedEdgeValues.push({
+          sourceNodeId: relatedNodeId,
+          targetNodeId: decisionNodeId,
+          edgeType: "CONTEXT",
           metadata: { source },
           createdBy: userId,
         })
-        .returning({ id: graphEdges.id })
-
-      committedEdgeIds.push(newEdge.id)
+      }
     }
 
-    // CONTEXT edges for relatedTo (all nodes validated above, batch insert)
-    if (payload.relatedTo && payload.relatedTo.length > 0) {
-      const contextEdgeValues = payload.relatedTo.map((relatedNodeId) => ({
-        sourceNodeId: relatedNodeId,
-        targetNodeId: decisionNodeId,
-        edgeType: "CONTEXT",
-        metadata: { source },
-        createdBy: userId,
-      }))
-
-      const contextEdges = await tx
+    // Batch insert all edges at once
+    if (resolvedEdgeValues.length > 0) {
+      const insertedEdges = await tx
         .insert(graphEdges)
-        .values(contextEdgeValues)
+        .values(resolvedEdgeValues)
         .returning({ id: graphEdges.id })
 
-      committedEdgeIds.push(...contextEdges.map((e) => e.id))
+      committedEdgeIds.push(...insertedEdges.map((e) => e.id))
     }
+
+    log.info("Transaction committed", {
+      nodesCreated: committedNodeIds.length,
+      edgesCreated: committedEdgeIds.length,
+    })
   }, "createDecisionSubgraph")
 
   return { decisionNodeId, committedNodeIds, committedEdgeIds }
@@ -180,6 +193,13 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   }
 
   const payload = parsed.data
+  log.info("Decision capture request validated", {
+    decision: sanitizeForLogging(payload.decision),
+    decidedBy: sanitizeForLogging(payload.decidedBy),
+    relatedToCount: payload.relatedTo?.length ?? 0,
+    hasMetadata: !!payload.metadata,
+    userId: auth.userId,
+  })
 
   // 3. Translate payload to graph nodes + edges
   const source = payload.agentId ? "agent" : "api"
@@ -199,8 +219,12 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   // 4. Persist in transaction (includes relatedTo validation atomically)
   let result: PersistResult
   try {
-    result = await persistDecisionSubgraph(translated, payload, source, auth.userId)
+    result = await persistDecisionSubgraph(translated, payload, source, auth.userId, requestId)
   } catch (error) {
+    if (isValidationError(error)) {
+      log.warn("Decision subgraph validation failed", { error: error.message })
+      return createErrorResponse(requestId, 400, "VALIDATION_ERROR", error.message)
+    }
     log.error("Failed to create decision subgraph", { error: error instanceof Error ? error.message : String(error) })
     return createErrorResponse(requestId, 500, "INTERNAL_ERROR", "Failed to create decision")
   }
