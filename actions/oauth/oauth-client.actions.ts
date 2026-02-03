@@ -15,6 +15,7 @@ import { executeQuery } from "@/lib/db/drizzle-client"
 import { oauthClients } from "@/lib/db/schema"
 import { eq } from "drizzle-orm"
 import { randomBytes, randomUUID } from "node:crypto"
+import { hashArgon2 } from "@/lib/api-keys/argon2-loader"
 import type { ActionState } from "@/types"
 
 // ============================================
@@ -197,8 +198,7 @@ export async function createOAuthClient(
 
     if (isConfidential) {
       clientSecret = `cs-${randomBytes(32).toString("hex")}`
-      const argon2 = await import("argon2")
-      clientSecretHash = await argon2.hash(clientSecret)
+      clientSecretHash = await hashArgon2(clientSecret)
     }
 
     const [created] = await executeQuery(

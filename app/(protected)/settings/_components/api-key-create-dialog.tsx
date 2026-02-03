@@ -123,8 +123,8 @@ export function ApiKeyCreateDialog({
         onOpenChange(isOpen)
       }}
     >
-      <DialogContent className="sm:max-w-md">
-        <DialogHeader>
+      <DialogContent className="sm:max-w-2xl flex flex-col max-h-[85vh]">
+        <DialogHeader className="shrink-0">
           <DialogTitle>Generate API Key</DialogTitle>
           <DialogDescription>
             Create a key to access AI Studio via the API. The key will be
@@ -132,7 +132,7 @@ export function ApiKeyCreateDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="space-y-4 py-2">
+        <div className="space-y-4 py-2 overflow-y-auto min-h-0">
           {/* Name */}
           <div className="space-y-2">
             <Label htmlFor="key-name">Key Name</Label>
@@ -159,7 +159,7 @@ export function ApiKeyCreateDialog({
                 No API scopes are available for your role.
               </p>
             ) : (
-              <div className="space-y-2">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 {availableScopes.map((scope) => (
                   <label
                     key={scope}
@@ -202,7 +202,7 @@ export function ApiKeyCreateDialog({
           </div>
         </div>
 
-        <DialogFooter>
+        <DialogFooter className="shrink-0">
           <Button
             variant="outline"
             onClick={() => onOpenChange(false)}

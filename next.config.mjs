@@ -3,6 +3,7 @@
 const nextConfig = {
   output: 'standalone', // Required for ECS Fargate deployment
   transpilePackages: ['recharts'], // Required for Turbopack to resolve recharts dynamic imports
+  serverExternalPackages: ['argon2'], // Native modules that must not be bundled by Turbopack
   images: {
     remotePatterns: [
       // Add specific trusted domains for user avatars
@@ -17,7 +18,7 @@ const nextConfig = {
     ]
   },
   experimental: {
-    serverComponentsExternalPackages: ['mammoth', 'pdf-parse', '@aws-sdk/lib-storage', 'oidc-provider'], // Server-only packages with Node.js dependencies
+    serverComponentsExternalPackages: ['mammoth', 'pdf-parse', '@aws-sdk/lib-storage', 'oidc-provider', 'argon2'], // Server-only packages with Node.js dependencies
     serverActions: {
       bodySizeLimit: '100mb', // Match the file upload limit from settings
     },
