@@ -53,8 +53,8 @@ const VIDEO_TUTORIALS: VideoTutorial[] = [
   },
   {
     id: 'video-3',
-    title: 'Using Model Compare for Feedback',
-    duration: '6:42',
+    title: 'Intro to Model Compare',
+    embedUrl: 'https://www.canva.com/design/DAHANXh192M/-u_avYAx8asW-qT_15cEig/watch?embed',
   },
   {
     id: 'video-4',

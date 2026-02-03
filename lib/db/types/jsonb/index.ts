@@ -94,6 +94,22 @@ export interface NexusConversationMetadata {
 }
 
 /**
+ * Metadata for Assistant Architect prompt execution messages
+ * Stored in nexus_messages.metadata for assistant architect chain executions.
+ * Part of PR #715 - Save prompt chain results as conversation messages
+ */
+export interface AssistantArchitectMessageMetadata extends NexusConversationMetadata {
+  source: 'assistant-architect-execution';
+  executionId: number;
+  promptId: number;
+  promptName: string;
+  position: number;
+  executionTimeMs?: number;
+  failed?: boolean;
+  error?: string;
+}
+
+/**
  * Metadata for Decision Capture conversations (provider: "decision-capture")
  * Stored in nexus_conversations.metadata for decision capture sessions.
  * Part of Epic #675 (Context Graph Decision Capture Layer) - Issue #681
@@ -102,6 +118,20 @@ export interface DecisionCaptureMetadata extends NexusConversationMetadata {
   captureType: "transcript" | "manual";
   committedNodeIds?: string[];
   committedEdgeIds?: string[];
+}
+
+/**
+ * Metadata for Assistant Architect conversations (provider: "assistant-architect")
+ * Stored in nexus_conversations.metadata for assistant architect executions.
+ * Part of PR #717 - Conversation list provider filtering
+ */
+export interface AssistantArchitectConversationMetadata extends NexusConversationMetadata {
+  /** ID of the assistant architect tool that created this conversation */
+  assistantId?: number;
+  /** Name of the assistant architect that created this conversation */
+  assistantName?: string;
+  /** Current execution status for display in conversation list */
+  executionStatus?: 'running' | 'completed' | 'failed';
 }
 
 /**

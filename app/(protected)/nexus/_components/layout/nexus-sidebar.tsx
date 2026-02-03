@@ -15,6 +15,8 @@ interface NexusSidebarProps {
   mode: SidebarMode
   onClose: () => void
   children: ReactNode
+  /** Override default new conversation navigation */
+  onNewConversation?: () => void
 }
 
 /**
@@ -31,6 +33,7 @@ export function NexusSidebar({
   mode,
   onClose,
   children,
+  onNewConversation,
 }: NexusSidebarProps) {
   // Handler for opening changes - close when set to false
   const handleOpenChange = useCallback((open: boolean) => {
@@ -42,8 +45,12 @@ export function NexusSidebar({
   // Handler for new chat button in overlay/drawer modes
   const handleNewChatWithClose = useCallback(() => {
     onClose()
-    navigateToNewConversation()
-  }, [onClose])
+    if (onNewConversation) {
+      onNewConversation()
+    } else {
+      navigateToNewConversation()
+    }
+  }, [onClose, onNewConversation])
 
   // Mobile drawer
   if (mode === 'drawer') {
@@ -115,7 +122,7 @@ export function NexusSidebar({
             <Button
               variant="default"
               size="sm"
-              onClick={navigateToNewConversation}
+              onClick={onNewConversation || navigateToNewConversation}
               className="flex items-center gap-1.5"
             >
               <Plus className="h-4 w-4" />

@@ -17,16 +17,25 @@ export function useNexusSidebar() {
   return context
 }
 
+/** Known conversation provider types used for sidebar filtering */
+type ConversationProvider = 'assistant-architect' | 'decision-capture'
+
 interface NexusLayoutProps {
   children: ReactNode
   conversationId?: string | null
+  /** When set, filters sidebar conversations to this provider and hides tabs */
+  provider?: ConversationProvider
+  /** Override default conversation selection navigation */
+  onConversationSelect?: (id: string) => void
+  /** Override navigation when starting new conversation or deleting selected */
+  onNewConversation?: () => void
 }
 
 /**
  * Root layout component for Nexus Chat.
  * Provides the sidebar and main content area with responsive behavior.
  */
-export function NexusLayout({ children, conversationId }: NexusLayoutProps) {
+export function NexusLayout({ children, conversationId, provider, onConversationSelect, onNewConversation }: NexusLayoutProps) {
   const sidebarState = useSidebarState()
   const { isOpen, isCollapsed, mode, close } = sidebarState
 
@@ -40,8 +49,9 @@ export function NexusLayout({ children, conversationId }: NexusLayoutProps) {
             isCollapsed={isCollapsed}
             mode={mode}
             onClose={close}
+            onNewConversation={onNewConversation}
           >
-            <ConversationList selectedConversationId={conversationId} />
+            <ConversationList selectedConversationId={conversationId} provider={provider} onConversationSelect={onConversationSelect} onNewConversation={onNewConversation} />
           </NexusSidebar>
         )}
 
@@ -52,8 +62,9 @@ export function NexusLayout({ children, conversationId }: NexusLayoutProps) {
             isCollapsed={isCollapsed}
             mode={mode}
             onClose={close}
+            onNewConversation={onNewConversation}
           >
-            <ConversationList selectedConversationId={conversationId} />
+            <ConversationList selectedConversationId={conversationId} provider={provider} onConversationSelect={onConversationSelect} onNewConversation={onNewConversation} />
           </NexusSidebar>
         )}
 
@@ -64,8 +75,9 @@ export function NexusLayout({ children, conversationId }: NexusLayoutProps) {
             isCollapsed={isCollapsed}
             mode={mode}
             onClose={close}
+            onNewConversation={onNewConversation}
           >
-            <ConversationList selectedConversationId={conversationId} />
+            <ConversationList selectedConversationId={conversationId} provider={provider} onConversationSelect={onConversationSelect} onNewConversation={onNewConversation} />
           </NexusSidebar>
         )}
 

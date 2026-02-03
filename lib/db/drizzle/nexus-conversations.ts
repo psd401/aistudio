@@ -17,7 +17,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, or, desc, sql, isNull } from "drizzle-orm";
+import { eq, and, or, desc, sql, isNull, notInArray } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   nexusConversations,
@@ -62,6 +62,7 @@ export interface ConversationListItem {
   isPinned: boolean | null;
   externalId: string | null;
   cacheKey: string | null;
+  metadata: NexusConversationMetadata | null;
 }
 
 export interface CreateConversationData {
@@ -81,9 +82,23 @@ export interface UpdateConversationData {
 }
 
 export interface ConversationListOptions {
+  /** Maximum number of conversations to return (default: 20, max: 500) */
   limit?: number;
+  /** Number of conversations to skip for pagination (default: 0) */
   offset?: number;
+  /** Include archived conversations in results (default: false) */
   includeArchived?: boolean;
+  /**
+   * Filter to a single provider (exact match)
+   * @example 'assistant-architect' | 'openai' | 'google' | 'bedrock' | 'azure'
+   */
+  provider?: string;
+  /**
+   * Exclude conversations with these providers
+   * Filters applied as SQL NOT IN clause
+   * @example ['assistant-architect', 'decision-capture']
+   */
+  excludeProviders?: string[];
 }
 
 export interface CreateFolderData {
@@ -117,7 +132,33 @@ export async function getConversations(
   userId: number,
   options: ConversationListOptions = {}
 ) {
-  const { limit = DEFAULT_CONVERSATION_LIMIT, offset = 0, includeArchived = false } = options;
+  const {
+    limit = DEFAULT_CONVERSATION_LIMIT,
+    offset = 0,
+    includeArchived = false,
+    provider,
+    excludeProviders,
+  } = options;
+
+  // Build WHERE conditions
+  const conditions = [eq(nexusConversations.userId, userId)];
+
+  if (!includeArchived) {
+    conditions.push(
+      or(
+        eq(nexusConversations.isArchived, false),
+        isNull(nexusConversations.isArchived)
+      )!
+    );
+  }
+
+  if (provider) {
+    conditions.push(eq(nexusConversations.provider, provider));
+  }
+
+  if (excludeProviders && excludeProviders.length > 0) {
+    conditions.push(notInArray(nexusConversations.provider, excludeProviders));
+  }
 
   return executeQuery(
     (db) =>
@@ -136,19 +177,10 @@ export async function getConversations(
           isPinned: nexusConversations.isPinned,
           externalId: nexusConversations.externalId,
           cacheKey: nexusConversations.cacheKey,
+          metadata: nexusConversations.metadata,
         })
         .from(nexusConversations)
-        .where(
-          includeArchived
-            ? eq(nexusConversations.userId, userId)
-            : and(
-                eq(nexusConversations.userId, userId),
-                or(
-                  eq(nexusConversations.isArchived, false),
-                  isNull(nexusConversations.isArchived)
-                )
-              )
-        )
+        .where(and(...conditions))
         // Order by pinned first (using COALESCE to treat null as false)
         // Then by most recent activity (last message or update time)
         .orderBy(
@@ -163,27 +195,40 @@ export async function getConversations(
 
 /**
  * Get total count of conversations for a user
+ * Accepts same filter options as getConversations for consistency
  */
 export async function getConversationCount(
   userId: number,
-  includeArchived: boolean = false
+  options: Pick<ConversationListOptions, "includeArchived" | "provider" | "excludeProviders"> = {}
 ) {
+  const { includeArchived = false, provider, excludeProviders } = options;
+
+  // Build WHERE conditions (mirrors getConversations logic)
+  const conditions = [eq(nexusConversations.userId, userId)];
+
+  if (!includeArchived) {
+    conditions.push(
+      or(
+        eq(nexusConversations.isArchived, false),
+        isNull(nexusConversations.isArchived)
+      )!
+    );
+  }
+
+  if (provider) {
+    conditions.push(eq(nexusConversations.provider, provider));
+  }
+
+  if (excludeProviders && excludeProviders.length > 0) {
+    conditions.push(notInArray(nexusConversations.provider, excludeProviders));
+  }
+
   const result = await executeQuery(
     (db) =>
       db
         .select({ count: countAsInt })
         .from(nexusConversations)
-        .where(
-          includeArchived
-            ? eq(nexusConversations.userId, userId)
-            : and(
-                eq(nexusConversations.userId, userId),
-                or(
-                  eq(nexusConversations.isArchived, false),
-                  isNull(nexusConversations.isArchived)
-                )
-              )
-        ),
+        .where(and(...conditions)),
     "getConversationCount"
   );
 

@@ -2,8 +2,9 @@
 
 import { useState, useEffect, useCallback, memo } from 'react'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
-import { Trash2Icon, MessageSquareIcon } from 'lucide-react'
+import { Trash2Icon, MessageSquareIcon, BotIcon } from 'lucide-react'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -18,6 +19,8 @@ import {
 import { createLogger } from '@/lib/client-logger'
 import { useRouter } from 'next/navigation'
 import { navigateToConversation } from '@/lib/nexus/conversation-navigation'
+import { archiveConversationAction } from '@/actions/nexus/archive-conversation.actions'
+import type { AssistantArchitectConversationMetadata, NexusConversationMetadata } from '@/lib/db/types/jsonb'
 
 const log = createLogger({ moduleName: 'nexus-conversation-list' })
 
@@ -31,10 +34,41 @@ interface ConversationItem {
   createdAt: string
   isArchived: boolean
   isPinned: boolean
+  metadata?: NexusConversationMetadata | AssistantArchitectConversationMetadata | null
 }
+
+type ConversationFilterTab = 'chat' | 'assistants'
+
+/** Providers excluded from Chat tab (non-chat conversation types) */
+const NON_CHAT_PROVIDERS = ['assistant-architect', 'decision-capture'] as const
+
+/** Valid execution statuses for assistant architect conversations */
+const VALID_EXECUTION_STATUSES = ['running', 'completed', 'failed'] as const
+type ExecutionStatus = typeof VALID_EXECUTION_STATUSES[number]
+
+/** Type guard for executionStatus — JSONB is untyped at runtime */
+function isValidExecutionStatus(status: unknown): status is ExecutionStatus {
+  return typeof status === 'string' && VALID_EXECUTION_STATUSES.includes(status as ExecutionStatus)
+}
+
+/** Type guard to check if metadata is AssistantArchitectConversationMetadata */
+function isAssistantArchitectMetadata(
+  metadata: NexusConversationMetadata | AssistantArchitectConversationMetadata | null | undefined
+): metadata is AssistantArchitectConversationMetadata {
+  return metadata !== null && metadata !== undefined && 'assistantName' in metadata
+}
+
+/** Known conversation provider types used for sidebar filtering */
+type ConversationProvider = 'assistant-architect' | 'decision-capture'
 
 interface ConversationListProps {
   selectedConversationId?: string | null
+  /** When set, hides filter tabs and filters conversations to this provider */
+  provider?: ConversationProvider
+  /** Override default conversation selection navigation */
+  onConversationSelect?: (id: string) => void
+  /** Override navigation when deleting the selected conversation */
+  onNewConversation?: () => void
 }
 
 // Helper function moved outside component to reduce function size
@@ -54,6 +88,20 @@ function formatRelativeTime(dateString: string): string {
   } else {
     return date.toLocaleDateString()
   }
+}
+
+// Status badge for assistant architect execution status
+function ExecutionStatusBadge({ status }: { status: ExecutionStatus }) {
+  const variantMap: Record<ExecutionStatus, 'warning' | 'success' | 'error'> = {
+    running: 'warning',
+    completed: 'success',
+    failed: 'error',
+  }
+  return (
+    <Badge variant={variantMap[status]} size="sm">
+      {status}
+    </Badge>
+  )
 }
 
 // Extracted component for conversation row to avoid inline functions
@@ -109,6 +157,11 @@ const ConversationItemRow = memo(function ConversationItemRow({
             <p className="text-sm font-medium truncate">
               {conversation.title}
             </p>
+            {conversation.provider === 'assistant-architect' && isAssistantArchitectMetadata(conversation.metadata) && conversation.metadata.assistantName && (
+              <p className="text-xs text-muted-foreground truncate mt-0.5">
+                {String(conversation.metadata.assistantName).slice(0, 200)}
+              </p>
+            )}
             <div className="flex items-center gap-2 mt-1">
               <span className="text-xs text-muted-foreground">
                 {conversation.messageCount} message{conversation.messageCount !== 1 ? 's' : ''}
@@ -116,6 +169,9 @@ const ConversationItemRow = memo(function ConversationItemRow({
               <span className="text-xs text-muted-foreground">
                 {formatRelativeTime(conversation.lastMessageAt || conversation.createdAt)}
               </span>
+              {conversation.provider === 'assistant-architect' && isAssistantArchitectMetadata(conversation.metadata) && isValidExecutionStatus(conversation.metadata.executionStatus) && (
+                <ExecutionStatusBadge status={conversation.metadata.executionStatus} />
+              )}
             </div>
           </div>
         </div>
@@ -156,26 +212,46 @@ const ConversationItemRow = memo(function ConversationItemRow({
   )
 })
 
-export function ConversationList({ selectedConversationId }: ConversationListProps) {
+export function ConversationList({ selectedConversationId, provider, onConversationSelect: onConversationSelectProp, onNewConversation }: ConversationListProps) {
   const [conversations, setConversations] = useState<ConversationItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<ConversationFilterTab>('chat')
   const router = useRouter()
-  
+
+  const handleTabChat = useCallback(() => setActiveTab('chat'), [])
+  const handleTabAssistants = useCallback(() => setActiveTab('assistants'), [])
 
   // Load conversations from database with comprehensive error handling
+  // Server-side filtering based on active tab to avoid missing items with >500 conversations
   const loadConversations = useCallback(async () => {
     try {
       setLoading(true)
       setError(null)
       
-      log.debug('Loading conversations from API')
-      
+      log.debug('Loading conversations from API', { activeTab, provider })
+
+      // Build query params with server-side filtering
+      const params = new URLSearchParams({
+        limit: '500',
+        offset: '0',
+      })
+
+      // Apply provider filtering: explicit provider prop takes precedence over tab logic
+      if (provider) {
+        params.set('provider', provider)
+      } else if (activeTab === 'assistants') {
+        params.set('provider', 'assistant-architect')
+      } else {
+        // Chat tab: exclude non-chat providers
+        params.set('excludeProviders', NON_CHAT_PROVIDERS.join(','))
+      }
+
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
-      
-      const response = await fetch('/api/nexus/conversations?limit=500', {
+
+      const response = await fetch(`/api/nexus/conversations?${params.toString()}`, {
         signal: controller.signal
       })
       
@@ -219,23 +295,25 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
       
     } catch (err) {
       let errorMessage = 'Failed to load conversations'
-      
+
       if (err instanceof Error) {
         if (err.name === 'AbortError') {
           errorMessage = 'Request timed out. Please check your connection and try again.'
+        } else if (err instanceof TypeError) {
+          errorMessage = 'Network error. Please check your internet connection.'
         } else {
           errorMessage = err.message
         }
       }
-      
-      log.error('Failed to load conversations', { error: errorMessage })
+
+      log.error('Failed to load conversations', { error: errorMessage, activeTab })
       setError(errorMessage)
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [activeTab, provider])
 
-  // Load conversations on component mount
+  // Load conversations on component mount and when tab changes
   useEffect(() => {
     loadConversations()
   }, [loadConversations])
@@ -244,8 +322,12 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
   // Handle conversation selection with secure navigation
   const handleConversationSelect = useCallback((conversationId: string) => {
     log.debug('Conversation selected', { conversationId })
-    navigateToConversation(conversationId)
-  }, [])
+    if (onConversationSelectProp) {
+      onConversationSelectProp(conversationId)
+    } else {
+      navigateToConversation(conversationId)
+    }
+  }, [onConversationSelectProp])
 
   // Handle deleting a conversation using server action with comprehensive error handling
   const handleDeleteConversation = useCallback(async (conversationId: string) => {
@@ -259,7 +341,6 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
       }
 
       // Use server action instead of direct API call
-      const { archiveConversationAction } = await import('@/actions/nexus/archive-conversation.actions')
       const result = await archiveConversationAction({ conversationId })
 
       if (!result.isSuccess) {
@@ -274,7 +355,11 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
 
       // If this was the selected conversation, navigate to new conversation
       if (selectedConversationId === conversationId) {
-        router.push('/nexus')
+        if (onNewConversation) {
+          onNewConversation()
+        } else {
+          router.push('/nexus')
+        }
       }
 
       log.debug('Conversation deleted successfully', { conversationId })
@@ -296,7 +381,7 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
     } finally {
       setDeletingConversationId(null)
     }
-  }, [selectedConversationId, router])
+  }, [selectedConversationId, router, onNewConversation])
 
   if (loading) {
     return (
@@ -319,12 +404,51 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
 
   return (
     <div className="flex flex-col items-stretch gap-1.5 text-foreground">
+      {/* Filter Tabs - hidden when provider is explicitly set */}
+      {!provider && (
+        <div className="flex gap-1 px-1 pb-1" role="tablist" aria-label="Conversation type filter">
+          <button
+            role="tab"
+            aria-selected={activeTab === 'chat'}
+            aria-label="Show chat conversations"
+            className={`flex-1 text-xs font-medium py-1.5 px-3 rounded-md transition-colors ${
+              activeTab === 'chat'
+                ? 'bg-muted text-foreground'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+            }`}
+            onClick={handleTabChat}
+          >
+            Chat
+          </button>
+          <button
+            role="tab"
+            aria-selected={activeTab === 'assistants'}
+            aria-label="Show assistant architect executions"
+            className={`flex-1 text-xs font-medium py-1.5 px-3 rounded-md transition-colors flex items-center justify-center gap-1 ${
+              activeTab === 'assistants'
+                ? 'bg-muted text-foreground'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+            }`}
+            onClick={handleTabAssistants}
+          >
+            <BotIcon className="h-3 w-3" />
+            Assistants
+          </button>
+        </div>
+      )}
+
       {/* Conversations List */}
       {conversations.length === 0 ? (
         <div className="text-center py-8">
           <MessageSquareIcon className="h-12 w-12 mx-auto mb-4 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">No conversations yet</p>
-          <p className="text-xs text-muted-foreground/60 mt-1">Your conversations will appear here</p>
+          <p className="text-sm text-muted-foreground">
+            {provider || activeTab === 'chat' ? 'No conversations yet' : 'No assistant executions yet'}
+          </p>
+          <p className="text-xs text-muted-foreground/60 mt-1">
+            {provider || activeTab === 'chat'
+              ? 'Your conversations will appear here'
+              : 'Run an assistant architect to see results here'}
+          </p>
         </div>
       ) : (
         <>
