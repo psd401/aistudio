@@ -40,8 +40,8 @@ import {
   createGraphEdge,
   deleteGraphEdge,
   getNodeConnections,
-  type NodeConnection,
 } from "@/actions/graph.actions"
+import type { NodeConnection } from "@/lib/graph"
 import type { SelectGraphNode, SelectGraphEdge } from "@/lib/db/types"
 
 type ActiveTab = "nodes" | "edges"

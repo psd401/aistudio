@@ -35,16 +35,6 @@ import type {
   NodeConnection,
 } from "@/lib/graph"
 
-// Re-export input types for consumers that import from here
-export type {
-  GraphNodeFilters,
-  CreateNodeInput as CreateGraphNodeInput,
-  UpdateNodeInput as UpdateGraphNodeInput,
-  GraphEdgeFilters,
-  CreateEdgeInput as CreateGraphEdgeInput,
-  NodeConnection,
-}
-
 // ============================================
 // Node Operations
 // ============================================

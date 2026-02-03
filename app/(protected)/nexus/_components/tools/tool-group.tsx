@@ -12,7 +12,12 @@ interface ToolGroupProps {
 }
 
 // Tools that should render directly without the collapsible wrapper
-const DIRECT_RENDER_TOOLS = ['show_chart']
+const DIRECT_RENDER_TOOLS = [
+  'show_chart',
+  'search_graph_nodes',
+  'propose_decision',
+  'commit_decision',
+]
 
 /**
  * ToolGroup component for consolidating multiple consecutive tool calls

@@ -94,6 +94,17 @@ export interface NexusConversationMetadata {
 }
 
 /**
+ * Metadata for Decision Capture conversations (provider: "decision-capture")
+ * Stored in nexus_conversations.metadata for decision capture sessions.
+ * Part of Epic #675 (Context Graph Decision Capture Layer) - Issue #681
+ */
+export interface DecisionCaptureMetadata extends NexusConversationMetadata {
+  captureType: "transcript" | "manual";
+  committedNodeIds?: string[];
+  committedEdgeIds?: string[];
+}
+
+/**
  * Settings for Nexus folders
  */
 export interface NexusFolderSettings {

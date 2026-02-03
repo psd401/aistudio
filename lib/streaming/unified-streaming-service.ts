@@ -537,6 +537,7 @@ function buildStreamConfig(options: BuildConfigOptions): StreamConfig {
     messages: convertedMessages,
     system: request.systemPrompt,
     maxTokens: request.maxTokens,
+    maxSteps: request.maxSteps,
     temperature: request.temperature,
     tools,
     toolChoice: tools && Object.keys(tools).length > 0 ? 'auto' : undefined,

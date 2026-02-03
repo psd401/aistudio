@@ -91,6 +91,12 @@ const SUGGESTED_ACTIONS = [
   },
 ];
 
+export interface SuggestedAction {
+  title: string;
+  label: string;
+  action: string;
+}
+
 interface ThreadProps {
   processingAttachments?: Set<string>;
   conversationId?: string | null;
@@ -101,6 +107,8 @@ interface ThreadProps {
   isLoadingModels?: boolean;
   enabledTools?: string[];
   onToolsChange?: (tools: string[]) => void;
+  // Custom suggested actions (pass [] to hide, undefined for defaults)
+  suggestedActions?: SuggestedAction[];
 }
 
 export const Thread: FC<ThreadProps> = ({
@@ -112,6 +120,7 @@ export const Thread: FC<ThreadProps> = ({
   isLoadingModels = false,
   enabledTools = EMPTY_TOOLS_ARRAY,
   onToolsChange,
+  suggestedActions,
 }) => {
   // Memoize message components to avoid recreation on every render
   const messageComponents = useMemo(() => ({
@@ -146,6 +155,7 @@ export const Thread: FC<ThreadProps> = ({
           isLoadingModels={isLoadingModels}
           enabledTools={enabledTools}
           onToolsChange={onToolsChange}
+          suggestedActions={suggestedActions}
         />
       </ThreadPrimitive.Root>
     </ConversationIdContext.Provider>
@@ -228,10 +238,13 @@ const SuggestionItem: FC<SuggestionItemProps> = ({ suggestion, index }) => {
   );
 };
 
-const ThreadWelcomeSuggestions: FC = () => {
+const ThreadWelcomeSuggestions: FC<{ actions?: SuggestedAction[] }> = ({ actions }) => {
+  const items = actions ?? SUGGESTED_ACTIONS;
+  if (items.length === 0) return null;
+
   return (
     <div className="grid w-full gap-2 sm:grid-cols-2">
-      {SUGGESTED_ACTIONS.map((suggestedAction, index) => (
+      {items.map((suggestedAction, index) => (
         <SuggestionItem
           key={`suggested-action-${suggestedAction.title}-${index}`}
           suggestion={suggestedAction}
@@ -250,6 +263,7 @@ interface ComposerProps {
   isLoadingModels?: boolean;
   enabledTools?: string[];
   onToolsChange?: (tools: string[]) => void;
+  suggestedActions?: SuggestedAction[];
 }
 
 const Composer: FC<ComposerProps> = ({
@@ -260,12 +274,13 @@ const Composer: FC<ComposerProps> = ({
   isLoadingModels = false,
   enabledTools = EMPTY_TOOLS_ARRAY,
   onToolsChange,
+  suggestedActions,
 }) => {
   return (
     <div className="bg-white relative mx-auto flex w-full max-w-[var(--thread-max-width)] flex-col gap-4 px-[var(--thread-padding-x)] pb-4 md:pb-6">
       <ThreadScrollToBottom />
       <ThreadPrimitive.Empty>
-        <ThreadWelcomeSuggestions />
+        <ThreadWelcomeSuggestions actions={suggestedActions} />
       </ThreadPrimitive.Empty>
       <ComposerPrimitive.Root className="relative flex w-full flex-col rounded-2xl border border-border focus-within:ring-2 focus-within:ring-black focus-within:ring-offset-2 dark:focus-within:ring-white overflow-hidden">
         {/* Control dock for model, tools, skills, MCP */}

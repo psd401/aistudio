@@ -31,6 +31,7 @@ export interface StreamRequest {
   // Tools configuration
   tools?: ToolSet;
   enabledTools?: string[]; // Tool names to enable (tools will be created by adapter)
+  maxSteps?: number; // Max tool-use round-trips (default: 1, set higher for multi-step tool use)
 
   // Advanced model options
   options?: {
@@ -96,6 +97,7 @@ export interface StreamConfig {
   messages: ModelMessage[];
   system?: string;
   maxTokens?: number;
+  maxSteps?: number;
   temperature?: number;
   timeout?: number;
   tools?: ToolSet;

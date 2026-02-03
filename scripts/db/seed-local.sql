@@ -81,7 +81,8 @@ ON CONFLICT (user_id, role_id) DO NOTHING;
 INSERT INTO tools (identifier, name, description, is_active) VALUES
 ('assistant-architect', 'Assistant Architect', 'Build and schedule custom AI assistants', true),
 ('model-compare', 'Model Compare', 'Compare AI model responses side-by-side', true),
-('knowledge-repositories', 'Knowledge Repositories', 'Manage knowledge bases for AI assistants', true)
+('knowledge-repositories', 'Knowledge Repositories', 'Manage knowledge bases for AI assistants', true),
+('decision-capture', 'Decision Capture', 'Extract and capture decisions from meeting transcripts into the context graph', true)
 ON CONFLICT (identifier) DO UPDATE SET
     name = EXCLUDED.name,
     description = EXCLUDED.description,
@@ -94,7 +95,7 @@ SELECT r.id, t.id
 FROM roles r
 CROSS JOIN tools t
 WHERE r.name = 'administrator'
-  AND t.identifier IN ('assistant-architect', 'model-compare', 'knowledge-repositories')
+  AND t.identifier IN ('assistant-architect', 'model-compare', 'knowledge-repositories', 'decision-capture')
 ON CONFLICT (role_id, tool_id) DO NOTHING;
 
 -- Grant assistant-architect and model-compare to staff role
@@ -128,24 +129,27 @@ INSERT INTO navigation_items (id, label, icon, link, parent_id, tool_id, require
 (12, 'Ideas', 'IconBulb', '/ideas', NULL, NULL, NULL, 70, true, NULL, 'link'),
 (11, 'Admin', 'IconShield', '', NULL, NULL, 'administrator', 80, true, '', 'section');
 
--- Admin sub-items
+-- Admin sub-items (alphabetical order)
 INSERT INTO navigation_items (id, label, icon, link, parent_id, tool_id, requires_role, position, is_active, description, type) VALUES
-(45, 'Prompt Management', 'IconBriefcase', '/admin/prompts', 11, NULL, NULL, 0, true, '', 'link'),
-(13, 'System Settings', 'IconTools', '/admin/settings', 11, NULL, 'administrator', 5, true, '', 'link'),
+(46, 'Activity Dashboard', 'IconActivity', '/admin/activity', 11, NULL, 'administrator', 0, true, 'View activity across Nexus, Assistant Architect, and Model Compare', 'link'),
 (16, 'AI Models', 'IconRobot', '/admin/models', 11, NULL, 'administrator', 10, true, '', 'link'),
-(15, 'User Management', 'IconUser', '/admin/users', 11, NULL, 'administrator', 20, true, '', 'link'),
-(14, 'Navigation Manager', 'IconHome', '/admin/navigation', 11, NULL, 'administrator', 30, true, '', 'link'),
-(18, 'Assistant Administration', 'IconBraces', '/admin/assistants', 11, NULL, 'administrator', 40, true, '', 'link'),
-(17, 'Role Management', 'IconUsersGroup', '/admin/roles', 11, NULL, 'administrator', 50, true, '', 'link'),
-(38, 'Repository Manager', 'IconBuildingBank', '/admin/repositories', 11, NULL, 'administrator', 60, true, '', 'link'),
-(46, 'Activity Dashboard', 'IconActivity', '/admin/activity', 11, NULL, 'administrator', 70, true, 'View activity across Nexus, Assistant Architect, and Model Compare', 'link');
+(18, 'Assistant Administration', 'IconBraces', '/admin/assistants', 11, NULL, 'administrator', 20, true, '', 'link'),
+(48, 'Context Graph', 'IconGitBranch', '/admin/graph', 11, NULL, 'administrator', 30, true, 'Manage context graph nodes and edges', 'link'),
+(14, 'Navigation Manager', 'IconHome', '/admin/navigation', 11, NULL, 'administrator', 40, true, '', 'link'),
+(49, 'OAuth Clients', 'IconKey', '/admin/oauth-clients', 11, NULL, 'administrator', 50, true, 'Manage OAuth client applications', 'link'),
+(45, 'Prompt Management', 'IconBriefcase', '/admin/prompts', 11, NULL, 'administrator', 60, true, '', 'link'),
+(38, 'Repository Manager', 'IconBuildingBank', '/admin/repositories', 11, NULL, 'administrator', 70, true, '', 'link'),
+(17, 'Role Management', 'IconUsersGroup', '/admin/roles', 11, NULL, 'administrator', 80, true, '', 'link'),
+(13, 'System Settings', 'IconTools', '/admin/settings', 11, NULL, 'administrator', 90, true, '', 'link'),
+(15, 'User Management', 'IconUser', '/admin/users', 11, NULL, 'administrator', 100, true, '', 'link');
 
 -- Utilities sub-items
 INSERT INTO navigation_items (id, label, icon, link, parent_id, tool_id, requires_role, position, is_active, description, type) VALUES
 (40, 'Assistant Scheduler', 'IconCalendar', '/schedules', 19, NULL, NULL, 0, true, '', 'link'),
 (7, 'Assistant Architect', 'IconBraces', '/utilities/assistant-architect', 19, NULL, NULL, 10, true, NULL, 'link'),
 (37, 'Model Compare', 'IconRobot', '/compare', 19, NULL, NULL, 20, true, 'Compare AI model responses side-by-side', 'link'),
-(36, 'Repositories', 'IconBuildingBank', '/repositories', 19, NULL, NULL, 30, true, '', 'link');
+(36, 'Repositories', 'IconBuildingBank', '/repositories', 19, NULL, NULL, 30, true, '', 'link'),
+(47, 'Decision Capture', 'IconGitBranch', '/nexus/decision-capture', 19, NULL, NULL, 40, true, 'Extract decisions from meeting transcripts', 'link');
 
 -- Update sequence to max id + 1
 SELECT setval('navigation_items_id_seq', (SELECT MAX(id) FROM navigation_items));
@@ -351,6 +355,18 @@ When capturing a decision, proactively ask about any missing elements. For examp
 - "What data or constraints informed this choice?"
 - "Under what conditions should this decision be revisited?"',
     'LLM system prompt fragment for decision capture in the context graph. Describes node types, edge types, and completeness criteria.',
+    'ai',
+    false
+)
+ON CONFLICT (key) DO NOTHING;
+
+-- Decision capture model setting - required by decision-chat route
+-- Part of Epic #675 (Context Graph Decision Capture Layer) - Issue #681
+INSERT INTO settings (key, value, description, category, is_secret)
+VALUES (
+    'DECISION_CAPTURE_MODEL',
+    'gemini-3-flash',
+    'AI model used for decision capture from meeting transcripts. Must match a model_id in ai_models table.',
     'ai',
     false
 )

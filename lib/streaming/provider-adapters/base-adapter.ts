@@ -1,4 +1,4 @@
-import { streamText, type LanguageModel, type ModelMessage, type ToolSet } from 'ai';
+import { streamText, stepCountIs, type LanguageModel, type ModelMessage, type ToolSet } from 'ai';
 import { createLogger } from '@/lib/logger';
 import { createUniversalTools } from '@/lib/tools/provider-native-tools';
 import type {
@@ -116,7 +116,8 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       hasModel: !!config.model,
       messageCount: config.messages.length,
       hasSystem: !!config.system,
-      hasTelemetry: !!config.experimental_telemetry?.isEnabled
+      hasTelemetry: !!config.experimental_telemetry?.isEnabled,
+      maxSteps: config.maxSteps || 'not set'
     });
     
     try {
@@ -135,6 +136,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
         tools: enhancedConfig.tools,
         toolChoice: enhancedConfig.toolChoice,
         temperature: enhancedConfig.temperature,
+        ...(enhancedConfig.maxSteps && { stopWhen: stepCountIs(enhancedConfig.maxSteps) }),
         ...(enhancedConfig.experimental_telemetry && enhancedConfig.experimental_telemetry.isEnabled && {
           experimental_telemetry: {
             isEnabled: enhancedConfig.experimental_telemetry.isEnabled,
@@ -291,6 +293,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       messages: config.messages,
       system: config.system,
       maxTokens: config.maxTokens,
+      maxSteps: config.maxSteps,
       temperature: config.temperature,
       tools: config.tools,
       toolChoice: config.toolChoice,
