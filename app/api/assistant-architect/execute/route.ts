@@ -16,7 +16,7 @@ import type { StreamRequest } from '@/lib/streaming/types';
 import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { storeExecutionEvent } from '@/lib/assistant-architect/event-storage';
 import { createConversation, updateConversation, getConversationById } from '@/lib/db/drizzle/nexus-conversations';
-import { createMessageWithStats } from '@/lib/db/drizzle/nexus-messages';
+import { createMessageWithStats, updateConversationStats } from '@/lib/db/drizzle/nexus-messages';
 import type { AssistantArchitectMessageMetadata } from '@/lib/db/types/jsonb';
 
 // Allow streaming responses up to 15 minutes for long chains
@@ -477,6 +477,8 @@ export async function POST(req: Request) {
               ...buildExecutionMetadata(toolId, architect.name, executionId, 'failed'),
             },
           });
+          // Reconcile stats for messages saved before the failure (#719)
+          await updateConversationStats(nexusConversationId);
         } catch (err) {
           log.error('Failed to update conversation status to failed', {
             error: err instanceof Error ? err.message : String(err),
@@ -1109,8 +1111,16 @@ async function executeSinglePromptWithCompletion(
                       },
                     });
 
-                    // Message already saved above for every prompt (#699)
-                    // No duplicate save needed for the last prompt
+                    // Reconcile message_count and last_message_at (#719)
+                    // Intermediate createMessageWithStats calls may have failed silently
+                    // (errors caught as non-fatal), leaving message_count at 0.
+                    // This single reconciliation call guarantees correct stats.
+                    await updateConversationStats(context.conversation.conversationId);
+
+                    log.info('Conversation stats reconciled after execution', {
+                      conversationId: context.conversation.conversationId,
+                      executionId: context.executionId,
+                    });
                   } catch (err) {
                     log.error('Failed to complete conversation updates', {
                       error: err instanceof Error ? err.message : String(err),
