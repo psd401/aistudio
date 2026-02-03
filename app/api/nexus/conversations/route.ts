@@ -44,16 +44,29 @@ export async function GET(req: Request) {
     const limit = Number.parseInt(url.searchParams.get('limit') || '20');
     const offset = Number.parseInt(url.searchParams.get('offset') || '0');
     const includeArchived = url.searchParams.get('includeArchived') === 'true';
+    const provider = url.searchParams.get('provider') || undefined;
+    const excludeProvidersParam = url.searchParams.get('excludeProviders');
+    const excludeProviders = excludeProvidersParam
+      ? excludeProvidersParam.split(',').map((p) => p.trim()).filter(Boolean)
+      : undefined;
 
-    // Query conversations using Drizzle ORM
-    const conversations = await getConversations(userId, {
+    const queryOptions = {
       limit,
       offset,
       includeArchived,
-    });
+      provider,
+      excludeProviders,
+    };
 
-    // Get total count
-    const total = await getConversationCount(userId, includeArchived);
+    // Query conversations using Drizzle ORM
+    const conversations = await getConversations(userId, queryOptions);
+
+    // Get total count (same filters, no pagination)
+    const total = await getConversationCount(userId, {
+      includeArchived,
+      provider,
+      excludeProviders,
+    });
 
     timer({ status: 'success' });
     log.info('Conversations retrieved', {

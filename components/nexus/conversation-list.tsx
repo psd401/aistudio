@@ -1,9 +1,10 @@
 'use client'
 
-import { useState, useEffect, useCallback, memo } from 'react'
+import { useState, useEffect, useCallback, useMemo, memo } from 'react'
 import { Button } from '@/components/ui/button'
+import { Badge } from '@/components/ui/badge'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
-import { Trash2Icon, MessageSquareIcon } from 'lucide-react'
+import { Trash2Icon, MessageSquareIcon, BotIcon } from 'lucide-react'
 import {
   AlertDialog,
   AlertDialogAction,
@@ -31,7 +32,17 @@ interface ConversationItem {
   createdAt: string
   isArchived: boolean
   isPinned: boolean
+  metadata?: {
+    assistantName?: string
+    executionStatus?: 'running' | 'completed' | 'failed'
+    [key: string]: unknown
+  } | null
 }
+
+type ConversationFilterTab = 'chat' | 'assistants'
+
+/** Providers excluded from Chat tab (non-chat conversation types) */
+const NON_CHAT_PROVIDERS = ['assistant-architect', 'decision-capture']
 
 interface ConversationListProps {
   selectedConversationId?: string | null
@@ -54,6 +65,20 @@ function formatRelativeTime(dateString: string): string {
   } else {
     return date.toLocaleDateString()
   }
+}
+
+// Status badge for assistant architect execution status
+function ExecutionStatusBadge({ status }: { status: 'running' | 'completed' | 'failed' }) {
+  const variantMap: Record<typeof status, 'warning' | 'success' | 'error'> = {
+    running: 'warning',
+    completed: 'success',
+    failed: 'error',
+  }
+  return (
+    <Badge variant={variantMap[status]} size="sm">
+      {status}
+    </Badge>
+  )
 }
 
 // Extracted component for conversation row to avoid inline functions
@@ -109,6 +134,11 @@ const ConversationItemRow = memo(function ConversationItemRow({
             <p className="text-sm font-medium truncate">
               {conversation.title}
             </p>
+            {conversation.provider === 'assistant-architect' && conversation.metadata?.assistantName && (
+              <p className="text-xs text-muted-foreground truncate mt-0.5">
+                {conversation.metadata.assistantName}
+              </p>
+            )}
             <div className="flex items-center gap-2 mt-1">
               <span className="text-xs text-muted-foreground">
                 {conversation.messageCount} message{conversation.messageCount !== 1 ? 's' : ''}
@@ -116,6 +146,9 @@ const ConversationItemRow = memo(function ConversationItemRow({
               <span className="text-xs text-muted-foreground">
                 {formatRelativeTime(conversation.lastMessageAt || conversation.createdAt)}
               </span>
+              {conversation.provider === 'assistant-architect' && conversation.metadata?.executionStatus && (
+                <ExecutionStatusBadge status={conversation.metadata.executionStatus} />
+              )}
             </div>
           </div>
         </div>
@@ -161,8 +194,21 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [deletingConversationId, setDeletingConversationId] = useState<string | null>(null)
+  const [activeTab, setActiveTab] = useState<ConversationFilterTab>('chat')
   const router = useRouter()
-  
+
+  const handleTabChat = useCallback(() => setActiveTab('chat'), [])
+  const handleTabAssistants = useCallback(() => setActiveTab('assistants'), [])
+
+  // Client-side filtering based on active tab
+  const filteredConversations = useMemo(() => {
+    if (activeTab === 'assistants') {
+      return conversations.filter((c) => c.provider === 'assistant-architect')
+    }
+    // Chat tab: exclude non-chat providers
+    return conversations.filter((c) => !NON_CHAT_PROVIDERS.includes(c.provider))
+  }, [conversations, activeTab])
+
 
   // Load conversations from database with comprehensive error handling
   const loadConversations = useCallback(async () => {
@@ -319,16 +365,47 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
 
   return (
     <div className="flex flex-col items-stretch gap-1.5 text-foreground">
+      {/* Filter Tabs */}
+      <div className="flex gap-1 px-1 pb-1">
+        <button
+          className={`flex-1 text-xs font-medium py-1.5 px-3 rounded-md transition-colors ${
+            activeTab === 'chat'
+              ? 'bg-muted text-foreground'
+              : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+          }`}
+          onClick={handleTabChat}
+        >
+          Chat
+        </button>
+        <button
+          className={`flex-1 text-xs font-medium py-1.5 px-3 rounded-md transition-colors flex items-center justify-center gap-1 ${
+            activeTab === 'assistants'
+              ? 'bg-muted text-foreground'
+              : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+          }`}
+          onClick={handleTabAssistants}
+        >
+          <BotIcon className="h-3 w-3" />
+          Assistants
+        </button>
+      </div>
+
       {/* Conversations List */}
-      {conversations.length === 0 ? (
+      {filteredConversations.length === 0 ? (
         <div className="text-center py-8">
           <MessageSquareIcon className="h-12 w-12 mx-auto mb-4 text-muted-foreground/50" />
-          <p className="text-sm text-muted-foreground">No conversations yet</p>
-          <p className="text-xs text-muted-foreground/60 mt-1">Your conversations will appear here</p>
+          <p className="text-sm text-muted-foreground">
+            {activeTab === 'chat' ? 'No conversations yet' : 'No assistant executions yet'}
+          </p>
+          <p className="text-xs text-muted-foreground/60 mt-1">
+            {activeTab === 'chat'
+              ? 'Your conversations will appear here'
+              : 'Run an assistant architect to see results here'}
+          </p>
         </div>
       ) : (
         <>
-          {conversations.map((conversation) => (
+          {filteredConversations.map((conversation) => (
             <ConversationItemRow
               key={conversation.id}
               conversation={conversation}
