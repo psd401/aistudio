@@ -15,6 +15,8 @@ import { createRepositoryTools } from '@/lib/tools/repository-tools';
 import type { StreamRequest } from '@/lib/streaming/types';
 import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { storeExecutionEvent } from '@/lib/assistant-architect/event-storage';
+import { createConversation, updateConversation, getConversationById } from '@/lib/db/drizzle/nexus-conversations';
+import { createMessageWithStats } from '@/lib/db/drizzle/nexus-messages';
 
 // Allow streaming responses up to 15 minutes for long chains
 export const maxDuration = 900;
@@ -78,6 +80,29 @@ interface PromptExecutionContext {
   assistantOwnerSub?: string;
   userId: number;
   executionStartTime: number;
+  conversation?: {
+    conversationId: string;
+    assistantId: number;
+    assistantName: string;
+  };
+}
+
+/**
+ * Build execution conversation metadata with consistent structure
+ */
+function buildExecutionMetadata(
+  assistantId: number,
+  assistantName: string,
+  executionId: number,
+  executionStatus: 'running' | 'failed' | 'completed'
+): Record<string, unknown> {
+  return {
+    source: 'app',
+    assistantId,
+    assistantName,
+    executionId,
+    executionStatus,
+  };
 }
 
 /**
@@ -323,6 +348,55 @@ export async function POST(req: Request) {
       toolName: architect.name
     });
 
+    // 7.5. Create nexus conversation for this execution
+    // Mirrors the pattern in /api/v1/assistants/[id]/conversations/route.ts
+    let nexusConversationId: string | undefined;
+    try {
+      const conversation = await createConversation({
+        userId,
+        title: `${architect.name} — ${new Date().toLocaleDateString()}`,
+        provider: 'assistant-architect',
+        metadata: buildExecutionMetadata(toolId, architect.name, executionId, 'running'),
+      });
+      nexusConversationId = conversation.id;
+
+      // Save user inputs as the first message
+      // Sanitize and truncate inputs for safe storage
+      const userContent = Object.keys(inputs).length > 0
+        ? Object.entries(inputs)
+            .map(([key, value]) => {
+              const safeKey = String(key).substring(0, 100);
+              const safeValue = typeof value === 'string'
+                ? value.substring(0, 5000)
+                : String(sanitizeForLogging(value)).substring(0, 5000);
+              return `${safeKey}: ${safeValue}`;
+            })
+            .join('\n')
+            .substring(0, 10000)
+        : '(Assistant executed with default inputs)';
+
+      await createMessageWithStats({
+        conversationId: conversation.id,
+        role: 'user',
+        content: userContent,
+        parts: [{ type: 'text', text: userContent }],
+        metadata: { inputs, source: 'app' },
+      });
+
+      log.info('Nexus conversation created for execution', {
+        conversationId: conversation.id,
+        executionId,
+        toolId,
+      });
+    } catch (conversationError) {
+      // Non-fatal: log and continue execution without conversation tracking
+      log.error('Failed to create nexus conversation for execution', {
+        error: conversationError instanceof Error ? conversationError.message : String(conversationError),
+        executionId,
+        toolId,
+      });
+    }
+
     // 8. Execute prompt chain with streaming
     const context: PromptExecutionContext = {
       previousOutputs: new Map(),
@@ -331,7 +405,12 @@ export async function POST(req: Request) {
       userCognitoSub: session.sub,
       assistantOwnerSub: architect.userId ? String(architect.userId) : undefined,
       userId,
-      executionStartTime: Date.now()
+      executionStartTime: Date.now(),
+      conversation: nexusConversationId ? {
+        conversationId: nexusConversationId,
+        assistantId: toolId,
+        assistantName: architect.name,
+      } : undefined,
     };
 
     try {
@@ -358,7 +437,8 @@ export async function POST(req: Request) {
           'X-Execution-Id': executionId.toString(),
           'X-Tool-Id': toolId.toString(),
           'X-Prompt-Count': prompts.length.toString(),
-          'X-Request-Id': requestId
+          'X-Request-Id': requestId,
+          ...(context.conversation?.conversationId && { 'X-Conversation-Id': context.conversation.conversationId }),
         }
       });
 
@@ -384,6 +464,26 @@ export async function POST(req: Request) {
         recoverable: false,
         details: executionError instanceof Error ? executionError.stack : undefined
       }).catch(err => log.error('Failed to store execution-error event', { error: err }));
+
+      // Update nexus conversation executionStatus to failed
+      if (nexusConversationId) {
+        try {
+          // Fetch existing metadata and merge to preserve other fields
+          const existing = await getConversationById(nexusConversationId, userId);
+          await updateConversation(nexusConversationId, userId, {
+            metadata: {
+              ...existing.metadata,
+              ...buildExecutionMetadata(toolId, architect.name, executionId, 'failed'),
+            },
+          });
+        } catch (err) {
+          log.error('Failed to update conversation status to failed', {
+            error: err instanceof Error ? err.message : String(err),
+            conversationId: nexusConversationId,
+            executionId
+          });
+        }
+      }
 
       throw executionError;
     }
@@ -947,6 +1047,47 @@ async function executeSinglePromptWithCompletion(
                   executionId: context.executionId,
                   totalPrompts
                 });
+
+                // Update nexus conversation executionStatus to completed
+                if (context.conversation) {
+                  try {
+                    // Fetch existing metadata and merge to preserve other fields
+                    const existing = await getConversationById(context.conversation.conversationId, context.userId);
+                    await updateConversation(context.conversation.conversationId, context.userId, {
+                      metadata: {
+                        ...existing.metadata,
+                        ...buildExecutionMetadata(
+                          context.conversation.assistantId,
+                          context.conversation.assistantName,
+                          context.executionId,
+                          'completed'
+                        ),
+                      },
+                    });
+
+                    // Save the final assistant response as a message
+                    if (text) {
+                      await createMessageWithStats({
+                        conversationId: context.conversation.conversationId,
+                        role: 'assistant',
+                        content: text,
+                        parts: [{ type: 'text', text }],
+                        tokenUsage: usage ? {
+                          promptTokens: usage.promptTokens,
+                          completionTokens: usage.completionTokens,
+                          totalTokens: usage.totalTokens,
+                        } : undefined,
+                        metadata: { source: 'app', executionId: context.executionId },
+                      });
+                    }
+                  } catch (err) {
+                    log.error('Failed to complete conversation updates', {
+                      error: err instanceof Error ? err.message : String(err),
+                      conversationId: context.conversation.conversationId,
+                      executionId: context.executionId
+                    });
+                  }
+                }
               }
 
               // CRITICAL: Wait for stream response to be ready, then resolve
