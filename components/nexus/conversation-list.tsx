@@ -59,6 +59,12 @@ function isAssistantArchitectMetadata(
 
 interface ConversationListProps {
   selectedConversationId?: string | null
+  /** When set, hides filter tabs and filters conversations to this provider */
+  provider?: string
+  /** Override default conversation selection navigation */
+  onConversationSelect?: (id: string) => void
+  /** Override navigation when deleting the selected conversation */
+  onNewConversation?: () => void
 }
 
 // Helper function moved outside component to reduce function size
@@ -202,7 +208,7 @@ const ConversationItemRow = memo(function ConversationItemRow({
   )
 })
 
-export function ConversationList({ selectedConversationId }: ConversationListProps) {
+export function ConversationList({ selectedConversationId, provider, onConversationSelect: onConversationSelectProp, onNewConversation }: ConversationListProps) {
   const [conversations, setConversations] = useState<ConversationItem[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
@@ -220,7 +226,7 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
       setLoading(true)
       setError(null)
       
-      log.debug('Loading conversations from API', { activeTab })
+      log.debug('Loading conversations from API', { activeTab, provider })
 
       // Build query params with server-side filtering
       const params = new URLSearchParams({
@@ -228,8 +234,10 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
         offset: '0',
       })
 
-      // Apply provider filtering based on active tab
-      if (activeTab === 'assistants') {
+      // Apply provider filtering: explicit provider prop takes precedence over tab logic
+      if (provider) {
+        params.set('provider', provider)
+      } else if (activeTab === 'assistants') {
         params.set('provider', 'assistant-architect')
       } else {
         // Chat tab: exclude non-chat providers
@@ -299,7 +307,7 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
     } finally {
       setLoading(false)
     }
-  }, [activeTab])
+  }, [activeTab, provider])
 
   // Load conversations on component mount and when tab changes
   useEffect(() => {
@@ -310,8 +318,12 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
   // Handle conversation selection with secure navigation
   const handleConversationSelect = useCallback((conversationId: string) => {
     log.debug('Conversation selected', { conversationId })
-    navigateToConversation(conversationId)
-  }, [])
+    if (onConversationSelectProp) {
+      onConversationSelectProp(conversationId)
+    } else {
+      navigateToConversation(conversationId)
+    }
+  }, [onConversationSelectProp])
 
   // Handle deleting a conversation using server action with comprehensive error handling
   const handleDeleteConversation = useCallback(async (conversationId: string) => {
@@ -340,7 +352,11 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
 
       // If this was the selected conversation, navigate to new conversation
       if (selectedConversationId === conversationId) {
-        router.push('/nexus')
+        if (onNewConversation) {
+          onNewConversation()
+        } else {
+          router.push('/nexus')
+        }
       }
 
       log.debug('Conversation deleted successfully', { conversationId })
@@ -362,7 +378,7 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
     } finally {
       setDeletingConversationId(null)
     }
-  }, [selectedConversationId, router])
+  }, [selectedConversationId, router, onNewConversation])
 
   if (loading) {
     return (
@@ -385,48 +401,52 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
 
   return (
     <div className="flex flex-col items-stretch gap-1.5 text-foreground">
-      {/* Filter Tabs */}
-      <div className="flex gap-1 px-1 pb-1" role="tablist" aria-label="Conversation type filter">
-        <button
-          role="tab"
-          aria-selected={activeTab === 'chat'}
-          aria-label="Show chat conversations"
-          className={`flex-1 text-xs font-medium py-1.5 px-3 rounded-md transition-colors ${
-            activeTab === 'chat'
-              ? 'bg-muted text-foreground'
-              : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-          }`}
-          onClick={handleTabChat}
-        >
-          Chat
-        </button>
-        <button
-          role="tab"
-          aria-selected={activeTab === 'assistants'}
-          aria-label="Show assistant architect executions"
-          className={`flex-1 text-xs font-medium py-1.5 px-3 rounded-md transition-colors flex items-center justify-center gap-1 ${
-            activeTab === 'assistants'
-              ? 'bg-muted text-foreground'
-              : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
-          }`}
-          onClick={handleTabAssistants}
-        >
-          <BotIcon className="h-3 w-3" />
-          Assistants
-        </button>
-      </div>
+      {/* Filter Tabs - hidden when provider is explicitly set */}
+      {!provider && (
+        <div className="flex gap-1 px-1 pb-1" role="tablist" aria-label="Conversation type filter">
+          <button
+            role="tab"
+            aria-selected={activeTab === 'chat'}
+            aria-label="Show chat conversations"
+            className={`flex-1 text-xs font-medium py-1.5 px-3 rounded-md transition-colors ${
+              activeTab === 'chat'
+                ? 'bg-muted text-foreground'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+            }`}
+            onClick={handleTabChat}
+          >
+            Chat
+          </button>
+          <button
+            role="tab"
+            aria-selected={activeTab === 'assistants'}
+            aria-label="Show assistant architect executions"
+            className={`flex-1 text-xs font-medium py-1.5 px-3 rounded-md transition-colors flex items-center justify-center gap-1 ${
+              activeTab === 'assistants'
+                ? 'bg-muted text-foreground'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+            }`}
+            onClick={handleTabAssistants}
+          >
+            <BotIcon className="h-3 w-3" />
+            Assistants
+          </button>
+        </div>
+      )}
 
       {/* Conversations List */}
       {conversations.length === 0 ? (
         <div className="text-center py-8">
           <MessageSquareIcon className="h-12 w-12 mx-auto mb-4 text-muted-foreground/50" />
           <p className="text-sm text-muted-foreground">
-            {activeTab === 'chat' ? 'No conversations yet' : 'No assistant executions yet'}
+            {provider ? 'No conversations yet' : activeTab === 'chat' ? 'No conversations yet' : 'No assistant executions yet'}
           </p>
           <p className="text-xs text-muted-foreground/60 mt-1">
-            {activeTab === 'chat'
+            {provider
               ? 'Your conversations will appear here'
-              : 'Run an assistant architect to see results here'}
+              : activeTab === 'chat'
+                ? 'Your conversations will appear here'
+                : 'Run an assistant architect to see results here'}
           </p>
         </div>
       ) : (

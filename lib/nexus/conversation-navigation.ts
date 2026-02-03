@@ -50,3 +50,36 @@ export function navigateToConversation(conversationId: string | null) {
 export function navigateToNewConversation() {
   window.location.href = '/nexus'
 }
+
+/**
+ * Securely navigate to a decision capture conversation with validation
+ * @param conversationId - The conversation ID to navigate to (null for new session)
+ */
+export function navigateToDecisionCaptureConversation(conversationId: string | null) {
+  try {
+    if (conversationId && validateConversationId(conversationId)) {
+      const targetUrl = `/nexus/decision-capture?id=${conversationId}`
+      if (targetUrl.startsWith('/nexus/decision-capture')) {
+        window.location.href = targetUrl
+      } else {
+        log.error('Invalid target URL constructed', { targetUrl })
+        window.location.href = '/nexus/decision-capture'
+      }
+    } else if (conversationId) {
+      log.warn('Invalid conversation ID for decision capture navigation', { conversationId })
+      window.location.href = '/nexus/decision-capture'
+    } else {
+      window.location.href = '/nexus/decision-capture'
+    }
+  } catch (error) {
+    log.error('Error during decision capture navigation', { error, conversationId })
+    window.location.href = '/nexus/decision-capture'
+  }
+}
+
+/**
+ * Securely navigate to a new decision capture session
+ */
+export function navigateToNewDecisionCapture() {
+  window.location.href = '/nexus/decision-capture'
+}

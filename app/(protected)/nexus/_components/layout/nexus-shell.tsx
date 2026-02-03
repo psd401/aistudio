@@ -10,10 +10,16 @@ import { SidebarToggle } from './sidebar-toggle'
 import { useNexusSidebar } from './nexus-layout'
 interface NexusShellProps {
   children: ReactNode
+  /** Header title (default: "Nexus Chat") */
+  title?: string
+  /** Override default new conversation navigation */
+  onNewConversation?: () => void
 }
 
 export function NexusShell({
   children,
+  title = 'Nexus Chat',
+  onNewConversation,
 }: NexusShellProps) {
   const { isCollapsed, mode, toggle } = useNexusSidebar()
 
@@ -29,13 +35,13 @@ export function NexusShell({
             onToggle={toggle}
           />
           <div className="flex-1">
-            <h1 className="text-2xl font-semibold text-gray-900">Nexus Chat</h1>
+            <h1 className="text-2xl font-semibold text-gray-900">{title}</h1>
           </div>
           {/* New Chat button - secondary location (also in sidebar) */}
           <Button
             variant="outline"
             size="sm"
-            onClick={navigateToNewConversation}
+            onClick={onNewConversation || navigateToNewConversation}
             className="flex items-center gap-1.5"
             title="Start new chat"
           >
