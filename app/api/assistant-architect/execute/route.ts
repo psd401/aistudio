@@ -17,6 +17,7 @@ import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { storeExecutionEvent } from '@/lib/assistant-architect/event-storage';
 import { createConversation, updateConversation, getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 import { createMessageWithStats } from '@/lib/db/drizzle/nexus-messages';
+import type { AssistantArchitectMessageMetadata } from '@/lib/db/types/jsonb';
 
 // Allow streaming responses up to 15 minutes for long chains
 export const maxDuration = 900;
@@ -1020,6 +1021,49 @@ async function executeSinglePromptWithCompletion(
                 cached: false // TODO: detect if response was cached
               }).catch(err => log.error('Failed to store prompt-complete event', { error: err }));
 
+              // Save prompt result as a Nexus conversation message (#699)
+              // Each prompt in the chain gets its own message for later resumption
+              if (context.conversation) {
+                try {
+                  const metadata: AssistantArchitectMessageMetadata = {
+                    source: 'assistant-architect-execution',
+                    executionId: context.executionId,
+                    promptId: prompt.id,
+                    promptName: prompt.name,
+                    position: prompt.position,
+                    executionTimeMs,
+                  };
+
+                  await createMessageWithStats({
+                    conversationId: context.conversation.conversationId,
+                    role: 'assistant',
+                    content: text || '',
+                    parts: [{ type: 'text', text: text || '' }],
+                    tokenUsage: usage ? {
+                      promptTokens: usage.promptTokens,
+                      completionTokens: usage.completionTokens,
+                      totalTokens: usage.totalTokens,
+                    } : undefined,
+                    metadata: metadata as unknown as Record<string, unknown>,
+                  });
+
+                  log.info('Prompt result saved as conversation message', {
+                    promptId: prompt.id,
+                    promptName: prompt.name,
+                    conversationId: context.conversation.conversationId,
+                    executionId: context.executionId,
+                  });
+                } catch (msgErr) {
+                  // Non-fatal: log and continue — prompt_results table still has the data
+                  log.error('Failed to save prompt result as conversation message', {
+                    error: msgErr instanceof Error ? msgErr.message : String(msgErr),
+                    promptId: prompt.id,
+                    conversationId: context.conversation.conversationId,
+                    executionId: context.executionId,
+                  });
+                }
+              }
+
               // If this is the last prompt, update execution status to completed
               // CRITICAL: Drizzle's AWS Data API driver has issues with timestamp serialization.
               // Must use raw SQL with db.execute() for reliable parameter binding.
@@ -1065,21 +1109,8 @@ async function executeSinglePromptWithCompletion(
                       },
                     });
 
-                    // Save the final assistant response as a message
-                    if (text) {
-                      await createMessageWithStats({
-                        conversationId: context.conversation.conversationId,
-                        role: 'assistant',
-                        content: text,
-                        parts: [{ type: 'text', text }],
-                        tokenUsage: usage ? {
-                          promptTokens: usage.promptTokens,
-                          completionTokens: usage.completionTokens,
-                          totalTokens: usage.totalTokens,
-                        } : undefined,
-                        metadata: { source: 'app', executionId: context.executionId },
-                      });
-                    }
+                    // Message already saved above for every prompt (#699)
+                    // No duplicate save needed for the last prompt
                   } catch (err) {
                     log.error('Failed to complete conversation updates', {
                       error: err instanceof Error ? err.message : String(err),
@@ -1202,6 +1233,43 @@ async function executeSinglePromptWithCompletion(
       `),
       'saveFailedPromptResult'
     );
+
+    // Save failed prompt result as a conversation message (#699)
+    if (context.conversation) {
+      try {
+        // Sanitize error message for safe storage (remove file paths, limit length)
+        const sanitizedPromptName = String(prompt.name).substring(0, 100).replace(/[<>"'&]/g, '');
+        const sanitizedError = String(sanitizeForLogging(errorMsg))
+          .substring(0, 500)
+          .replace(/\/[a-zA-Z0-9/_-]+\/[a-zA-Z0-9/_-]+\.ts/g, '[file]');
+
+        const failureContent = `⚠️ Prompt "${sanitizedPromptName}" failed: ${sanitizedError}`;
+
+        const failureMetadata: AssistantArchitectMessageMetadata = {
+          source: 'assistant-architect-execution',
+          executionId: context.executionId,
+          promptId: prompt.id,
+          promptName: prompt.name,
+          position: prompt.position,
+          failed: true,
+          error: sanitizedError,
+        };
+
+        await createMessageWithStats({
+          conversationId: context.conversation.conversationId,
+          role: 'assistant',
+          content: failureContent,
+          parts: [{ type: 'text', text: failureContent }],
+          metadata: failureMetadata as unknown as Record<string, unknown>,
+        });
+      } catch (msgErr) {
+        log.error('Failed to save failed prompt as conversation message', {
+          error: msgErr instanceof Error ? msgErr.message : String(msgErr),
+          promptId: prompt.id,
+          conversationId: context.conversation.conversationId,
+        });
+      }
+    }
 
     // For now, stop execution on first error
     // Future enhancement: check prompt.stop_on_error field
