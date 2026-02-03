@@ -5,13 +5,15 @@
  * compile time — not via static import, dynamic import(), webpackIgnore,
  * or require() with a literal string.
  *
- * Solution: Use createRequire with a variable module name so Turbopack's
- * static analysis cannot determine the module at compile time.
+ * Solution: Use createRequire anchored to process.cwd() (the real app root)
+ * rather than __filename, which Turbopack rewrites to a virtual "/ROOT/..."
+ * path that breaks module resolution.
  *
  * This file is server-only — never imported by client components.
  */
 
 import { createRequire } from "node:module";
+import path from "node:path";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let argon2Module: any = null;
@@ -20,13 +22,14 @@ let argon2Module: any = null;
 const ARGON2_MODULE = "argon2";
 
 /**
- * Lazy-load argon2 at runtime using createRequire with a non-literal module name.
- * Turbopack can only trace literal strings — variable references bypass analysis.
+ * Lazy-load argon2 at runtime using createRequire anchored to the real
+ * project root (process.cwd()), bypassing Turbopack's virtual __filename.
  */
 function getArgon2() {
   if (argon2Module) return argon2Module;
 
-  const dynamicRequire = createRequire(__filename);
+  const realEntry = path.join(process.cwd(), "node_modules", ".package-lock.json");
+  const dynamicRequire = createRequire(realEntry);
   argon2Module = dynamicRequire(ARGON2_MODULE);
   return argon2Module;
 }
