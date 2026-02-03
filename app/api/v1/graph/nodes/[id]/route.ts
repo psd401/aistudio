@@ -15,6 +15,7 @@ import {
   removeGraphNode,
 } from "@/lib/graph"
 import { createLogger } from "@/lib/logger"
+import { graphMetadataSchema } from "@/lib/validations/api-schemas"
 
 // ============================================
 // Validation Schemas
@@ -22,17 +23,12 @@ import { createLogger } from "@/lib/logger"
 
 const uuidSchema = z.string().uuid("Invalid node ID format")
 
-const metadataSchema = z.record(z.string(), z.unknown()).refine(
-  (val) => JSON.stringify(val).length <= 10_240,
-  { message: "Metadata must be 10KB or less when serialized" }
-)
-
 const updateNodeSchema = z.object({
   name: z.string().trim().min(1).max(500).optional(),
   nodeType: z.string().trim().min(1).max(100).optional(),
   nodeClass: z.string().trim().min(1).max(100).optional(),
   description: z.string().max(5000).nullable().optional(),
-  metadata: metadataSchema.optional(),
+  metadata: graphMetadataSchema.optional(),
 }).refine(
   (data) => Object.keys(data).length > 0,
   { message: "At least one field must be provided for update" }

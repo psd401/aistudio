@@ -21,21 +21,11 @@ import { ErrorFactories } from "@/lib/error-utils"
 import { executeTransaction } from "@/lib/db/drizzle-client"
 import { graphNodes, graphEdges } from "@/lib/db/schema"
 import { createLogger, sanitizeForLogging } from "@/lib/logger"
-
-// ============================================
-// Constants
-// ============================================
-
-const METADATA_MAX_BYTES = 10_240
+import { graphMetadataSchema } from "@/lib/validations/api-schemas"
 
 // ============================================
 // Validation Schema
 // ============================================
-
-const metadataSchema = z.record(z.string(), z.unknown()).refine(
-  (val) => JSON.stringify(val).length <= METADATA_MAX_BYTES,
-  { message: `Metadata must be ${METADATA_MAX_BYTES} bytes or less when serialized` }
-)
 
 export const createDecisionSchema = z.object({
   decision: z.string().trim().min(1, "Decision text is required").max(2000),
@@ -47,7 +37,7 @@ export const createDecisionSchema = z.object({
   alternatives_considered: z.array(z.string().trim().min(1).max(2000)).max(20).optional(),
   relatedTo: z.array(z.string().uuid("Each relatedTo must be a valid UUID")).max(50).optional(),
   agentId: z.string().trim().max(200).optional(),
-  metadata: metadataSchema.optional(),
+  metadata: graphMetadataSchema.optional(),
 })
 
 export type DecisionPayload = z.infer<typeof createDecisionSchema>

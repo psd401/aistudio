@@ -14,6 +14,7 @@ import {
   GraphServiceError,
 } from "@/lib/graph"
 import { createLogger } from "@/lib/logger"
+import { graphMetadataSchema } from "@/lib/validations/api-schemas"
 
 // ============================================
 // Validation Schemas
@@ -27,16 +28,11 @@ const listQuerySchema = z.object({
   cursor: z.string().optional(),
 })
 
-const metadataSchema = z.record(z.string(), z.unknown()).refine(
-  (val) => JSON.stringify(val).length <= 10_240,
-  { message: "Metadata must be 10KB or less when serialized" }
-)
-
 const createEdgeSchema = z.object({
   sourceNodeId: z.string().uuid("Invalid sourceNodeId format"),
   targetNodeId: z.string().uuid("Invalid targetNodeId format"),
   edgeType: z.string().trim().min(1).max(100),
-  metadata: metadataSchema.optional(),
+  metadata: graphMetadataSchema.optional(),
 }).refine(
   (data) => data.sourceNodeId !== data.targetNodeId,
   { message: "sourceNodeId and targetNodeId must be different", path: ["targetNodeId"] }

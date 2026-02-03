@@ -162,6 +162,14 @@ export const createToolInputFieldSchema = z.object({
   })).optional()
 });
 
+// Graph metadata schema (shared across graph API routes and decision-capture-service)
+export const GRAPH_METADATA_MAX_BYTES = 10_240
+
+export const graphMetadataSchema = z.record(z.string(), z.unknown()).refine(
+  (val) => JSON.stringify(val).length <= GRAPH_METADATA_MAX_BYTES,
+  { message: `Metadata must be ${GRAPH_METADATA_MAX_BYTES} bytes or less when serialized` }
+)
+
 // Generic ID parameter schema for route params
 export const idParamSchema = z.object({
   id: z.string()

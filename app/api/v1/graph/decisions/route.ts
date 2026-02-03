@@ -7,7 +7,7 @@
  */
 
 import { NextRequest } from "next/server"
-import { withApiAuth, requireScope, createApiResponse, createErrorResponse } from "@/lib/api"
+import { withApiAuth, requireScope, createApiResponse, createErrorResponse, parseRequestBody, isErrorResponse } from "@/lib/api"
 import {
   captureStructuredDecision,
   createDecisionSchema,
@@ -25,21 +25,11 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
 
   const log = createLogger({ requestId, route: "api.v1.graph.decisions.create" })
 
-  // 1. Parse JSON body
-  let body: unknown
-  try {
-    body = await request.json()
-  } catch {
-    return createErrorResponse(requestId, 400, "INVALID_JSON", "Request body must be valid JSON")
-  }
+  // 1. Parse and validate request body
+  const parsed = await parseRequestBody(request, createDecisionSchema, requestId)
+  if (isErrorResponse(parsed)) return parsed
 
-  // 2. Validate with shared Zod schema
-  const parsed = createDecisionSchema.safeParse(body)
-  if (!parsed.success) {
-    return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid request body", parsed.error.issues)
-  }
-
-  // 3. Delegate to shared service
+  // 2. Delegate to shared service
   try {
     const result = await captureStructuredDecision(parsed.data, auth.userId, requestId)
 
