@@ -16,10 +16,8 @@ import {
   computeLlmScore,
   type DecisionApiPayload,
   type TranslatedDecision,
-  type CompletenessResult,
 } from "@/lib/graph/decision-api-translator"
 import { ErrorFactories } from "@/lib/error-utils"
-import { isValidationError } from "@/types/error-types"
 import { executeTransaction } from "@/lib/db/drizzle-client"
 import { graphNodes, graphEdges } from "@/lib/db/schema"
 import { createLogger, sanitizeForLogging } from "@/lib/logger"
