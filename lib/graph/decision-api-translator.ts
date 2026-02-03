@@ -11,6 +11,7 @@
  * Part of Epic #674 (External API Platform) - Issue #683
  */
 
+import { z } from "zod"
 import { generateText } from "ai"
 import { createProviderModel } from "@/lib/ai/provider-factory"
 import { getModelConfig } from "@/lib/ai/model-config"
@@ -306,7 +307,13 @@ Rule-based warnings: ${ruleResult.warnings.length > 0 ? ruleResult.warnings.join
 
 /**
  * Parse JSON from LLM response text, returning score + warnings or null if unparseable.
+ * Uses Zod for runtime validation of LLM output shape.
  */
+const llmResponseSchema = z.object({
+  score: z.number().optional(),
+  warnings: z.array(z.string()).optional(),
+})
+
 function parseLlmResponse(
   text: string,
   fallback: CompletenessResult
@@ -315,13 +322,13 @@ function parseLlmResponse(
   if (!jsonMatch) return null
 
   try {
-    const parsed = JSON.parse(jsonMatch[0]) as { score?: number; warnings?: string[] }
-    const score = typeof parsed.score === "number"
-      ? Math.min(100, Math.max(0, Math.round(parsed.score)))
+    const parsed = llmResponseSchema.safeParse(JSON.parse(jsonMatch[0]))
+    if (!parsed.success) return null
+
+    const score = typeof parsed.data.score === "number"
+      ? Math.min(100, Math.max(0, Math.round(parsed.data.score)))
       : fallback.score
-    const warnings = Array.isArray(parsed.warnings)
-      ? parsed.warnings.filter((w): w is string => typeof w === "string")
-      : fallback.warnings
+    const warnings = parsed.data.warnings ?? fallback.warnings
 
     return { score, warnings, method: "llm-enhanced" }
   } catch {
@@ -364,6 +371,7 @@ export async function computeLlmScore(
         model,
         prompt,
         abortSignal: controller.signal,
+        maxOutputTokens: 200,
       })
       clearTimeout(timeout)
 

@@ -6,11 +6,10 @@
 
 import { NextRequest } from "next/server"
 import { z } from "zod"
-import { eq, inArray } from "drizzle-orm"
+import { inArray } from "drizzle-orm"
 import { withApiAuth, requireScope, createApiResponse, createErrorResponse } from "@/lib/api"
 import {
   translatePayloadToGraph,
-  computeRuleBasedScore,
   computeLlmScore,
   type DecisionApiPayload,
   type TranslatedDecision,
@@ -65,10 +64,29 @@ async function persistDecisionSubgraph(
   const committedEdgeIds: string[] = []
 
   await executeTransaction(async (tx) => {
+    // Validate relatedTo inside transaction to prevent race conditions
+    // (nodes could be deleted between a pre-check and edge creation)
+    if (payload.relatedTo && payload.relatedTo.length > 0) {
+      const existingNodes = await tx
+        .select({ id: graphNodes.id })
+        .from(graphNodes)
+        .where(inArray(graphNodes.id, payload.relatedTo))
+      const foundIds = new Set(existingNodes.map((n) => n.id))
+      const missingIds = payload.relatedTo.filter((id) => !foundIds.has(id))
+      if (missingIds.length > 0) {
+        throw ErrorFactories.validationFailed([{
+          field: "relatedTo",
+          message: `Referenced nodes do not exist: ${missingIds.join(", ")}`,
+        }])
+      }
+    }
+
     const tempIdToRealId = new Map<string, string>()
 
     // Create nodes
     for (const node of translated.nodes) {
+      // Only merge user-provided metadata onto the primary decision node (temp-1)
+      // Other nodes (evidence, constraints, etc.) only get internal metadata (source, agentId)
       const nodeMetadata = node.tempId === "temp-1" && payload.metadata
         ? { ...node.metadata, ...payload.metadata }
         : node.metadata
@@ -115,30 +133,22 @@ async function persistDecisionSubgraph(
       committedEdgeIds.push(newEdge.id)
     }
 
-    // CONTEXT edges for relatedTo
+    // CONTEXT edges for relatedTo (all nodes validated above, batch insert)
     if (payload.relatedTo && payload.relatedTo.length > 0) {
-      for (const relatedNodeId of payload.relatedTo) {
-        const [exists] = await tx
-          .select({ id: graphNodes.id })
-          .from(graphNodes)
-          .where(eq(graphNodes.id, relatedNodeId))
-          .limit(1)
+      const contextEdgeValues = payload.relatedTo.map((relatedNodeId) => ({
+        sourceNodeId: relatedNodeId,
+        targetNodeId: decisionNodeId,
+        edgeType: "CONTEXT",
+        metadata: { source },
+        createdBy: userId,
+      }))
 
-        if (exists) {
-          const [contextEdge] = await tx
-            .insert(graphEdges)
-            .values({
-              sourceNodeId: relatedNodeId,
-              targetNodeId: decisionNodeId,
-              edgeType: "CONTEXT",
-              metadata: { source },
-              createdBy: userId,
-            })
-            .returning({ id: graphEdges.id })
+      const contextEdges = await tx
+        .insert(graphEdges)
+        .values(contextEdgeValues)
+        .returning({ id: graphEdges.id })
 
-          committedEdgeIds.push(contextEdge.id)
-        }
-      }
+      committedEdgeIds.push(...contextEdges.map((e) => e.id))
     }
   }, "createDecisionSubgraph")
 
@@ -171,28 +181,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
 
   const payload = parsed.data
 
-  // 3. Validate relatedTo UUIDs exist
-  if (payload.relatedTo && payload.relatedTo.length > 0) {
-    try {
-      const existingNodes = await executeTransaction(
-        async (tx) => tx
-          .select({ id: graphNodes.id })
-          .from(graphNodes)
-          .where(inArray(graphNodes.id, payload.relatedTo!)),
-        "validateRelatedTo"
-      )
-      const foundIds = new Set(existingNodes.map((n) => n.id))
-      const missingIds = payload.relatedTo.filter((id) => !foundIds.has(id))
-      if (missingIds.length > 0) {
-        return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Some relatedTo node IDs do not exist", { missingIds })
-      }
-    } catch (error) {
-      log.error("Failed to validate relatedTo IDs", { error: error instanceof Error ? error.message : String(error) })
-      return createErrorResponse(requestId, 500, "INTERNAL_ERROR", "Failed to validate related nodes")
-    }
-  }
-
-  // 4. Translate payload to graph nodes + edges
+  // 3. Translate payload to graph nodes + edges
   const source = payload.agentId ? "agent" : "api"
   const apiPayload: DecisionApiPayload = {
     decision: payload.decision,
@@ -207,7 +196,7 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
   }
   const translated = translatePayloadToGraph(apiPayload, source)
 
-  // 5. Persist in transaction
+  // 4. Persist in transaction (includes relatedTo validation atomically)
   let result: PersistResult
   try {
     result = await persistDecisionSubgraph(translated, payload, source, auth.userId)
@@ -216,13 +205,8 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     return createErrorResponse(requestId, 500, "INTERNAL_ERROR", "Failed to create decision")
   }
 
-  // 6. Compute completeness score
-  let completeness = computeRuleBasedScore(translated.nodes, translated.edges)
-  try {
-    completeness = await computeLlmScore(apiPayload, translated.nodes, translated.edges, log)
-  } catch {
-    // computeLlmScore handles its own fallback; this catches unexpected outer errors
-  }
+  // 5. Compute completeness score (LLM-enhanced with rule-based fallback)
+  const completeness = await computeLlmScore(apiPayload, translated.nodes, translated.edges, log)
 
   log.info("Decision subgraph created", {
     decisionNodeId: result.decisionNodeId,
