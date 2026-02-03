@@ -58,37 +58,69 @@ export const MCP_TOOLS: McpToolDefinition[] = [
   {
     name: "capture_decision",
     description:
-      "Create a new decision node in the context graph, optionally linking it to existing nodes.",
+      `Capture a structured decision with full context (evidence, constraints, reasoning, alternatives). Creates a decision subgraph with completeness scoring.
+
+Example:
+{
+  "decision": "Use PostgreSQL for data layer",
+  "decidedBy": "Engineering Team",
+  "reasoning": "Strong ACID guarantees needed for financial data",
+  "evidence": ["Benchmark shows 3x throughput vs MySQL"],
+  "constraints": ["Must support JSONB queries"],
+  "conditions": ["Revisit if write volume exceeds 50k ops/s"],
+  "alternatives_considered": ["MongoDB", "DynamoDB"],
+  "relatedTo": ["550e8400-e29b-41d4-a716-446655440000"]
+}`,
     inputSchema: {
       type: "object",
       properties: {
-        name: {
+        decision: {
           type: "string",
-          description: "Name/title of the decision",
+          description: "The decision text (max 2000 chars)",
         },
-        nodeType: {
+        decidedBy: {
           type: "string",
-          description: "Type of node (e.g., decision, policy, guideline)",
+          description: "Who made the decision (person or role, max 500 chars)",
         },
-        nodeClass: {
+        reasoning: {
           type: "string",
-          description: "Classification (e.g., strategic, operational)",
+          description: "Why this decision was made (max 5000 chars)",
         },
-        description: {
-          type: "string",
-          description: "Detailed description of the decision",
+        evidence: {
+          type: "array",
+          items: { type: "string" },
+          description: "Supporting evidence or data points (max 20 items)",
         },
-        linkedNodeId: {
-          type: "string",
-          description: "Optional: ID of an existing node to link to",
+        constraints: {
+          type: "array",
+          items: { type: "string" },
+          description: "Constraints or limiting factors (max 20 items)",
         },
-        edgeType: {
+        conditions: {
+          type: "array",
+          items: { type: "string" },
+          description: "Conditions under which the decision should be revisited (max 20 items)",
+        },
+        alternatives_considered: {
+          type: "array",
+          items: { type: "string" },
+          description: "Alternative options that were considered and rejected (max 20 items)",
+        },
+        relatedTo: {
+          type: "array",
+          items: { type: "string" },
+          description: "UUIDs of existing graph nodes to link via CONTEXT edges (max 50)",
+        },
+        agentId: {
           type: "string",
-          description:
-            "Type of link to create (e.g., supports, implements, supersedes). Required if linkedNodeId is set.",
+          description: "Identifier for the agent capturing this decision (max 200 chars)",
+        },
+        metadata: {
+          type: "object",
+          description: "Additional metadata to attach to the decision node (max 10KB serialized)",
         },
       },
-      required: ["name", "nodeType", "nodeClass"],
+      required: ["decision", "decidedBy"],
     },
   },
   {
