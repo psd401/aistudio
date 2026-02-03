@@ -12,6 +12,7 @@ import { ChevronRight, MessageSquareIcon } from 'lucide-react'
 import { createLogger } from '@/lib/client-logger'
 import { navigateToConversation } from '@/lib/nexus/conversation-navigation'
 import type { AssistantArchitectConversationMetadata, NexusConversationMetadata } from '@/lib/db/types/jsonb'
+import { getAssistantArchitectConversationsAction } from '@/actions/assistant-architect/get-conversations.actions'
 
 const log = createLogger({ moduleName: 'past-conversations' })
 
@@ -78,50 +79,31 @@ interface PastConversationsProps {
 
 export function PastConversations({ toolId }: PastConversationsProps) {
   const [conversations, setConversations] = useState<ConversationItem[]>([])
-  const [loading, setLoading] = useState(true)
+  const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [isOpen, setIsOpen] = useState(false)
+  const [hasLoaded, setHasLoaded] = useState(false)
 
   const loadConversations = useCallback(async () => {
     try {
       setLoading(true)
       setError(null)
 
-      const params = new URLSearchParams({
-        provider: 'assistant-architect',
-        limit: '50',
-        offset: '0',
-      })
+      log.debug('Fetching conversations via server action', { toolId })
 
-      const controller = new AbortController()
-      const timeoutId = setTimeout(() => controller.abort(), 10000)
+      // Use server action for authorization-checked, server-side filtered data
+      const result = await getAssistantArchitectConversationsAction(toolId)
 
-      const response = await fetch(`/api/nexus/conversations?${params.toString()}`, {
-        signal: controller.signal,
-      })
-
-      clearTimeout(timeoutId)
-
-      if (!response.ok) {
-        throw new Error(`Failed to load conversations: ${response.status}`)
+      if (!result.isSuccess) {
+        throw new Error(result.message || 'Failed to load conversations')
       }
 
-      const data = await response.json()
-      const { conversations: loaded = [] } = data
-
-      // Client-side filter to conversations for this specific assistant
-      const filtered = (loaded as ConversationItem[]).filter((conv) => {
-        if (!conv.metadata || typeof conv.metadata !== 'object') return false
-        const meta = conv.metadata as Record<string, unknown>
-        return meta.assistantId === toolId
-      })
-
-      setConversations(filtered)
-      log.debug('Past conversations loaded', { toolId, total: loaded.length, filtered: filtered.length })
+      const conversations = (result.data || []) as ConversationItem[]
+      setConversations(conversations)
+      setHasLoaded(true)
+      log.debug('Past conversations loaded', { toolId, count: conversations.length })
     } catch (err) {
-      const message = err instanceof Error
-        ? err.name === 'AbortError' ? 'Request timed out' : err.message
-        : 'Failed to load conversations'
+      const message = err instanceof Error ? err.message : 'Failed to load conversations'
       log.error('Failed to load past conversations', { error: message, toolId })
       setError(message)
     } finally {
@@ -129,9 +111,12 @@ export function PastConversations({ toolId }: PastConversationsProps) {
     }
   }, [toolId])
 
+  // Lazy-load: only fetch conversations when section is opened
   useEffect(() => {
-    loadConversations()
-  }, [loadConversations])
+    if (isOpen && !hasLoaded && !loading) {
+      loadConversations()
+    }
+  }, [isOpen, hasLoaded, loading, loadConversations])
 
   const handleConversationClick = useCallback((conversationId: string) => {
     navigateToConversation(conversationId)

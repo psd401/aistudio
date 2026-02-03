@@ -126,6 +126,8 @@ export interface DecisionCaptureMetadata extends NexusConversationMetadata {
  * Part of PR #717 - Conversation list provider filtering
  */
 export interface AssistantArchitectConversationMetadata extends NexusConversationMetadata {
+  /** ID of the assistant architect tool that created this conversation */
+  assistantId?: number;
   /** Name of the assistant architect that created this conversation */
   assistantName?: string;
   /** Current execution status for display in conversation list */
