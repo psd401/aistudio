@@ -79,11 +79,13 @@ export function convertContentToParts(content?: ApiMessageContent): UIMessagePar
           let errorText: string
           if (typeof part.result === 'string') {
             errorText = part.result
+          } else if (part.result instanceof Error) {
+            errorText = part.result.message
           } else {
             try {
               errorText = JSON.stringify(part.result)
             } catch {
-              errorText = String(part.result)
+              errorText = String(part.result ?? 'Unknown error')
             }
           }
           toolPart = {
@@ -155,12 +157,11 @@ export function ConversationInitializer({
 }) {
   const [messages, setMessages] = useState<UIMessage[]>([])
   const [loading, setLoading] = useState(true)
-  const { status } = useSession()
+  const { status, data: session } = useSession()
 
   useEffect(() => {
     // Verify authentication before making API call
     if (status === 'loading') {
-      // Still determining auth state
       setLoading(true)
       return
     }
@@ -172,27 +173,34 @@ export function ConversationInitializer({
       return
     }
 
+    // Guard against authenticated status with missing user data
+    if (status === 'authenticated' && !session?.user) {
+      log.warn('Authenticated but no user data, skipping conversation load')
+      setMessages([])
+      setLoading(false)
+      return
+    }
+
     if (!conversationId) {
       setMessages([])
       setLoading(false)
       return
     }
 
-    let cancelled = false
+    const abortController = new AbortController()
     setLoading(true)
     log.debug('ConversationInitializer loading messages', { conversationId })
 
-    fetch(`/api/nexus/conversations/${conversationId}/messages`)
+    fetch(`/api/nexus/conversations/${conversationId}/messages`, {
+      signal: abortController.signal,
+    })
       .then(res => {
-        if (cancelled) return null
         if (!res.ok) {
           throw new Error(`Failed to load messages: ${res.status}`)
         }
         return res.json() as Promise<{ messages: ApiMessage[] }>
       })
       .then(data => {
-        if (cancelled || !data) return
-
         const loadedMessages = data.messages || []
         log.debug('Messages loaded from API', { count: loadedMessages.length })
 
@@ -208,7 +216,7 @@ export function ConversationInitializer({
         log.debug('Messages converted and ready', { count: threadMessages.length })
       })
       .catch(error => {
-        if (cancelled) return
+        if (error instanceof DOMException && error.name === 'AbortError') return
 
         log.error('Failed to load conversation', {
           conversationId,
@@ -219,9 +227,9 @@ export function ConversationInitializer({
       })
 
     return () => {
-      cancelled = true
+      abortController.abort()
     }
-  }, [conversationId, status])
+  }, [conversationId, status, session])
 
   if (loading) {
     return (

@@ -17,11 +17,14 @@ export function useNexusSidebar() {
   return context
 }
 
+/** Known conversation provider types used for sidebar filtering */
+type ConversationProvider = 'assistant-architect' | 'decision-capture'
+
 interface NexusLayoutProps {
   children: ReactNode
   conversationId?: string | null
   /** When set, filters sidebar conversations to this provider and hides tabs */
-  provider?: string
+  provider?: ConversationProvider
   /** Override default conversation selection navigation */
   onConversationSelect?: (id: string) => void
   /** Override navigation when starting new conversation or deleting selected */

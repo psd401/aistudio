@@ -58,10 +58,13 @@ function isAssistantArchitectMetadata(
   return metadata !== null && metadata !== undefined && 'assistantName' in metadata
 }
 
+/** Known conversation provider types used for sidebar filtering */
+type ConversationProvider = 'assistant-architect' | 'decision-capture'
+
 interface ConversationListProps {
   selectedConversationId?: string | null
   /** When set, hides filter tabs and filters conversations to this provider */
-  provider?: string
+  provider?: ConversationProvider
   /** Override default conversation selection navigation */
   onConversationSelect?: (id: string) => void
   /** Override navigation when deleting the selected conversation */
