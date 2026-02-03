@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useMemo, memo } from 'react'
+import { useState, useEffect, useCallback, memo } from 'react'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
@@ -19,6 +19,7 @@ import {
 import { createLogger } from '@/lib/client-logger'
 import { useRouter } from 'next/navigation'
 import { navigateToConversation } from '@/lib/nexus/conversation-navigation'
+import type { AssistantArchitectConversationMetadata, NexusConversationMetadata } from '@/lib/db/types/jsonb'
 
 const log = createLogger({ moduleName: 'nexus-conversation-list' })
 
@@ -32,17 +33,20 @@ interface ConversationItem {
   createdAt: string
   isArchived: boolean
   isPinned: boolean
-  metadata?: {
-    assistantName?: string
-    executionStatus?: 'running' | 'completed' | 'failed'
-    [key: string]: unknown
-  } | null
+  metadata?: NexusConversationMetadata | AssistantArchitectConversationMetadata | null
 }
 
 type ConversationFilterTab = 'chat' | 'assistants'
 
 /** Providers excluded from Chat tab (non-chat conversation types) */
 const NON_CHAT_PROVIDERS = ['assistant-architect', 'decision-capture']
+
+/** Type guard to check if metadata is AssistantArchitectConversationMetadata */
+function isAssistantArchitectMetadata(
+  metadata: NexusConversationMetadata | AssistantArchitectConversationMetadata | null | undefined
+): metadata is AssistantArchitectConversationMetadata {
+  return metadata !== null && metadata !== undefined && 'assistantName' in metadata
+}
 
 interface ConversationListProps {
   selectedConversationId?: string | null
@@ -134,9 +138,9 @@ const ConversationItemRow = memo(function ConversationItemRow({
             <p className="text-sm font-medium truncate">
               {conversation.title}
             </p>
-            {conversation.provider === 'assistant-architect' && conversation.metadata?.assistantName && (
+            {conversation.provider === 'assistant-architect' && isAssistantArchitectMetadata(conversation.metadata) && conversation.metadata.assistantName && (
               <p className="text-xs text-muted-foreground truncate mt-0.5">
-                {conversation.metadata.assistantName}
+                {String(conversation.metadata.assistantName).slice(0, 200)}
               </p>
             )}
             <div className="flex items-center gap-2 mt-1">
@@ -146,7 +150,7 @@ const ConversationItemRow = memo(function ConversationItemRow({
               <span className="text-xs text-muted-foreground">
                 {formatRelativeTime(conversation.lastMessageAt || conversation.createdAt)}
               </span>
-              {conversation.provider === 'assistant-architect' && conversation.metadata?.executionStatus && (
+              {conversation.provider === 'assistant-architect' && isAssistantArchitectMetadata(conversation.metadata) && conversation.metadata.executionStatus && (
                 <ExecutionStatusBadge status={conversation.metadata.executionStatus} />
               )}
             </div>
@@ -200,28 +204,33 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
   const handleTabChat = useCallback(() => setActiveTab('chat'), [])
   const handleTabAssistants = useCallback(() => setActiveTab('assistants'), [])
 
-  // Client-side filtering based on active tab
-  const filteredConversations = useMemo(() => {
-    if (activeTab === 'assistants') {
-      return conversations.filter((c) => c.provider === 'assistant-architect')
-    }
-    // Chat tab: exclude non-chat providers
-    return conversations.filter((c) => !NON_CHAT_PROVIDERS.includes(c.provider))
-  }, [conversations, activeTab])
-
-
   // Load conversations from database with comprehensive error handling
+  // Server-side filtering based on active tab to avoid missing items with >500 conversations
   const loadConversations = useCallback(async () => {
     try {
       setLoading(true)
       setError(null)
       
-      log.debug('Loading conversations from API')
-      
+      log.debug('Loading conversations from API', { activeTab })
+
+      // Build query params with server-side filtering
+      const params = new URLSearchParams({
+        limit: '500',
+        offset: '0',
+      })
+
+      // Apply provider filtering based on active tab
+      if (activeTab === 'assistants') {
+        params.set('provider', 'assistant-architect')
+      } else {
+        // Chat tab: exclude non-chat providers
+        params.set('excludeProviders', NON_CHAT_PROVIDERS.join(','))
+      }
+
       const controller = new AbortController()
       const timeoutId = setTimeout(() => controller.abort(), 10000) // 10 second timeout
-      
-      const response = await fetch('/api/nexus/conversations?limit=500', {
+
+      const response = await fetch(`/api/nexus/conversations?${params.toString()}`, {
         signal: controller.signal
       })
       
@@ -279,9 +288,9 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [activeTab])
 
-  // Load conversations on component mount
+  // Load conversations on component mount and when tab changes
   useEffect(() => {
     loadConversations()
   }, [loadConversations])
@@ -391,7 +400,7 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
       </div>
 
       {/* Conversations List */}
-      {filteredConversations.length === 0 ? (
+      {conversations.length === 0 ? (
         <div className="text-center py-8">
           <MessageSquareIcon className="h-12 w-12 mx-auto mb-4 text-muted-foreground/50" />
           <p className="text-sm text-muted-foreground">
@@ -405,7 +414,7 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
         </div>
       ) : (
         <>
-          {filteredConversations.map((conversation) => (
+          {conversations.map((conversation) => (
             <ConversationItemRow
               key={conversation.id}
               conversation={conversation}

@@ -8,6 +8,16 @@ import {
   recordConversationEvent,
 } from '@/lib/db/drizzle/nexus-conversations';
 
+// Valid provider values matching database schema constraints
+const VALID_PROVIDERS = [
+  'openai',
+  'google',
+  'bedrock',
+  'azure',
+  'assistant-architect',
+  'decision-capture',
+] as const;
+
 /**
  * GET /api/nexus/conversations - List user's conversations
  *
@@ -41,13 +51,33 @@ export async function GET(req: Request) {
 
     // Parse query parameters
     const url = new URL(req.url);
-    const limit = Number.parseInt(url.searchParams.get('limit') || '20');
-    const offset = Number.parseInt(url.searchParams.get('offset') || '0');
+
+    // Validate and constrain limit/offset to prevent DoS (OWASP Input Validation)
+    const rawLimit = Number.parseInt(url.searchParams.get('limit') || '20');
+    const rawOffset = Number.parseInt(url.searchParams.get('offset') || '0');
+    const limit = Number.isNaN(rawLimit) || rawLimit < 1 ? 20 : Math.min(rawLimit, 500);
+    const offset = Number.isNaN(rawOffset) || rawOffset < 0 ? 0 : rawOffset;
+
     const includeArchived = url.searchParams.get('includeArchived') === 'true';
-    const provider = url.searchParams.get('provider') || undefined;
+
+    // Validate provider filter against whitelist
+    const rawProvider = url.searchParams.get('provider')?.trim();
+    const provider = rawProvider && VALID_PROVIDERS.includes(rawProvider as typeof VALID_PROVIDERS[number])
+      ? rawProvider
+      : undefined;
+
+    // Log invalid provider attempts for monitoring
+    if (rawProvider && !provider) {
+      log.warn('Invalid provider filter attempted', { provider: rawProvider, userId });
+    }
+
+    // Validate excludeProviders filter against whitelist
     const excludeProvidersParam = url.searchParams.get('excludeProviders');
     const excludeProviders = excludeProvidersParam
-      ? excludeProvidersParam.split(',').map((p) => p.trim()).filter(Boolean)
+      ? excludeProvidersParam
+          .split(',')
+          .map((p) => p.trim())
+          .filter((p) => VALID_PROVIDERS.includes(p as typeof VALID_PROVIDERS[number]))
       : undefined;
 
     const queryOptions = {

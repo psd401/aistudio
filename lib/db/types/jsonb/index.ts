@@ -121,6 +121,18 @@ export interface DecisionCaptureMetadata extends NexusConversationMetadata {
 }
 
 /**
+ * Metadata for Assistant Architect conversations (provider: "assistant-architect")
+ * Stored in nexus_conversations.metadata for assistant architect executions.
+ * Part of PR #717 - Conversation list provider filtering
+ */
+export interface AssistantArchitectConversationMetadata extends NexusConversationMetadata {
+  /** Name of the assistant architect that created this conversation */
+  assistantName?: string;
+  /** Current execution status for display in conversation list */
+  executionStatus?: 'running' | 'completed' | 'failed';
+}
+
+/**
  * Settings for Nexus folders
  */
 export interface NexusFolderSettings {

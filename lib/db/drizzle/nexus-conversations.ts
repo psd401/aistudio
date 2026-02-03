@@ -82,12 +82,22 @@ export interface UpdateConversationData {
 }
 
 export interface ConversationListOptions {
+  /** Maximum number of conversations to return (default: 20, max: 500) */
   limit?: number;
+  /** Number of conversations to skip for pagination (default: 0) */
   offset?: number;
+  /** Include archived conversations in results (default: false) */
   includeArchived?: boolean;
-  /** Filter to a single provider (exact match) */
+  /**
+   * Filter to a single provider (exact match)
+   * @example 'assistant-architect' | 'openai' | 'google' | 'bedrock' | 'azure'
+   */
   provider?: string;
-  /** Exclude conversations with these providers */
+  /**
+   * Exclude conversations with these providers
+   * Filters applied as SQL NOT IN clause
+   * @example ['assistant-architect', 'decision-capture']
+   */
   excludeProviders?: string[];
 }
 
