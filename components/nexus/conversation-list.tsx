@@ -39,7 +39,16 @@ interface ConversationItem {
 type ConversationFilterTab = 'chat' | 'assistants'
 
 /** Providers excluded from Chat tab (non-chat conversation types) */
-const NON_CHAT_PROVIDERS = ['assistant-architect', 'decision-capture']
+const NON_CHAT_PROVIDERS = ['assistant-architect', 'decision-capture'] as const
+
+/** Valid execution statuses for assistant architect conversations */
+const VALID_EXECUTION_STATUSES = ['running', 'completed', 'failed'] as const
+type ExecutionStatus = typeof VALID_EXECUTION_STATUSES[number]
+
+/** Type guard for executionStatus — JSONB is untyped at runtime */
+function isValidExecutionStatus(status: unknown): status is ExecutionStatus {
+  return typeof status === 'string' && VALID_EXECUTION_STATUSES.includes(status as ExecutionStatus)
+}
 
 /** Type guard to check if metadata is AssistantArchitectConversationMetadata */
 function isAssistantArchitectMetadata(
@@ -72,8 +81,8 @@ function formatRelativeTime(dateString: string): string {
 }
 
 // Status badge for assistant architect execution status
-function ExecutionStatusBadge({ status }: { status: 'running' | 'completed' | 'failed' }) {
-  const variantMap: Record<typeof status, 'warning' | 'success' | 'error'> = {
+function ExecutionStatusBadge({ status }: { status: ExecutionStatus }) {
+  const variantMap: Record<ExecutionStatus, 'warning' | 'success' | 'error'> = {
     running: 'warning',
     completed: 'success',
     failed: 'error',
@@ -150,7 +159,7 @@ const ConversationItemRow = memo(function ConversationItemRow({
               <span className="text-xs text-muted-foreground">
                 {formatRelativeTime(conversation.lastMessageAt || conversation.createdAt)}
               </span>
-              {conversation.provider === 'assistant-architect' && isAssistantArchitectMetadata(conversation.metadata) && conversation.metadata.executionStatus && (
+              {conversation.provider === 'assistant-architect' && isAssistantArchitectMetadata(conversation.metadata) && isValidExecutionStatus(conversation.metadata.executionStatus) && (
                 <ExecutionStatusBadge status={conversation.metadata.executionStatus} />
               )}
             </div>
@@ -274,16 +283,18 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
       
     } catch (err) {
       let errorMessage = 'Failed to load conversations'
-      
+
       if (err instanceof Error) {
         if (err.name === 'AbortError') {
           errorMessage = 'Request timed out. Please check your connection and try again.'
+        } else if (err instanceof TypeError) {
+          errorMessage = 'Network error. Please check your internet connection.'
         } else {
           errorMessage = err.message
         }
       }
-      
-      log.error('Failed to load conversations', { error: errorMessage })
+
+      log.error('Failed to load conversations', { error: errorMessage, activeTab })
       setError(errorMessage)
     } finally {
       setLoading(false)
@@ -375,8 +386,11 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
   return (
     <div className="flex flex-col items-stretch gap-1.5 text-foreground">
       {/* Filter Tabs */}
-      <div className="flex gap-1 px-1 pb-1">
+      <div className="flex gap-1 px-1 pb-1" role="tablist" aria-label="Conversation type filter">
         <button
+          role="tab"
+          aria-selected={activeTab === 'chat'}
+          aria-label="Show chat conversations"
           className={`flex-1 text-xs font-medium py-1.5 px-3 rounded-md transition-colors ${
             activeTab === 'chat'
               ? 'bg-muted text-foreground'
@@ -387,6 +401,9 @@ export function ConversationList({ selectedConversationId }: ConversationListPro
           Chat
         </button>
         <button
+          role="tab"
+          aria-selected={activeTab === 'assistants'}
+          aria-label="Show assistant architect executions"
           className={`flex-1 text-xs font-medium py-1.5 px-3 rounded-md transition-colors flex items-center justify-center gap-1 ${
             activeTab === 'assistants'
               ? 'bg-muted text-foreground'
