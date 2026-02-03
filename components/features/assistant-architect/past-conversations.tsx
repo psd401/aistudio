@@ -111,12 +111,12 @@ export function PastConversations({ toolId }: PastConversationsProps) {
     }
   }, [toolId])
 
-  // Lazy-load: only fetch conversations when section is opened
+  // Fetch conversations on mount so the count is accurate in the header
   useEffect(() => {
-    if (isOpen && !hasLoaded && !loading) {
+    if (!hasLoaded && !loading) {
       loadConversations()
     }
-  }, [isOpen, hasLoaded, loading, loadConversations])
+  }, [hasLoaded, loading, loadConversations])
 
   const handleConversationClick = useCallback((conversationId: string) => {
     navigateToConversation(conversationId)
