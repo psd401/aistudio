@@ -58,7 +58,19 @@ export const MCP_TOOLS: McpToolDefinition[] = [
   {
     name: "capture_decision",
     description:
-      "Capture a structured decision with full context (evidence, constraints, reasoning, alternatives). Creates a decision subgraph with completeness scoring.",
+      `Capture a structured decision with full context (evidence, constraints, reasoning, alternatives). Creates a decision subgraph with completeness scoring.
+
+Example:
+{
+  "decision": "Use PostgreSQL for data layer",
+  "decidedBy": "Engineering Team",
+  "reasoning": "Strong ACID guarantees needed for financial data",
+  "evidence": ["Benchmark shows 3x throughput vs MySQL"],
+  "constraints": ["Must support JSONB queries"],
+  "conditions": ["Revisit if write volume exceeds 50k ops/s"],
+  "alternatives_considered": ["MongoDB", "DynamoDB"],
+  "relatedTo": ["550e8400-e29b-41d4-a716-446655440000"]
+}`,
     inputSchema: {
       type: "object",
       properties: {
