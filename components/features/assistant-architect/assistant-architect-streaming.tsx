@@ -221,7 +221,12 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
           onPromptCountChange(Number(promptCount))
         }
 
-        if (newConversationId) {
+        if (newConversationId && newConversationId !== conversationIdRef.current) {
+          log.info('Conversation ID captured', {
+            conversationId: newConversationId,
+            mode,
+            wasNull: conversationIdRef.current === null
+          })
           conversationIdRef.current = newConversationId
         }
 
@@ -1112,6 +1117,14 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
                   totalPrompts={promptCount}
                   prompts={tool.prompts || []}
                 />
+              )}
+
+              {/* Execution in-progress status banner */}
+              {isExecuting && !hasResults && (
+                <div className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 rounded-md px-3 py-2">
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  <span>Execution in progress — follow-up available when complete</span>
+                </div>
               )}
 
               {/* Thread component for streaming output and follow-up conversations */}
