@@ -222,6 +222,17 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
         }
 
         if (newConversationId && newConversationId !== conversationIdRef.current) {
+          // Validate UUID format before storing (defense-in-depth)
+          const validation = z.string().uuid().safeParse(newConversationId)
+          if (!validation.success) {
+            log.error('Invalid conversation ID format from server', {
+              conversationId: newConversationId,
+              mode,
+              error: validation.error.message
+            })
+            return
+          }
+
           log.info('Conversation ID captured', {
             conversationId: newConversationId,
             mode,
@@ -1121,7 +1132,7 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
 
               {/* Execution in-progress status banner */}
               {isExecuting && !hasResults && (
-                <div className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 rounded-md px-3 py-2">
+                <div role="status" className="flex items-center gap-2 text-sm text-muted-foreground bg-muted/50 rounded-md px-3 py-2">
                   <Loader2 className="h-4 w-4 animate-spin" />
                   <span>Execution in progress — follow-up available when complete</span>
                 </div>
