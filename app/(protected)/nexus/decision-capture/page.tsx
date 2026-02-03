@@ -9,6 +9,7 @@ import { useRouter, useSearchParams } from 'next/navigation'
 import { useEffect, useMemo, useCallback, useState, useRef, Suspense } from 'react'
 import { NexusShell } from '../_components/layout/nexus-shell'
 import { NexusLayout } from '../_components/layout/nexus-layout'
+import { ErrorBoundary } from '../_components/error-boundary'
 import { ConversationInitializer } from '../_components/conversation-initializer'
 import { DecisionToolUIs } from './_components/tools/decision-tools-ui'
 import { ChartVisualizationUI } from '../_components/tools/chart-visualization-ui'
@@ -229,27 +230,29 @@ function DecisionCapturePageContent() {
   }
 
   return (
-    <NexusLayout
-      conversationId={conversationId}
-      provider="decision-capture"
-      onConversationSelect={handleConversationSelect}
-      onNewConversation={handleNewConversation}
-    >
-      <NexusShell
-        title="Decision Capture"
+    <ErrorBoundary>
+      <NexusLayout
+        conversationId={conversationId}
+        provider="decision-capture"
+        onConversationSelect={handleConversationSelect}
         onNewConversation={handleNewConversation}
       >
-        <ConversationInitializer conversationId={stableConversationId}>
-          {(initialMessages) => (
-            <DecisionRuntimeProvider
-              conversationId={conversationId}
-              initialMessages={initialMessages}
-              onConversationIdChange={handleConversationIdChange}
-            />
-          )}
-        </ConversationInitializer>
-      </NexusShell>
-    </NexusLayout>
+        <NexusShell
+          title="Decision Capture"
+          onNewConversation={handleNewConversation}
+        >
+          <ConversationInitializer conversationId={stableConversationId}>
+            {(initialMessages) => (
+              <DecisionRuntimeProvider
+                conversationId={conversationId}
+                initialMessages={initialMessages}
+                onConversationIdChange={handleConversationIdChange}
+              />
+            )}
+          </ConversationInitializer>
+        </NexusShell>
+      </NexusLayout>
+    </ErrorBoundary>
   )
 }
 

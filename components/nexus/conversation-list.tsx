@@ -19,6 +19,7 @@ import {
 import { createLogger } from '@/lib/client-logger'
 import { useRouter } from 'next/navigation'
 import { navigateToConversation } from '@/lib/nexus/conversation-navigation'
+import { archiveConversationAction } from '@/actions/nexus/archive-conversation.actions'
 import type { AssistantArchitectConversationMetadata, NexusConversationMetadata } from '@/lib/db/types/jsonb'
 
 const log = createLogger({ moduleName: 'nexus-conversation-list' })
@@ -337,7 +338,6 @@ export function ConversationList({ selectedConversationId, provider, onConversat
       }
 
       // Use server action instead of direct API call
-      const { archiveConversationAction } = await import('@/actions/nexus/archive-conversation.actions')
       const result = await archiveConversationAction({ conversationId })
 
       if (!result.isSuccess) {
@@ -439,14 +439,12 @@ export function ConversationList({ selectedConversationId, provider, onConversat
         <div className="text-center py-8">
           <MessageSquareIcon className="h-12 w-12 mx-auto mb-4 text-muted-foreground/50" />
           <p className="text-sm text-muted-foreground">
-            {provider ? 'No conversations yet' : activeTab === 'chat' ? 'No conversations yet' : 'No assistant executions yet'}
+            {provider || activeTab === 'chat' ? 'No conversations yet' : 'No assistant executions yet'}
           </p>
           <p className="text-xs text-muted-foreground/60 mt-1">
-            {provider
+            {provider || activeTab === 'chat'
               ? 'Your conversations will appear here'
-              : activeTab === 'chat'
-                ? 'Your conversations will appear here'
-                : 'Run an assistant architect to see results here'}
+              : 'Run an assistant architect to see results here'}
           </p>
         </div>
       ) : (

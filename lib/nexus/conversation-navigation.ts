@@ -7,13 +7,20 @@ import { createLogger } from '@/lib/client-logger'
 const log = createLogger({ moduleName: 'conversation-navigation' })
 
 /**
- * Validates a conversation ID format
+ * Validates a conversation ID format (RFC 4122 UUID v4)
  * @param conversationId - The conversation ID to validate
- * @returns true if the conversation ID is valid, false otherwise
+ * @returns true if the conversation ID is a valid UUID v4, false otherwise
  */
 export function validateConversationId(conversationId: string | null | undefined): conversationId is string {
   if (!conversationId) return false
-  return /^[\w-]{1,50}$/.test(conversationId)
+
+  // UUID v4 format: xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx
+  // - 8-4-4-4-12 hexadecimal digits separated by hyphens
+  // - Third group starts with '4' (version 4)
+  // - Fourth group starts with '8', '9', 'a', or 'b' (variant bits)
+  const uuidV4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+
+  return uuidV4Pattern.test(conversationId)
 }
 
 /**

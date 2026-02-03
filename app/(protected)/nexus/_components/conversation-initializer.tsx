@@ -2,7 +2,9 @@
 
 import { useState, useEffect } from 'react'
 import { type UIMessage } from '@ai-sdk/react'
+import { useSession } from 'next-auth/react'
 import { createLogger } from '@/lib/client-logger'
+import type { MessagePart } from '@/lib/db/drizzle/nexus-messages'
 
 const log = createLogger({ moduleName: 'conversation-initializer' })
 
@@ -10,55 +12,115 @@ const log = createLogger({ moduleName: 'conversation-initializer' })
 // Static tool format: type is 'tool-{toolName}' (e.g., 'tool-show_chart')
 // AISDKMessageConverter extracts toolName via type.replace("tool-", "")
 type TextPart = { type: 'text'; text: string }
-type StaticToolPart = {
-  type: string;  // 'tool-{toolName}' format
+
+// Discriminated union for tool states
+type StaticToolPartBase = {
+  type: `tool-${string}`;  // Template literal type for 'tool-{toolName}' format
   toolCallId: string;
-  state: 'output-available' | 'output-error' | 'input-available';
   input: Record<string, unknown>;
-  output?: unknown;
-  errorText?: string;
 }
+
+type StaticToolPartOutputAvailable = StaticToolPartBase & {
+  state: 'output-available';
+  output: unknown;
+  errorText?: undefined;
+}
+
+type StaticToolPartOutputError = StaticToolPartBase & {
+  state: 'output-error';
+  errorText: string;
+  output?: undefined;
+}
+
+type StaticToolPartInputAvailable = StaticToolPartBase & {
+  state: 'input-available';
+  output?: undefined;
+  errorText?: undefined;
+}
+
+type StaticToolPart = StaticToolPartOutputAvailable | StaticToolPartOutputError | StaticToolPartInputAvailable
 type UIMessagePart = TextPart | StaticToolPart
 
-// Helper to convert content parts to UIMessage parts format
-// Converts tool-call to static tool format (type: 'tool-{toolName}')
-export function convertContentToParts(
-  content?: Array<{ type: string; text?: string; [key: string]: unknown }> | string
-): UIMessagePart[] {
+// API response type - explicitly matches MessagePart structure from database
+type ApiMessageContent = MessagePart[] | string
+
+// Type guard for tool-call parts
+function isToolCallPart(part: MessagePart): part is MessagePart & {
+  type: 'tool-call';
+  toolName: string;
+  toolCallId: string
+} {
+  return part.type === 'tool-call' &&
+         typeof part.toolName === 'string' &&
+         typeof part.toolCallId === 'string'
+}
+
+/**
+ * Helper to convert content parts to UIMessage parts format
+ * Converts tool-call to static tool format (type: 'tool-{toolName}')
+ */
+export function convertContentToParts(content?: ApiMessageContent): UIMessagePart[] {
   if (Array.isArray(content)) {
     const parts: UIMessagePart[] = []
 
     for (const part of content) {
       // Convert tool-call to static tool format for AISDKMessageConverter
       // type: 'tool-{toolName}' -> converter extracts toolName via type.replace("tool-", "")
-      if (part.type === 'tool-call' && part.toolName && part.toolCallId) {
-        const toolName = part.toolName as string
-        const args = (part.args as Record<string, unknown>) || {}
+      if (isToolCallPart(part)) {
+        const args = part.args ?? {}
         const hasResult = part.result !== undefined
         const isError = part.isError === true
+        const input = typeof args === 'object' && args !== null ? args as Record<string, unknown> : {}
 
-        const toolPart: StaticToolPart = {
-          type: `tool-${toolName}`,  // e.g., 'tool-show_chart'
-          toolCallId: part.toolCallId as string,
-          state: isError ? 'output-error' : hasResult ? 'output-available' : 'input-available',
-          input: args,
-        }
+        let toolPart: StaticToolPart
 
-        if (hasResult && !isError) {
-          toolPart.output = part.result
-        }
         if (isError) {
-          toolPart.errorText = typeof part.result === 'string' ? part.result : JSON.stringify(part.result)
+          // Error state
+          let errorText: string
+          if (typeof part.result === 'string') {
+            errorText = part.result
+          } else {
+            try {
+              errorText = JSON.stringify(part.result)
+            } catch {
+              errorText = String(part.result)
+            }
+          }
+          toolPart = {
+            type: `tool-${part.toolName}`,
+            toolCallId: part.toolCallId,
+            state: 'output-error',
+            input,
+            errorText,
+          }
+        } else if (hasResult) {
+          // Output available state
+          toolPart = {
+            type: `tool-${part.toolName}`,
+            toolCallId: part.toolCallId,
+            state: 'output-available',
+            input,
+            output: part.result,
+          }
+        } else {
+          // Input available state (no result yet)
+          toolPart = {
+            type: `tool-${part.toolName}`,
+            toolCallId: part.toolCallId,
+            state: 'input-available',
+            input,
+          }
         }
 
         parts.push(toolPart)
-      } else {
+      } else if (part.type === 'text') {
         // Convert text parts
         parts.push({
           type: 'text',
-          text: part.text || ''
+          text: part.text ?? ''
         })
       }
+      // Skip other part types (image, tool-result)
     }
 
     return parts
@@ -69,7 +131,21 @@ export function convertContentToParts(
   return [{ type: 'text', text: '' }]
 }
 
-// Component to load conversation messages before creating runtime
+// Type for API response message
+interface ApiMessage {
+  id: string
+  role: 'user' | 'assistant' | 'system'
+  content?: ApiMessageContent
+  createdAt?: string | Date
+}
+
+/**
+ * Component to load conversation messages before creating runtime
+ *
+ * CRITICAL: Pass `stableConversationId` (not `conversationId`) to prevent
+ * remounting when conversation ID is assigned during runtime.
+ * See /docs/features/nexus-conversation-architecture.md
+ */
 export function ConversationInitializer({
   conversationId,
   children
@@ -79,35 +155,49 @@ export function ConversationInitializer({
 }) {
   const [messages, setMessages] = useState<UIMessage[]>([])
   const [loading, setLoading] = useState(true)
+  const { status } = useSession()
 
   useEffect(() => {
+    // Verify authentication before making API call
+    if (status === 'loading') {
+      // Still determining auth state
+      setLoading(true)
+      return
+    }
+
+    if (status === 'unauthenticated') {
+      log.warn('User not authenticated, skipping conversation load')
+      setMessages([])
+      setLoading(false)
+      return
+    }
+
     if (!conversationId) {
       setMessages([])
       setLoading(false)
       return
     }
 
+    let cancelled = false
     setLoading(true)
     log.debug('ConversationInitializer loading messages', { conversationId })
 
     fetch(`/api/nexus/conversations/${conversationId}/messages`)
       .then(res => {
+        if (cancelled) return null
         if (!res.ok) {
           throw new Error(`Failed to load messages: ${res.status}`)
         }
-        return res.json()
+        return res.json() as Promise<{ messages: ApiMessage[] }>
       })
       .then(data => {
+        if (cancelled || !data) return
+
         const loadedMessages = data.messages || []
         log.debug('Messages loaded from API', { count: loadedMessages.length })
 
         // Convert to UIMessage format (required by useChatRuntime)
-        const threadMessages = loadedMessages.map((msg: {
-          id: string
-          role: 'user' | 'assistant' | 'system'
-          content?: Array<{ type: string; text?: string; [key: string]: unknown }> | string
-          createdAt?: string | Date
-        }) => ({
+        const threadMessages: UIMessage[] = loadedMessages.map((msg) => ({
           id: msg.id,
           role: msg.role,
           parts: convertContentToParts(msg.content)
@@ -118,6 +208,8 @@ export function ConversationInitializer({
         log.debug('Messages converted and ready', { count: threadMessages.length })
       })
       .catch(error => {
+        if (cancelled) return
+
         log.error('Failed to load conversation', {
           conversationId,
           error: error instanceof Error ? error.message : String(error)
@@ -125,7 +217,11 @@ export function ConversationInitializer({
         setMessages([])
         setLoading(false)
       })
-  }, [conversationId])
+
+    return () => {
+      cancelled = true
+    }
+  }, [conversationId, status])
 
   if (loading) {
     return (
