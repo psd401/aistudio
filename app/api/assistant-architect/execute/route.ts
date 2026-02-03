@@ -17,6 +17,7 @@ import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { storeExecutionEvent } from '@/lib/assistant-architect/event-storage';
 import { createConversation, updateConversation, getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 import { createMessageWithStats } from '@/lib/db/drizzle/nexus-messages';
+import type { AssistantArchitectMessageMetadata } from '@/lib/db/types/jsonb';
 
 // Allow streaming responses up to 15 minutes for long chains
 export const maxDuration = 900;
@@ -1024,6 +1025,15 @@ async function executeSinglePromptWithCompletion(
               // Each prompt in the chain gets its own message for later resumption
               if (context.conversation) {
                 try {
+                  const metadata: AssistantArchitectMessageMetadata = {
+                    source: 'assistant-architect-execution',
+                    executionId: context.executionId,
+                    promptId: prompt.id,
+                    promptName: prompt.name,
+                    position: prompt.position,
+                    executionTimeMs,
+                  };
+
                   await createMessageWithStats({
                     conversationId: context.conversation.conversationId,
                     role: 'assistant',
@@ -1034,14 +1044,7 @@ async function executeSinglePromptWithCompletion(
                       completionTokens: usage.completionTokens,
                       totalTokens: usage.totalTokens,
                     } : undefined,
-                    metadata: {
-                      source: 'assistant-architect-execution',
-                      executionId: context.executionId,
-                      promptId: prompt.id,
-                      promptName: prompt.name,
-                      position: prompt.position,
-                      executionTimeMs,
-                    },
+                    metadata: metadata as unknown as Record<string, unknown>,
                   });
 
                   log.info('Prompt result saved as conversation message', {
@@ -1234,21 +1237,30 @@ async function executeSinglePromptWithCompletion(
     // Save failed prompt result as a conversation message (#699)
     if (context.conversation) {
       try {
-        const failureContent = `⚠️ Prompt "${prompt.name}" failed: ${errorMsg}`;
+        // Sanitize error message for safe storage (remove file paths, limit length)
+        const sanitizedPromptName = String(prompt.name).substring(0, 100).replace(/[<>"'&]/g, '');
+        const sanitizedError = String(sanitizeForLogging(errorMsg))
+          .substring(0, 500)
+          .replace(/\/[a-zA-Z0-9/_-]+\/[a-zA-Z0-9/_-]+\.ts/g, '[file]');
+
+        const failureContent = `⚠️ Prompt "${sanitizedPromptName}" failed: ${sanitizedError}`;
+
+        const failureMetadata: AssistantArchitectMessageMetadata = {
+          source: 'assistant-architect-execution',
+          executionId: context.executionId,
+          promptId: prompt.id,
+          promptName: prompt.name,
+          position: prompt.position,
+          failed: true,
+          error: sanitizedError,
+        };
+
         await createMessageWithStats({
           conversationId: context.conversation.conversationId,
           role: 'assistant',
           content: failureContent,
           parts: [{ type: 'text', text: failureContent }],
-          metadata: {
-            source: 'assistant-architect-execution',
-            executionId: context.executionId,
-            promptId: prompt.id,
-            promptName: prompt.name,
-            position: prompt.position,
-            failed: true,
-            error: errorMsg,
-          },
+          metadata: failureMetadata as unknown as Record<string, unknown>,
         });
       } catch (msgErr) {
         log.error('Failed to save failed prompt as conversation message', {
