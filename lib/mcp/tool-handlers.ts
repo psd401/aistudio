@@ -15,10 +15,12 @@ import {
   queryGraphNodes,
   queryGraphNode,
   queryNodeConnections,
-  insertGraphNode,
-  insertGraphEdge,
-  GraphServiceError,
 } from "@/lib/graph/graph-service"
+import {
+  captureStructuredDecision,
+  createDecisionSchema,
+} from "@/lib/graph/decision-capture-service"
+import { isValidationError } from "@/types/error-types"
 import { executeAssistantForJobCompletion } from "@/lib/api/assistant-execution-service"
 import { listAccessibleAssistants } from "@/lib/api/assistant-service"
 import { isAdminByUserId } from "@/lib/api/route-helpers"
@@ -84,69 +86,48 @@ async function handleCaptureDecision(
 ): Promise<McpToolResult> {
   const log = createLogger({ requestId: context.requestId, action: "mcp.capture_decision" })
 
-  const name = args.name as string
-  const nodeType = args.nodeType as string
-  const nodeClass = args.nodeClass as string
-  const description = typeof args.description === "string" ? args.description : undefined
-
-  if (!name || !nodeType || !nodeClass) {
+  // Validate input with shared Zod schema
+  const parsed = createDecisionSchema.safeParse(args)
+  if (!parsed.success) {
+    const issues = parsed.error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ")
     return {
-      content: [{ type: "text", text: "Missing required fields: name, nodeType, nodeClass" }],
+      content: [{ type: "text", text: `Validation failed: ${issues}` }],
       isError: true,
     }
   }
 
   try {
-    const node = await insertGraphNode(
-      { name, nodeType, nodeClass, description },
-      context.userId
-    )
+    const result = await captureStructuredDecision(parsed.data, context.userId, context.requestId)
 
-    log.info("Decision node created via MCP", { nodeId: node.id })
-
-    // Optionally create an edge
-    let edge = null
-    if (typeof args.linkedNodeId === "string" && typeof args.edgeType === "string") {
-      try {
-        edge = await insertGraphEdge(
-          {
-            sourceNodeId: node.id,
-            targetNodeId: args.linkedNodeId,
-            edgeType: args.edgeType,
-          },
-          context.userId
-        )
-        log.info("Decision edge created via MCP", { edgeId: edge.id })
-      } catch (edgeError) {
-        if (edgeError instanceof GraphServiceError) {
-          return {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify({
-                  node: { id: node.id, name: node.name },
-                  edgeError: edgeError.message,
-                }),
-              },
-            ],
-          }
-        }
-        throw edgeError
-      }
-    }
+    log.info("Structured decision captured via MCP", {
+      decisionNodeId: result.decisionNodeId,
+      nodesCreated: result.nodesCreated,
+      edgesCreated: result.edgesCreated,
+      completenessScore: result.completenessScore,
+    })
 
     return {
       content: [
         {
           type: "text",
           text: JSON.stringify({
-            node: { id: node.id, name: node.name, nodeType: node.nodeType },
-            edge: edge ? { id: edge.id, edgeType: edge.edgeType } : null,
+            decisionNodeId: result.decisionNodeId,
+            nodesCreated: result.nodesCreated,
+            edgesCreated: result.edgesCreated,
+            completenessScore: result.completenessScore,
+            ...(result.warnings.length > 0 && { warnings: result.warnings }),
           }),
         },
       ],
     }
   } catch (error) {
+    if (isValidationError(error)) {
+      log.warn("capture_decision validation failed", { error: error.message })
+      return {
+        content: [{ type: "text", text: `Validation error: ${error.message}` }],
+        isError: true,
+      }
+    }
     log.error("capture_decision failed", {
       error: error instanceof Error ? error.message : String(error),
     })
