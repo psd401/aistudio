@@ -145,7 +145,7 @@ export class GuardrailsStack extends cdk.Stack {
             // cover distinct categories: general self-harm, suicide, eating disorders,
             // and instructional content.
             name: 'Self-Harm',
-            definition: 'Content that actively promotes, provides instructions for, or glorifies self-harm, suicide, or eating disorders. Focus on instructional or promotional content, not educational discussions or behavioral documentation.',
+            definition: 'Content that promotes, instructs, or glorifies self-harm, suicide, or eating disorders. Targets instructional or promotional content, not educational discussions or behavioral documentation.',
             type: 'DENY',
             examples: [
               'Methods of self-harm',
