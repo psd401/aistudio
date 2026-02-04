@@ -112,12 +112,29 @@ export class GuardrailsStack extends cdk.Stack {
       // service has a chance to protect it.
 
       // Topic-based filtering for K-12 inappropriate topics
+      //
+      // Issue #742: All topics switched to detect-only mode (inputAction/outputAction: NONE).
+      // False positives were blocking legitimate K-12 educational content:
+      // - Staff writing about student bullying incidents for PBIS documentation
+      // - AI generating anti-bullying/SEL content classified as "Bullying"
+      // - Student behavioral health discussions classified as "Self-Harm"
+      // - Safety/discipline content hitting Violence + Bullying + Weapons simultaneously
+      //
+      // Strategy: Log all detections without blocking to collect data on what triggers
+      // each topic. Once we understand the false positive patterns, we can selectively
+      // re-enable blocking on topics that don't affect educational use cases.
+      //
+      // Content filters (HATE, VIOLENCE, SEXUAL, etc.) remain active as a safety net.
       topicPolicyConfig: {
         topicsConfig: [
           {
             name: 'Weapons',
             definition: 'Content about weapons, firearms, explosives, or how to make weapons',
             type: 'DENY',
+            inputAction: 'NONE',    // Issue #742: Detect only, don't block
+            inputEnabled: true,      // Still evaluate for logging
+            outputAction: 'NONE',   // Issue #742: Detect only, don't block
+            outputEnabled: true,     // Still evaluate for logging
             examples: [
               'How to build a bomb',
               'Where can I buy a gun without ID',
@@ -128,6 +145,10 @@ export class GuardrailsStack extends cdk.Stack {
             name: 'Drugs',
             definition: 'Content promoting or instructing about illegal drug use or substance abuse',
             type: 'DENY',
+            inputAction: 'NONE',    // Issue #742: Detect only, don't block
+            inputEnabled: true,
+            outputAction: 'NONE',   // Issue #742: Detect only, don't block
+            outputEnabled: true,
             examples: [
               'How to make drugs',
               'Where to buy illegal substances',
@@ -147,6 +168,10 @@ export class GuardrailsStack extends cdk.Stack {
             name: 'Self-Harm',
             definition: 'Content that promotes, instructs, or glorifies self-harm, suicide, or eating disorders. Targets instructional or promotional content, not educational discussions or behavioral documentation.',
             type: 'DENY',
+            inputAction: 'NONE',    // Issue #742: Detect only, don't block
+            inputEnabled: true,
+            outputAction: 'NONE',   // Issue #742: Detect only, don't block
+            outputEnabled: true,
             examples: [
               'Methods of self-harm',
               'Ways to commit suicide',
@@ -156,13 +181,23 @@ export class GuardrailsStack extends cdk.Stack {
             ],
           },
           {
+            // Issue #742: Refined definition to narrow scope (matching Self-Harm pattern).
+            // Previous broad definition "promotes bullying, harassment, or intimidation"
+            // was triggering on AI responses discussing anti-bullying programs, PBIS
+            // documentation, and student incident reports.
             name: 'Bullying',
-            definition: 'Content that promotes bullying, harassment, or intimidation of others',
+            definition: 'Instructions, encouragement, or strategies for bullying, harassing, or intimidating specific individuals. Targets instructional or promotional content, not educational discussions about anti-bullying, behavior documentation, or student incident reporting.',
             type: 'DENY',
+            inputAction: 'NONE',    // Issue #742: Detect only, don't block
+            inputEnabled: true,
+            outputAction: 'NONE',   // Issue #742: Detect only, don't block
+            outputEnabled: true,
             examples: [
               'Ways to cyberbully someone',
               'How to harass classmates',
               'Creating fake profiles to bully',
+              'Strategies to intimidate a student',
+              'How to spread rumors about someone at school',
             ],
           },
         ],
