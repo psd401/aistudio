@@ -281,8 +281,9 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
             .where(gte(nexusConversations.createdAt, sevenDaysAgo)),
         "getActivityStats-activeUsers"
       ),
-      // Estimated cost: total_tokens * blended rate from ai_models pricing
-      // Uses (input_cost + output_cost) / 2 as blended rate since we only have total tokens
+      // Estimated cost combines:
+      // 1. Token-based cost: total_tokens * blended rate from ai_models pricing
+      // 2. Image generation cost: SUM of estimatedCost from nexus_messages metadata
       executeQuery(
         (db) =>
           db
@@ -291,6 +292,10 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
                 ${nexusConversations.totalTokens}::numeric
                 * (COALESCE(${aiModels.inputCostPer1kTokens}, 0) + COALESCE(${aiModels.outputCostPer1kTokens}, 0))
                 / 2.0 / 1000.0
+              ), 0) + COALESCE((
+                SELECT SUM((${nexusMessages.metadata}->>'estimatedCost')::numeric)
+                FROM ${nexusMessages}
+                WHERE ${nexusMessages.metadata}->>'estimatedCost' IS NOT NULL
               ), 0)`,
             })
             .from(nexusConversations)
@@ -308,6 +313,11 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
                 ${nexusConversations.totalTokens}::numeric
                 * (COALESCE(${aiModels.inputCostPer1kTokens}, 0) + COALESCE(${aiModels.outputCostPer1kTokens}, 0))
                 / 2.0 / 1000.0
+              ), 0) + COALESCE((
+                SELECT SUM((${nexusMessages.metadata}->>'estimatedCost')::numeric)
+                FROM ${nexusMessages}
+                WHERE ${nexusMessages.metadata}->>'estimatedCost' IS NOT NULL
+                  AND ${nexusMessages.createdAt} >= ${oneDayAgo}
               ), 0)`,
             })
             .from(nexusConversations)
@@ -326,6 +336,11 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
                 ${nexusConversations.totalTokens}::numeric
                 * (COALESCE(${aiModels.inputCostPer1kTokens}, 0) + COALESCE(${aiModels.outputCostPer1kTokens}, 0))
                 / 2.0 / 1000.0
+              ), 0) + COALESCE((
+                SELECT SUM((${nexusMessages.metadata}->>'estimatedCost')::numeric)
+                FROM ${nexusMessages}
+                WHERE ${nexusMessages.metadata}->>'estimatedCost' IS NOT NULL
+                  AND ${nexusMessages.createdAt} >= ${sevenDaysAgo}
               ), 0)`,
             })
             .from(nexusConversations)
@@ -446,12 +461,17 @@ export async function getNexusActivity(
 
     const whereClause = and(...conditions)
 
-    // Estimated cost per conversation: total_tokens * blended rate from ai_models
+    // Estimated cost per conversation: token-based cost + image generation cost
     const costSubquery = sql<string>`COALESCE(
       ${nexusConversations.totalTokens}::numeric
       * (COALESCE(${aiModels.inputCostPer1kTokens}, 0) + COALESCE(${aiModels.outputCostPer1kTokens}, 0))
       / 2.0 / 1000.0
-    , 0)`
+    , 0) + COALESCE((
+      SELECT SUM((${nexusMessages.metadata}->>'estimatedCost')::numeric)
+      FROM ${nexusMessages}
+      WHERE ${nexusMessages.conversationId} = ${nexusConversations.id}
+        AND ${nexusMessages.metadata}->>'estimatedCost' IS NOT NULL
+    ), 0)`
 
     // Parallel fetch: data + count
     const [items, countResult] = await Promise.all([
@@ -853,12 +873,17 @@ export async function getAssistantConversationActivity(
 
     const whereClause = and(...conditions)
 
-    // Estimated cost per conversation: total_tokens * blended rate from ai_models
+    // Estimated cost per conversation: token-based cost + image generation cost
     const costSubquery = sql<string>`COALESCE(
       ${nexusConversations.totalTokens}::numeric
       * (COALESCE(${aiModels.inputCostPer1kTokens}, 0) + COALESCE(${aiModels.outputCostPer1kTokens}, 0))
       / 2.0 / 1000.0
-    , 0)`
+    , 0) + COALESCE((
+      SELECT SUM((${nexusMessages.metadata}->>'estimatedCost')::numeric)
+      FROM ${nexusMessages}
+      WHERE ${nexusMessages.conversationId} = ${nexusConversations.id}
+        AND ${nexusMessages.metadata}->>'estimatedCost' IS NOT NULL
+    ), 0)`
 
     const [items, countResult] = await Promise.all([
       executeQuery(
