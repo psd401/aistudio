@@ -80,6 +80,11 @@ export class BedrockGuardrailsService {
     if (!this.config.guardrailId) {
       this.log.warn('Bedrock Guardrail ID not configured - content safety filtering disabled');
     }
+
+    // Issue #727: Validate GUARDRAIL_HASH_SECRET is set for privacy protection
+    if (!process.env.GUARDRAIL_HASH_SECRET && !config?.hashSecret) {
+      this.log.warn('GUARDRAIL_HASH_SECRET not configured - using default secret for session ID hashing (weakens privacy protection)');
+    }
   }
 
   /**
@@ -109,6 +114,20 @@ export class BedrockGuardrailsService {
     }
 
     const requestId = generateRequestId();
+
+    // Issue #727: Monitor for suspicious patterns even when PROMPT_ATTACK filter is disabled
+    // This provides visibility into potential injection attempts without blocking legitimate content
+    const suspiciousPatterns = this.detectSuspiciousPatterns(content);
+    if (suspiciousPatterns.length > 0) {
+      this.log.warn('Suspicious prompt patterns detected (allowed due to disabled PROMPT_ATTACK filter)', {
+        requestId,
+        sessionId,
+        patterns: suspiciousPatterns,
+        contentLength: content.length,
+        contentPreview: content.substring(0, 200),
+      });
+    }
+
     this.log.info('Evaluating input content', {
       requestId,
       contentLength: content.length,
@@ -334,6 +353,67 @@ export class BedrockGuardrailsService {
     }
 
     return categories;
+  }
+
+  /**
+   * Detect potentially malicious prompt injection patterns
+   *
+   * Issue #727: With PROMPT_ATTACK filter disabled (inputStrength: NONE), we monitor
+   * for suspicious patterns to maintain visibility into potential attacks without blocking
+   * legitimate educational content. LLM safety training still prevents actual exploitation.
+   *
+   * @param content - User input content to analyze
+   * @returns Array of detected pattern types (empty if none found)
+   */
+  private detectSuspiciousPatterns(content: string): string[] {
+    const patterns: string[] = [];
+    const lowerContent = content.toLowerCase();
+
+    // System instruction override attempts
+    if (lowerContent.includes('system instruction') ||
+        lowerContent.includes('system prompt') ||
+        lowerContent.includes('system message') ||
+        lowerContent.includes('ignore previous') ||
+        lowerContent.includes('ignore all previous') ||
+        lowerContent.includes('disregard previous') ||
+        lowerContent.includes('forget everything')) {
+      patterns.push('system_override_attempt');
+    }
+
+    // Role manipulation attempts
+    const roleManipulationPatterns = [
+      /you\s+are\s+now\s+(?:a|an|the)/iu,
+      /act\s+as\s+(?:if|though)\s+you\s+(?:are|were)/iu,
+      /pretend\s+(?:to\s+be|you\s+are)/iu,
+      /simulate\s+(?:being|a)/iu,
+    ];
+    // Exclude legitimate educational role-playing (context: Danielson observations, teacher evaluation)
+    const isLegitimateRolePlaying = /principal|teacher|administrator|superintendent|danielson|evaluation|observation/iu.test(content);
+    if (!isLegitimateRolePlaying && roleManipulationPatterns.some(pattern => pattern.test(content))) {
+      patterns.push('role_manipulation');
+    }
+
+    // Data extraction attempts
+    if (lowerContent.includes('show me your prompt') ||
+        lowerContent.includes('what are your instructions') ||
+        lowerContent.includes('reveal your system prompt') ||
+        lowerContent.includes('output your configuration')) {
+      patterns.push('data_extraction_attempt');
+    }
+
+    // Delimiter/encoding bypass attempts
+    if ((/[<>]{3,}/u.test(content) && /<\/?system>/iu.test(content)) ||
+        content.includes('[INST]') ||
+        /\{\{\{\s*system/iu.test(content)) {
+      patterns.push('delimiter_bypass');
+    }
+
+    // Jailbreak/DAN patterns
+    if (/do\s+anything\s+now|dan\s+mode|developer\s+mode/iu.test(content)) {
+      patterns.push('jailbreak_attempt');
+    }
+
+    return patterns;
   }
 
   /**

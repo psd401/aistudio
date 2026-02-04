@@ -252,7 +252,26 @@ describe('BedrockGuardrailsService', () => {
    *
    * Filter changes in Issue #727:
    * - PROMPT_ATTACK: LOW → NONE (3/4 detections were false positives)
-   * - Self-Harm topic: definition refined to exclude K-12 behavioral language
+   * - Self-Harm topic: definition simplified with stronger positive examples
+   *
+   * IMPORTANT - Test Coverage Limitations:
+   * These tests use mocked AWS clients and validate graceful degradation
+   * (service behavior when AWS is unavailable), NOT actual guardrail filtering.
+   * To verify actual Bedrock Guardrails behavior, you must:
+   *
+   * 1. Deploy to dev environment: `cd infra && npx cdk deploy AIStudio-GuardrailsStack-Dev`
+   * 2. Manually test with the content below (see manual test checklist in PR description)
+   * 3. Monitor CloudWatch logs for 24 hours post-deployment
+   * 4. Use CloudWatch Logs Insights query to validate false positive rate:
+   *
+   *    fields @timestamp, requestId, source, blockedCategories, action
+   *    | filter module = "BedrockGuardrailsService"
+   *    | filter action = "blocked"
+   *    | stats count() by source, blockedCategories
+   *    | sort count desc
+   *
+   * Integration tests against real Bedrock API are expensive/slow and not
+   * included in the CI pipeline. Production validation is the primary verification.
    */
   describe('production false positives (Issue #727)', () => {
     it('should process PBIS "hands to self" behavior tracking content', async () => {

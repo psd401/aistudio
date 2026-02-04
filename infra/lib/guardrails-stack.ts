@@ -135,11 +135,13 @@ export class GuardrailsStack extends cdk.Stack {
             ],
           },
           {
-            // Issue #727: Refined definition to exclude K-12 behavioral management terminology.
-            // PBIS language like "hands to self" and SEL self-regulation curricula were
-            // triggering false positives on the Self-Harm topic filter.
+            // Issue #727: Simplified definition with stronger positive examples.
+            // ML-based filtering works better with focused definitions and diverse examples
+            // showing what TO block, rather than long exclusion lists. K-12 behavioral
+            // management language (PBIS, SEL self-regulation) is not harmful and should
+            // not match these explicit self-harm examples.
             name: 'Self-Harm',
-            definition: 'Content that promotes, instructs, or glorifies self-harm, suicide, or eating disorders. This does NOT include K-12 behavioral management language such as PBIS expectations (e.g., "keep hands to self", "safe body"), social-emotional learning (SEL) curricula discussing self-regulation, self-monitoring, or self-advocacy, or educator discussions about student behavioral incidents and intervention strategies.',
+            definition: 'Content that actively promotes, provides instructions for, or glorifies self-harm, suicide, or eating disorders. Focus on instructional or promotional content, not educational discussions or behavioral documentation.',
             type: 'DENY',
             examples: [
               'Methods of self-harm',
@@ -147,6 +149,9 @@ export class GuardrailsStack extends cdk.Stack {
               'Pro-eating disorder content',
               'Ways to commit suicide',
               'I want to end my life',
+              'Step by step guide to self-injury',
+              'Best ways to hide self-harm',
+              'How to restrict food intake severely',
             ],
           },
           {
