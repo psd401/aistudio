@@ -36,6 +36,8 @@ export interface GuardrailCheckResult {
   blockedMessage?: string;
   /** Categories that triggered blocking */
   blockedCategories?: string[];
+  /** Issue #742: Topics detected in detect-only mode (not blocked) */
+  detectedTopics?: string[];
 }
 
 /**
@@ -96,8 +98,8 @@ export interface GuardrailViolation {
   modelId: string;
   /** Provider used */
   provider: string;
-  /** Action taken (blocked/warned) */
-  action: 'blocked' | 'warned';
+  /** Action taken (blocked/detected/warned) */
+  action: 'blocked' | 'detected' | 'warned';
   /** Conversation ID (if available) */
   conversationId?: string;
   /** Session ID */
