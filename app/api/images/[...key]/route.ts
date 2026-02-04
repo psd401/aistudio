@@ -62,6 +62,14 @@ export async function GET(
     }
 
     const conversationId = pathParts[2];
+
+    // Validate UUID format before database query
+    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    if (!uuidRegex.test(conversationId)) {
+      log.warn('Invalid conversation ID format in path', { conversationId, s3Key });
+      return new Response('Not Found', { status: 404 });
+    }
+
     const userId = currentUser.data.user.id;
 
     // 5. Verify conversation ownership (user can only access their own generated images)

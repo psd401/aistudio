@@ -52,17 +52,22 @@ async function convertPartToTextContent(part: MessagePart): Promise<ContentPart 
 
   if (partType === 'image') {
     // Refresh presigned URL from s3Key if available (fixes expired URL issue)
-    const s3Key = (part as unknown as { s3Key?: string }).s3Key
+    const s3Key = part.s3Key
     if (s3Key) {
       try {
         const freshUrl = await getDocumentSignedUrl({ key: s3Key, expiresIn: 3600 })
         return { type: 'text', text: `![Generated Image](${freshUrl})` }
-      } catch {
-        // Fall through to stored imageUrl if URL generation fails
+      } catch (error) {
+        // Log error and fall through to stored imageUrl if URL generation fails
+        const log = createLogger({ context: 'convertPartToTextContent' })
+        log.warn('Failed to refresh presigned URL from s3Key', {
+          s3Key,
+          error: error instanceof Error ? error.message : String(error)
+        })
       }
     }
     // Fallback to stored imageUrl if no s3Key or URL generation failed
-    const imageUrl = (part as unknown as { imageUrl?: string }).imageUrl
+    const imageUrl = part.imageUrl
     return imageUrl ? { type: 'text', text: `![Generated Image](${imageUrl})` } : null
   }
 
