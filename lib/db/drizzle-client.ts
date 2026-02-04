@@ -105,9 +105,9 @@ function getPgClient(): ReturnType<typeof postgres> {
     const sqlLoggingEnabled = process.env.SQL_LOGGING === "true";
 
     pgClient = postgres(getDatabaseUrl(), {
-      max: parseInt(process.env.DB_MAX_CONNECTIONS || "20", 10),
-      idle_timeout: parseInt(process.env.DB_IDLE_TIMEOUT || "20", 10),
-      connect_timeout: parseInt(process.env.DB_CONNECT_TIMEOUT || "10", 10),
+      max: Number.parseInt(process.env.DB_MAX_CONNECTIONS || "20", 10),
+      idle_timeout: Number.parseInt(process.env.DB_IDLE_TIMEOUT || "20", 10),
+      connect_timeout: Number.parseInt(process.env.DB_CONNECT_TIMEOUT || "10", 10),
       max_lifetime: 60 * 60, // 1 hour - forces reconnection for credential rotation
       prepare: true, // Enable prepared statements for performance
       ssl: sslEnabled ? "require" : false, // SSL required for AWS, optional for local dev

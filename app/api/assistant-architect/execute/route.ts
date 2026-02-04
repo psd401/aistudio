@@ -1248,7 +1248,7 @@ async function executeSinglePromptWithCompletion(
     if (context.conversation) {
       try {
         // Sanitize error message for safe storage (remove file paths, limit length)
-        const sanitizedPromptName = String(prompt.name).substring(0, 100).replace(/[<>"'&]/g, '');
+        const sanitizedPromptName = String(prompt.name).substring(0, 100).replace(/["&'<>]/g, '');
         const sanitizedError = String(sanitizeForLogging(errorMsg))
           .substring(0, 500)
           .replace(/\/[a-zA-Z0-9/_-]+\/[a-zA-Z0-9/_-]+\.ts/g, '[file]');

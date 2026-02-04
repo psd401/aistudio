@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, useCallback } from "react"
+import { useEffect, useState, startTransition } from "react"
 import {
   Sheet,
   SheetContent,
@@ -36,31 +36,30 @@ export function ComparisonDetailSheet({
   const [detail, setDetail] = useState<ComparisonDetailItem | null>(null)
   const [loading, setLoading] = useState(false)
 
-  const loadDetail = useCallback(async () => {
-    if (!comparison?.id) return
-
-    setLoading(true)
-    const result = await getComparisonDetail(comparison.id)
-
-    if (result.isSuccess && result.data) {
-      setDetail(result.data)
-    } else {
-      toast({
-        variant: "destructive",
-        title: "Error loading details",
-        description: result.message,
-      })
-    }
-    setLoading(false)
-  }, [comparison?.id, toast])
-
   useEffect(() => {
     if (open && comparison?.id) {
-      loadDetail()
+      let cancelled = false
+      startTransition(() => { setLoading(true) })
+
+      getComparisonDetail(comparison.id).then(result => {
+        if (cancelled) return
+        if (result.isSuccess && result.data) {
+          setDetail(result.data)
+        } else {
+          toast({
+            variant: "destructive",
+            title: "Error loading details",
+            description: result.message,
+          })
+        }
+        setLoading(false)
+      })
+
+      return () => { cancelled = true }
     } else {
-      setDetail(null)
+      startTransition(() => { setDetail(null) })
     }
-  }, [open, comparison?.id, loadDetail])
+  }, [open, comparison?.id, toast])
 
   if (!comparison) return null
 

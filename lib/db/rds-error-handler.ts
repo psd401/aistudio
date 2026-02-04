@@ -161,9 +161,9 @@ export function isRetryableError(error: unknown): boolean {
       /terminating connection/i,
       /server closed the connection/i,
       /too many connections/i,
-      /Connection terminated/i,
-      /Connection refused/i,
-      /Connection reset/i,
+      /connection terminated/i,
+      /connection refused/i,
+      /connection reset/i,
     ]
 
     if (connectionErrorPatterns.some(pattern => pattern.test(error.message))) {

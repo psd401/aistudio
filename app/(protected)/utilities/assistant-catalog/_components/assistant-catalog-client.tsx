@@ -1,6 +1,6 @@
 "use client"
 
-import { useMemo, useState, useEffect } from "react"
+import { useMemo, useState, useEffect, startTransition } from "react"
 import { useDebounce } from "use-debounce"
 import { Search, X, Star } from "lucide-react"
 import { Card, CardContent, CardHeader } from "@/components/ui/card"
@@ -41,7 +41,7 @@ export function AssistantCatalogClient({ initialAssistants }: AssistantCatalogCl
   const [isHydrated, setIsHydrated] = useState(false)
 
   useEffect(() => {
-    setIsHydrated(true)
+    startTransition(() => { setIsHydrated(true) })
   }, [])
 
   // Filter assistants based on category, search, and favorites

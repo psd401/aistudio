@@ -109,6 +109,7 @@
     "argon2": "^0.44.0",
     "aws-amplify": "^6.16.0",
     "aws-jwt-verify": "^5.1.1",
+    "babel-plugin-react-compiler": "^1.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",

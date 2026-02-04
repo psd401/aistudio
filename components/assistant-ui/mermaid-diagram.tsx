@@ -3,7 +3,7 @@
 import { useMessagePart } from "@assistant-ui/react";
 import type { SyntaxHighlighterProps } from "@assistant-ui/react-markdown";
 import mermaid from "mermaid";
-import { FC, useEffect, useRef, useId, useState } from "react";
+import { FC, useEffect, useRef, useId, useState, startTransition } from "react";
 import { cn } from "@/lib/utils";
 
 /**
@@ -71,7 +71,7 @@ export const MermaidDiagram: FC<MermaidDiagramProps> = ({
 
     // Set initial theme
     const isDark = document.documentElement.classList.contains('dark');
-    setTheme(isDark ? 'dark' : 'default');
+    startTransition(() => { setTheme(isDark ? 'dark' : 'default') });
 
     // Start observing
     observer.observe(document.documentElement, {

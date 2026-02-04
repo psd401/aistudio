@@ -1,6 +1,7 @@
 /** @type {import('next').NextConfig} */
 
 const nextConfig = {
+  reactCompiler: true,
   output: 'standalone', // Required for ECS Fargate deployment
   transpilePackages: ['recharts'], // Required for Turbopack to resolve recharts dynamic imports
   serverExternalPackages: ['argon2'], // Native modules that must not be bundled by Turbopack

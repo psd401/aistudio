@@ -304,7 +304,7 @@ export function UsersDataTable({
                   ))}
                 </TableRow>
               ))
-            ) : table.getRowModel().rows.length ? (
+            ) : table.getRowModel().rows.length > 0 ? (
               table.getRowModel().rows.map((row) => (
                 <TableRow
                   key={row.id}

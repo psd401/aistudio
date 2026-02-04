@@ -6,7 +6,7 @@ import { type UIMessage } from '@ai-sdk/react'
 import { Thread } from '@/components/assistant-ui/thread'
 import { useSession } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { useEffect, useMemo, useCallback, useState, useRef, Suspense } from 'react'
+import { useEffect, useMemo, useCallback, useState, Suspense } from 'react'
 import { NexusShell } from './_components/layout/nexus-shell'
 import { NexusLayout } from './_components/layout/nexus-layout'
 import { ErrorBoundary } from './_components/error-boundary'
@@ -63,19 +63,6 @@ function ConversationRuntimeProvider({
     [conversationId]
   )
 
-  // Use ref to prevent stale closure on enabledTools
-  const enabledToolsRef = useRef(enabledTools)
-  useEffect(() => {
-    enabledToolsRef.current = enabledTools
-  }, [enabledTools])
-
-  // Use ref for conversation ID to ensure synchronous updates
-  // This prevents race conditions when sending multiple messages quickly
-  const conversationIdRef = useRef(conversationId)
-  useEffect(() => {
-    conversationIdRef.current = conversationId
-  }, [conversationId])
-
   // Custom fetch to intercept X-Conversation-Id header for conversation continuity
   // and handle content safety blocked errors with user-friendly messages
   const customFetch = useCallback(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -103,13 +90,11 @@ function ConversationRuntimeProvider({
 
     // Extract conversation ID from response header (new conversations only)
     const newConversationId = response.headers.get('X-Conversation-Id')
-    if (newConversationId && newConversationId !== conversationIdRef.current) {
+    if (newConversationId && newConversationId !== conversationId) {
       log.debug('Received new conversation ID from server', {
         newConversationId,
-        currentConversationId: conversationIdRef.current
+        currentConversationId: conversationId
       })
-      // Update ref immediately for synchronous access in next message
-      conversationIdRef.current = newConversationId
       // Update parent state for URL and component updates
       if (onConversationIdChange) {
         onConversationIdChange(newConversationId)
@@ -117,7 +102,7 @@ function ConversationRuntimeProvider({
     }
 
     return response
-  }, [onConversationIdChange])
+  }, [conversationId, onConversationIdChange])
 
   // Use official useChatRuntime from @assistant-ui/react-ai-sdk
   // This natively understands AI SDK's streaming format
@@ -130,8 +115,8 @@ function ConversationRuntimeProvider({
       body: () => selectedModel ? {
         modelId: selectedModel.modelId,
         provider: selectedModel.provider,
-        enabledTools: enabledToolsRef.current,
-        conversationId: conversationIdRef.current || undefined
+        enabledTools,
+        conversationId: conversationId || undefined
       } : {}
     }),
     adapters: {

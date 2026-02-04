@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, startTransition } from 'react'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
@@ -67,12 +67,14 @@ export function ToolSelectionSection({
   // Load available tools when model changes
   useEffect(() => {
     if (!selectedModel?.modelId) {
-      setAvailableTools([])
-      setError(null)
+      startTransition(() => {
+        setAvailableTools([])
+        setError(null)
+      })
       return
     }
 
-    setIsLoading(true)
+    startTransition(() => { setIsLoading(true) })
     log.debug('Loading tools for model', {
       modelId: selectedModel.modelId,
       modelName: selectedModel.name

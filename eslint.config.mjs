@@ -124,27 +124,9 @@ export default [
     },
   },
 
-  // Temporarily disable React Compiler experimental rules (Issue #460)
-  // These are optimization hints from the React 19 Compiler, not correctness issues.
-  // The compiler automatically skips components with violations - code still works.
-  // TODO: Re-enable and fix in dedicated optimization sprint when:
-  //   1. React Compiler rules mature and false positives are resolved
-  //   2. Proper time allocated for testing all 39+ affected components
-  //   3. Better guidance from React team on recommended patterns
-  {
-    files: ["**/*.jsx", "**/*.tsx"],
-    rules: {
-      // Disable React Compiler experimental optimization rules
-      "react-compiler/react-compiler": "off",
-      "react-hooks/set-state-in-effect": "off",
-      "react-hooks/error-boundaries": "off",
-      "react-hooks/incompatible-library": "off",
-      "react-hooks/static-components": "off",
-      "react-hooks/refs": "off",
-      "react-hooks/immutability": "off",
-      "react-hooks/preserve-manual-memoization": "off",
-    },
-  },
+  // React Compiler rules - enabled now that compiler is stable (v1.0)
+  // and enabled via reactCompiler: true in next.config.mjs
+  // Violations cause the compiler to skip the component (still works, just not optimized)
 
   // PHASE 4: Enhanced Linting Rules (Issue #460)
 
@@ -214,16 +196,18 @@ export default [
   },
 
   // Performance rules - React optimization
+  // Disabled: React Compiler (v1.0) handles automatic memoization at build time,
+  // making manual useCallback/useMemo unnecessary. These rules are now redundant.
   {
     files: ["**/*.jsx", "**/*.tsx"],
     plugins: {
       "react-perf": reactPerfPlugin,
     },
     rules: {
-      "react-perf/jsx-no-new-object-as-prop": "warn",
-      "react-perf/jsx-no-new-array-as-prop": "warn",
-      "react-perf/jsx-no-new-function-as-prop": "warn",
-      "react-perf/jsx-no-jsx-as-prop": "warn",
+      "react-perf/jsx-no-new-object-as-prop": "off",
+      "react-perf/jsx-no-new-array-as-prop": "off",
+      "react-perf/jsx-no-new-function-as-prop": "off",
+      "react-perf/jsx-no-jsx-as-prop": "off",
     },
   },
 
@@ -365,6 +349,27 @@ export default [
     ],
     rules: {
       "no-console": "off",
+    },
+  },
+
+  // Rule 6: Relaxed rules for build/utility scripts (dynamic paths, complexity inherent)
+  {
+    files: ["scripts/**/*.ts"],
+    rules: {
+      "security/detect-non-literal-fs-filename": "off",
+      "max-depth": "off",
+      "complexity": "off",
+      "max-lines-per-function": "off",
+    },
+  },
+
+  // Rule 7: Relaxed complexity rules for test files
+  {
+    files: ["tests/**/*.ts"],
+    rules: {
+      "max-depth": "off",
+      "complexity": "off",
+      "max-lines-per-function": "off",
     },
   },
 ];

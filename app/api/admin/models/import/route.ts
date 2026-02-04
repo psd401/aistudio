@@ -118,8 +118,8 @@ export async function POST(request: Request) {
 
     // Validate all models
     const validationErrors: string[] = [];
-    for (let i = 0; i < models.length; i++) {
-      const result = validateModel(models[i], i);
+    for (const [i, model] of models.entries()) {
+      const result = validateModel(model, i);
       if (!result.valid) {
         validationErrors.push(...result.errors);
       }

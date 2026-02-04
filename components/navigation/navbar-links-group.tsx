@@ -78,8 +78,8 @@ export function LinksGroup({ icon: Icon, label, type = 'link', links, link, isEx
     );
   });
 
-  // Shared Icon Component
-  const IconDisplay = () => (
+  // Inline icon display element (not a component, avoids "Cannot create components during render")
+  const iconDisplay = (
     <div className={cn(
       "flex h-7 w-7 items-center justify-center rounded-lg border bg-background flex-shrink-0",
       "mr-3"
@@ -88,16 +88,16 @@ export function LinksGroup({ icon: Icon, label, type = 'link', links, link, isEx
     </div>
   );
 
-  // Button content for direct links
-  const DirectLinkButtonContent = () => (
+  // Inline button content for direct links
+  const directLinkButtonContent = (
     <div className={cn(
       "flex items-center w-full",
       "justify-start"
     )}>
-      <IconDisplay />
+      {iconDisplay}
       <AnimatePresence>
         {isExpanded && (
-          <motion.span 
+          <motion.span
             variants={labelVariants}
             initial="collapsed"
             animate="expanded"
@@ -111,17 +111,17 @@ export function LinksGroup({ icon: Icon, label, type = 'link', links, link, isEx
     </div>
   );
 
-  // Button content for dropdowns
-  const DropdownButtonContent = () => (
+  // Inline button content for dropdowns
+  const dropdownButtonContent = (
     <div className={cn(
       "flex items-center w-full",
       "justify-start"
     )}>
-      <IconDisplay />
+      {iconDisplay}
       <AnimatePresence>
         {isExpanded && (
           <>
-            <motion.span 
+            <motion.span
               variants={labelVariants}
               initial="collapsed"
               animate="expanded"
@@ -154,7 +154,7 @@ export function LinksGroup({ icon: Icon, label, type = 'link', links, link, isEx
             "px-3 justify-start"
           )}
         >
-          <DirectLinkButtonContent />
+          {directLinkButtonContent}
         </Button>
       </Link>
     );
@@ -176,7 +176,7 @@ export function LinksGroup({ icon: Icon, label, type = 'link', links, link, isEx
             "px-3 justify-start"
           )}
         >
-          <DropdownButtonContent />
+          {dropdownButtonContent}
         </Button>
       </CollapsibleTrigger>
       

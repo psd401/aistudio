@@ -748,8 +748,7 @@ export async function bulkImportAIModels(
           existingModels.map((m) => [m.modelId, m])
         );
 
-        for (let i = 0; i < models.length; i++) {
-          const model = models[i];
+        for (const model of models) {
           const existing = existingByModelId.get(model.modelId);
 
           // Serialize capabilities to JSON string if provided as array
