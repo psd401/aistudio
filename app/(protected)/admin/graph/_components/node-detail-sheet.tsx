@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, startTransition } from "react"
 import * as Dialog from "@radix-ui/react-dialog"
 import { XIcon } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -41,7 +41,9 @@ export function NodeDetailSheet({
 
   useEffect(() => {
     if (open) {
-      setActiveSection("details")
+      startTransition(() => {
+        setActiveSection("details")
+      })
     }
   }, [open])
 

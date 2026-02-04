@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, useCallback } from "react"
+import { useEffect, useState, startTransition } from "react"
 import {
   Sheet,
   SheetContent,
@@ -36,31 +36,30 @@ export function NexusDetailSheet({
   const [messages, setMessages] = useState<NexusMessageItem[]>([])
   const [loadingMessages, setLoadingMessages] = useState(false)
 
-  const loadMessages = useCallback(async () => {
-    if (!conversation?.id) return
-
-    setLoadingMessages(true)
-    const result = await getConversationMessages(conversation.id)
-
-    if (result.isSuccess && result.data) {
-      setMessages(result.data)
-    } else {
-      toast({
-        variant: "destructive",
-        title: "Error loading messages",
-        description: result.message,
-      })
-    }
-    setLoadingMessages(false)
-  }, [conversation?.id, toast])
-
   useEffect(() => {
     if (open && conversation?.id) {
-      loadMessages()
+      let cancelled = false
+      startTransition(() => { setLoadingMessages(true) })
+
+      getConversationMessages(conversation.id).then(result => {
+        if (cancelled) return
+        if (result.isSuccess && result.data) {
+          startTransition(() => { setMessages(result.data) })
+        } else {
+          toast({
+            variant: "destructive",
+            title: "Error loading messages",
+            description: result.message,
+          })
+        }
+        startTransition(() => { setLoadingMessages(false) })
+      })
+
+      return () => { cancelled = true }
     } else {
-      setMessages([])
+      startTransition(() => { setMessages([]) })
     }
-  }, [open, conversation?.id, loadMessages])
+  }, [open, conversation?.id, toast])
 
   if (!conversation) return null
 

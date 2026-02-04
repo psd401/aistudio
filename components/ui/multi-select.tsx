@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, startTransition } from 'react';
 import { Button } from '@/components/ui/button';
 import { Checkbox } from '@/components/ui/checkbox';
 import {
@@ -48,12 +48,16 @@ export function MultiSelect({
   const [customItems, setCustomItems] = useState<string[]>([]);
 
   useEffect(() => {
-    setSelectedItems(value);
+    startTransition(() => {
+      setSelectedItems(value);
+    });
     // Extract custom items (items not in predefined options)
     if (allowCustom) {
       const optionValues = options.map(o => o.value);
       const custom = value.filter(v => !optionValues.includes(v));
-      setCustomItems(custom);
+      startTransition(() => {
+        setCustomItems(custom);
+      });
     }
   }, [value, options, allowCustom]);
 

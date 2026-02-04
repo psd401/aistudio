@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, startTransition } from 'react'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
@@ -67,12 +67,14 @@ export function ToolSelectionSection({
   // Load available tools when model changes
   useEffect(() => {
     if (!selectedModel?.modelId) {
-      setAvailableTools([])
-      setError(null)
+      startTransition(() => {
+        setAvailableTools([])
+        setError(null)
+      })
       return
     }
 
-    setIsLoading(true)
+    startTransition(() => { setIsLoading(true) })
     log.debug('Loading tools for model', {
       modelId: selectedModel.modelId,
       modelName: selectedModel.name
@@ -81,17 +83,21 @@ export function ToolSelectionSection({
     getAvailableToolsForModel(selectedModel.modelId)
       .then(tools => {
         log.debug('Tools loaded', { tools: tools.map(t => t.name) })
-        setError(null) // Clear any previous errors
-        setAvailableTools(tools)
+        startTransition(() => {
+          setError(null) // Clear any previous errors
+          setAvailableTools(tools)
+        })
         filterIncompatibleTools(tools)
       })
       .catch(error => {
         log.error('Failed to load tools', { error })
-        setError('Failed to load available tools. Please try again.')
-        setAvailableTools([])
+        startTransition(() => {
+          setError('Failed to load available tools. Please try again.')
+          setAvailableTools([])
+        })
       })
       .finally(() => {
-        setIsLoading(false)
+        startTransition(() => { setIsLoading(false) })
       })
   }, [selectedModel?.modelId, selectedModel?.name, filterIncompatibleTools])
 

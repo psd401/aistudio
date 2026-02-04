@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from "react"
+import { useState, useEffect, startTransition } from "react"
 import {
   Dialog,
   DialogContent,
@@ -53,10 +53,12 @@ export function PromptSaveDialog({
   // Reset form when dialog opens/closes
   useEffect(() => {
     if (open) {
-      setTitle(defaultTitle)
-      setDescription("")
-      setVisibility("private")
-      setTags([])
+      startTransition(() => {
+        setTitle(defaultTitle)
+        setDescription("")
+        setVisibility("private")
+        setTags([])
+      })
     }
   }, [open, defaultTitle])
 

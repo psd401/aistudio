@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, startTransition } from 'react'
 import { type UIMessage } from '@ai-sdk/react'
 import { useSession } from 'next-auth/react'
 import { createLogger } from '@/lib/client-logger'
@@ -162,33 +162,39 @@ export function ConversationInitializer({
   useEffect(() => {
     // Verify authentication before making API call
     if (status === 'loading') {
-      setLoading(true)
+      startTransition(() => { setLoading(true) })
       return
     }
 
     if (status === 'unauthenticated') {
       log.warn('User not authenticated, skipping conversation load')
-      setMessages([])
-      setLoading(false)
+      startTransition(() => {
+        setMessages([])
+        setLoading(false)
+      })
       return
     }
 
     // Guard against authenticated status with missing user data
     if (status === 'authenticated' && !session?.user) {
       log.warn('Authenticated but no user data, skipping conversation load')
-      setMessages([])
-      setLoading(false)
+      startTransition(() => {
+        setMessages([])
+        setLoading(false)
+      })
       return
     }
 
     if (!conversationId) {
-      setMessages([])
-      setLoading(false)
+      startTransition(() => {
+        setMessages([])
+        setLoading(false)
+      })
       return
     }
 
     const abortController = new AbortController()
-    setLoading(true)
+    startTransition(() => { setLoading(true) })
     log.debug('ConversationInitializer loading messages', { conversationId })
 
     fetch(`/api/nexus/conversations/${conversationId}/messages`, {
@@ -211,8 +217,10 @@ export function ConversationInitializer({
           parts: convertContentToParts(msg.content)
         }))
 
-        setMessages(threadMessages)
-        setLoading(false)
+        startTransition(() => {
+          setMessages(threadMessages)
+          setLoading(false)
+        })
         log.debug('Messages converted and ready', { count: threadMessages.length })
       })
       .catch(error => {
@@ -222,8 +230,10 @@ export function ConversationInitializer({
           conversationId,
           error: error instanceof Error ? error.message : String(error)
         })
-        setMessages([])
-        setLoading(false)
+        startTransition(() => {
+          setMessages([])
+          setLoading(false)
+        })
       })
 
     return () => {

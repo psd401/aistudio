@@ -6,7 +6,7 @@ import { type UIMessage } from '@ai-sdk/react'
 import { Thread, type SuggestedAction } from '@/components/assistant-ui/thread'
 import { useSession } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { useEffect, useMemo, useCallback, useState, useRef, Suspense } from 'react'
+import { useEffect, useMemo, useCallback, useState, Suspense } from 'react'
 import { NexusShell } from '../_components/layout/nexus-shell'
 import { NexusLayout } from '../_components/layout/nexus-layout'
 import { ErrorBoundary } from '../_components/error-boundary'
@@ -78,12 +78,6 @@ function DecisionRuntimeProvider({
   initialMessages = [],
   onConversationIdChange,
 }: DecisionRuntimeProviderProps) {
-  // Use ref for conversation ID to ensure synchronous updates
-  const conversationIdRef = useRef(conversationId)
-  useEffect(() => {
-    conversationIdRef.current = conversationId
-  }, [conversationId])
-
   // Attachment processing state
   const [processingAttachments, setProcessingAttachments] = useState<Set<string>>(new Set())
 
@@ -108,15 +102,14 @@ function DecisionRuntimeProvider({
     const response = await fetch(input, init)
 
     const newConversationId = response.headers.get('X-Conversation-Id')
-    if (newConversationId && newConversationId !== conversationIdRef.current) {
-      conversationIdRef.current = newConversationId
+    if (newConversationId && newConversationId !== conversationId) {
       if (onConversationIdChange) {
         onConversationIdChange(newConversationId)
       }
     }
 
     return response
-  }, [onConversationIdChange])
+  }, [conversationId, onConversationIdChange])
 
   // Create attachment adapter
   const attachmentAdapter = useMemo(() => {
@@ -132,7 +125,7 @@ function DecisionRuntimeProvider({
       api: '/api/nexus/decision-chat',
       fetch: customFetch,
       body: () => ({
-        conversationId: conversationIdRef.current || undefined,
+        conversationId: conversationId || undefined,
       }),
     }),
     adapters: {

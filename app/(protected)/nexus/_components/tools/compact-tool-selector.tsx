@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, startTransition } from 'react'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import {
@@ -39,27 +39,29 @@ export function CompactToolSelector({
   // Load available tools when model changes
   useEffect(() => {
     if (!selectedModel?.modelId) {
-      setAvailableTools([])
+      startTransition(() => { setAvailableTools([]) })
       return
     }
 
-    setIsLoading(true)
+    startTransition(() => { setIsLoading(true) })
     getAvailableToolsForModel(selectedModel.modelId)
       .then(tools => {
-        setAvailableTools(tools)
-        // Auto-disable tools that are no longer available
-        const newEnabledTools = enabledTools.filter(toolName =>
-          tools.some(tool => tool.name === toolName)
-        )
-        if (newEnabledTools.length !== enabledTools.length) {
-          onToolsChange(newEnabledTools)
-        }
+        startTransition(() => {
+          setAvailableTools(tools)
+          // Auto-disable tools that are no longer available
+          const newEnabledTools = enabledTools.filter(toolName =>
+            tools.some(tool => tool.name === toolName)
+          )
+          if (newEnabledTools.length !== enabledTools.length) {
+            onToolsChange(newEnabledTools)
+          }
+        })
       })
       .catch(() => {
-        setAvailableTools([])
+        startTransition(() => { setAvailableTools([]) })
       })
       .finally(() => {
-        setIsLoading(false)
+        startTransition(() => { setIsLoading(false) })
       })
   }, [selectedModel?.modelId, enabledTools, onToolsChange])
 

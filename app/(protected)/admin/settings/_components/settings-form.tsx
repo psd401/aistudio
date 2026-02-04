@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, startTransition } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
@@ -88,7 +88,9 @@ export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFo
   useEffect(() => {
     if (!open) {
       // Reset submission state when dialog closes
-      setIsSubmitting(false)
+      startTransition(() => {
+        setIsSubmitting(false)
+      })
     }
     
     if (setting) {
