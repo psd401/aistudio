@@ -84,9 +84,9 @@ async function main(): Promise<void> {
   }
 
   log.info("Syncing the following tables:");
-  TABLES_TO_SYNC.forEach((t) => log.info(`  - ${t}`));
+  for (const t of TABLES_TO_SYNC) log.info(`  - ${t}`);
   log.info("Excluded tables (contain sensitive data):");
-  EXCLUDED_TABLES.forEach((t) => log.info(`  - ${t}`));
+  for (const t of EXCLUDED_TABLES) log.info(`  - ${t}`);
 
   for (const table of TABLES_TO_SYNC) {
     const dumpFile = path.join(tmpDir, `${table}.sql`);

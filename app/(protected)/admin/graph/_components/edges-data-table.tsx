@@ -230,7 +230,7 @@ export function EdgesDataTable({
                   ))}
                 </TableRow>
               ))
-            ) : table.getRowModel().rows.length ? (
+            ) : table.getRowModel().rows.length > 0 ? (
               table.getRowModel().rows.map((row) => (
                 <TableRow key={row.id} className="hover:bg-muted/50">
                   {row.getVisibleCells().map((cell) => (

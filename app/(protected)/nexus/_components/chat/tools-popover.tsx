@@ -97,14 +97,15 @@ export function ToolsPopover({
   })
 
   // Load available tools when model changes
+  const selectedModelId = selectedModel?.modelId
   useEffect(() => {
-    if (!selectedModel) {
+    if (!selectedModelId) {
       setAvailableTools([])
       return
     }
 
     setIsLoading(true)
-    getAvailableToolsForModel(selectedModel.modelId)
+    getAvailableToolsForModel(selectedModelId)
       .then(tools => {
         setAvailableTools(tools)
 
@@ -119,7 +120,7 @@ export function ToolsPopover({
         }
       })
       .finally(() => setIsLoading(false))
-  }, [selectedModel?.modelId])
+  }, [selectedModelId])
 
   const handleToolToggle = useCallback((toolName: string) => {
     if (enabledTools.includes(toolName)) {

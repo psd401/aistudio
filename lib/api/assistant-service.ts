@@ -120,8 +120,8 @@ export async function listAccessibleAssistants(
 
   const searchCondition = options.search
     ? or(
-        ilike(assistantArchitects.name, `%${options.search.replace(/[%_\\]/g, "\\$&")}%`),
-        ilike(assistantArchitects.description, `%${options.search.replace(/[%_\\]/g, "\\$&")}%`)
+        ilike(assistantArchitects.name, `%${options.search.replace(/[%\\_]/g, "\\$&")}%`),
+        ilike(assistantArchitects.description, `%${options.search.replace(/[%\\_]/g, "\\$&")}%`)
       )
     : undefined
 

@@ -541,9 +541,9 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
         }
 
         // Update nexusCapabilities based on selected capabilities
-        Object.entries(capabilityMapping).forEach(([capValue, nexusKey]) => {
+        for (const [capValue, nexusKey] of Object.entries(capabilityMapping)) {
           syncedNexusCapabilities[nexusKey] = data.capabilitiesList.includes(capValue)
-        })
+        }
 
         // Prepare data for API
         const apiData = {

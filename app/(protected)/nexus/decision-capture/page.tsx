@@ -197,14 +197,12 @@ function DecisionCapturePageContent() {
 
   // Handle conversation selection from sidebar
   // navigateToDecisionCaptureConversation uses window.location.href (not a React dependency)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   const handleConversationSelect = useCallback((id: string) => {
     navigateToDecisionCaptureConversation(id)
   }, [])
 
   // Handle new conversation from sidebar
   // navigateToNewDecisionCapture uses window.location.href (not a React dependency)
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   const handleNewConversation = useCallback(() => {
     navigateToNewDecisionCapture()
   }, [])

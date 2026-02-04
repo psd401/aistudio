@@ -367,4 +367,25 @@ export default [
       "no-console": "off",
     },
   },
+
+  // Rule 6: Relaxed rules for build/utility scripts (dynamic paths, complexity inherent)
+  {
+    files: ["scripts/**/*.ts"],
+    rules: {
+      "security/detect-non-literal-fs-filename": "off",
+      "max-depth": "off",
+      "complexity": "off",
+      "max-lines-per-function": "off",
+    },
+  },
+
+  // Rule 7: Relaxed complexity rules for test files
+  {
+    files: ["tests/**/*.ts"],
+    rules: {
+      "max-depth": "off",
+      "complexity": "off",
+      "max-lines-per-function": "off",
+    },
+  },
 ];
