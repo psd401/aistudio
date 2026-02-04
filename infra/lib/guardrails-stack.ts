@@ -140,17 +140,18 @@ export class GuardrailsStack extends cdk.Stack {
             // showing what TO block, rather than long exclusion lists. K-12 behavioral
             // management language (PBIS, SEL self-regulation) is not harmful and should
             // not match these explicit self-harm examples.
+            //
+            // Issue #731: Bedrock enforces max 5 examples per topic. Selected examples
+            // cover distinct categories: general self-harm, suicide, eating disorders,
+            // and instructional content.
             name: 'Self-Harm',
             definition: 'Content that actively promotes, provides instructions for, or glorifies self-harm, suicide, or eating disorders. Focus on instructional or promotional content, not educational discussions or behavioral documentation.',
             type: 'DENY',
             examples: [
               'Methods of self-harm',
-              'How to hurt yourself',
-              'Pro-eating disorder content',
               'Ways to commit suicide',
-              'I want to end my life',
+              'Pro-eating disorder content',
               'Step by step guide to self-injury',
-              'Best ways to hide self-harm',
               'How to restrict food intake severely',
             ],
           },
