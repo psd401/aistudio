@@ -69,7 +69,10 @@ export async function GET(req: Request) {
 
     // Log invalid provider attempts for monitoring
     if (rawProvider && !provider) {
-      log.warn('Invalid provider filter attempted', { provider: rawProvider, userId });
+      log.warn('Invalid provider filter attempted', {
+        provider: rawProvider.substring(0, 20), // Truncate to prevent log injection
+        userId
+      });
     }
 
     // Validate excludeProviders filter against whitelist
