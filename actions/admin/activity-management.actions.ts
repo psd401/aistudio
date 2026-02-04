@@ -14,7 +14,7 @@ import {
 import type { ActionState } from "@/types"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery } from "@/lib/db/drizzle-client"
-import { eq, sql, desc, count, gte, and, ilike, or, asc } from "drizzle-orm"
+import { eq, sql, desc, count, gte, and, ilike, or, asc, notInArray } from "drizzle-orm"
 import { users } from "@/lib/db/schema"
 import { nexusConversations } from "@/lib/db/schema/tables/nexus-conversations"
 import { nexusMessages } from "@/lib/db/schema/tables/nexus-messages"
@@ -22,7 +22,12 @@ import { executionResults } from "@/lib/db/schema/tables/execution-results"
 import { scheduledExecutions } from "@/lib/db/schema/tables/scheduled-executions"
 import { assistantArchitects } from "@/lib/db/schema/tables/assistant-architects"
 import { modelComparisons } from "@/lib/db/schema/tables/model-comparisons"
+import { aiModels } from "@/lib/db/schema/tables/ai-models"
 import { getDateThreshold } from "@/lib/date-utils"
+
+// Providers that represent non-chat conversation types (assistant executions, decision captures, etc.)
+// These should be excluded from the "Nexus Conversations" tab in the activity dashboard
+const NON_CHAT_PROVIDERS = ["assistant-architect", "decision-capture"] as const
 
 // ============================================
 // Types
@@ -39,6 +44,9 @@ export interface ActivityStats {
   executions7d: number
   comparisons7d: number
   activeUsers7d: number
+  totalCostUsd: number
+  cost24hUsd: number
+  cost7dUsd: number
 }
 
 export interface NexusActivityItem {
@@ -51,6 +59,7 @@ export interface NexusActivityItem {
   modelUsed: string | null
   messageCount: number
   totalTokens: number
+  costUsd: number
   lastMessageAt: Date | null
   createdAt: Date | null
 }
@@ -106,6 +115,22 @@ export interface ComparisonDetailItem extends ComparisonActivityItem {
   metadata: Record<string, unknown>
 }
 
+export interface AssistantConversationItem {
+  id: string
+  userId: number
+  userEmail: string | null
+  userName: string
+  title: string | null
+  assistantName: string | null
+  executionStatus: string | null
+  modelUsed: string | null
+  messageCount: number
+  totalTokens: number
+  costUsd: number
+  lastMessageAt: Date | null
+  createdAt: Date | null
+}
+
 export interface ActivityFilters {
   search?: string
   userId?: number
@@ -136,6 +161,9 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
     const oneDayAgo = getDateThreshold(1)
     const sevenDaysAgo = getDateThreshold(7)
 
+    // Filter condition for chat-only conversations (excludes assistant-architect, decision-capture)
+    const chatOnlyFilter = notInArray(nexusConversations.provider, [...NON_CHAT_PROVIDERS])
+
     // Parallelize all stat queries
     const [
       nexusTotalResult,
@@ -148,10 +176,14 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
       comparisons24hResult,
       comparisons7dResult,
       activeUsersResult,
+      costTotalResult,
+      cost24hResult,
+      cost7dResult,
     ] = await Promise.all([
-      // Nexus conversations
+      // Nexus conversations (excluding non-chat providers)
       executeQuery(
-        (db) => db.select({ count: count() }).from(nexusConversations),
+        (db) =>
+          db.select({ count: count() }).from(nexusConversations).where(chatOnlyFilter),
         "getActivityStats-nexusTotal"
       ),
       executeQuery(
@@ -159,7 +191,7 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
           db
             .select({ count: count() })
             .from(nexusConversations)
-            .where(gte(nexusConversations.createdAt, oneDayAgo)),
+            .where(and(chatOnlyFilter, gte(nexusConversations.createdAt, oneDayAgo))),
         "getActivityStats-nexus24h"
       ),
       executeQuery(
@@ -167,7 +199,7 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
           db
             .select({ count: count() })
             .from(nexusConversations)
-            .where(gte(nexusConversations.createdAt, sevenDaysAgo)),
+            .where(and(chatOnlyFilter, gte(nexusConversations.createdAt, sevenDaysAgo))),
         "getActivityStats-nexus7d"
       ),
       // Execution results
@@ -221,6 +253,61 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
             .where(gte(nexusConversations.createdAt, sevenDaysAgo)),
         "getActivityStats-activeUsers"
       ),
+      // Estimated cost: total_tokens * blended rate from ai_models pricing
+      // Uses (input_cost + output_cost) / 2 as blended rate since we only have total tokens
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              total: sql<string>`COALESCE(SUM(
+                ${nexusConversations.totalTokens}::numeric
+                * (COALESCE(${aiModels.inputCostPer1kTokens}, 0) + COALESCE(${aiModels.outputCostPer1kTokens}, 0))
+                / 2.0 / 1000.0
+              ), 0)`,
+            })
+            .from(nexusConversations)
+            .leftJoin(aiModels, and(
+              eq(nexusConversations.provider, aiModels.provider),
+              eq(nexusConversations.modelUsed, aiModels.modelId)
+            )),
+        "getActivityStats-costTotal"
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              total: sql<string>`COALESCE(SUM(
+                ${nexusConversations.totalTokens}::numeric
+                * (COALESCE(${aiModels.inputCostPer1kTokens}, 0) + COALESCE(${aiModels.outputCostPer1kTokens}, 0))
+                / 2.0 / 1000.0
+              ), 0)`,
+            })
+            .from(nexusConversations)
+            .leftJoin(aiModels, and(
+              eq(nexusConversations.provider, aiModels.provider),
+              eq(nexusConversations.modelUsed, aiModels.modelId)
+            ))
+            .where(gte(nexusConversations.createdAt, oneDayAgo)),
+        "getActivityStats-cost24h"
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              total: sql<string>`COALESCE(SUM(
+                ${nexusConversations.totalTokens}::numeric
+                * (COALESCE(${aiModels.inputCostPer1kTokens}, 0) + COALESCE(${aiModels.outputCostPer1kTokens}, 0))
+                / 2.0 / 1000.0
+              ), 0)`,
+            })
+            .from(nexusConversations)
+            .leftJoin(aiModels, and(
+              eq(nexusConversations.provider, aiModels.provider),
+              eq(nexusConversations.modelUsed, aiModels.modelId)
+            ))
+            .where(gte(nexusConversations.createdAt, sevenDaysAgo)),
+        "getActivityStats-cost7d"
+      ),
     ])
 
     const stats: ActivityStats = {
@@ -234,6 +321,9 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
       executions7d: executions7dResult[0]?.count ?? 0,
       comparisons7d: comparisons7dResult[0]?.count ?? 0,
       activeUsers7d: activeUsersResult[0]?.count ?? 0,
+      totalCostUsd: Number.parseFloat(String(costTotalResult[0]?.total ?? "0")),
+      cost24hUsd: Number.parseFloat(String(cost24hResult[0]?.total ?? "0")),
+      cost7dUsd: Number.parseFloat(String(cost7dResult[0]?.total ?? "0")),
     }
 
     timer({ status: "success" })
@@ -277,8 +367,10 @@ export async function getNexusActivity(
       throw ErrorFactories.invalidInput("pageSize", pageSize, "Must be between 1 and 100")
     }
 
-    // Build conditions
-    const conditions = []
+    // Build conditions - always exclude non-chat providers
+    const conditions = [
+      notInArray(nexusConversations.provider, [...NON_CHAT_PROVIDERS]),
+    ]
 
     if (filters?.search) {
       const searchInput = filters.search.trim()
@@ -316,7 +408,14 @@ export async function getNexusActivity(
       conditions.push(sql`${nexusConversations.createdAt} <= ${endDate}`)
     }
 
-    const whereClause = conditions.length > 0 ? and(...conditions) : undefined
+    const whereClause = and(...conditions)
+
+    // Estimated cost per conversation: total_tokens * blended rate from ai_models
+    const costSubquery = sql<string>`COALESCE(
+      ${nexusConversations.totalTokens}::numeric
+      * (COALESCE(${aiModels.inputCostPer1kTokens}, 0) + COALESCE(${aiModels.outputCostPer1kTokens}, 0))
+      / 2.0 / 1000.0
+    , 0)`
 
     // Parallel fetch: data + count
     const [items, countResult] = await Promise.all([
@@ -333,11 +432,16 @@ export async function getNexusActivity(
               modelUsed: nexusConversations.modelUsed,
               messageCount: nexusConversations.messageCount,
               totalTokens: nexusConversations.totalTokens,
+              costUsd: costSubquery,
               lastMessageAt: nexusConversations.lastMessageAt,
               createdAt: nexusConversations.createdAt,
             })
             .from(nexusConversations)
             .innerJoin(users, eq(nexusConversations.userId, users.id))
+            .leftJoin(aiModels, and(
+              eq(nexusConversations.provider, aiModels.provider),
+              eq(nexusConversations.modelUsed, aiModels.modelId)
+            ))
             .where(whereClause)
             .orderBy(desc(nexusConversations.lastMessageAt))
             .limit(pageSize)
@@ -355,11 +459,20 @@ export async function getNexusActivity(
       ),
     ])
 
+    // Parse cost from numeric string to number, handle nullable defaults
+    const mappedItems: NexusActivityItem[] = items.map((item) => ({
+      ...item,
+      userName: item.userName ?? "Unknown",
+      messageCount: item.messageCount ?? 0,
+      totalTokens: item.totalTokens ?? 0,
+      costUsd: Number.parseFloat(String(item.costUsd ?? "0")),
+    }))
+
     timer({ status: "success" })
     log.info("Nexus activity fetched", { count: items.length, total: countResult[0]?.count ?? 0 })
 
     return createSuccess(
-      { items: items as NexusActivityItem[], total: countResult[0]?.count ?? 0 },
+      { items: mappedItems, total: countResult[0]?.count ?? 0 },
       "Activity fetched successfully"
     )
   } catch (error) {
@@ -632,6 +745,148 @@ export async function getExecutionDetail(
       context: "getExecutionDetail",
       requestId,
       operation: "getExecutionDetail",
+    })
+  }
+}
+
+/**
+ * Get paginated assistant architect conversations (manual runs that don't have execution_results records).
+ * These are nexus_conversations with provider='assistant-architect'.
+ */
+export async function getAssistantConversationActivity(
+  filters?: ActivityFilters
+): Promise<ActionState<{ items: AssistantConversationItem[]; total: number }>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("getAssistantConversationActivity")
+  const log = createLogger({ requestId, action: "getAssistantConversationActivity" })
+
+  try {
+    log.info("Fetching assistant conversation activity", { filters: sanitizeForLogging(filters) })
+
+    await requireRole("administrator")
+
+    const page = filters?.page ?? 1
+    const pageSize = Math.min(filters?.pageSize ?? 25, 100)
+    const offset = (page - 1) * pageSize
+
+    if (page < 1) {
+      throw ErrorFactories.invalidInput("page", page, "Must be >= 1")
+    }
+
+    // Build conditions - always filter to assistant-architect provider
+    const conditions = [
+      eq(nexusConversations.provider, "assistant-architect"),
+    ]
+
+    if (filters?.search) {
+      const searchInput = filters.search.trim()
+      if (searchInput.length > 100) {
+        throw ErrorFactories.invalidInput("search", searchInput, "Must be 100 characters or less")
+      }
+      if (searchInput.length > 0) {
+        const escapedInput = searchInput
+          .replace(/\\/g, "\\\\")
+          .replace(/%/g, "\\%")
+          .replace(/_/g, "\\_")
+        const searchTerm = `%${escapedInput}%`
+        conditions.push(
+          or(
+            ilike(nexusConversations.title, searchTerm),
+            ilike(users.email, searchTerm),
+            ilike(users.firstName, searchTerm),
+            ilike(users.lastName, searchTerm),
+            sql`${nexusConversations.metadata}->>'assistantName' ILIKE ${searchTerm}`
+          )!
+        )
+      }
+    }
+
+    if (filters?.userId) {
+      conditions.push(eq(nexusConversations.userId, filters.userId))
+    }
+
+    if (filters?.dateFrom) {
+      conditions.push(gte(nexusConversations.createdAt, new Date(filters.dateFrom)))
+    }
+
+    if (filters?.dateTo) {
+      const endDate = new Date(filters.dateTo)
+      endDate.setHours(23, 59, 59, 999)
+      conditions.push(sql`${nexusConversations.createdAt} <= ${endDate}`)
+    }
+
+    const whereClause = and(...conditions)
+
+    // Estimated cost per conversation: total_tokens * blended rate from ai_models
+    const costSubquery = sql<string>`COALESCE(
+      ${nexusConversations.totalTokens}::numeric
+      * (COALESCE(${aiModels.inputCostPer1kTokens}, 0) + COALESCE(${aiModels.outputCostPer1kTokens}, 0))
+      / 2.0 / 1000.0
+    , 0)`
+
+    const [items, countResult] = await Promise.all([
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              id: nexusConversations.id,
+              userId: nexusConversations.userId,
+              userEmail: users.email,
+              userName: sql<string>`COALESCE(CONCAT(${users.firstName}, ' ', ${users.lastName}), 'Unknown')`,
+              title: nexusConversations.title,
+              assistantName: sql<string | null>`${nexusConversations.metadata}->>'assistantName'`,
+              executionStatus: sql<string | null>`${nexusConversations.metadata}->>'executionStatus'`,
+              modelUsed: nexusConversations.modelUsed,
+              messageCount: nexusConversations.messageCount,
+              totalTokens: nexusConversations.totalTokens,
+              costUsd: costSubquery,
+              lastMessageAt: nexusConversations.lastMessageAt,
+              createdAt: nexusConversations.createdAt,
+            })
+            .from(nexusConversations)
+            .innerJoin(users, eq(nexusConversations.userId, users.id))
+            .leftJoin(aiModels, and(
+              eq(nexusConversations.provider, aiModels.provider),
+              eq(nexusConversations.modelUsed, aiModels.modelId)
+            ))
+            .where(whereClause)
+            .orderBy(desc(nexusConversations.lastMessageAt))
+            .limit(pageSize)
+            .offset(offset),
+        "getAssistantConversationActivity-list"
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .select({ count: count() })
+            .from(nexusConversations)
+            .innerJoin(users, eq(nexusConversations.userId, users.id))
+            .where(whereClause),
+        "getAssistantConversationActivity-count"
+      ),
+    ])
+
+    const mappedItems: AssistantConversationItem[] = items.map((item) => ({
+      ...item,
+      userName: item.userName ?? "Unknown",
+      messageCount: item.messageCount ?? 0,
+      totalTokens: item.totalTokens ?? 0,
+      costUsd: Number.parseFloat(String(item.costUsd ?? "0")),
+    }))
+
+    timer({ status: "success" })
+    log.info("Assistant conversation activity fetched", { count: items.length, total: countResult[0]?.count ?? 0 })
+
+    return createSuccess(
+      { items: mappedItems, total: countResult[0]?.count ?? 0 },
+      "Activity fetched successfully"
+    )
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to fetch assistant conversation activity", {
+      context: "getAssistantConversationActivity",
+      requestId,
+      operation: "getAssistantConversationActivity",
     })
   }
 }

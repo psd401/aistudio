@@ -12,6 +12,7 @@ import { ActivityFiltersComponent } from "./activity-filters"
 import { ActivityPagination } from "./activity-pagination"
 import { NexusActivityTable } from "./nexus-activity-table"
 import { ExecutionActivityTable } from "./execution-activity-table"
+import { AssistantConversationTable } from "./assistant-conversation-table"
 import { ComparisonActivityTable } from "./comparison-activity-table"
 import { NexusDetailSheet } from "./nexus-detail-sheet"
 import { ExecutionDetailSheet } from "./execution-detail-sheet"
@@ -21,11 +22,13 @@ import {
   getActivityStats,
   getNexusActivity,
   getExecutionActivity,
+  getAssistantConversationActivity,
   getComparisonActivity,
   type ActivityStats,
   type ActivityFilters,
   type NexusActivityItem,
   type ExecutionActivityItem,
+  type AssistantConversationItem,
   type ComparisonActivityItem,
 } from "@/actions/admin/activity-management.actions"
 
@@ -52,6 +55,10 @@ export function ActivityPageClient() {
   const [executionData, setExecutionData] = useState<ExecutionActivityItem[]>([])
   const [executionTotal, setExecutionTotal] = useState(0)
   const [executionLoading, setExecutionLoading] = useState(false)
+
+  const [assistantConvData, setAssistantConvData] = useState<AssistantConversationItem[]>([])
+  const [assistantConvTotal, setAssistantConvTotal] = useState(0)
+  const [assistantConvLoading, setAssistantConvLoading] = useState(false)
 
   const [comparisonData, setComparisonData] = useState<ComparisonActivityItem[]>([])
   const [comparisonTotal, setComparisonTotal] = useState(0)
@@ -102,22 +109,40 @@ export function ActivityPageClient() {
     setNexusLoading(false)
   }, [filters, page, pageSize, toast])
 
-  // Load Execution data
+  // Load Execution data (scheduled + assistant conversations in parallel)
   const loadExecutionData = useCallback(async () => {
     setExecutionLoading(true)
-    const result = await getExecutionActivity({ ...filters, page, pageSize })
+    setAssistantConvLoading(true)
 
-    if (result.isSuccess && result.data) {
-      setExecutionData(result.data.items)
-      setExecutionTotal(result.data.total)
+    const [execResult, convResult] = await Promise.all([
+      getExecutionActivity({ ...filters, page, pageSize }),
+      getAssistantConversationActivity({ ...filters, page, pageSize }),
+    ])
+
+    if (execResult.isSuccess && execResult.data) {
+      setExecutionData(execResult.data.items)
+      setExecutionTotal(execResult.data.total)
     } else {
       toast({
         variant: "destructive",
         title: "Error loading execution activity",
-        description: result.message,
+        description: execResult.message,
       })
     }
+
+    if (convResult.isSuccess && convResult.data) {
+      setAssistantConvData(convResult.data.items)
+      setAssistantConvTotal(convResult.data.total)
+    } else {
+      toast({
+        variant: "destructive",
+        title: "Error loading assistant conversations",
+        description: convResult.message,
+      })
+    }
+
     setExecutionLoading(false)
+    setAssistantConvLoading(false)
   }, [filters, page, pageSize, toast])
 
   // Load Comparison data
@@ -213,6 +238,26 @@ export function ActivityPageClient() {
     setExecutionDetailOpen(true)
   }, [])
 
+  // View assistant conversation detail via the Nexus detail sheet (same underlying conversation)
+  const handleViewAssistantConv = useCallback((item: AssistantConversationItem) => {
+    const asNexusItem: NexusActivityItem = {
+      id: item.id,
+      userId: item.userId,
+      userEmail: item.userEmail,
+      userName: item.userName,
+      title: item.title,
+      provider: "assistant-architect",
+      modelUsed: item.modelUsed,
+      messageCount: item.messageCount,
+      totalTokens: item.totalTokens,
+      costUsd: item.costUsd,
+      lastMessageAt: item.lastMessageAt,
+      createdAt: item.createdAt,
+    }
+    setSelectedNexus(asNexusItem)
+    setNexusDetailOpen(true)
+  }, [])
+
   const handleViewComparison = useCallback((item: ComparisonActivityItem) => {
     setSelectedComparison(item)
     setComparisonDetailOpen(true)
@@ -286,12 +331,28 @@ export function ActivityPageClient() {
         </TabsContent>
 
         {/* Executions Tab */}
-        <TabsContent value="executions" className="mt-4">
-          <ExecutionActivityTable
-            data={executionData}
-            loading={executionLoading}
-            onViewDetail={handleViewExecution}
-          />
+        <TabsContent value="executions" className="mt-4 space-y-6">
+          <div>
+            <h3 className="text-sm font-medium text-muted-foreground mb-3">Scheduled Executions</h3>
+            <ExecutionActivityTable
+              data={executionData}
+              loading={executionLoading}
+              onViewDetail={handleViewExecution}
+            />
+          </div>
+          <div>
+            <h3 className="text-sm font-medium text-muted-foreground mb-3">
+              Manual Assistant Conversations
+              {assistantConvTotal > 0 && (
+                <span className="ml-2 text-xs">({assistantConvTotal})</span>
+              )}
+            </h3>
+            <AssistantConversationTable
+              data={assistantConvData}
+              loading={assistantConvLoading}
+              onViewDetail={handleViewAssistantConv}
+            />
+          </div>
         </TabsContent>
 
         {/* Comparisons Tab */}

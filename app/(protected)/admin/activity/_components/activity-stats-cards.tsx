@@ -7,13 +7,14 @@ import {
   IconRobot,
   IconScale,
   IconUsers,
+  IconCurrencyDollar,
 } from "@tabler/icons-react"
 import { cn } from "@/lib/utils"
 import type { ActivityStats } from "@/actions/admin/activity-management.actions"
 
 interface StatCardProps {
   label: string
-  value: number
+  value: number | string
   subValue?: string
   icon: React.ReactNode
   loading?: boolean
@@ -44,7 +45,7 @@ function StatCard({ label, value, subValue, icon, loading, className }: StatCard
         <div className="flex items-center justify-between">
           <div>
             <p className="text-sm text-muted-foreground font-medium">{label}</p>
-            <p className="text-2xl font-bold mt-1">{value.toLocaleString()}</p>
+            <p className="text-2xl font-bold mt-1">{typeof value === "string" ? value : value.toLocaleString()}</p>
             {subValue && (
               <p className="text-xs text-muted-foreground mt-1">{subValue}</p>
             )}
@@ -62,6 +63,15 @@ interface ActivityStatsCardsProps {
   stats: ActivityStats | null
   loading?: boolean
   className?: string
+}
+
+function formatUsd(value: number): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  }).format(value)
 }
 
 export function ActivityStatsCards({
@@ -99,12 +109,20 @@ export function ActivityStatsCards({
       value: stats?.activeUsers7d ?? 0,
       icon: <IconUsers className="h-5 w-5 text-orange-600" />,
     },
+    {
+      label: "Est. AI Cost",
+      value: formatUsd(stats?.totalCostUsd ?? 0),
+      subValue: stats
+        ? `${formatUsd(stats.cost24hUsd)} today, ${formatUsd(stats.cost7dUsd)} this week`
+        : undefined,
+      icon: <IconCurrencyDollar className="h-5 w-5 text-green-600" />,
+    },
   ]
 
   return (
     <div
       className={cn(
-        "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4",
+        "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4",
         className
       )}
     >
@@ -124,8 +142,8 @@ export function ActivityStatsCards({
 
 export function ActivityStatsCardsSkeleton() {
   return (
-    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-      {Array.from({ length: 4 }).map((_, i) => (
+    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+      {Array.from({ length: 5 }).map((_, i) => (
         <Skeleton key={i} className="h-28 w-full" />
       ))}
     </div>
