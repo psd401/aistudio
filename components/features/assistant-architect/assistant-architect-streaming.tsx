@@ -50,7 +50,8 @@ import {
   isErrorEvent,
   isMessageEvent,
   isAssistantMessageEvent,
-  isFinishEvent
+  isFinishEvent,
+  isSourceUrlEvent
 } from '@/lib/streaming/sse-event-types'
 import { createSSEMonitor } from '@/lib/streaming/sse-monitoring'
 import { validateSSEEvent } from '@/lib/streaming/sse-event-schemas'
@@ -250,6 +251,7 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
         const decoder = new TextDecoder()
         let buffer = ''
         let accumulatedText = ''
+        const sources: Array<{ id: string; url: string; title?: string }> = []
 
         // Create SSE monitor for this stream
         const monitor = createSSEMonitor({
@@ -396,6 +398,11 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
                       })
                     }
                   }
+                  // Handle source URL events (web search citations from Gemini, etc.)
+                  else if (isSourceUrlEvent(event)) {
+                    sources.push({ id: event.sourceId, url: event.url, title: event.title })
+                    log.debug('Source URL collected', { sourceId: event.sourceId })
+                  }
                   // Handle complete assistant messages (direct format - legacy support)
                   else if ('role' in event && event.role === 'assistant' && 'parts' in event) {
                     log.info('Received complete assistant message (legacy format)')
@@ -461,13 +468,21 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
             }
           }
 
-          // Final yield with complete accumulated text
-          if (accumulatedText) {
+          // Final yield with complete accumulated text and any collected sources
+          if (accumulatedText || sources.length > 0) {
             yield {
-              content: [{
-                type: 'text' as const,
-                text: accumulatedText
-              }]
+              content: [
+                ...(accumulatedText
+                  ? [{ type: 'text' as const, text: accumulatedText }]
+                  : []),
+                ...sources.map(source => ({
+                  type: 'source' as const,
+                  sourceType: 'url' as const,
+                  id: source.id,
+                  url: source.url,
+                  title: source.title
+                }))
+              ]
             }
           }
 
