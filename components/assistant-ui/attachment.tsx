@@ -30,12 +30,12 @@ const useFileSrc = (file: File | undefined) => {
 
   useEffect(() => {
     if (!file) {
-      startTransition(() => { setSrc(undefined); });
+      startTransition(() => { setSrc(undefined) });
       return;
     }
 
     const objectUrl = URL.createObjectURL(file);
-    startTransition(() => { setSrc(objectUrl); });
+    startTransition(() => { setSrc(objectUrl) });
 
     return () => {
       URL.revokeObjectURL(objectUrl);
@@ -132,7 +132,7 @@ const AttachmentProcessingIndicator: FC<AttachmentProcessingIndicatorProps> = ({
   // Track when processing completes to show temporary "Ready" state
   useEffect(() => {
     if (isCurrentlyProcessing) {
-      startTransition(() => { setWasProcessing(true); });
+      startTransition(() => { setWasProcessing(true) });
     } else if (wasProcessing && !isCurrentlyProcessing) {
       // Just completed processing
       startTransition(() => {
@@ -140,7 +140,7 @@ const AttachmentProcessingIndicator: FC<AttachmentProcessingIndicatorProps> = ({
         setWasProcessing(false);
       });
       // Auto-hide "Ready" state after 2 seconds
-      const timer = setTimeout(() => startTransition(() => { setShowReady(false); }), 2000);
+      const timer = setTimeout(() => { setShowReady(false); }, 2000);
       return () => clearTimeout(timer);
     }
   }, [isCurrentlyProcessing, wasProcessing]);

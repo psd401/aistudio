@@ -652,9 +652,7 @@ function AssistantArchitectRuntimeProvider({
       onExecutionIdChangeRef,
       onPromptCountChangeRef
     })
-    startTransition(() => {
-      setAdapter(newAdapter)
-    })
+    startTransition(() => { setAdapter(newAdapter) })
   }, [currentToolId])
 
   // Use LocalRuntime with stable adapter reference

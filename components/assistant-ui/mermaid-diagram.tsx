@@ -64,14 +64,14 @@ export const MermaidDiagram: FC<MermaidDiagramProps> = ({
       for (const mutation of mutations) {
         if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
           const isDark = document.documentElement.classList.contains('dark');
-          startTransition(() => { setTheme(isDark ? 'dark' : 'default'); });
+          setTheme(isDark ? 'dark' : 'default');
         }
       }
     });
 
     // Set initial theme
     const isDark = document.documentElement.classList.contains('dark');
-    startTransition(() => { setTheme(isDark ? 'dark' : 'default'); });
+    startTransition(() => { setTheme(isDark ? 'dark' : 'default') });
 
     // Start observing
     observer.observe(document.documentElement, {

@@ -46,22 +46,20 @@ export function CompactToolSelector({
     startTransition(() => { setIsLoading(true) })
     getAvailableToolsForModel(selectedModel.modelId)
       .then(tools => {
-        startTransition(() => {
-          setAvailableTools(tools)
-          // Auto-disable tools that are no longer available
-          const newEnabledTools = enabledTools.filter(toolName =>
-            tools.some(tool => tool.name === toolName)
-          )
-          if (newEnabledTools.length !== enabledTools.length) {
-            onToolsChange(newEnabledTools)
-          }
-        })
+        setAvailableTools(tools)
+        // Auto-disable tools that are no longer available
+        const newEnabledTools = enabledTools.filter(toolName =>
+          tools.some(tool => tool.name === toolName)
+        )
+        if (newEnabledTools.length !== enabledTools.length) {
+          onToolsChange(newEnabledTools)
+        }
       })
       .catch(() => {
-        startTransition(() => { setAvailableTools([]) })
+        setAvailableTools([])
       })
       .finally(() => {
-        startTransition(() => { setIsLoading(false) })
+        setIsLoading(false)
       })
   }, [selectedModel?.modelId, enabledTools, onToolsChange])
 

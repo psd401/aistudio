@@ -48,16 +48,12 @@ export function MultiSelect({
   const [customItems, setCustomItems] = useState<string[]>([]);
 
   useEffect(() => {
-    startTransition(() => {
-      setSelectedItems(value);
-    });
+    startTransition(() => { setSelectedItems(value) });
     // Extract custom items (items not in predefined options)
     if (allowCustom) {
       const optionValues = options.map(o => o.value);
       const custom = value.filter(v => !optionValues.includes(v));
-      startTransition(() => {
-        setCustomItems(custom);
-      });
+      startTransition(() => { setCustomItems(custom) });
     }
   }, [value, options, allowCustom]);
 

@@ -83,21 +83,17 @@ export function ToolSelectionSection({
     getAvailableToolsForModel(selectedModel.modelId)
       .then(tools => {
         log.debug('Tools loaded', { tools: tools.map(t => t.name) })
-        startTransition(() => {
-          setError(null) // Clear any previous errors
-          setAvailableTools(tools)
-        })
+        setError(null) // Clear any previous errors
+        setAvailableTools(tools)
         filterIncompatibleTools(tools)
       })
       .catch(error => {
         log.error('Failed to load tools', { error })
-        startTransition(() => {
-          setError('Failed to load available tools. Please try again.')
-          setAvailableTools([])
-        })
+        setError('Failed to load available tools. Please try again.')
+        setAvailableTools([])
       })
       .finally(() => {
-        startTransition(() => { setIsLoading(false) })
+        setIsLoading(false)
       })
   }, [selectedModel?.modelId, selectedModel?.name, filterIncompatibleTools])
 

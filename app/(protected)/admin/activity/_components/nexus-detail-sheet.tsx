@@ -44,7 +44,7 @@ export function NexusDetailSheet({
       getConversationMessages(conversation.id).then(result => {
         if (cancelled) return
         if (result.isSuccess && result.data) {
-          startTransition(() => { setMessages(result.data) })
+          setMessages(result.data)
         } else {
           toast({
             variant: "destructive",
@@ -52,7 +52,7 @@ export function NexusDetailSheet({
             description: result.message,
           })
         }
-        startTransition(() => { setLoadingMessages(false) })
+        setLoadingMessages(false)
       })
 
       return () => { cancelled = true }

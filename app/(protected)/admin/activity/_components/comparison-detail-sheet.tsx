@@ -44,7 +44,7 @@ export function ComparisonDetailSheet({
       getComparisonDetail(comparison.id).then(result => {
         if (cancelled) return
         if (result.isSuccess && result.data) {
-          startTransition(() => { setDetail(result.data) })
+          setDetail(result.data)
         } else {
           toast({
             variant: "destructive",
@@ -52,7 +52,7 @@ export function ComparisonDetailSheet({
             description: result.message,
           })
         }
-        startTransition(() => { setLoading(false) })
+        setLoading(false)
       })
 
       return () => { cancelled = true }

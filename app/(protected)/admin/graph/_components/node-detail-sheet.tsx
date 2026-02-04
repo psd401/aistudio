@@ -41,9 +41,7 @@ export function NodeDetailSheet({
 
   useEffect(() => {
     if (open) {
-      startTransition(() => {
-        setActiveSection("details")
-      })
+      startTransition(() => { setActiveSection("details") })
     }
   }, [open])
 

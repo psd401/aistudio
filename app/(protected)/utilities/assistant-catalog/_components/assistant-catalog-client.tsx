@@ -41,9 +41,7 @@ export function AssistantCatalogClient({ initialAssistants }: AssistantCatalogCl
   const [isHydrated, setIsHydrated] = useState(false)
 
   useEffect(() => {
-    startTransition(() => {
-      setIsHydrated(true)
-    })
+    startTransition(() => { setIsHydrated(true) })
   }, [])
 
   // Filter assistants based on category, search, and favorites

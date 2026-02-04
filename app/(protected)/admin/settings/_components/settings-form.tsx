@@ -88,9 +88,7 @@ export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFo
   useEffect(() => {
     if (!open) {
       // Reset submission state when dialog closes
-      startTransition(() => {
-        setIsSubmitting(false)
-      })
+      startTransition(() => { setIsSubmitting(false) })
     }
     
     if (setting) {

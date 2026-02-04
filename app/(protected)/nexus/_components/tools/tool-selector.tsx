@@ -44,24 +44,22 @@ export function ToolSelector({
 
     getAvailableToolsForModel(selectedModel.modelId)
       .then(tools => {
-        startTransition(() => {
-          setAvailableTools(tools)
+        setAvailableTools(tools)
 
-          // Auto-disable tools that are no longer available
-          const newEnabledTools = enabledTools.filter(toolName =>
-            tools.some(tool => tool.name === toolName)
-          )
-          if (newEnabledTools.length !== enabledTools.length) {
-            onToolsChange(newEnabledTools)
-          }
-        })
+        // Auto-disable tools that are no longer available
+        const newEnabledTools = enabledTools.filter(toolName =>
+          tools.some(tool => tool.name === toolName)
+        )
+        if (newEnabledTools.length !== enabledTools.length) {
+          onToolsChange(newEnabledTools)
+        }
       })
       .catch(() => {
         // Log error silently and reset available tools
-        startTransition(() => { setAvailableTools([]) })
+        setAvailableTools([])
       })
       .finally(() => {
-        startTransition(() => { setIsLoadingTools(false) })
+        setIsLoadingTools(false)
       })
   }, [selectedModel?.modelId, enabledTools, onToolsChange])
 

@@ -107,21 +107,19 @@ export function ToolsPopover({
     startTransition(() => { setIsLoading(true) })
     getAvailableToolsForModel(selectedModelId)
       .then(tools => {
-        startTransition(() => {
-          setAvailableTools(tools)
+        setAvailableTools(tools)
 
-          // Remove any enabled tools that are no longer available
-          const availableToolNames = tools.map(t => t.name)
-          const currentEnabledTools = enabledToolsRef.current
-          const validEnabledTools = currentEnabledTools.filter(tool =>
-            availableToolNames.includes(tool)
-          )
-          if (validEnabledTools.length !== currentEnabledTools.length) {
+        // Remove any enabled tools that are no longer available
+        const availableToolNames = tools.map(t => t.name)
+        const currentEnabledTools = enabledToolsRef.current
+        const validEnabledTools = currentEnabledTools.filter(tool =>
+          availableToolNames.includes(tool)
+        )
+        if (validEnabledTools.length !== currentEnabledTools.length) {
             onToolsChangeRef.current(validEnabledTools)
           }
-        })
       })
-      .finally(() => startTransition(() => { setIsLoading(false) }))
+      .finally(() => { setIsLoading(false) })
   }, [selectedModelId])
 
   const handleToolToggle = useCallback((toolName: string) => {

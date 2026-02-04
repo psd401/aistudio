@@ -217,10 +217,8 @@ export function ConversationInitializer({
           parts: convertContentToParts(msg.content)
         }))
 
-        startTransition(() => {
-          setMessages(threadMessages)
-          setLoading(false)
-        })
+        setMessages(threadMessages)
+        setLoading(false)
         log.debug('Messages converted and ready', { count: threadMessages.length })
       })
       .catch(error => {
@@ -230,10 +228,8 @@ export function ConversationInitializer({
           conversationId,
           error: error instanceof Error ? error.message : String(error)
         })
-        startTransition(() => {
-          setMessages([])
-          setLoading(false)
-        })
+        setMessages([])
+        setLoading(false)
       })
 
     return () => {
