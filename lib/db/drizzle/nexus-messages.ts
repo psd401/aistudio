@@ -50,6 +50,7 @@ export interface MessagePart {
   text?: string;
   image?: string;
   imageUrl?: string;
+  s3Key?: string;
   // Tool-call specific fields (flat structure for assistant-ui compatibility)
   toolCallId?: string;
   toolName?: string;

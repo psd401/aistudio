@@ -4,7 +4,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
-import { getJob } from '@/lib/db/drizzle';
+import { getConversationById } from '@/lib/db/drizzle';
 
 // Initialize S3 client
 const s3Client = new S3Client({
@@ -48,38 +48,28 @@ export async function GET(
     }
     
     // 3. Validate that this is an AI-generated image path
-    if (!s3Key.startsWith('ai-generated-images/')) {
+    if (!s3Key.startsWith('v2/generated-images/')) {
       log.warn('Invalid image path - not AI generated', { s3Key, userId: currentUser.data.user.id });
       return new Response('Not Found', { status: 404 });
     }
-    
-    // 4. Extract job ID from path for ownership validation
-    // Path format: ai-generated-images/{jobId}/{timestamp}.{ext}
+
+    // 4. Extract conversation ID from path for ownership validation
+    // Path format: v2/generated-images/{conversationId}/{filename}
     const pathParts = s3Key.split('/');
-    if (pathParts.length < 3) {
+    if (pathParts.length < 4) {
       log.warn('Invalid image path format', { s3Key, pathParts });
       return new Response('Not Found', { status: 404 });
     }
-    
-    const jobId = pathParts[1];
-    
-    // 5. Verify job ownership (user can only access their own generated images)
-    // Note: This could be optimized with caching if needed
-    const job = await getJob(jobId);
 
-    if (!job) {
-      log.warn('Job not found for image access', { jobId, s3Key, userId: currentUser.data.user.id });
+    const conversationId = pathParts[2];
+    const userId = currentUser.data.user.id;
+
+    // 5. Verify conversation ownership (user can only access their own generated images)
+    const conversation = await getConversationById(conversationId, userId);
+
+    if (!conversation) {
+      log.warn('Conversation not found for image access', { conversationId, s3Key, userId });
       return new Response('Not Found', { status: 404 });
-    }
-
-    if (job.userId !== currentUser.data.user.id) {
-      log.warn('Image access denied - wrong user', {
-        jobId,
-        s3Key,
-        jobUserId: job.userId,
-        requestUserId: currentUser.data.user.id
-      });
-      return new Response('Forbidden', { status: 403 });
     }
     
     // 6. Generate presigned URL for the image (valid for 1 hour)
@@ -98,10 +88,10 @@ export async function GET(
       expiresIn: 60 * 60 // 1 hour in seconds
     });
     
-    log.info('Image access granted, redirecting to presigned URL', { 
-      jobId,
+    log.info('Image access granted, redirecting to presigned URL', {
+      conversationId,
       s3Key,
-      userId: currentUser.data.user.id 
+      userId
     });
     
     timer({ status: 'success' });
