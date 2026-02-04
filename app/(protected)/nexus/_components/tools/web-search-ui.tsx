@@ -4,6 +4,7 @@ import { makeAssistantToolUI } from '@assistant-ui/react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { ExternalLink, Globe, Clock } from 'lucide-react'
+import { isSafeUrl } from '@/lib/utils'
 
 interface WebSearchArgs {
   query: string
@@ -76,36 +77,43 @@ export const WebSearchUI = makeAssistantToolUI<WebSearchArgs, WebSearchResult>({
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
-          {result.results.map((item, index) => (
-            <div key={index} className="space-y-1">
-              <div className="flex items-start justify-between gap-2">
-                <h4 className="text-sm font-medium text-blue-900 leading-tight">
-                  {item.title}
-                </h4>
-                <ExternalLink className="h-3 w-3 text-blue-600 flex-shrink-0 mt-0.5" />
+          {result.results.map((item, index) => {
+            // Security: Only render http/https URLs to prevent XSS
+            if (!isSafeUrl(item.url)) {
+              return null
+            }
+
+            return (
+              <div key={index} className="space-y-1">
+                <div className="flex items-start justify-between gap-2">
+                  <h4 className="text-sm font-medium text-blue-900 leading-tight">
+                    {item.title}
+                  </h4>
+                  <ExternalLink className="h-3 w-3 text-blue-600 flex-shrink-0 mt-0.5" />
+                </div>
+                <div className="flex items-center gap-2 text-xs text-blue-700">
+                  <span className="font-medium">{item.source}</span>
+                  {item.publishedDate && (
+                    <>
+                      <span>•</span>
+                      <span>{new Date(item.publishedDate).toLocaleDateString()}</span>
+                    </>
+                  )}
+                </div>
+                <p className="text-xs text-blue-800 leading-relaxed">
+                  {item.snippet}
+                </p>
+                <a
+                  href={item.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs text-blue-600 hover:text-blue-800 hover:underline break-all"
+                >
+                  {item.url}
+                </a>
               </div>
-              <div className="flex items-center gap-2 text-xs text-blue-700">
-                <span className="font-medium">{item.source}</span>
-                {item.publishedDate && (
-                  <>
-                    <span>•</span>
-                    <span>{new Date(item.publishedDate).toLocaleDateString()}</span>
-                  </>
-                )}
-              </div>
-              <p className="text-xs text-blue-800 leading-relaxed">
-                {item.snippet}
-              </p>
-              <a 
-                href={item.url} 
-                target="_blank" 
-                rel="noopener noreferrer"
-                className="text-xs text-blue-600 hover:text-blue-800 hover:underline break-all"
-              >
-                {item.url}
-              </a>
-            </div>
-          ))}
+            )
+          })}
         </CardContent>
       </Card>
     )

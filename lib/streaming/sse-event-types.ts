@@ -472,14 +472,29 @@ export function isToolOutputAvailableEvent(event: SSEEvent): event is ToolOutput
 
 /**
  * Type guard for source-url events
- * Validates both type and required fields with strict runtime checks
+ * Validates both type and required fields with strict runtime checks.
+ * Also validates URL protocol (http/https only) as defense-in-depth against XSS.
  */
 export function isSourceUrlEvent(event: SSEEvent): event is SourceUrlEvent {
-  return event.type === 'source-url' &&
-         'sourceId' in event &&
-         typeof event.sourceId === 'string' &&
-         'url' in event &&
-         typeof event.url === 'string';
+  if (event.type !== 'source-url' ||
+      !('sourceId' in event) ||
+      typeof event.sourceId !== 'string' ||
+      !('url' in event) ||
+      typeof event.url !== 'string') {
+    return false;
+  }
+
+  // Defense-in-depth: validate URL protocol to prevent javascript:, data:, file:// attacks
+  try {
+    const parsed = new URL(event.url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+
+  return true;
 }
 
 /**
