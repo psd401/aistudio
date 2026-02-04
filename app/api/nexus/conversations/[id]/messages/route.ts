@@ -10,6 +10,7 @@ import {
   MAX_MESSAGE_LIMIT,
   type MessagePart,
 } from '@/lib/db/drizzle'
+import { getDocumentSignedUrl } from '@/lib/aws/s3-client'
 
 // Broader content type for API response (less strict than MessagePart)
 type ContentPart = { type: string; text?: string; [key: string]: unknown }
@@ -36,9 +37,10 @@ function truncateContent(content: string): string {
 }
 
 /**
- * Convert a part to content format, handling images as markdown and passing through tool parts
+ * Convert a part to content format, handling images as markdown and passing through tool parts.
+ * For image parts with s3Key, generates a fresh presigned URL to replace expired ones.
  */
-function convertPartToTextContent(part: MessagePart): ContentPart | null {
+async function convertPartToTextContent(part: MessagePart): Promise<ContentPart | null> {
   const partType = part.type as string
 
   if (partType === 'text') {
@@ -49,7 +51,23 @@ function convertPartToTextContent(part: MessagePart): ContentPart | null {
   }
 
   if (partType === 'image') {
-    const imageUrl = (part as unknown as { imageUrl?: string }).imageUrl
+    // Refresh presigned URL from s3Key if available (fixes expired URL issue)
+    const s3Key = part.s3Key
+    if (s3Key) {
+      try {
+        const freshUrl = await getDocumentSignedUrl({ key: s3Key, expiresIn: 3600 })
+        return { type: 'text', text: `![Generated Image](${freshUrl})` }
+      } catch (error) {
+        // Log error and fall through to stored imageUrl if URL generation fails
+        const log = createLogger({ context: 'convertPartToTextContent' })
+        log.warn('Failed to refresh presigned URL from s3Key', {
+          s3Key,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      }
+    }
+    // Fallback to stored imageUrl if no s3Key or URL generation failed
+    const imageUrl = part.imageUrl
     return imageUrl ? { type: 'text', text: `![Generated Image](${imageUrl})` } : null
   }
 
@@ -68,12 +86,12 @@ function convertPartToTextContent(part: MessagePart): ContentPart | null {
 }
 
 /**
- * Truncate parts content and ensure at least one part
+ * Truncate parts content and ensure at least one part.
+ * Async to support presigned URL refresh for image parts.
  */
-function truncatePartsContent(parts: MessagePart[]): ContentPart[] {
-  const converted = parts
-    .map(part => convertPartToTextContent(part))
-    .filter((part): part is ContentPart => part !== null)
+async function truncatePartsContent(parts: MessagePart[]): Promise<ContentPart[]> {
+  const results = await Promise.all(parts.map(part => convertPartToTextContent(part)))
+  const converted = results.filter((part): part is ContentPart => part !== null)
   return converted.length > 0 ? converted : [{ type: 'text', text: '' }]
 }
 
@@ -123,21 +141,22 @@ function getErrorDetails(error: unknown): { statusCode: number; errorCode: strin
 }
 
 /**
- * Convert message to AI SDK format
+ * Convert message to AI SDK format.
+ * Async to support presigned URL refresh for image parts.
  */
-function convertMessageToAiSdk(msg: {
+async function convertMessageToAiSdk(msg: {
   id: string
   role: string
   content?: string | null
   parts?: MessagePart[] | null
   createdAt?: Date | null
   metadata?: Record<string, unknown> | null
-}): NexusMessageResponse {
+}): Promise<NexusMessageResponse> {
   const truncatedContent = msg.content ? truncateContent(msg.content) : null
   let truncatedParts: ContentPart[] | null = null
 
   if (msg.parts && Array.isArray(msg.parts)) {
-    truncatedParts = truncatePartsContent(msg.parts)
+    truncatedParts = await truncatePartsContent(msg.parts)
   }
 
   const baseMessage = {
@@ -224,8 +243,8 @@ export async function GET(
     })
     const totalCount = await getMessageCount(conversationId)
 
-    // Convert to AI SDK format
-    const aiSdkMessages = messages.map(convertMessageToAiSdk)
+    // Convert to AI SDK format (async for presigned URL refresh)
+    const aiSdkMessages = await Promise.all(messages.map(convertMessageToAiSdk))
 
     timer({ status: 'success' })
     log.info('Messages retrieved', { conversationId, userId, messageCount: messages.length })

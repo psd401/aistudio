@@ -572,14 +572,15 @@ async function storeImageInS3(params: {
 
     log.debug('Image stored in S3', { s3Key, size: params.imageBuffer.length });
 
-    // Generate presigned URL (valid for 7 days)
+    // Generate presigned URL (valid for 1 hour — only needs to survive the streaming response;
+    // subsequent loads refresh via the messages API)
     const presignedUrl = await getSignedUrl(
       s3Client,
       new GetObjectCommand({
         Bucket: bucket,
         Key: s3Key
       }),
-      { expiresIn: 7 * 24 * 60 * 60 } // 7 days
+      { expiresIn: 60 * 60 } // 1 hour
     );
 
     return { s3Key, presignedUrl };
