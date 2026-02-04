@@ -92,16 +92,15 @@ export class GuardrailsStack extends cdk.Stack {
             outputStrength: 'LOW',
           },
           {
-            // Issue #657: Lowered from HIGH to MEDIUM, then to LOW
-            // HIGH was blocking legitimate Assistant Architect prompts that contain
-            // instructional language (e.g., "WA School Legislation Radar" assistant).
-            // MEDIUM still triggered false positives on longer instructional prompts
-            // (4000+ char system prompts with detailed step-by-step instructions).
-            // LOW provides minimal protection but allows all legitimate assistant content.
-            // Other filters (topic-based, content filters) still provide safety coverage.
+            // Issue #657: Lowered HIGH→MEDIUM→LOW. Issue #727: Lowered LOW→NONE.
+            // 3 of 4 first-day prompt attack detections were false positives:
+            // role-based prompting ("as an expert, veteran principal"), Assistant
+            // Architect system prompts with detailed instructions, and Danielson
+            // Framework evaluation requests. Legitimate injection attempts are still
+            // caught by LLM safety training. Other filters remain active.
             type: 'PROMPT_ATTACK',
-            inputStrength: 'LOW', // Allows all legitimate instructional assistant prompts
-            outputStrength: 'NONE', // Only block on input
+            inputStrength: 'NONE', // Disabled - too many false positives on educational content
+            outputStrength: 'NONE',
           },
         ],
       },
@@ -136,13 +135,23 @@ export class GuardrailsStack extends cdk.Stack {
             ],
           },
           {
+            // Issue #727: Simplified definition with stronger positive examples.
+            // ML-based filtering works better with focused definitions and diverse examples
+            // showing what TO block, rather than long exclusion lists. K-12 behavioral
+            // management language (PBIS, SEL self-regulation) is not harmful and should
+            // not match these explicit self-harm examples.
             name: 'Self-Harm',
-            definition: 'Content that promotes, instructs, or glorifies self-harm, suicide, or eating disorders',
+            definition: 'Content that actively promotes, provides instructions for, or glorifies self-harm, suicide, or eating disorders. Focus on instructional or promotional content, not educational discussions or behavioral documentation.',
             type: 'DENY',
             examples: [
               'Methods of self-harm',
               'How to hurt yourself',
               'Pro-eating disorder content',
+              'Ways to commit suicide',
+              'I want to end my life',
+              'Step by step guide to self-injury',
+              'Best ways to hide self-harm',
+              'How to restrict food intake severely',
             ],
           },
           {
