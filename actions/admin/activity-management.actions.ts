@@ -164,14 +164,20 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
     // Filter condition for chat-only conversations (excludes assistant-architect, decision-capture)
     const chatOnlyFilter = notInArray(nexusConversations.provider, [...NON_CHAT_PROVIDERS])
 
+    // Filter for assistant-architect conversations (manual runs)
+    const assistantFilter = eq(nexusConversations.provider, "assistant-architect")
+
     // Parallelize all stat queries
     const [
       nexusTotalResult,
       nexus24hResult,
       nexus7dResult,
-      executionsTotalResult,
-      executions24hResult,
-      executions7dResult,
+      scheduledExecTotalResult,
+      scheduledExec24hResult,
+      scheduledExec7dResult,
+      assistantConvTotalResult,
+      assistantConv24hResult,
+      assistantConv7dResult,
       comparisonsTotalResult,
       comparisons24hResult,
       comparisons7dResult,
@@ -202,10 +208,10 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
             .where(and(chatOnlyFilter, gte(nexusConversations.createdAt, sevenDaysAgo))),
         "getActivityStats-nexus7d"
       ),
-      // Execution results
+      // Scheduled execution results
       executeQuery(
         (db) => db.select({ count: count() }).from(executionResults),
-        "getActivityStats-executionsTotal"
+        "getActivityStats-scheduledExecTotal"
       ),
       executeQuery(
         (db) =>
@@ -213,7 +219,7 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
             .select({ count: count() })
             .from(executionResults)
             .where(gte(executionResults.executedAt, oneDayAgo)),
-        "getActivityStats-executions24h"
+        "getActivityStats-scheduledExec24h"
       ),
       executeQuery(
         (db) =>
@@ -221,7 +227,29 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
             .select({ count: count() })
             .from(executionResults)
             .where(gte(executionResults.executedAt, sevenDaysAgo)),
-        "getActivityStats-executions7d"
+        "getActivityStats-scheduledExec7d"
+      ),
+      // Manual assistant-architect conversations
+      executeQuery(
+        (db) =>
+          db.select({ count: count() }).from(nexusConversations).where(assistantFilter),
+        "getActivityStats-assistantConvTotal"
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .select({ count: count() })
+            .from(nexusConversations)
+            .where(and(assistantFilter, gte(nexusConversations.createdAt, oneDayAgo))),
+        "getActivityStats-assistantConv24h"
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .select({ count: count() })
+            .from(nexusConversations)
+            .where(and(assistantFilter, gte(nexusConversations.createdAt, sevenDaysAgo))),
+        "getActivityStats-assistantConv7d"
       ),
       // Model comparisons
       executeQuery(
@@ -310,15 +338,23 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
       ),
     ])
 
+    // Combine scheduled executions + manual assistant conversations for total execution counts
+    const scheduledTotal = scheduledExecTotalResult[0]?.count ?? 0
+    const assistantConvTotal = assistantConvTotalResult[0]?.count ?? 0
+    const scheduled24h = scheduledExec24hResult[0]?.count ?? 0
+    const assistantConv24h = assistantConv24hResult[0]?.count ?? 0
+    const scheduled7d = scheduledExec7dResult[0]?.count ?? 0
+    const assistantConv7d = assistantConv7dResult[0]?.count ?? 0
+
     const stats: ActivityStats = {
       totalNexusConversations: nexusTotalResult[0]?.count ?? 0,
-      totalArchitectExecutions: executionsTotalResult[0]?.count ?? 0,
+      totalArchitectExecutions: scheduledTotal + assistantConvTotal,
       totalComparisons: comparisonsTotalResult[0]?.count ?? 0,
       nexus24h: nexus24hResult[0]?.count ?? 0,
-      executions24h: executions24hResult[0]?.count ?? 0,
+      executions24h: scheduled24h + assistantConv24h,
       comparisons24h: comparisons24hResult[0]?.count ?? 0,
       nexus7d: nexus7dResult[0]?.count ?? 0,
-      executions7d: executions7dResult[0]?.count ?? 0,
+      executions7d: scheduled7d + assistantConv7d,
       comparisons7d: comparisons7dResult[0]?.count ?? 0,
       activeUsers7d: activeUsersResult[0]?.count ?? 0,
       totalCostUsd: Number.parseFloat(String(costTotalResult[0]?.total ?? "0")),
