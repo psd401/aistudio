@@ -9,7 +9,6 @@ import {
   IconUsers,
   IconCurrencyDollar,
 } from "@tabler/icons-react"
-import { cn } from "@/lib/utils"
 import type { ActivityStats } from "@/actions/admin/activity-management.actions"
 
 interface StatCardProps {
@@ -120,22 +119,19 @@ export function ActivityStatsCards({
   ]
 
   return (
-    <div
-      className={cn(
-        "grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4",
-        className
-      )}
-    >
-      {cards.map((card) => (
-        <StatCard
-          key={card.label}
-          label={card.label}
-          value={card.value}
-          subValue={card.subValue}
-          icon={card.icon}
-          loading={loading}
-        />
-      ))}
+    <div className={className}>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+        {cards.map((card) => (
+          <StatCard
+            key={card.label}
+            label={card.label}
+            value={card.value}
+            subValue={card.subValue}
+            icon={card.icon}
+            loading={loading}
+          />
+        ))}
+      </div>
     </div>
   )
 }

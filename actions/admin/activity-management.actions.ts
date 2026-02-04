@@ -29,6 +29,24 @@ import { getDateThreshold } from "@/lib/date-utils"
 // These should be excluded from the "Nexus Conversations" tab in the activity dashboard
 const NON_CHAT_PROVIDERS = ["assistant-architect", "decision-capture"] as const
 
+export type StatsDateRange = "30d" | "this-month" | "6m" | "this-year" | "all"
+
+function getStatsDateRange(range: StatsDateRange): Date | null {
+  const now = new Date()
+  switch (range) {
+    case "30d":
+      return getDateThreshold(30)
+    case "this-month":
+      return new Date(now.getFullYear(), now.getMonth(), 1)
+    case "6m":
+      return getDateThreshold(180)
+    case "this-year":
+      return new Date(now.getFullYear(), 0, 1)
+    case "all":
+      return null
+  }
+}
+
 // ============================================
 // Types
 // ============================================
@@ -106,6 +124,7 @@ export interface ComparisonActivityItem {
   executionTimeMs2: number | null
   tokensUsed1: number | null
   tokensUsed2: number | null
+  costUsd: number
   createdAt: Date | null
 }
 
@@ -147,19 +166,22 @@ export interface ActivityFilters {
 /**
  * Get activity dashboard statistics
  */
-export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
+export async function getActivityStats(
+  dateRange: StatsDateRange = "30d"
+): Promise<ActionState<ActivityStats>> {
   const requestId = generateRequestId()
   const timer = startTimer("getActivityStats")
   const log = createLogger({ requestId, action: "getActivityStats" })
 
   try {
-    log.info("Fetching activity stats")
+    log.info("Fetching activity stats", { dateRange })
 
     // Verify admin role
     await requireRole("administrator")
 
     const oneDayAgo = getDateThreshold(1)
     const sevenDaysAgo = getDateThreshold(7)
+    const rangeStart = getStatsDateRange(dateRange)
 
     // Filter condition for chat-only conversations (excludes assistant-architect, decision-capture)
     const chatOnlyFilter = notInArray(nexusConversations.provider, [...NON_CHAT_PROVIDERS])
@@ -185,11 +207,19 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
       costTotalResult,
       cost24hResult,
       cost7dResult,
+      imageGenCostTotalResult,
+      imageGenCost24hResult,
+      imageGenCost7dResult,
+      comparisonCostTotalResult,
+      comparisonCost24hResult,
+      comparisonCost7dResult,
     ] = await Promise.all([
       // Nexus conversations (excluding non-chat providers)
       executeQuery(
         (db) =>
-          db.select({ count: count() }).from(nexusConversations).where(chatOnlyFilter),
+          db.select({ count: count() }).from(nexusConversations).where(
+            rangeStart ? and(chatOnlyFilter, gte(nexusConversations.createdAt, rangeStart)) : chatOnlyFilter
+          ),
         "getActivityStats-nexusTotal"
       ),
       executeQuery(
@@ -210,7 +240,10 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
       ),
       // Scheduled execution results
       executeQuery(
-        (db) => db.select({ count: count() }).from(executionResults),
+        (db) =>
+          db.select({ count: count() }).from(executionResults).where(
+            rangeStart ? gte(executionResults.executedAt, rangeStart) : undefined
+          ),
         "getActivityStats-scheduledExecTotal"
       ),
       executeQuery(
@@ -232,7 +265,9 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
       // Manual assistant-architect conversations
       executeQuery(
         (db) =>
-          db.select({ count: count() }).from(nexusConversations).where(assistantFilter),
+          db.select({ count: count() }).from(nexusConversations).where(
+            rangeStart ? and(assistantFilter, gte(nexusConversations.createdAt, rangeStart)) : assistantFilter
+          ),
         "getActivityStats-assistantConvTotal"
       ),
       executeQuery(
@@ -253,7 +288,10 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
       ),
       // Model comparisons
       executeQuery(
-        (db) => db.select({ count: count() }).from(modelComparisons),
+        (db) =>
+          db.select({ count: count() }).from(modelComparisons).where(
+            rangeStart ? gte(modelComparisons.createdAt, rangeStart) : undefined
+          ),
         "getActivityStats-comparisonsTotal"
       ),
       executeQuery(
@@ -281,9 +319,7 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
             .where(gte(nexusConversations.createdAt, sevenDaysAgo)),
         "getActivityStats-activeUsers"
       ),
-      // Estimated cost combines:
-      // 1. Token-based cost: total_tokens * blended rate from ai_models pricing
-      // 2. Image generation cost: SUM of estimatedCost from nexus_messages metadata
+      // Conversation-level token cost (for conversations with totalTokens > 0)
       executeQuery(
         (db) =>
           db
@@ -292,17 +328,14 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
                 ${nexusConversations.totalTokens}::numeric
                 * (COALESCE(${aiModels.inputCostPer1kTokens}, 0) + COALESCE(${aiModels.outputCostPer1kTokens}, 0))
                 / 2.0 / 1000.0
-              ), 0) + COALESCE((
-                SELECT SUM((${nexusMessages.metadata}->>'estimatedCost')::numeric)
-                FROM ${nexusMessages}
-                WHERE ${nexusMessages.metadata}->>'estimatedCost' IS NOT NULL
               ), 0)`,
             })
             .from(nexusConversations)
             .leftJoin(aiModels, and(
               eq(nexusConversations.provider, aiModels.provider),
               eq(nexusConversations.modelUsed, aiModels.modelId)
-            )),
+            ))
+            .where(rangeStart ? gte(nexusConversations.createdAt, rangeStart) : undefined),
         "getActivityStats-costTotal"
       ),
       executeQuery(
@@ -313,11 +346,6 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
                 ${nexusConversations.totalTokens}::numeric
                 * (COALESCE(${aiModels.inputCostPer1kTokens}, 0) + COALESCE(${aiModels.outputCostPer1kTokens}, 0))
                 / 2.0 / 1000.0
-              ), 0) + COALESCE((
-                SELECT SUM((${nexusMessages.metadata}->>'estimatedCost')::numeric)
-                FROM ${nexusMessages}
-                WHERE ${nexusMessages.metadata}->>'estimatedCost' IS NOT NULL
-                  AND ${nexusMessages.createdAt} >= ${oneDayAgo}
               ), 0)`,
             })
             .from(nexusConversations)
@@ -336,11 +364,6 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
                 ${nexusConversations.totalTokens}::numeric
                 * (COALESCE(${aiModels.inputCostPer1kTokens}, 0) + COALESCE(${aiModels.outputCostPer1kTokens}, 0))
                 / 2.0 / 1000.0
-              ), 0) + COALESCE((
-                SELECT SUM((${nexusMessages.metadata}->>'estimatedCost')::numeric)
-                FROM ${nexusMessages}
-                WHERE ${nexusMessages.metadata}->>'estimatedCost' IS NOT NULL
-                  AND ${nexusMessages.createdAt} >= ${sevenDaysAgo}
               ), 0)`,
             })
             .from(nexusConversations)
@@ -350,6 +373,112 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
             ))
             .where(gte(nexusConversations.createdAt, sevenDaysAgo)),
         "getActivityStats-cost7d"
+      ),
+      // Image generation estimated costs (separate queries to avoid sql template param issues)
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              total: sql<string>`COALESCE(SUM((${nexusMessages.metadata}->>'estimatedCost')::numeric), 0)`,
+            })
+            .from(nexusMessages)
+            .where(
+              rangeStart
+                ? and(
+                    sql`${nexusMessages.metadata}->>'estimatedCost' IS NOT NULL`,
+                    gte(nexusMessages.createdAt, rangeStart)
+                  )
+                : sql`${nexusMessages.metadata}->>'estimatedCost' IS NOT NULL`
+            ),
+        "getActivityStats-imageGenCostTotal"
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              total: sql<string>`COALESCE(SUM((${nexusMessages.metadata}->>'estimatedCost')::numeric), 0)`,
+            })
+            .from(nexusMessages)
+            .where(
+              and(
+                sql`${nexusMessages.metadata}->>'estimatedCost' IS NOT NULL`,
+                gte(nexusMessages.createdAt, oneDayAgo)
+              )
+            ),
+        "getActivityStats-imageGenCost24h"
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              total: sql<string>`COALESCE(SUM((${nexusMessages.metadata}->>'estimatedCost')::numeric), 0)`,
+            })
+            .from(nexusMessages)
+            .where(
+              and(
+                sql`${nexusMessages.metadata}->>'estimatedCost' IS NOT NULL`,
+                gte(nexusMessages.createdAt, sevenDaysAgo)
+              )
+            ),
+        "getActivityStats-imageGenCost7d"
+      ),
+      // Model comparison costs (total, 24h, 7d)
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              total: sql<string>`COALESCE(SUM(
+                COALESCE(${modelComparisons.tokensUsed1}::numeric * (
+                  COALESCE((SELECT am1.input_cost_per_1k_tokens FROM ai_models am1 WHERE am1.id = ${modelComparisons.model1Id}), 0)
+                  + COALESCE((SELECT am1.output_cost_per_1k_tokens FROM ai_models am1 WHERE am1.id = ${modelComparisons.model1Id}), 0)
+                ) / 2.0 / 1000.0, 0)
+                + COALESCE(${modelComparisons.tokensUsed2}::numeric * (
+                  COALESCE((SELECT am2.input_cost_per_1k_tokens FROM ai_models am2 WHERE am2.id = ${modelComparisons.model2Id}), 0)
+                  + COALESCE((SELECT am2.output_cost_per_1k_tokens FROM ai_models am2 WHERE am2.id = ${modelComparisons.model2Id}), 0)
+                ) / 2.0 / 1000.0, 0)
+              ), 0)`,
+            })
+            .from(modelComparisons)
+            .where(rangeStart ? gte(modelComparisons.createdAt, rangeStart) : undefined),
+        "getActivityStats-comparisonCostTotal"
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              total: sql<string>`COALESCE(SUM(
+                COALESCE(${modelComparisons.tokensUsed1}::numeric * (
+                  COALESCE((SELECT am1.input_cost_per_1k_tokens FROM ai_models am1 WHERE am1.id = ${modelComparisons.model1Id}), 0)
+                  + COALESCE((SELECT am1.output_cost_per_1k_tokens FROM ai_models am1 WHERE am1.id = ${modelComparisons.model1Id}), 0)
+                ) / 2.0 / 1000.0, 0)
+                + COALESCE(${modelComparisons.tokensUsed2}::numeric * (
+                  COALESCE((SELECT am2.input_cost_per_1k_tokens FROM ai_models am2 WHERE am2.id = ${modelComparisons.model2Id}), 0)
+                  + COALESCE((SELECT am2.output_cost_per_1k_tokens FROM ai_models am2 WHERE am2.id = ${modelComparisons.model2Id}), 0)
+                ) / 2.0 / 1000.0, 0)
+              ), 0)`,
+            })
+            .from(modelComparisons)
+            .where(gte(modelComparisons.createdAt, oneDayAgo)),
+        "getActivityStats-comparisonCost24h"
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              total: sql<string>`COALESCE(SUM(
+                COALESCE(${modelComparisons.tokensUsed1}::numeric * (
+                  COALESCE((SELECT am1.input_cost_per_1k_tokens FROM ai_models am1 WHERE am1.id = ${modelComparisons.model1Id}), 0)
+                  + COALESCE((SELECT am1.output_cost_per_1k_tokens FROM ai_models am1 WHERE am1.id = ${modelComparisons.model1Id}), 0)
+                ) / 2.0 / 1000.0, 0)
+                + COALESCE(${modelComparisons.tokensUsed2}::numeric * (
+                  COALESCE((SELECT am2.input_cost_per_1k_tokens FROM ai_models am2 WHERE am2.id = ${modelComparisons.model2Id}), 0)
+                  + COALESCE((SELECT am2.output_cost_per_1k_tokens FROM ai_models am2 WHERE am2.id = ${modelComparisons.model2Id}), 0)
+                ) / 2.0 / 1000.0, 0)
+              ), 0)`,
+            })
+            .from(modelComparisons)
+            .where(gte(modelComparisons.createdAt, sevenDaysAgo)),
+        "getActivityStats-comparisonCost7d"
       ),
     ])
 
@@ -372,9 +501,15 @@ export async function getActivityStats(): Promise<ActionState<ActivityStats>> {
       executions7d: scheduled7d + assistantConv7d,
       comparisons7d: comparisons7dResult[0]?.count ?? 0,
       activeUsers7d: activeUsersResult[0]?.count ?? 0,
-      totalCostUsd: Number.parseFloat(String(costTotalResult[0]?.total ?? "0")),
-      cost24hUsd: Number.parseFloat(String(cost24hResult[0]?.total ?? "0")),
-      cost7dUsd: Number.parseFloat(String(cost7dResult[0]?.total ?? "0")),
+      totalCostUsd: Number.parseFloat(String(costTotalResult[0]?.total ?? "0"))
+        + Number.parseFloat(String(imageGenCostTotalResult[0]?.total ?? "0"))
+        + Number.parseFloat(String(comparisonCostTotalResult[0]?.total ?? "0")),
+      cost24hUsd: Number.parseFloat(String(cost24hResult[0]?.total ?? "0"))
+        + Number.parseFloat(String(imageGenCost24hResult[0]?.total ?? "0"))
+        + Number.parseFloat(String(comparisonCost24hResult[0]?.total ?? "0")),
+      cost7dUsd: Number.parseFloat(String(cost7dResult[0]?.total ?? "0"))
+        + Number.parseFloat(String(imageGenCost7dResult[0]?.total ?? "0"))
+        + Number.parseFloat(String(comparisonCost7dResult[0]?.total ?? "0")),
     }
 
     timer({ status: "success" })
@@ -873,11 +1008,36 @@ export async function getAssistantConversationActivity(
 
     const whereClause = and(...conditions)
 
-    // Estimated cost per conversation: token-based cost + image generation cost
+    // Token count: use conversation total_tokens, fall back to sum of per-message token data
+    const tokenSubquery = sql<number>`CASE
+      WHEN ${nexusConversations.totalTokens} > 0 THEN ${nexusConversations.totalTokens}
+      ELSE COALESCE((
+        SELECT SUM((nm.token_usage->>'totalTokens')::int)
+        FROM nexus_messages nm
+        WHERE nm.conversation_id = ${nexusConversations.id}
+          AND nm.token_usage->>'totalTokens' IS NOT NULL
+      ), 0)
+    END`
+
+    // Estimated cost: conversation-level token cost OR per-message token cost with model pricing
     const costSubquery = sql<string>`COALESCE(
-      ${nexusConversations.totalTokens}::numeric
-      * (COALESCE(${aiModels.inputCostPer1kTokens}, 0) + COALESCE(${aiModels.outputCostPer1kTokens}, 0))
-      / 2.0 / 1000.0
+      CASE
+        WHEN ${nexusConversations.totalTokens} > 0 THEN
+          ${nexusConversations.totalTokens}::numeric
+          * (COALESCE(${aiModels.inputCostPer1kTokens}, 0) + COALESCE(${aiModels.outputCostPer1kTokens}, 0))
+          / 2.0 / 1000.0
+        ELSE (
+          SELECT SUM(
+            (nm.token_usage->>'totalTokens')::numeric
+            * (COALESCE(am.input_cost_per_1k_tokens, 0) + COALESCE(am.output_cost_per_1k_tokens, 0))
+            / 2.0 / 1000.0
+          )
+          FROM nexus_messages nm
+          LEFT JOIN ai_models am ON nm.model_id = am.id
+          WHERE nm.conversation_id = ${nexusConversations.id}
+            AND nm.token_usage->>'totalTokens' IS NOT NULL
+        )
+      END
     , 0) + COALESCE((
       SELECT SUM((${nexusMessages.metadata}->>'estimatedCost')::numeric)
       FROM ${nexusMessages}
@@ -899,7 +1059,7 @@ export async function getAssistantConversationActivity(
               executionStatus: sql<string | null>`${nexusConversations.metadata}->>'executionStatus'`,
               modelUsed: nexusConversations.modelUsed,
               messageCount: nexusConversations.messageCount,
-              totalTokens: nexusConversations.totalTokens,
+              totalTokens: tokenSubquery,
               costUsd: costSubquery,
               lastMessageAt: nexusConversations.lastMessageAt,
               createdAt: nexusConversations.createdAt,
@@ -1016,6 +1176,19 @@ export async function getComparisonActivity(
 
     const whereClause = conditions.length > 0 ? and(...conditions) : undefined
 
+    // Cost subquery: sum cost for both models using their ai_models pricing
+    const comparisonCostSubquery = sql<string>`COALESCE(
+      ${modelComparisons.tokensUsed1}::numeric * (
+        COALESCE((SELECT am1.input_cost_per_1k_tokens FROM ai_models am1 WHERE am1.id = ${modelComparisons.model1Id}), 0)
+        + COALESCE((SELECT am1.output_cost_per_1k_tokens FROM ai_models am1 WHERE am1.id = ${modelComparisons.model1Id}), 0)
+      ) / 2.0 / 1000.0
+    , 0) + COALESCE(
+      ${modelComparisons.tokensUsed2}::numeric * (
+        COALESCE((SELECT am2.input_cost_per_1k_tokens FROM ai_models am2 WHERE am2.id = ${modelComparisons.model2Id}), 0)
+        + COALESCE((SELECT am2.output_cost_per_1k_tokens FROM ai_models am2 WHERE am2.id = ${modelComparisons.model2Id}), 0)
+      ) / 2.0 / 1000.0
+    , 0)`
+
     const [items, countResult] = await Promise.all([
       executeQuery(
         (db) =>
@@ -1032,6 +1205,7 @@ export async function getComparisonActivity(
               executionTimeMs2: modelComparisons.executionTimeMs2,
               tokensUsed1: modelComparisons.tokensUsed1,
               tokensUsed2: modelComparisons.tokensUsed2,
+              costUsd: comparisonCostSubquery,
               createdAt: modelComparisons.createdAt,
             })
             .from(modelComparisons)
@@ -1053,11 +1227,18 @@ export async function getComparisonActivity(
       ),
     ])
 
+    // Parse cost from numeric string to number
+    const mappedItems: ComparisonActivityItem[] = items.map((item) => ({
+      ...item,
+      userName: item.userName ?? "Anonymous",
+      costUsd: Number.parseFloat(String(item.costUsd ?? "0")),
+    }))
+
     timer({ status: "success" })
     log.info("Comparison activity fetched", { count: items.length, total: countResult[0]?.count ?? 0 })
 
     return createSuccess(
-      { items: items as ComparisonActivityItem[], total: countResult[0]?.count ?? 0 },
+      { items: mappedItems, total: countResult[0]?.count ?? 0 },
       "Activity fetched successfully"
     )
   } catch (error) {

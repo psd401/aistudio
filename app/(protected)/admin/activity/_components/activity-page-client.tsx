@@ -4,6 +4,13 @@ import { useState, useEffect, useCallback } from "react"
 import { useToast } from "@/components/ui/use-toast"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { IconRefresh } from "@tabler/icons-react"
 import { PageBranding } from "@/components/ui/page-branding"
 
@@ -30,9 +37,18 @@ import {
   type ExecutionActivityItem,
   type AssistantConversationItem,
   type ComparisonActivityItem,
+  type StatsDateRange,
 } from "@/actions/admin/activity-management.actions"
 
 type ActivityTab = "nexus" | "executions" | "comparisons"
+
+const DATE_RANGE_OPTIONS: { value: StatsDateRange; label: string }[] = [
+  { value: "30d", label: "Last 30 days" },
+  { value: "this-month", label: "This month" },
+  { value: "6m", label: "Last 6 months" },
+  { value: "this-year", label: "This year" },
+  { value: "all", label: "All time" },
+]
 
 export function ActivityPageClient() {
   const { toast } = useToast()
@@ -41,6 +57,7 @@ export function ActivityPageClient() {
   const [activeTab, setActiveTab] = useState<ActivityTab>("nexus")
   const [stats, setStats] = useState<ActivityStats | null>(null)
   const [statsLoading, setStatsLoading] = useState(true)
+  const [statsDateRange, setStatsDateRange] = useState<StatsDateRange>("30d")
 
   // Filters and pagination state
   const [filters, setFilters] = useState<ActivityFilters>({})
@@ -77,7 +94,7 @@ export function ActivityPageClient() {
   // Load stats
   const loadStats = useCallback(async () => {
     setStatsLoading(true)
-    const result = await getActivityStats()
+    const result = await getActivityStats(statsDateRange)
 
     if (result.isSuccess && result.data) {
       setStats(result.data)
@@ -89,7 +106,7 @@ export function ActivityPageClient() {
       })
     }
     setStatsLoading(false)
-  }, [toast])
+  }, [statsDateRange, toast])
 
   // Load Nexus data
   const loadNexusData = useCallback(async () => {
@@ -291,10 +308,27 @@ export function ActivityPageClient() {
               Monitor platform usage across Nexus, Assistant Architect, and Model Compare
             </p>
           </div>
-          <Button variant="outline" size="sm" onClick={handleRefresh}>
-            <IconRefresh className="h-4 w-4 mr-2" />
-            Refresh
-          </Button>
+          <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-muted-foreground">Stats range:</span>
+              <Select value={statsDateRange} onValueChange={(v) => setStatsDateRange(v as StatsDateRange)}>
+                <SelectTrigger className="w-[160px] h-8 text-sm">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {DATE_RANGE_OPTIONS.map((opt) => (
+                    <SelectItem key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <Button variant="outline" size="sm" onClick={handleRefresh}>
+              <IconRefresh className="h-4 w-4 mr-2" />
+              Refresh
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -302,7 +336,9 @@ export function ActivityPageClient() {
       {statsLoading ? (
         <ActivityStatsCardsSkeleton />
       ) : stats ? (
-        <ActivityStatsCards stats={stats} />
+        <ActivityStatsCards
+          stats={stats}
+        />
       ) : null}
 
       {/* Activity Tabs */}
