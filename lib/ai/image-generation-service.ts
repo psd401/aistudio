@@ -506,7 +506,7 @@ async function generateWithGemini(
       provider: 'google',
       model: request.modelId,
       altText: result.text, // Gemini always returns text description
-      estimatedCost: 0 // Gemini image pricing TBD
+      estimatedCost: getGeminiCost(request.modelId)
     };
 
   } catch (error) {
@@ -648,6 +648,27 @@ function getOpenAICost(modelId: string, size?: string, quality?: string): number
   }
 
   return cost;
+}
+
+/**
+ * Estimate Gemini/Imagen image generation cost
+ */
+function getGeminiCost(modelId: string): number {
+  const baseCosts: Record<string, number> = {
+    'gemini-2.5-flash-image-generation': 0.04,
+    'gemini-3-pro-image-preview': 0.04,
+    'imagen-3.0-generate-002': 0.04,
+    'imagen-3.0-generate-001': 0.04,
+  };
+
+  const lowerModelId = modelId.toLowerCase();
+  for (const [key, cost] of Object.entries(baseCosts)) {
+    if (lowerModelId.includes(key)) {
+      return cost;
+    }
+  }
+
+  return 0.04;
 }
 
 /**
