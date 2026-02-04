@@ -325,7 +325,7 @@ async function generateWithOpenAI(
 
     if (errorMessage.includes('rate_limit') || errorMessage.includes('429')) {
       const retryMatch = errorMessage.match(/retry after (\d+)/i);
-      throw createImageError('RATE_LIMIT', 'Rate limit exceeded', retryMatch ? parseInt(retryMatch[1]) : 60);
+      throw createImageError('RATE_LIMIT', 'Rate limit exceeded', retryMatch ? Number.parseInt(retryMatch[1]) : 60);
     }
 
     if (errorMessage.includes('invalid_api_key') || errorMessage.includes('authentication')) {
@@ -546,7 +546,7 @@ async function storeImageInS3(params: {
 }): Promise<{ s3Key: string; presignedUrl: string }> {
   const bucket = getDocumentsBucket();
   const timestamp = Date.now();
-  const sanitizedModelId = params.modelId.replace(/[^a-zA-Z0-9-]/g, '-');
+  const sanitizedModelId = params.modelId.replace(/[^\dA-Za-z-]/g, '-');
 
   // Create S3 key with proper path structure
   const s3Key = `v2/generated-images/${params.conversationId}/${timestamp}-${sanitizedModelId}.png`;
@@ -572,14 +572,15 @@ async function storeImageInS3(params: {
 
     log.debug('Image stored in S3', { s3Key, size: params.imageBuffer.length });
 
-    // Generate presigned URL (valid for 7 days)
+    // Generate presigned URL (valid for 1 hour — only needs to survive the streaming response;
+    // subsequent loads refresh via the messages API)
     const presignedUrl = await getSignedUrl(
       s3Client,
       new GetObjectCommand({
         Bucket: bucket,
         Key: s3Key
       }),
-      { expiresIn: 7 * 24 * 60 * 60 } // 7 days
+      { expiresIn: 60 * 60 } // 1 hour
     );
 
     return { s3Key, presignedUrl };
@@ -616,8 +617,8 @@ function createImageError(
 function parseDimensions(size: string): { width: number; height: number } {
   const parts = size.split('x');
   return {
-    width: parseInt(parts[0]) || 1024,
-    height: parseInt(parts[1]) || 1024
+    width: Number.parseInt(parts[0]) || 1024,
+    height: Number.parseInt(parts[1]) || 1024
   };
 }
 

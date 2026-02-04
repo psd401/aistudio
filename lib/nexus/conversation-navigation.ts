@@ -18,7 +18,7 @@ export function validateConversationId(conversationId: string | null | undefined
   // - 8-4-4-4-12 hexadecimal digits separated by hyphens
   // - Third group starts with '4' (version 4)
   // - Fourth group starts with '8', '9', 'a', or 'b' (variant bits)
-  const uuidV4Pattern = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+  const uuidV4Pattern = /^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i
 
   return uuidV4Pattern.test(conversationId)
 }

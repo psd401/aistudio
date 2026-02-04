@@ -242,4 +242,105 @@ describe('BedrockGuardrailsService', () => {
       expect(result.allowed).toBe(true);
     });
   });
+
+  /**
+   * Production False Positive Test Cases (Issue #727)
+   *
+   * These tests document real false positives observed on the first day of
+   * guardrail deployment. 4 of 5 violations were false positives (80%).
+   * They serve as regression tests and documentation for guardrail tuning.
+   *
+   * Filter changes in Issue #727:
+   * - PROMPT_ATTACK: LOW → NONE (3/4 detections were false positives)
+   * - Self-Harm topic: definition simplified with stronger positive examples
+   *
+   * IMPORTANT - Test Coverage Limitations:
+   * These tests use mocked AWS clients and validate graceful degradation
+   * (service behavior when AWS is unavailable), NOT actual guardrail filtering.
+   * To verify actual Bedrock Guardrails behavior, you must:
+   *
+   * 1. Deploy to dev environment: `cd infra && npx cdk deploy AIStudio-GuardrailsStack-Dev`
+   * 2. Manually test with the content below (see manual test checklist in PR description)
+   * 3. Monitor CloudWatch logs for 24 hours post-deployment
+   * 4. Use CloudWatch Logs Insights query to validate false positive rate:
+   *
+   *    fields @timestamp, requestId, source, blockedCategories, action
+   *    | filter module = "BedrockGuardrailsService"
+   *    | filter action = "blocked"
+   *    | stats count() by source, blockedCategories
+   *    | sort count desc
+   *
+   * Integration tests against real Bedrock API are expensive/slow and not
+   * included in the CI pipeline. Production validation is the primary verification.
+   */
+  describe('production false positives (Issue #727)', () => {
+    it('should process PBIS "hands to self" behavior tracking content', async () => {
+      const pbisContent = `
+        PBIS Behavior Expectations Tracking:
+        - Student reminded to keep hands to self during morning meeting
+        - Practiced safe body expectations in the hallway
+        - Self-monitoring checklist: Did I keep hands and feet to myself?
+        - Self-regulation strategy: Take 3 deep breaths before reacting
+        - Goal: Student will demonstrate safe body 4 out of 5 transitions
+        - SEL lesson on self-advocacy: asking for help instead of acting out
+      `;
+
+      const result = await service.evaluateInput(pbisContent);
+      expect(result.allowed).toBe(true);
+      expect(result.processedContent).toBe(pbisContent);
+    });
+
+    it('should process role-based prompting with Danielson rubrics', async () => {
+      const roleBasedPrompt = `
+        As an expert, veteran principal in the state of Washington with deep knowledge
+        of the 2022 Danielson Framework for Teaching, please analyze the following
+        classroom observation notes. Code each piece of evidence to the appropriate
+        criterion and component. Provide specific ratings (Distinguished, Proficient,
+        Basic, or Unsatisfied) with justification for each.
+
+        Focus on:
+        - Criterion 1: Centering instruction on high expectations for student achievement
+        - Criterion 2: Demonstrating effective teaching practices
+        - Criterion 3: Recognizing individual student learning needs
+
+        Observation notes:
+        Teacher used differentiated instruction with three small groups.
+        Students were engaged in collaborative problem-solving.
+        Teacher circulated and provided targeted feedback.
+      `;
+
+      const result = await service.evaluateInput(roleBasedPrompt);
+      expect(result.allowed).toBe(true);
+      expect(result.processedContent).toBe(roleBasedPrompt);
+    });
+
+    it('should process Assistant Architect system prompts with detailed instructions', async () => {
+      const architectPrompt = `
+        You are the WA School Legislation Radar assistant for Peninsula School District.
+        Your role is to monitor and analyze Washington State education legislation.
+
+        INSTRUCTIONS:
+        1. When a user asks about a bill, provide the bill number, title, sponsors, and current status.
+        2. Analyze the potential impact on K-12 education in Washington State.
+        3. Flag any bills that could affect school district funding, curriculum requirements,
+           or student privacy.
+        4. Provide balanced, non-partisan analysis of legislative proposals.
+        5. Cross-reference with existing RCW and WAC regulations.
+        6. Summarize committee hearing testimony when available.
+
+        RESPONSE FORMAT:
+        - Start with a brief summary
+        - Include bill status and timeline
+        - Analyze impact on districts
+        - Provide actionable recommendations for district leadership
+
+        You must always cite specific bill numbers and sections when referencing legislation.
+        Do not speculate about legislative outcomes. Base analysis on published committee reports.
+      `;
+
+      const result = await service.evaluateInput(architectPrompt);
+      expect(result.allowed).toBe(true);
+      expect(result.processedContent).toBe(architectPrompt);
+    });
+  });
 });

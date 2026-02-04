@@ -94,7 +94,6 @@ export function createEdgeLogger(context: LogContext): EdgeLogger {
         }
 
         // For development debugging - works in both Node.js and Edge Runtime
-        // eslint-disable-next-line no-console
         if (level === 'ERROR') {
           // eslint-disable-next-line no-console
           console.error(`${formattedMessage}${metaString}`)

@@ -1,5 +1,6 @@
 import { getServerSession } from '@/lib/auth/server-session';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+import { ErrorFactories } from '@/lib/error-utils';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import {
   getConversations,
@@ -68,7 +69,10 @@ export async function GET(req: Request) {
 
     // Log invalid provider attempts for monitoring
     if (rawProvider && !provider) {
-      log.warn('Invalid provider filter attempted', { provider: rawProvider, userId });
+      log.warn('Invalid provider filter attempted', {
+        provider: rawProvider.substring(0, 20), // Truncate to prevent log injection
+        userId
+      });
     }
 
     // Validate excludeProviders filter against whitelist
@@ -184,7 +188,7 @@ export async function POST(req: Request) {
     });
 
     if (!conversation) {
-      throw new Error('Failed to create conversation - no result returned');
+      throw ErrorFactories.dbQueryFailed('createConversation');
     }
 
     // Record creation event (non-blocking, errors are logged but don't fail creation)

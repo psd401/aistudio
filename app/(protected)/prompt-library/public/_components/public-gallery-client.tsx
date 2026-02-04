@@ -35,32 +35,38 @@ export function PublicGalleryClient({
   const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
-    loadPrompts()
-  }, [initialQuery, initialPage, initialTags, initialSort]) // eslint-disable-line react-hooks/exhaustive-deps
+    let cancelled = false
 
-  const loadPrompts = async () => {
-    setLoading(true)
-    setError(null)
+    async function loadPrompts() {
+      setLoading(true)
+      setError(null)
 
-    const result = await listPrompts({
-      visibility: 'public',
-      search: initialQuery || undefined,
-      tags: initialTags.length > 0 ? initialTags : undefined,
-      sort: initialSort,
-      page: initialPage,
-      limit: 24
-    })
+      const result = await listPrompts({
+        visibility: 'public',
+        search: initialQuery || undefined,
+        tags: initialTags.length > 0 ? initialTags : undefined,
+        sort: initialSort,
+        page: initialPage,
+        limit: 24
+      })
 
-    if (result.isSuccess) {
-      setPrompts(result.data.prompts)
-      setTotal(result.data.total)
-      setHasMore(result.data.hasMore)
-    } else {
-      setError(result.message || "Failed to load prompts")
+      if (cancelled) return
+
+      if (result.isSuccess) {
+        setPrompts(result.data.prompts)
+        setTotal(result.data.total)
+        setHasMore(result.data.hasMore)
+      } else {
+        setError(result.message || "Failed to load prompts")
+      }
+
+      setLoading(false)
     }
 
-    setLoading(false)
-  }
+    loadPrompts()
+
+    return () => { cancelled = true }
+  }, [initialQuery, initialPage, initialTags, initialSort])
 
   const handleTagChange = (tags: string[]) => {
     startTransition(() => {

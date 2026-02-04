@@ -16,7 +16,7 @@ import {
 import { Input } from "@/components/ui/input"
 import { Textarea } from "@/components/ui/textarea"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { useState, useEffect, useCallback, memo, useMemo, useRef } from "react"
+import { useState, useEffect, useCallback, memo, useMemo, useRef, startTransition } from "react"
 import { useToast } from "@/components/ui/use-toast"
 import { SelectToolInputField } from "@/types/db-types"
 import { Loader2, Sparkles, AlertCircle, Settings } from "lucide-react"
@@ -50,7 +50,8 @@ import {
   isErrorEvent,
   isMessageEvent,
   isAssistantMessageEvent,
-  isFinishEvent
+  isFinishEvent,
+  isSourceUrlEvent
 } from '@/lib/streaming/sse-event-types'
 import { createSSEMonitor } from '@/lib/streaming/sse-monitoring'
 import { validateSSEEvent } from '@/lib/streaming/sse-event-schemas'
@@ -105,8 +106,8 @@ interface AssistantArchitectAdapterOptions {
   executionIdRef: React.MutableRefObject<number | null>
   conversationIdRef: React.MutableRefObject<string | null>
   executionModelRef: React.MutableRefObject<{ modelId: string; provider: string } | null>
-  onExecutionIdChange: (id: number) => void
-  onPromptCountChange: (count: number) => void
+  onExecutionIdChangeRef: React.MutableRefObject<(id: number) => void>
+  onPromptCountChangeRef: React.MutableRefObject<(count: number) => void>
 }
 
 // Factory function to create a stable ChatModelAdapter
@@ -118,8 +119,8 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
     executionIdRef,
     conversationIdRef,
     executionModelRef,
-    onExecutionIdChange,
-    onPromptCountChange
+    onExecutionIdChangeRef,
+    onPromptCountChangeRef
   } = options
 
   return {
@@ -213,12 +214,12 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
 
         if (executionId) {
           executionIdRef.current = Number(executionId)
-          onExecutionIdChange(Number(executionId))
+          onExecutionIdChangeRef.current(Number(executionId))
           log.info('Execution started', { executionId, promptCount })
         }
 
         if (promptCount) {
-          onPromptCountChange(Number(promptCount))
+          onPromptCountChangeRef.current(Number(promptCount))
         }
 
         if (newConversationId && newConversationId !== conversationIdRef.current) {
@@ -250,6 +251,7 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
         const decoder = new TextDecoder()
         let buffer = ''
         let accumulatedText = ''
+        const sources: Array<{ id: string; url: string; title?: string }> = []
 
         // Create SSE monitor for this stream
         const monitor = createSSEMonitor({
@@ -396,6 +398,11 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
                       })
                     }
                   }
+                  // Handle source URL events (web search citations from Gemini, etc.)
+                  else if (isSourceUrlEvent(event)) {
+                    sources.push({ id: event.sourceId, url: event.url, title: event.title })
+                    log.debug('Source URL collected', { sourceId: event.sourceId })
+                  }
                   // Handle complete assistant messages (direct format - legacy support)
                   else if ('role' in event && event.role === 'assistant' && 'parts' in event) {
                     log.info('Received complete assistant message (legacy format)')
@@ -461,13 +468,21 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
             }
           }
 
-          // Final yield with complete accumulated text
-          if (accumulatedText) {
+          // Final yield with complete accumulated text and any collected sources
+          if (accumulatedText || sources.length > 0) {
             yield {
-              content: [{
-                type: 'text' as const,
-                text: accumulatedText
-              }]
+              content: [
+                ...(accumulatedText
+                  ? [{ type: 'text' as const, text: accumulatedText }]
+                  : []),
+                ...sources.map(source => ({
+                  type: 'source' as const,
+                  sourceType: 'url' as const,
+                  id: source.id,
+                  url: source.url,
+                  title: source.title
+                }))
+              ]
             }
           }
 
@@ -621,23 +636,30 @@ function AssistantArchitectRuntimeProvider({
     }
   }, [hasCompletedExecution, tool.prompts])
 
-  // Create stable adapter using useMemo to prevent recreation on every render
-  const adapter = useMemo(
-    () => createAssistantArchitectAdapter({
-      toolId: tool.id,
+  // Create adapter in effect to avoid accessing refs during render.
+  // The adapter captures refs and reads .current at call time inside the async generator.
+  const [adapter, setAdapter] = useState<ReturnType<typeof createAssistantArchitectAdapter> | null>(null)
+
+  const currentToolId = tool.id
+  useEffect(() => {
+    const newAdapter = createAssistantArchitectAdapter({
+      toolId: currentToolId,
       inputsRef,
       hasCompletedExecutionRef,
       executionIdRef,
       conversationIdRef,
       executionModelRef,
-      onExecutionIdChange: onExecutionIdChangeRef.current,
-      onPromptCountChange: onPromptCountChangeRef.current
-    }),
-    [tool.id] // Only recreate adapter when tool changes
-  )
+      onExecutionIdChangeRef,
+      onPromptCountChangeRef
+    })
+    startTransition(() => { setAdapter(newAdapter) })
+  }, [currentToolId])
 
   // Use LocalRuntime with stable adapter reference
-  const runtime = useLocalRuntime(adapter)
+  // Adapter is null only on first render before the effect fires
+  const runtime = useLocalRuntime(adapter!)
+
+  if (!adapter) return null
 
   return (
     <AssistantRuntimeProvider runtime={runtime}>
@@ -735,6 +757,10 @@ function AutoStartExecution({
 }) {
   const runtime = useThreadRuntime()
   const hasStarted = useRef(false)
+  // Capture inputs in a ref so the effect can log them without depending on the
+  // object reference (which changes on every parent render and would reset hasStarted).
+  const inputsRef = useRef(inputs)
+  useEffect(() => { inputsRef.current = inputs })
 
   useEffect(() => {
     // Reset mode when starting fresh execution
@@ -753,7 +779,7 @@ function AutoStartExecution({
           role: 'user',
           content: [{ type: 'text', text: `Execute ${tool.name}` }]
         })
-        log.info('Execution started', { toolName: tool.name, inputKeys: Object.keys(inputs) })
+        log.info('Execution started', { toolName: tool.name, inputKeys: Object.keys(inputsRef.current) })
       }, 0)
 
       // Cleanup: clear timeout and reset hasStarted so StrictMode remount can restart
@@ -762,16 +788,52 @@ function AutoStartExecution({
         hasStarted.current = false
       }
     }
-
-  // NOTE: inputs is intentionally NOT in the dependency array to prevent re-execution
-  // if the parent component re-renders with a new inputs object reference. The inputs
-  // are captured via inputsRef in the parent component and passed to the adapter.
-  // Adding inputs here would cause the effect to re-run unnecessarily.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [runtime, tool.name, hasCompletedExecution, hasCompletedExecutionRef])
 
   return null
 }
+
+// Module-level memoized components (must be defined outside component to avoid
+// "Cannot create components during render" React Compiler error)
+const ToolHeader = memo(({ tool }: { tool: AssistantArchitectWithRelations }) => {
+  const safeImagePath = sanitizeImagePath(tool.imagePath)
+
+  return (
+    <div>
+      <div className="flex items-start gap-4">
+        {safeImagePath && (
+          <div className="relative w-32 h-32 rounded-xl overflow-hidden flex-shrink-0 bg-muted/20 p-1">
+            <div className="relative w-full h-full rounded-lg overflow-hidden ring-1 ring-black/10">
+              <Image
+                src={`/assistant_logos/${safeImagePath}`}
+                alt={tool.name}
+                fill
+                className="object-cover"
+              />
+            </div>
+          </div>
+        )}
+        <div>
+          <h2 className="text-2xl font-bold">{tool.name}</h2>
+          <p className="text-muted-foreground">{tool.description}</p>
+        </div>
+      </div>
+      <div className="h-px bg-border mt-6" />
+    </div>
+  )
+})
+ToolHeader.displayName = "ToolHeader"
+
+const ErrorAlert = memo(({ errorMessage }: { errorMessage: string }) => (
+  <Alert variant="destructive">
+    <AlertCircle className="h-4 w-4" />
+    <AlertTitle>Execution Error</AlertTitle>
+    <AlertDescription className="mt-2 text-sm">
+      {errorMessage}
+    </AlertDescription>
+  </Alert>
+))
+ErrorAlert.displayName = "ErrorAlert"
 
 export const AssistantArchitectStreaming = memo(function AssistantArchitectStreaming({
   tool
@@ -788,15 +850,17 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
   // This was causing the bug where hasResults stayed true from a previous session
   useEffect(() => {
     log.info('Tool changed - resetting execution state', { toolId: tool.id })
-    setHasResults(false)
-    setIsExecuting(false)
-    setError(null)
+    startTransition(() => {
+      setHasResults(false)
+      setIsExecuting(false)
+      setError(null)
+    })
   }, [tool.id])
 
   // Collect enabled tools from the assistant architect when component mounts
   useEffect(() => {
     const tools = tool.prompts ? collectAndSanitizeEnabledTools(tool.prompts) : []
-    setEnabledTools(tools)
+    startTransition(() => { setEnabledTools(tools) })
   }, [tool])
 
   // Create form schema based on tool input fields
@@ -906,49 +970,6 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
       variant: "destructive"
     })
   }, [toast])
-
-  // Memoized components for better performance
-  const ToolHeader = memo(({ tool }: { tool: AssistantArchitectWithRelations }) => {
-    const safeImagePath = sanitizeImagePath(tool.imagePath)
-
-    return (
-      <div>
-        <div className="flex items-start gap-4">
-          {safeImagePath && (
-            <div className="relative w-32 h-32 rounded-xl overflow-hidden flex-shrink-0 bg-muted/20 p-1">
-              <div className="relative w-full h-full rounded-lg overflow-hidden ring-1 ring-black/10">
-                <Image
-                  src={`/assistant_logos/${safeImagePath}`}
-                  alt={tool.name}
-                  fill
-                  className="object-cover"
-                />
-              </div>
-            </div>
-          )}
-          <div>
-            <h2 className="text-2xl font-bold">{tool.name}</h2>
-            <p className="text-muted-foreground">{tool.description}</p>
-          </div>
-        </div>
-        <div className="h-px bg-border mt-6" />
-      </div>
-    )
-  })
-
-  const ErrorAlert = memo(({ errorMessage }: { errorMessage: string }) => (
-    <Alert variant="destructive">
-      <AlertCircle className="h-4 w-4" />
-      <AlertTitle>Execution Error</AlertTitle>
-      <AlertDescription className="mt-2 text-sm">
-        {errorMessage}
-      </AlertDescription>
-    </Alert>
-  ))
-
-  // Add display names to memoized components
-  ToolHeader.displayName = "ToolHeader"
-  ErrorAlert.displayName = "ErrorAlert"
 
   return (
     <div className="space-y-6">

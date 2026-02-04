@@ -26,6 +26,7 @@ interface MessagePart {
   text?: string;
   image?: string;
   imageUrl?: string;
+  s3Key?: string;
   // Tool-call specific fields (flat structure for assistant-ui ToolCallMessagePart compatibility)
   // Note: result is EMBEDDED in the tool-call part (not separate tool-result)
   toolCallId?: string;

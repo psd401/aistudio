@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState, useCallback } from "react"
+import { useEffect, useState, startTransition } from "react"
 import {
   Sheet,
   SheetContent,
@@ -48,31 +48,30 @@ export function ExecutionDetailSheet({
   const [detail, setDetail] = useState<ExecutionDetailItem | null>(null)
   const [loading, setLoading] = useState(false)
 
-  const loadDetail = useCallback(async () => {
-    if (!execution?.id) return
-
-    setLoading(true)
-    const result = await getExecutionDetail(execution.id)
-
-    if (result.isSuccess && result.data) {
-      setDetail(result.data)
-    } else {
-      toast({
-        variant: "destructive",
-        title: "Error loading details",
-        description: result.message,
-      })
-    }
-    setLoading(false)
-  }, [execution?.id, toast])
-
   useEffect(() => {
     if (open && execution?.id) {
-      loadDetail()
+      let cancelled = false
+      startTransition(() => { setLoading(true) })
+
+      getExecutionDetail(execution.id).then(result => {
+        if (cancelled) return
+        if (result.isSuccess && result.data) {
+          setDetail(result.data)
+        } else {
+          toast({
+            variant: "destructive",
+            title: "Error loading details",
+            description: result.message,
+          })
+        }
+        setLoading(false)
+      })
+
+      return () => { cancelled = true }
     } else {
-      setDetail(null)
+      startTransition(() => { setDetail(null) })
     }
-  }, [open, execution?.id, loadDetail])
+  }, [open, execution?.id, toast])
 
   if (!execution) return null
 

@@ -28,6 +28,7 @@ import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { MarkdownText } from "./markdown-text";
+import { WebSearchSource } from "./web-search-sources";
 import { ToolFallback } from "./tool-fallback";
 import { ToolGroup } from "@/app/(protected)/nexus/_components/tools/tool-group";
 import {
@@ -55,6 +56,7 @@ const THREAD_ROOT_STYLE = {
 
 const ASSISTANT_MESSAGE_CONTENT_COMPONENTS = {
   Text: MarkdownText,
+  Source: WebSearchSource,
   ToolGroup: ToolGroup,
   tools: { Fallback: ToolFallback },
 };

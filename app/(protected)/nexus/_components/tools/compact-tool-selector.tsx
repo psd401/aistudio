@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, startTransition } from 'react'
 import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
 import {
@@ -39,11 +39,11 @@ export function CompactToolSelector({
   // Load available tools when model changes
   useEffect(() => {
     if (!selectedModel?.modelId) {
-      setAvailableTools([])
+      startTransition(() => { setAvailableTools([]) })
       return
     }
 
-    setIsLoading(true)
+    startTransition(() => { setIsLoading(true) })
     getAvailableToolsForModel(selectedModel.modelId)
       .then(tools => {
         setAvailableTools(tools)

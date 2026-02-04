@@ -163,9 +163,11 @@ export function ApiKeyCreateDialog({
                 {availableScopes.map((scope) => (
                   <label
                     key={scope}
+                    htmlFor={`scope-${scope}`}
                     className="flex items-start gap-3 rounded-md border p-3 cursor-pointer hover:bg-accent/50"
                   >
                     <Checkbox
+                      id={`scope-${scope}`}
                       checked={selectedScopes.includes(scope)}
                       onCheckedChange={() => toggleScope(scope)}
                       className="mt-0.5"

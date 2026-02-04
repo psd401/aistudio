@@ -1,8 +1,6 @@
 import { S3Client, PutObjectCommand, CreateMultipartUploadCommand, UploadPartCommand, CompleteMultipartUploadCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createLogger } from '@/lib/logger';
-import { Readable } from 'node:stream';
-import type { ReadableStream as WebReadableStream } from 'node:stream/web';
 
 const s3Client = new S3Client({});
 const log = createLogger({ service: 'document-upload' });
@@ -260,12 +258,37 @@ export interface DirectUploadResult {
 }
 
 /**
+ * Convert a Web ReadableStream to a Buffer.
+ * Used for S3 uploads since @aws-sdk/lib-storage has Turbopack compatibility issues.
+ */
+async function streamToBuffer(stream: ReadableStream<Uint8Array>): Promise<Buffer> {
+  const chunks: Uint8Array[] = [];
+  const reader = stream.getReader();
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (value) chunks.push(value);
+  }
+
+  return Buffer.concat(chunks);
+}
+
+/**
  * Upload a file directly to S3 using the SDK (server-side).
  * This bypasses presigned URLs which can be blocked by school network proxies.
  *
- * Supports both streaming and buffered uploads:
- * - For streaming (memory-efficient): Use fileStream
- * - For buffered (legacy): Use fileBuffer
+ * ## Memory Model
+ * Both fileStream and fileBuffer result in the entire file being loaded into memory.
+ * This is acceptable because:
+ * - Next.js formData() already loads the file into memory before we receive it
+ * - Rate limiting (5 uploads/min/user) controls concurrent memory usage
+ * - File size limits (50MB assistant, 500MB chat) bound maximum memory per upload
+ *
+ * ## Why not @aws-sdk/lib-storage?
+ * That package has Turbopack compatibility issues (MODULE_NOT_FOUND at runtime)
+ * due to missing proper `exports` field in package.json. Using PutObjectCommand
+ * from @aws-sdk/client-s3 works reliably with Turbopack.
  *
  * @see https://github.com/psd401/aistudio/issues/632
  */
@@ -276,58 +299,34 @@ export async function uploadToS3(config: DirectUploadConfig): Promise<DirectUplo
   const bucket = getDocumentsBucket();
 
   try {
-    let body: Buffer | Readable;
+    let body: Buffer;
 
     if (fileStream) {
-      // Convert Web ReadableStream to Node.js Readable stream for streaming upload
-      // This is memory-efficient for large files
-      body = Readable.fromWeb(fileStream as WebReadableStream<Uint8Array>);
-
-      // Dynamic import to avoid Turbopack resolution issues with @aws-sdk/lib-storage
-      // (package lacks proper exports field, causing static import failures)
-      const { Upload } = await import('@aws-sdk/lib-storage');
-
-      // Use Upload class for streaming (handles multipart automatically)
-      const upload = new Upload({
-        client: s3Client,
-        params: {
-          Bucket: bucket,
-          Key: s3Key,
-          Body: body,
-          ContentType: contentType,
-          Metadata: {
-            jobId,
-            originalFileName: fileName,
-            uploadTimestamp: Date.now().toString(),
-          },
-        },
-        queueSize: 4, // Concurrent parts
-        partSize: 5 * 1024 * 1024, // 5MB chunks
-      });
-
-      await upload.done();
-
-      log.info('Direct S3 streaming upload completed', { jobId, fileName, s3Key, method: 'streaming' });
+      // Convert ReadableStream to Buffer for S3 upload
+      // Note: This loads the file into memory, but formData() already did that
+      body = await streamToBuffer(fileStream);
+      log.info('Converted stream to buffer', { jobId, fileName, size: body.length });
     } else if (fileBuffer) {
-      // Legacy buffered upload (loads entire file in memory)
-      const command = new PutObjectCommand({
-        Bucket: bucket,
-        Key: s3Key,
-        Body: fileBuffer,
-        ContentType: contentType,
-        Metadata: {
-          jobId,
-          originalFileName: fileName,
-          uploadTimestamp: Date.now().toString(),
-        },
-      });
-
-      await s3Client.send(command);
-
-      log.info('Direct S3 buffered upload completed', { jobId, fileName, s3Key, size: fileBuffer.length, method: 'buffered' });
+      body = fileBuffer;
     } else {
       throw new Error('Either fileBuffer or fileStream must be provided');
     }
+
+    const command = new PutObjectCommand({
+      Bucket: bucket,
+      Key: s3Key,
+      Body: body,
+      ContentType: contentType,
+      Metadata: {
+        jobId,
+        originalFileName: fileName,
+        uploadTimestamp: Date.now().toString(),
+      },
+    });
+
+    await s3Client.send(command);
+
+    log.info('Direct S3 upload completed', { jobId, fileName, s3Key, size: body.length });
 
     return {
       s3Key,

@@ -79,8 +79,8 @@ export function JsonImportDialog({
       }
 
       // Validate each model
-      for (let i = 0; i < modelsArray.length; i++) {
-        const result = validateModel(modelsArray[i], i)
+      for (const [i, element] of modelsArray.entries()) {
+        const result = validateModel(element, i)
         if (!result.valid) {
           validationErrors.push(...result.errors)
         }

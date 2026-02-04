@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useState } from "react"
+import { useEffect, useState, startTransition } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import * as z from "zod"
@@ -34,7 +34,7 @@ import { Checkbox } from "@/components/ui/checkbox"
 import type { Setting } from "@/actions/db/settings-actions"
 
 const formSchema = z.object({
-  key: z.string().min(1, "Key is required").regex(/^[A-Z][A-Z0-9_]*$/, "Key must start with uppercase letter, and contain only uppercase letters, numbers, and underscores"),
+  key: z.string().min(1, "Key is required").regex(/^[A-Z][\dA-Z_]*$/, "Key must start with uppercase letter, and contain only uppercase letters, numbers, and underscores"),
   value: z.string().nullable(),
   description: z.string().nullable(),
   category: z.string().nullable(),
@@ -88,7 +88,7 @@ export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFo
   useEffect(() => {
     if (!open) {
       // Reset submission state when dialog closes
-      setIsSubmitting(false)
+      startTransition(() => { setIsSubmitting(false) })
     }
     
     if (setting) {

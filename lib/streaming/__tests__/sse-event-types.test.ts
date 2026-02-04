@@ -27,6 +27,7 @@ import {
   isMessageEvent,
   isAssistantMessageEvent,
   isErrorEvent,
+  isSourceUrlEvent,
   type SSEEvent
 } from '../sse-event-types';
 
@@ -478,6 +479,126 @@ describe('Error Event Type Guards', () => {
   });
 });
 
+describe('Source Event Type Guards', () => {
+  describe('isSourceUrlEvent', () => {
+    it('should return true for valid source-url event with https URL', () => {
+      const event: SSEEvent = {
+        type: 'source-url',
+        sourceId: 'ws_123',
+        url: 'https://example.com/article'
+      };
+
+      expect(isSourceUrlEvent(event)).toBe(true);
+    });
+
+    it('should return true for source-url event with optional title', () => {
+      const event: SSEEvent = {
+        type: 'source-url',
+        sourceId: 'ws_456',
+        url: 'https://example.com',
+        title: 'Example Article Title'
+      };
+
+      expect(isSourceUrlEvent(event)).toBe(true);
+    });
+
+    it('should return true for source-url event with http URL', () => {
+      const event: SSEEvent = {
+        type: 'source-url',
+        sourceId: 'ws_789',
+        url: 'http://example.com/page'
+      };
+
+      expect(isSourceUrlEvent(event)).toBe(true);
+    });
+
+    it('should return false for source-url with missing sourceId', () => {
+      const event = {
+        type: 'source-url',
+        url: 'https://example.com'
+      } as unknown as SSEEvent;
+
+      expect(isSourceUrlEvent(event)).toBe(false);
+    });
+
+    it('should return false for source-url with missing url', () => {
+      const event = {
+        type: 'source-url',
+        sourceId: 'ws_123'
+      } as unknown as SSEEvent;
+
+      expect(isSourceUrlEvent(event)).toBe(false);
+    });
+
+    it('should return false for source-url with non-string sourceId', () => {
+      const event = {
+        type: 'source-url',
+        sourceId: 123,
+        url: 'https://example.com'
+      } as unknown as SSEEvent;
+
+      expect(isSourceUrlEvent(event)).toBe(false);
+    });
+
+    it('should return false for source-url with non-string url', () => {
+      const event = {
+        type: 'source-url',
+        sourceId: 'ws_123',
+        url: 123
+      } as unknown as SSEEvent;
+
+      expect(isSourceUrlEvent(event)).toBe(false);
+    });
+
+    it('should return false for different event type', () => {
+      const event: SSEEvent = { type: 'text-delta', delta: 'Hello' };
+
+      expect(isSourceUrlEvent(event)).toBe(false);
+    });
+
+    // Security: URL protocol validation (defense-in-depth)
+    it('should return false for javascript: protocol URL', () => {
+      const event = {
+        type: 'source-url',
+        sourceId: 'ws_evil',
+        url: 'javascript:alert(document.cookie)'
+      } as unknown as SSEEvent;
+
+      expect(isSourceUrlEvent(event)).toBe(false);
+    });
+
+    it('should return false for data: protocol URL', () => {
+      const event = {
+        type: 'source-url',
+        sourceId: 'ws_evil',
+        url: 'data:text/html,<script>alert(1)</script>'
+      } as unknown as SSEEvent;
+
+      expect(isSourceUrlEvent(event)).toBe(false);
+    });
+
+    it('should return false for file: protocol URL', () => {
+      const event = {
+        type: 'source-url',
+        sourceId: 'ws_evil',
+        url: 'file:///etc/passwd'
+      } as unknown as SSEEvent;
+
+      expect(isSourceUrlEvent(event)).toBe(false);
+    });
+
+    it('should return false for malformed URL', () => {
+      const event = {
+        type: 'source-url',
+        sourceId: 'ws_bad',
+        url: 'not-a-valid-url'
+      } as unknown as SSEEvent;
+
+      expect(isSourceUrlEvent(event)).toBe(false);
+    });
+  });
+});
+
 describe('Integration Tests', () => {
   it('should correctly identify event type through parsing and type guards', () => {
     const events = [
@@ -485,7 +606,8 @@ describe('Integration Tests', () => {
       '{"type":"text-start","id":"text-123"}',
       '{"type":"error","error":"Failed"}',
       '{"type":"start"}',
-      '{"type":"tool-call","toolCallId":"call-1","toolName":"search"}'
+      '{"type":"tool-call","toolCallId":"call-1","toolName":"search"}',
+      '{"type":"source-url","sourceId":"ws_1","url":"https://example.com","title":"Example"}'
     ];
 
     const parsed = events.map(data => parseSSEEvent(data));
@@ -495,6 +617,7 @@ describe('Integration Tests', () => {
     expect(isErrorEvent(parsed[2])).toBe(true);
     expect(isStartEvent(parsed[3])).toBe(true);
     expect(isToolCallEvent(parsed[4])).toBe(true);
+    expect(isSourceUrlEvent(parsed[5])).toBe(true);
   });
 
   it('should handle real-world SSE stream sequence', () => {
@@ -519,5 +642,35 @@ describe('Integration Tests', () => {
 
     expect(accumulatedText).toBe('The answer is');
     expect(isFinishEvent(events[events.length - 1])).toBe(true);
+  });
+
+  it('should handle stream with mixed text and source-url events', () => {
+    const streamData = [
+      '{"type":"start"}',
+      '{"type":"text-start","id":"text-1"}',
+      '{"type":"text-delta","delta":"According to "}',
+      '{"type":"source-url","sourceId":"ws_1","url":"https://example.com","title":"Example"}',
+      '{"type":"text-delta","delta":"the source"}',
+      '{"type":"source-url","sourceId":"ws_2","url":"https://google.com","title":"Google"}',
+      '{"type":"text-end","id":"text-1"}',
+      '{"type":"finish"}'
+    ];
+
+    const events = streamData.map(data => parseSSEEvent(data));
+    let text = '';
+    const sources: Array<{ id: string; url: string; title?: string }> = [];
+
+    events.forEach(event => {
+      if (isTextDeltaEvent(event)) {
+        text += event.delta;
+      } else if (isSourceUrlEvent(event)) {
+        sources.push({ id: event.sourceId, url: event.url, title: event.title });
+      }
+    });
+
+    expect(text).toBe('According to the source');
+    expect(sources).toHaveLength(2);
+    expect(sources[0]).toEqual({ id: 'ws_1', url: 'https://example.com', title: 'Example' });
+    expect(sources[1]).toEqual({ id: 'ws_2', url: 'https://google.com', title: 'Google' });
   });
 });

@@ -180,6 +180,25 @@ export interface ToolOutputAvailableEvent extends BaseSSEEvent {
 }
 
 // ============================================================================
+// SOURCE EVENTS
+// ============================================================================
+
+/**
+ * Source URL event - web search citation/grounding source
+ * Emitted by providers like Gemini when web search grounding is enabled.
+ * Contains a URL reference that should be rendered as a clickable source card.
+ */
+export interface SourceUrlEvent extends BaseSSEEvent {
+  type: 'source-url';
+  /** Unique identifier for this source */
+  sourceId: string;
+  /** The URL of the source */
+  url: string;
+  /** Optional title of the source page */
+  title?: string;
+}
+
+// ============================================================================
 // LIFECYCLE EVENTS
 // ============================================================================
 
@@ -314,6 +333,7 @@ export type SSEEvent =
   | ToolInputErrorEvent
   | ToolOutputErrorEvent
   | ToolOutputAvailableEvent
+  | SourceUrlEvent
   | StartEvent
   | StartStepEvent
   | FinishStepEvent
@@ -451,6 +471,33 @@ export function isToolOutputAvailableEvent(event: SSEEvent): event is ToolOutput
 }
 
 /**
+ * Type guard for source-url events
+ * Validates both type and required fields with strict runtime checks.
+ * Also validates URL protocol (http/https only) as defense-in-depth against XSS.
+ */
+export function isSourceUrlEvent(event: SSEEvent): event is SourceUrlEvent {
+  if (event.type !== 'source-url' ||
+      !('sourceId' in event) ||
+      typeof event.sourceId !== 'string' ||
+      !('url' in event) ||
+      typeof event.url !== 'string') {
+    return false;
+  }
+
+  // Defense-in-depth: validate URL protocol to prevent javascript:, data:, file:// attacks
+  try {
+    const parsed = new URL(event.url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+  } catch {
+    return false;
+  }
+
+  return true;
+}
+
+/**
  * Type guard for start events
  */
 export function isStartEvent(event: SSEEvent): event is StartEvent {
@@ -520,6 +567,7 @@ const VALID_SSE_EVENT_TYPES = new Set([
   'tool-input-error',
   'tool-output-error',
   'tool-output-available',
+  'source-url',
   'start',
   'start-step',
   'finish-step',

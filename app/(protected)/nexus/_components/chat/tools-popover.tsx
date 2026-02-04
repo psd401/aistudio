@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useCallback, useRef, memo } from 'react'
+import { useState, useEffect, useCallback, useRef, memo, startTransition } from 'react'
 import { Button } from '@/components/ui/button'
 import {
   Popover,
@@ -97,14 +97,15 @@ export function ToolsPopover({
   })
 
   // Load available tools when model changes
+  const selectedModelId = selectedModel?.modelId
   useEffect(() => {
-    if (!selectedModel) {
-      setAvailableTools([])
+    if (!selectedModelId) {
+      startTransition(() => { setAvailableTools([]) })
       return
     }
 
-    setIsLoading(true)
-    getAvailableToolsForModel(selectedModel.modelId)
+    startTransition(() => { setIsLoading(true) })
+    getAvailableToolsForModel(selectedModelId)
       .then(tools => {
         setAvailableTools(tools)
 
@@ -115,11 +116,11 @@ export function ToolsPopover({
           availableToolNames.includes(tool)
         )
         if (validEnabledTools.length !== currentEnabledTools.length) {
-          onToolsChangeRef.current(validEnabledTools)
-        }
+            onToolsChangeRef.current(validEnabledTools)
+          }
       })
-      .finally(() => setIsLoading(false))
-  }, [selectedModel?.modelId])
+      .finally(() => { setIsLoading(false) })
+  }, [selectedModelId])
 
   const handleToolToggle = useCallback((toolName: string) => {
     if (enabledTools.includes(toolName)) {

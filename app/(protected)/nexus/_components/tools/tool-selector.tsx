@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, startTransition } from 'react'
 import { Label } from '@/components/ui/label'
 import { Switch } from '@/components/ui/switch'
 import { Badge } from '@/components/ui/badge'
@@ -36,16 +36,16 @@ export function ToolSelector({
   // Load available tools when model changes
   useEffect(() => {
     if (!selectedModel?.modelId) {
-      setAvailableTools([])
+      startTransition(() => { setAvailableTools([]) })
       return
     }
 
-    setIsLoadingTools(true)
-    
+    startTransition(() => { setIsLoadingTools(true) })
+
     getAvailableToolsForModel(selectedModel.modelId)
       .then(tools => {
         setAvailableTools(tools)
-        
+
         // Auto-disable tools that are no longer available
         const newEnabledTools = enabledTools.filter(toolName =>
           tools.some(tool => tool.name === toolName)
