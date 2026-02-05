@@ -2,12 +2,22 @@
 
 const nextConfig = {
   reactCompiler: true,
-  output: 'standalone', // Required for ECS Fargate deployment
-  transpilePackages: ['recharts'], // Required for Turbopack to resolve recharts dynamic imports
-  serverExternalPackages: ['argon2'], // Native modules that must not be bundled by Turbopack
+  reactStrictMode: true,
+  output: 'standalone',
+  transpilePackages: ['recharts'],
+  serverExternalPackages: ['winston', 'logform', '@colors/colors', 'argon2', 'postgres', 'mammoth', 'pdf-parse', 'oidc-provider'],
+  outputFileTracingIncludes: {
+    '/**': [
+      './node_modules/argon2/**/*',
+      './node_modules/@phc/format/**/*',
+      './node_modules/node-gyp-build/**/*',
+    ],
+  },
+  typescript: {
+    ignoreBuildErrors: true,
+  },
   images: {
     remotePatterns: [
-      // Add specific trusted domains for user avatars
       {
         protocol: 'https',
         hostname: 'avatars.githubusercontent.com',
@@ -18,83 +28,65 @@ const nextConfig = {
       }
     ]
   },
+  devIndicators: false,
+  async headers() {
+    return [
+      {
+        source: '/:path*',
+        headers: [
+          {
+            key: 'X-Frame-Options',
+            value: 'DENY'
+          },
+          {
+            key: 'X-Content-Type-Options',
+            value: 'nosniff'
+          },
+          {
+            key: 'Strict-Transport-Security',
+            value: 'max-age=31536000; includeSubDomains'
+          },
+          {
+            key: 'Referrer-Policy',
+            value: 'strict-origin-when-cross-origin'
+          },
+          {
+            key: 'Permissions-Policy',
+            value: 'camera=(), microphone=(), geolocation=()'
+          },
+          {
+            key: 'Content-Security-Policy',
+            value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.amazonaws.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; font-src 'self' data:; connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com; frame-src 'self' https://www.canva.com; frame-ancestors 'none';"
+          }
+        ],
+      },
+    ];
+  },
   experimental: {
-    serverComponentsExternalPackages: ['mammoth', 'pdf-parse', 'oidc-provider', 'argon2'], // Server-only packages with Node.js dependencies
     serverActions: {
-      bodySizeLimit: '100mb', // Match the file upload limit from settings
+      bodySizeLimit: '100mb',
+      timeout: 300,
     },
   },
-  // Don't embed environment variables at build time
-  // They will be available at runtime from the ECS container environment
-  // webpack: (config, { buildId, dev, isServer, defaultLoaders, webpack }) => {
-  //   // Add rule for wasm files
-  //   config.resolve.extensions.push('.wasm');
-  //   config.module.rules.push({
-  //     test: /\.wasm$/,
-  //     type: 'javascript/auto',
-  //     // Use file-loader for wasm files
-  //     use: [
-  //       {
-  //         loader: 'file-loader',
-  //         options: {
-  //           publicPath: '/_next/static/wasm',
-  //           outputPath: 'static/wasm',
-  //           name: '[name].[hash].[ext]',
-  //         },
-  //       },
-  //     ],
-  //   });
-  //
-  //   // Prevent bundling pdfjs-dist in client-side bundle if not needed there
-  //   // or configure worker path
-  //   config.plugins.push(
-  //     new webpack.ProvidePlugin({
-  //       // If you use pdfjs in the browser, configure the worker path
-  //       // 'pdfjs-dist/build/pdf': [path.resolve(__dirname, 'node_modules/pdfjs-dist/build/pdf.js')],
-  //       // 'pdfjs-dist/build/pdf.worker': [path.resolve(__dirname, 'node_modules/pdfjs-dist/build/pdf.worker.js')]
-  //     })
-  //   );
-  //
-  //   // Copy the pdfjs worker files to the static directory
-  //   if (isServer) {
-  //     config.plugins.push(
-  //       new CopyPlugin({
-  //         patterns: [
-  //           {
-  //             from: path.join(
-  //               path.dirname(require.resolve('pdfjs-dist/package.json')),
-  //               'legacy/build/pdf.worker.mjs'
-  //             ),
-  //             to: path.join(__dirname, '.next/server'),
-  //           },
-  //           // Optionally copy cmaps and standard_fonts if needed by server worker
-  //           // {
-  //           //   from: path.join(path.dirname(require.resolve('pdfjs-dist/package.json')), 'cmaps'),
-  //           //   to: path.join(__dirname, '.next/server/cmaps')
-  //           // },
-  //           // {
-  //           //   from: path.join(path.dirname(require.resolve('pdfjs-dist/package.json')), 'standard_fonts'),
-  //           //   to: path.join(__dirname, '.next/server/standard_fonts')
-  //           // },
-  //         ],
-  //       })
-  //     );
-  //   } else {
-  //     // For client-side builds, you might need to copy to a static path 
-  //     // accessible by the browser if you were using pdfjs-dist on the client.
-  //     // Since we are only using it server-side for now, this might not be needed.
-  //     // config.plugins.push(
-  //     //   new CopyPlugin({
-  //     //     patterns: [
-  //     //       { from: 'node_modules/pdfjs-dist/build/pdf.worker.min.js', to: path.join(__dirname, 'public/pdfjs') },
-  //     //     ],
-  //     //   })
-  //     // );
-  //   }
-  //
-  //   // Important: return the modified config
-  //   return config;
-  // },
+  webpack: (config, { isServer }) => {
+    config.cache = {
+      type: 'memory',
+      maxGenerations: 1,
+    };
+
+    if (isServer) {
+      config.externals = config.externals || [];
+      config.externals.push({
+        'winston': 'commonjs winston',
+        'logform': 'commonjs logform',
+        '@colors/colors': 'commonjs @colors/colors',
+        'postgres': 'commonjs postgres',
+        'argon2': 'commonjs argon2',
+      });
+    }
+
+    return config;
+  },
 };
 
-export default nextConfig; 
+export default nextConfig;
