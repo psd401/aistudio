@@ -141,7 +141,7 @@ export function useModelsWithPersistence(storageKey: string, requiredCapabilitie
   // Tracks the last model ID this effect validated to prevent redundant runs.
   // This allows selectedModel in the dependency array (no stale closure)
   // while preventing infinite loops from setSelectedModel triggering re-runs.
-  const lastValidatedModelId = useRef<string | null>(null)
+  const lastValidatedModelId = useRef<string | null | undefined>(undefined)
 
   // Auto-select a valid model if none selected or if persisted model is no longer available
   useEffect(() => {

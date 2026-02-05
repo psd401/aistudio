@@ -1,19 +1,15 @@
 /**
- * Argon2 Loader for Next.js with Turbopack
+ * Argon2 Loader for Next.js
  *
- * Problem: argon2 is a native C++ addon that Turbopack cannot resolve at
- * compile time — not via static import, dynamic import(), webpackIgnore,
- * or require() with a literal string.
+ * Uses direct require('argon2') which works because argon2 is listed in
+ * serverExternalPackages — both webpack and Turbopack preserve the require
+ * call as-is without bundling it.
  *
- * Solution: Use createRequire anchored to process.cwd() (the real app root)
- * rather than __filename, which Turbopack rewrites to a virtual "/ROOT/..."
- * path that breaks module resolution.
+ * Previous approach using createRequire was eliminated by webpack at build
+ * time (replaced with `(void 0)`), breaking argon2 loading on ECS.
  *
  * This file is server-only — never imported by client components.
  */
-
-import { createRequire } from "node:module";
-import * as path from "node:path";
 
 // ============================================
 // Types
@@ -33,19 +29,15 @@ interface Argon2Module {
 
 let argon2Module: Argon2Module | null = null;
 
-// Module name stored in a variable to prevent Turbopack static analysis
-const ARGON2_MODULE = "argon2";
-
 /**
- * Lazy-load argon2 at runtime using createRequire anchored to the real
- * project root (process.cwd()), bypassing Turbopack's virtual __filename.
+ * Lazy-load argon2 at runtime via require (preserved by webpack externals
+ * and serverExternalPackages).
  */
 function getArgon2(): Argon2Module {
   if (argon2Module) return argon2Module;
 
-  const realEntry = path.join(process.cwd(), "node_modules", ".package-lock.json");
-  const dynamicRequire = createRequire(realEntry);
-  argon2Module = dynamicRequire(ARGON2_MODULE) as Argon2Module;
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  argon2Module = require('argon2') as Argon2Module;
   return argon2Module;
 }
 

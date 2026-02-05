@@ -293,72 +293,222 @@ interface BugReportModalProps {
   isExpanded: boolean;
 }
 
+interface WindowWithErrors extends Window {
+  __capturedErrors?: string[];
+}
+
+interface NavigatorWithExtras extends Navigator {
+  deviceMemory?: number;
+  hardwareConcurrency: number;
+  connection?: {
+    effectiveType?: string;
+    downlink?: number;
+    saveData?: boolean;
+  };
+}
+
+interface PerformanceWithMemory extends Performance {
+  memory?: {
+    usedJSHeapSize: number;
+    jsHeapSizeLimit: number;
+  };
+}
+
+const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+const MAX_SCREENSHOT_SIZE = 10 * 1024 * 1024; // 10MB
+
 const bugReportLog = createLogger({ moduleName: 'bug-report-modal' });
 
+function escapeHtml(text: string): string {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function sanitizeUrl(url: string): string {
+  try {
+    const urlObj = new URL(url);
+    const sensitiveParams = ['token', 'key', 'session', 'auth', 'reset', 'verify', 'code', 'state', 'apikey'];
+    sensitiveParams.forEach(param => urlObj.searchParams.delete(param));
+    return urlObj.toString();
+  } catch {
+    return url.split('?')[0];
+  }
+}
+
+function sanitizeErrorMessage(error: string): string {
+  // Redact potential API keys and tokens
+  let sanitized = error.replace(/[a-f0-9]{32,}/gi, '[REDACTED_TOKEN]');
+  sanitized = sanitized.replace(/sk-[A-Za-z0-9]{20,}/g, '[REDACTED_API_KEY]');
+  sanitized = sanitized.replace(/Bearer\s+[A-Za-z0-9_-]+/gi, 'Bearer [REDACTED]');
+  sanitized = sanitized.replace(/[Aa]pi[_-]?[Kk]ey[:\s]+[A-Za-z0-9_-]+/g, 'api_key: [REDACTED]');
+  return escapeHtml(sanitized);
+}
+
+function validateScreenshotFile(file: File): string | null {
+  if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
+    return 'Only JPEG, PNG, GIF, and WebP images are supported';
+  }
+  if (file.size > MAX_SCREENSHOT_SIZE) {
+    return 'Screenshot must be smaller than 10MB';
+  }
+  return null;
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error || new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function collectBugReportMetadata(userDescription: string, steps: string, consoleErrors: string[], isAuthenticated: boolean): string {
+  const sections: string[] = [];
+
+  // User description - escape HTML
+  sections.push('<strong>=== USER DESCRIPTION ===</strong>');
+  sections.push(escapeHtml(userDescription));
+  if (steps) {
+    sections.push('<br><strong>Steps to Reproduce:</strong>');
+    sections.push(escapeHtml(steps));
+  }
+
+  // Browser & System - escape all user-controlled data
+  sections.push('<br><br><strong>=== BROWSER & SYSTEM INFO ===</strong>');
+  if (typeof window !== 'undefined') {
+    sections.push(`Page URL: ${escapeHtml(sanitizeUrl(window.location.href))}`);
+    sections.push(`Page Title: ${escapeHtml(document.title)}`);
+    sections.push(`Referrer: ${escapeHtml(document.referrer || 'Direct access')}`);
+  }
+  if (typeof navigator !== 'undefined') {
+    sections.push(`Browser: ${escapeHtml(navigator.userAgent)}`);
+    sections.push(`Platform: ${escapeHtml(navigator.platform)}`);
+    sections.push(`Language: ${navigator.language}`);
+    sections.push(`Online Status: ${navigator.onLine ? 'Online' : 'Offline'}`);
+    sections.push(`Cookies Enabled: ${navigator.cookieEnabled}`);
+    const nav = navigator as unknown as NavigatorWithExtras;
+    if (nav.deviceMemory) {
+      sections.push(`Device Memory: ${nav.deviceMemory} GB`);
+    }
+    if (nav.hardwareConcurrency) {
+      sections.push(`CPU Cores: ${nav.hardwareConcurrency}`);
+    }
+  }
+
+  // Display
+  sections.push('<br><br><strong>=== DISPLAY INFO ===</strong>');
+  if (typeof window !== 'undefined') {
+    sections.push(`Screen Resolution: ${window.screen.width}x${window.screen.height}`);
+    sections.push(`Viewport Size: ${window.innerWidth}x${window.innerHeight}`);
+    sections.push(`Color Depth: ${window.screen.colorDepth}-bit`);
+    sections.push(`Pixel Ratio: ${window.devicePixelRatio}`);
+  }
+
+  // Session - use isAuthenticated param instead of localStorage
+  sections.push('<br><br><strong>=== SESSION INFO ===</strong>');
+  sections.push(`Timestamp: ${new Date().toISOString()}`);
+  sections.push(`Timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`);
+  sections.push(`Authenticated: ${isAuthenticated ? 'Yes' : 'No'}`);
+  if (typeof window !== 'undefined' && window.localStorage) {
+    sections.push(`Local Storage Items: ${window.localStorage.length}`);
+  }
+
+  // Performance
+  sections.push('<br><br><strong>=== PERFORMANCE METRICS ===</strong>');
+  if (typeof window !== 'undefined' && window.performance) {
+    const perf = window.performance as PerformanceWithMemory;
+    if (perf.memory) {
+      sections.push(`JS Heap Used: ${Math.round(perf.memory.usedJSHeapSize / 1048576)} MB`);
+      sections.push(`JS Heap Limit: ${Math.round(perf.memory.jsHeapSizeLimit / 1048576)} MB`);
+    } else {
+      sections.push('Memory info not available');
+    }
+  }
+
+  // Network
+  if (typeof navigator !== 'undefined') {
+    const navConn = navigator as unknown as NavigatorWithExtras;
+    if (navConn.connection) {
+      sections.push('<br><br><strong>=== NETWORK INFO ===</strong>');
+      sections.push(`Connection Type: ${navConn.connection.effectiveType || 'Unknown'}`);
+      if (navConn.connection.downlink) {
+        sections.push(`Downlink Speed: ${navConn.connection.downlink} Mbps`);
+      }
+      sections.push(`Data Saver: ${navConn.connection.saveData ? 'Enabled' : 'Disabled'}`);
+    }
+  }
+
+  // Console errors - sanitize and escape
+  if (consoleErrors.length > 0) {
+    sections.push('<br><br><strong>=== RECENT CONSOLE ERRORS ===</strong>');
+    consoleErrors.slice(0, 10).forEach((err, index) => {
+      sections.push(`Error ${index + 1}: ${sanitizeErrorMessage(err)}`);
+    });
+  }
+
+  return sections.join('<br>');
+}
+
 function BugReportModal({ isExpanded }: BugReportModalProps) {
+  const { data: session } = useSession();
   const [open, setOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [screenshot, setScreenshot] = useState<File | null>(null);
   const [screenshotPreview, setScreenshotPreview] = useState<string | null>(null);
+  const [consoleErrors, setConsoleErrors] = useState<string[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Capture console errors when the modal opens
+  useEffect(() => {
+    if (open) {
+      const storedErrors = (window as unknown as WindowWithErrors).__capturedErrors || [];
+      setConsoleErrors(storedErrors.slice(-10));
+    }
+  }, [open]);
+
+  const setScreenshotFromFile = useCallback(async (file: File) => {
+    const error = validateScreenshotFile(file);
+    if (error) {
+      toast.error(error);
+      return;
+    }
+    setScreenshot(file);
+    try {
+      const dataUrl = await readFileAsDataUrl(file);
+      setScreenshotPreview(dataUrl);
+    } catch {
+      toast.error('Failed to read screenshot file');
+      setScreenshot(null);
+    }
+  }, []);
 
   const handleScreenshotChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    e.target.value = '';
+    setScreenshotFromFile(file);
+  }, [setScreenshotFromFile]);
 
-    // Client-side validation matching server rules
-    const ALLOWED_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
-    const MAX_SIZE = 10 * 1024 * 1024; // 10MB
-
-    if (!ALLOWED_TYPES.includes(file.type)) {
-      toast.error('Only JPEG, PNG, GIF, and WebP images are supported');
-      e.target.value = ''; // Clear input
-      return;
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        const file = item.getAsFile();
+        if (file) {
+          setScreenshotFromFile(file);
+          break;
+        }
+      }
     }
-
-    if (file.size > MAX_SIZE) {
-      toast.error('Screenshot must be smaller than 10MB');
-      e.target.value = ''; // Clear input
-      return;
-    }
-
-    setScreenshot(file);
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      setScreenshotPreview(reader.result as string);
-    };
-    reader.onerror = () => {
-      toast.error('Failed to read screenshot file');
-      setScreenshot(null);
-      if (fileInputRef.current) fileInputRef.current.value = '';
-    };
-    reader.readAsDataURL(file);
-  }, []);
+  }, [setScreenshotFromFile]);
 
   const removeScreenshot = useCallback(() => {
     setScreenshot(null);
     setScreenshotPreview(null);
     if (fileInputRef.current) fileInputRef.current.value = '';
-  }, []);
-
-  // Sanitize URL to remove sensitive query parameters
-  const sanitizeUrl = useCallback((url: string): string => {
-    try {
-      const urlObj = new URL(url);
-      // Remove potentially sensitive query parameters
-      const sensitiveParams = ['token', 'key', 'session', 'auth', 'reset', 'verify'];
-      sensitiveParams.forEach(param => urlObj.searchParams.delete(param));
-      return urlObj.toString();
-    } catch {
-      return url.split('?')[0]; // Fallback: remove all query params
-    }
-  }, []);
-
-  // Sanitize user agent to reduce fingerprinting
-  const sanitizeUserAgent = useCallback((ua: string): string => {
-    // Extract just browser name and version, not full fingerprint
-    const match = ua.match(/(Chrome|Firefox|Safari|Edge)\/[\d.]+/);
-    return match ? match[0] : 'Unknown Browser';
   }, []);
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -380,18 +530,19 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
       const descriptionText = descriptionEl.value;
       const steps = stepsEl instanceof HTMLTextAreaElement ? stepsEl.value : '';
 
-      // Build rich description with steps and browser info
-      let fullDescription = descriptionText;
-      if (steps) {
-        fullDescription += `\n\n**Steps to Reproduce:**\n${steps}`;
-      }
-      fullDescription += `\n\n---\n**Environment:**\n- URL: ${sanitizeUrl(window.location.href)}\n- Browser: ${sanitizeUserAgent(navigator.userAgent)}\n- Timestamp: ${new Date().toISOString()}`;
+      // Build rich description with all metadata
+      const fullDescription = collectBugReportMetadata(descriptionText, steps, consoleErrors, !!session);
 
       const formData = new FormData();
       formData.append('title', title);
       formData.append('description', fullDescription);
+
+      // Convert screenshot to base64 data URL to avoid Next.js RSC serialization issues
       if (screenshot) {
-        formData.append('screenshot', screenshot, screenshot.name || 'screenshot.png');
+        const dataUrl = screenshotPreview || await readFileAsDataUrl(screenshot);
+        formData.append('screenshotData', dataUrl);
+        formData.append('screenshotName', screenshot.name || 'screenshot.png');
+        formData.append('screenshotType', screenshot.type);
       }
 
       const result = await createFreshserviceTicketAction(formData);
@@ -436,7 +587,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
             Found an issue? Let us know so we can fix it.
           </DialogDescription>
         </DialogHeader>
-        <form onSubmit={handleSubmit} className="space-y-4 pt-4">
+        <form onSubmit={handleSubmit} onPaste={handlePaste} className="space-y-4 pt-4">
           <div className="space-y-2">
             <Label htmlFor="bug-title">Title</Label>
             <Input
@@ -485,22 +636,27 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
                 </Button>
               </div>
             ) : (
-              <div className="flex items-center gap-2">
-                <Label
-                  htmlFor="bug-screenshot"
-                  className="flex items-center gap-2 px-4 py-2 border rounded-md cursor-pointer hover:bg-muted transition-colors"
-                >
-                  <ImageIcon className="h-4 w-4" />
-                  <span className="text-sm">Attach Screenshot</span>
-                </Label>
-                <Input
-                  ref={fileInputRef}
-                  id="bug-screenshot"
-                  type="file"
-                  accept=".jpg,.jpeg,.png,.gif,.webp"
-                  className="hidden"
-                  onChange={handleScreenshotChange}
-                />
+              <div className="flex flex-col gap-2">
+                <div className="flex items-center gap-2">
+                  <Label
+                    htmlFor="bug-screenshot"
+                    className="flex items-center gap-2 px-4 py-2 border rounded-md cursor-pointer hover:bg-muted transition-colors"
+                  >
+                    <ImageIcon className="h-4 w-4" />
+                    <span className="text-sm">Attach Screenshot</span>
+                  </Label>
+                  <Input
+                    ref={fileInputRef}
+                    id="bug-screenshot"
+                    type="file"
+                    accept=".jpg,.jpeg,.png,.gif,.webp"
+                    className="hidden"
+                    onChange={handleScreenshotChange}
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Tip: You can also paste images directly (Ctrl/Cmd+V)
+                </p>
               </div>
             )}
           </div>
