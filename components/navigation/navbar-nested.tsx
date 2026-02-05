@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
@@ -300,6 +300,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [screenshot, setScreenshot] = useState<File | null>(null);
   const [screenshotPreview, setScreenshotPreview] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleScreenshotChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -326,12 +327,18 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
     reader.onloadend = () => {
       setScreenshotPreview(reader.result as string);
     };
+    reader.onerror = () => {
+      toast.error('Failed to read screenshot file');
+      setScreenshot(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    };
     reader.readAsDataURL(file);
   }, []);
 
   const removeScreenshot = useCallback(() => {
     setScreenshot(null);
     setScreenshotPreview(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
   }, []);
 
   // Sanitize URL to remove sensitive query parameters
@@ -394,6 +401,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
         form.reset();
         setScreenshot(null);
         setScreenshotPreview(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
         handleOpenChange(false);
       } else {
         toast.error(result.message);
@@ -486,6 +494,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
                   <span className="text-sm">Attach Screenshot</span>
                 </Label>
                 <Input
+                  ref={fileInputRef}
                   id="bug-screenshot"
                   type="file"
                   accept=".jpg,.jpeg,.png,.gif,.webp"
