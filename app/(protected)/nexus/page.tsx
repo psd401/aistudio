@@ -69,6 +69,8 @@ function ConversationRuntimeProvider({
     const response = await fetch(input, init)
 
     // Handle model-not-found errors (404)
+    // Note: We show a toast but still return the 404 response to let the AI SDK runtime
+    // handle cleanup. This provides dual feedback: user-friendly toast + runtime error handling.
     if (response.status === 404) {
       try {
         const clonedResponse = response.clone()
@@ -79,7 +81,12 @@ function ConversationRuntimeProvider({
         })
         log.warn('Selected model not found on server')
       } catch {
-        log.debug('Could not parse 404 response as JSON')
+        log.debug('Could not parse 404 response as JSON, showing generic toast')
+        // Show generic toast even if JSON parsing fails
+        toast.error('Model Unavailable', {
+          description: 'The selected model is no longer available. Please choose a different model.',
+          duration: 8000
+        })
       }
     }
 

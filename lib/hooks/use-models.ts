@@ -1,8 +1,26 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useToast } from "@/components/ui/use-toast"
 import type { SelectAiModel } from "@/types"
+import { z } from "zod"
+import { createLogger } from "@/lib/client-logger"
+
+const log = createLogger({ module: 'use-models' })
+
+// Validation schema for localStorage model data
+// This is a partial schema - we only validate the fields we actually use
+const StoredModelSchema = z.object({
+  id: z.number(),
+  modelId: z.string(),
+  name: z.string(),
+  provider: z.string(),
+  active: z.boolean(),
+  nexusEnabled: z.boolean(),
+  capabilities: z.union([z.string(), z.array(z.string())]).nullable().optional(),
+  description: z.string().nullable().optional(),
+  maxTokens: z.number().nullable().optional(),
+}).passthrough() // Allow additional fields from SelectAiModel type
 
 /**
  * Shared hook for fetching and managing AI models
@@ -67,15 +85,33 @@ export function useModels() {
 export function useModelPersistence(storageKey: string) {
   const [selectedModel, setSelectedModelState] = useState<SelectAiModel | null>(null)
   
-  // Load persisted model on mount
+  // Load persisted model on mount with validation
   useEffect(() => {
     const savedData = localStorage.getItem(`${storageKey}Data`)
     if (savedData) {
       try {
-        const model = JSON.parse(savedData)
-        setSelectedModelState(model)
-      } catch {
-        // Invalid stored data, ignore
+        const parsed = JSON.parse(savedData)
+        const validation = StoredModelSchema.safeParse(parsed)
+
+        if (validation.success) {
+          setSelectedModelState(validation.data as SelectAiModel)
+        } else {
+          log.warn('Invalid model data in localStorage, cleaning up', {
+            storageKey,
+            errorCount: validation.error.issues.length
+          })
+          // Clean up invalid data
+          localStorage.removeItem(`${storageKey}Data`)
+          localStorage.removeItem(`${storageKey}Id`)
+        }
+      } catch (error) {
+        log.warn('Failed to parse localStorage model data', {
+          storageKey,
+          error: error instanceof Error ? error.message : String(error)
+        })
+        // Invalid JSON, clean up
+        localStorage.removeItem(`${storageKey}Data`)
+        localStorage.removeItem(`${storageKey}Id`)
       }
     }
   }, [storageKey])
@@ -102,16 +138,28 @@ export function useModelPersistence(storageKey: string) {
 export function useModelsWithPersistence(storageKey: string, requiredCapabilities?: string[]) {
   const { models, isLoading, error, refetch } = useModels()
   const [selectedModel, setSelectedModel] = useModelPersistence(storageKey)
-  
+  const hasAutoSelected = useRef(false)
+
   // Auto-select a valid model if none selected or if persisted model is no longer available
+  // Note: selectedModel is NOT in dependencies to prevent infinite loop from setSelectedModel triggering re-runs
   useEffect(() => {
     if (models.length === 0 || isLoading) return
 
     // Check if persisted model still exists in available models
     const isStale = selectedModel && !models.some(m => m.modelId === selectedModel.modelId)
 
-    if (!selectedModel || isStale) {
-      let candidateModel = models[0]
+    // Only auto-select if we haven't already done so for this models list
+    if ((!selectedModel || isStale) && !hasAutoSelected.current) {
+      if (isStale) {
+        log.info('Stale model detected, auto-selecting new model', {
+          staleModelId: selectedModel.modelId,
+          staleName: selectedModel.name,
+          availableCount: models.length
+        })
+      }
+
+      // Find a model that matches required capabilities
+      let candidateModel: SelectAiModel | null = null
 
       if (requiredCapabilities && requiredCapabilities.length > 0) {
         candidateModel = models.find(model => {
@@ -119,18 +167,54 @@ export function useModelsWithPersistence(storageKey: string, requiredCapabilitie
             const capabilities = typeof model.capabilities === 'string'
               ? JSON.parse(model.capabilities)
               : model.capabilities
-            return Array.isArray(capabilities) &&
-              requiredCapabilities.every(cap => capabilities.includes(cap))
-          } catch {
+
+            if (!Array.isArray(capabilities)) {
+              log.warn('Model has invalid capabilities format', {
+                modelId: model.modelId,
+                capabilitiesType: typeof capabilities
+              })
+              return false
+            }
+
+            return requiredCapabilities.every(cap => capabilities.includes(cap))
+          } catch (error) {
+            log.warn('Failed to parse model capabilities', {
+              modelId: model.modelId,
+              error: error instanceof Error ? error.message : String(error)
+            })
             return false
           }
-        }) || models[0]
+        }) ?? null
+
+        // If no model matches required capabilities, don't fall back to models[0]
+        // Instead, leave it null to prompt user selection
+        if (!candidateModel) {
+          log.warn('No models match required capabilities', {
+            requiredCapabilities,
+            availableModels: models.map(m => m.modelId)
+          })
+        }
+      } else {
+        // No capability requirements, default to first model
+        candidateModel = models[0]
       }
 
-      setSelectedModel(candidateModel)
+      if (candidateModel) {
+        setSelectedModel(candidateModel)
+        hasAutoSelected.current = true
+        log.info('Auto-selected model', {
+          modelId: candidateModel.modelId,
+          name: candidateModel.name
+        })
+      }
     }
-  }, [models, selectedModel, isLoading, requiredCapabilities, setSelectedModel])
-  
+
+    // Reset auto-selection flag when a valid model is manually selected
+    if (selectedModel && !isStale) {
+      hasAutoSelected.current = false
+    }
+  }, [models, isLoading, requiredCapabilities, setSelectedModel])
+
   return {
     models,
     selectedModel,
