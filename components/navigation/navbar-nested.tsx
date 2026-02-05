@@ -25,6 +25,7 @@ import { toast } from 'sonner';
 import { useNotifications } from '@/contexts/notification-context';
 import { useExecutionResults } from '@/hooks/use-execution-results';
 import { createFreshserviceTicketAction } from '@/actions/create-freshservice-ticket.actions';
+import { createLogger } from '@/lib/client-logger';
 import { NotificationBell } from '@/components/notifications/notification-bell';
 import { MessageCenter } from '@/components/notifications/message-center';
 import { iconMap, IconName } from './icon-map';
@@ -292,6 +293,8 @@ interface BugReportModalProps {
   isExpanded: boolean;
 }
 
+const bugReportLog = createLogger({ moduleName: 'bug-report-modal' });
+
 function BugReportModal({ isExpanded }: BugReportModalProps) {
   const [open, setOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -357,9 +360,18 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
 
     try {
       const form = e.currentTarget;
-      const title = (form.elements.namedItem('title') as HTMLInputElement).value;
-      const descriptionText = (form.elements.namedItem('description') as HTMLTextAreaElement).value;
-      const steps = (form.elements.namedItem('steps') as HTMLTextAreaElement).value;
+      const titleEl = form.elements.namedItem('title');
+      const descriptionEl = form.elements.namedItem('description');
+      const stepsEl = form.elements.namedItem('steps');
+
+      if (!(titleEl instanceof HTMLInputElement) || !(descriptionEl instanceof HTMLTextAreaElement)) {
+        toast.error('Form error. Please try again.');
+        return;
+      }
+
+      const title = titleEl.value;
+      const descriptionText = descriptionEl.value;
+      const steps = stepsEl instanceof HTMLTextAreaElement ? stepsEl.value : '';
 
       // Build rich description with steps and browser info
       let fullDescription = descriptionText;
@@ -387,7 +399,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
         toast.error(result.message);
       }
     } catch (error) {
-      console.error('Bug report submission failed', error);
+      bugReportLog.error('Bug report submission failed', { error: error instanceof Error ? error.message : String(error) });
       toast.error('An unexpected error occurred. Please try again.');
     } finally {
       setIsSubmitting(false);
