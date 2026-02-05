@@ -295,24 +295,60 @@ interface BugReportModalProps {
 function BugReportModal({ isExpanded }: BugReportModalProps) {
   const [open, setOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [_screenshot, setScreenshot] = useState<File | null>(null);
+  const [screenshot, setScreenshot] = useState<File | null>(null);
   const [screenshotPreview, setScreenshotPreview] = useState<string | null>(null);
 
   const handleScreenshotChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      setScreenshot(file);
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setScreenshotPreview(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+    if (!file) return;
+
+    // Client-side validation matching server rules
+    const ALLOWED_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+    const MAX_SIZE = 10 * 1024 * 1024; // 10MB
+
+    if (!ALLOWED_TYPES.includes(file.type)) {
+      toast.error('Only JPEG, PNG, GIF, and WebP images are supported');
+      e.target.value = ''; // Clear input
+      return;
     }
+
+    if (file.size > MAX_SIZE) {
+      toast.error('Screenshot must be smaller than 10MB');
+      e.target.value = ''; // Clear input
+      return;
+    }
+
+    setScreenshot(file);
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setScreenshotPreview(reader.result as string);
+    };
+    reader.readAsDataURL(file);
   }, []);
 
   const removeScreenshot = useCallback(() => {
     setScreenshot(null);
     setScreenshotPreview(null);
+  }, []);
+
+  // Sanitize URL to remove sensitive query parameters
+  const sanitizeUrl = useCallback((url: string): string => {
+    try {
+      const urlObj = new URL(url);
+      // Remove potentially sensitive query parameters
+      const sensitiveParams = ['token', 'key', 'session', 'auth', 'reset', 'verify'];
+      sensitiveParams.forEach(param => urlObj.searchParams.delete(param));
+      return urlObj.toString();
+    } catch {
+      return url.split('?')[0]; // Fallback: remove all query params
+    }
+  }, []);
+
+  // Sanitize user agent to reduce fingerprinting
+  const sanitizeUserAgent = useCallback((ua: string): string => {
+    // Extract just browser name and version, not full fingerprint
+    const match = ua.match(/(Chrome|Firefox|Safari|Edge)\/[\d.]+/);
+    return match ? match[0] : 'Unknown Browser';
   }, []);
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
@@ -330,25 +366,28 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
       if (steps) {
         fullDescription += `\n\n**Steps to Reproduce:**\n${steps}`;
       }
-      fullDescription += `\n\n---\n**Environment:**\n- URL: ${window.location.href}\n- Browser: ${navigator.userAgent}\n- Timestamp: ${new Date().toISOString()}`;
+      fullDescription += `\n\n---\n**Environment:**\n- URL: ${sanitizeUrl(window.location.href)}\n- Browser: ${sanitizeUserAgent(navigator.userAgent)}\n- Timestamp: ${new Date().toISOString()}`;
 
       const formData = new FormData();
       formData.append('title', title);
       formData.append('description', fullDescription);
-      if (_screenshot) {
-        formData.append('screenshot', _screenshot, _screenshot.name || 'screenshot.png');
+      if (screenshot) {
+        formData.append('screenshot', screenshot, screenshot.name || 'screenshot.png');
       }
 
       const result = await createFreshserviceTicketAction(formData);
 
       if (result.isSuccess) {
         toast.success('Bug report submitted successfully');
-        handleOpenChange(false);
         form.reset();
+        setScreenshot(null);
+        setScreenshotPreview(null);
+        handleOpenChange(false);
       } else {
         toast.error(result.message);
       }
-    } catch {
+    } catch (error) {
+      console.error('Bug report submission failed', error);
       toast.error('An unexpected error occurred. Please try again.');
     } finally {
       setIsSubmitting(false);
@@ -437,7 +476,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
                 <Input
                   id="bug-screenshot"
                   type="file"
-                  accept="image/*"
+                  accept=".jpg,.jpeg,.png,.gif,.webp"
                   className="hidden"
                   onChange={handleScreenshotChange}
                 />
