@@ -496,7 +496,12 @@ export async function updateConversationStats(
     "getConversationStats"
   );
 
-  const { count, lastMessageAt } = stats[0] ?? { count: 0, lastMessageAt: null };
+  const { count, lastMessageAt: rawLastMessageAt } = stats[0] ?? { count: 0, lastMessageAt: null };
+
+  // postgres.js returns timestamps as strings from aggregation functions (e.g. max()),
+  // not Date objects. Drizzle's sql<Date> is a TypeScript hint only — no runtime conversion.
+  // We must convert to Date before passing to .set() to avoid "toISOString is not a function".
+  const lastMessageAt = rawLastMessageAt ? new Date(rawLastMessageAt as unknown as string) : null;
 
   await executeQuery(
     (db) =>
