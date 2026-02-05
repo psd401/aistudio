@@ -138,19 +138,24 @@ export function useModelPersistence(storageKey: string) {
 export function useModelsWithPersistence(storageKey: string, requiredCapabilities?: string[]) {
   const { models, isLoading, error, refetch } = useModels()
   const [selectedModel, setSelectedModel] = useModelPersistence(storageKey)
-  const hasAutoSelected = useRef(false)
+  // Tracks the last model ID this effect validated to prevent redundant runs.
+  // This allows selectedModel in the dependency array (no stale closure)
+  // while preventing infinite loops from setSelectedModel triggering re-runs.
+  const lastValidatedModelId = useRef<string | null>(null)
 
   // Auto-select a valid model if none selected or if persisted model is no longer available
-  // Note: selectedModel is NOT in dependencies to prevent infinite loop from setSelectedModel triggering re-runs
   useEffect(() => {
     if (models.length === 0 || isLoading) return
 
-    // Check if persisted model still exists in available models
-    const isStale = selectedModel && !models.some(m => m.modelId === selectedModel.modelId)
+    const currentModelId = selectedModel?.modelId ?? null
 
-    // Only auto-select if we haven't already done so for this models list
-    if ((!selectedModel || isStale) && !hasAutoSelected.current) {
-      if (isStale) {
+    // Skip if we've already validated this model ID against this models list
+    if (currentModelId === lastValidatedModelId.current) return
+
+    const isStale = currentModelId && !models.some(m => m.modelId === currentModelId)
+
+    if (!currentModelId || isStale) {
+      if (isStale && selectedModel) {
         log.info('Stale model detected, auto-selecting new model', {
           staleModelId: selectedModel.modelId,
           staleName: selectedModel.name,
@@ -201,19 +206,17 @@ export function useModelsWithPersistence(storageKey: string, requiredCapabilitie
 
       if (candidateModel) {
         setSelectedModel(candidateModel)
-        hasAutoSelected.current = true
+        lastValidatedModelId.current = candidateModel.modelId
         log.info('Auto-selected model', {
           modelId: candidateModel.modelId,
           name: candidateModel.name
         })
       }
+    } else {
+      // Current model is valid — record it so we don't re-validate
+      lastValidatedModelId.current = currentModelId
     }
-
-    // Reset auto-selection flag when a valid model is manually selected
-    if (selectedModel && !isStale) {
-      hasAutoSelected.current = false
-    }
-  }, [models, isLoading, requiredCapabilities, setSelectedModel])
+  }, [models, isLoading, requiredCapabilities, setSelectedModel, selectedModel])
 
   return {
     models,
