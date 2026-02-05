@@ -25,6 +25,7 @@ import {
   aiModels,
 } from "@/lib/db/schema";
 import { countAsInt } from "@/lib/db/drizzle/helpers/pagination";
+import { aggregationTimestampToDate } from "@/lib/db/drizzle/helpers/type-conversions";
 import type { SelectNexusMessage } from "@/lib/db/types";
 import { safeJsonbStringify } from "@/lib/db/json-utils";
 
@@ -496,7 +497,12 @@ export async function updateConversationStats(
     "getConversationStats"
   );
 
-  const { count, lastMessageAt } = stats[0] ?? { count: 0, lastMessageAt: null };
+  const { count, lastMessageAt: rawLastMessageAt } = stats[0] ?? { count: 0, lastMessageAt: null };
+
+  // postgres.js returns timestamps as strings from aggregation functions (e.g. max()),
+  // not Date objects. Drizzle's sql<Date> is a TypeScript hint only — no runtime conversion.
+  // We must convert to Date before passing to .set() to avoid "toISOString is not a function".
+  const lastMessageAt = aggregationTimestampToDate(rawLastMessageAt);
 
   await executeQuery(
     (db) =>

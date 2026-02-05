@@ -27,7 +27,7 @@ import {
   IconEye,
 } from "@tabler/icons-react"
 import { formatDistanceToNow } from "date-fns"
-import type { NexusActivityItem } from "@/actions/admin/activity-management.actions"
+import type { AssistantConversationItem } from "@/actions/admin/activity-management.actions"
 
 interface SortableHeaderProps {
   column: {
@@ -56,33 +56,50 @@ function SortableHeader({ column, title }: SortableHeaderProps) {
   )
 }
 
-interface NexusActivityTableProps {
-  data: NexusActivityItem[]
-  loading?: boolean
-  onViewDetail: (item: NexusActivityItem) => void
+function StatusBadge({ status }: { status: string | null }) {
+  if (!status) return <Badge variant="outline">unknown</Badge>
+
+  const variant =
+    status === "completed"
+      ? "default"
+      : status === "failed"
+        ? "destructive"
+        : status === "running"
+          ? "secondary"
+          : "outline"
+
+  return <Badge variant={variant}>{status}</Badge>
 }
 
-export function NexusActivityTable({
+interface AssistantConversationTableProps {
+  data: AssistantConversationItem[]
+  loading?: boolean
+  onViewDetail: (item: AssistantConversationItem) => void
+}
+
+export function AssistantConversationTable({
   data,
   loading,
   onViewDetail,
-}: NexusActivityTableProps) {
+}: AssistantConversationTableProps) {
   const [sorting, setSorting] = useState<SortingState>([
     { id: "lastMessageAt", desc: true },
   ])
 
-  const columns = useMemo<ColumnDef<NexusActivityItem>[]>(
+  const columns = useMemo<ColumnDef<AssistantConversationItem>[]>(
     () => [
       {
-        accessorKey: "title",
-        header: ({ column }) => <SortableHeader column={column} title="Title" />,
+        accessorKey: "assistantName",
+        header: ({ column }) => (
+          <SortableHeader column={column} title="Assistant" />
+        ),
         cell: ({ row }) => (
           <div className="max-w-xs">
             <p className="font-medium truncate">
-              {row.original.title || "Untitled Conversation"}
+              {row.original.assistantName || "Unknown Assistant"}
             </p>
             <p className="text-xs text-muted-foreground truncate">
-              ID: {row.original.id.slice(0, 8)}...
+              {row.original.title || "Untitled"}
             </p>
           </div>
         ),
@@ -100,17 +117,17 @@ export function NexusActivityTable({
         ),
       },
       {
-        accessorKey: "provider",
-        header: "Provider",
+        accessorKey: "executionStatus",
+        header: "Status",
         cell: ({ row }) => (
-          <Badge variant="secondary">{row.original.provider}</Badge>
+          <StatusBadge status={row.original.executionStatus} />
         ),
       },
       {
         accessorKey: "modelUsed",
         header: "Model",
         cell: ({ row }) => (
-          <span className="text-sm">{row.original.modelUsed || "—"}</span>
+          <span className="text-sm">{row.original.modelUsed || "\u2014"}</span>
         ),
       },
       {
@@ -151,7 +168,9 @@ export function NexusActivityTable({
         ),
         cell: ({ row }) => {
           const date = row.original.lastMessageAt
-          return date ? formatDistanceToNow(new Date(date), { addSuffix: true }) : "—"
+          return date
+            ? formatDistanceToNow(new Date(date), { addSuffix: true })
+            : "\u2014"
         },
       },
       {
@@ -192,7 +211,7 @@ export function NexusActivityTable({
   if (data.length === 0) {
     return (
       <div className="text-center py-12 text-muted-foreground">
-        No Nexus conversations found
+        No assistant conversations found
       </div>
     )
   }

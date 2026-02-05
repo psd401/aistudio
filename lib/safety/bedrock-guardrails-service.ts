@@ -161,9 +161,25 @@ export class BedrockGuardrailsService {
         };
       }
 
+      // Issue #742: Send detection notification for topics in detect-only mode
+      if (result.detectedTopics && result.detectedTopics.length > 0) {
+        await this.sendViolationNotification({
+          violationId: requestId,
+          userIdHash: this.hashValue(sessionId || 'anonymous'),
+          timestamp: new Date().toISOString(),
+          source: 'input',
+          categories: result.detectedTopics,
+          modelId: 'pre-check',
+          provider: 'user-input',
+          action: 'detected',
+          sessionId,
+        });
+      }
+
       this.log.info('Input content passed safety check', {
         requestId,
         contentLength: content.length,
+        detectedTopics: result.detectedTopics,
       });
 
       return {
@@ -244,11 +260,27 @@ export class BedrockGuardrailsService {
         };
       }
 
+      // Issue #742: Send detection notification for topics in detect-only mode
+      if (result.detectedTopics && result.detectedTopics.length > 0) {
+        await this.sendViolationNotification({
+          violationId: requestId,
+          userIdHash: this.hashValue(sessionId || 'anonymous'),
+          timestamp: new Date().toISOString(),
+          source: 'output',
+          categories: result.detectedTopics,
+          modelId,
+          provider,
+          action: 'detected',
+          sessionId,
+        });
+      }
+
       this.log.info('Output content passed safety check', {
         requestId,
         contentLength: content.length,
         modelId,
         provider,
+        detectedTopics: result.detectedTopics,
       });
 
       return {
@@ -294,8 +326,21 @@ export class BedrockGuardrailsService {
     const command = new ApplyGuardrailCommand(input);
     const response = await this.bedrockClient.send(command);
 
+    // Issue #742: Extract detected-but-not-blocked topics from assessments.
+    // When topics use inputAction/outputAction: 'NONE' (detect-only mode),
+    // the overall response.action will NOT be 'GUARDRAIL_INTERVENED' for those
+    // topics, but the assessment trace still contains detection information.
+    const assessment = response.assessments?.[0];
+    const detectedTopics = this.extractDetectedTopics(assessment);
+    if (detectedTopics.length > 0) {
+      this.log.info('Topics detected in detect-only mode (not blocked)', {
+        source,
+        detectedTopics,
+        contentLength: content.length,
+      });
+    }
+
     if (response.action === 'GUARDRAIL_INTERVENED') {
-      const assessment = response.assessments?.[0];
       const blockedCategories = this.extractBlockedCategories(assessment);
       const blockedMessage = response.outputs?.[0]?.text;
 
@@ -315,6 +360,7 @@ export class BedrockGuardrailsService {
 
     return {
       blocked: false,
+      detectedTopics: detectedTopics.length > 0 ? detectedTopics : undefined,
     };
   }
 
@@ -353,6 +399,29 @@ export class BedrockGuardrailsService {
     }
 
     return categories;
+  }
+
+  /**
+   * Extract topic names that were detected but not blocked (detect-only mode)
+   *
+   * Issue #742: When topics use inputAction/outputAction: 'NONE', Bedrock still
+   * evaluates content against topic definitions and returns detection information
+   * in the assessment. The topic action will be 'NONE' instead of 'BLOCKED'.
+   * We extract these for logging and monitoring to learn what triggers false positives.
+   */
+  private extractDetectedTopics(assessment?: SDKGuardrailAssessment): string[] {
+    const detected: string[] = [];
+
+    if (assessment?.topicPolicy?.topics) {
+      for (const topic of assessment.topicPolicy.topics) {
+        // Topics in detect-only mode have action 'NONE' instead of 'BLOCKED'
+        if (topic.action === 'NONE' && topic.name) {
+          detected.push(topic.name);
+        }
+      }
+    }
+
+    return detected;
   }
 
   /**

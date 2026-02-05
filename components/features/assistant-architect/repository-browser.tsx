@@ -173,7 +173,7 @@ export function RepositoryBrowser({
                         </span>
                         {repo.lastUpdated && (
                           <span>
-                            Updated {new Date(repo.lastUpdated).toLocaleDateString()}
+                            Updated {repo.lastUpdated.toLocaleDateString()}
                           </span>
                         )}
                       </div>

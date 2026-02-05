@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
@@ -21,8 +21,11 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
+import { toast } from 'sonner';
 import { useNotifications } from '@/contexts/notification-context';
 import { useExecutionResults } from '@/hooks/use-execution-results';
+import { createFreshserviceTicketAction } from '@/actions/create-freshservice-ticket.actions';
+import { createLogger } from '@/lib/client-logger';
 import { NotificationBell } from '@/components/notifications/notification-bell';
 import { MessageCenter } from '@/components/notifications/message-center';
 import { iconMap, IconName } from './icon-map';
@@ -290,41 +293,125 @@ interface BugReportModalProps {
   isExpanded: boolean;
 }
 
+const bugReportLog = createLogger({ moduleName: 'bug-report-modal' });
+
 function BugReportModal({ isExpanded }: BugReportModalProps) {
   const [open, setOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [_screenshot, setScreenshot] = useState<File | null>(null);
+  const [screenshot, setScreenshot] = useState<File | null>(null);
   const [screenshotPreview, setScreenshotPreview] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleScreenshotChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (file) {
-      setScreenshot(file);
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setScreenshotPreview(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+    if (!file) return;
+
+    // Client-side validation matching server rules
+    const ALLOWED_TYPES = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+    const MAX_SIZE = 10 * 1024 * 1024; // 10MB
+
+    if (!ALLOWED_TYPES.includes(file.type)) {
+      toast.error('Only JPEG, PNG, GIF, and WebP images are supported');
+      e.target.value = ''; // Clear input
+      return;
     }
+
+    if (file.size > MAX_SIZE) {
+      toast.error('Screenshot must be smaller than 10MB');
+      e.target.value = ''; // Clear input
+      return;
+    }
+
+    setScreenshot(file);
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      setScreenshotPreview(reader.result as string);
+    };
+    reader.onerror = () => {
+      toast.error('Failed to read screenshot file');
+      setScreenshot(null);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    };
+    reader.readAsDataURL(file);
   }, []);
 
   const removeScreenshot = useCallback(() => {
     setScreenshot(null);
     setScreenshotPreview(null);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  }, []);
+
+  // Sanitize URL to remove sensitive query parameters
+  const sanitizeUrl = useCallback((url: string): string => {
+    try {
+      const urlObj = new URL(url);
+      // Remove potentially sensitive query parameters
+      const sensitiveParams = ['token', 'key', 'session', 'auth', 'reset', 'verify'];
+      sensitiveParams.forEach(param => urlObj.searchParams.delete(param));
+      return urlObj.toString();
+    } catch {
+      return url.split('?')[0]; // Fallback: remove all query params
+    }
+  }, []);
+
+  // Sanitize user agent to reduce fingerprinting
+  const sanitizeUserAgent = useCallback((ua: string): string => {
+    // Extract just browser name and version, not full fingerprint
+    const match = ua.match(/(Chrome|Firefox|Safari|Edge)\/[\d.]+/);
+    return match ? match[0] : 'Unknown Browser';
   }, []);
 
   const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setIsSubmitting(true);
 
-    // Simulate submission (replace with actual API call later)
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    try {
+      const form = e.currentTarget;
+      const titleEl = form.elements.namedItem('title');
+      const descriptionEl = form.elements.namedItem('description');
+      const stepsEl = form.elements.namedItem('steps');
 
-    setIsSubmitting(false);
-    setOpen(false);
-    setScreenshot(null);
-    setScreenshotPreview(null);
-    // Could add toast notification here
+      if (!(titleEl instanceof HTMLInputElement) || !(descriptionEl instanceof HTMLTextAreaElement)) {
+        toast.error('Form error. Please try again.');
+        return;
+      }
+
+      const title = titleEl.value;
+      const descriptionText = descriptionEl.value;
+      const steps = stepsEl instanceof HTMLTextAreaElement ? stepsEl.value : '';
+
+      // Build rich description with steps and browser info
+      let fullDescription = descriptionText;
+      if (steps) {
+        fullDescription += `\n\n**Steps to Reproduce:**\n${steps}`;
+      }
+      fullDescription += `\n\n---\n**Environment:**\n- URL: ${sanitizeUrl(window.location.href)}\n- Browser: ${sanitizeUserAgent(navigator.userAgent)}\n- Timestamp: ${new Date().toISOString()}`;
+
+      const formData = new FormData();
+      formData.append('title', title);
+      formData.append('description', fullDescription);
+      if (screenshot) {
+        formData.append('screenshot', screenshot, screenshot.name || 'screenshot.png');
+      }
+
+      const result = await createFreshserviceTicketAction(formData);
+
+      if (result.isSuccess) {
+        toast.success('Bug report submitted successfully');
+        form.reset();
+        setScreenshot(null);
+        setScreenshotPreview(null);
+        if (fileInputRef.current) fileInputRef.current.value = '';
+        handleOpenChange(false);
+      } else {
+        toast.error(result.message);
+      }
+    } catch (error) {
+      bugReportLog.error('Bug report submission failed', { error: error instanceof Error ? error.message : String(error) });
+      toast.error('An unexpected error occurred. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleOpenChange = useCallback((newOpen: boolean) => {
@@ -354,6 +441,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
             <Label htmlFor="bug-title">Title</Label>
             <Input
               id="bug-title"
+              name="title"
               placeholder="Brief description of the issue"
               required
             />
@@ -362,6 +450,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
             <Label htmlFor="bug-description">Description</Label>
             <Textarea
               id="bug-description"
+              name="description"
               placeholder="What happened? What did you expect to happen?"
               rows={4}
               required
@@ -371,6 +460,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
             <Label htmlFor="bug-steps">Steps to Reproduce (optional)</Label>
             <Textarea
               id="bug-steps"
+              name="steps"
               placeholder="1. Go to...&#10;2. Click on...&#10;3. See error"
               rows={3}
             />
@@ -404,9 +494,10 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
                   <span className="text-sm">Attach Screenshot</span>
                 </Label>
                 <Input
+                  ref={fileInputRef}
                   id="bug-screenshot"
                   type="file"
-                  accept="image/*"
+                  accept=".jpg,.jpeg,.png,.gif,.webp"
                   className="hidden"
                   onChange={handleScreenshotChange}
                 />

@@ -125,6 +125,23 @@ export function ComparisonActivityTable({
         ),
       },
       {
+        accessorKey: "costUsd",
+        header: ({ column }) => (
+          <SortableHeader column={column} title="Cost" />
+        ),
+        cell: ({ row }) => {
+          const cost = row.original.costUsd
+          return cost > 0
+            ? new Intl.NumberFormat("en-US", {
+                style: "currency",
+                currency: "USD",
+                minimumFractionDigits: 2,
+                maximumFractionDigits: 4,
+              }).format(cost)
+            : "$0.00"
+        },
+      },
+      {
         accessorKey: "createdAt",
         header: ({ column }) => (
           <SortableHeader column={column} title="Created" />
