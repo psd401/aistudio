@@ -1,6 +1,11 @@
 import { NextRequest } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
 import { createLogger, generateRequestId } from "@/lib/logger"
+import type {
+  ConnectionEstablishedEvent,
+  PingEvent,
+  ConnectionTimeoutEvent,
+} from "@/types/notification-sse-events"
 
 // In-memory connection tracking (use Redis in production)
 const activeConnections = new Map<string, { count: number; lastCleanup: number }>()
@@ -8,6 +13,10 @@ const MAX_CONNECTIONS_PER_USER = 3
 const MAX_TOTAL_CONNECTIONS = 1000
 const CLEANUP_INTERVAL = 5 * 60 * 1000 // 5 minutes
 const CONNECTION_TIMEOUT = 15 * 60 * 1000 // 15 minutes
+
+// SSE connection timeout in milliseconds (default: 30 minutes)
+// Can be configured via SSE_TIMEOUT_MS environment variable
+const SSE_TIMEOUT_MS = parseInt(process.env.SSE_TIMEOUT_MS || '1800000', 10) // 30 minutes default
 
 // Periodic cleanup to prevent memory leaks
 const cleanupStaleConnections = () => {
@@ -133,10 +142,11 @@ export async function GET(request: NextRequest) {
 
         // Send initial connection message
         const encoder = new TextEncoder()
-        const initialMessage = `data: ${JSON.stringify({
+        const initialEvent: ConnectionEstablishedEvent = {
           type: 'connection_established',
           timestamp: new Date().toISOString()
-        })}\n\n`
+        }
+        const initialMessage = `data: ${JSON.stringify(initialEvent)}\n\n`
 
         try {
           controller.enqueue(encoder.encode(initialMessage))
@@ -154,10 +164,11 @@ export async function GET(request: NextRequest) {
           if (isClosed) return
 
           try {
-            const pingMessage = `data: ${JSON.stringify({
+            const pingEvent: PingEvent = {
               type: 'ping',
               timestamp: new Date().toISOString()
-            })}\n\n`
+            }
+            const pingMessage = `data: ${JSON.stringify(pingEvent)}\n\n`
 
             controller.enqueue(encoder.encode(pingMessage))
           } catch (error) {
@@ -179,18 +190,23 @@ export async function GET(request: NextRequest) {
           closeConnection()
         })
 
-        // Clean up after 30 minutes to prevent resource leaks
+        // Clean up after configured timeout to prevent resource leaks
         // Send a typed timeout event before closing so the client can
         // distinguish expected timeouts from real errors
         maxConnectionTime.current = setTimeout(() => {
-          log.info("SSE connection timed out after 30 minutes", { userId })
+          log.info("SSE connection timed out", {
+            userId,
+            timeoutMs: SSE_TIMEOUT_MS,
+            timeoutMinutes: Math.round(SSE_TIMEOUT_MS / 60000)
+          })
 
           if (!isClosed) {
             try {
-              const timeoutMessage = `data: ${JSON.stringify({
+              const timeoutEvent: ConnectionTimeoutEvent = {
                 type: 'connection_timeout',
                 timestamp: new Date().toISOString()
-              })}\n\n`
+              }
+              const timeoutMessage = `data: ${JSON.stringify(timeoutEvent)}\n\n`
               controller.enqueue(encoder.encode(timeoutMessage))
             } catch {
               // Stream may already be closed; proceed to cleanup
@@ -198,7 +214,7 @@ export async function GET(request: NextRequest) {
           }
 
           closeConnection()
-        }, 30 * 60 * 1000)
+        }, SSE_TIMEOUT_MS)
 
         // Store cleanup functions for potential external triggers
         // In a real implementation, you'd want a way for the notification
