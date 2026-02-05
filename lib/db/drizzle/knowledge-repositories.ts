@@ -51,6 +51,7 @@ import type {
   SelectRepositoryItemChunk,
   SelectRepositoryAccess,
 } from "@/lib/db/types";
+import { aggregationTimestampToDate } from "@/lib/db/drizzle/helpers/type-conversions";
 import { createLogger, sanitizeForLogging } from "@/lib/logger";
 
 // ============================================
@@ -324,7 +325,12 @@ export async function getUserAccessibleRepositories(
     "getUserAccessibleRepositories"
   );
 
-  return result;
+  // postgres.js returns timestamps as strings from aggregation functions (e.g. MAX()),
+  // not Date objects. Convert to actual Dates to match the type annotation.
+  return result.map(repo => ({
+    ...repo,
+    lastUpdated: aggregationTimestampToDate(repo.lastUpdated)
+  }));
 }
 
 /**
