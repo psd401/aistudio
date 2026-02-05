@@ -18,16 +18,22 @@ This guide covers local development, coding standards, and testing for this proj
    cp .env.example .env.local
    # Edit .env.local with your local/test values
    ```
-4. Configure SSR environment (required for authentication):
+4. Start local PostgreSQL and dev server:
    ```sh
-   # Add to .env.local
-   AMPLIFY_APP_ORIGIN=http://localhost:3000  # Use HTTPS in production
+   npm run db:up              # Start PostgreSQL via Docker
+   npm run db:seed            # Create test users (first time only)
+   npm run dev:local          # Start Next.js with local database
    ```
-5. Run the development server:
+   Test users after seeding:
+   - `test@example.com` — administrator role
+   - `staff@example.com` — staff role
+   - `student@example.com` — student role
+
+   Other useful database commands:
    ```sh
-   npm run dev
-   # For faster development with Turbopack:
-   npm run dev --turbo
+   npm run db:studio          # Open Drizzle Studio to inspect DB
+   npm run db:psql            # Connect via psql
+   npm run db:reset           # Reset database (destroys all data)
    ```
 
 ## Coding Standards
@@ -54,7 +60,7 @@ This project follows a **Layered Architecture** pattern:
    - Authorization checks via `hasToolAccess()`
 
 3. **Infrastructure Layer** (`/lib`, `/infra`)
-   - Database adapter pattern (`executeSQL`)
+   - Database access via Drizzle ORM (`executeQuery`/`executeTransaction`)
    - External service integrations
    - AWS CDK infrastructure definitions
 
@@ -80,8 +86,8 @@ import { TriangleIcon } from '@phosphor-icons/react'
 
 ## Frontend Domain Pattern
 - The base domain is provided as a parameter (e.g., `yourdomain.com`).
-- The Amplify app will use `dev.<domain>` for dev and `prod.<domain>` for prod.
-- If you want your root domain (e.g., `yourdomain.com`) to point to the Amplify app, set up a CNAME or ALIAS at your DNS provider pointing the apex to the prod subdomain (`prod.<domain>`).
+- The ECS Fargate service uses `dev.<domain>` for dev and the apex domain for prod.
+- DNS is managed via Route 53 with A records pointing to the Application Load Balancer.
 
 ## Example: Passing Parameters
 When deploying, pass the client IDs and base domain as parameters:
@@ -101,26 +107,42 @@ cdk deploy FrontendStack-Prod --parameters FrontendStack-Prod:BaseDomain=yourdom
 
 ## Database Development
 
-### RDS Data API Usage
-All database operations must use the RDS Data API with parameterized queries:
+### Drizzle ORM Usage
+All database operations use Drizzle ORM with the postgres.js driver:
 ```typescript
-// ✅ Correct - parameterized query
-await executeSQL(
-  "SELECT * FROM users WHERE id = :id",
-  [{ name: "id", value: { longValue: userId } }]
+import { eq, and } from "drizzle-orm"
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
+import { users, userRoles } from "@/lib/db/schema"
+
+// ✅ Correct - type-safe Drizzle query
+const user = await executeQuery(
+  (db) => db.select().from(users).where(eq(users.id, userId)).limit(1),
+  "getUserById"
 )
 
-// ❌ Never use string concatenation
-await executeSQL(`SELECT * FROM users WHERE id = ${userId}`)
+// ❌ Never use string concatenation or raw SQL for standard queries
 ```
 
 ### Transaction Management
 For operations that modify multiple tables, use transactions:
 ```typescript
-await executeTransaction(async (transactionId) => {
-  await executeSQL("INSERT INTO ...", params, transactionId)
-  await executeSQL("UPDATE ...", params, transactionId)
-})
+await executeTransaction(
+  async (tx) => {
+    await tx.delete(userRoles).where(eq(userRoles.userId, userId))
+    await tx.insert(userRoles).values(
+      roleIds.map(id => ({ userId, roleId: id }))
+    )
+  },
+  "updateUserRoles"
+)
+```
+
+### Migrations
+```bash
+npm run drizzle:generate        # Generate from schema changes
+npm run migration:prepare       # Format for Lambda deployment
+npm run migration:list          # List all migrations
+# Then add filename to MIGRATION_FILES array in db-init-handler.ts
 ```
 
 ## Server Actions Pattern
@@ -129,12 +151,15 @@ All server actions must follow the `ActionState<T>` pattern:
 export async function actionName(): Promise<ActionState<ReturnType>> {
   const session = await getServerSession()
   if (!session) return { isSuccess: false, message: "Unauthorized" }
-  
+
   const hasAccess = await hasToolAccess(session.user.sub, "toolName")
   if (!hasAccess) return { isSuccess: false, message: "Access denied" }
-  
+
   try {
-    const result = await executeSQL(...)
+    const result = await executeQuery(
+      (db) => db.select().from(table).where(eq(table.id, id)),
+      "actionName"
+    )
     return { isSuccess: true, message: "Success", data: result }
   } catch (error) {
     return handleError(error, "Operation failed")
@@ -227,27 +252,11 @@ See `docs/DEPLOYMENT.md` for more details and examples.
 
 ## Authentication & SSR Development
 
-### Amplify Configuration
-When using Amplify in Next.js, always configure with SSR enabled:
-```typescript
-import { Amplify } from 'aws-amplify'
-import config from '@/amplifyconfiguration.json'
-
-Amplify.configure(config, { ssr: true })
-```
-
-### Server-Side Operations
-Use `runWithAmplifyServerContext` for server-side Amplify operations:
-```typescript
-import { runWithAmplifyServerContext } from '@/utils/amplify-utils'
-
-const result = await runWithAmplifyServerContext({
-  nextServerContext: { request, response },
-  operation: async (contextSpec) => {
-    // Your Amplify operation here
-  }
-})
-```
+### NextAuth v5 Configuration
+Authentication uses NextAuth v5 with AWS Cognito and JWT strategy:
+- Session managed via HTTP-only cookies
+- Server-side session access via `getServerSession()`
+- Protected routes under `/(protected)` layout group
 
 ### Protected Routes
 Implement middleware for authentication:

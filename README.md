@@ -1,8 +1,8 @@
 # AI Studio
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![Built with Next.js](https://img.shields.io/badge/Built%20with-Next.js%2015-black)](https://nextjs.org/)
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/psd401/aistudio/releases)
+[![Built with Next.js](https://img.shields.io/badge/Built%20with-Next.js%2016-black)](https://nextjs.org/)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](https://github.com/psd401/aistudio/releases)
 
 > **Bring frontier AI to K-12 education—securely, affordably, and responsibly.**
 
@@ -87,15 +87,39 @@ AI Studio eliminates these barriers by:
   - Circuit breaker for AI provider failures
   - Performance metrics
 
+### Integration Platform
+
+- 🔌 **API v1** - REST API for external integrations
+  - Authenticated endpoints for assistants, decisions, and chat
+  - API key management (`sk-` prefix tokens)
+  - Rate limiting (60 req/min default)
+  - OpenAPI specification at `docs/API/v1/openapi.yaml`
+
+- 🔐 **OAuth2/OIDC Provider** - JWT-based auth for external apps
+  - Authorization Code Flow with PKCE
+  - Access tokens (15min), refresh tokens (24hr), ID tokens
+  - Granular scopes for API, MCP, and OIDC
+  - Admin UI for client registration at `/admin/oauth-clients`
+
+- 🤖 **MCP Server** - Model Context Protocol for AI tool integrations
+  - 5 tools: search decisions, capture decisions, list assistants, execute assistants, get context
+  - Works with Claude Code, Cursor, and custom MCP clients
+  - Authenticated via API key or OAuth token
+
+- 🧭 **Decision Framework** - Structured decision capture & graph
+  - Capture decisions with context, alternatives, and outcomes
+  - Graph-based decision relationships
+  - Search and retrieve past decisions for organizational knowledge
+
 ## 🏗️ Architecture
 
 Built on AWS with production-ready infrastructure:
 
-- **Frontend**: Next.js 15 (App Router) with React Server Components
+- **Frontend**: Next.js 16 (App Router) with React 19 Server Components
 - **Backend**: ECS Fargate containers with Application Load Balancer
-- **Database**: Aurora Serverless v2 (PostgreSQL 15) with pgvector for embeddings
+- **Database**: Aurora Serverless v2 (PostgreSQL) with Drizzle ORM and postgres.js driver
 - **Authentication**: AWS Cognito + NextAuth v5
-- **AI Providers**: OpenAI (GPT-5), Anthropic (Claude), Google (Gemini), AWS Bedrock
+- **AI Providers**: OpenAI (GPT-5), Anthropic (Claude), Google (Gemini), AWS Bedrock via AI SDK v6
 - **Infrastructure**: AWS CDK (TypeScript) following Well-Architected Framework
 - **Streaming**: Server-Sent Events (SSE) over HTTP/2 for real-time responses
 
@@ -122,10 +146,12 @@ npm install
 
 # Copy environment variables
 cp .env.example .env.local
-# Edit .env.local with your AWS RDS cluster ARN and secret ARN
+# Edit .env.local with your configuration
 
-# Run development server
-npm run dev
+# Start local PostgreSQL and dev server
+npm run db:up              # Start PostgreSQL via Docker
+npm run db:seed            # Create test users (first time)
+npm run dev:local          # Start Next.js with local database
 ```
 
 Open [http://localhost:3000](http://localhost:3000) to see the application.
@@ -142,6 +168,7 @@ npx cdk deploy AIStudio-DatabaseStack-Dev
 npx cdk deploy AIStudio-AuthStack-Dev
 npx cdk deploy AIStudio-StorageStack-Dev
 npx cdk deploy AIStudio-DocumentProcessingStack-Dev
+npx cdk deploy AIStudio-GuardrailsStack-Dev
 npx cdk deploy AIStudio-FrontendStack-Dev
 
 # Or deploy all at once
@@ -171,16 +198,16 @@ With mixed usage (Gemini + GPT-4 mini), costs drop to ~$200/month (**90% savings
 ## 🛠️ Tech Stack
 
 ### Frontend
-- Next.js 15 with App Router
+- Next.js 16 with App Router
 - React 19 with Server Components
 - Shadcn UI component library
 - Tailwind CSS for styling
-- Vercel AI SDK v5 for streaming
+- Vercel AI SDK v6 for streaming
 
 ### Backend
 - ECS Fargate for container hosting
 - Aurora Serverless v2 (PostgreSQL)
-- RDS Data API (no connection pooling needed)
+- Drizzle ORM with postgres.js driver
 - AWS Lambda for async processing
 - S3 for document storage
 - AWS Textract for OCR
@@ -212,6 +239,11 @@ With mixed usage (Gemini + GPT-4 mini), costs drop to ~$200/month (**90% savings
 - [Database ERD](./docs/diagrams/04-database-erd.md) - 54 PostgreSQL tables
 - [Authentication Flow](./docs/diagrams/05-authentication-flow.md) - OAuth 2.0 flow
 - [Streaming Architecture](./docs/diagrams/09-streaming-architecture.md) - SSE implementation
+
+### Integration
+- [API v1 Quickstart](./docs/guides/api-quickstart.md) - Getting started with the REST API
+- [OAuth2 Integration](./docs/guides/oauth-integration.md) - Authenticating external apps
+- [MCP Integration](./docs/guides/mcp-integration.md) - Connecting AI tools via MCP
 
 ### Development
 - [Developer Guide](./DEVELOPER_GUIDE.md) - Development setup and workflow

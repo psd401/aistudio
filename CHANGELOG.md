@@ -1,9 +1,73 @@
 # Changelog
 
-All notable changes to AI Studio will be documented in this file.
+All notable changes to AI Studio are documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.1.0] - 2026-02-05
+
+### Added
+
+- **API v1 Platform** — REST API with OpenAPI spec for external integrations. Endpoints for assistants, context graph, conversations, and jobs. Authenticated via API key, OAuth JWT, or session.
+- **OAuth2/OIDC Provider** — Authorization Code Flow with PKCE. Admin UI for client registration. KMS-signed JWTs in production. Access tokens (15min), refresh tokens (24hr), ID tokens.
+- **MCP Server** — Model Context Protocol server exposing 5 tools (search_decisions, capture_decision, list_assistants, execute_assistant, get_decision_graph) over streamable HTTP transport.
+- **Decision Framework** — Structured decision capture with context, alternatives, evidence, and outcomes. Graph-based relationships between decisions. Full-text and semantic search.
+- **K-12 Bedrock Guardrails** — Amazon Bedrock content filtering and PII protection. DynamoDB-backed configuration. SNS real-time alerts. Detect-only mode by default.
+- **API Key Management** — User-managed API keys with `sk-` prefix. Argon2id hashing. Per-key scopes, rate limiting (60 req/min), usage analytics. Max 10 keys per user.
+- **User Settings Page** — Consolidated settings UI with API keys tab, preferences, and profile management.
+- **Assistant Architect Improvements** — Conversation continuity across executions. Provider-based model filtering. Enhanced SSE event streaming.
+- **Dashboard Redesign** — Updated layout with usage statistics and quick actions.
+- **Tutorials Library** — In-app tutorial content for onboarding educators and students.
+- **Chart Visualization** — Recharts-based data visualization in conversations.
+- **Local Docker Development** — `npm run db:up`, `npm run dev:local`, `npm run db:seed` for fully local development without AWS dependencies.
+- **Integration Guides** — New docs for MCP, OAuth, and API v1 quickstart.
+
+### Changed
+
+- **Database ORM** — Complete migration from RDS Data API to Drizzle ORM with postgres.js driver. Type-safe queries via `executeQuery`/`executeTransaction`. Connection pooling (max 20 per container).
+- **Next.js 16** — Upgraded from Next.js 15 to 16.1.6.
+- **AI SDK v6** — Upgraded from Vercel AI SDK v5 to v6.0 with updated provider packages.
+- **React 19** — Updated to React 19.2.4.
+- **Lambda Power-Tuning** — 66% memory reduction (3GB to 1GB default) via AWS Lambda Power Tuning.
+
+### Fixed
+
+- SSE connection error log noise (#747)
+- Model-not-found errors (#746)
+- Timestamp conversion issues (#745)
+- Presigned URL refresh for expired S3 URLs (#737)
+- Guardrails false positives (#727, #742) — Disabled PROMPT_ATTACK filter, set topics to detect-only
+- Message count reconciliation (#719)
+- React Compiler violations (#461)
+
+### Infrastructure
+
+- **GuardrailsStack** — New CDK stack: Bedrock Guardrails + DynamoDB config table + SNS alert topic
+- **Aurora Auto-Pause** — Dev environments scale to 0 ACU when idle (~$44/month savings)
+- **ECS Spot Instances** — 70% cost savings on non-critical workloads
+- **VPC Consolidation** — Reduced from 2 VPCs to 1 shared VPC across all stacks
+
+### Breaking Changes
+
+- `documents.conversation_id` column type changed to UUID
+- `chatEnabled` column removed from relevant tables
+- OAuth token response includes new fields (`id_token`, updated `scope` format)
+- API key format standardized to `sk-` prefix
+
+### Dependencies
+
+| Package | Version |
+|---------|---------|
+| next | 16.1.6 |
+| ai | ~6.0.0 |
+| drizzle-orm | ^0.45.1 |
+| react | ^19.2.4 |
+| @ai-sdk/react | ^3.0.71 |
+| @ai-sdk/openai | ^3.0.7 |
+| @ai-sdk/google | ^3.0.20 |
+| @ai-sdk/amazon-bedrock | ^4.0.48 |
+| @ai-sdk/azure | ^3.0.26 |
 
 ## [1.0.0] - 2025-01-19
 
@@ -153,4 +217,5 @@ This is the first public release. Previously, AI Studio was internal-only to Pen
 - Updated to NextAuth v5 (breaking changes from v4)
 - Upgraded to Next.js 15 (App Router required)
 
+[1.1.0]: https://github.com/psd401/aistudio/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/psd401/aistudio/releases/tag/v1.0.0

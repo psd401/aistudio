@@ -12,19 +12,19 @@ Complete system architecture including technology stack, design patterns, databa
 #### [DEPLOYMENT.md](./DEPLOYMENT.md)
 Step-by-step deployment guide for AWS infrastructure using CDK, including Google OAuth setup and first administrator configuration.
 
-#### [API_REFERENCE.md](./API_REFERENCE.md) ⭐ **NEW**
+#### [API_REFERENCE.md](./API_REFERENCE.md)
 Complete API documentation for REST endpoints and server actions with request/response examples.
 
-#### [ERROR_REFERENCE.md](./ERROR_REFERENCE.md) ⭐ **NEW**
+#### [ERROR_REFERENCE.md](./ERROR_REFERENCE.md)
 Error codes, handling patterns, and debugging workflow.
 
-#### [TROUBLESHOOTING.md](./TROUBLESHOOTING.md) ⭐ **NEW**
+#### [TROUBLESHOOTING.md](./TROUBLESHOOTING.md)
 Common issues and solutions for development, deployment, and production.
 
 #### [ENVIRONMENT_VARIABLES.md](./ENVIRONMENT_VARIABLES.md)
 Complete reference of all environment variables required for development and production environments.
 
-### Visual Architecture Diagrams ⭐ **NEW**
+### Visual Architecture Diagrams
 
 #### [diagrams/README.md](./diagrams/README.md)
 **Index of all architectural diagrams** (9 comprehensive Mermaid.js diagrams with 10,000+ lines of documentation):
@@ -61,7 +61,16 @@ Step-by-step provider integration guide for adding new AI providers.
 #### [guides/secrets-management-quickstart.md](./guides/secrets-management-quickstart.md)
 AWS Secrets Manager integration and best practices.
 
-### Database Documentation ⭐ **NEW**
+#### [guides/api-quickstart.md](./guides/api-quickstart.md)
+Getting started with the AI Studio REST API v1.
+
+#### [guides/oauth-integration.md](./guides/oauth-integration.md)
+OAuth2/OIDC integration for authenticating external applications.
+
+#### [guides/mcp-integration.md](./guides/mcp-integration.md)
+Connecting AI tools (Claude Code, Cursor) via Model Context Protocol.
+
+### Database Documentation
 
 #### [database/drizzle-migration-guide.md](./database/drizzle-migration-guide.md)
 Complete guide for creating and managing database migrations with Drizzle ORM.
@@ -84,14 +93,14 @@ Tracking the RDS Data API to Drizzle ORM migration progress.
 Overview of library directory structure and common utilities.
 
 #### [/lib/db/README.md](../lib/db/README.md)
-Database access layer using Drizzle ORM with RDS Data API.
+Database access layer using Drizzle ORM with postgres.js driver.
 
 #### [/lib/streaming/README.md](../lib/streaming/README.md)
 Unified streaming service, provider adapters, and circuit breaker implementation.
 
 ### Infrastructure Documentation
 
-#### [/infra/README.md](../infra/README.md) ⭐ **UPDATED**
+#### [/infra/README.md](../infra/README.md)
 Complete CDK infrastructure guide with deployment commands, environment configuration, and best practices.
 
 #### [infrastructure/VPC-CONSOLIDATION.md](./infrastructure/VPC-CONSOLIDATION.md)
@@ -140,7 +149,7 @@ Managing Assistant Architect tools and permissions.
 ### API Documentation
 
 #### [API/AI_SDK_PATTERNS.md](./API/AI_SDK_PATTERNS.md)
-AI integration patterns using Vercel AI SDK v5, provider factory implementation, and streaming techniques.
+AI integration patterns using Vercel AI SDK v6, provider factory implementation, and streaming techniques.
 
 ### Feature Documentation
 
@@ -176,6 +185,18 @@ Client integration patterns for polling APIs.
 
 #### [features/s3-storage-optimization.md](./features/s3-storage-optimization.md)
 S3 lifecycle policies and cost optimization.
+
+#### [features/oauth-provider.md](./features/oauth-provider.md)
+OAuth2/OIDC provider architecture and implementation.
+
+#### [features/mcp-server.md](./features/mcp-server.md)
+Model Context Protocol server for AI tool integrations.
+
+#### [features/decision-framework.md](./features/decision-framework.md)
+Structured decision capture and context graph system.
+
+#### [features/k12-content-safety.md](./features/k12-content-safety.md)
+K-12 content filtering with Amazon Bedrock Guardrails.
 
 ## 🚀 Quick Start
 
@@ -218,7 +239,7 @@ Database-first configuration with environment fallback. See [ARCHITECTURE.md#set
 Direct ECS execution for real-time AI streaming with HTTP/2 support. See [diagrams/09-streaming-architecture.md](./diagrams/09-streaming-architecture.md) and [/lib/streaming/README.md](../lib/streaming/README.md).
 
 ### Database Access
-Drizzle ORM with RDS Data API driver and circuit breaker. See [database/drizzle-patterns.md](./database/drizzle-patterns.md), [/lib/db/README.md](../lib/db/README.md), and [diagrams/04-database-erd.md](./diagrams/04-database-erd.md).
+Drizzle ORM with postgres.js driver and connection pooling. See [database/drizzle-patterns.md](./database/drizzle-patterns.md), [/lib/db/README.md](../lib/db/README.md), and [diagrams/04-database-erd.md](./diagrams/04-database-erd.md).
 
 ## 🔧 Common Tasks
 
@@ -305,7 +326,7 @@ Key architectural decisions documented:
 
 ---
 
-**Last updated**: November 2025
+**Last updated**: February 2026
 **Status**: Active - comprehensive documentation with 9 architectural diagrams
 **Total Documentation**: 10,000+ lines across 50+ files
 *For AI assistant guidelines, see [CLAUDE.md](../CLAUDE.md)*

@@ -31,6 +31,7 @@ Before deploying, ensure you have:
   - `aistudio-dev-google-oauth` (JSON: `{ "clientSecret": "..." }`)
   - `aistudio-prod-google-oauth` (JSON: `{ "clientSecret": "..." }`)
 - **Google OAuth client IDs** ready (for dev and prod)
+- **Amazon Bedrock access** enabled in your AWS account (for GuardrailsStack)
 - **AWS account permissions** for CDK deployment
 
 ---
@@ -183,9 +184,10 @@ Stacks have dependencies and should be deployed in this order:
 3. **StorageStack** - Creates S3 buckets for documents
 4. **ProcessingStack** - Creates SQS queues and Lambda functions
 5. **DocumentProcessingStack** - Creates document processing pipeline
-6. **FrontendStack-ECS** - Creates ECS Fargate service with ALB
-7. **SchedulerStack** - Creates scheduled task execution (depends on Frontend)
-8. **MonitoringStack** - Creates CloudWatch dashboards and alarms
+6. **GuardrailsStack** - Creates Bedrock Guardrails, DynamoDB config table, and SNS alerts
+7. **FrontendStack-ECS** - Creates ECS Fargate service with ALB
+8. **SchedulerStack** - Creates scheduled task execution (depends on Frontend)
+9. **MonitoringStack** - Creates CloudWatch dashboards and alarms
 
 ### Deploy All Development Stacks
 
@@ -198,6 +200,7 @@ cdk deploy \
   AIStudio-StorageStack-Dev \
   AIStudio-ProcessingStack-Dev \
   AIStudio-DocumentProcessingStack-Dev \
+  AIStudio-GuardrailsStack-Dev \
   AIStudio-FrontendStack-ECS-Dev \
   AIStudio-SchedulerStack-Dev \
   AIStudio-MonitoringStack-Dev \
@@ -216,6 +219,7 @@ cdk deploy \
   AIStudio-StorageStack-Prod \
   AIStudio-ProcessingStack-Prod \
   AIStudio-DocumentProcessingStack-Prod \
+  AIStudio-GuardrailsStack-Prod \
   AIStudio-FrontendStack-ECS-Prod \
   AIStudio-SchedulerStack-Prod \
   AIStudio-MonitoringStack-Prod \
@@ -453,7 +457,30 @@ curl https://dev.aistudio.psd401.ai/api/healthz
    SELECT COUNT(*) FROM document_chunks WHERE document_id = [test-doc-id];
    ```
 
-### 6. Monitor Processing Queues
+### 6. Verify Guardrails Configuration
+
+```bash
+# Check guardrail ID is stored in SSM
+aws ssm get-parameter \
+  --name /aistudio/dev/guardrail-id \
+  --query 'Parameter.Value' \
+  --output text
+
+# Check guardrail version
+aws ssm get-parameter \
+  --name /aistudio/dev/guardrail-version \
+  --query 'Parameter.Value' \
+  --output text
+
+# Test guardrail (should return ALLOWED for safe content)
+aws bedrock-runtime apply-guardrail \
+  --guardrail-identifier $(aws ssm get-parameter --name /aistudio/dev/guardrail-id --query 'Parameter.Value' --output text) \
+  --guardrail-version $(aws ssm get-parameter --name /aistudio/dev/guardrail-version --query 'Parameter.Value' --output text) \
+  --source INPUT \
+  --content '[{"text":{"text":"Hello, can you help me with my homework?"}}]'
+```
+
+### 7. Monitor Processing Queues
 
 ```bash
 # Check SQS queue depth
@@ -603,6 +630,17 @@ aws acm describe-certificate --certificate-arn [cert-arn]
 - Ensure Google Client ID parameter is provided for AuthStack
 - Confirm all required secrets exist in Secrets Manager
 
+#### 7. Guardrails Issues
+
+**Symptoms:** Content being incorrectly blocked or guardrail not applying
+
+**Solutions:**
+- **False positives**: Check DynamoDB config table for topic `inputAction`/`outputAction` — set to `NONE` for detect-only mode
+- **Guardrail not found**: Verify SSM parameters exist: `/aistudio/[env]/guardrail-id` and `/aistudio/[env]/guardrail-version`
+- **Bedrock access denied**: Ensure IAM role has `bedrock:ApplyGuardrail` permission and Bedrock is enabled in your region
+- **CLASSIC tier limit**: Topic definitions must be under 200 characters (STANDARD tier allows 1,000 but requires cross-region inference)
+- See [K-12 Content Safety docs](./features/k12-content-safety.md) for configuration details
+
 ### Getting Help
 
 For detailed logs and metrics:
@@ -695,5 +733,5 @@ aws s3 ls | grep aistudio
 
 ---
 
-**Last Updated:** January 2025
+**Last Updated:** February 2026
 **Architecture Version:** ECS Fargate with HTTP/2 Streaming
