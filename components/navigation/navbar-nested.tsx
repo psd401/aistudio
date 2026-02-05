@@ -319,6 +319,32 @@ const MAX_SCREENSHOT_SIZE = 10 * 1024 * 1024; // 10MB
 
 const bugReportLog = createLogger({ moduleName: 'bug-report-modal' });
 
+function escapeHtml(text: string): string {
+  const div = document.createElement('div');
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function sanitizeUrl(url: string): string {
+  try {
+    const urlObj = new URL(url);
+    const sensitiveParams = ['token', 'key', 'session', 'auth', 'reset', 'verify', 'code', 'state', 'apikey'];
+    sensitiveParams.forEach(param => urlObj.searchParams.delete(param));
+    return urlObj.toString();
+  } catch {
+    return url.split('?')[0];
+  }
+}
+
+function sanitizeErrorMessage(error: string): string {
+  // Redact potential API keys and tokens
+  let sanitized = error.replace(/[a-f0-9]{32,}/gi, '[REDACTED_TOKEN]');
+  sanitized = sanitized.replace(/sk-[A-Za-z0-9]{20,}/g, '[REDACTED_API_KEY]');
+  sanitized = sanitized.replace(/Bearer\s+[A-Za-z0-9_-]+/gi, 'Bearer [REDACTED]');
+  sanitized = sanitized.replace(/[Aa]pi[_-]?[Kk]ey[:\s]+[A-Za-z0-9_-]+/g, 'api_key: [REDACTED]');
+  return escapeHtml(sanitized);
+}
+
 function validateScreenshotFile(file: File): string | null {
   if (!ALLOWED_IMAGE_TYPES.includes(file.type)) {
     return 'Only JPEG, PNG, GIF, and WebP images are supported';
@@ -338,27 +364,27 @@ function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
-function collectBugReportMetadata(userDescription: string, steps: string, consoleErrors: string[]): string {
+function collectBugReportMetadata(userDescription: string, steps: string, consoleErrors: string[], isAuthenticated: boolean): string {
   const sections: string[] = [];
 
-  // User description
+  // User description - escape HTML
   sections.push('<strong>=== USER DESCRIPTION ===</strong>');
-  sections.push(userDescription);
+  sections.push(escapeHtml(userDescription));
   if (steps) {
     sections.push('<br><strong>Steps to Reproduce:</strong>');
-    sections.push(steps);
+    sections.push(escapeHtml(steps));
   }
 
-  // Browser & System
+  // Browser & System - escape all user-controlled data
   sections.push('<br><br><strong>=== BROWSER & SYSTEM INFO ===</strong>');
   if (typeof window !== 'undefined') {
-    sections.push(`Page URL: ${window.location.href}`);
-    sections.push(`Page Title: ${document.title}`);
-    sections.push(`Referrer: ${document.referrer || 'Direct access'}`);
+    sections.push(`Page URL: ${escapeHtml(sanitizeUrl(window.location.href))}`);
+    sections.push(`Page Title: ${escapeHtml(document.title)}`);
+    sections.push(`Referrer: ${escapeHtml(document.referrer || 'Direct access')}`);
   }
   if (typeof navigator !== 'undefined') {
-    sections.push(`Browser: ${navigator.userAgent}`);
-    sections.push(`Platform: ${navigator.platform}`);
+    sections.push(`Browser: ${escapeHtml(navigator.userAgent)}`);
+    sections.push(`Platform: ${escapeHtml(navigator.platform)}`);
     sections.push(`Language: ${navigator.language}`);
     sections.push(`Online Status: ${navigator.onLine ? 'Online' : 'Offline'}`);
     sections.push(`Cookies Enabled: ${navigator.cookieEnabled}`);
@@ -380,14 +406,13 @@ function collectBugReportMetadata(userDescription: string, steps: string, consol
     sections.push(`Pixel Ratio: ${window.devicePixelRatio}`);
   }
 
-  // Session
+  // Session - use isAuthenticated param instead of localStorage
   sections.push('<br><br><strong>=== SESSION INFO ===</strong>');
   sections.push(`Timestamp: ${new Date().toISOString()}`);
   sections.push(`Timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`);
+  sections.push(`Authenticated: ${isAuthenticated ? 'Yes' : 'No'}`);
   if (typeof window !== 'undefined' && window.localStorage) {
     sections.push(`Local Storage Items: ${window.localStorage.length}`);
-    const authSession = window.localStorage.getItem('next-auth.session-token');
-    sections.push(`Authenticated: ${authSession ? 'Yes' : 'No'}`);
   }
 
   // Performance
@@ -415,11 +440,11 @@ function collectBugReportMetadata(userDescription: string, steps: string, consol
     }
   }
 
-  // Console errors
+  // Console errors - sanitize and escape
   if (consoleErrors.length > 0) {
     sections.push('<br><br><strong>=== RECENT CONSOLE ERRORS ===</strong>');
-    consoleErrors.forEach((err, index) => {
-      sections.push(`Error ${index + 1}: ${err}`);
+    consoleErrors.slice(0, 10).forEach((err, index) => {
+      sections.push(`Error ${index + 1}: ${sanitizeErrorMessage(err)}`);
     });
   }
 
@@ -427,6 +452,7 @@ function collectBugReportMetadata(userDescription: string, steps: string, consol
 }
 
 function BugReportModal({ isExpanded }: BugReportModalProps) {
+  const { data: session } = useSession();
   const [open, setOpen] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [screenshot, setScreenshot] = useState<File | null>(null);
@@ -505,7 +531,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
       const steps = stepsEl instanceof HTMLTextAreaElement ? stepsEl.value : '';
 
       // Build rich description with all metadata
-      const fullDescription = collectBugReportMetadata(descriptionText, steps, consoleErrors);
+      const fullDescription = collectBugReportMetadata(descriptionText, steps, consoleErrors, !!session);
 
       const formData = new FormData();
       formData.append('title', title);
