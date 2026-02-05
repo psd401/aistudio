@@ -179,11 +179,26 @@ export async function GET(request: NextRequest) {
           closeConnection()
         })
 
-        // Clean up after 10 minutes to prevent resource leaks
+        // Clean up after 30 minutes to prevent resource leaks
+        // Send a typed timeout event before closing so the client can
+        // distinguish expected timeouts from real errors
         maxConnectionTime.current = setTimeout(() => {
-          log.info("SSE connection timed out after 10 minutes", { userId })
+          log.info("SSE connection timed out after 30 minutes", { userId })
+
+          if (!isClosed) {
+            try {
+              const timeoutMessage = `data: ${JSON.stringify({
+                type: 'connection_timeout',
+                timestamp: new Date().toISOString()
+              })}\n\n`
+              controller.enqueue(encoder.encode(timeoutMessage))
+            } catch {
+              // Stream may already be closed; proceed to cleanup
+            }
+          }
+
           closeConnection()
-        }, 10 * 60 * 1000)
+        }, 30 * 60 * 1000)
 
         // Store cleanup functions for potential external triggers
         // In a real implementation, you'd want a way for the notification

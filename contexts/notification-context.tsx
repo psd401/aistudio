@@ -214,13 +214,20 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
         eventSource.addEventListener('message', (event) => {
           try {
             const data = JSON.parse(event.data)
-            log.info('Received notification update', { type: data.type })
 
             // Reset retry count on successful message
             retryCount = 0
 
+            if (data.type === 'connection_timeout') {
+              // Server is gracefully closing — reconnect silently without backoff
+              log.debug('SSE connection timeout, reconnecting', { retryCount })
+              eventSource?.close()
+              setTimeout(setupEventSource, 1000)
+              return
+            }
+
             if (data.type === 'notification_update') {
-              // Refresh notifications when we get an update
+              log.info('Received notification update', { type: data.type })
               fetchNotifications()
             }
           } catch (err) {
@@ -230,8 +237,8 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
           }
         })
 
-        eventSource.addEventListener('error', (event) => {
-          log.warn('SSE connection error, will retry', { event, retryCount })
+        eventSource.addEventListener('error', () => {
+          log.debug('SSE connection error, will retry', { retryCount })
           eventSource?.close()
 
           // Increment retry count and setup retry with backoff
