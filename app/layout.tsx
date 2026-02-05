@@ -2,6 +2,7 @@ import '@/app/globals.css';
 import { Toaster } from 'sonner';
 import AuthSessionProvider from "@/components/utilities/session-provider"
 import { NotificationProvider } from "@/contexts/notification-context";
+import { ErrorCaptureInit } from "@/components/utilities/error-capture-init";
 import { fontSans } from "@/lib/fonts"
 import { cn } from "@/lib/utils"
 
@@ -30,6 +31,7 @@ export default function RootLayout({
       >
         <AuthSessionProvider>
           <NotificationProvider>
+            <ErrorCaptureInit />
             {children}
             <Toaster />
           </NotificationProvider>

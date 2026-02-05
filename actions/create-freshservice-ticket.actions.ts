@@ -50,12 +50,14 @@ export async function createFreshserviceTicketAction(
     // Extract form data
     const title = formData.get('title') as string
     const description = formData.get('description') as string
-    const screenshot = formData.get('screenshot') as File | null
-    
+    const screenshotData = formData.get('screenshotData') as string | null
+    const screenshotName = formData.get('screenshotName') as string | null
+    const screenshotType = formData.get('screenshotType') as string | null
+
     log.info("Action started: Creating Freshservice ticket", {
       titleLength: title?.length,
       descriptionLength: description?.length,
-      hasScreenshot: !!screenshot
+      hasScreenshot: !!screenshotData
     })
     
     // Validate required fields
@@ -99,36 +101,48 @@ export async function createFreshserviceTicketAction(
     const encodedKey = Buffer.from(settings.apiKey + ":X").toString("base64")
     
     let response: Response
-    
-    // Check if we have a screenshot attachment
-    const hasAttachment = screenshot && screenshot.size > 0
-    
+
+    // Reconstruct screenshot from base64 data URL if provided
+    const hasAttachment = screenshotData && screenshotData.startsWith('data:')
+
     if (hasAttachment) {
-      // Validate screenshot
-      const maxSizeBytes = 10 * 1024 * 1024 // 10MB
-      if (screenshot.size > maxSizeBytes) {
-        log.warn("Screenshot too large", { size: screenshot.size, maxSize: maxSizeBytes })
-        throw ErrorFactories.validationFailed([
-          { field: "screenshot", message: "Screenshot must be smaller than 10MB" }
-        ])
-      }
-      
-      // Validate file type - explicitly allow only safe image types
+      // Validate MIME type
       const ALLOWED_IMAGE_TYPES = [
         'image/jpeg',
-        'image/jpg', 
+        'image/jpg',
         'image/png',
         'image/gif',
         'image/webp'
       ]
-      
-      if (!ALLOWED_IMAGE_TYPES.includes(screenshot.type)) {
-        log.warn("Invalid file type", { type: screenshot.type })
+
+      if (!screenshotType || !ALLOWED_IMAGE_TYPES.includes(screenshotType)) {
+        log.warn("Invalid file type", { type: screenshotType })
         throw ErrorFactories.validationFailed([
           { field: "screenshot", message: "Only JPEG, PNG, GIF, and WebP images are supported" }
         ])
       }
-      
+
+      // Extract base64 payload and reconstruct as buffer
+      const base64 = screenshotData.split(',')[1]
+      if (!base64) {
+        throw ErrorFactories.validationFailed([
+          { field: "screenshot", message: "Invalid screenshot data" }
+        ])
+      }
+      const buffer = Buffer.from(base64, 'base64')
+
+      // Validate size (buffer.length is actual bytes)
+      const maxSizeBytes = 10 * 1024 * 1024 // 10MB
+      if (buffer.length > maxSizeBytes) {
+        log.warn("Screenshot too large", { size: buffer.length, maxSize: maxSizeBytes })
+        throw ErrorFactories.validationFailed([
+          { field: "screenshot", message: "Screenshot must be smaller than 10MB" }
+        ])
+      }
+
+      // Reconstruct as Blob for FreshService multipart upload
+      const blob = new Blob([buffer], { type: screenshotType })
+
       // Use multipart/form-data for requests with attachments
       const freshserviceFormData = new FormData()
       freshserviceFormData.append('subject', title)
@@ -138,23 +152,24 @@ export async function createFreshserviceTicketAction(
       freshserviceFormData.append('status', settings.status)
       freshserviceFormData.append('department_id', settings.departmentId)
       freshserviceFormData.append('type', settings.ticketType)
-      
+
       // Add workspace_id for multipart requests
       if (settings.workspaceId) {
         freshserviceFormData.append('workspace_id', settings.workspaceId)
       }
-      
-      freshserviceFormData.append('attachments[]', screenshot, screenshot.name || 'screenshot.png')
-      
+
+      freshserviceFormData.append('attachments[]', blob, screenshotName || 'screenshot.png')
+
       log.info("Calling Freshservice API with attachment", {
         domain: settings.domain,
         titlePreview: title.substring(0, 50),
         priority: settings.priority,
         status: settings.status,
         hasWorkspace: !!settings.workspaceId,
-        hasApiKey: !!settings.apiKey
+        hasApiKey: !!settings.apiKey,
+        screenshotSize: buffer.length
       })
-      
+
       response = await fetch(apiUrl, {
         method: 'POST',
         headers: {
@@ -285,9 +300,9 @@ export async function createFreshserviceTicketAction(
       context: "createFreshserviceTicket",
       requestId,
       operation: "createFreshserviceTicket",
-      metadata: { 
+      metadata: {
         titleLength: formData.get('title')?.toString()?.length,
-        hasScreenshot: !!formData.get('screenshot')
+        hasScreenshot: !!formData.get('screenshotData')
       }
     })
   }
