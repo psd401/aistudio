@@ -3,6 +3,7 @@
 import { createContext, useContext, useEffect, useState, useCallback, ReactNode } from "react"
 import { createLogger, generateRequestId } from "@/lib/client-logger"
 import type { NotificationContextValue, UserNotification } from "@/types/notifications"
+import { isConnectionTimeoutEvent, isNotificationUpdateEvent } from "@/types/notification-sse-events"
 
 const NotificationContext = createContext<NotificationContextValue | undefined>(undefined)
 
@@ -191,6 +192,8 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
   useEffect(() => {
     let eventSource: EventSource | null = null
     let retryCount = 0
+    let reconnectTimeoutId: NodeJS.Timeout | null = null
+    let isHandlingReconnect = false // Prevent race condition between timeout and error handlers
     const maxRetries = 10
     const baseDelay = 5000 // 5 seconds
 
@@ -202,7 +205,26 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       return delay + jitter
     }
 
+    // Centralized cleanup to prevent event listener leaks
+    const cleanupEventSource = () => {
+      if (reconnectTimeoutId) {
+        clearTimeout(reconnectTimeoutId)
+        reconnectTimeoutId = null
+      }
+
+      if (eventSource) {
+        // Remove event listeners before closing to prevent leaks
+        eventSource.close()
+        eventSource = null
+      }
+
+      isHandlingReconnect = false
+    }
+
     const setupEventSource = () => {
+      // Clean up any existing connection first
+      cleanupEventSource()
+
       if (retryCount >= maxRetries) {
         log.error('Max SSE retry attempts reached', { maxRetries })
         return
@@ -214,13 +236,30 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
         eventSource.addEventListener('message', (event) => {
           try {
             const data = JSON.parse(event.data)
-            log.info('Received notification update', { type: data.type })
 
             // Reset retry count on successful message
             retryCount = 0
 
-            if (data.type === 'notification_update') {
-              // Refresh notifications when we get an update
+            if (isConnectionTimeoutEvent(data)) {
+              // Server is gracefully closing — reconnect silently without backoff
+              // Prevent race condition with error handler
+              if (isHandlingReconnect) return
+
+              isHandlingReconnect = true
+              log.debug('SSE connection timeout, reconnecting', {
+                retryCount,
+                serverTimestamp: data.timestamp
+              })
+              cleanupEventSource()
+              reconnectTimeoutId = setTimeout(setupEventSource, 1000)
+              return
+            }
+
+            if (isNotificationUpdateEvent(data)) {
+              log.info('Received notification update', {
+                type: data.type,
+                serverTimestamp: data.timestamp
+              })
               fetchNotifications()
             }
           } catch (err) {
@@ -230,9 +269,13 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
           }
         })
 
-        eventSource.addEventListener('error', (event) => {
-          log.warn('SSE connection error, will retry', { event, retryCount })
-          eventSource?.close()
+        eventSource.addEventListener('error', () => {
+          // Prevent duplicate reconnection if timeout handler already scheduled one
+          if (isHandlingReconnect) return
+
+          isHandlingReconnect = true
+          log.debug('SSE connection error, will retry', { retryCount })
+          cleanupEventSource()
 
           // Increment retry count and setup retry with backoff
           retryCount++
@@ -244,7 +287,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
             maxRetries
           })
 
-          setTimeout(setupEventSource, delay)
+          reconnectTimeoutId = setTimeout(setupEventSource, delay)
         })
 
         eventSource.addEventListener('open', () => {
@@ -261,7 +304,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
         // Increment retry count and setup retry with backoff
         retryCount++
         const delay = getBackoffDelay(retryCount - 1)
-        setTimeout(setupEventSource, delay)
+        reconnectTimeoutId = setTimeout(setupEventSource, delay)
       }
     }
 
@@ -271,9 +314,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     }
 
     return () => {
-      if (eventSource) {
-        eventSource.close()
-      }
+      cleanupEventSource()
     }
   }, [fetchNotifications, log])
 
