@@ -1,10 +1,10 @@
 # AI SDK Patterns Guide
 
-Comprehensive guide for implementing AI features using Vercel AI SDK v5 and provider integrations in AI Studio.
+Comprehensive guide for implementing AI features using Vercel AI SDK v6 and provider integrations in AI Studio.
 
 ## Overview
 
-AI Studio uses Vercel AI SDK v5 with a modular provider factory pattern supporting:
+AI Studio uses Vercel AI SDK v6 with a modular provider factory pattern supporting:
 - OpenAI (GPT-5, GPT-4, GPT-3.5)
 - Google AI (Gemini models)
 - Amazon Bedrock (Claude, Llama, etc.)
@@ -14,12 +14,12 @@ AI Studio uses Vercel AI SDK v5 with a modular provider factory pattern supporti
 
 ```json
 {
-  "ai": "^5.0.0",
-  "@ai-sdk/react": "^2.0.15",
-  "@ai-sdk/openai": "^2.0.14",
-  "@ai-sdk/google": "^2.0.6",
-  "@ai-sdk/amazon-bedrock": "^3.0.8",
-  "@ai-sdk/azure": "^2.0.14"
+  "ai": "~6.0.0",
+  "@ai-sdk/react": "^3.0.71",
+  "@ai-sdk/openai": "^3.0.7",
+  "@ai-sdk/google": "^3.0.20",
+  "@ai-sdk/amazon-bedrock": "^4.0.48",
+  "@ai-sdk/azure": "^3.0.26"
 }
 ```
 
@@ -312,20 +312,27 @@ interface Model {
 ### Model Selection
 
 ```typescript
+import { eq } from "drizzle-orm"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { models } from "@/lib/db/schema"
+
 // Get available models for chat
-const chatModels = await executeSQL(`
-  SELECT * FROM models 
-  WHERE is_available_for_chat = true 
-  ORDER BY provider, name
-`)
+const chatModels = await executeQuery(
+  (db) => db.select().from(models)
+    .where(eq(models.isAvailableForChat, true))
+    .orderBy(models.provider, models.name),
+  "getChatModels"
+)
 
 // Get model configuration
 async function getModelConfig(modelId: string) {
-  const result = await executeSQL(
-    "SELECT * FROM models WHERE model_id = :modelId",
-    [{ name: "modelId", value: { stringValue: modelId } }]
+  const [model] = await executeQuery(
+    (db) => db.select().from(models)
+      .where(eq(models.modelId, modelId))
+      .limit(1),
+    "getModelConfig"
   )
-  return result[0]
+  return model
 }
 ```
 
@@ -426,20 +433,16 @@ const result = await streamText({
   
   onFinish: async ({ usage }) => {
     // Log token usage
-    await executeSQL(
-      `INSERT INTO token_usage 
-       (user_id, model_id, input_tokens, output_tokens, total_tokens, cost, created_at)
-       VALUES (:userId, :modelId, :inputTokens, :outputTokens, :totalTokens, :cost, NOW())`,
-      [
-        { name: "userId", value: { longValue: userId } },
-        { name: "modelId", value: { longValue: modelConfig.id } },
-        { name: "inputTokens", value: { longValue: usage.promptTokens } },
-        { name: "outputTokens", value: { longValue: usage.completionTokens } },
-        { name: "totalTokens", value: { longValue: usage.totalTokens } },
-        { name: "cost", value: { 
-          doubleValue: calculateCost(usage, modelConfig) 
-        } }
-      ]
+    await executeQuery(
+      (db) => db.insert(tokenUsage).values({
+        userId,
+        modelId: modelConfig.id,
+        inputTokens: usage.promptTokens,
+        outputTokens: usage.completionTokens,
+        totalTokens: usage.totalTokens,
+        cost: calculateCost(usage, modelConfig),
+      }),
+      "trackTokenUsage"
     )
   }
 })

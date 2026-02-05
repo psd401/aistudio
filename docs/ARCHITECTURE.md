@@ -2,7 +2,7 @@
 
 ## Overview
 
-AI Studio is a Next.js 15+ enterprise application built with modern cloud-native architecture principles. It provides AI-powered tools with role-based access control, featuring multiple LLM providers, document processing, and knowledge management capabilities.
+AI Studio is a Next.js 16 enterprise application built with modern cloud-native architecture principles. It provides AI-powered tools with role-based access control, featuring multiple LLM providers, document processing, and knowledge management capabilities.
 
 > **📊 Visual Diagrams**: See `/docs/diagrams/` for comprehensive architectural diagrams including:
 > - [CDK Stack Dependencies](./diagrams/01-cdk-stack-dependencies.md)
@@ -15,12 +15,12 @@ AI Studio is a Next.js 15+ enterprise application built with modern cloud-native
 ## Technology Stack
 
 ### Core Framework
-- **Frontend**: Next.js 15+ with App Router, React 19
+- **Frontend**: Next.js 16 with App Router, React 19
 - **UI Components**: Shadcn UI + Tailwind CSS
 - **TypeScript**: Strict type safety across the application
 
 ### AI & Machine Learning
-- **AI SDK**: Vercel AI SDK v5 for LLM integration
+- **AI SDK**: Vercel AI SDK v6 for LLM integration
 - **Providers**: 
   - OpenAI (GPT-5, GPT-4, GPT-3.5)
   - Google AI (Gemini models)
@@ -37,14 +37,13 @@ AI Studio is a Next.js 15+ enterprise application built with modern cloud-native
 
 ### Data Layer
 - **Database**: AWS Aurora Serverless v2 (PostgreSQL)
-- **Access Pattern**: RDS Data API (no direct connections)
-- **ORM**: Direct SQL with parameterized queries
+- **ORM**: Drizzle ORM with postgres.js driver (type-safe queries)
 - **Caching**: 5-minute TTL for settings
 
 ### Infrastructure
 - **IaC**: AWS CDK (TypeScript)
 - **Hosting**: AWS ECS Fargate with Application Load Balancer
-- **Container**: Next.js 15 SSR on Fargate with auto-scaling
+- **Container**: Next.js 16 SSR on Fargate with auto-scaling
 - **Storage**: S3 with lifecycle policies
 - **Monitoring**: CloudWatch with structured logging + ADOT
 - **Network**: VPC with public/private/isolated subnets
@@ -70,8 +69,8 @@ AI Studio is a Next.js 15+ enterprise application built with modern cloud-native
                 ▼                             ▼
         ┌──────────────┐            ┌──────────────┐
         │              │            │              │
-        │  AI Providers│            │   RDS Data   │
-        │   (Factory)  │            │     API      │
+        │  AI Providers│            │  Drizzle ORM │
+        │   (Factory)  │            │  (postgres)  │
         │              │            │              │
         └──────────────┘            └──────────────┘
                 │                             │
@@ -196,7 +195,7 @@ await getSetting('OPENAI_API_KEY')
 - **Settings**: 5-minute TTL cache
 - **Model Configs**: In-memory caching
 - **S3 Client**: Connection pooling
-- **Database**: RDS Proxy for connection management
+- **Database**: postgres.js connection pooling
 
 ### Streaming Architecture
 - **Chat Responses**: SSE for real-time streaming
@@ -246,6 +245,7 @@ All resources defined in AWS CDK:
 │   │   ├── auth-stack.ts         # Cognito configuration
 │   │   ├── database-stack.ts     # Aurora Serverless v2
 │   │   ├── frontend-stack.ts     # ECS Fargate + ALB
+│   │   ├── guardrails-stack.ts   # Bedrock Guardrails + DynamoDB + SNS
 │   │   └── storage-stack.ts      # S3 buckets
 │   └── constructs/
 │       ├── security/             # IAM, service roles
@@ -388,8 +388,8 @@ interface ToolResult {
 #### Tool Configuration
 ```sql
 -- SECURITY NOTE: The following SQL examples are for documentation purposes only.
--- In production code, ALWAYS use parameterized queries through the executeSQL function
--- with proper parameter binding to prevent SQL injection attacks.
+-- In production code, ALWAYS use Drizzle ORM type-safe queries
+-- through executeQuery/executeTransaction to prevent SQL injection attacks.
 
 -- Enhanced chain_prompts table
 ALTER TABLE chain_prompts ADD COLUMN enabled_tools JSONB DEFAULT '[]';
@@ -421,8 +421,8 @@ CREATE TABLE tool_results (
 #### Model Capabilities
 ```sql
 -- SECURITY NOTE: The following SQL examples are for documentation purposes only.
--- In production code, ALWAYS use parameterized queries through the executeSQL function
--- with proper parameter binding to prevent SQL injection attacks.
+-- In production code, ALWAYS use Drizzle ORM type-safe queries
+-- through executeQuery/executeTransaction to prevent SQL injection attacks.
 
 -- Enhanced ai_models table
 ALTER TABLE ai_models ADD COLUMN capabilities JSONB DEFAULT '{}';
@@ -725,14 +725,48 @@ The AI Studio streaming infrastructure has evolved through two major architectur
 - Simpler architecture for maintenance
 - All features continue to work as expected
 
+## Integration Platform
+
+### API v1
+REST API for external integrations, providing programmatic access to assistants, decisions, and chat. Authenticated via API key (`sk-` prefix), OAuth JWT, or session cookie. Rate-limited at 60 requests/minute by default.
+
+- **OpenAPI spec**: `docs/API/v1/openapi.yaml`
+- **Base path**: `/api/v1/`
+- **Auth**: Bearer token (API key or OAuth access token)
+
+### OAuth2/OIDC Provider
+JWT-based authorization for external applications using Authorization Code Flow with PKCE.
+
+- **Endpoints**: `/api/oauth/authorize`, `/api/oauth/token`, `/api/oauth/userinfo`
+- **Token lifetimes**: Access (15min), Refresh (24hr), ID token (15min)
+- **Scopes**: `openid`, `profile`, `email`, `mcp:read`, `mcp:write`, `api:read`, `api:write`
+- **Admin UI**: `/admin/oauth-clients` for client registration
+
+### MCP Server
+Model Context Protocol server exposing AI Studio capabilities as tools for external AI agents.
+
+- **Tools**: search_decisions, capture_decision, list_assistants, execute_assistant, get_context
+- **Transport**: HTTP with SSE streaming
+- **Auth**: API key or OAuth access token
+
+### Decision Framework
+Structured decision capture and retrieval system for organizational knowledge management.
+
+- **Capture**: Decisions with context, alternatives, criteria, and outcomes
+- **Graph**: Relationship-based navigation between related decisions
+- **Search**: Full-text and semantic search across decision history
+
+### K-12 Content Safety (Guardrails)
+Amazon Bedrock Guardrails integration for content filtering and PII protection.
+
+- **Stack**: `GuardrailsStack` (Bedrock + DynamoDB + SNS)
+- **Features**: Content filtering, topic blocking, PII tokenization, real-time alerts
+- **Mode**: Detect-only by default to minimize false positives
+
 ## Future Enhancements
 
-### In Progress
-- Multi-modal support (images, audio)
-- Advanced streaming with partial tool calls
-- Model Context Protocol (MCP) integration
-
 ### Planned
+- Multi-modal support (images, audio)
 - WebSocket support for real-time collaboration
 - Edge runtime optimization
 - Distributed caching with Redis

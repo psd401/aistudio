@@ -36,7 +36,7 @@ Thank you for contributing to this project! Please follow these standards to ens
 - Update `.env.example` when adding or changing environment variables.
 - Store all secrets in `.env.local` (never commit this file).
 - **DB_LOG_QUERIES**: Set to `true` in `.env.local` to enable Drizzle ORM query logging in development. Leave blank or set to `false` to disable noisy query logs and keep dev logs clean.
-- **Required for SSR**: Set `AMPLIFY_APP_ORIGIN=https://yourdomain.com` for server-side auth flows (use HTTPS in production).
+- **Required for SSR**: Set `AUTH_URL=https://yourdomain.com` for server-side auth flows (use HTTPS in production).
 
 ## Security Best Practices
 
@@ -65,21 +65,20 @@ We experienced a catastrophic database corruption incident (July 2025) when SQL 
 4. **NEVER deploy CDK** without verifying the Aurora HTTP endpoint is enabled
 
 **Safe Practices:**
-- **Field Naming Convention**: Database column names use snake_case. The RDS Data API adapter automatically transforms these to camelCase for TypeScript compatibility. Never manually transform field names.
-- **Parameterized Queries**: Always use parameterized queries with the RDS Data API:
+- **Field Naming Convention**: Database column names use snake_case. Drizzle ORM schema maps these to camelCase in TypeScript automatically.
+- **Type-Safe Queries**: Always use Drizzle ORM `executeQuery` for database operations:
   ```typescript
-  await executeSQL(
-    "SELECT * FROM users WHERE id = :id",
-    [{ name: "id", value: { longValue: userId } }]
+  import { eq } from "drizzle-orm"
+  import { executeQuery } from "@/lib/db/drizzle-client"
+  import { users } from "@/lib/db/schema"
+
+  const user = await executeQuery(
+    (db) => db.select().from(users).where(eq(users.id, userId)).limit(1),
+    "getUserById"
   )
   ```
 - **Transaction Management**: Use `executeTransaction()` for operations that modify multiple tables.
-- **Connection Security**: Access the database only through RDS Data API, never direct connections.
-- **Type Casting**: When the automatic transformation doesn't match your type interface, use double casting:
-  ```typescript
-  const result = await executeSQL(query)
-  return result as unknown as YourType[]
-  ```
+- **Connection Security**: Access the database only through Drizzle ORM's `executeQuery`/`executeTransaction` wrappers.
 
 **Database Migration Guidelines:**
 - Initial setup files (001-005) should ONLY run on empty databases
@@ -94,16 +93,8 @@ We experienced a catastrophic database corruption incident (July 2025) when SQL 
 
 ## Server-Side Rendering (SSR) & Next.js
 
-### Amplify Configuration
-- Always configure Amplify with `ssr: true` in Next.js applications:
-  ```typescript
-  Amplify.configure(config, { ssr: true })
-  ```
-- Use `runWithAmplifyServerContext` for all server-side Amplify operations.
-- Import server-side APIs from the `/server` sub-path (e.g., `aws-amplify/auth/server`).
-
 ### Performance Optimization
-- **Development**: Use `npm run dev --turbo` for faster local development with Turbopack.
+- **Development**: Use `npm run dev:local` for local development with Docker PostgreSQL.
 - **Imports**: Import specific components rather than entire libraries:
   ```typescript
   // Good
@@ -128,9 +119,12 @@ Follow the consistent `ActionState<T>` pattern for all server actions:
 export async function actionName(): Promise<ActionState<ReturnType>> {
   const session = await getServerSession()
   if (!session) return { isSuccess: false, message: "Unauthorized" }
-  
+
   try {
-    const result = await executeSQL(...)
+    const result = await executeQuery(
+      (db) => db.select().from(table).where(eq(table.id, id)),
+      "actionName"
+    )
     return { isSuccess: true, message: "Success", data: result }
   } catch (error) {
     return handleError(error, "Operation failed")

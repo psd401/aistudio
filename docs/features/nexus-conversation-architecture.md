@@ -21,8 +21,8 @@
 The Nexus conversation system manages AI chat interactions using:
 - **@assistant-ui/react v0.11.37** - UI framework for AI assistants
 - **@assistant-ui/react-ai-sdk v1.1.9** - AI SDK integration
-- **AI SDK v5** - Vercel's AI SDK with streaming support
-- **Next.js 15.2.3** - App Router with React 19.2.0
+- **AI SDK v6** - Vercel's AI SDK with streaming support
+- **Next.js 16** - App Router with React 19
 
 ### Key Design Principles
 
