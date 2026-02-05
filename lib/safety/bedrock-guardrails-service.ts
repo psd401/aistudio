@@ -176,10 +176,26 @@ export class BedrockGuardrailsService {
         });
       }
 
+      // Issue #761: Send detection notification for content filters in detect-only mode
+      if (result.detectedFilters && result.detectedFilters.length > 0) {
+        await this.sendViolationNotification({
+          violationId: requestId,
+          userIdHash: this.hashValue(sessionId || 'anonymous'),
+          timestamp: new Date().toISOString(),
+          source: 'input',
+          categories: result.detectedFilters,
+          modelId: 'pre-check',
+          provider: 'user-input',
+          action: 'detected',
+          sessionId,
+        });
+      }
+
       this.log.info('Input content passed safety check', {
         requestId,
         contentLength: content.length,
         detectedTopics: result.detectedTopics,
+        detectedFilters: result.detectedFilters,
       });
 
       return {
@@ -275,12 +291,28 @@ export class BedrockGuardrailsService {
         });
       }
 
+      // Issue #761: Send detection notification for content filters in detect-only mode
+      if (result.detectedFilters && result.detectedFilters.length > 0) {
+        await this.sendViolationNotification({
+          violationId: requestId,
+          userIdHash: this.hashValue(sessionId || 'anonymous'),
+          timestamp: new Date().toISOString(),
+          source: 'output',
+          categories: result.detectedFilters,
+          modelId,
+          provider,
+          action: 'detected',
+          sessionId,
+        });
+      }
+
       this.log.info('Output content passed safety check', {
         requestId,
         contentLength: content.length,
         modelId,
         provider,
         detectedTopics: result.detectedTopics,
+        detectedFilters: result.detectedFilters,
       });
 
       return {
@@ -340,6 +372,19 @@ export class BedrockGuardrailsService {
       });
     }
 
+    // Issue #761: Extract detected-but-not-blocked content filters from assessments.
+    // When content filters use inputStrength/outputStrength: 'NONE' (detect-only mode),
+    // the overall response.action will NOT be 'GUARDRAIL_INTERVENED' for those
+    // filters, but the assessment trace still contains detection information.
+    const detectedFilters = this.extractDetectedFilters(assessment);
+    if (detectedFilters.length > 0) {
+      this.log.info('Content filters detected in detect-only mode (not blocked)', {
+        source,
+        detectedFilters,
+        contentLength: content.length,
+      });
+    }
+
     if (response.action === 'GUARDRAIL_INTERVENED') {
       const blockedCategories = this.extractBlockedCategories(assessment);
       const blockedMessage = response.outputs?.[0]?.text;
@@ -361,6 +406,7 @@ export class BedrockGuardrailsService {
     return {
       blocked: false,
       detectedTopics: detectedTopics.length > 0 ? detectedTopics : undefined,
+      detectedFilters: detectedFilters.length > 0 ? detectedFilters : undefined,
     };
   }
 
@@ -417,6 +463,30 @@ export class BedrockGuardrailsService {
         // Topics in detect-only mode have action 'NONE' instead of 'BLOCKED'
         if (topic.action === 'NONE' && topic.name) {
           detected.push(topic.name);
+        }
+      }
+    }
+
+    return detected;
+  }
+
+  /**
+   * Extract content filter types that were detected but not blocked (detect-only mode)
+   *
+   * Issue #761: When content filters use inputStrength/outputStrength: 'NONE', Bedrock
+   * still evaluates content and returns detection information in the assessment.
+   * The filter action will be 'NONE' instead of 'BLOCKED'.
+   * We extract these for logging and monitoring to learn what triggers false positives.
+   */
+  private extractDetectedFilters(assessment?: SDKGuardrailAssessment): string[] {
+    const detected: string[] = [];
+
+    if (assessment?.contentPolicy?.filters) {
+      for (const filter of assessment.contentPolicy.filters) {
+        // Filters in detect-only mode have action 'NONE' instead of 'BLOCKED'
+        // We also check that confidence exists to confirm it was actually triggered
+        if (filter.action === 'NONE' && filter.type && filter.confidence) {
+          detected.push(this.formatCategoryName(filter.type as ContentFilterType));
         }
       }
     }
