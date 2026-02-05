@@ -103,25 +103,30 @@ export function useModelsWithPersistence(storageKey: string, requiredCapabilitie
   const { models, isLoading, error, refetch } = useModels()
   const [selectedModel, setSelectedModel] = useModelPersistence(storageKey)
   
-  // Auto-select first capable model if none selected
+  // Auto-select a valid model if none selected or if persisted model is no longer available
   useEffect(() => {
-    if (!selectedModel && models.length > 0 && !isLoading) {
+    if (models.length === 0 || isLoading) return
+
+    // Check if persisted model still exists in available models
+    const isStale = selectedModel && !models.some(m => m.modelId === selectedModel.modelId)
+
+    if (!selectedModel || isStale) {
       let candidateModel = models[0]
-      
+
       if (requiredCapabilities && requiredCapabilities.length > 0) {
         candidateModel = models.find(model => {
           try {
-            const capabilities = typeof model.capabilities === 'string' 
-              ? JSON.parse(model.capabilities) 
+            const capabilities = typeof model.capabilities === 'string'
+              ? JSON.parse(model.capabilities)
               : model.capabilities
-            return Array.isArray(capabilities) && 
+            return Array.isArray(capabilities) &&
               requiredCapabilities.every(cap => capabilities.includes(cap))
           } catch {
             return false
           }
         }) || models[0]
       }
-      
+
       setSelectedModel(candidateModel)
     }
   }, [models, selectedModel, isLoading, requiredCapabilities, setSelectedModel])

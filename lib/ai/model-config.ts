@@ -17,8 +17,18 @@ export async function getModelConfig(modelId: string | number) {
     ? await getAIModelById(Number(modelId))
     : await getAIModelByModelId(String(modelId));
 
-  if (!model || !model.active || !model.nexusEnabled) {
-    log.error('Model not found or not enabled for Nexus', { modelId, found: !!model });
+  if (!model) {
+    log.error('Model not found in database', { modelId, idType: isNumericId ? 'numeric' : 'string' });
+    return null;
+  }
+
+  if (!model.active || !model.nexusEnabled) {
+    log.warn('Model exists but is not available for Nexus', {
+      modelId,
+      name: model.name,
+      active: model.active,
+      nexusEnabled: model.nexusEnabled
+    });
     return null;
   }
 
