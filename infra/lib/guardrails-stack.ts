@@ -185,8 +185,9 @@ export class GuardrailsStack extends cdk.Stack {
             // Previous broad definition "promotes bullying, harassment, or intimidation"
             // was triggering on AI responses discussing anti-bullying programs, PBIS
             // documentation, and student incident reports.
+            // NOTE: CLASSIC tier limit is 200 chars for definitions (187 chars used).
             name: 'Bullying',
-            definition: 'Instructions, encouragement, or strategies for bullying, harassing, or intimidating specific individuals. Targets instructional or promotional content, not educational discussions about anti-bullying, behavior documentation, or student incident reporting.',
+            definition: 'Instructions or encouragement for bullying, harassing, or intimidating individuals. Targets promotional content, not educational discussions about anti-bullying or behavior documentation.',
             type: 'DENY',
             inputAction: 'NONE',    // Issue #742: Detect only, don't block
             inputEnabled: true,
