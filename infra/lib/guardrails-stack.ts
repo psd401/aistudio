@@ -50,7 +50,7 @@ export class GuardrailsStack extends cdk.Stack {
 
       // Content filtering policies
       //
-      // Issue #761: ALL content filters switched to detect-only mode (NONE).
+      // Issue #761: Content filters switched to detect-only mode where possible.
       // Following the same strategy as topic policies (Issue #742), content filters
       // were blocking legitimate K-12 educational content:
       // - SEXUAL: Blocking health education discussions
@@ -58,9 +58,9 @@ export class GuardrailsStack extends cdk.Stack {
       // - VIOLENCE: Blocking history lessons (wars, civil rights struggles)
       // - HATE: Blocking Holocaust education, civil rights content
       //
-      // Strategy: Log all detections without blocking to collect data on what triggers
-      // each filter. Once we understand false positive patterns, we can selectively
-      // re-enable blocking on filters that don't affect educational use cases.
+      // AWS Bedrock requires at least ONE content filter at non-NONE strength.
+      // HATE at LOW is kept as the minimum required filter — LOW threshold has
+      // the fewest false positives for K-12 educational content.
       //
       // Safety net: LLM providers (OpenAI, Anthropic, Google) have built-in safety
       // training that provides baseline content filtering even without Bedrock.
@@ -68,13 +68,14 @@ export class GuardrailsStack extends cdk.Stack {
       // History:
       // - Issue #639: INSULTS/MISCONDUCT lowered from MEDIUM to LOW
       // - Issue #727: PROMPT_ATTACK disabled (75% false positive rate)
-      // - Issue #761: ALL filters switched to NONE (detect-only mode)
+      // - Issue #761: All filters to NONE except HATE at LOW (Bedrock minimum requirement)
       contentPolicyConfig: {
         filtersConfig: [
           {
+            // Kept at LOW — Bedrock requires at least one non-NONE filter
             type: 'HATE',
-            inputStrength: 'NONE',  // Issue #761: Detect only, don't block
-            outputStrength: 'NONE',
+            inputStrength: 'LOW',
+            outputStrength: 'LOW',
           },
           {
             type: 'VIOLENCE',
