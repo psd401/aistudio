@@ -21,8 +21,10 @@ import {
 import { Textarea } from '@/components/ui/textarea';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
+import { toast } from 'sonner';
 import { useNotifications } from '@/contexts/notification-context';
 import { useExecutionResults } from '@/hooks/use-execution-results';
+import { createFreshserviceTicketAction } from '@/actions/create-freshservice-ticket.actions';
 import { NotificationBell } from '@/components/notifications/notification-bell';
 import { MessageCenter } from '@/components/notifications/message-center';
 import { iconMap, IconName } from './icon-map';
@@ -317,14 +319,40 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
     e.preventDefault();
     setIsSubmitting(true);
 
-    // Simulate submission (replace with actual API call later)
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    try {
+      const form = e.currentTarget;
+      const title = (form.elements.namedItem('title') as HTMLInputElement).value;
+      const descriptionText = (form.elements.namedItem('description') as HTMLTextAreaElement).value;
+      const steps = (form.elements.namedItem('steps') as HTMLTextAreaElement).value;
 
-    setIsSubmitting(false);
-    setOpen(false);
-    setScreenshot(null);
-    setScreenshotPreview(null);
-    // Could add toast notification here
+      // Build rich description with steps and browser info
+      let fullDescription = descriptionText;
+      if (steps) {
+        fullDescription += `\n\n**Steps to Reproduce:**\n${steps}`;
+      }
+      fullDescription += `\n\n---\n**Environment:**\n- URL: ${window.location.href}\n- Browser: ${navigator.userAgent}\n- Timestamp: ${new Date().toISOString()}`;
+
+      const formData = new FormData();
+      formData.append('title', title);
+      formData.append('description', fullDescription);
+      if (_screenshot) {
+        formData.append('screenshot', _screenshot, _screenshot.name || 'screenshot.png');
+      }
+
+      const result = await createFreshserviceTicketAction(formData);
+
+      if (result.isSuccess) {
+        toast.success('Bug report submitted successfully');
+        handleOpenChange(false);
+        form.reset();
+      } else {
+        toast.error(result.message);
+      }
+    } catch {
+      toast.error('An unexpected error occurred. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const handleOpenChange = useCallback((newOpen: boolean) => {
@@ -354,6 +382,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
             <Label htmlFor="bug-title">Title</Label>
             <Input
               id="bug-title"
+              name="title"
               placeholder="Brief description of the issue"
               required
             />
@@ -362,6 +391,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
             <Label htmlFor="bug-description">Description</Label>
             <Textarea
               id="bug-description"
+              name="description"
               placeholder="What happened? What did you expect to happen?"
               rows={4}
               required
@@ -371,6 +401,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
             <Label htmlFor="bug-steps">Steps to Reproduce (optional)</Label>
             <Textarea
               id="bug-steps"
+              name="steps"
               placeholder="1. Go to...&#10;2. Click on...&#10;3. See error"
               rows={3}
             />
