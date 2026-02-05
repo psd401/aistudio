@@ -5,7 +5,14 @@ const nextConfig = {
   reactStrictMode: true,
   output: 'standalone',
   transpilePackages: ['recharts'],
-  serverExternalPackages: ['winston', 'logform', '@colors/colors', 'argon2', 'postgres'],
+  serverExternalPackages: ['winston', 'logform', '@colors/colors', 'argon2', 'postgres', 'mammoth', 'pdf-parse', 'oidc-provider'],
+  outputFileTracingIncludes: {
+    '/**': [
+      './node_modules/argon2/**/*',
+      './node_modules/@phc/format/**/*',
+      './node_modules/node-gyp-build/**/*',
+    ],
+  },
   typescript: {
     ignoreBuildErrors: true,
   },
@@ -40,10 +47,6 @@ const nextConfig = {
             value: 'max-age=31536000; includeSubDomains'
           },
           {
-            key: 'X-XSS-Protection',
-            value: '1; mode=block'
-          },
-          {
             key: 'Referrer-Policy',
             value: 'strict-origin-when-cross-origin'
           },
@@ -60,7 +63,6 @@ const nextConfig = {
     ];
   },
   experimental: {
-    serverComponentsExternalPackages: ['mammoth', 'pdf-parse', 'oidc-provider', 'argon2'],
     serverActions: {
       bodySizeLimit: '100mb',
       timeout: 300,
