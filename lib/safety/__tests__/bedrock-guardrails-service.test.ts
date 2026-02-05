@@ -244,15 +244,18 @@ describe('BedrockGuardrailsService', () => {
   });
 
   /**
-   * Production False Positive Test Cases (Issue #727)
+   * Production False Positive Test Cases (Issues #727, #742)
    *
-   * These tests document real false positives observed on the first day of
-   * guardrail deployment. 4 of 5 violations were false positives (80%).
-   * They serve as regression tests and documentation for guardrail tuning.
+   * Issue #727: 4 of 5 violations were false positives (80%) on first deployment day.
+   * Issue #742: 6+ additional false positives on 2026-02-04 — staff educational content
+   * about student behavior (PBIS, anti-bullying, behavioral health) being classified as
+   * Bullying/Self-Harm/Violence/Weapons. 3 of 4 original violations were OUTPUT blocks.
    *
-   * Filter changes in Issue #727:
-   * - PROMPT_ATTACK: LOW → NONE (3/4 detections were false positives)
-   * - Self-Harm topic: definition simplified with stronger positive examples
+   * Filter changes:
+   * - Issue #727: PROMPT_ATTACK: LOW → NONE (75% false positive rate)
+   * - Issue #727: Self-Harm topic: definition simplified
+   * - Issue #742: All topics: BLOCK → NONE (detect-only mode)
+   * - Issue #742: Bullying topic: definition narrowed
    *
    * IMPORTANT - Test Coverage Limitations:
    * These tests use mocked AWS clients and validate graceful degradation
@@ -261,19 +264,27 @@ describe('BedrockGuardrailsService', () => {
    *
    * 1. Deploy to dev environment: `cd infra && npx cdk deploy AIStudio-GuardrailsStack-Dev`
    * 2. Manually test with the content below (see manual test checklist in PR description)
-   * 3. Monitor CloudWatch logs for 24 hours post-deployment
-   * 4. Use CloudWatch Logs Insights query to validate false positive rate:
+   * 3. Monitor CloudWatch logs for 48 hours post-deployment
+   * 4. Use CloudWatch Logs Insights queries to validate:
    *
+   *    -- Blocked content (should be zero for topics now)
    *    fields @timestamp, requestId, source, blockedCategories, action
    *    | filter module = "BedrockGuardrailsService"
    *    | filter action = "blocked"
    *    | stats count() by source, blockedCategories
    *    | sort count desc
    *
+   *    -- Detected topics (detect-only mode logging)
+   *    fields @timestamp, detectedTopics, source, contentLength
+   *    | filter module = "BedrockGuardrailsService"
+   *    | filter detectedTopics is not empty
+   *    | stats count() by detectedTopics
+   *    | sort count desc
+   *
    * Integration tests against real Bedrock API are expensive/slow and not
    * included in the CI pipeline. Production validation is the primary verification.
    */
-  describe('production false positives (Issue #727)', () => {
+  describe('production false positives (Issues #727, #742)', () => {
     it('should process PBIS "hands to self" behavior tracking content', async () => {
       const pbisContent = `
         PBIS Behavior Expectations Tracking:
@@ -341,6 +352,145 @@ describe('BedrockGuardrailsService', () => {
       const result = await service.evaluateInput(architectPrompt);
       expect(result.allowed).toBe(true);
       expect(result.processedContent).toBe(architectPrompt);
+    });
+  });
+
+  /**
+   * Production False Positive Test Cases (Issue #742)
+   *
+   * These tests document false positives observed on 2026-02-04 where staff
+   * educational content was being classified as Bullying/Self-Harm/Violence/Weapons.
+   *
+   * Key observations from #742:
+   * - 3 of 4 violations were OUTPUT blocks (AI responses about educational topics)
+   * - Self-Harm input was 54K chars (large document attachment through model-compare)
+   * - Two violations from same user session working on behavior/safety content
+   * - One session had 4 successful checks before 5th response triggered Bullying
+   * - Two more violations triggered Violence + Bullying + Weapons simultaneously
+   */
+  describe('production false positives (Issue #742)', () => {
+    it('should process anti-bullying program content (Bullying false positive)', async () => {
+      const antiBullyingContent = `
+        Anti-Bullying Prevention Program Overview:
+        Our school implements a comprehensive anti-bullying framework based on PBIS Tier 2 supports.
+
+        Definition of Bullying (per RCW 28A.600.477):
+        Bullying means any intentional electronic, written, verbal, or physical act that
+        physically harms a student, damages property, substantially interferes with education,
+        threatens the overall educational process, or places a person in reasonable fear of harm.
+
+        Prevention Strategies:
+        - Classroom lessons on identifying bullying behavior
+        - Bystander intervention training for students
+        - Restorative justice circles for conflict resolution
+        - Anonymous reporting system for students to report harassment
+        - Staff training on recognizing signs of bullying and cyberbullying
+
+        Intervention Protocol:
+        1. Document the incident using behavior referral form
+        2. Notify parents/guardians of both parties
+        3. Implement safety plan for targeted student
+        4. Assign consequences per student handbook
+        5. Follow up with counseling referral if needed
+      `;
+
+      const result = await service.evaluateInput(antiBullyingContent);
+      expect(result.allowed).toBe(true);
+      expect(result.processedContent).toBe(antiBullyingContent);
+    });
+
+    it('should process student behavioral health documentation (Self-Harm false positive)', async () => {
+      const behavioralHealthContent = `
+        Student Support Team Meeting Notes - Confidential
+
+        Presenting Concerns:
+        - Student expressing feelings of hopelessness and isolation
+        - Decline in academic performance over past 3 weeks
+        - Social withdrawal from peer group activities
+        - Parent reports difficulty sleeping and changes in appetite
+
+        Risk Assessment (Columbia Protocol):
+        - Passive ideation reported, no active plan
+        - Protective factors: supportive family, engaged in sports
+        - Previous counseling history: none
+
+        Support Plan:
+        1. Weekly check-ins with school counselor
+        2. Safety plan developed with student and family
+        3. Referral to community mental health provider
+        4. 504 accommodations for reduced workload during crisis period
+        5. Teacher notification of support plan (without clinical details)
+        6. Re-assessment in 2 weeks
+
+        Crisis Resources Provided to Family:
+        - 988 Suicide & Crisis Lifeline
+        - Crisis Text Line: Text HOME to 741741
+        - Local crisis center contact information
+      `;
+
+      const result = await service.evaluateInput(behavioralHealthContent);
+      expect(result.allowed).toBe(true);
+      expect(result.processedContent).toBe(behavioralHealthContent);
+    });
+
+    it('should process school safety/discipline content (Violence+Bullying+Weapons false positive)', async () => {
+      const safetyContent = `
+        School Safety Assessment Report
+
+        Threat Assessment Team Review:
+        Following district protocol (per OSPI guidelines), the threat assessment team convened
+        to evaluate a reported concern about a student's written assignment.
+
+        Context:
+        - Student wrote a creative fiction piece involving conflict and confrontation
+        - Teacher flagged per mandatory reporting procedures
+        - Student has no prior behavioral concerns or disciplinary history
+
+        Assessment Findings:
+        - No specific threat identified toward any individual or group
+        - Content consistent with age-appropriate creative writing themes
+        - Student demonstrated understanding of fiction vs. reality in interview
+        - No access to weapons confirmed through parent interview
+
+        Recommendations:
+        - No disciplinary action warranted
+        - Continue monitoring through regular check-ins
+        - Provide guidance on school writing assignment expectations
+        - Document in student file per district records retention policy
+      `;
+
+      const result = await service.evaluateInput(safetyContent);
+      expect(result.allowed).toBe(true);
+      expect(result.processedContent).toBe(safetyContent);
+    });
+
+    it('should process AI-generated anti-bullying response (OUTPUT false positive)', async () => {
+      const aiResponse = `
+        Here's a comprehensive overview of evidence-based anti-bullying strategies for your school:
+
+        **Understanding Bullying Dynamics:**
+        Research shows that bullying involves a power imbalance between the person doing the
+        bullying and the target. It can manifest as physical aggression, verbal harassment,
+        social exclusion, or cyberbullying through digital platforms.
+
+        **PBIS Framework for Bullying Prevention:**
+        - Tier 1 (Universal): School-wide expectations, classroom lessons on respect
+        - Tier 2 (Targeted): Social skills groups, Check-In/Check-Out for at-risk students
+        - Tier 3 (Intensive): Individual behavior plans, wraparound services
+
+        **Staff Response Protocol:**
+        When a bullying incident is reported:
+        1. Ensure immediate safety of the targeted student
+        2. Separate involved parties
+        3. Interview witnesses independently
+        4. Document using the district's behavioral incident form
+        5. Follow the harassment, intimidation, and bullying (HIB) investigation timeline
+        6. Communicate findings to families within 2 school days
+      `;
+
+      const result = await service.evaluateOutput(aiResponse, 'claude-haiku-4.5', 'amazon-bedrock');
+      expect(result.allowed).toBe(true);
+      expect(result.processedContent).toBe(aiResponse);
     });
   });
 });
