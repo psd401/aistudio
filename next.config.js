@@ -10,6 +10,16 @@ const nextConfig = {
     ignoreBuildErrors: true,
   },
   output: 'standalone',
+  // argon2 is loaded dynamically via createRequire in argon2-loader.ts,
+  // which prevents Next.js standalone file tracing from detecting it.
+  // Explicitly include argon2 and its runtime dependencies.
+  outputFileTracingIncludes: {
+    '/**': [
+      './node_modules/argon2/**/*',
+      './node_modules/@phc/format/**/*',
+      './node_modules/node-gyp-build/**/*',
+    ],
+  },
   images: {
     remotePatterns: [],
   },
