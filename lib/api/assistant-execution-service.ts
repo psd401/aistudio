@@ -946,11 +946,14 @@ function substituteVariables(
   for (let i = 0; i < sortedPrevPrompts.length; i++) {
     const prevPrompt = sortedPrevPrompts[i]
     const output = previousOutputs.get(prevPrompt.id)
+    // Always map position → prompt ID for prompt_N_output (even if no output yet)
+    positionToPromptId.set(i, prevPrompt.id)
     if (output !== undefined) {
       // Map slugified name → output (e.g., "facilitator-opening" → output text)
-      slugifiedOutputs.set(slugify(prevPrompt.name), output)
-      // Map positional index → prompt ID for prompt_N_output support
-      positionToPromptId.set(i, prevPrompt.id)
+      const slug = slugify(prevPrompt.name)
+      // Handle duplicate/empty slugs by appending prompt ID for uniqueness
+      const uniqueKey = slug || `prompt-${prevPrompt.id}`
+      slugifiedOutputs.set(uniqueKey, output)
     }
   }
 
