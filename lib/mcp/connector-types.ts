@@ -79,4 +79,8 @@ export interface McpToolCallLogEntry {
   output: Record<string, unknown> | null
   durationMs: number
   error?: string
+  /** Client IP address (forwarded from request headers) */
+  ipAddress?: string
+  /** Client user-agent string */
+  userAgent?: string
 }

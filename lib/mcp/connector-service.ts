@@ -39,6 +39,12 @@ import type {
 
 const log = createLogger({ action: "mcp-connector-service" })
 
+/** Timeout for MCP client creation and tool fetch (30s — external server round trip) */
+const MCP_CLIENT_TIMEOUT_MS = 30_000
+
+/** Token expiry buffer — proactively reject tokens expiring within 60 seconds */
+const TOKEN_EXPIRY_BUFFER_MS = 60_000
+
 // ─── Connector Listing ───────────────────────────────────────────────────────
 
 /**
@@ -158,20 +164,29 @@ export async function getConnectorTools(
   // 4. Resolve auth headers from loaded token
   const headers = await buildAuthHeaders(server.authType as McpAuthType, tokenRow)
 
-  // 5. Create MCP client (per-request lifecycle)
-  const client = await createMCPClient({
-    transport: {
-      type: "http",
-      url: server.url,
-      headers,
-    },
-    name: "aistudio-connector",
-  })
+  // 5. Create MCP client and fetch tools with timeout + cleanup on failure.
+  // Both createMCPClient and client.tools() make outbound HTTP calls to
+  // user-controlled URLs, so they must be guarded against indefinite hangs.
+  const client = await withTimeout(
+    createMCPClient({
+      transport: {
+        type: "http",
+        url: server.url,
+        headers,
+      },
+      name: "aistudio-connector",
+    }),
+    MCP_CLIENT_TIMEOUT_MS,
+    "MCP client creation timed out"
+  )
 
-  // 6. Fetch tools — close client on failure to prevent resource leaks
   let tools
   try {
-    tools = await client.tools()
+    tools = await withTimeout(
+      client.tools(),
+      MCP_CLIENT_TIMEOUT_MS,
+      "MCP tool fetch timed out"
+    )
   } catch (error) {
     try { await client.close() } catch { /* ignore cleanup errors */ }
     throw error
@@ -348,6 +363,8 @@ export async function logToolCall(entry: McpToolCallLogEntry): Promise<void> {
           output: truncateForAudit(entry.output),
           durationMs: entry.durationMs,
           error: entry.error ?? null,
+          ipAddress: entry.ipAddress ?? null,
+          userAgent: entry.userAgent ?? null,
         }),
       "logToolCall"
     )
@@ -418,9 +435,10 @@ async function buildAuthHeaders(
     throw new Error("No token found. User must authenticate first.")
   }
 
-  // Check token expiry before sending
-  if (tokenRow.tokenExpiresAt && tokenRow.tokenExpiresAt < new Date()) {
-    throw new Error("Token expired. User must re-authenticate or refresh token.")
+  // Proactively reject tokens expiring within the buffer window — the token
+  // may expire between this check and when the remote MCP server receives it.
+  if (tokenRow.tokenExpiresAt && tokenRow.tokenExpiresAt < new Date(Date.now() + TOKEN_EXPIRY_BUFFER_MS)) {
+    throw new Error("Token expired or expiring soon. User must re-authenticate or refresh token.")
   }
 
   if (!tokenRow.encryptedAccessToken) {
@@ -507,13 +525,21 @@ interface OAuthClientCredentials {
   tokenEndpointUrl?: string
 }
 
-const secretsClient = new SecretsManagerClient({
-  region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-west-2",
-})
+let secretsClient: SecretsManagerClient | null = null
 
-/** In-memory cache for OAuth client credentials (keyed by credentialsKey) */
+function getSecretsClient(): SecretsManagerClient {
+  if (!secretsClient) {
+    secretsClient = new SecretsManagerClient({
+      region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-west-2",
+    })
+  }
+  return secretsClient
+}
+
+/** In-memory cache for OAuth client credentials (keyed by credentialsKey, max 100 entries) */
 const credentialsCache = new Map<string, { value: OAuthClientCredentials; fetchedAt: number }>()
 const CREDENTIALS_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+const CREDENTIALS_CACHE_MAX = 100
 
 /**
  * Fetches OAuth client credentials from AWS Secrets Manager with 5-minute TTL cache.
@@ -527,7 +553,7 @@ async function loadOAuthCredentials(
     return cached.value
   }
 
-  const result = await secretsClient.send(
+  const result = await getSecretsClient().send(
     new GetSecretValueCommand({ SecretId: credentialsKey })
   )
   if (!result.SecretString) {
@@ -552,8 +578,31 @@ async function loadOAuthCredentials(
       typeof obj.tokenEndpointUrl === "string" ? obj.tokenEndpointUrl : undefined,
   }
 
+  // Evict oldest entry if cache is at capacity (simple FIFO via Map insertion order)
+  if (credentialsCache.size >= CREDENTIALS_CACHE_MAX) {
+    const oldestKey = credentialsCache.keys().next().value
+    if (oldestKey !== undefined) credentialsCache.delete(oldestKey)
+  }
+
   credentialsCache.set(credentialsKey, { value: credentials, fetchedAt: Date.now() })
   return credentials
+}
+
+// ─── Timeout Helper ─────────────────────────────────────────────────────────
+
+/**
+ * Wraps a promise with a timeout. Rejects with the given message if the
+ * promise doesn't settle within `ms` milliseconds. Used for outbound calls
+ * where @ai-sdk/mcp doesn't accept an AbortSignal directly.
+ */
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms)
+    promise.then(
+      (val) => { clearTimeout(timer); resolve(val) },
+      (err) => { clearTimeout(timer); reject(err) },
+    )
+  })
 }
 
 // ─── Validation Helpers ──────────────────────────────────────────────────────
@@ -575,6 +624,12 @@ function truncateForAudit(
 /**
  * Validates that a server URL is safe for outbound requests (SSRF prevention).
  * Blocks private/internal addresses and non-HTTPS schemes in production.
+ *
+ * LIMITATION: This performs hostname-based validation only. It does NOT resolve
+ * DNS to verify the target IP, so it is vulnerable to DNS rebinding attacks
+ * (where a public hostname resolves to a private IP after validation). For
+ * defense-in-depth, deploy an egress proxy or DNS firewall at the infrastructure
+ * level to block outbound connections to RFC 1918 / link-local addresses.
  */
 function validateMcpServerUrl(rawUrl: string): void {
   let parsed: URL
