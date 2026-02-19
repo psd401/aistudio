@@ -187,6 +187,12 @@ describe("Token Encryption (AES-256-GCM)", () => {
       )
     })
 
+    it("should propagate Secrets Manager network errors", async () => {
+      mockSend.mockRejectedValueOnce(new Error("Network error"))
+
+      await expect(encryptToken("test")).rejects.toThrow("Network error")
+    })
+
     it("should work with any secret string format (derived via HKDF)", async () => {
       // Short secret
       mockSend.mockResolvedValueOnce({ SecretString: "short" })

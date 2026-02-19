@@ -47,8 +47,11 @@ let smClient: SecretsManagerClient | null = null
 
 function getSecretsManagerClient(): SecretsManagerClient {
   if (!smClient) {
+    if (!process.env.AWS_REGION) {
+      log.warn("AWS_REGION not set — Secrets Manager client may target wrong region")
+    }
     smClient = new SecretsManagerClient({
-      region: process.env.AWS_REGION || "us-west-2",
+      region: process.env.AWS_REGION,
       maxAttempts: 3,
     })
   }
