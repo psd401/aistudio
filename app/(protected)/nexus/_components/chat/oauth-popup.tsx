@@ -75,7 +75,8 @@ export async function openOAuthPopup(
   const popup = window.open(
     url,
     "mcp-oauth-popup",
-    // noopener=no: popup intentionally needs window.opener to postMessage back to parent
+    // noopener=no: popup intentionally needs window.opener for postMessage back to parent.
+    // Mitigation: parent validates event.origin before acting on messages (line ~107).
     `width=${width},height=${height},left=${left},top=${top},popup=yes,noopener=no`
   )
 

@@ -721,8 +721,15 @@ export function validateMcpServerUrl(rawUrl: string): void {
     /^metadata\.google\.internal$/,
   ]
 
-  if (isProduction && privatePatterns.some((p) => p.test(hostname))) {
+  const isPrivate = privatePatterns.some((p) => p.test(hostname))
+  if (isProduction && isPrivate) {
     throw new Error("MCP server URL must not target private/internal addresses")
+  }
+  if (!isProduction && isPrivate) {
+    log.warn("MCP server URL targets private/internal address (allowed in non-production)", {
+      hostname,
+      url: rawUrl,
+    })
   }
 }
 

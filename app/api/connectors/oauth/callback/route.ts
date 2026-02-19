@@ -28,7 +28,7 @@ import { nexusMcpServers, nexusMcpUserTokens } from "@/lib/db/schema"
 import { loadOAuthCredentials, validateMcpServerUrl } from "@/lib/mcp/connector-service"
 import { encryptToken, decryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
-import { OAUTH_STATE_COOKIE } from "../authorize/route"
+import { getOAuthStateCookieName } from "../authorize/route"
 
 const log = createLogger({ action: "oauth-callback" })
 
@@ -68,7 +68,7 @@ function renderCallbackHtml(
     success,
     serverId,
     error: error ?? null,
-  }).replace(/</g, "\\u003c")
+  }).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026")
 
   const html = `<!DOCTYPE html>
 <html>
@@ -124,14 +124,24 @@ export async function GET(req: Request): Promise<Response> {
       return renderCallbackHtml(false, serverId, "Missing authorization code or state")
     }
 
-    // 2. Read and decrypt state cookie
+    // 2. Extract serverId from state (format: "serverId:nonce") to find per-server cookie
+    const colonIdx = state.indexOf(":")
+    if (colonIdx !== 36) {
+      log.warn("Invalid state format in callback", { requestId })
+      timer({ status: "error", reason: "invalid_state_format" })
+      return renderCallbackHtml(false, serverId, "Invalid OAuth state. Please try again.")
+    }
+    const stateServerId = state.slice(0, 36)
+
+    // 3. Read and decrypt per-server state cookie
     const cookieStore = await cookies()
-    const stateCookie = cookieStore.get(OAUTH_STATE_COOKIE)
+    const cookieName = getOAuthStateCookieName(stateServerId)
+    const stateCookie = cookieStore.get(cookieName)
 
     if (!stateCookie?.value) {
-      log.warn("Missing OAuth state cookie", { requestId })
+      log.warn("Missing OAuth state cookie", { requestId, cookieName })
       timer({ status: "error", reason: "missing_cookie" })
-      return renderCallbackHtml(false, serverId, "OAuth session expired. Please try again.")
+      return renderCallbackHtml(false, stateServerId, "OAuth session expired. Please try again.")
     }
 
     let cookieData: OAuthStateCookie
@@ -173,7 +183,7 @@ export async function GET(req: Request): Promise<Response> {
 
     // 5. Clear the state cookie immediately (one-time use)
     cookieStore.delete({
-      name: OAUTH_STATE_COOKIE,
+      name: cookieName,
       path: "/api/connectors/oauth",
     })
 
@@ -214,6 +224,10 @@ export async function GET(req: Request): Promise<Response> {
     if (credentials.tokenEndpointUrl) {
       tokenEndpoint = credentials.tokenEndpointUrl
     } else {
+      // Fallback: resolve /oauth/token from the server's origin (not path).
+      // new URL("/oauth/token", "https://host/mcp/v1") → "https://host/oauth/token"
+      // This discards any path segments in server.url — providers requiring a
+      // path-relative token endpoint must set tokenEndpointUrl explicitly.
       tokenEndpoint = new URL("/oauth/token", server.url).toString()
       log.warn("No tokenEndpointUrl configured — falling back to /oauth/token", {
         requestId,

@@ -31,8 +31,14 @@ import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 
 const log = createLogger({ action: "oauth-authorize" })
 
-/** Cookie name for the encrypted PKCE state */
-export const OAUTH_STATE_COOKIE = "mcp_oauth_state"
+/**
+ * Builds a per-server cookie name for the encrypted PKCE state.
+ * Using a per-server suffix allows concurrent OAuth flows for different
+ * connectors without one overwriting the other's cookie.
+ */
+export function getOAuthStateCookieName(serverId: string): string {
+  return `mcp_oauth_state_${serverId.slice(0, 8)}`
+}
 
 /** Max age for the state cookie (5 minutes — generous window for popup flow) */
 const STATE_COOKIE_MAX_AGE = 300
@@ -151,8 +157,9 @@ export async function GET(req: Request): Promise<Response> {
     const codeVerifier = generateCodeVerifier()
     const codeChallenge = computeCodeChallenge(codeVerifier)
 
-    // 6. Generate state nonce
-    const state = randomBytes(32).toString("base64url")
+    // 6. Generate state nonce (prefixed with serverId for cookie routing in callback)
+    const nonce = randomBytes(32).toString("base64url")
+    const state = `${serverId}:${nonce}`
 
     // 7. Build redirect URI
     const baseUrl = getIssuerUrl()
@@ -183,7 +190,7 @@ export async function GET(req: Request): Promise<Response> {
     const encryptedState = await encryptToken(cookiePayload)
 
     const cookieStore = await cookies()
-    cookieStore.set(OAUTH_STATE_COOKIE, encryptedState, {
+    cookieStore.set(getOAuthStateCookieName(serverId), encryptedState, {
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
       sameSite: "lax",
