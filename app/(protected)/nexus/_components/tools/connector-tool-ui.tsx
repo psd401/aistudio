@@ -321,27 +321,27 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
           )}
         </div>
 
-        {/* Status indicator */}
-        <div className="flex items-center gap-2">
+        {/* Status indicator — aria-live announces tool completion/failure to screen readers */}
+        <div className="flex items-center gap-2" aria-live="polite" aria-atomic="true">
           {isLoading ? (
             <div className="flex items-center gap-1.5">
-              <Loader2 className="h-4 w-4 text-purple-600 animate-spin" />
+              <Loader2 className="h-4 w-4 text-purple-600 animate-spin" aria-hidden="true" />
               <span className="text-xs text-purple-600 animate-pulse">Running...</span>
             </div>
           ) : isError ? (
-            <AlertCircle className="h-4 w-4 text-red-500" />
+            <AlertCircle className="h-4 w-4 text-red-500" aria-label="Tool failed" />
           ) : (
-            <CheckCircle2 className="h-4 w-4 text-green-600" />
+            <CheckCircle2 className="h-4 w-4 text-green-600" aria-label="Tool completed" />
           )}
 
-          {/* Expand/collapse */}
+          {/* Expand/collapse — min 44px touch target per WCAG 2.5.5 */}
           <Button
             variant="ghost"
             size="sm"
             onClick={() => setIsExpanded(!isExpanded)}
             aria-expanded={isExpanded}
             aria-label={isExpanded ? 'Hide tool details' : 'Show tool details'}
-            className="h-7 w-7 p-0 text-purple-700 hover:text-purple-900 hover:bg-purple-100"
+            className="h-9 w-9 p-0 text-purple-700 hover:text-purple-900 hover:bg-purple-100"
           >
             {isExpanded ? (
               <ChevronUp className="h-4 w-4" />
@@ -435,7 +435,7 @@ export function ConnectorReconnectPrompt({ serverIds, onReconnect }: ConnectorRe
           <div className="text-sm text-amber-800 mb-3">
             {serverNames.length === 1
               ? `Your ${serverNames[0]?.name} connection has expired.`
-              : `${serverNames.length} connector connections have expired.`}
+              : `Your ${serverNames.map(s => s.name).join(', ')} connections have expired.`}
           </div>
           <div className="flex flex-wrap gap-2">
             {serverNames.map(({ id, name }) => (
