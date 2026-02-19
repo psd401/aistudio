@@ -20,7 +20,6 @@
 import { cookies } from "next/headers"
 import { createHash, randomBytes } from "node:crypto"
 import { NextResponse } from "next/server"
-import { getServerSession } from "@/lib/auth/server-session"
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
@@ -61,18 +60,11 @@ export async function GET(req: Request): Promise<Response> {
   const timer = startTimer("oauth.authorize")
 
   try {
-    // 1. Authenticate
-    const session = await getServerSession()
-    if (!session) {
-      log.warn("Unauthorized OAuth authorize attempt", { requestId })
-      timer({ status: "error", reason: "unauthorized" })
-      return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
-    }
-
+    // 1. Authenticate (getCurrentUserAction calls getServerSession internally)
     const currentUser = await getCurrentUserAction()
     if (!currentUser.isSuccess) {
-      log.warn("Failed to get current user", { requestId })
-      timer({ status: "error", reason: "user_lookup_failed" })
+      log.warn("Unauthorized OAuth authorize attempt", { requestId })
+      timer({ status: "error", reason: "unauthorized" })
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 

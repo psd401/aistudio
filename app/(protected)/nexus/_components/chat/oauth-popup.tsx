@@ -75,6 +75,7 @@ export async function openOAuthPopup(
   const popup = window.open(
     url,
     "mcp-oauth-popup",
+    // noopener=no: popup intentionally needs window.opener to postMessage back to parent
     `width=${width},height=${height},left=${left},top=${top},popup=yes,noopener=no`
   )
 
@@ -115,7 +116,8 @@ export async function openOAuthPopup(
       }
 
       if (data.type !== "mcp-oauth-callback") return
-      if (data.serverId !== serverId) return
+      // Accept error messages with empty serverId (cookie not yet parsed in early error paths)
+      if (data.serverId !== serverId && !(data.success === false && !data.serverId)) return
 
       settle({
         success: Boolean(data.success),

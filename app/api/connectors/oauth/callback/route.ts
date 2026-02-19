@@ -224,6 +224,8 @@ export async function GET(req: Request): Promise<Response> {
     validateMcpServerUrl(tokenEndpoint)
 
     // 10. Exchange auth code for tokens (RFC 6749 §4.1.3 + RFC 7636 §4.5)
+    // Uses client_secret_post method (secret in body). Providers requiring
+    // client_secret_basic (HTTP Basic auth) are not supported yet.
     const tokenBody: Record<string, string> = {
       grant_type: "authorization_code",
       code,
@@ -321,7 +323,11 @@ function parseTokenResponse(json: unknown): OAuthTokenResponse {
     access_token: obj.access_token as string,
     token_type: obj.token_type as string,
     refresh_token: typeof obj.refresh_token === "string" ? obj.refresh_token : undefined,
-    expires_in: typeof obj.expires_in === "number" ? obj.expires_in : undefined,
+    expires_in: typeof obj.expires_in === "number"
+      ? obj.expires_in
+      : typeof obj.expires_in === "string" && obj.expires_in !== ""
+        ? Number(obj.expires_in) || undefined
+        : undefined,
     scope: typeof obj.scope === "string" ? obj.scope : undefined,
   }
 }
