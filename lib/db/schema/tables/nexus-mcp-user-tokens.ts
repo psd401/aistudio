@@ -7,12 +7,12 @@
  */
 
 import {
-  index,
   integer,
   pgTable,
   text,
   timestamp,
   uniqueIndex,
+  index,
   uuid,
 } from "drizzle-orm/pg-core";
 import { nexusMcpServers } from "./nexus-mcp-servers";
@@ -28,22 +28,23 @@ export const nexusMcpUserTokens = pgTable(
     serverId: uuid("server_id")
       .references(() => nexusMcpServers.id, { onDelete: "cascade" })
       .notNull(),
-    // ENCRYPTION: Must be written only via lib/mcp/token-encryption.ts (follow-up issue)
+    // ENCRYPTION: Must be written only via lib/mcp/token-encryption.ts (Issue #776 follow-up)
     encryptedAccessToken: text("encrypted_access_token").notNull(),
     encryptedRefreshToken: text("encrypted_refresh_token"),
     tokenExpiresAt: timestamp("token_expires_at", { withTimezone: true }),
     scope: text("scope"),
-    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow(),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .defaultNow()
+      .notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .defaultNow()
-      .$onUpdateFn(() => new Date()),
+      .notNull(),
   },
   (table) => [
     uniqueIndex("nexus_mcp_user_tokens_user_server_unique").on(
       table.userId,
       table.serverId
     ),
-    index("idx_mcp_user_tokens_user").on(table.userId),
     index("idx_mcp_user_tokens_server").on(table.serverId),
   ]
 );

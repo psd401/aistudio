@@ -20,12 +20,15 @@ CREATE TABLE IF NOT EXISTS nexus_mcp_user_tokens (
   encrypted_refresh_token TEXT,
   token_expires_at TIMESTAMPTZ,
   scope TEXT,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW(),
-  CONSTRAINT nexus_mcp_user_tokens_user_server_unique UNIQUE(user_id, server_id)
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
-CREATE INDEX IF NOT EXISTS idx_mcp_user_tokens_user ON nexus_mcp_user_tokens(user_id);
+-- Unique constraint as idempotent index (CREATE TABLE IF NOT EXISTS skips inline constraints)
+CREATE UNIQUE INDEX IF NOT EXISTS nexus_mcp_user_tokens_user_server_unique
+  ON nexus_mcp_user_tokens(user_id, server_id);
+
+-- server_id index for lookups by server (user_id is covered by the composite unique index)
 CREATE INDEX IF NOT EXISTS idx_mcp_user_tokens_server ON nexus_mcp_user_tokens(server_id);
 
 -- TRIGGERS

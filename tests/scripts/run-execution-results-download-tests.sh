@@ -68,7 +68,7 @@ run_test_category() {
         if [ -f "$test_file" ]; then
             print_status "  • Running $test_file"
 
-            if bun test -- "$test_file" --verbose; then
+            if bunx jest "$test_file" --verbose; then
                 print_success "    ✅ $test_file passed"
             else
                 print_error "    ❌ $test_file failed"
@@ -88,7 +88,7 @@ run_with_coverage() {
     print_status "Running tests with coverage report..."
 
     # Run all execution results download tests with coverage
-    bun test -- \
+    bunx jest \
         --coverage \
         --collectCoverageFrom="app/api/execution-results/[id]/download/**/*.{ts,tsx}" \
         --coverageDirectory="coverage/execution-results-download" \
@@ -162,7 +162,7 @@ validate_test_setup() {
     done
 
     # Check if test utilities can be imported
-    if node -e "require('./tests/utils/execution-result-test-data.ts')" 2>/dev/null; then
+    if bun -e "import './tests/utils/execution-result-test-data.ts'" 2>/dev/null; then
         print_success "Test utilities are properly configured"
     else
         print_warning "Test utilities may have import issues"
