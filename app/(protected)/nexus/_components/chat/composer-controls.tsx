@@ -53,8 +53,8 @@ export function ComposerControls({
       {/* Skills (placeholder) */}
       <SkillsPopover disabled />
 
-      {/* MCP Connections (placeholder) */}
-      <MCPPopover disabled />
+      {/* MCP Connections */}
+      <MCPPopover />
     </div>
   )
 }
