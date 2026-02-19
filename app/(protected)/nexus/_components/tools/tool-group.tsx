@@ -92,18 +92,22 @@ export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<
 
   const toolCount = endIndex - startIndex + 1
 
-  // Connector tool group
-  if (groupType === 'connector') {
-    // Collect unique server names across all tools in the group
-    const serverNames = [...new Set(
+  // Collect unique server names for connector groups (memoized to avoid O(tools) on every render)
+  const connectorServerNames = useMemo(() => {
+    if (groupType !== 'connector') return []
+    return [...new Set(
       toolCalls
         .filter(part => 'toolName' in part)
         .map(part => connectorCtx?.getConnectorInfo(part.toolName as string)?.serverName)
         .filter((name): name is string => !!name)
     )]
-    const serverLabel = serverNames.length === 1
-      ? serverNames[0]
-      : serverNames.length > 1
+  }, [groupType, toolCalls, connectorCtx])
+
+  // Connector tool group
+  if (groupType === 'connector') {
+    const serverLabel = connectorServerNames.length === 1
+      ? connectorServerNames[0]
+      : connectorServerNames.length > 1
         ? 'Connectors'
         : 'Connector'
 

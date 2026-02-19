@@ -101,6 +101,8 @@ function parseResult(result: unknown): ParsedResult[] {
   }
 
   // MCP tool results follow the McpToolResult format: { content: McpContentItem[] }
+  // Double cast needed: isPlainObject narrows to Record<string, unknown> which doesn't
+  // structurally overlap McpToolResult. The Object.hasOwn guard validates the shape.
   if (isPlainObject(result) && Object.hasOwn(result, 'content')) {
     const mcpResult = result as unknown as McpToolResult
 
@@ -139,7 +141,9 @@ function parseResult(result: unknown): ParsedResult[] {
   return [{ type: 'json', text: JSON.stringify(result, null, 2) }]
 }
 
-/** Validate that an icon URL is safe to render (https only, no data: or javascript:). */
+/** Validate that an icon URL is safe to render (https only, no data: or javascript:).
+ * Note: iconUrl comes from admin-configured connector registration data, not user input.
+ * Rendered in <img src> which does not execute scripts. */
 function isSafeIconUrl(url: string): boolean {
   try {
     const parsed = new URL(url)
@@ -256,6 +260,7 @@ function ResultRenderer({ parsed }: { parsed: ParsedResult[] }) {
           case 'link': return <LinkResult key={key} url={item.url || ''} />
           case 'error': return <ErrorResult key={key} text={item.text || 'Unknown error'} />
           case 'json': return <JsonResult key={key} text={item.text || '{}'} />
+          default: return null
         }
       })}
     </div>
@@ -301,10 +306,10 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
   const isError = parsedResult.some(p => p.type === 'error')
 
   // Auto-expand when a tool transitions from loading to error state.
-  // setState in effect is intentional — result arrives asynchronously after mount.
+  // Note: setState in useEffect is intentional here — tool results arrive
+  // asynchronously after mount (result starts as undefined while loading).
   useEffect(() => {
     if (isError) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
       setIsExpanded(true)
     }
   }, [isError])
