@@ -94,12 +94,18 @@ export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<
 
   // Connector tool group
   if (groupType === 'connector') {
-    // Get the connector server name from the first tool
-    const firstToolName = toolCalls[0] && 'toolName' in toolCalls[0]
-      ? toolCalls[0].toolName as string
-      : undefined
-    const connectorInfo = firstToolName ? connectorCtx?.getConnectorInfo(firstToolName) : undefined
-    const serverLabel = connectorInfo?.serverName || 'Connector'
+    // Collect unique server names across all tools in the group
+    const serverNames = [...new Set(
+      toolCalls
+        .filter(part => 'toolName' in part)
+        .map(part => connectorCtx?.getConnectorInfo(part.toolName as string)?.serverName)
+        .filter((name): name is string => !!name)
+    )]
+    const serverLabel = serverNames.length === 1
+      ? serverNames[0]
+      : serverNames.length > 1
+        ? 'Connectors'
+        : 'Connector'
 
     return (
       <Card className="mb-4 border-purple-200 bg-purple-50/30">

@@ -15,7 +15,7 @@ import { ConversationInitializer } from './_components/conversation-initializer'
 import { useConversationContext, createNexusHistoryAdapter } from '@/lib/nexus/history-adapter'
 import { MultiProviderToolUIs } from './_components/tools/multi-provider-tools'
 import { ConnectorToolProvider, useConnectorTools } from './_components/tools/connector-tool-context'
-import { ConnectorReconnectPrompt } from './_components/tools/connector-tool-ui'
+import { ConnectorReconnectPrompt, ConnectorToolFallback } from './_components/tools/connector-tool-ui'
 import { useModelsWithPersistence } from '@/lib/hooks/use-models'
 import { createEnhancedNexusAttachmentAdapter } from '@/lib/nexus/enhanced-attachment-adapters'
 import { validateConversationId } from '@/lib/nexus/conversation-navigation'
@@ -236,9 +236,7 @@ function NexusRuntimeWrapper({
   const handleReconnectAction = useCallback((serverId: string) => {
     // Clear the failed status for this server
     if (connectorCtx) {
-      connectorCtx.setFailedServerIds(
-        connectorCtx.failedServerIds.filter(id => id !== serverId)
-      )
+      connectorCtx.setFailedServerIds(prev => prev.filter(id => id !== serverId))
     }
     // Future: This will open the OAuth popup for the server (Task 5/6)
     // For now, show guidance toast
@@ -287,6 +285,7 @@ function NexusRuntimeWrapper({
           onToolsChange={onToolsChange}
           enabledConnectors={enabledConnectors}
           onConnectorsChange={onConnectorsChange}
+          toolFallback={ConnectorToolFallback}
         />
       </div>
     </ConversationRuntimeProvider>

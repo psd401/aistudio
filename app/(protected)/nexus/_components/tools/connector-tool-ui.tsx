@@ -17,6 +17,7 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import { useConnectorTools, type ConnectorServerInfo } from './connector-tool-context'
+import type { McpToolResult } from '@/lib/mcp/types'
 
 /**
  * Format a tool name for display.
@@ -79,9 +80,20 @@ interface ParsedResult {
 function parseResult(result: unknown): ParsedResult[] {
   if (result === undefined || result === null) return []
 
+  // Non-MCP error objects (e.g. { isError: true, error: 'message' }) — surfaced by assistant-ui
+  if (typeof result === 'object' && result !== null) {
+    const obj = result as Record<string, unknown>
+    if (obj.isError === true && !Object.hasOwn(obj, 'content')) {
+      const errorText = typeof obj.error === 'string' ? obj.error
+        : typeof obj.message === 'string' ? obj.message
+        : 'Tool execution failed'
+      return [{ type: 'error', text: errorText }]
+    }
+  }
+
   // MCP tool results follow the McpToolResult format: { content: McpContentItem[] }
   if (typeof result === 'object' && result !== null && Object.hasOwn(result as Record<string, unknown>, 'content')) {
-    const mcpResult = result as { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>; isError?: boolean }
+    const mcpResult = result as McpToolResult
 
     if (mcpResult.isError) {
       const errorText = mcpResult.content
@@ -398,7 +410,7 @@ const GenericToolFallback: ToolCallMessagePartComponent = ({
           Used tool: <b>{toolName}</b>
         </p>
         <Button onClick={() => setIsCollapsed(!isCollapsed)}>
-          {isCollapsed ? <ChevronUp /> : <ChevronDown />}
+          {isCollapsed ? <ChevronDown /> : <ChevronUp />}
         </Button>
       </div>
       {!isCollapsed && (

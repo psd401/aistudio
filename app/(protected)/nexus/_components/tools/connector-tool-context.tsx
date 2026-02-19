@@ -1,6 +1,6 @@
 'use client'
 
-import { createContext, useContext, useCallback, useState, useMemo } from 'react'
+import { createContext, useContext, useCallback, useState, useMemo, type Dispatch, type SetStateAction } from 'react'
 
 /**
  * Metadata about an MCP connector server
@@ -33,8 +33,8 @@ interface ConnectorToolContextValue {
   getConnectorInfo: (toolName: string) => ConnectorServerInfo | undefined
   /** List of server IDs that failed reconnect (from X-Connector-Reconnect header) */
   failedServerIds: string[]
-  /** Set failed server IDs from reconnect header */
-  setFailedServerIds: (ids: string[]) => void
+  /** Set failed server IDs from reconnect header (supports functional update form) */
+  setFailedServerIds: Dispatch<SetStateAction<string[]>>
   /** Clear failed server IDs (e.g., after successful reconnect) */
   clearFailedServerIds: () => void
 }

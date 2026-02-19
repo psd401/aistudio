@@ -9,6 +9,7 @@ import {
 } from "@assistant-ui/react";
 import type { FC } from "react";
 import { createContext, useContext, useMemo } from "react";
+import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
@@ -29,7 +30,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { MarkdownText } from "./markdown-text";
 import { WebSearchSource } from "./web-search-sources";
-import { ConnectorToolFallback } from "@/app/(protected)/nexus/_components/tools/connector-tool-ui";
+import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { ToolGroup } from "@/app/(protected)/nexus/_components/tools/tool-group";
 import {
   ComposerAttachments,
@@ -55,12 +56,17 @@ const THREAD_ROOT_STYLE = {
   ["--thread-padding-x" as string]: "1rem",
 };
 
-const ASSISTANT_MESSAGE_CONTENT_COMPONENTS = {
+const DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS = {
   Text: MarkdownText,
   Source: WebSearchSource,
   ToolGroup: ToolGroup,
-  tools: { Fallback: ConnectorToolFallback },
+  tools: { Fallback: ToolFallback as ToolCallMessagePartComponent },
 };
+
+type AssistantContentComponents = typeof DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS;
+
+/** Allows the rendering layer (e.g. Nexus) to inject a custom tool fallback without coupling thread.tsx to feature-specific imports */
+const AssistantContentComponentsContext = createContext<AssistantContentComponents>(DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS);
 
 const USER_MESSAGE_CONTENT_COMPONENTS = { Text: MarkdownText };
 
@@ -115,6 +121,8 @@ interface ThreadProps {
   onConnectorsChange?: (connectors: string[]) => void;
   // Custom suggested actions (pass [] to hide, undefined for defaults)
   suggestedActions?: SuggestedAction[];
+  /** Override the tool fallback component (e.g. ConnectorToolFallback in Nexus) */
+  toolFallback?: ToolCallMessagePartComponent;
 }
 
 export const Thread: FC<ThreadProps> = ({
@@ -129,7 +137,14 @@ export const Thread: FC<ThreadProps> = ({
   enabledConnectors = EMPTY_CONNECTORS_ARRAY,
   onConnectorsChange,
   suggestedActions,
+  toolFallback,
 }) => {
+  const contentComponents = useMemo(() =>
+    toolFallback
+      ? { ...DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS, tools: { Fallback: toolFallback } }
+      : DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS
+  , [toolFallback]);
+
   // Memoize message components to avoid recreation on every render
   const messageComponents = useMemo(() => ({
     UserMessage,
@@ -138,6 +153,7 @@ export const Thread: FC<ThreadProps> = ({
   }), []);
 
   return (
+    <AssistantContentComponentsContext.Provider value={contentComponents}>
     <ConversationIdContext.Provider value={conversationId || null}>
       <ThreadPrimitive.Root
         className="bg-white flex h-full flex-col"
@@ -169,6 +185,7 @@ export const Thread: FC<ThreadProps> = ({
         />
       </ThreadPrimitive.Root>
     </ConversationIdContext.Provider>
+    </AssistantContentComponentsContext.Provider>
   );
 };
 
@@ -382,6 +399,7 @@ const MessageError: FC = () => {
 };
 
 const AssistantMessage: FC = () => {
+  const contentComponents = useContext(AssistantContentComponentsContext);
   return (
     <MessagePrimitive.Root asChild>
       <motion.div
@@ -396,7 +414,7 @@ const AssistantMessage: FC = () => {
 
         <div className="text-foreground col-span-2 col-start-2 row-start-1 ml-4 break-words leading-7">
           <MessagePrimitive.Content
-            components={ASSISTANT_MESSAGE_CONTENT_COMPONENTS}
+            components={contentComponents}
           />
           <MessageError />
         </div>
