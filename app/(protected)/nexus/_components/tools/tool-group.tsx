@@ -3,7 +3,7 @@
 import { type PropsWithChildren, useState, useMemo, useCallback } from 'react'
 import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
-import { ChevronDown, ChevronUp, Search, Loader2, Plug } from 'lucide-react'
+import { ChevronDown, ChevronUp, Wrench, Loader2, Plug } from 'lucide-react'
 import { useMessage } from '@assistant-ui/react'
 import { useConnectorToolsOptional } from './connector-tool-context'
 
@@ -23,7 +23,7 @@ const DIRECT_RENDER_TOOLS = [
 /**
  * Detect group type based on tool contents and connector context.
  */
-type GroupType = 'direct' | 'web-search' | 'connector' | 'mixed'
+type GroupType = 'direct' | 'generic' | 'connector' | 'mixed'
 
 /**
  * ToolGroup component for consolidating multiple consecutive tool calls
@@ -31,7 +31,7 @@ type GroupType = 'direct' | 'web-search' | 'connector' | 'mixed'
  *
  * Behavior:
  * - Charts (show_chart): Render directly without wrapper
- * - Web searches: Render in collapsible "Web Searches" card
+ * - Generic tools: Render in collapsible "Tool Actions" card
  * - Connector tools: Render in collapsible "Connector Actions" card (purple theme)
  * - Mixed/other tools: Render directly without wrapper
  */
@@ -67,13 +67,13 @@ export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<
       if (allConnector) return 'connector'
     }
 
-    // Check if this looks like a web search group (non-direct, non-connector)
+    // Mixed: some connector, some not — render without wrapper
     const hasConnectorTools = connectorCtx && toolCalls.some(part =>
       'toolName' in part && connectorCtx.getConnectorInfo(part.toolName as string)
     )
     if (hasConnectorTools) return 'mixed'
 
-    return 'web-search'
+    return 'generic'
   }, [toolCalls, connectorCtx])
 
   const isRunning = toolCalls.some(part =>
@@ -163,24 +163,22 @@ export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<
     )
   }
 
-  // Web search group (default)
+  // Generic tool group (default for non-connector, non-direct tools)
   return (
     <Card className="mb-4 border-blue-200 bg-blue-50/30">
       <CardHeader className="pb-3">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            {/* Show spinner ONLY when searches are actually running */}
             {isRunning ? (
               <Loader2 className="h-4 w-4 text-blue-600 animate-spin" />
             ) : (
-              <Search className="h-4 w-4 text-blue-600" />
+              <Wrench className="h-4 w-4 text-blue-600" />
             )}
             <span className="text-sm font-medium text-blue-900">
-              Web Searches ({toolCount})
+              Tool Actions ({toolCount})
             </span>
-            {/* Show "Searching..." text ONLY when active */}
             {isRunning && (
-              <span className="text-xs text-blue-600 animate-pulse">Searching...</span>
+              <span className="text-xs text-blue-600 animate-pulse">Running...</span>
             )}
           </div>
           <Button
@@ -188,7 +186,7 @@ export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<
             size="sm"
             onClick={toggleExpanded}
             aria-expanded={isExpanded}
-            aria-label={isExpanded ? 'Hide web searches' : 'Show web searches'}
+            aria-label={isExpanded ? 'Hide tool actions' : 'Show tool actions'}
             className="h-8 text-blue-700 hover:text-blue-900 hover:bg-blue-100"
           >
             {isExpanded ? (

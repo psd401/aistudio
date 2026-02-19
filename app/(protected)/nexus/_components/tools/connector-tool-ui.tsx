@@ -62,7 +62,9 @@ function summarizeArgs(argsText: string): string {
 
 /** Allowlist of safe image MIME types for data URI construction.
  * image/svg+xml is intentionally included: when rendered via <img> (not <object>/<embed>),
- * SVG scripts are sandboxed by browsers and do not execute. */
+ * SVG scripts are sandboxed by browsers and do not execute.
+ * WARNING: This allowlist is only safe for <img src> rendering. If these MIME types are ever
+ * used in CSS backgrounds, <object>, or <embed> tags, SVG script execution is possible. */
 const SAFE_IMAGE_MIME_TYPES = new Set([
   'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp',
 ])
@@ -119,9 +121,15 @@ function parseResult(result: unknown): ParsedResult[] {
         return { type: 'image' as const, url: item.data, mimeType: item.mimeType }
       }
       if (item.type === 'resource' && item.text) {
-        // Restrict to https:// only — connector output is untrusted
+        // MCP resource items: item.text holds the resource content body.
+        // If it looks like an HTTPS URL, render as a clickable link.
+        // Non-URL content falls through to text rendering below.
         if (/^https:\/\//.test(item.text)) {
           return { type: 'link' as const, url: item.text, mimeType: item.mimeType }
+        }
+        // Skip URI-like strings (file://, custom schemes) that aren't renderable content
+        if (/^[a-z][a-z0-9+.-]*:\/\//i.test(item.text)) {
+          return { type: 'text' as const, text: '(Resource not available for display)' }
         }
       }
       return { type: 'text' as const, text: item.text || '' }
@@ -163,6 +171,7 @@ function ConnectorIcon({ info, size = 16 }: { info: ConnectorServerInfo; size?: 
         height={size}
         className="rounded-sm"
         referrerPolicy="no-referrer"
+        crossOrigin="anonymous"
       />
     )
   }

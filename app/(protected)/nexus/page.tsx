@@ -260,17 +260,18 @@ function NexusRuntimeWrapper({
       {/* Auto-load prompts from Prompt Library */}
       <PromptAutoLoader />
 
-      {/* Connector reconnect prompt (shown when auth fails) */}
-      {failedServerIds.length > 0 && (
-        <div className="mx-auto w-full max-w-[48rem] px-4">
-          <ConnectorReconnectPrompt
-            serverIds={failedServerIds}
-            onReconnect={handleReconnectAction}
-          />
-        </div>
-      )}
-
       <div className="flex h-full flex-col">
+        {/* Connector reconnect prompt (shown when auth fails) — inside flex column so it
+            shares layout with Thread instead of pushing it outside the scroll container */}
+        {failedServerIds.length > 0 && (
+          <div className="mx-auto w-full max-w-[48rem] px-4 flex-shrink-0">
+            <ConnectorReconnectPrompt
+              serverIds={failedServerIds}
+              onReconnect={handleReconnectAction}
+            />
+          </div>
+        )}
+
         <Thread
           processingAttachments={processingAttachments}
           conversationId={conversationId}
