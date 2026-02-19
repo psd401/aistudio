@@ -52,7 +52,7 @@ const INITIAL_SETUP_FILES = migrationsConfig.initialSetupFiles;
 
 export async function handler(event: CustomResourceEvent): Promise<any> {
   console.log('Database initialization event:', JSON.stringify(event, null, 2));
-  console.log('Handler version: 2026-02-03-v14 - Add decision capture tool migration 057');
+  console.log('Handler version: 2026-02-18-v15 - Add nexus MCP user tokens migration 058');
   
   // SAFETY CHECK: Log what mode we're in
   console.log(`🔍 Checking database state for safety...`);

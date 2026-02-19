@@ -59,6 +59,7 @@ import {
   nexusMcpConnections,
   nexusMcpCapabilities,
   nexusMcpAuditLogs,
+  nexusMcpUserTokens,
   // Documents
   documents,
   documentChunks,
@@ -247,6 +248,9 @@ export type SelectNexusMcpCapability = InferSelectModel<
   typeof nexusMcpCapabilities
 >;
 export type SelectNexusMcpAuditLog = InferSelectModel<typeof nexusMcpAuditLogs>;
+export type SelectNexusMcpUserToken = InferSelectModel<
+  typeof nexusMcpUserTokens
+>;
 
 // ============================================
 // Nexus MCP - Insert Types
@@ -259,6 +263,9 @@ export type InsertNexusMcpCapability = InferInsertModel<
   typeof nexusMcpCapabilities
 >;
 export type InsertNexusMcpAuditLog = InferInsertModel<typeof nexusMcpAuditLogs>;
+export type InsertNexusMcpUserToken = InferInsertModel<
+  typeof nexusMcpUserTokens
+>;
 
 // ============================================
 // Documents - Select Types
