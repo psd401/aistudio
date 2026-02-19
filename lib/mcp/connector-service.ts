@@ -424,7 +424,7 @@ export async function logToolCall(entry: McpToolCallLogEntry): Promise<void> {
 // ─── Data Loading Helpers ────────────────────────────────────────────────────
 
 /** Server row type from nexusMcpServers */
-type ServerRow = typeof nexusMcpServers.$inferSelect
+export type ServerRow = typeof nexusMcpServers.$inferSelect
 
 /** Token row type from nexusMcpUserTokens (nullable — user may not have a token) */
 type TokenRow = typeof nexusMcpUserTokens.$inferSelect | null
@@ -563,11 +563,15 @@ async function exchangeRefreshToken(
 // ─── OAuth Credentials Helper ────────────────────────────────────────────────
 
 /** Shape of the JSON stored in Secrets Manager under credentialsKey */
-interface OAuthClientCredentials {
+export interface OAuthClientCredentials {
   clientId: string
   clientSecret: string
   /** Provider-specific token endpoint (e.g. https://accounts.google.com/o/oauth2/token) */
   tokenEndpointUrl?: string
+  /** Provider-specific authorization endpoint (e.g. https://www.canva.com/api/oauth/authorize) */
+  authorizationEndpointUrl?: string
+  /** Space-separated scopes for the OAuth flow */
+  scopes?: string
 }
 
 let secretsClient: SecretsManagerClient | null = null
@@ -588,9 +592,10 @@ const CREDENTIALS_CACHE_MAX = 100
 
 /**
  * Fetches OAuth client credentials from AWS Secrets Manager with 5-minute TTL cache.
- * The secret is expected to be a JSON string with { clientId, clientSecret, tokenEndpointUrl? }.
+ * The secret is expected to be a JSON string with
+ * { clientId, clientSecret, tokenEndpointUrl?, authorizationEndpointUrl?, scopes? }.
  */
-async function loadOAuthCredentials(
+export async function loadOAuthCredentials(
   credentialsKey: string
 ): Promise<OAuthClientCredentials> {
   const cached = credentialsCache.get(credentialsKey)
@@ -621,6 +626,10 @@ async function loadOAuthCredentials(
     clientSecret: obj.clientSecret as string,
     tokenEndpointUrl:
       typeof obj.tokenEndpointUrl === "string" ? obj.tokenEndpointUrl : undefined,
+    authorizationEndpointUrl:
+      typeof obj.authorizationEndpointUrl === "string" ? obj.authorizationEndpointUrl : undefined,
+    scopes:
+      typeof obj.scopes === "string" ? obj.scopes : undefined,
   }
 
   // Evict oldest entry if cache is at capacity (simple FIFO via Map insertion order)
@@ -677,7 +686,7 @@ function truncateForAudit(
  * level to block outbound connections to RFC 1918 / link-local addresses.
  * Tracked as Issue #791 — must be resolved before production deployment.
  */
-function validateMcpServerUrl(rawUrl: string): void {
+export function validateMcpServerUrl(rawUrl: string): void {
   let parsed: URL
   try {
     parsed = new URL(rawUrl)
@@ -712,8 +721,15 @@ function validateMcpServerUrl(rawUrl: string): void {
     /^metadata\.google\.internal$/,
   ]
 
-  if (isProduction && privatePatterns.some((p) => p.test(hostname))) {
+  const isPrivate = privatePatterns.some((p) => p.test(hostname))
+  if (isProduction && isPrivate) {
     throw new Error("MCP server URL must not target private/internal addresses")
+  }
+  if (!isProduction && isPrivate) {
+    log.warn("MCP server URL targets private/internal address (allowed in non-production)", {
+      hostname,
+      url: rawUrl,
+    })
   }
 }
 
@@ -723,7 +739,7 @@ function validateMcpServerUrl(rawUrl: string): void {
  * - If allowedUsers is non-empty, user must be in the list.
  * - If allowedUsers is empty, user must have admin or staff role.
  */
-function assertUserAccess(server: ServerRow, userId: number, userRoleNames: string[]): void {
+export function assertUserAccess(server: ServerRow, userId: number, userRoleNames: string[]): void {
   const allowed = server.allowedUsers ?? []
   if (allowed.length > 0) {
     if (!allowed.includes(userId)) {
