@@ -5,7 +5,7 @@
 # ============================================================================
 # Stage 1: Dependencies
 # ============================================================================
-FROM oven/bun:1-alpine AS deps
+FROM oven/bun:1.2-alpine AS deps
 WORKDIR /app
 
 # Install dependencies for native packages
@@ -48,9 +48,9 @@ ARG RDS_SECRET_ARN=arn:aws:secretsmanager:us-east-1:000000000000:secret:build-pl
 ENV RDS_SECRET_ARN=${RDS_SECRET_ARN}
 
 # Build with cache mount for Next.js build artifacts
-# next build runs via node (bun not needed at build stage — node_modules already installed)
+# next is invoked directly from node_modules/.bin — bun not needed at build stage
 RUN --mount=type=cache,target=/app/.next/cache \
-    npx next build
+    node_modules/.bin/next build
 
 # ============================================================================
 # Stage 3: Production Runner

@@ -2,6 +2,7 @@
   "name": "aistudio",
   "version": "1.1.0",
   "private": true,
+  "packageManager": "bun@1.2.23",
   "scripts": {
     "dev": "next dev",
     "build": "next build --webpack",
@@ -43,12 +44,12 @@
     "dev:local": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run dev"
   },
   "dependencies": {
-    "@ai-sdk/amazon-bedrock": "^4.0.61",
-    "@ai-sdk/azure": "^3.0.31",
-    "@ai-sdk/google": "^3.0.29",
-    "@ai-sdk/mcp": "^1.0.21",
-    "@ai-sdk/openai": "^3.0.30",
-    "@ai-sdk/react": "^3.0.93",
+    "@ai-sdk/amazon-bedrock": "~4.0.61",
+    "@ai-sdk/azure": "~3.0.31",
+    "@ai-sdk/google": "~3.0.29",
+    "@ai-sdk/mcp": "~1.0.21",
+    "@ai-sdk/openai": "~3.0.30",
+    "@ai-sdk/react": "~3.0.93",
     "@assistant-ui/react": "^0.12.3",
     "@assistant-ui/react-ai-sdk": "^1.3.3",
     "@assistant-ui/react-markdown": "^0.12.1",
@@ -200,7 +201,7 @@
       "zod": "^4.1.11"
     },
     "ai": "~6.0.91",
-    "@ai-sdk/provider": "^3.0.8",
-    "@ai-sdk/provider-utils": "^4.0.15"
+    "@ai-sdk/provider": "~3.0.8",
+    "@ai-sdk/provider-utils": "~4.0.15"
   }
 }
