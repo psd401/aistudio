@@ -23,7 +23,7 @@
     "test:perf:stress": "jest --testMatch='**/stress-test.test.ts' --runInBand",
     "ts-node": "tsx",
     "check-sdk-version": "node -p \"require('ai/package.json').version\"",
-    "preflight:ai-sdk-upgrade": "npm run test:streaming:contract && npm run test:streaming && npm run typecheck",
+    "preflight:ai-sdk-upgrade": "bun run test:streaming:contract && bun run test:streaming && bun run typecheck",
     "drizzle:generate": "drizzle-kit generate",
     "drizzle:push": "drizzle-kit push",
     "drizzle:studio": "drizzle-kit studio",
@@ -37,10 +37,10 @@
     "db:logs": "docker compose -f docker-compose.dev.yml logs -f postgres",
     "db:migrate": "tsx scripts/db/run-migrations.ts",
     "db:seed": "docker exec -i aistudio-postgres psql -U postgres -d aistudio < scripts/db/seed-local.sql",
-    "db:studio": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false npm run drizzle:studio",
+    "db:studio": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run drizzle:studio",
     "db:psql": "docker exec -it aistudio-postgres psql -U postgres -d aistudio",
     "dev:docker": "docker compose -f docker-compose.dev.yml up",
-    "dev:local": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false npm run dev"
+    "dev:local": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run dev"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "^4.0.61",

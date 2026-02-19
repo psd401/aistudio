@@ -30,7 +30,10 @@ jobs:
           node-version: '20'
 
       - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3  # v2
+        with:
+          bun-version: "1.2.x"
+          cache: true
 
       - name: Check for AI SDK version changes
         id: version-check
@@ -116,7 +119,7 @@ jobs:
 
             - [ ] **Review** [Vercel AI SDK Changelog](https://github.com/vercel/ai/blob/main/CHANGELOG.md) for breaking changes
             - [ ] **Update** compatibility adapter in \`lib/streaming/sdk-compatibility-adapter.ts\` if needed
-            - [ ] **Run** contract tests manually: \`npm run test:streaming-contract\`
+            - [ ] **Run** contract tests manually: \`bun run test:streaming:contract\`
             - [ ] **Test** all streaming features:
               - Assistant Architect execution
               - Nexus Chat streaming
