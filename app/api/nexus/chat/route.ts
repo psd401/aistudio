@@ -1,4 +1,4 @@
-import { UIMessage } from 'ai';
+import { UIMessage, type ToolSet } from 'ai';
 import { z } from 'zod';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
@@ -10,6 +10,8 @@ import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-servi
 import type { StreamRequest } from '@/lib/streaming/types';
 import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { getModelConfig } from '@/lib/ai/model-config';
+import { getConnectorTools } from '@/lib/mcp/connector-service';
+import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
 
 import {
   extractImagePrompt,
@@ -92,6 +94,8 @@ async function executeStreaming(params: {
   conversationIdValue?: string;
   conversationTitle: string;
   enabledTools: string[];
+  enabledConnectors: string[];
+  connectorToolResults: McpConnectorToolsResult[];
   reasoningEffort: 'minimal' | 'low' | 'medium' | 'high';
   responseMode: 'standard' | 'flex' | 'priority';
   requestId: string;
@@ -101,11 +105,26 @@ async function executeStreaming(params: {
 }): Promise<Response> {
   const {
     messages, modelConfig, userId, sessionId, conversationId,
-    conversationIdValue, conversationTitle, enabledTools,
-    reasoningEffort, responseMode, requestId, dbModelId, log, timer
+    conversationIdValue, conversationTitle, enabledTools, enabledConnectors,
+    connectorToolResults, reasoningEffort, responseMode, requestId, dbModelId, log, timer
   } = params;
 
   const systemPrompt = `You are a helpful AI assistant in the Nexus interface.`;
+
+  // Merge MCP connector tools into a single ToolSet
+  const connectorTools: ToolSet = {};
+  for (const result of connectorToolResults) {
+    Object.assign(connectorTools, result.tools);
+  }
+
+  // Wrap onFinish to also close MCP clients
+  const baseOnFinish = createOnFinishCallback({ conversationId, dbModelId, log, timer });
+  const onFinishWithCleanup = async (data: Parameters<typeof baseOnFinish>[0]) => {
+    await baseOnFinish(data);
+    for (const result of connectorToolResults) {
+      try { await result.close(); } catch { /* ignore cleanup errors */ }
+    }
+  };
 
   const streamRequest: StreamRequest = {
     messages,
@@ -117,9 +136,11 @@ async function executeStreaming(params: {
     source: 'nexus',
     systemPrompt,
     enabledTools,
+    enabledConnectors,
+    tools: Object.keys(connectorTools).length > 0 ? connectorTools : undefined,
     options: { reasoningEffort, responseMode },
     callbacks: {
-      onFinish: createOnFinishCallback({ conversationId, dbModelId, log, timer })
+      onFinish: onFinishWithCleanup
     }
   };
 
@@ -158,6 +179,7 @@ const ChatRequestSchema = z.object({
   provider: z.string().optional(),
   conversationId: z.string().nullable().optional(),
   enabledTools: z.array(z.string()).optional(),
+  enabledConnectors: z.array(z.string()).optional(),
   reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high']).optional(),
   responseMode: z.enum(['standard', 'priority', 'flex']).optional()
 });
@@ -317,7 +339,7 @@ function validateConversationId(id: string | undefined, requestId: string, log: 
 async function authenticateUser(
   log: ReturnType<typeof createLogger>,
   timer: (data: Record<string, unknown>) => void
-): Promise<{ userId: number; session: { sub: string } } | { error: Response }> {
+): Promise<{ userId: number; userRoleNames: string[]; session: { sub: string } } | { error: Response }> {
   const session = await getServerSession();
   if (!session) {
     log.warn('Unauthorized request - no session');
@@ -331,7 +353,8 @@ async function authenticateUser(
     return { error: new Response('Unauthorized', { status: 401 }) };
   }
 
-  return { userId: currentUser.data.user.id, session };
+  const userRoleNames = currentUser.data.roles.map(r => r.name);
+  return { userId: currentUser.data.user.id, userRoleNames, session };
 }
 
 /**
@@ -412,7 +435,7 @@ export async function POST(req: Request) {
     const validation = validateRequest(body, requestId, log);
     if (!validation.valid) return validation.error;
 
-    const { messages, modelId, provider = 'openai', conversationId: existingConversationId, enabledTools = [] } = validation.data;
+    const { messages, modelId, provider = 'openai', conversationId: existingConversationId, enabledTools = [], enabledConnectors = [] } = validation.data;
     const conversationIdValue = existingConversationId || undefined;
 
     // 2. Validate conversation ID format
@@ -424,7 +447,7 @@ export async function POST(req: Request) {
     // 3. Authenticate user
     const authResult = await authenticateUser(log, timer);
     if ('error' in authResult) return authResult.error;
-    const { userId, session } = authResult;
+    const { userId, userRoleNames, session } = authResult;
 
     // 4. Get model configuration
     const modelResult = await getValidatedModelConfig(modelId, log);
@@ -455,6 +478,29 @@ export async function POST(req: Request) {
       messagesWithParts
     );
 
+    // 8. Resolve MCP connector tools (parallel fetch for all enabled connectors)
+    const connectorToolResults: McpConnectorToolsResult[] = [];
+    if (enabledConnectors.length > 0) {
+      log.info('Resolving MCP connector tools', { connectorCount: enabledConnectors.length });
+      const results = await Promise.allSettled(
+        enabledConnectors.map(serverId => getConnectorTools(serverId, userId, userRoleNames))
+      );
+      for (const result of results) {
+        if (result.status === 'fulfilled') {
+          connectorToolResults.push(result.value);
+        } else {
+          log.warn('Failed to resolve connector tools', {
+            error: result.reason instanceof Error ? result.reason.message : String(result.reason)
+          });
+        }
+      }
+      log.info('MCP connector tools resolved', {
+        requested: enabledConnectors.length,
+        resolved: connectorToolResults.length,
+        totalTools: connectorToolResults.reduce((sum, r) => sum + Object.keys(r.tools).length, 0)
+      });
+    }
+
     // 9. Execute streaming and return response
     return executeStreaming({
       messages: lightweightMessages as UIMessage[],
@@ -465,6 +511,8 @@ export async function POST(req: Request) {
       conversationIdValue,
       conversationTitle,
       enabledTools,
+      enabledConnectors,
+      connectorToolResults,
       reasoningEffort: validation.data.reasoningEffort || 'medium',
       responseMode: validation.data.responseMode || 'standard',
       requestId,

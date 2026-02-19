@@ -606,10 +606,12 @@ async function getOrCreateTools(
   request: StreamRequest,
   adapter: Awaited<ReturnType<typeof getProviderAdapter>>
 ): Promise<StreamConfig['tools']> {
+  const adapterTools = await adapter.createTools(request.enabledTools || []);
+  // Merge pre-resolved tools (e.g., MCP connector tools) with adapter-created tools
   if (request.tools) {
-    return request.tools;
+    return { ...adapterTools, ...request.tools };
   }
-  return adapter.createTools(request.enabledTools || []);
+  return adapterTools;
 }
 
 /**
