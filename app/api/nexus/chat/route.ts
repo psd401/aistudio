@@ -117,15 +117,6 @@ async function executeStreaming(params: {
     Object.assign(connectorTools, result.tools);
   }
 
-  // Wrap onFinish to also close MCP clients
-  const baseOnFinish = createOnFinishCallback({ conversationId, dbModelId, log, timer });
-  const onFinishWithCleanup = async (data: Parameters<typeof baseOnFinish>[0]) => {
-    await baseOnFinish(data);
-    for (const result of connectorToolResults) {
-      try { await result.close(); } catch { /* ignore cleanup errors */ }
-    }
-  };
-
   const streamRequest: StreamRequest = {
     messages,
     modelId: modelConfig.model_id,
@@ -140,7 +131,7 @@ async function executeStreaming(params: {
     tools: Object.keys(connectorTools).length > 0 ? connectorTools : undefined,
     options: { reasoningEffort, responseMode },
     callbacks: {
-      onFinish: onFinishWithCleanup
+      onFinish: createOnFinishCallback({ conversationId, dbModelId, log, timer })
     }
   };
 
@@ -150,20 +141,28 @@ async function executeStreaming(params: {
     conversationId
   });
 
-  const streamResponse = await unifiedStreamingService.stream(streamRequest);
+  // try/finally guarantees MCP client cleanup on stream error, cancellation,
+  // or client disconnect — not just on successful onFinish.
+  try {
+    const streamResponse = await unifiedStreamingService.stream(streamRequest);
 
-  const responseHeaders: Record<string, string> = {
-    'X-Request-Id': requestId,
-    'X-Unified-Streaming': 'true',
-    'X-Supports-Reasoning': streamResponse.capabilities.supportsReasoning.toString()
-  };
+    const responseHeaders: Record<string, string> = {
+      'X-Request-Id': requestId,
+      'X-Unified-Streaming': 'true',
+      'X-Supports-Reasoning': streamResponse.capabilities.supportsReasoning.toString()
+    };
 
-  if (!conversationIdValue && conversationId) {
-    responseHeaders['X-Conversation-Id'] = conversationId;
-    responseHeaders['X-Conversation-Title'] = encodeURIComponent(conversationTitle || 'New Conversation');
+    if (!conversationIdValue && conversationId) {
+      responseHeaders['X-Conversation-Id'] = conversationId;
+      responseHeaders['X-Conversation-Title'] = encodeURIComponent(conversationTitle || 'New Conversation');
+    }
+
+    return streamResponse.result.toUIMessageStreamResponse({ headers: responseHeaders });
+  } finally {
+    for (const result of connectorToolResults) {
+      try { await result.close(); } catch { /* ignore cleanup errors */ }
+    }
   }
-
-  return streamResponse.result.toUIMessageStreamResponse({ headers: responseHeaders });
 }
 
 // Flexible message validation that accepts various formats from the UI
@@ -179,7 +178,7 @@ const ChatRequestSchema = z.object({
   provider: z.string().optional(),
   conversationId: z.string().nullable().optional(),
   enabledTools: z.array(z.string()).optional(),
-  enabledConnectors: z.array(z.string()).optional(),
+  enabledConnectors: z.array(z.string().uuid()).optional(),
   reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high']).optional(),
   responseMode: z.enum(['standard', 'priority', 'flex']).optional()
 });

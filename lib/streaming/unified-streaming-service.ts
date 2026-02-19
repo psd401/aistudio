@@ -606,8 +606,10 @@ async function getOrCreateTools(
   request: StreamRequest,
   adapter: Awaited<ReturnType<typeof getProviderAdapter>>
 ): Promise<StreamConfig['tools']> {
+  // Adapter tools are always created (returns empty set when enabledTools is empty).
+  // Pre-resolved tools (e.g., MCP connector tools from request.tools) are merged in
+  // and take precedence on name collision.
   const adapterTools = await adapter.createTools(request.enabledTools || []);
-  // Merge pre-resolved tools (e.g., MCP connector tools) with adapter-created tools
   if (request.tools) {
     return { ...adapterTools, ...request.tools };
   }

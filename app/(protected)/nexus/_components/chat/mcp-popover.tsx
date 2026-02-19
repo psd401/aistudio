@@ -133,6 +133,7 @@ export function MCPPopover({
   const [loadError, setLoadError] = useState(false)
   const [authenticatingIds, setAuthenticatingIds] = useState<Set<string>>(new Set())
   const [open, setOpen] = useState(false)
+  const [retryCount, setRetryCount] = useState(0)
 
   // Refs to avoid stale closures in async callbacks
   const enabledConnectorsRef = useRef(enabledConnectors)
@@ -171,7 +172,7 @@ export function MCPPopover({
     })
 
     return () => { cancelled = true }
-  }, [open])
+  }, [open, retryCount])
 
   /**
    * Shared OAuth flow — used by both toggle-on and reconnect.
@@ -275,9 +276,16 @@ export function MCPPopover({
               <span className="text-xs">Loading connectors...</span>
             </div>
           ) : loadError ? (
-            <p className="text-xs text-destructive p-2 text-center">
-              Failed to load connectors
-            </p>
+            <div className="p-2 text-center">
+              <p className="text-xs text-destructive">Failed to load connectors</p>
+              <button
+                type="button"
+                onClick={() => setRetryCount((c) => c + 1)}
+                className="text-xs text-primary hover:underline mt-1"
+              >
+                Retry
+              </button>
+            </div>
           ) : !hasConnectors ? (
             <p className="text-xs text-muted-foreground p-2 text-center">
               No connectors available
