@@ -77,6 +77,7 @@ export async function GET(req: Request): Promise<Response> {
     }
 
     const userId = currentUser.data.user.id
+    const userRoleNames = currentUser.data.roles.map((r: { name: string }) => r.name)
 
     // 2. Validate serverId param
     const { searchParams } = new URL(req.url)
@@ -117,6 +118,24 @@ export async function GET(req: Request): Promise<Response> {
     }
 
     const server = serverRows[0]
+
+    // Access control: mirrors assertUserAccess() in connector-service.ts
+    const allowedUsers: number[] = server.allowedUsers ?? []
+    if (allowedUsers.length > 0) {
+      if (!allowedUsers.includes(userId)) {
+        log.warn("User not in allowedUsers for connector", { requestId, serverId, userId })
+        timer({ status: "error", reason: "forbidden" })
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+      }
+    } else {
+      const hasDefaultAccess =
+        userRoleNames.includes("administrator") || userRoleNames.includes("staff")
+      if (!hasDefaultAccess) {
+        log.warn("User lacks role-based access to connector", { requestId, serverId, userId })
+        timer({ status: "error", reason: "forbidden" })
+        return NextResponse.json({ error: "Forbidden" }, { status: 403 })
+      }
+    }
 
     if (server.authType !== "oauth") {
       timer({ status: "error", reason: "not_oauth" })

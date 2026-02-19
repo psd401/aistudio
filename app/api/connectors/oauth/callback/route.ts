@@ -23,7 +23,7 @@ import { cookies } from "next/headers"
 import { timingSafeEqual } from "node:crypto"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
-import { eq, and } from "drizzle-orm"
+import { eq } from "drizzle-orm"
 import { nexusMcpServers, nexusMcpUserTokens } from "@/lib/db/schema"
 import { loadOAuthCredentials, validateMcpServerUrl } from "@/lib/mcp/connector-service"
 import { encryptToken, decryptToken } from "@/lib/crypto/token-encryption"
@@ -62,12 +62,13 @@ function renderCallbackHtml(
   error?: string
 ): Response {
   const origin = getIssuerUrl()
-  const payload = JSON.stringify({
+  // Escape '<' to prevent </script> injection; embed as JS object (not a string)
+  const payloadJson = JSON.stringify({
     type: "mcp-oauth-callback",
     success,
     serverId,
     error: error ?? null,
-  })
+  }).replace(/</g, "\\u003c")
 
   const html = `<!DOCTYPE html>
 <html>
@@ -76,7 +77,7 @@ function renderCallbackHtml(
 <p>${success ? "Authorization successful. This window will close." : "Authorization failed."}</p>
 <script>
   if (window.opener) {
-    window.opener.postMessage(${JSON.stringify(payload)}, ${JSON.stringify(origin)});
+    window.opener.postMessage(${payloadJson}, ${JSON.stringify(origin)});
   }
   window.close();
 </script>
@@ -85,7 +86,12 @@ function renderCallbackHtml(
 
   return new Response(html, {
     status: 200,
-    headers: { "Content-Type": "text/html; charset=utf-8" },
+    headers: {
+      "Content-Type": "text/html; charset=utf-8",
+      "X-Frame-Options": "DENY",
+      "X-Content-Type-Options": "nosniff",
+      "Cache-Control": "no-store",
+    },
   })
 }
 
@@ -108,7 +114,8 @@ export async function GET(req: Request): Promise<Response> {
       const errorDesc = searchParams.get("error_description") ?? errorParam
       log.warn("OAuth provider returned error", { requestId, error: errorParam, errorDesc })
       timer({ status: "error", reason: "provider_error" })
-      return renderCallbackHtml(false, serverId, errorDesc)
+      // Use static message in HTML to prevent XSS from provider-controlled error_description
+      return renderCallbackHtml(false, serverId, "Authorization was denied by the provider.")
     }
 
     if (!code || !state) {
@@ -243,51 +250,31 @@ export async function GET(req: Request): Promise<Response> {
       ? new Date(Date.now() + tokens.expires_in * 1000)
       : null
 
-    // 12. Upsert token row (user+server unique constraint)
-    const existingRows = await executeQuery(
+    // 12. Atomic upsert token row (user+server unique constraint)
+    await executeQuery(
       (db) =>
         db
-          .select({ id: nexusMcpUserTokens.id })
-          .from(nexusMcpUserTokens)
-          .where(
-            and(
-              eq(nexusMcpUserTokens.userId, cookieData.userId),
-              eq(nexusMcpUserTokens.serverId, serverId)
-            )
-          )
-          .limit(1),
-      "oauth-callback:checkExisting"
-    )
-
-    if (existingRows.length > 0) {
-      await executeQuery(
-        (db) =>
-          db
-            .update(nexusMcpUserTokens)
-            .set({
-              encryptedAccessToken: encryptedAccess,
-              encryptedRefreshToken: encryptedRefresh,
-              tokenExpiresAt: expiresAt,
-              scope: tokens.scope ?? null,
-              updatedAt: new Date(),
-            })
-            .where(eq(nexusMcpUserTokens.id, existingRows[0].id)),
-        "oauth-callback:updateToken"
-      )
-    } else {
-      await executeQuery(
-        (db) =>
-          db.insert(nexusMcpUserTokens).values({
+          .insert(nexusMcpUserTokens)
+          .values({
             userId: cookieData.userId,
             serverId,
             encryptedAccessToken: encryptedAccess,
             encryptedRefreshToken: encryptedRefresh,
             tokenExpiresAt: expiresAt,
             scope: tokens.scope ?? null,
+          })
+          .onConflictDoUpdate({
+            target: [nexusMcpUserTokens.userId, nexusMcpUserTokens.serverId],
+            set: {
+              encryptedAccessToken: encryptedAccess,
+              encryptedRefreshToken: encryptedRefresh,
+              tokenExpiresAt: expiresAt,
+              scope: tokens.scope ?? null,
+              updatedAt: new Date(),
+            },
           }),
-        "oauth-callback:insertToken"
-      )
-    }
+      "oauth-callback:upsertToken"
+    )
 
     timer({ status: "success" })
     log.info("OAuth callback completed successfully", {
