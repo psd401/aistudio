@@ -1,6 +1,7 @@
 "use server"
 
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
+import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
 import { getServerSession } from "@/lib/auth/server-session"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq, and, or, sql } from "drizzle-orm"
@@ -14,33 +15,44 @@ import {
 import type { ActionState } from "@/types/actions-types"
 import type { McpAuthType, McpConnectionStatus } from "@/lib/mcp/connector-types"
 
-const log = createLogger({ action: "mcp-connector-actions" })
-
 /** Token expiry buffer — proactively mark tokens expiring within 60 seconds as expired */
 const TOKEN_EXPIRY_BUFFER_MS = 60_000
 
-/** Connector with connection status for the current user */
+/** Valid authType values — mirrors CHECK constraint in 028-nexus-schema.sql */
+const VALID_AUTH_TYPES = new Set<McpAuthType>(["api_key", "oauth", "jwt", "none"])
+
+/**
+ * Connector with connection status for the current user.
+ * tokenExpiresAt is intentionally omitted — the UI only needs the derived status.
+ */
 export interface ConnectorWithStatus {
   id: string
   name: string
   authType: McpAuthType
   status: McpConnectionStatus
-  tokenExpiresAt: string | null
 }
 
 /**
  * Fetches available MCP connectors for the current user with their connection status.
- * Combines connector listing + per-user token status in a single server action.
+ *
+ * Access rules (mirrors connector-service.ts getAvailableConnectors):
+ *   - If allowedUsers is non-empty, user must be in the list.
+ *   - Otherwise, user must have "administrator" or "staff" role.
+ *
+ * Combines connector listing + per-user token status in a single JOIN.
  */
 export async function getConnectorsWithStatus(): Promise<ActionState<ConnectorWithStatus[]>> {
   const requestId = generateRequestId()
   const timer = startTimer("getConnectorsWithStatus")
+  const log = createLogger({ requestId, action: "getConnectorsWithStatus" })
 
   try {
+    log.info("Fetching connectors with status")
+
     const session = await getServerSession()
     if (!session?.sub) {
-      log.warn("Unauthorized", { requestId })
-      return { isSuccess: false, message: "Not authenticated" }
+      log.warn("Unauthorized")
+      throw ErrorFactories.authNoSession()
     }
 
     // Look up numeric user ID from cognito sub
@@ -54,8 +66,8 @@ export async function getConnectorsWithStatus(): Promise<ActionState<ConnectorWi
     )
 
     if (userRows.length === 0) {
-      log.warn("User not found", { requestId })
-      return { isSuccess: false, message: "User not found" }
+      log.warn("User not found in DB")
+      throw ErrorFactories.authNoSession()
     }
 
     const userId = userRows[0].id
@@ -71,19 +83,23 @@ export async function getConnectorsWithStatus(): Promise<ActionState<ConnectorWi
     )
 
     const userRoleNames = roleRows.map((r) => r.name)
+    // Access control: empty allowedUsers[] = open to admin/staff; non-empty = explicit allow list.
+    // Non-admin/non-staff users can only see connectors where they are explicitly listed.
     const hasDefaultAccess =
       userRoleNames.includes("administrator") || userRoleNames.includes("staff")
 
-    // Fetch accessible connectors with LEFT JOIN on user tokens for status
     const conditions = [
+      // User is explicitly listed in the allow list
       sql`${userId} = ANY(${nexusMcpServers.allowedUsers})`,
     ]
     if (hasDefaultAccess) {
+      // Connectors with empty allow list are open to admin/staff
       conditions.push(
         sql`coalesce(cardinality(${nexusMcpServers.allowedUsers}), 0) = 0`
       )
     }
 
+    // Single JOIN — connector rows + user token status in one round trip
     const rows = await executeQuery(
       (db) =>
         db.select({
@@ -116,37 +132,29 @@ export async function getConnectorsWithStatus(): Promise<ActionState<ConnectorWi
             : "connected"
       }
 
-      // Connectors with authType "none" are always connected
+      // Connectors with authType "none" are always connected (no token needed)
       if (row.authType === "none") {
         status = "connected"
       }
 
-      return {
-        id: row.id,
-        name: row.name,
-        authType: row.authType as McpAuthType,
-        status,
-        tokenExpiresAt: row.tokenExpiresAt?.toISOString() ?? null,
-      }
+      // Runtime validation — DB varchar has no enum enforcement at the ORM level
+      const authType = VALID_AUTH_TYPES.has(row.authType as McpAuthType)
+        ? (row.authType as McpAuthType)
+        : "none" // safe fallback; unexpected values treated as no-auth
+
+      return { id: row.id, name: row.name, authType, status }
     })
 
     timer({ status: "success", count: connectors.length })
-    log.info("Connectors fetched", { requestId, count: connectors.length })
+    log.info("Connectors fetched", { count: connectors.length })
 
-    return {
-      isSuccess: true,
-      message: "Connectors fetched",
-      data: connectors,
-    }
+    return createSuccess(connectors, "Connectors fetched")
   } catch (error) {
     timer({ status: "error" })
-    log.error("Failed to fetch connectors", {
+    return handleError(error, "Failed to fetch connectors", {
+      context: "getConnectorsWithStatus",
       requestId,
-      error: String(error),
+      operation: "getConnectorsWithStatus",
     })
-    return {
-      isSuccess: false,
-      message: "Failed to fetch connectors",
-    }
   }
 }

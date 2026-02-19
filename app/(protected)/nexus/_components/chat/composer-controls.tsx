@@ -15,9 +15,9 @@ interface ComposerControlsProps {
   // Tool selection
   enabledTools: string[]
   onToolsChange: (tools: string[]) => void
-  // Connector selection
-  enabledConnectors: string[]
-  onConnectorsChange: (connectors: string[]) => void
+  // Connector selection (optional — MCPPopover shows disabled when not provided)
+  enabledConnectors?: string[]
+  onConnectorsChange?: (connectors: string[]) => void
 }
 
 /**
@@ -32,7 +32,7 @@ export function ComposerControls({
   isLoadingModels = false,
   enabledTools,
   onToolsChange,
-  enabledConnectors,
+  enabledConnectors = [],
   onConnectorsChange,
 }: ComposerControlsProps) {
   return (
@@ -59,11 +59,19 @@ export function ComposerControls({
       <SkillsPopover disabled />
 
       {/* MCP Connections */}
-      <MCPPopover
-        enabledConnectors={enabledConnectors}
-        onConnectorsChange={onConnectorsChange}
-        disabled={!selectedModel}
-      />
+      {onConnectorsChange ? (
+        <MCPPopover
+          enabledConnectors={enabledConnectors}
+          onConnectorsChange={onConnectorsChange}
+          disabled={!selectedModel}
+        />
+      ) : (
+        <MCPPopover
+          enabledConnectors={enabledConnectors}
+          onConnectorsChange={() => undefined}
+          disabled
+        />
+      )}
     </div>
   )
 }

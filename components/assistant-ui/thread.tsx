@@ -298,7 +298,7 @@ const Composer: FC<ComposerProps> = ({
       </ThreadPrimitive.Empty>
       <ComposerPrimitive.Root className="relative flex w-full flex-col rounded-2xl border border-border focus-within:ring-2 focus-within:ring-black focus-within:ring-offset-2 dark:focus-within:ring-white overflow-hidden">
         {/* Control dock for model, tools, skills, MCP */}
-        {onModelChange && onToolsChange && onConnectorsChange && (
+        {onModelChange && onToolsChange && (
           <ComposerControls
             models={models}
             selectedModel={selectedModel ?? null}
