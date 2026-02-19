@@ -113,8 +113,20 @@ function parseResult(result: unknown): ParsedResult[] {
  * Connector icon component.
  * Falls back to Plug icon if no custom icon URL.
  */
+/**
+ * Validate that an icon URL is safe to render (https only, no data: or javascript:).
+ */
+function isSafeIconUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 function ConnectorIcon({ info, size = 16 }: { info: ConnectorServerInfo; size?: number }) {
-  if (info.iconUrl) {
+  if (info.iconUrl && isSafeIconUrl(info.iconUrl)) {
     return (
       <img
         src={info.iconUrl}

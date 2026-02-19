@@ -95,6 +95,7 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
     isConnectorTool,
     getConnectorInfo,
     failedServerIds,
+    setFailedServerIds,
     clearFailedServerIds,
   ])
 
