@@ -83,13 +83,14 @@ describe("Token Encryption (AES-256-GCM)", () => {
   })
 
   describe("encrypted payload format", () => {
-    it("should produce a base64-encoded JSON string with iv, tag, data", async () => {
+    it("should produce a base64-encoded JSON with ver, iv, tag, data", async () => {
       const encrypted = await encryptToken("test")
 
       // Decode the base64 outer wrapper
       const json = Buffer.from(encrypted, "base64").toString("utf8")
       const payload = JSON.parse(json)
 
+      expect(payload).toHaveProperty("ver", 1)
       expect(payload).toHaveProperty("iv")
       expect(payload).toHaveProperty("tag")
       expect(payload).toHaveProperty("data")
@@ -104,6 +105,32 @@ describe("Token Encryption (AES-256-GCM)", () => {
       // Auth tag should be 16 bytes
       const tagBytes = Buffer.from(payload.tag, "base64")
       expect(tagBytes.length).toBe(16)
+    })
+
+    it("should reject unsupported payload versions", async () => {
+      // Encrypt a token, then tamper with the version
+      const encrypted = await encryptToken("test")
+      const json = Buffer.from(encrypted, "base64").toString("utf8")
+      const payload = JSON.parse(json)
+      payload.ver = 99
+      const tampered = Buffer.from(JSON.stringify(payload)).toString("base64")
+
+      await expect(decryptToken(tampered)).rejects.toThrow(
+        "Unsupported encrypted token version: 99"
+      )
+    })
+
+    it("should decrypt payloads without a ver field (backward compat)", async () => {
+      // Simulate a legacy payload without the ver field
+      const encrypted = await encryptToken("legacy-token")
+      const json = Buffer.from(encrypted, "base64").toString("utf8")
+      const payload = JSON.parse(json)
+      delete payload.ver
+      const legacy = Buffer.from(JSON.stringify(payload)).toString("base64")
+
+      // Should still decrypt (ver == null is accepted)
+      const decrypted = await decryptToken(legacy)
+      expect(decrypted).toBe("legacy-token")
     })
   })
 
@@ -175,6 +202,33 @@ describe("Token Encryption (AES-256-GCM)", () => {
       for (let i = 0; i < 5; i++) {
         expect(await decryptToken(results[i])).toBe(`token-${i}`)
       }
+    })
+
+    it("should discard stale in-flight fetch when cache is invalidated (generation counter)", async () => {
+      // Set up a slow fetch that will resolve after invalidation
+      let resolveSlowFetch: ((value: { SecretString: string }) => void) | undefined
+      const slowPromise = new Promise<{ SecretString: string }>((resolve) => {
+        resolveSlowFetch = resolve
+      })
+      mockSend.mockReturnValueOnce(slowPromise)
+
+      // Start a fetch (will be in-flight)
+      const encryptPromise = encryptToken("test")
+
+      // While fetch is in-flight, invalidate cache and set up new secret
+      invalidateDEKCache()
+      mockSend.mockResolvedValue({ SecretString: "new-secret-after-rotation" })
+
+      // Resolve the slow fetch with the OLD secret
+      resolveSlowFetch!({ SecretString: TEST_SECRET })
+      await encryptPromise
+
+      // Encrypt again — should fetch the NEW secret because the stale result
+      // should not have populated the cache (generation mismatch)
+      await encryptToken("after-invalidation")
+
+      // Two total fetches: the original slow one + the new one post-invalidation
+      expect(mockSend).toHaveBeenCalledTimes(2)
     })
   })
 
