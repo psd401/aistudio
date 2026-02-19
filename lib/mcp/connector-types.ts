@@ -37,7 +37,6 @@ export interface McpConnector {
   authType: McpAuthType
   /** If non-empty, only these user IDs may use this connector */
   allowedUsers: number[]
-  maxConnections: number
 }
 
 // ─── Connection Status ───────────────────────────────────────────────────────

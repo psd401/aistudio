@@ -145,7 +145,8 @@ export async function getUserConnectionStatus(
  */
 export async function getConnectorTools(
   serverId: string,
-  userId: number
+  userId: number,
+  userRoleNames: string[]
 ): Promise<McpConnectorToolsResult> {
   const requestId = generateRequestId()
   const timer = startTimer("getConnectorTools")
@@ -155,8 +156,8 @@ export async function getConnectorTools(
   // 1. Load server config + user token in a single round trip
   const { server, tokenRow } = await loadServerAndToken(serverId, userId)
 
-  // 2. Verify user has access to this server
-  assertUserAccess(server, userId)
+  // 2. Verify user has access to this server (same rules as getAvailableConnectors)
+  assertUserAccess(server, userId, userRoleNames)
 
   // 3. Validate transport — @ai-sdk/mcp only supports "http" for server-to-server
   assertHttpTransport(server.transport)
@@ -170,18 +171,23 @@ export async function getConnectorTools(
   // 6. Create MCP client and fetch tools with timeout + cleanup on failure.
   // Both createMCPClient and client.tools() make outbound HTTP calls to
   // user-controlled URLs, so they must be guarded against indefinite hangs.
-  const client = await withTimeout(
-    createMCPClient({
-      transport: {
-        type: "http",
-        url: server.url,
-        headers,
-      },
-      name: "aistudio-connector",
-    }),
-    MCP_CLIENT_TIMEOUT_MS,
-    "MCP client creation timed out"
-  )
+  const clientPromise = createMCPClient({
+    transport: {
+      type: "http",
+      url: server.url,
+      headers,
+    },
+    name: "aistudio-connector",
+  })
+
+  let client
+  try {
+    client = await withTimeout(clientPromise, MCP_CLIENT_TIMEOUT_MS, "MCP client creation timed out")
+  } catch (err) {
+    // If the timeout fires but createMCPClient resolves later, close the orphaned client
+    clientPromise.then(c => c.close().catch(() => {})).catch(() => {})
+    throw err
+  }
 
   let tools
   try {
@@ -229,11 +235,11 @@ export async function refreshUserToken(
 
   log.info("Attempting token refresh", { requestId, userId, serverId })
 
-  // Wrap the entire read-refresh-write cycle in a transaction with row lock
-  // to prevent concurrent refreshes from stomping each other's tokens.
-  return await executeTransaction(
+  // Phase 1: Read — load token + server config (short transaction, no HTTP)
+  const { tokenRow, server, refreshToken } = await executeTransaction(
     async (tx) => {
-      // 1. Lock and load existing token row (SELECT FOR UPDATE)
+      // Lock the token row to serialize concurrent refresh attempts.
+      // The lock is released when this transaction commits (before the HTTP call).
       const rows = await tx
         .select()
         .from(nexusMcpUserTokens)
@@ -247,24 +253,19 @@ export async function refreshUserToken(
         .for("update")
 
       if (rows.length === 0 || !rows[0].encryptedRefreshToken) {
-        log.warn("No refresh token available", { requestId, userId, serverId })
-        timer({ status: "error" })
-        return { success: false, reconnectRequired: true }
+        return { tokenRow: null, server: null, refreshToken: null }
       }
 
-      const tokenRow = rows[0]
+      const row = rows[0]
 
-      // 2. Decrypt refresh token
-      let refreshToken: string
+      let decrypted: string
       try {
-        refreshToken = await decryptToken(tokenRow.encryptedRefreshToken!)
+        decrypted = await decryptToken(row.encryptedRefreshToken!)
       } catch (err) {
         log.warn("Failed to decrypt refresh token", { requestId, error: String(err) })
-        timer({ status: "error" })
-        return { success: false, reconnectRequired: true }
+        return { tokenRow: null, server: null, refreshToken: null }
       }
 
-      // 3. Load server config for token endpoint + client credentials
       const servers = await tx
         .select()
         .from(nexusMcpServers)
@@ -275,30 +276,42 @@ export async function refreshUserToken(
         throw new Error(`MCP server not found: ${serverId}`)
       }
 
-      const server = servers[0]
+      return { tokenRow: row, server: servers[0], refreshToken: decrypted }
+    },
+    "refreshUserToken:read"
+  )
 
-      // 4. Validate server URL — prevent SSRF
-      validateMcpServerUrl(server.url)
+  if (!tokenRow || !server || !refreshToken) {
+    log.warn("No refresh token available", { requestId, userId, serverId })
+    timer({ status: "error" })
+    return { success: false, reconnectRequired: true }
+  }
 
-      // 5. Exchange refresh token for new access token
-      const tokenResponse = await exchangeRefreshToken(server, refreshToken)
-      if (!tokenResponse) {
-        log.warn("Token refresh failed", { requestId, userId, serverId })
-        timer({ status: "error" })
-        return { success: false, reconnectRequired: true }
-      }
+  // Phase 2: Exchange — outbound HTTP call (no DB connection held)
+  validateMcpServerUrl(server.url)
+  const tokenResponse = await exchangeRefreshToken(server, refreshToken)
+  if (!tokenResponse) {
+    log.warn("Token refresh failed", { requestId, userId, serverId })
+    timer({ status: "error" })
+    return { success: false, reconnectRequired: true }
+  }
 
-      // 6. Encrypt new tokens and write within the same transaction
-      const newEncryptedAccess = await encryptToken(tokenResponse.access_token)
-      const newEncryptedRefresh = tokenResponse.refresh_token
-        ? await encryptToken(tokenResponse.refresh_token)
-        : tokenRow.encryptedRefreshToken ?? undefined
+  // Phase 3: Write — encrypt and persist new tokens (short transaction)
+  const newEncryptedAccess = await encryptToken(tokenResponse.access_token)
+  // undefined intentionally skipped by Drizzle .set(), preserving existing refresh token
+  const newEncryptedRefresh = tokenResponse.refresh_token
+    ? await encryptToken(tokenResponse.refresh_token)
+    : tokenRow.encryptedRefreshToken ?? undefined
 
-      const expiresAt = tokenResponse.expires_in
-        ? new Date(Date.now() + tokenResponse.expires_in * 1000)
-        : null
+  const expiresAt = tokenResponse.expires_in
+    ? new Date(Date.now() + tokenResponse.expires_in * 1000)
+    : null
 
-      await tx
+  const updatedCount = await executeTransaction(
+    async (tx) => {
+      // Optimistic check: only update if the row hasn't been modified by
+      // another concurrent refresh that completed between Phase 1 and Phase 3.
+      const result = await tx
         .update(nexusMcpUserTokens)
         .set({
           encryptedAccessToken: newEncryptedAccess,
@@ -307,15 +320,31 @@ export async function refreshUserToken(
           scope: tokenResponse.scope ?? tokenRow.scope,
           updatedAt: new Date(),
         })
-        .where(eq(nexusMcpUserTokens.id, tokenRow.id))
+        .where(
+          and(
+            eq(nexusMcpUserTokens.id, tokenRow.id),
+            eq(nexusMcpUserTokens.updatedAt, tokenRow.updatedAt!)
+          )
+        )
+        .returning({ id: nexusMcpUserTokens.id })
 
-      timer({ status: "success" })
-      log.info("Token refresh successful", { requestId, userId, serverId })
-
-      return { success: true, tokenExpiresAt: expiresAt ?? undefined }
+      return result.length
     },
-    "refreshUserToken"
+    "refreshUserToken:write"
   )
+
+  if (updatedCount === 0) {
+    log.warn("Token row was modified by a concurrent refresh — discarding our result", {
+      requestId, userId, serverId,
+    })
+    timer({ status: "success" })
+    return { success: true, tokenExpiresAt: expiresAt ?? undefined }
+  }
+
+  timer({ status: "success" })
+  log.info("Token refresh successful", { requestId, userId, serverId })
+
+  return { success: true, tokenExpiresAt: expiresAt ?? undefined }
 }
 
 /** Minimal OAuth token response shape */
@@ -675,14 +704,23 @@ function validateMcpServerUrl(rawUrl: string): void {
 }
 
 /**
- * Asserts that the user is in the server's allowedUsers list.
- * If the list is empty, access is granted (role-based access is checked upstream
- * by getAvailableConnectors). This prevents direct serverId access by unauthorized users.
+ * Asserts that the user has access to the server.
+ * Mirrors the same rules as getAvailableConnectors:
+ * - If allowedUsers is non-empty, user must be in the list.
+ * - If allowedUsers is empty, user must have admin or staff role.
  */
-function assertUserAccess(server: ServerRow, userId: number): void {
+function assertUserAccess(server: ServerRow, userId: number, userRoleNames: string[]): void {
   const allowed = server.allowedUsers ?? []
-  if (allowed.length > 0 && !allowed.includes(userId)) {
-    throw new Error(`User ${userId} does not have access to MCP server ${server.id}`)
+  if (allowed.length > 0) {
+    if (!allowed.includes(userId)) {
+      throw new Error(`User ${userId} does not have access to MCP server ${server.id}`)
+    }
+  } else {
+    const hasDefaultAccess =
+      userRoleNames.includes("administrator") || userRoleNames.includes("staff")
+    if (!hasDefaultAccess) {
+      throw new Error(`User ${userId} does not have role-based access to MCP server ${server.id}`)
+    }
   }
 }
 
@@ -717,7 +755,6 @@ function toMcpConnector(row: typeof nexusMcpServers.$inferSelect): McpConnector 
     transport: row.transport as McpTransportType,
     authType: row.authType as McpAuthType,
     allowedUsers: row.allowedUsers ?? [],
-    maxConnections: row.maxConnections ?? 10,
   }
 }
 
