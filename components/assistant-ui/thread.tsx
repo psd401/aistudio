@@ -48,6 +48,7 @@ export const useConversationId = () => useContext(ConversationIdContext);
 // Pre-defined constants to avoid creating new objects/arrays on every render
 const EMPTY_MODELS_ARRAY: SelectAiModel[] = [];
 const EMPTY_TOOLS_ARRAY: string[] = [];
+const EMPTY_CONNECTORS_ARRAY: string[] = [];
 
 const THREAD_ROOT_STYLE = {
   ["--thread-max-width" as string]: "48rem",
@@ -109,6 +110,9 @@ interface ThreadProps {
   isLoadingModels?: boolean;
   enabledTools?: string[];
   onToolsChange?: (tools: string[]) => void;
+  // Connector selection
+  enabledConnectors?: string[];
+  onConnectorsChange?: (connectors: string[]) => void;
   // Custom suggested actions (pass [] to hide, undefined for defaults)
   suggestedActions?: SuggestedAction[];
 }
@@ -122,6 +126,8 @@ export const Thread: FC<ThreadProps> = ({
   isLoadingModels = false,
   enabledTools = EMPTY_TOOLS_ARRAY,
   onToolsChange,
+  enabledConnectors = EMPTY_CONNECTORS_ARRAY,
+  onConnectorsChange,
   suggestedActions,
 }) => {
   // Memoize message components to avoid recreation on every render
@@ -157,6 +163,8 @@ export const Thread: FC<ThreadProps> = ({
           isLoadingModels={isLoadingModels}
           enabledTools={enabledTools}
           onToolsChange={onToolsChange}
+          enabledConnectors={enabledConnectors}
+          onConnectorsChange={onConnectorsChange}
           suggestedActions={suggestedActions}
         />
       </ThreadPrimitive.Root>
@@ -265,6 +273,8 @@ interface ComposerProps {
   isLoadingModels?: boolean;
   enabledTools?: string[];
   onToolsChange?: (tools: string[]) => void;
+  enabledConnectors?: string[];
+  onConnectorsChange?: (connectors: string[]) => void;
   suggestedActions?: SuggestedAction[];
 }
 
@@ -276,6 +286,8 @@ const Composer: FC<ComposerProps> = ({
   isLoadingModels = false,
   enabledTools = EMPTY_TOOLS_ARRAY,
   onToolsChange,
+  enabledConnectors = EMPTY_CONNECTORS_ARRAY,
+  onConnectorsChange,
   suggestedActions,
 }) => {
   return (
@@ -286,7 +298,7 @@ const Composer: FC<ComposerProps> = ({
       </ThreadPrimitive.Empty>
       <ComposerPrimitive.Root className="relative flex w-full flex-col rounded-2xl border border-border focus-within:ring-2 focus-within:ring-black focus-within:ring-offset-2 dark:focus-within:ring-white overflow-hidden">
         {/* Control dock for model, tools, skills, MCP */}
-        {onModelChange && onToolsChange && (
+        {onModelChange && onToolsChange && onConnectorsChange && (
           <ComposerControls
             models={models}
             selectedModel={selectedModel ?? null}
@@ -294,6 +306,8 @@ const Composer: FC<ComposerProps> = ({
             isLoadingModels={isLoadingModels}
             enabledTools={enabledTools}
             onToolsChange={onToolsChange}
+            enabledConnectors={enabledConnectors}
+            onConnectorsChange={onConnectorsChange}
           />
         )}
         <ComposerAttachments processingAttachments={processingAttachments} />

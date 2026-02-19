@@ -44,6 +44,7 @@ interface ConversationRuntimeProviderProps {
   conversationId: string | null
   selectedModel: SelectAiModel | null
   enabledTools: string[]
+  enabledConnectors: string[]
   attachmentAdapter: AttachmentAdapter
   initialMessages?: UIMessage[]
   onConversationIdChange?: (conversationId: string) => void
@@ -54,6 +55,7 @@ function ConversationRuntimeProvider({
   conversationId,
   selectedModel,
   enabledTools,
+  enabledConnectors,
   attachmentAdapter,
   initialMessages = [],
   onConversationIdChange
@@ -138,6 +140,7 @@ function ConversationRuntimeProvider({
         modelId: selectedModel.modelId,
         provider: selectedModel.provider,
         enabledTools,
+        enabledConnectors,
         conversationId: conversationId || undefined
       } : {}
     }),
@@ -187,6 +190,9 @@ function NexusPageContent() {
   // Tool management state
   const [enabledTools, setEnabledTools] = useState<string[]>([])
 
+  // Connector management state (per-conversation)
+  const [enabledConnectors, setEnabledConnectors] = useState<string[]>([])
+
   // Attachment processing state
   const [processingAttachments, setProcessingAttachments] = useState<Set<string>>(new Set())
 
@@ -209,8 +215,9 @@ function NexusPageContent() {
   // Wrap setSelectedModel to reload page on model change
   const setSelectedModel = useCallback((model: SelectAiModel | null) => {
     originalSetSelectedModel(model);
-    // Clear enabled tools when switching models
+    // Clear enabled tools and connectors when switching models
     setEnabledTools([]);
+    setEnabledConnectors([]);
     // Clear conversation ID when switching models for fresh conversation
     setConversationId(null);
     // Force page reload to ensure clean state
@@ -222,6 +229,11 @@ function NexusPageContent() {
   // Memoized callback for tool changes to prevent unnecessary re-renders
   const onToolsChange = useCallback((tools: string[]) => {
     setEnabledTools(tools);
+  }, [])
+
+  // Memoized callback for connector changes to prevent unnecessary re-renders
+  const onConnectorsChange = useCallback((connectors: string[]) => {
+    setEnabledConnectors(connectors);
   }, [])
 
   // Attachment processing callbacks
@@ -315,6 +327,7 @@ function NexusPageContent() {
                     conversationId={conversationId}
                     selectedModel={selectedModel}
                     enabledTools={enabledTools}
+                    enabledConnectors={enabledConnectors}
                     attachmentAdapter={attachmentAdapter}
                     initialMessages={initialMessages}
                     onConversationIdChange={handleConversationIdChange}
@@ -335,6 +348,8 @@ function NexusPageContent() {
                         isLoadingModels={isLoadingModels}
                         enabledTools={enabledTools}
                         onToolsChange={onToolsChange}
+                        enabledConnectors={enabledConnectors}
+                        onConnectorsChange={onConnectorsChange}
                       />
                     </div>
                   </ConversationRuntimeProvider>
