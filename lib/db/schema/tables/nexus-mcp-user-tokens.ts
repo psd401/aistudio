@@ -28,7 +28,7 @@ export const nexusMcpUserTokens = pgTable(
     serverId: uuid("server_id")
       .references(() => nexusMcpServers.id, { onDelete: "cascade" })
       .notNull(),
-    // ENCRYPTION: Must be written only via lib/mcp/token-encryption.ts (Issue #776 follow-up)
+    // ENCRYPTION: Must be written only via lib/crypto/token-encryption.ts (Issue #777)
     encryptedAccessToken: text("encrypted_access_token").notNull(),
     encryptedRefreshToken: text("encrypted_refresh_token"),
     tokenExpiresAt: timestamp("token_expires_at", { withTimezone: true }),

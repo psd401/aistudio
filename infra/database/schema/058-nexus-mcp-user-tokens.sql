@@ -3,8 +3,8 @@
 -- Issue #776
 --
 -- ENCRYPTION CONTRACT: encrypted_access_token and encrypted_refresh_token
--- MUST be written only via lib/mcp/token-encryption.ts (to be implemented in a
--- follow-up issue). Plain-text writes are not enforced at the DB layer.
+-- MUST be written only via lib/crypto/token-encryption.ts (Issue #777).
+-- Plain-text writes are not enforced at the DB layer.
 --
 -- CASCADE NOTE: ON DELETE CASCADE removes token rows from DB but does NOT revoke
 -- tokens at the OAuth provider. The application layer MUST call the provider's
