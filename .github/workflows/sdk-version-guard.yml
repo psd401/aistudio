@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - 'package.json'
-      - 'package-lock.json'
+      - 'bun.lock'
       - 'lib/streaming/**'
   workflow_dispatch:
   schedule:
@@ -28,7 +28,9 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: '20'
-          cache: 'npm'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
 
       - name: Check for AI SDK version changes
         id: version-check
@@ -77,11 +79,11 @@ jobs:
 
       - name: Install dependencies
         if: steps.version-check.outputs.version_changed == 'true'
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: Run contract tests
         if: steps.version-check.outputs.version_changed == 'true'
-        run: npm run test:streaming:contract
+        run: bun run test:streaming:contract
         continue-on-error: true
         id: contract-tests
         env:
@@ -91,7 +93,7 @@ jobs:
 
       - name: Run regular streaming tests
         if: steps.version-check.outputs.version_changed == 'true'
-        run: npm run test -- lib/streaming
+        run: bun run test -- lib/streaming
         continue-on-error: false
 
       - name: Comment on PR - Major version change

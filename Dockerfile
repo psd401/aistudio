@@ -5,19 +5,19 @@
 # ============================================================================
 # Stage 1: Dependencies
 # ============================================================================
-FROM node:22-alpine AS deps
+FROM oven/bun:1-alpine AS deps
 WORKDIR /app
 
 # Install dependencies for native packages
 RUN apk add --no-cache libc6-compat
 
 # Copy package files
-COPY package.json package-lock.json* ./
+COPY package.json bun.lock ./
 
-# Install ALL dependencies (including dev) with BuildKit cache mount for 50-90% faster builds
+# Install ALL dependencies (including dev) with BuildKit cache mount
 # Dev dependencies needed for build stage
-RUN --mount=type=cache,target=/root/.npm \
-    npm ci --legacy-peer-deps
+RUN --mount=type=cache,target=/root/.bun/install/cache \
+    bun install --frozen-lockfile
 
 # ============================================================================
 # Stage 2: Builder
@@ -48,8 +48,9 @@ ARG RDS_SECRET_ARN=arn:aws:secretsmanager:us-east-1:000000000000:secret:build-pl
 ENV RDS_SECRET_ARN=${RDS_SECRET_ARN}
 
 # Build with cache mount for Next.js build artifacts
+# next build runs via node (bun not needed at build stage — node_modules already installed)
 RUN --mount=type=cache,target=/app/.next/cache \
-    npm run build
+    npx next build
 
 # ============================================================================
 # Stage 3: Production Runner
