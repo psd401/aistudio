@@ -45,6 +45,9 @@ const MCP_CLIENT_TIMEOUT_MS = 30_000
 /** Token expiry buffer — proactively reject tokens expiring within 60 seconds */
 const TOKEN_EXPIRY_BUFFER_MS = 60_000
 
+/** Counter for audit log write failures — emitted in structured logs for CloudWatch alarming */
+let auditFailureCount = 0
+
 // ─── Connector Listing ───────────────────────────────────────────────────────
 
 /**
@@ -201,13 +204,9 @@ export async function getConnectorTools(
     throw error
   }
 
-  timer({ status: "success", toolCount: Object.keys(tools).length })
-  log.info("Connector tools fetched", {
-    requestId,
-    serverId,
-    serverName: server.name,
-    toolCount: Object.keys(tools).length,
-  })
+  const toolCount = Object.keys(tools).length
+  timer({ status: "success", toolCount })
+  log.info("Connector tools fetched", { requestId, serverId, serverName: server.name, toolCount })
 
   return {
     serverId,
@@ -235,12 +234,11 @@ export async function refreshUserToken(
 
   log.info("Attempting token refresh", { requestId, userId, serverId })
 
-  // Phase 1: Read — load token + server config (short transaction, no HTTP)
-  const { tokenRow, server, refreshToken } = await executeTransaction(
-    async (tx) => {
-      // Lock the token row to serialize concurrent refresh attempts.
-      // The lock is released when this transaction commits (before the HTTP call).
-      const rows = await tx
+  // Phase 1: Read token + server config (no transaction needed — just reads).
+  // Concurrency is handled by optimistic locking in Phase 3 (updatedAt check).
+  const tokenRows = await executeQuery(
+    (db) =>
+      db
         .select()
         .from(nexusMcpUserTokens)
         .where(
@@ -249,43 +247,51 @@ export async function refreshUserToken(
             eq(nexusMcpUserTokens.serverId, serverId)
           )
         )
-        .limit(1)
-        .for("update")
-
-      if (rows.length === 0 || !rows[0].encryptedRefreshToken) {
-        return { tokenRow: null, server: null, refreshToken: null }
-      }
-
-      const row = rows[0]
-
-      let decrypted: string
-      try {
-        decrypted = await decryptToken(row.encryptedRefreshToken!)
-      } catch (err) {
-        log.warn("Failed to decrypt refresh token", { requestId, error: String(err) })
-        return { tokenRow: null, server: null, refreshToken: null }
-      }
-
-      const servers = await tx
-        .select()
-        .from(nexusMcpServers)
-        .where(eq(nexusMcpServers.id, serverId))
-        .limit(1)
-
-      if (servers.length === 0) {
-        throw new Error(`MCP server not found: ${serverId}`)
-      }
-
-      return { tokenRow: row, server: servers[0], refreshToken: decrypted }
-    },
-    "refreshUserToken:read"
+        .limit(1),
+    "refreshUserToken:loadToken"
   )
 
-  if (!tokenRow || !server || !refreshToken) {
+  if (tokenRows.length === 0 || !tokenRows[0].encryptedRefreshToken) {
     log.warn("No refresh token available", { requestId, userId, serverId })
     timer({ status: "error" })
     return { success: false, reconnectRequired: true }
   }
+
+  const tokenRow = tokenRows[0]
+
+  let refreshToken: string
+  try {
+    refreshToken = await decryptToken(tokenRow.encryptedRefreshToken!)
+  } catch (err) {
+    log.warn("Failed to decrypt refresh token — deleting corrupted row", {
+      requestId, error: String(err),
+    })
+    // Delete the corrupted token so the user gets a clean "no_token" status
+    // and can re-authenticate via OAuth flow
+    await executeQuery(
+      (db) =>
+        db.delete(nexusMcpUserTokens).where(eq(nexusMcpUserTokens.id, tokenRow.id)),
+      "refreshUserToken:deleteCorrupt"
+    )
+    timer({ status: "error" })
+    return { success: false, reconnectRequired: true }
+  }
+
+  const serverRows = await executeQuery(
+    (db) =>
+      db
+        .select()
+        .from(nexusMcpServers)
+        .where(eq(nexusMcpServers.id, serverId))
+        .limit(1),
+    "refreshUserToken:loadServer"
+  )
+
+  if (serverRows.length === 0) {
+    throw new Error(`MCP server not found: ${serverId}`)
+  }
+
+  const server = serverRows[0]
 
   // Phase 2: Exchange — outbound HTTP call (no DB connection held)
   validateMcpServerUrl(server.url)
@@ -401,8 +407,15 @@ export async function logToolCall(entry: McpToolCallLogEntry): Promise<void> {
       "logToolCall"
     )
   } catch (err) {
-    // Audit log failure must not break the request
-    log.warn("Failed to write MCP audit log", { error: String(err) })
+    // Audit log failure must not break the request, but sustained failures
+    // silently dropping compliance records need to be alarmable.
+    auditFailureCount++
+    log.error("Failed to write MCP audit log", {
+      error: String(err),
+      auditFailureCount,
+      serverId: entry.serverId,
+      toolName: entry.toolName,
+    })
   }
 }
 
@@ -662,6 +675,7 @@ function truncateForAudit(
  * (where a public hostname resolves to a private IP after validation). For
  * defense-in-depth, deploy an egress proxy or DNS firewall at the infrastructure
  * level to block outbound connections to RFC 1918 / link-local addresses.
+ * Tracked as Issue #791 — must be resolved before production deployment.
  */
 function validateMcpServerUrl(rawUrl: string): void {
   let parsed: URL

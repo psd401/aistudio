@@ -41,7 +41,7 @@ export interface McpConnector {
 
 // ─── Connection Status ───────────────────────────────────────────────────────
 
-export type McpConnectionStatus = "connected" | "token_expired" | "reconnect_required" | "no_token"
+export type McpConnectionStatus = "connected" | "token_expired" | "no_token"
 
 export interface McpUserConnectionStatus {
   serverId: string
