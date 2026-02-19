@@ -204,12 +204,13 @@ export function ConnectorsPageClient({ initialServers }: Props) {
                         variant="ghost"
                         size="sm"
                         onClick={() => handleEdit(server)}
+                        aria-label={`Edit ${server.name}`}
                       >
                         <Pencil className="h-4 w-4" />
                       </Button>
                       <AlertDialog>
                         <AlertDialogTrigger asChild>
-                          <Button variant="ghost" size="sm">
+                          <Button variant="ghost" size="sm" aria-label={`Delete ${server.name}`}>
                             <Trash2 className="h-4 w-4 text-destructive" />
                           </Button>
                         </AlertDialogTrigger>

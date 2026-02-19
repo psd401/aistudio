@@ -11,8 +11,7 @@ import {
   ErrorFactories,
   createSuccess,
 } from "@/lib/error-utils"
-import { getServerSession } from "@/lib/auth/server-session"
-import { hasRole } from "@/utils/roles"
+import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { nexusMcpServers, nexusMcpConnections } from "@/lib/db/schema"
 import { eq, sql, count } from "drizzle-orm"
@@ -58,30 +57,6 @@ export interface McpServerHealthInfo {
 }
 
 // ============================================
-// Helpers
-// ============================================
-
-async function requireAdminSession(log?: ReturnType<typeof createLogger>) {
-  const session = await getServerSession()
-  if (!session) {
-    log?.warn("Unauthorized admin access attempt")
-    throw ErrorFactories.authNoSession()
-  }
-
-  log?.debug("Checking administrator role", { userId: session.sub })
-  const isAdmin = await hasRole("administrator")
-  if (!isAdmin) {
-    log?.warn("Admin access denied - insufficient privileges", {
-      userId: session.sub,
-    })
-    throw ErrorFactories.authzAdminRequired()
-  }
-
-  log?.debug("Admin access granted", { userId: session.sub })
-  return session
-}
-
-// ============================================
 // List MCP Servers
 // ============================================
 
@@ -94,7 +69,7 @@ export async function listMcpServers(): Promise<
 
   try {
     log.info("Admin action started: Listing MCP servers")
-    await requireAdminSession(log)
+    await requireRole("administrator")
 
     const servers = await executeQuery(
       (db) =>
@@ -159,7 +134,7 @@ export async function createMcpServer(
     log.info("Admin action started: Creating MCP server", {
       params: sanitizeForLogging(input),
     })
-    await requireAdminSession(log)
+    await requireRole("administrator")
 
     const [server] = await executeQuery(
       (db) =>
@@ -213,7 +188,7 @@ export async function updateMcpServer(
       serverId: input.id,
       params: sanitizeForLogging(input),
     })
-    await requireAdminSession(log)
+    await requireRole("administrator")
 
     const updateData: Record<string, unknown> = {}
     if (input.name !== undefined) updateData.name = input.name
@@ -278,7 +253,7 @@ export async function deleteMcpServer(
 
   try {
     log.info("Admin action started: Deleting MCP server", { serverId: id })
-    await requireAdminSession(log)
+    await requireRole("administrator")
 
     const result = await executeQuery(
       (db) =>
@@ -326,7 +301,7 @@ export async function getMcpServerHealth(
 
   try {
     log.info("Admin action started: Getting MCP server health", { serverId })
-    await requireAdminSession(log)
+    await requireRole("administrator")
 
     const stats = await executeQuery(
       (db) =>
