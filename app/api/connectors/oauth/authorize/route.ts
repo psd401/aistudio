@@ -37,7 +37,9 @@ const log = createLogger({ action: "oauth-authorize" })
  * connectors without one overwriting the other's cookie.
  */
 export function getOAuthStateCookieName(serverId: string): string {
-  return `mcp_oauth_state_${serverId.slice(0, 8)}`
+  // Full UUID avoids collisions when only later segments differ.
+  // Dashes are valid in cookie names per RFC 6265.
+  return `mcp_oauth_state_${serverId}`
 }
 
 /** Max age for the state cookie (5 minutes — generous window for popup flow) */

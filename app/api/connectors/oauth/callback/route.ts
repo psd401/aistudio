@@ -21,6 +21,7 @@
 
 import { cookies } from "next/headers"
 import { timingSafeEqual } from "node:crypto"
+import { z } from "zod"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq, sql } from "drizzle-orm"
@@ -43,14 +44,20 @@ interface OAuthStateCookie {
   createdAt: number
 }
 
-/** Minimal OAuth token response shape (same as connector-service) */
-interface OAuthTokenResponse {
-  access_token: string
-  refresh_token?: string
-  expires_in?: number
-  scope?: string
-  token_type: string
-}
+/** Zod schema for external OAuth token responses (RFC 6749 §5.1) */
+const oauthTokenResponseSchema = z.object({
+  access_token: z.string(),
+  token_type: z.string(),
+  refresh_token: z.string().optional(),
+  // Some providers (GitHub, Azure) return expires_in as a numeric string
+  expires_in: z.union([
+    z.number(),
+    z.string().transform((s) => (s !== "" ? Number(s) || undefined : undefined)),
+  ]).optional(),
+  scope: z.string().optional(),
+})
+
+type OAuthTokenResponse = z.infer<typeof oauthTokenResponseSchema>
 
 /**
  * Renders an HTML page that sends a postMessage to the opener window and closes.
@@ -88,6 +95,7 @@ function renderCallbackHtml(
     status: 200,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
+      "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'",
       "X-Frame-Options": "DENY",
       "X-Content-Type-Options": "nosniff",
       "Cache-Control": "no-store",
@@ -133,6 +141,13 @@ export async function GET(req: Request): Promise<Response> {
     }
     const stateServerId = state.slice(0, 36)
 
+    // Validate stateServerId format before using it in cookie lookup or error rendering
+    if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(stateServerId)) {
+      log.warn("Invalid serverId in state parameter", { requestId })
+      timer({ status: "error", reason: "invalid_state_server_id" })
+      return renderCallbackHtml(false, "", "Invalid OAuth state. Please try again.")
+    }
+
     // 3. Read and decrypt per-server state cookie
     const cookieStore = await cookies()
     const cookieName = getOAuthStateCookieName(stateServerId)
@@ -156,11 +171,16 @@ export async function GET(req: Request): Promise<Response> {
 
     serverId = cookieData.serverId
 
-    // Validate serverId from cookie is a UUID (defense-in-depth; also satisfies CodeQL taint analysis)
+    // Defense-in-depth: validate cookie data before use in DB queries or HTML
     if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(serverId)) {
       log.warn("Invalid serverId in OAuth state cookie", { requestId })
       timer({ status: "error", reason: "invalid_cookie_data" })
       return renderCallbackHtml(false, "", "Invalid OAuth session. Please try again.")
+    }
+    if (!Number.isInteger(cookieData.userId) || cookieData.userId <= 0) {
+      log.warn("Invalid userId in OAuth state cookie", { requestId })
+      timer({ status: "error", reason: "invalid_cookie_data" })
+      return renderCallbackHtml(false, serverId, "Invalid OAuth session. Please try again.")
     }
 
     // 3. Validate state nonce (timing-safe comparison for CSRF prevention)
@@ -179,6 +199,11 @@ export async function GET(req: Request): Promise<Response> {
       return renderCallbackHtml(false, serverId, "OAuth session expired. Please try again.")
     }
 
+    // Note: we do NOT re-authenticate via getCurrentUserAction() here. The callback
+    // arrives as a redirect from the OAuth provider, and the popup may not carry the
+    // full session cookie jar in all browsers. We rely on cookieData.userId from the
+    // encrypted state cookie (set during authorize). If the user is deleted in the
+    // ~5 min window, the users FK with onDelete:"cascade" handles cleanup.
     log.info("Processing OAuth callback", { requestId, serverId, userId: cookieData.userId })
 
     // 5. Clear the state cookie immediately (one-time use)
@@ -322,26 +347,11 @@ export async function GET(req: Request): Promise<Response> {
   }
 }
 
-/** Runtime validation for external OAuth token responses */
+/** Runtime validation for external OAuth token responses using Zod */
 function parseTokenResponse(json: unknown): OAuthTokenResponse {
-  if (
-    typeof json !== "object" ||
-    json === null ||
-    typeof (json as Record<string, unknown>).access_token !== "string" ||
-    typeof (json as Record<string, unknown>).token_type !== "string"
-  ) {
-    throw new Error("Invalid OAuth token response: missing access_token or token_type")
+  const result = oauthTokenResponseSchema.safeParse(json)
+  if (!result.success) {
+    throw new Error(`Invalid OAuth token response: ${result.error.issues[0]?.message ?? "unknown"}`)
   }
-  const obj = json as Record<string, unknown>
-  return {
-    access_token: obj.access_token as string,
-    token_type: obj.token_type as string,
-    refresh_token: typeof obj.refresh_token === "string" ? obj.refresh_token : undefined,
-    expires_in: typeof obj.expires_in === "number"
-      ? obj.expires_in
-      : typeof obj.expires_in === "string" && obj.expires_in !== ""
-        ? Number(obj.expires_in) || undefined
-        : undefined,
-    scope: typeof obj.scope === "string" ? obj.scope : undefined,
-  }
+  return result.data
 }
