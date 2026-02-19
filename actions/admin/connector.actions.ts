@@ -4,7 +4,6 @@ import {
   createLogger,
   generateRequestId,
   startTimer,
-  sanitizeForLogging,
 } from "@/lib/logger"
 import {
   handleError,
@@ -17,7 +16,7 @@ import { nexusMcpServers, nexusMcpConnections } from "@/lib/db/schema"
 import { eq, sql, count } from "drizzle-orm"
 import { revalidatePath } from "next/cache"
 import type { ActionState } from "@/types/actions-types"
-import type { SelectNexusMcpServer } from "@/lib/db/types"
+import type { SelectNexusMcpServer, InsertNexusMcpServer } from "@/lib/db/types"
 
 // ============================================
 // Types
@@ -54,6 +53,107 @@ export interface McpServerHealthInfo {
   connectedCount: number
   errorCount: number
   disconnectedCount: number
+}
+
+// Typed update payload — uses Drizzle's inferred insert type for type safety
+type McpServerUpdate = Partial<
+  Pick<
+    InsertNexusMcpServer,
+    | "name"
+    | "url"
+    | "transport"
+    | "authType"
+    | "credentialsKey"
+    | "allowedUsers"
+    | "maxConnections"
+  >
+>
+
+// ============================================
+// Validation
+// ============================================
+
+const VALID_TRANSPORTS = ["http", "stdio", "websocket"] as const
+const VALID_AUTH_TYPES = ["none", "oauth", "api_key", "jwt"] as const
+const MAX_CONNECTIONS_LIMIT = 100
+
+/**
+ * Block private/loopback IP ranges and non-HTTP(S)/WS(S) protocols.
+ * Prevents SSRF when admin-configured URLs are later used to establish connections.
+ */
+function validateMcpUrl(rawUrl: string): void {
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    throw ErrorFactories.invalidInput("url", "[redacted]", "Must be a valid URL")
+  }
+
+  const allowedProtocols =
+    process.env.NODE_ENV === "production"
+      ? ["https:", "wss:"]
+      : ["https:", "wss:", "http:", "ws:"]
+
+  if (!allowedProtocols.includes(parsed.protocol)) {
+    throw ErrorFactories.invalidInput(
+      "url",
+      "[redacted]",
+      `Protocol must be one of: ${allowedProtocols.join(", ")}`
+    )
+  }
+
+  const privateRanges = [
+    /^localhost$/i,
+    /^127\./,
+    /^10\./,
+    /^172\.(1[6-9]|2\d|3[01])\./,
+    /^192\.168\./,
+    /^169\.254\./, // AWS EC2 instance metadata
+    /^::1$/,
+  ]
+
+  if (privateRanges.some((p) => p.test(parsed.hostname))) {
+    throw ErrorFactories.invalidInput(
+      "url",
+      "[redacted]",
+      "URL must not target internal network ranges"
+    )
+  }
+}
+
+function validateServerInput(
+  input: Pick<Partial<CreateMcpServerInput>, "name" | "transport" | "authType" | "maxConnections">
+): void {
+  if (input.transport !== undefined) {
+    if (!VALID_TRANSPORTS.includes(input.transport as typeof VALID_TRANSPORTS[number])) {
+      throw ErrorFactories.invalidInput(
+        "transport",
+        input.transport,
+        `Must be one of: ${VALID_TRANSPORTS.join(", ")}`
+      )
+    }
+  }
+  if (input.authType !== undefined) {
+    if (!VALID_AUTH_TYPES.includes(input.authType as typeof VALID_AUTH_TYPES[number])) {
+      throw ErrorFactories.invalidInput(
+        "authType",
+        input.authType,
+        `Must be one of: ${VALID_AUTH_TYPES.join(", ")}`
+      )
+    }
+  }
+  if (input.name !== undefined) {
+    const trimmed = input.name.trim()
+    if (trimmed.length === 0 || trimmed.length > 255) {
+      throw ErrorFactories.invalidInput("name", "[redacted]", "Name must be 1–255 characters")
+    }
+  }
+  if (input.maxConnections !== undefined) {
+    const n = input.maxConnections
+    if (!Number.isInteger(n) || n < 1 || n > MAX_CONNECTIONS_LIMIT) {
+      throw ErrorFactories.valueOutOfRange("maxConnections", n, 1, MAX_CONNECTIONS_LIMIT)
+    }
+  }
 }
 
 // ============================================
@@ -131,10 +231,18 @@ export async function createMcpServer(
   const log = createLogger({ requestId, action: "admin.createMcpServer" })
 
   try {
+    // Log without credentialsKey — Secrets Manager key names should not appear in logs
     log.info("Admin action started: Creating MCP server", {
-      params: sanitizeForLogging(input),
+      name: input.name,
+      url: input.url,
+      transport: input.transport,
+      authType: input.authType,
+      hasCredentials: !!input.credentialsKey,
     })
     await requireRole("administrator")
+
+    validateMcpUrl(input.url)
+    validateServerInput(input)
 
     const [server] = await executeQuery(
       (db) =>
@@ -184,25 +292,39 @@ export async function updateMcpServer(
   const log = createLogger({ requestId, action: "admin.updateMcpServer" })
 
   try {
+    // Log without credentialsKey — Secrets Manager key names should not appear in logs
     log.info("Admin action started: Updating MCP server", {
       serverId: input.id,
-      params: sanitizeForLogging(input),
+      name: input.name,
+      url: input.url,
+      transport: input.transport,
+      authType: input.authType,
+      hasCredentials: input.credentialsKey !== undefined
+        ? input.credentialsKey !== null
+        : undefined,
     })
     await requireRole("administrator")
 
-    const updateData: Record<string, unknown> = {}
-    if (input.name !== undefined) updateData.name = input.name
-    if (input.url !== undefined) updateData.url = input.url
-    if (input.transport !== undefined) updateData.transport = input.transport
-    if (input.authType !== undefined) updateData.authType = input.authType
-    if (input.credentialsKey !== undefined)
-      updateData.credentialsKey = input.credentialsKey
-    if (input.allowedUsers !== undefined)
-      updateData.allowedUsers = input.allowedUsers
-    if (input.maxConnections !== undefined)
-      updateData.maxConnections = input.maxConnections
+    if (input.url !== undefined) validateMcpUrl(input.url)
+    validateServerInput(input)
+
+    // Typed update payload — avoids Record<string, unknown>
+    const { id: _, ...fields } = input
+    const updateData: McpServerUpdate = {}
+    if (fields.name !== undefined) updateData.name = fields.name
+    if (fields.url !== undefined) updateData.url = fields.url
+    if (fields.transport !== undefined) updateData.transport = fields.transport
+    if (fields.authType !== undefined) updateData.authType = fields.authType
+    if (fields.credentialsKey !== undefined)
+      updateData.credentialsKey = fields.credentialsKey
+    if (fields.allowedUsers !== undefined)
+      updateData.allowedUsers = fields.allowedUsers
+    if (fields.maxConnections !== undefined)
+      updateData.maxConnections = fields.maxConnections
 
     if (Object.keys(updateData).length === 0) {
+      timer({ status: "noop" })
+      log.warn("Update called with no fields to change", { serverId: input.id })
       return { isSuccess: false, message: "No fields to update" }
     }
 
@@ -300,8 +422,23 @@ export async function getMcpServerHealth(
   const log = createLogger({ requestId, action: "admin.getMcpServerHealth" })
 
   try {
-    log.info("Admin action started: Getting MCP server health", { serverId })
+    log.debug("Admin action started: Getting MCP server health", { serverId })
     await requireRole("administrator")
+
+    // Verify server exists before aggregating — avoids returning success with 0s for unknown IDs
+    const [serverExists] = await executeQuery(
+      (db) =>
+        db
+          .select({ id: nexusMcpServers.id })
+          .from(nexusMcpServers)
+          .where(eq(nexusMcpServers.id, serverId))
+          .limit(1),
+      "getMcpServerHealth.existenceCheck"
+    )
+
+    if (!serverExists) {
+      throw ErrorFactories.dbRecordNotFound("nexus_mcp_servers", serverId)
+    }
 
     const stats = await executeQuery(
       (db) =>
@@ -339,7 +476,7 @@ export async function getMcpServerHealth(
     }
 
     timer({ status: "success" })
-    log.info("MCP server health retrieved", result)
+    log.debug("MCP server health retrieved", { serverId, total: result.totalConnections })
     return createSuccess(result, "Health data loaded")
   } catch (error) {
     timer({ status: "error" })

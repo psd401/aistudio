@@ -44,35 +44,34 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
     setError(null)
 
     try {
-      const maxConn = parseInt(maxConnections, 10)
+      const maxConn = Math.min(Math.max(parseInt(maxConnections, 10) || 1, 1), 100)
 
-      if (isEditing && server) {
-        const result = await updateMcpServer({
-          id: server.id,
-          name,
-          url,
-          transport,
-          authType,
-          credentialsKey: credentialsKey || null,
-          maxConnections: isNaN(maxConn) ? 10 : maxConn,
-        })
-        if (!result.isSuccess) {
-          setError(result.message || "Failed to update connector")
-          return
-        }
-      } else {
-        const result = await createMcpServer({
-          name,
-          url,
-          transport,
-          authType,
-          credentialsKey: credentialsKey || undefined,
-          maxConnections: isNaN(maxConn) ? 10 : maxConn,
-        })
-        if (!result.isSuccess) {
-          setError(result.message || "Failed to create connector")
-          return
-        }
+      const commonPayload = {
+        name,
+        url,
+        transport,
+        authType,
+        maxConnections: maxConn,
+      }
+
+      const result =
+        isEditing && server
+          ? await updateMcpServer({
+              id: server.id,
+              ...commonPayload,
+              credentialsKey: credentialsKey || null,
+            })
+          : await createMcpServer({
+              ...commonPayload,
+              credentialsKey: credentialsKey || undefined,
+            })
+
+      if (!result.isSuccess) {
+        setError(
+          result.message ??
+            (isEditing ? "Failed to update connector" : "Failed to create connector")
+        )
+        return
       }
 
       onSuccess()
@@ -100,6 +99,7 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
         <Label htmlFor="url">URL</Label>
         <Input
           id="url"
+          type="url"
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           placeholder="https://mcp.canva.com/mcp"
@@ -157,6 +157,7 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
           id="maxConnections"
           type="number"
           min="1"
+          max="100"
           value={maxConnections}
           onChange={(e) => setMaxConnections(e.target.value)}
         />

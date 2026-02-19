@@ -137,7 +137,9 @@ export function ConnectorsPageClient({ initialServers }: Props) {
                   : "Register a new MCP server as a Nexus connector."}
               </SheetDescription>
             </SheetHeader>
+            {/* key forces remount when switching between servers, resetting form state */}
             <ConnectorFormSheet
+              key={editingServer?.id ?? "new"}
               server={editingServer}
               onSuccess={handleFormSuccess}
             />
