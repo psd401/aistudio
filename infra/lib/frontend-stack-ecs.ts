@@ -98,6 +98,23 @@ export class FrontendStackEcs extends cdk.Stack {
     });
 
     // ============================================================================
+    // MCP Token Encryption Key (AES-256-GCM DEK)
+    // ============================================================================
+    // 32-byte random hex key for field-level encryption of per-user OAuth tokens.
+    // ECS task role already has wildcard access to aistudio/{env}/* secrets.
+    // See: lib/crypto/token-encryption.ts, Issue #777
+    new secretsmanager.Secret(this, 'McpTokenEncryptionKey', {
+      secretName: `aistudio/${environment}/mcp/token-encryption-key`,
+      description: 'AES-256-GCM data encryption key for MCP connector OAuth tokens',
+      generateSecretString: {
+        excludePunctuation: true,
+        includeSpace: false,
+        passwordLength: 64,
+      },
+      removalPolicy: environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ============================================================================
     // Create ECS Service with ALB
     // ============================================================================
     this.ecsService = new EcsServiceConstruct(this, 'EcsService', {
