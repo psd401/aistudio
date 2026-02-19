@@ -563,11 +563,15 @@ async function exchangeRefreshToken(
 // ─── OAuth Credentials Helper ────────────────────────────────────────────────
 
 /** Shape of the JSON stored in Secrets Manager under credentialsKey */
-interface OAuthClientCredentials {
+export interface OAuthClientCredentials {
   clientId: string
   clientSecret: string
   /** Provider-specific token endpoint (e.g. https://accounts.google.com/o/oauth2/token) */
   tokenEndpointUrl?: string
+  /** Provider-specific authorization endpoint (e.g. https://www.canva.com/api/oauth/authorize) */
+  authorizationEndpointUrl?: string
+  /** Space-separated scopes for the OAuth flow */
+  scopes?: string
 }
 
 let secretsClient: SecretsManagerClient | null = null
@@ -590,7 +594,7 @@ const CREDENTIALS_CACHE_MAX = 100
  * Fetches OAuth client credentials from AWS Secrets Manager with 5-minute TTL cache.
  * The secret is expected to be a JSON string with { clientId, clientSecret, tokenEndpointUrl? }.
  */
-async function loadOAuthCredentials(
+export async function loadOAuthCredentials(
   credentialsKey: string
 ): Promise<OAuthClientCredentials> {
   const cached = credentialsCache.get(credentialsKey)
@@ -621,6 +625,10 @@ async function loadOAuthCredentials(
     clientSecret: obj.clientSecret as string,
     tokenEndpointUrl:
       typeof obj.tokenEndpointUrl === "string" ? obj.tokenEndpointUrl : undefined,
+    authorizationEndpointUrl:
+      typeof obj.authorizationEndpointUrl === "string" ? obj.authorizationEndpointUrl : undefined,
+    scopes:
+      typeof obj.scopes === "string" ? obj.scopes : undefined,
   }
 
   // Evict oldest entry if cache is at capacity (simple FIFO via Map insertion order)
