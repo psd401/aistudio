@@ -97,13 +97,8 @@ export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<
     )]
   }, [groupType, toolCalls, getConnectorInfo])
 
-  // Direct render (charts, etc.)
-  if (groupType === 'direct') {
-    return <div className="space-y-4">{children}</div>
-  }
-
-  // Mixed groups or connector tools that also contain non-connector tools: render directly
-  if (groupType === 'mixed') {
+  // Direct render (charts, etc.) and mixed groups: render without collapsible wrapper
+  if (groupType === 'direct' || groupType === 'mixed') {
     return <div className="space-y-4">{children}</div>
   }
 

@@ -14,7 +14,6 @@ import {
   CheckCircle2,
   ImageIcon,
   FileText,
-  RefreshCw,
 } from 'lucide-react'
 import { useConnectorToolsOptional, type ConnectorServerInfo } from './connector-tool-context'
 import type { McpToolResult } from '@/lib/mcp/types'
@@ -290,6 +289,18 @@ function ResultTypeIcon({ parsed }: { parsed: ParsedResult[] }) {
   return <FileText className="h-3.5 w-3.5 text-purple-600" />
 }
 
+/** Get a compact preview string for the first result item */
+function getPreviewText(parsed: ParsedResult[]): string {
+  const first = parsed[0]
+  if (!first) return 'Result available'
+  if (first.type === 'text' && first.text) {
+    return first.text.length > 100 ? `${first.text.substring(0, 97)}...` : first.text
+  }
+  if (first.type === 'link') return first.url || 'Link'
+  if (first.type === 'image') return 'Image result'
+  return 'Result available'
+}
+
 // ============================================================================
 // Main Component
 // ============================================================================
@@ -302,12 +313,7 @@ function ResultTypeIcon({ parsed }: { parsed: ParsedResult[] }) {
  */
 export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
   const { toolName, argsText, result } = props
-  // null = no user interaction yet; boolean = user has explicitly toggled
-  const [manualExpanded, setManualExpanded] = useState<boolean | null>(null)
-  const toggleExpanded = useCallback(() => setManualExpanded(prev => prev === null ? true : !prev), [])
   const connectorCtx = useConnectorToolsOptional()
-
-  const connectorInfo = connectorCtx?.getConnectorInfo(toolName)
 
   // Always compute memos (hooks must not be conditional)
   const displayName = formatToolName(toolName)
@@ -315,6 +321,15 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
   const parsedResult = useMemo(() => parseResult(result), [result])
   const isLoading = result === undefined
   const isError = parsedResult.some(p => p.type === 'error')
+
+  // null = no user interaction yet; boolean = user has explicitly toggled
+  const [manualExpanded, setManualExpanded] = useState<boolean | null>(null)
+  const toggleExpanded = useCallback(
+    () => setManualExpanded(prev => !(prev !== null ? prev : isError)),
+    [isError]
+  )
+
+  const connectorInfo = connectorCtx?.getConnectorInfo(toolName)
 
   // Auto-expand on error unless user has explicitly toggled.
   // Derived state avoids setState-in-useEffect cascading render pattern.
@@ -408,15 +423,7 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
       {!isExpanded && !isLoading && parsedResult.length > 0 && !isError && (
         <div className="border-t border-purple-100 px-4 py-2">
           <div className="text-xs text-purple-700 truncate">
-            {parsedResult[0]?.type === 'text' && parsedResult[0].text
-              ? (parsedResult[0].text.length > 100
-                ? `${parsedResult[0].text.substring(0, 97)}...`
-                : parsedResult[0].text)
-              : parsedResult[0]?.type === 'link'
-                ? parsedResult[0].url
-                : parsedResult[0]?.type === 'image'
-                  ? 'Image result'
-                  : 'Result available'}
+            {getPreviewText(parsedResult)}
           </div>
         </div>
       )}
@@ -430,26 +437,22 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
 
 interface ConnectorReconnectPromptProps {
   serverIds: string[]
-  onReconnect: (serverId: string) => void
 }
 
 /**
  * Inline prompt shown when connector auth has expired.
  * Rendered in the message stream when X-Connector-Reconnect header is received.
  */
-export function ConnectorReconnectPrompt({ serverIds, onReconnect }: ConnectorReconnectPromptProps) {
+export function ConnectorReconnectPrompt({ serverIds }: ConnectorReconnectPromptProps) {
   const connectorCtx = useConnectorToolsOptional()
 
-  // Memoize server name lookup — avoids O(servers × tools) scan on every render
+  // O(1) server name lookup via reverse index
   const serverNames = useMemo(() => {
     return serverIds.map(id => {
-      if (connectorCtx) {
-        const entry = Object.values(connectorCtx.toolMap).find(info => info.serverId === id)
-        if (entry) return { id, name: entry.serverName }
-      }
-      return { id, name: 'Connector' }
+      const info = connectorCtx?.serverMap[id]
+      return { id, name: info?.serverName ?? 'Connector' }
     })
-  }, [serverIds, connectorCtx])
+  }, [serverIds, connectorCtx?.serverMap])
 
   if (serverIds.length === 0) return null
 
@@ -461,24 +464,11 @@ export function ConnectorReconnectPrompt({ serverIds, onReconnect }: ConnectorRe
           <div className="text-sm font-medium text-amber-900 mb-1">
             Connection expired
           </div>
-          <div className="text-sm text-amber-800 mb-3">
+          <div className="text-sm text-amber-800">
             {serverNames.length === 1
               ? `Your ${serverNames[0]?.name} connection has expired.`
               : `Your ${serverNames.map(s => s.name).join(', ')} connections have expired.`}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {serverNames.map(({ id, name }) => (
-              <Button
-                key={id}
-                variant="outline"
-                size="sm"
-                className="h-8 gap-1.5 border-amber-300 text-amber-800 hover:bg-amber-100"
-                onClick={() => onReconnect(id)}
-              >
-                <RefreshCw className="h-3.5 w-3.5" />
-                Reconnect {name}
-              </Button>
-            ))}
+            {' '}Use the <strong>Connect</strong> menu in the composer to re-authenticate.
           </div>
         </div>
       </div>

@@ -25,6 +25,8 @@ export interface ConnectorToolMap {
 interface ConnectorToolContextValue {
   /** Map of tool names to connector server info */
   toolMap: ConnectorToolMap
+  /** Reverse index: serverId → ConnectorServerInfo for O(1) server lookup */
+  serverMap: Record<string, ConnectorServerInfo>
   /** Register tools from a connector server */
   registerConnectorTools: (serverInfo: ConnectorServerInfo, toolNames: string[]) => void
   /** Unregister all tools from a connector server */
@@ -67,6 +69,15 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
     })
   }, [])
 
+  // Reverse index: serverId → ConnectorServerInfo for O(1) server lookup
+  const serverMap = useMemo(() => {
+    const map: Record<string, ConnectorServerInfo> = {}
+    for (const info of Object.values(toolMap)) {
+      map[info.serverId] = info
+    }
+    return map
+  }, [toolMap])
+
   const getConnectorInfo = useCallback((toolName: string) => {
     return toolMap[toolName]
   }, [toolMap])
@@ -81,18 +92,18 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
 
   const value = useMemo<ConnectorToolContextValue>(() => ({
     toolMap,
+    serverMap,
     registerConnectorTools,
     unregisterConnectorServer,
-
     getConnectorInfo,
     failedServerIds,
     addFailedServerIds,
     removeFailedServerId,
   }), [
     toolMap,
+    serverMap,
     registerConnectorTools,
     unregisterConnectorServer,
-
     getConnectorInfo,
     failedServerIds,
     addFailedServerIds,

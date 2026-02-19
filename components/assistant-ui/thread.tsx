@@ -6,10 +6,10 @@ import {
   BranchPickerPrimitive,
   ErrorPrimitive,
   useMessage,
+  type ToolCallMessagePartComponent,
 } from "@assistant-ui/react";
 import type { FC } from "react";
 import { createContext, useContext, useMemo } from "react";
-import type { ToolCallMessagePartComponent } from "@assistant-ui/react";
 import {
   ArrowDownIcon,
   ArrowUpIcon,

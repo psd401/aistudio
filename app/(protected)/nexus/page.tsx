@@ -229,20 +229,6 @@ function NexusRuntimeWrapper({
     })
   }, [addFailedServerIds])
 
-  // Handle reconnect action from the inline prompt.
-  // NOTE: Do NOT remove the server ID from failedServerIds here — the prompt
-  // should remain visible until actual reconnection succeeds. The OAuth popup
-  // flow (Task 5/6) will call removeFailedServerId on success.
-  const handleReconnectAction = useCallback((_serverId: string) => {
-    // Future: This will open the OAuth popup for the server (Task 5/6)
-    // and call removeFailedServerId(serverId) on successful reconnection.
-    // For now, show guidance toast while keeping the prompt visible.
-    toast.info('Reconnect', {
-      description: 'Use the Connect menu in the composer to re-authenticate.',
-      duration: 5000,
-    })
-  }, [])
-
   return (
     <ConversationRuntimeProvider
       conversationId={conversationId}
@@ -267,7 +253,6 @@ function NexusRuntimeWrapper({
           <div className="mx-auto w-full max-w-[48rem] px-4 flex-shrink-0">
             <ConnectorReconnectPrompt
               serverIds={failedServerIds}
-              onReconnect={handleReconnectAction}
             />
           </div>
         )}
