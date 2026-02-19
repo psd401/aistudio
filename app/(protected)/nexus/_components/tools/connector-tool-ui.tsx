@@ -359,6 +359,8 @@ function ConnectorToolCard({ toolName, argsText, result, connectorInfo }: {
   // null = no user interaction yet; boolean = user has explicitly toggled.
   // toggleExpanded closes over isError so the callback recreates when error state changes.
   // This is intentional: the toggle needs to know the currently displayed state to invert it.
+  // Note: if the user manually expands before an error arrives, auto-expand won't re-trigger
+  // because manualExpanded is already set. This is acceptable — user intent takes precedence.
   const [manualExpanded, setManualExpanded] = useState<boolean | null>(null)
   const toggleExpanded = useCallback(
     () => setManualExpanded(prev => !(prev !== null ? prev : isError)),
@@ -504,7 +506,7 @@ export function ConnectorReconnectPrompt({ serverIds }: ConnectorReconnectPrompt
             {serverNames.length === 1
               ? `Your ${serverNames[0]?.name} connection has expired.`
               : `Your ${serverNames.map(s => s.name).join(', ')} connections have expired.`}
-            {' '}Use the <strong>Connect</strong> menu in the composer to re-authenticate.
+            {' '}Please reconnect the affected connector to continue.
           </div>
         </div>
         <Button
