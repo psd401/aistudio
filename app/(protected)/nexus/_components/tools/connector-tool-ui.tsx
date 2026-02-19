@@ -14,6 +14,7 @@ import {
   CheckCircle2,
   ImageIcon,
   FileText,
+  X,
 } from 'lucide-react'
 import { useConnectorToolsOptional, type ConnectorServerInfo } from './connector-tool-context'
 import type { McpToolResult } from '@/lib/mcp/types'
@@ -33,6 +34,8 @@ function formatToolName(toolName: string): string {
 /**
  * Summarize tool arguments for compact display.
  * Shows first 2-3 key=value pairs.
+ * NOTE: argsText is model-generated content (from the AI stream), not user input.
+ * Rendered in JSX text nodes / <pre> which auto-escape HTML — do not use dangerouslySetInnerHTML.
  */
 function summarizeArgs(argsText: string): string {
   try {
@@ -122,10 +125,12 @@ function parseResult(result: unknown): ParsedResult[] {
       if (item.type === 'image') {
         return { type: 'image' as const, url: item.data, mimeType: item.mimeType }
       }
-      if (item.type === 'resource' && item.text) {
+      if (item.type === 'resource') {
+        if (!item.text) {
+          return { type: 'text' as const, text: '(Binary resource)' }
+        }
         // MCP resource items: item.text holds the resource content body.
         // If it looks like an HTTPS URL, render as a clickable link.
-        // Non-URL content falls through to text rendering below.
         if (/^https:\/\//.test(item.text)) {
           return { type: 'link' as const, url: item.text, mimeType: item.mimeType }
         }
@@ -133,6 +138,7 @@ function parseResult(result: unknown): ParsedResult[] {
         if (/^[a-z][a-z0-9+.-]*:\/\//i.test(item.text)) {
           return { type: 'text' as const, text: '(Resource not available for display)' }
         }
+        // Non-URL content falls through to text rendering below
       }
       return { type: 'text' as const, text: item.text || '' }
     })
@@ -326,8 +332,24 @@ function getPreviewText(parsed: ParsedResult[]): string {
 export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
   const { toolName, argsText, result } = props
   const connectorCtx = useConnectorToolsOptional()
+  const connectorInfo = connectorCtx?.getConnectorInfo(toolName)
 
-  // Always compute memos (hooks must not be conditional)
+  // Not a connector tool — render the standard generic fallback.
+  // Early return avoids computing displayName, argsSummary, parsedResult for non-connector tools.
+  if (!connectorInfo) {
+    return <ToolFallback {...props} />
+  }
+
+  return <ConnectorToolCard toolName={toolName} argsText={argsText} result={result} connectorInfo={connectorInfo} />
+}
+
+/** Inner component for connector tools — avoids conditional hooks in the parent. */
+function ConnectorToolCard({ toolName, argsText, result, connectorInfo }: {
+  toolName: string
+  argsText: string
+  result: unknown
+  connectorInfo: ConnectorServerInfo
+}) {
   const displayName = formatToolName(toolName)
   const argsSummary = useMemo(() => summarizeArgs(argsText), [argsText])
   const parsedResult = useMemo(() => parseResult(result), [result])
@@ -343,16 +365,9 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
     [isError]
   )
 
-  const connectorInfo = connectorCtx?.getConnectorInfo(toolName)
-
   // Auto-expand on error unless user has explicitly toggled.
   // Derived state avoids setState-in-useEffect cascading render pattern.
   const isExpanded = manualExpanded !== null ? manualExpanded : isError
-
-  // Not a connector tool — render the standard generic fallback
-  if (!connectorInfo) {
-    return <ToolFallback {...props} />
-  }
 
   return (
     <div className="mb-4 w-full rounded-lg border border-purple-200 bg-purple-50/30 overflow-hidden">
@@ -468,6 +483,13 @@ export function ConnectorReconnectPrompt({ serverIds }: ConnectorReconnectPrompt
     })
   }, [serverIds, connectorCtx?.serverMap])
 
+  const handleDismiss = useCallback(() => {
+    if (!connectorCtx) return
+    for (const id of serverIds) {
+      connectorCtx.removeFailedServerId(id)
+    }
+  }, [connectorCtx, serverIds])
+
   if (serverIds.length === 0) return null
 
   return (
@@ -485,6 +507,15 @@ export function ConnectorReconnectPrompt({ serverIds }: ConnectorReconnectPrompt
             {' '}Use the <strong>Connect</strong> menu in the composer to re-authenticate.
           </div>
         </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={handleDismiss}
+          aria-label="Dismiss connection prompt"
+          className="h-8 w-8 p-0 text-amber-600 hover:text-amber-800 hover:bg-amber-100 flex-shrink-0"
+        >
+          <X className="h-4 w-4" />
+        </Button>
       </div>
     </div>
   )

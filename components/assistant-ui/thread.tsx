@@ -65,7 +65,10 @@ const DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS = {
 
 type AssistantContentComponents = typeof DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS;
 
-/** Allows the rendering layer (e.g. Nexus) to inject a custom tool fallback without coupling thread.tsx to feature-specific imports */
+/** Allows the rendering layer (e.g. Nexus) to inject a custom tool fallback without coupling
+ * thread.tsx to feature-specific imports. Intentionally not exported — override is via the
+ * Thread `toolFallback` prop only. If other components need to override content components,
+ * extend the Thread props interface rather than exporting this context directly. */
 const AssistantContentComponentsContext = createContext<AssistantContentComponents>(DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS);
 
 const USER_MESSAGE_CONTENT_COMPONENTS = { Text: MarkdownText };
