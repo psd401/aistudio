@@ -49,8 +49,9 @@ ENV RDS_SECRET_ARN=${RDS_SECRET_ARN}
 
 # Build with cache mount for Next.js build artifacts
 # next is invoked directly from node_modules/.bin — bun not needed at build stage
+# --webpack: Next.js 16 defaults to Turbopack but project has webpack config (externals, cache)
 RUN --mount=type=cache,target=/app/.next/cache \
-    node_modules/.bin/next build
+    node_modules/.bin/next build --webpack
 
 # ============================================================================
 # Stage 3: Production Runner

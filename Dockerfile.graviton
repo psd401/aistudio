@@ -6,19 +6,19 @@
 # ============================================================================
 # Stage 1: Dependencies
 # ============================================================================
-FROM --platform=linux/arm64 node:22-alpine AS deps
+FROM --platform=linux/arm64 oven/bun:1.2-alpine AS deps
 WORKDIR /app
 
 # Install dependencies for native packages on ARM64
-RUN apk add --no-cache libc6-compat python3 make g++
+RUN apk add --no-cache libc6-compat
 
 # Copy package files
-COPY package.json package-lock.json* ./
+COPY package.json bun.lock ./
 
 # Install ALL dependencies with BuildKit cache mount
 # Native modules will be compiled for ARM64
-RUN --mount=type=cache,target=/root/.npm,id=npm-arm64 \
-    npm ci --legacy-peer-deps
+RUN --mount=type=cache,target=/root/.bun/install/cache,id=bun-arm64 \
+    bun install --frozen-lockfile
 
 # ============================================================================
 # Stage 2: Builder
@@ -39,10 +39,6 @@ COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
 ENV NODE_ENV=production
 
-# ARM64-specific optimizations
-ENV CFLAGS="-O3 -march=armv8-a+crc+simd"
-ENV CXXFLAGS="-O3 -march=armv8-a+crc+simd"
-
 # Dummy environment variables required for Next.js build
 ENV DOCUMENTS_BUCKET_NAME=build-time-placeholder
 ENV NEXT_PUBLIC_AWS_REGION=us-east-1
@@ -51,8 +47,10 @@ ARG RDS_SECRET_ARN=arn:aws:secretsmanager:us-east-1:000000000000:secret:build-pl
 ENV RDS_SECRET_ARN=${RDS_SECRET_ARN}
 
 # Build with cache mount for Next.js build artifacts
+# next is invoked directly from node_modules/.bin — bun not needed at build stage
+# --webpack: Next.js 16 defaults to Turbopack but project has webpack config (externals, cache)
 RUN --mount=type=cache,target=/app/.next/cache,id=nextjs-arm64 \
-    npm run build
+    node_modules/.bin/next build --webpack
 
 # ============================================================================
 # Stage 3: Production Runner

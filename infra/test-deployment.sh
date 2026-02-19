@@ -35,7 +35,7 @@ check_status() {
 
 # 1. Test synthesis of all stacks
 echo "1️⃣ Testing CDK synthesis..."
-npx cdk synth --all --context baseDomain=$BASEDOMAIN > /dev/null 2>&1
+bunx cdk synth --all --context baseDomain=$BASEDOMAIN > /dev/null 2>&1
 check_status "All stacks synthesize correctly"
 echo ""
 
@@ -50,7 +50,7 @@ STACKS=(
 
 for STACK in "${STACKS[@]}"; do
     echo "   Checking $STACK..."
-    npx cdk diff $STACK --context baseDomain=$BASEDOMAIN 2>&1 | grep -E "\[[\+\-\~]\]" | head -5 || echo "   No changes detected"
+    bunx cdk diff $STACK --context baseDomain=$BASEDOMAIN 2>&1 | grep -E "\[[\+\-\~]\]" | head -5 || echo "   No changes detected"
 done
 echo ""
 
@@ -82,13 +82,13 @@ echo ""
 echo "6️⃣ Deployment commands to run:"
 echo ""
 echo "   First deployment (all stacks together to create SSM parameters):"
-echo "   npx cdk deploy --all --context baseDomain=$BASEDOMAIN"
+echo "   bunx cdk deploy --all --context baseDomain=$BASEDOMAIN"
 echo ""
 echo "   Future deployments (individual stacks):"
-echo "   npx cdk deploy AIStudio-DatabaseStack-Dev --exclusively --context baseDomain=$BASEDOMAIN"
-echo "   npx cdk deploy AIStudio-StorageStack-Dev --exclusively --context baseDomain=$BASEDOMAIN"
-echo "   npx cdk deploy AIStudio-ProcessingStack-Dev --exclusively --context baseDomain=$BASEDOMAIN"
-echo "   npx cdk deploy AIStudio-FrontendStack-Dev --exclusively --context baseDomain=$BASEDOMAIN"
+echo "   bunx cdk deploy AIStudio-DatabaseStack-Dev --exclusively --context baseDomain=$BASEDOMAIN"
+echo "   bunx cdk deploy AIStudio-StorageStack-Dev --exclusively --context baseDomain=$BASEDOMAIN"
+echo "   bunx cdk deploy AIStudio-ProcessingStack-Dev --exclusively --context baseDomain=$BASEDOMAIN"
+echo "   bunx cdk deploy AIStudio-FrontendStack-Dev --exclusively --context baseDomain=$BASEDOMAIN"
 echo ""
 
 # 7. Post-deployment verification
@@ -99,7 +99,7 @@ echo ""
 echo "✅ Pre-deployment tests completed successfully!"
 echo ""
 echo "⚠️  IMPORTANT: For the first deployment after this change:"
-echo "   1. Deploy all stacks together: npx cdk deploy --all --context baseDomain=$BASEDOMAIN"
+echo "   1. Deploy all stacks together: bunx cdk deploy --all --context baseDomain=$BASEDOMAIN"
 echo "   2. This creates SSM parameters while maintaining existing exports"
 echo "   3. Future deployments can use --exclusively for individual stacks"
 echo ""

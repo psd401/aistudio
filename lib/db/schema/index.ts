@@ -64,6 +64,7 @@ export * from "./tables/nexus-mcp-servers";
 export * from "./tables/nexus-mcp-connections";
 export * from "./tables/nexus-mcp-capabilities";
 export * from "./tables/nexus-mcp-audit-logs";
+export * from "./tables/nexus-mcp-user-tokens";
 
 // ============================================
 // Documents

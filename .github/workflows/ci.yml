@@ -72,25 +72,23 @@ jobs:
     - name: Install dependencies
       run: |
         bun install --frozen-lockfile
-        # infra/ is a separate npm workspace with its own package-lock.json
-        # intentionally not migrated to bun — CDK toolchain stays on npm
-        cd infra && npm ci --legacy-peer-deps
-    
+        cd infra && bun install --frozen-lockfile
+
     - name: Install CDK CLI
-      run: npm install -g aws-cdk@2
-    
+      run: bun install -g aws-cdk@2
+
     - name: Build CDK TypeScript
-      run: cd infra && npm run build
-    
+      run: cd infra && bun run build
+
     - name: Synthesize CDK stacks
       run: |
         cd infra
-        cdk synth --all --no-lookups --context baseDomain=example.com
+        bunx cdk synth --all --no-lookups --context baseDomain=example.com
       env:
         # Dummy values for synthesis only - not for deployment
         CDK_DEFAULT_ACCOUNT: '123456789012'
         CDK_DEFAULT_REGION: 'us-east-1'
-    
+
     # Show infrastructure changes on PRs
     - name: CDK Diff
       if: github.event_name == 'pull_request'
@@ -98,7 +96,7 @@ jobs:
         cd infra
         echo "## Infrastructure Changes" >> $GITHUB_STEP_SUMMARY
         echo "```" >> $GITHUB_STEP_SUMMARY
-        npx cdk diff --context baseDomain=example.com 2>&1 | tee -a $GITHUB_STEP_SUMMARY || true
+        bunx cdk diff --context baseDomain=example.com 2>&1 | tee -a $GITHUB_STEP_SUMMARY || true
         echo "```" >> $GITHUB_STEP_SUMMARY
       env:
         CDK_DEFAULT_ACCOUNT: '123456789012'
