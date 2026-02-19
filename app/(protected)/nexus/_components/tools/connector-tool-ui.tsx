@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useCallback } from 'react'
 import type { ToolCallMessagePartComponent } from '@assistant-ui/react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -16,7 +16,7 @@ import {
   FileText,
   RefreshCw,
 } from 'lucide-react'
-import { useConnectorTools, type ConnectorServerInfo } from './connector-tool-context'
+import { useConnectorToolsOptional, type ConnectorServerInfo } from './connector-tool-context'
 import type { McpToolResult } from '@/lib/mcp/types'
 import { ToolFallback } from '@/components/assistant-ui/tool-fallback'
 
@@ -181,7 +181,15 @@ function ImageResult({ url, mimeType }: { url: string; mimeType?: string }) {
 
   // Validate pre-formed data URIs against the same MIME allowlist
   if (url.startsWith('data:')) {
-    const declaredMime = url.slice(5, url.indexOf(';'))
+    const semiIdx = url.indexOf(';')
+    if (semiIdx === -1) {
+      return (
+        <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2.5">
+          <span className="text-sm text-amber-800">Unsupported image format</span>
+        </div>
+      )
+    }
+    const declaredMime = url.slice(5, semiIdx)
     if (!SAFE_IMAGE_MIME_TYPES.has(declaredMime)) {
       return (
         <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2.5">
@@ -198,6 +206,7 @@ function ImageResult({ url, mimeType }: { url: string; mimeType?: string }) {
         src={src}
         alt="Connector result"
         className="max-w-xs rounded-lg border shadow-sm"
+        referrerPolicy="no-referrer"
       />
     </div>
   )
@@ -240,12 +249,13 @@ function ResultRenderer({ parsed }: { parsed: ParsedResult[] }) {
   return (
     <div className="space-y-2">
       {parsed.map((item, i) => {
+        const key = `${item.type}-${i}`
         switch (item.type) {
-          case 'text': return <TextResult key={i} text={item.text || ''} />
-          case 'image': return <ImageResult key={i} url={item.url || ''} mimeType={item.mimeType} />
-          case 'link': return <LinkResult key={i} url={item.url || ''} />
-          case 'error': return <ErrorResult key={i} text={item.text || 'Unknown error'} />
-          case 'json': return <JsonResult key={i} text={item.text || '{}'} />
+          case 'text': return <TextResult key={key} text={item.text || ''} />
+          case 'image': return <ImageResult key={key} url={item.url || ''} mimeType={item.mimeType} />
+          case 'link': return <LinkResult key={key} url={item.url || ''} />
+          case 'error': return <ErrorResult key={key} text={item.text || 'Unknown error'} />
+          case 'json': return <JsonResult key={key} text={item.text || '{}'} />
         }
       })}
     </div>
@@ -277,11 +287,9 @@ function ResultTypeIcon({ parsed }: { parsed: ParsedResult[] }) {
  */
 export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
   const { toolName, argsText, result } = props
-  // Auto-expand when the tool result is an error so users see it immediately
-  const [isExpanded, setIsExpanded] = useState(() =>
-    parseResult(result).some(p => p.type === 'error')
-  )
-  const connectorCtx = useConnectorTools()
+  const [isExpanded, setIsExpanded] = useState(false)
+  const toggleExpanded = useCallback(() => setIsExpanded(prev => !prev), [])
+  const connectorCtx = useConnectorToolsOptional()
 
   const connectorInfo = connectorCtx?.getConnectorInfo(toolName)
 
@@ -291,6 +299,15 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
   const parsedResult = useMemo(() => parseResult(result), [result])
   const isLoading = result === undefined
   const isError = parsedResult.some(p => p.type === 'error')
+
+  // Auto-expand when a tool transitions from loading to error state.
+  // setState in effect is intentional — result arrives asynchronously after mount.
+  useEffect(() => {
+    if (isError) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setIsExpanded(true)
+    }
+  }, [isError])
 
   // Not a connector tool — render the standard generic fallback
   if (!connectorInfo) {
@@ -338,7 +355,7 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
           <Button
             variant="ghost"
             size="sm"
-            onClick={() => setIsExpanded(!isExpanded)}
+            onClick={toggleExpanded}
             aria-expanded={isExpanded}
             aria-label={isExpanded ? 'Hide tool details' : 'Show tool details'}
             className="h-9 w-9 p-0 text-purple-700 hover:text-purple-900 hover:bg-purple-100"
@@ -358,7 +375,7 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
           {/* Arguments */}
           <div>
             <div className="text-xs font-semibold text-purple-900 mb-1">Arguments</div>
-            <pre className="text-xs bg-purple-50 p-2 rounded overflow-x-auto text-purple-800 whitespace-pre-wrap">
+            <pre className="text-xs bg-purple-50 p-2 rounded overflow-x-auto overflow-y-auto max-h-48 text-purple-800 whitespace-pre-wrap">
               {argsText}
             </pre>
           </div>
@@ -410,19 +427,20 @@ interface ConnectorReconnectPromptProps {
  * Rendered in the message stream when X-Connector-Reconnect header is received.
  */
 export function ConnectorReconnectPrompt({ serverIds, onReconnect }: ConnectorReconnectPromptProps) {
-  const connectorCtx = useConnectorTools()
+  const connectorCtx = useConnectorToolsOptional()
+
+  // Memoize server name lookup — avoids O(servers × tools) scan on every render
+  const serverNames = useMemo(() => {
+    return serverIds.map(id => {
+      if (connectorCtx) {
+        const entry = Object.values(connectorCtx.toolMap).find(info => info.serverId === id)
+        if (entry) return { id, name: entry.serverName }
+      }
+      return { id, name: 'Connector' }
+    })
+  }, [serverIds, connectorCtx])
 
   if (serverIds.length === 0) return null
-
-  // Look up server names from the tool map
-  const serverNames = serverIds.map(id => {
-    // Find any tool that belongs to this server
-    if (connectorCtx) {
-      const entry = Object.values(connectorCtx.toolMap).find(info => info.serverId === id)
-      if (entry) return { id, name: entry.serverName }
-    }
-    return { id, name: 'Connector' }
-  })
 
   return (
     <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50/50 p-4">

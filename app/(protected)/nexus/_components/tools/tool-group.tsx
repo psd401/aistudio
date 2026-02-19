@@ -5,7 +5,7 @@ import { Card, CardContent, CardHeader } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { ChevronDown, ChevronUp, Search, Loader2, Plug } from 'lucide-react'
 import { useMessage } from '@assistant-ui/react'
-import { useConnectorTools } from './connector-tool-context'
+import { useConnectorToolsOptional } from './connector-tool-context'
 
 interface ToolGroupProps {
   startIndex: number
@@ -38,7 +38,7 @@ type GroupType = 'direct' | 'web-search' | 'connector' | 'mixed'
 export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<ToolGroupProps>) {
   const [isExpanded, setIsExpanded] = useState(false)
   const message = useMessage()
-  const connectorCtx = useConnectorTools()
+  const connectorCtx = useConnectorToolsOptional()
 
   // Memoized toggle handler to avoid creating new function on each render
   const toggleExpanded = useCallback(() => {

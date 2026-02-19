@@ -1,6 +1,6 @@
 'use client'
 
-import { createContext, useContext, useCallback, useState, useMemo, type Dispatch, type SetStateAction } from 'react'
+import { createContext, useContext, useCallback, useState, useMemo } from 'react'
 
 /**
  * Metadata about an MCP connector server
@@ -33,8 +33,10 @@ interface ConnectorToolContextValue {
   getConnectorInfo: (toolName: string) => ConnectorServerInfo | undefined
   /** List of server IDs that failed reconnect (from X-Connector-Reconnect header) */
   failedServerIds: string[]
-  /** Set failed server IDs from reconnect header (supports functional update form) */
-  setFailedServerIds: Dispatch<SetStateAction<string[]>>
+  /** Merge new failed server IDs into the existing set (de-duplicated) */
+  addFailedServerIds: (ids: string[]) => void
+  /** Remove a single server ID from the failed list (e.g., after successful reconnect) */
+  removeFailedServerId: (id: string) => void
 }
 
 const ConnectorToolContext = createContext<ConnectorToolContextValue | null>(null)
@@ -73,6 +75,14 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
     return toolMap[toolName]
   }, [toolMap])
 
+  const addFailedServerIds = useCallback((ids: string[]) => {
+    setFailedServerIds(prev => [...new Set([...prev, ...ids])])
+  }, [])
+
+  const removeFailedServerId = useCallback((id: string) => {
+    setFailedServerIds(prev => prev.filter(sid => sid !== id))
+  }, [])
+
   const value = useMemo<ConnectorToolContextValue>(() => ({
     toolMap,
     registerConnectorTools,
@@ -80,7 +90,8 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
     isConnectorTool,
     getConnectorInfo,
     failedServerIds,
-    setFailedServerIds,
+    addFailedServerIds,
+    removeFailedServerId,
   }), [
     toolMap,
     registerConnectorTools,
@@ -88,7 +99,8 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
     isConnectorTool,
     getConnectorInfo,
     failedServerIds,
-    setFailedServerIds,
+    addFailedServerIds,
+    removeFailedServerId,
   ])
 
   return (
@@ -100,8 +112,20 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
 
 /**
  * Hook to access connector tool context.
- * Returns null if used outside of ConnectorToolProvider (graceful degradation).
+ * Throws if used outside of ConnectorToolProvider — use for components that
+ * are guaranteed to be inside the provider (e.g., NexusRuntimeWrapper).
  */
-export function useConnectorTools(): ConnectorToolContextValue | null {
+export function useConnectorTools(): ConnectorToolContextValue {
+  const ctx = useContext(ConnectorToolContext)
+  if (!ctx) throw new Error('useConnectorTools must be used within ConnectorToolProvider')
+  return ctx
+}
+
+/**
+ * Optional hook that returns null outside ConnectorToolProvider.
+ * Use for components that need graceful degradation (e.g., ConnectorToolFallback,
+ * ToolGroup) which may render outside the provider in non-nexus contexts.
+ */
+export function useConnectorToolsOptional(): ConnectorToolContextValue | null {
   return useContext(ConnectorToolContext)
 }

@@ -219,30 +219,26 @@ function NexusRuntimeWrapper({
   onToolsChange,
   onConnectorsChange,
 }: NexusRuntimeWrapperProps) {
-  const connectorCtx = useConnectorTools()
+  const { addFailedServerIds, removeFailedServerId, failedServerIds } = useConnectorTools()
 
-  const handleConnectorReconnect = useCallback((failedServerIds: string[]) => {
-    // NexusRuntimeWrapper is always rendered inside ConnectorToolProvider, so connectorCtx is non-null
-    // Merge incoming IDs with existing ones (de-duplicated) to handle concurrent reconnect signals
-    connectorCtx!.setFailedServerIds(prev => [...new Set([...prev, ...failedServerIds])])
-    // Show toast to guide user to reconnect
+  const handleConnectorReconnect = useCallback((ids: string[]) => {
+    addFailedServerIds(ids)
     toast.warning('Connector connection expired', {
       description: 'Some connector tools are unavailable. Use the Connect menu to reconnect.',
       duration: 8000,
     })
-  }, [connectorCtx])
+  }, [addFailedServerIds])
 
   // Handle reconnect action from the inline prompt
   const handleReconnectAction = useCallback((serverId: string) => {
-    // NexusRuntimeWrapper is always rendered inside ConnectorToolProvider, so connectorCtx is non-null
-    connectorCtx!.setFailedServerIds(prev => prev.filter(id => id !== serverId))
+    removeFailedServerId(serverId)
     // Future: This will open the OAuth popup for the server (Task 5/6)
     // For now, show guidance toast
     toast.info('Reconnect', {
       description: 'Use the Connect menu in the composer to re-authenticate.',
       duration: 5000,
     })
-  }, [connectorCtx])
+  }, [removeFailedServerId])
 
   return (
     <ConversationRuntimeProvider
@@ -262,10 +258,10 @@ function NexusRuntimeWrapper({
       <PromptAutoLoader />
 
       {/* Connector reconnect prompt (shown when auth fails) */}
-      {connectorCtx && connectorCtx.failedServerIds.length > 0 && (
+      {failedServerIds.length > 0 && (
         <div className="mx-auto w-full max-w-[48rem] px-4">
           <ConnectorReconnectPrompt
-            serverIds={connectorCtx.failedServerIds}
+            serverIds={failedServerIds}
             onReconnect={handleReconnectAction}
           />
         </div>
