@@ -14,6 +14,8 @@ import { PromptAutoLoader } from './_components/prompt-auto-loader'
 import { ConversationInitializer } from './_components/conversation-initializer'
 import { useConversationContext, createNexusHistoryAdapter } from '@/lib/nexus/history-adapter'
 import { MultiProviderToolUIs } from './_components/tools/multi-provider-tools'
+import { ConnectorToolProvider, useConnectorTools } from './_components/tools/connector-tool-context'
+import { ConnectorReconnectPrompt } from './_components/tools/connector-tool-ui'
 import { useModelsWithPersistence } from '@/lib/hooks/use-models'
 import { createEnhancedNexusAttachmentAdapter } from '@/lib/nexus/enhanced-attachment-adapters'
 import { validateConversationId } from '@/lib/nexus/conversation-navigation'
@@ -48,6 +50,7 @@ interface ConversationRuntimeProviderProps {
   attachmentAdapter: AttachmentAdapter
   initialMessages?: UIMessage[]
   onConversationIdChange?: (conversationId: string) => void
+  onConnectorReconnect?: (failedServerIds: string[]) => void
 }
 
 function ConversationRuntimeProvider({
@@ -58,7 +61,8 @@ function ConversationRuntimeProvider({
   enabledConnectors,
   attachmentAdapter,
   initialMessages = [],
-  onConversationIdChange
+  onConversationIdChange,
+  onConnectorReconnect
 }: ConversationRuntimeProviderProps) {
   const historyAdapter = useMemo(
     () => createNexusHistoryAdapter(conversationId),
@@ -125,19 +129,21 @@ function ConversationRuntimeProvider({
       }
     }
 
-    // Signal when connectors failed (auth expiry, missing token, etc.)
-    const reconnectIds = response.headers.get('X-Connector-Reconnect')
-    if (reconnectIds) {
-      const count = reconnectIds.split(',').length
-      toast.warning('Connector Issue', {
-        description: `${count} connector${count > 1 ? 's' : ''} could not be reached. Open the Connect menu to reconnect.`,
-        duration: 8000
-      })
-      log.warn('Connectors need reconnection', { failedCount: count })
+    // Handle connector reconnect signal (from failed MCP connector auth)
+    const reconnectHeader = response.headers.get('X-Connector-Reconnect')
+    if (reconnectHeader) {
+      // Parse comma-separated server IDs (UUIDs only, validated on server side)
+      const failedIds = reconnectHeader.split(',').filter(id => id.trim().length > 0)
+      if (failedIds.length > 0) {
+        log.warn('Connector reconnect signal received', { failedCount: failedIds.length })
+        if (onConnectorReconnect) {
+          onConnectorReconnect(failedIds)
+        }
+      }
     }
 
     return response
-  }, [conversationId, onConversationIdChange])
+  }, [conversationId, onConversationIdChange, onConnectorReconnect])
 
   // Use official useChatRuntime from @assistant-ui/react-ai-sdk
   // This natively understands AI SDK's streaming format
@@ -167,6 +173,115 @@ function ConversationRuntimeProvider({
     <AssistantRuntimeProvider runtime={runtime}>
       {children}
     </AssistantRuntimeProvider>
+  )
+}
+
+/**
+ * Inner wrapper that uses ConnectorToolContext to wire up
+ * the reconnect handler between the runtime and the context.
+ */
+interface NexusRuntimeWrapperProps {
+  conversationId: string | null
+  selectedModel: SelectAiModel | null
+  enabledTools: string[]
+  enabledConnectors: string[]
+  attachmentAdapter: AttachmentAdapter
+  initialMessages: UIMessage[]
+  onConversationIdChange: (id: string) => void
+  processingAttachments: Set<string>
+  models: SelectAiModel[]
+  onModelChange: (model: SelectAiModel) => void
+  isLoadingModels: boolean
+  onToolsChange: (tools: string[]) => void
+  onConnectorsChange: (connectors: string[]) => void
+}
+
+function NexusRuntimeWrapper({
+  conversationId,
+  selectedModel,
+  enabledTools,
+  enabledConnectors,
+  attachmentAdapter,
+  initialMessages,
+  onConversationIdChange,
+  processingAttachments,
+  models,
+  onModelChange,
+  isLoadingModels,
+  onToolsChange,
+  onConnectorsChange,
+}: NexusRuntimeWrapperProps) {
+  const connectorCtx = useConnectorTools()
+
+  const handleConnectorReconnect = useCallback((failedServerIds: string[]) => {
+    if (connectorCtx) {
+      connectorCtx.setFailedServerIds(failedServerIds)
+    }
+    // Show toast to guide user to reconnect
+    toast.warning('Connector connection expired', {
+      description: 'Some connector tools are unavailable. Use the Connect menu to reconnect.',
+      duration: 8000,
+    })
+  }, [connectorCtx])
+
+  // Handle reconnect action from the inline prompt
+  const handleReconnectAction = useCallback((serverId: string) => {
+    // Clear the failed status for this server
+    if (connectorCtx) {
+      connectorCtx.setFailedServerIds(
+        connectorCtx.failedServerIds.filter(id => id !== serverId)
+      )
+    }
+    // Future: This will open the OAuth popup for the server (Task 5/6)
+    // For now, show guidance toast
+    toast.info('Reconnect', {
+      description: 'Use the Connect menu in the composer to re-authenticate.',
+      duration: 5000,
+    })
+  }, [connectorCtx])
+
+  return (
+    <ConversationRuntimeProvider
+      conversationId={conversationId}
+      selectedModel={selectedModel}
+      enabledTools={enabledTools}
+      enabledConnectors={enabledConnectors}
+      attachmentAdapter={attachmentAdapter}
+      initialMessages={initialMessages}
+      onConversationIdChange={onConversationIdChange}
+      onConnectorReconnect={handleConnectorReconnect}
+    >
+      {/* Register tool UI components for all providers */}
+      <MultiProviderToolUIs />
+
+      {/* Auto-load prompts from Prompt Library */}
+      <PromptAutoLoader />
+
+      {/* Connector reconnect prompt (shown when auth fails) */}
+      {connectorCtx && connectorCtx.failedServerIds.length > 0 && (
+        <div className="mx-auto w-full max-w-[48rem] px-4">
+          <ConnectorReconnectPrompt
+            serverIds={connectorCtx.failedServerIds}
+            onReconnect={handleReconnectAction}
+          />
+        </div>
+      )}
+
+      <div className="flex h-full flex-col">
+        <Thread
+          processingAttachments={processingAttachments}
+          conversationId={conversationId}
+          models={models}
+          selectedModel={selectedModel}
+          onModelChange={onModelChange}
+          isLoadingModels={isLoadingModels}
+          enabledTools={enabledTools}
+          onToolsChange={onToolsChange}
+          enabledConnectors={enabledConnectors}
+          onConnectorsChange={onConnectorsChange}
+        />
+      </div>
+    </ConversationRuntimeProvider>
   )
 }
 
@@ -327,54 +442,41 @@ function NexusPageContent() {
 
   return (
     <ErrorBoundary>
-      <NexusLayout conversationId={conversationId}>
-        <NexusShell>
-          <div className="relative h-full">
-            {selectedModel ? (
-              <ConversationInitializer conversationId={stableConversationId}>
-                {(initialMessages) => (
-                  <ConversationRuntimeProvider
-                    conversationId={conversationId}
-                    selectedModel={selectedModel}
-                    enabledTools={enabledTools}
-                    enabledConnectors={enabledConnectors}
-                    attachmentAdapter={attachmentAdapter}
-                    initialMessages={initialMessages}
-                    onConversationIdChange={handleConversationIdChange}
-                  >
-                    {/* Register tool UI components for all providers */}
-                    <MultiProviderToolUIs />
-
-                    {/* Auto-load prompts from Prompt Library */}
-                    <PromptAutoLoader />
-
-                    <div className="flex h-full flex-col">
-                      <Thread
-                        processingAttachments={processingAttachments}
-                        conversationId={conversationId}
-                        models={models}
-                        selectedModel={selectedModel}
-                        onModelChange={setSelectedModel}
-                        isLoadingModels={isLoadingModels}
-                        enabledTools={enabledTools}
-                        onToolsChange={onToolsChange}
-                        enabledConnectors={enabledConnectors}
-                        onConnectorsChange={onConnectorsChange}
-                      />
-                    </div>
-                  </ConversationRuntimeProvider>
-                )}
-              </ConversationInitializer>
-            ) : (
-              <div className="flex h-full items-center justify-center">
-                <div className="text-center">
-                  <div className="text-lg text-muted-foreground">Please select a model to start chatting</div>
+      <ConnectorToolProvider>
+        <NexusLayout conversationId={conversationId}>
+          <NexusShell>
+            <div className="relative h-full">
+              {selectedModel ? (
+                <ConversationInitializer conversationId={stableConversationId}>
+                  {(initialMessages) => (
+                    <NexusRuntimeWrapper
+                      conversationId={conversationId}
+                      selectedModel={selectedModel}
+                      enabledTools={enabledTools}
+                      enabledConnectors={enabledConnectors}
+                      attachmentAdapter={attachmentAdapter}
+                      initialMessages={initialMessages}
+                      onConversationIdChange={handleConversationIdChange}
+                      processingAttachments={processingAttachments}
+                      models={models}
+                      onModelChange={setSelectedModel}
+                      isLoadingModels={isLoadingModels}
+                      onToolsChange={onToolsChange}
+                      onConnectorsChange={onConnectorsChange}
+                    />
+                  )}
+                </ConversationInitializer>
+              ) : (
+                <div className="flex h-full items-center justify-center">
+                  <div className="text-center">
+                    <div className="text-lg text-muted-foreground">Please select a model to start chatting</div>
+                  </div>
                 </div>
-              </div>
-            )}
-          </div>
-        </NexusShell>
-      </NexusLayout>
+              )}
+            </div>
+          </NexusShell>
+        </NexusLayout>
+      </ConnectorToolProvider>
     </ErrorBoundary>
   )
 }

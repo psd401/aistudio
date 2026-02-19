@@ -29,7 +29,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { MarkdownText } from "./markdown-text";
 import { WebSearchSource } from "./web-search-sources";
-import { ToolFallback } from "./tool-fallback";
+import { ConnectorToolFallback } from "@/app/(protected)/nexus/_components/tools/connector-tool-ui";
 import { ToolGroup } from "@/app/(protected)/nexus/_components/tools/tool-group";
 import {
   ComposerAttachments,
@@ -59,7 +59,7 @@ const ASSISTANT_MESSAGE_CONTENT_COMPONENTS = {
   Text: MarkdownText,
   Source: WebSearchSource,
   ToolGroup: ToolGroup,
-  tools: { Fallback: ToolFallback },
+  tools: { Fallback: ConnectorToolFallback },
 };
 
 const USER_MESSAGE_CONTENT_COMPONENTS = { Text: MarkdownText };
