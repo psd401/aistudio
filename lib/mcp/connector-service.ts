@@ -13,7 +13,7 @@
  */
 
 import { createMCPClient } from "@ai-sdk/mcp"
-import { eq, and } from "drizzle-orm"
+import { eq, and, or, sql } from "drizzle-orm"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
 import {
@@ -53,24 +53,30 @@ export async function getAvailableConnectors(
 
   log.info("Fetching available connectors", { requestId, userId })
 
-  const servers = await executeQuery(
-    (db) => db.select().from(nexusMcpServers),
-    "getAvailableConnectors"
-  )
-
   const hasDefaultAccess =
     userRoleNames.includes("administrator") || userRoleNames.includes("staff")
 
-  const accessible = servers.filter((server) => {
-    const allowed = server.allowedUsers ?? []
-    if (allowed.length > 0) {
-      return allowed.includes(userId)
-    }
-    return hasDefaultAccess
-  })
+  // Filter at DB level: user in allowedUsers[], OR empty allowedUsers + admin/staff role
+  const accessible = await executeQuery(
+    (db) =>
+      db
+        .select()
+        .from(nexusMcpServers)
+        .where(
+          or(
+            // User is explicitly in the allow list
+            sql`${userId} = ANY(${nexusMcpServers.allowedUsers})`,
+            // Or the list is empty and user has default role-based access
+            hasDefaultAccess
+              ? sql`coalesce(cardinality(${nexusMcpServers.allowedUsers}), 0) = 0`
+              : undefined
+          )
+        ),
+    "getAvailableConnectors"
+  )
 
   timer({ status: "success", count: accessible.length })
-  log.info("Connectors retrieved", { requestId, total: servers.length, accessible: accessible.length })
+  log.info("Connectors retrieved", { requestId, count: accessible.length })
 
   return accessible.map(toMcpConnector)
 }
@@ -151,21 +157,33 @@ export async function getConnectorTools(
 
   const server = servers[0]
 
-  // 2. Resolve auth headers
+  // 2. Validate transport — @ai-sdk/mcp only supports "http" and "sse"
+  assertHttpTransport(server.transport)
+
+  // 3. Validate URL — prevent SSRF against internal/metadata endpoints
+  validateMcpServerUrl(server.url)
+
+  // 4. Resolve auth headers
   const headers = await resolveAuthHeaders(server.authType as McpAuthType, userId, serverId)
 
-  // 3. Create MCP client (per-request lifecycle)
+  // 5. Create MCP client (per-request lifecycle)
   const client = await createMCPClient({
     transport: {
-      type: server.transport as "http" | "sse",
+      type: "http",
       url: server.url,
       headers,
     },
     name: "aistudio-connector",
   })
 
-  // 4. Fetch tools
-  const tools = await client.tools()
+  // 6. Fetch tools — close client on failure to prevent resource leaks
+  let tools
+  try {
+    tools = await client.tools()
+  } catch (error) {
+    try { await client.close() } catch { /* ignore cleanup errors */ }
+    throw error
+  }
 
   timer({ status: "success", toolCount: Object.keys(tools).length })
   log.info("Connector tools fetched", {
@@ -253,7 +271,10 @@ export async function refreshUserToken(
 
   const server = servers[0]
 
-  // 4. Exchange refresh token for new access token
+  // 4. Validate server URL — prevent SSRF
+  validateMcpServerUrl(server.url)
+
+  // 5. Exchange refresh token for new access token
   // The token endpoint is derived from the server URL (convention: /oauth/token)
   const tokenEndpoint = new URL("/oauth/token", server.url).toString()
 
@@ -274,9 +295,10 @@ export async function refreshUserToken(
       return { success: false, reconnectRequired: true }
     }
 
-    tokenResponse = (await resp.json()) as OAuthTokenResponse
+    const json = await resp.json()
+    tokenResponse = parseOAuthTokenResponse(json)
   } catch (err) {
-    log.warn("Token refresh network error", { requestId, error: String(err) })
+    log.warn("Token refresh failed", { requestId, error: String(err) })
     timer({ status: "error" })
     return { success: false, reconnectRequired: true }
   }
@@ -322,6 +344,26 @@ interface OAuthTokenResponse {
   token_type: string
 }
 
+/** Runtime validation for external OAuth token responses (no zod dependency) */
+function parseOAuthTokenResponse(json: unknown): OAuthTokenResponse {
+  if (
+    typeof json !== "object" ||
+    json === null ||
+    typeof (json as Record<string, unknown>).access_token !== "string" ||
+    typeof (json as Record<string, unknown>).token_type !== "string"
+  ) {
+    throw new Error("Invalid OAuth token response: missing access_token or token_type")
+  }
+  const obj = json as Record<string, unknown>
+  return {
+    access_token: obj.access_token as string,
+    token_type: obj.token_type as string,
+    refresh_token: typeof obj.refresh_token === "string" ? obj.refresh_token : undefined,
+    expires_in: typeof obj.expires_in === "number" ? obj.expires_in : undefined,
+    scope: typeof obj.scope === "string" ? obj.scope : undefined,
+  }
+}
+
 // ─── Audit Logging ───────────────────────────────────────────────────────────
 
 /**
@@ -337,8 +379,8 @@ export async function logToolCall(entry: McpToolCallLogEntry): Promise<void> {
           userId: entry.userId,
           serverId: entry.serverId,
           toolName: entry.toolName,
-          input: entry.input,
-          output: entry.output,
+          input: truncateForAudit(entry.input),
+          output: truncateForAudit(entry.output),
           durationMs: entry.durationMs,
           error: entry.error ?? null,
         }),
@@ -351,6 +393,72 @@ export async function logToolCall(entry: McpToolCallLogEntry): Promise<void> {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+// ─── Validation Helpers ──────────────────────────────────────────────────────
+
+/** Max size for audit log JSONB payloads (64 KB) */
+const MAX_AUDIT_PAYLOAD_BYTES = 64 * 1024
+
+/** Truncates large JSONB payloads before audit log insert */
+function truncateForAudit(
+  data: Record<string, unknown> | null
+): Record<string, unknown> | null {
+  if (!data) return null
+  const json = JSON.stringify(data)
+  if (json.length <= MAX_AUDIT_PAYLOAD_BYTES) return data
+  return { _truncated: true, _sizeBytes: json.length }
+}
+
+/**
+ * Validates that a server URL is safe for outbound requests (SSRF prevention).
+ * Blocks private/internal addresses and non-HTTPS schemes in production.
+ */
+function validateMcpServerUrl(rawUrl: string): void {
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    throw new Error("Invalid MCP server URL")
+  }
+
+  const isProduction = process.env.NODE_ENV === "production"
+
+  if (isProduction && parsed.protocol !== "https:") {
+    throw new Error("MCP server URL must use HTTPS in production")
+  }
+
+  if (!isProduction && !["https:", "http:"].includes(parsed.protocol)) {
+    throw new Error("MCP server URL must use HTTP or HTTPS")
+  }
+
+  const hostname = parsed.hostname.toLowerCase()
+  const privatePatterns = [
+    /^127\./,
+    /^10\./,
+    /^172\.(1[6-9]|2\d|3[01])\./,
+    /^192\.168\./,
+    /^169\.254\./, // link-local / AWS IMDS
+    /^::1$/,
+    /^metadata\.google\.internal$/,
+  ]
+
+  if (isProduction && privatePatterns.some((p) => p.test(hostname))) {
+    throw new Error("MCP server URL must not target private/internal addresses")
+  }
+}
+
+/**
+ * Asserts the transport value from the DB is supported by @ai-sdk/mcp.
+ * The DB schema allows stdio/http/websocket, but the SDK only supports http transport
+ * for server-to-server communication.
+ */
+function assertHttpTransport(transport: string): asserts transport is "http" {
+  if (transport !== "http") {
+    throw new Error(
+      `Unsupported MCP transport: "${transport}". Only "http" is supported for server-to-server connections.`
+    )
+  }
+}
 
 /** Maps a DB row to the McpConnector type */
 function toMcpConnector(row: typeof nexusMcpServers.$inferSelect): McpConnector {
@@ -368,9 +476,11 @@ function toMcpConnector(row: typeof nexusMcpServers.$inferSelect): McpConnector 
 /**
  * Resolves HTTP headers for authenticating to an MCP server.
  *
- * For "bearer" and "oauth2" auth types, decrypts the stored access token.
- * For "none", returns empty headers.
- * For "api_key", decrypts the stored token and passes it as X-API-Key.
+ * Auth types match the DB CHECK constraint in 028-nexus-schema.sql:
+ * - "oauth": Bearer token from per-user encrypted token store
+ * - "jwt": Bearer token (JWT-based auth)
+ * - "api_key": X-API-Key header
+ * - "none": no auth headers
  */
 async function resolveAuthHeaders(
   authType: McpAuthType,
@@ -397,16 +507,15 @@ async function resolveAuthHeaders(
   )
 
   if (rows.length === 0) {
-    throw new Error(
-      `No token found for user ${userId} on server ${serverId}. User must authenticate first.`
-    )
+    log.warn("No token found for user on server", { userId, serverId })
+    throw new Error("No token found. User must authenticate first.")
   }
 
   const accessToken = await decryptToken(rows[0].encryptedAccessToken)
 
   switch (authType) {
-    case "bearer":
-    case "oauth2":
+    case "oauth":
+    case "jwt":
       return { Authorization: `Bearer ${accessToken}` }
     case "api_key":
       return { "X-API-Key": accessToken }
