@@ -133,7 +133,7 @@ function ConversationRuntimeProvider({
         description: `${count} connector${count > 1 ? 's' : ''} could not be reached. Open the Connect menu to reconnect.`,
         duration: 8000
       })
-      log.warn('Connectors need reconnection', { reconnectIds })
+      log.warn('Connectors need reconnection', { failedCount: count })
     }
 
     return response

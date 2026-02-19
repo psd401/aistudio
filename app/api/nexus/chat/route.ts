@@ -167,7 +167,10 @@ async function executeStreaming(params: {
     }
 
     if (failedConnectorIds.length > 0) {
-      responseHeaders['X-Connector-Reconnect'] = failedConnectorIds.join(',');
+      const safeIds = failedConnectorIds.filter(id => /^[\da-f-]{36}$/i.test(id));
+      if (safeIds.length > 0) {
+        responseHeaders['X-Connector-Reconnect'] = safeIds.join(',');
+      }
     }
 
     return streamResponse.result.toUIMessageStreamResponse({ headers: responseHeaders });
@@ -191,7 +194,7 @@ const ChatRequestSchema = z.object({
   provider: z.string().optional(),
   conversationId: z.string().nullable().optional(),
   enabledTools: z.array(z.string()).optional(),
-  enabledConnectors: z.array(z.string().uuid()).optional(),
+  enabledConnectors: z.array(z.string().uuid()).max(10).optional(),
   reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high']).optional(),
   responseMode: z.enum(['standard', 'priority', 'flex']).optional()
 });
@@ -498,8 +501,7 @@ export async function POST(req: Request) {
       const results = await Promise.allSettled(
         enabledConnectors.map(serverId => getConnectorTools(serverId, userId, userRoleNames))
       );
-      for (let i = 0; i < results.length; i++) {
-        const result = results[i];
+      for (const [i, result] of results.entries()) {
         if (result.status === 'fulfilled') {
           connectorToolResults.push(result.value);
         } else {
