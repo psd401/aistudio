@@ -132,8 +132,14 @@ function ConversationRuntimeProvider({
     // Handle connector reconnect signal (from failed MCP connector auth)
     const reconnectHeader = response.headers.get('X-Connector-Reconnect')
     if (reconnectHeader) {
-      // Parse comma-separated server IDs (UUIDs only, validated on server side)
-      const failedIds = reconnectHeader.split(',').filter(id => id.trim().length > 0)
+      // Parse comma-separated server IDs — validate UUID format and cap count
+      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+      const MAX_RECONNECT_IDS = 10
+      const failedIds = reconnectHeader
+        .split(',')
+        .map(id => id.trim())
+        .filter(id => UUID_RE.test(id))
+        .slice(0, MAX_RECONNECT_IDS)
       if (failedIds.length > 0) {
         log.warn('Connector reconnect signal received', { failedCount: failedIds.length })
         if (onConnectorReconnect) {

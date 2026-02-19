@@ -58,6 +58,14 @@ function summarizeArgs(argsText: string): string {
   }
 }
 
+/** Allowlist of safe image MIME types for data URI construction */
+const SAFE_IMAGE_MIME_TYPES = new Set([
+  'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp',
+])
+
+/** Maximum content items to render from a single tool result */
+const MAX_CONTENT_ITEMS = 50
+
 /**
  * Detect result type for rendering.
  */
@@ -83,7 +91,7 @@ function parseResult(result: unknown): ParsedResult[] {
       return [{ type: 'error', text: errorText }]
     }
 
-    return (mcpResult.content || []).map(item => {
+    return (mcpResult.content || []).slice(0, MAX_CONTENT_ITEMS).map(item => {
       if (item.type === 'image') {
         return { type: 'image' as const, url: item.data, mimeType: item.mimeType }
       }
@@ -153,10 +161,11 @@ function TextResult({ text }: { text: string }) {
 }
 
 function ImageResult({ url, mimeType }: { url: string; mimeType?: string }) {
+  const safeMime = mimeType && SAFE_IMAGE_MIME_TYPES.has(mimeType) ? mimeType : 'image/png'
   return (
     <div className="mt-2">
       <img
-        src={url.startsWith('data:') ? url : `data:${mimeType || 'image/png'};base64,${url}`}
+        src={url.startsWith('data:') ? url : `data:${safeMime};base64,${url}`}
         alt="Connector result"
         className="max-w-xs rounded-lg border shadow-sm"
       />

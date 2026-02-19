@@ -68,7 +68,7 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
   }, [])
 
   const isConnectorTool = useCallback((toolName: string) => {
-    return toolName in toolMap
+    return Object.hasOwn(toolMap, toolName)
   }, [toolMap])
 
   const getConnectorInfo = useCallback((toolName: string) => {
