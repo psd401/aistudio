@@ -22,6 +22,10 @@ import {
   nexusMcpAuditLogs,
 } from "@/lib/db/schema"
 import { encryptToken, decryptToken } from "@/lib/crypto/token-encryption"
+import {
+  SecretsManagerClient,
+  GetSecretValueCommand,
+} from "@aws-sdk/client-secrets-manager"
 import type {
   McpConnector,
   McpAuthType,
@@ -57,21 +61,23 @@ export async function getAvailableConnectors(
     userRoleNames.includes("administrator") || userRoleNames.includes("staff")
 
   // Filter at DB level: user in allowedUsers[], OR empty allowedUsers + admin/staff role
+  const conditions = [
+    // User is explicitly in the allow list
+    sql`${userId} = ANY(${nexusMcpServers.allowedUsers})`,
+  ]
+  if (hasDefaultAccess) {
+    // Empty allow list + admin/staff role = open access
+    conditions.push(
+      sql`coalesce(cardinality(${nexusMcpServers.allowedUsers}), 0) = 0`
+    )
+  }
+
   const accessible = await executeQuery(
     (db) =>
       db
         .select()
         .from(nexusMcpServers)
-        .where(
-          or(
-            // User is explicitly in the allow list
-            sql`${userId} = ANY(${nexusMcpServers.allowedUsers})`,
-            // Or the list is empty and user has default role-based access
-            hasDefaultAccess
-              ? sql`coalesce(cardinality(${nexusMcpServers.allowedUsers}), 0) = 0`
-              : undefined
-          )
-        ),
+        .where(or(...conditions)),
     "getAvailableConnectors"
   )
 
@@ -140,31 +146,17 @@ export async function getConnectorTools(
 
   log.info("Fetching connector tools", { requestId, serverId, userId })
 
-  // 1. Load server config
-  const servers = await executeQuery(
-    (db) =>
-      db
-        .select()
-        .from(nexusMcpServers)
-        .where(eq(nexusMcpServers.id, serverId))
-        .limit(1),
-    "getConnectorTools:server"
-  )
+  // 1. Load server config + user token in a single round trip
+  const { server, tokenRow } = await loadServerAndToken(serverId, userId)
 
-  if (servers.length === 0) {
-    throw new Error(`MCP server not found: ${serverId}`)
-  }
-
-  const server = servers[0]
-
-  // 2. Validate transport — @ai-sdk/mcp only supports "http" and "sse"
+  // 2. Validate transport — @ai-sdk/mcp only supports "http" for server-to-server
   assertHttpTransport(server.transport)
 
   // 3. Validate URL — prevent SSRF against internal/metadata endpoints
   validateMcpServerUrl(server.url)
 
-  // 4. Resolve auth headers
-  const headers = await resolveAuthHeaders(server.authType as McpAuthType, userId, serverId)
+  // 4. Resolve auth headers from loaded token
+  const headers = await buildAuthHeaders(server.authType as McpAuthType, tokenRow)
 
   // 5. Create MCP client (per-request lifecycle)
   const client = await createMCPClient({
@@ -254,7 +246,7 @@ export async function refreshUserToken(
     return { success: false, reconnectRequired: true }
   }
 
-  // 3. Load server config for token endpoint
+  // 3. Load server config for token endpoint + client credentials
   const servers = await executeQuery(
     (db) =>
       db
@@ -275,35 +267,14 @@ export async function refreshUserToken(
   validateMcpServerUrl(server.url)
 
   // 5. Exchange refresh token for new access token
-  // The token endpoint is derived from the server URL (convention: /oauth/token)
-  const tokenEndpoint = new URL("/oauth/token", server.url).toString()
-
-  let tokenResponse: OAuthTokenResponse
-  try {
-    const resp = await fetch(tokenEndpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: refreshToken,
-      }),
-    })
-
-    if (!resp.ok) {
-      log.warn("Token refresh request failed", { requestId, status: resp.status })
-      timer({ status: "error" })
-      return { success: false, reconnectRequired: true }
-    }
-
-    const json = await resp.json()
-    tokenResponse = parseOAuthTokenResponse(json)
-  } catch (err) {
-    log.warn("Token refresh failed", { requestId, error: String(err) })
+  const tokenResponse = await exchangeRefreshToken(server, refreshToken)
+  if (!tokenResponse) {
+    log.warn("Token refresh failed", { requestId, userId, serverId })
     timer({ status: "error" })
     return { success: false, reconnectRequired: true }
   }
 
-  // 5. Encrypt new tokens and update DB atomically
+  // 6. Encrypt new tokens and update DB atomically
   const newEncryptedAccess = await encryptToken(tokenResponse.access_token)
   const newEncryptedRefresh = tokenResponse.refresh_token
     ? await encryptToken(tokenResponse.refresh_token)
@@ -394,6 +365,184 @@ export async function logToolCall(entry: McpToolCallLogEntry): Promise<void> {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
+// ─── Data Loading Helpers ────────────────────────────────────────────────────
+
+/** Server row type from nexusMcpServers */
+type ServerRow = typeof nexusMcpServers.$inferSelect
+
+/** Token row type from nexusMcpUserTokens (nullable — user may not have a token) */
+type TokenRow = typeof nexusMcpUserTokens.$inferSelect | null
+
+/**
+ * Loads server config and user token in a single DB round trip (avoids N+1).
+ * Returns both so callers can build auth headers without a second query.
+ */
+async function loadServerAndToken(
+  serverId: string,
+  userId: number
+): Promise<{ server: ServerRow; tokenRow: TokenRow }> {
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({
+          server: nexusMcpServers,
+          token: nexusMcpUserTokens,
+        })
+        .from(nexusMcpServers)
+        .leftJoin(
+          nexusMcpUserTokens,
+          and(
+            eq(nexusMcpUserTokens.serverId, nexusMcpServers.id),
+            eq(nexusMcpUserTokens.userId, userId)
+          )
+        )
+        .where(eq(nexusMcpServers.id, serverId))
+        .limit(1),
+    "loadServerAndToken"
+  )
+
+  if (rows.length === 0) {
+    throw new Error(`MCP server not found: ${serverId}`)
+  }
+
+  return { server: rows[0].server, tokenRow: rows[0].token }
+}
+
+/**
+ * Builds auth headers from a pre-loaded token row (sync — no DB call).
+ * Decrypts the stored access token and maps it to the appropriate header.
+ */
+async function buildAuthHeaders(
+  authType: McpAuthType,
+  tokenRow: TokenRow
+): Promise<Record<string, string>> {
+  if (authType === "none") {
+    return {}
+  }
+
+  if (!tokenRow) {
+    throw new Error("No token found. User must authenticate first.")
+  }
+
+  // Check token expiry before sending
+  if (tokenRow.tokenExpiresAt && tokenRow.tokenExpiresAt < new Date()) {
+    throw new Error("Token expired. User must re-authenticate or refresh token.")
+  }
+
+  const accessToken = await decryptToken(tokenRow.encryptedAccessToken)
+
+  switch (authType) {
+    case "oauth":
+    case "jwt":
+      return { Authorization: `Bearer ${accessToken}` }
+    case "api_key":
+      return { "X-API-Key": accessToken }
+    default: {
+      const _exhaustive: never = authType
+      throw new Error(`Unsupported auth type: ${_exhaustive}`)
+    }
+  }
+}
+
+// ─── Token Exchange Helper ───────────────────────────────────────────────────
+
+/**
+ * Performs the OAuth token refresh exchange (RFC 6749 §6).
+ * Loads client credentials from Secrets Manager if configured, resolves the
+ * token endpoint, and exchanges the refresh token for a new access token.
+ * Returns null on any failure (caller handles reconnect flow).
+ */
+async function exchangeRefreshToken(
+  server: ServerRow,
+  refreshToken: string
+): Promise<OAuthTokenResponse | null> {
+  // Load client credentials from Secrets Manager if configured
+  const credentials = server.credentialsKey
+    ? await loadOAuthCredentials(server.credentialsKey)
+    : null
+
+  // Resolve token endpoint: credentials secret > fallback to /oauth/token
+  const tokenEndpoint = credentials?.tokenEndpointUrl
+    ? credentials.tokenEndpointUrl
+    : new URL("/oauth/token", server.url).toString()
+  validateMcpServerUrl(tokenEndpoint)
+
+  // Build request body with client credentials (RFC 6749 §6)
+  const body: Record<string, string> = {
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+  }
+  if (credentials?.clientId) body.client_id = credentials.clientId
+  if (credentials?.clientSecret) body.client_secret = credentials.clientSecret
+
+  try {
+    const resp = await fetch(tokenEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      signal: AbortSignal.timeout(15_000),
+      body: new URLSearchParams(body),
+    })
+
+    if (!resp.ok) {
+      log.warn("Token refresh request failed", { status: resp.status })
+      return null
+    }
+
+    const json = await resp.json()
+    return parseOAuthTokenResponse(json)
+  } catch (err) {
+    log.warn("Token exchange failed", { error: String(err) })
+    return null
+  }
+}
+
+// ─── OAuth Credentials Helper ────────────────────────────────────────────────
+
+/** Shape of the JSON stored in Secrets Manager under credentialsKey */
+interface OAuthClientCredentials {
+  clientId: string
+  clientSecret: string
+  /** Provider-specific token endpoint (e.g. https://accounts.google.com/o/oauth2/token) */
+  tokenEndpointUrl?: string
+}
+
+const secretsClient = new SecretsManagerClient({
+  region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-west-2",
+})
+
+/**
+ * Fetches OAuth client credentials from AWS Secrets Manager.
+ * The secret is expected to be a JSON string with { clientId, clientSecret, tokenEndpointUrl? }.
+ */
+async function loadOAuthCredentials(
+  credentialsKey: string
+): Promise<OAuthClientCredentials> {
+  const result = await secretsClient.send(
+    new GetSecretValueCommand({ SecretId: credentialsKey })
+  )
+  if (!result.SecretString) {
+    throw new Error(`OAuth credentials secret is empty: ${credentialsKey}`)
+  }
+  const parsed: unknown = JSON.parse(result.SecretString)
+  if (
+    typeof parsed !== "object" ||
+    parsed === null ||
+    typeof (parsed as Record<string, unknown>).clientId !== "string" ||
+    typeof (parsed as Record<string, unknown>).clientSecret !== "string"
+  ) {
+    throw new Error(
+      `Invalid OAuth credentials format in ${credentialsKey}: expected { clientId, clientSecret }`
+    )
+  }
+  const obj = parsed as Record<string, unknown>
+  return {
+    clientId: obj.clientId as string,
+    clientSecret: obj.clientSecret as string,
+    tokenEndpointUrl:
+      typeof obj.tokenEndpointUrl === "string" ? obj.tokenEndpointUrl : undefined,
+  }
+}
+
 // ─── Validation Helpers ──────────────────────────────────────────────────────
 
 /** Max size for audit log JSONB payloads (64 KB) */
@@ -438,7 +587,12 @@ function validateMcpServerUrl(rawUrl: string): void {
     /^172\.(1[6-9]|2\d|3[01])\./,
     /^192\.168\./,
     /^169\.254\./, // link-local / AWS IMDS
+    /^0\.0\.0\.0$/,
+    /^localhost$/,
     /^::1$/,
+    /^fc[\da-f]{2}:/i, // IPv6 unique-local (fc00::/7)
+    /^fd[\da-f]{2}:/i,
+    /^fe80:/i, // IPv6 link-local (fe80::/10)
     /^metadata\.google\.internal$/,
   ]
 
@@ -473,57 +627,3 @@ function toMcpConnector(row: typeof nexusMcpServers.$inferSelect): McpConnector 
   }
 }
 
-/**
- * Resolves HTTP headers for authenticating to an MCP server.
- *
- * Auth types match the DB CHECK constraint in 028-nexus-schema.sql:
- * - "oauth": Bearer token from per-user encrypted token store
- * - "jwt": Bearer token (JWT-based auth)
- * - "api_key": X-API-Key header
- * - "none": no auth headers
- */
-async function resolveAuthHeaders(
-  authType: McpAuthType,
-  userId: number,
-  serverId: string
-): Promise<Record<string, string>> {
-  if (authType === "none") {
-    return {}
-  }
-
-  const rows = await executeQuery(
-    (db) =>
-      db
-        .select()
-        .from(nexusMcpUserTokens)
-        .where(
-          and(
-            eq(nexusMcpUserTokens.userId, userId),
-            eq(nexusMcpUserTokens.serverId, serverId)
-          )
-        )
-        .limit(1),
-    "resolveAuthHeaders"
-  )
-
-  if (rows.length === 0) {
-    log.warn("No token found for user on server", { userId, serverId })
-    throw new Error("No token found. User must authenticate first.")
-  }
-
-  const accessToken = await decryptToken(rows[0].encryptedAccessToken)
-
-  switch (authType) {
-    case "oauth":
-    case "jwt":
-      return { Authorization: `Bearer ${accessToken}` }
-    case "api_key":
-      return { "X-API-Key": accessToken }
-    default: {
-      // authType is constrained by McpAuthType; "none" handled above.
-      // If a new type is added to the DB without updating this switch, fail loud.
-      const _exhaustive: never = authType
-      throw new Error(`Unsupported auth type: ${_exhaustive}`)
-    }
-  }
-}

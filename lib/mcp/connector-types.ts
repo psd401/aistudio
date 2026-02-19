@@ -16,10 +16,9 @@ export type McpToolSet = Awaited<ReturnType<MCPClient["tools"]>>
 // ─── Connector Metadata ──────────────────────────────────────────────────────
 
 /**
- * Transport protocols supported for MCP server connections.
- * Must match CHECK constraint in 028-nexus-schema.sql.
- * Note: @ai-sdk/mcp only supports "http" and "sse" transports — "stdio" and
- * "websocket" are stored in the DB for future use but rejected at runtime.
+ * Transport protocols stored in the DB (CHECK constraint in 028-nexus-schema.sql).
+ * Only "http" is supported at runtime by @ai-sdk/mcp for server-to-server
+ * connections. "stdio" and "websocket" are rejected by assertHttpTransport().
  */
 export type McpTransportType = "stdio" | "http" | "websocket"
 
