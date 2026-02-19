@@ -211,10 +211,12 @@ export async function refreshUserToken(
 
   log.info("Attempting token refresh", { requestId, userId, serverId })
 
-  // 1. Load existing token row
-  const rows = await executeQuery(
-    (db) =>
-      db
+  // Wrap the entire read-refresh-write cycle in a transaction with row lock
+  // to prevent concurrent refreshes from stomping each other's tokens.
+  return await executeTransaction(
+    async (tx) => {
+      // 1. Lock and load existing token row (SELECT FOR UPDATE)
+      const rows = await tx
         .select()
         .from(nexusMcpUserTokens)
         .where(
@@ -223,69 +225,61 @@ export async function refreshUserToken(
             eq(nexusMcpUserTokens.serverId, serverId)
           )
         )
-        .limit(1),
-    "refreshUserToken:loadToken"
-  )
+        .limit(1)
+        .for("update")
 
-  if (rows.length === 0 || !rows[0].encryptedRefreshToken) {
-    log.warn("No refresh token available", { requestId, userId, serverId })
-    timer({ status: "error" })
-    return { success: false, reconnectRequired: true }
-  }
+      if (rows.length === 0 || !rows[0].encryptedRefreshToken) {
+        log.warn("No refresh token available", { requestId, userId, serverId })
+        timer({ status: "error" })
+        return { success: false, reconnectRequired: true }
+      }
 
-  const tokenRow = rows[0]
+      const tokenRow = rows[0]
 
-  // 2. Decrypt refresh token
-  let refreshToken: string
-  try {
-    // Safe: we checked `!rows[0].encryptedRefreshToken` above
-    refreshToken = await decryptToken(tokenRow.encryptedRefreshToken!)
-  } catch (err) {
-    log.warn("Failed to decrypt refresh token", { requestId, error: String(err) })
-    timer({ status: "error" })
-    return { success: false, reconnectRequired: true }
-  }
+      // 2. Decrypt refresh token
+      let refreshToken: string
+      try {
+        refreshToken = await decryptToken(tokenRow.encryptedRefreshToken!)
+      } catch (err) {
+        log.warn("Failed to decrypt refresh token", { requestId, error: String(err) })
+        timer({ status: "error" })
+        return { success: false, reconnectRequired: true }
+      }
 
-  // 3. Load server config for token endpoint + client credentials
-  const servers = await executeQuery(
-    (db) =>
-      db
+      // 3. Load server config for token endpoint + client credentials
+      const servers = await tx
         .select()
         .from(nexusMcpServers)
         .where(eq(nexusMcpServers.id, serverId))
-        .limit(1),
-    "refreshUserToken:loadServer"
-  )
+        .limit(1)
 
-  if (servers.length === 0) {
-    throw new Error(`MCP server not found: ${serverId}`)
-  }
+      if (servers.length === 0) {
+        throw new Error(`MCP server not found: ${serverId}`)
+      }
 
-  const server = servers[0]
+      const server = servers[0]
 
-  // 4. Validate server URL — prevent SSRF
-  validateMcpServerUrl(server.url)
+      // 4. Validate server URL — prevent SSRF
+      validateMcpServerUrl(server.url)
 
-  // 5. Exchange refresh token for new access token
-  const tokenResponse = await exchangeRefreshToken(server, refreshToken)
-  if (!tokenResponse) {
-    log.warn("Token refresh failed", { requestId, userId, serverId })
-    timer({ status: "error" })
-    return { success: false, reconnectRequired: true }
-  }
+      // 5. Exchange refresh token for new access token
+      const tokenResponse = await exchangeRefreshToken(server, refreshToken)
+      if (!tokenResponse) {
+        log.warn("Token refresh failed", { requestId, userId, serverId })
+        timer({ status: "error" })
+        return { success: false, reconnectRequired: true }
+      }
 
-  // 6. Encrypt new tokens and update DB atomically
-  const newEncryptedAccess = await encryptToken(tokenResponse.access_token)
-  const newEncryptedRefresh = tokenResponse.refresh_token
-    ? await encryptToken(tokenResponse.refresh_token)
-    : tokenRow.encryptedRefreshToken ?? undefined
+      // 6. Encrypt new tokens and write within the same transaction
+      const newEncryptedAccess = await encryptToken(tokenResponse.access_token)
+      const newEncryptedRefresh = tokenResponse.refresh_token
+        ? await encryptToken(tokenResponse.refresh_token)
+        : tokenRow.encryptedRefreshToken ?? undefined
 
-  const expiresAt = tokenResponse.expires_in
-    ? new Date(Date.now() + tokenResponse.expires_in * 1000)
-    : null
+      const expiresAt = tokenResponse.expires_in
+        ? new Date(Date.now() + tokenResponse.expires_in * 1000)
+        : null
 
-  await executeTransaction(
-    async (tx) => {
       await tx
         .update(nexusMcpUserTokens)
         .set({
@@ -296,14 +290,14 @@ export async function refreshUserToken(
           updatedAt: new Date(),
         })
         .where(eq(nexusMcpUserTokens.id, tokenRow.id))
+
+      timer({ status: "success" })
+      log.info("Token refresh successful", { requestId, userId, serverId })
+
+      return { success: true, tokenExpiresAt: expiresAt ?? undefined }
     },
-    "refreshUserToken:updateTokens"
+    "refreshUserToken"
   )
-
-  timer({ status: "success" })
-  log.info("Token refresh successful", { requestId, userId, serverId })
-
-  return { success: true, tokenExpiresAt: expiresAt ?? undefined }
 }
 
 /** Minimal OAuth token response shape */
@@ -429,6 +423,10 @@ async function buildAuthHeaders(
     throw new Error("Token expired. User must re-authenticate or refresh token.")
   }
 
+  if (!tokenRow.encryptedAccessToken) {
+    throw new Error("No access token found. User must re-authenticate.")
+  }
+
   const accessToken = await decryptToken(tokenRow.encryptedAccessToken)
 
   switch (authType) {
@@ -461,7 +459,10 @@ async function exchangeRefreshToken(
     ? await loadOAuthCredentials(server.credentialsKey)
     : null
 
-  // Resolve token endpoint: credentials secret > fallback to /oauth/token
+  // Resolve token endpoint: credentials secret > fallback to root-relative /oauth/token.
+  // new URL("/oauth/token", base) intentionally strips the base path — OAuth token
+  // endpoints are typically at the provider root, not relative to the MCP server path.
+  // Providers with non-standard paths should set tokenEndpointUrl in their credentials.
   const tokenEndpoint = credentials?.tokenEndpointUrl
     ? credentials.tokenEndpointUrl
     : new URL("/oauth/token", server.url).toString()
@@ -510,13 +511,22 @@ const secretsClient = new SecretsManagerClient({
   region: process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-west-2",
 })
 
+/** In-memory cache for OAuth client credentials (keyed by credentialsKey) */
+const credentialsCache = new Map<string, { value: OAuthClientCredentials; fetchedAt: number }>()
+const CREDENTIALS_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+
 /**
- * Fetches OAuth client credentials from AWS Secrets Manager.
+ * Fetches OAuth client credentials from AWS Secrets Manager with 5-minute TTL cache.
  * The secret is expected to be a JSON string with { clientId, clientSecret, tokenEndpointUrl? }.
  */
 async function loadOAuthCredentials(
   credentialsKey: string
 ): Promise<OAuthClientCredentials> {
+  const cached = credentialsCache.get(credentialsKey)
+  if (cached && Date.now() - cached.fetchedAt < CREDENTIALS_CACHE_TTL) {
+    return cached.value
+  }
+
   const result = await secretsClient.send(
     new GetSecretValueCommand({ SecretId: credentialsKey })
   )
@@ -535,12 +545,15 @@ async function loadOAuthCredentials(
     )
   }
   const obj = parsed as Record<string, unknown>
-  return {
+  const credentials: OAuthClientCredentials = {
     clientId: obj.clientId as string,
     clientSecret: obj.clientSecret as string,
     tokenEndpointUrl:
       typeof obj.tokenEndpointUrl === "string" ? obj.tokenEndpointUrl : undefined,
   }
+
+  credentialsCache.set(credentialsKey, { value: credentials, fetchedAt: Date.now() })
+  return credentials
 }
 
 // ─── Validation Helpers ──────────────────────────────────────────────────────
@@ -548,14 +561,15 @@ async function loadOAuthCredentials(
 /** Max size for audit log JSONB payloads (64 KB) */
 const MAX_AUDIT_PAYLOAD_BYTES = 64 * 1024
 
-/** Truncates large JSONB payloads before audit log insert */
+/** Truncates large JSONB payloads before audit log insert (byte-accurate for multibyte chars) */
 function truncateForAudit(
   data: Record<string, unknown> | null
 ): Record<string, unknown> | null {
   if (!data) return null
   const json = JSON.stringify(data)
-  if (json.length <= MAX_AUDIT_PAYLOAD_BYTES) return data
-  return { _truncated: true, _sizeBytes: json.length }
+  const byteSize = new TextEncoder().encode(json).length
+  if (byteSize <= MAX_AUDIT_PAYLOAD_BYTES) return data
+  return { _truncated: true, _sizeBytes: byteSize }
 }
 
 /**
@@ -593,6 +607,7 @@ function validateMcpServerUrl(rawUrl: string): void {
     /^fc[\da-f]{2}:/i, // IPv6 unique-local (fc00::/7)
     /^fd[\da-f]{2}:/i,
     /^fe80:/i, // IPv6 link-local (fe80::/10)
+    /^::ffff:/i, // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1)
     /^metadata\.google\.internal$/,
   ]
 
