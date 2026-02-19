@@ -1,6 +1,6 @@
 "use server"
 
-import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
+import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
 import { getServerSession } from "@/lib/auth/server-session"
 import { executeQuery } from "@/lib/db/drizzle-client"
@@ -154,7 +154,7 @@ export async function getConnectorsWithStatus(): Promise<ActionState<ConnectorWi
     })
 
     timer({ status: "success", count: connectors.length })
-    log.info("Connectors fetched", { count: connectors.length })
+    log.info("Connectors fetched", sanitizeForLogging({ count: connectors.length, userId }))
 
     return createSuccess(connectors, "Connectors fetched")
   } catch (error) {

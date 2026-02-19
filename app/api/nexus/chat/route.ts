@@ -12,6 +12,7 @@ import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { getModelConfig } from '@/lib/ai/model-config';
 import { getConnectorTools } from '@/lib/mcp/connector-service';
 import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
+import { createUniversalTools } from '@/lib/tools/provider-native-tools';
 
 import {
   extractImagePrompt,
@@ -111,10 +112,17 @@ async function executeStreaming(params: {
 
   const systemPrompt = `You are a helpful AI assistant in the Nexus interface.`;
 
-  // Merge MCP connector tools into a single ToolSet
-  const connectorTools: ToolSet = {};
-  for (const result of connectorToolResults) {
-    Object.assign(connectorTools, result.tools);
+  // When MCP connectors are enabled, pre-merge adapter tools + connector tools
+  // and pass as request.tools so the streaming service uses them directly
+  // (skipping adapter.createTools to avoid redundant work).
+  // Connector tools take precedence on name collision.
+  let mergedTools: ToolSet | undefined;
+  if (connectorToolResults.length > 0) {
+    const adapterTools = await createUniversalTools(enabledTools);
+    mergedTools = { ...adapterTools };
+    for (const result of connectorToolResults) {
+      Object.assign(mergedTools, result.tools);
+    }
   }
 
   const streamRequest: StreamRequest = {
@@ -126,9 +134,9 @@ async function executeStreaming(params: {
     conversationId,
     source: 'nexus',
     systemPrompt,
-    enabledTools,
+    enabledTools: mergedTools ? undefined : enabledTools,
     enabledConnectors,
-    tools: Object.keys(connectorTools).length > 0 ? connectorTools : undefined,
+    tools: mergedTools,
     options: { reasoningEffort, responseMode },
     callbacks: {
       onFinish: createOnFinishCallback({ conversationId, dbModelId, log, timer })

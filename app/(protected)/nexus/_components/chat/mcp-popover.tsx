@@ -72,7 +72,9 @@ const ConnectorItem = memo(function ConnectorItem({
 
   return (
     <div
-      role="button"
+      role="switch"
+      aria-checked={isEnabled}
+      aria-label={`${connector.name} connector — ${STATUS_LABELS[connector.status]}`}
       tabIndex={0}
       className="flex items-center justify-between p-2 rounded-md hover:bg-muted/50 cursor-pointer"
       onClick={handleClick}
@@ -83,7 +85,6 @@ const ConnectorItem = memo(function ConnectorItem({
         <div className="min-w-0">
           <div className="flex items-center gap-1.5">
             <p className="text-sm font-medium truncate">{connector.name}</p>
-            {/* aria-hidden: status communicated via visible label below */}
             <span
               aria-hidden="true"
               className={cn('h-1.5 w-1.5 rounded-full shrink-0', STATUS_COLORS[connector.status])}
@@ -110,7 +111,7 @@ const ConnectorItem = memo(function ConnectorItem({
         {isAuthenticating && (
           <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
         )}
-        {/* Switch is visual-only; row click handles toggle logic including OAuth */}
+        {/* Visual toggle indicator — row handles interaction via role="switch" */}
         <Switch
           checked={isEnabled}
           tabIndex={-1}
@@ -206,6 +207,9 @@ export function MCPPopover({
   }, [])
 
   const handleToggle = useCallback(async (connectorId: string) => {
+    // Guard against double-clicks while OAuth popup is already open
+    if (authenticatingIds.has(connectorId)) return
+
     const connector = connectors.find((c) => c.id === connectorId)
     if (!connector) return
 
@@ -231,7 +235,7 @@ export function MCPPopover({
     if (!latest.includes(connectorId)) {
       onConnectorsChangeRef.current([...latest, connectorId])
     }
-  }, [connectors, performOAuth])
+  }, [connectors, authenticatingIds, performOAuth])
 
   const handleReconnect = useCallback(async (connectorId: string) => {
     await performOAuth(connectorId, 'Reconnection')
