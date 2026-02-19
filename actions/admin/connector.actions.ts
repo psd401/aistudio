@@ -29,8 +29,8 @@ export interface McpServerWithStats extends SelectNexusMcpServer {
 export interface CreateMcpServerInput {
   name: string
   url: string
-  transport: string
-  authType: string
+  transport: "http" | "stdio" | "websocket"
+  authType: "none" | "oauth" | "api_key" | "jwt"
   credentialsKey?: string
   allowedUsers?: number[]
   maxConnections?: number
@@ -40,8 +40,8 @@ export interface UpdateMcpServerInput {
   id: string
   name?: string
   url?: string
-  transport?: string
-  authType?: string
+  transport?: "http" | "stdio" | "websocket"
+  authType?: "none" | "oauth" | "api_key" | "jwt"
   credentialsKey?: string | null
   allowedUsers?: number[]
   maxConnections?: number
@@ -104,12 +104,16 @@ function validateMcpUrl(rawUrl: string): void {
 
   const privateRanges = [
     /^localhost$/i,
+    /^0\.0\.0\.0$/,
     /^127\./,
     /^10\./,
     /^172\.(1[6-9]|2\d|3[01])\./,
     /^192\.168\./,
     /^169\.254\./, // AWS EC2 instance metadata
     /^::1$/,
+    /^fc/i,   // IPv6 ULA fc00::/7
+    /^fd/i,   // IPv6 ULA fd00::/8
+    /^fe80/i, // IPv6 link-local
   ]
 
   if (privateRanges.some((p) => p.test(parsed.hostname))) {
@@ -231,6 +235,8 @@ export async function createMcpServer(
   const log = createLogger({ requestId, action: "admin.createMcpServer" })
 
   try {
+    await requireRole("administrator")
+
     // Log without credentialsKey — Secrets Manager key names should not appear in logs
     log.info("Admin action started: Creating MCP server", {
       name: input.name,
@@ -239,7 +245,6 @@ export async function createMcpServer(
       authType: input.authType,
       hasCredentials: !!input.credentialsKey,
     })
-    await requireRole("administrator")
 
     validateMcpUrl(input.url)
     validateServerInput(input)
@@ -323,9 +328,21 @@ export async function updateMcpServer(
       updateData.maxConnections = fields.maxConnections
 
     if (Object.keys(updateData).length === 0) {
+      const [current] = await executeQuery(
+        (db) =>
+          db
+            .select()
+            .from(nexusMcpServers)
+            .where(eq(nexusMcpServers.id, input.id))
+            .limit(1),
+        "updateMcpServer.noOp"
+      )
+      if (!current) {
+        throw ErrorFactories.dbRecordNotFound("nexus_mcp_servers", input.id)
+      }
       timer({ status: "noop" })
-      log.warn("Update called with no fields to change", { serverId: input.id })
-      return { isSuccess: false, message: "No fields to update" }
+      log.info("Update called with no fields to change", { serverId: input.id })
+      return createSuccess(current, "No changes to update")
     }
 
     const [server] = await executeQuery(
@@ -425,22 +442,10 @@ export async function getMcpServerHealth(
     log.debug("Admin action started: Getting MCP server health", { serverId })
     await requireRole("administrator")
 
-    // Verify server exists before aggregating — avoids returning success with 0s for unknown IDs
-    const [serverExists] = await executeQuery(
-      (db) =>
-        db
-          .select({ id: nexusMcpServers.id })
-          .from(nexusMcpServers)
-          .where(eq(nexusMcpServers.id, serverId))
-          .limit(1),
-      "getMcpServerHealth.existenceCheck"
-    )
-
-    if (!serverExists) {
-      throw ErrorFactories.dbRecordNotFound("nexus_mcp_servers", serverId)
-    }
-
-    const stats = await executeQuery(
+    // Single LEFT JOIN query: existence check + aggregation in one round-trip.
+    // No rows returned means server doesn't exist; one row with all-zero counts
+    // means server exists but has no connections.
+    const [row] = await executeQuery(
       (db) =>
         db
           .select({
@@ -455,16 +460,18 @@ export async function getMcpServerHealth(
               sql`CASE WHEN ${nexusMcpConnections.status} = 'disconnected' THEN 1 END`
             ),
           })
-          .from(nexusMcpConnections)
-          .where(eq(nexusMcpConnections.serverId, serverId)),
+          .from(nexusMcpServers)
+          .leftJoin(
+            nexusMcpConnections,
+            eq(nexusMcpServers.id, nexusMcpConnections.serverId)
+          )
+          .where(eq(nexusMcpServers.id, serverId))
+          .groupBy(nexusMcpServers.id),
       "getMcpServerHealth"
     )
 
-    const row = stats[0] ?? {
-      totalConnections: 0,
-      connectedCount: 0,
-      errorCount: 0,
-      disconnectedCount: 0,
+    if (!row) {
+      throw ErrorFactories.dbRecordNotFound("nexus_mcp_servers", serverId)
     }
 
     const result: McpServerHealthInfo = {

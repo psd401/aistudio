@@ -27,8 +27,12 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
 
   const [name, setName] = useState(server?.name ?? "")
   const [url, setUrl] = useState(server?.url ?? "")
-  const [transport, setTransport] = useState(server?.transport ?? "http")
-  const [authType, setAuthType] = useState(server?.authType ?? "none")
+  const [transport, setTransport] = useState<"http" | "stdio" | "websocket">(
+    (server?.transport as "http" | "stdio" | "websocket") ?? "http"
+  )
+  const [authType, setAuthType] = useState<"none" | "oauth" | "api_key" | "jwt">(
+    (server?.authType as "none" | "oauth" | "api_key" | "jwt") ?? "none"
+  )
   const [credentialsKey, setCredentialsKey] = useState(
     server?.credentialsKey ?? ""
   )
@@ -40,12 +44,24 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    setIsSubmitting(true)
     setError(null)
 
-    try {
-      const maxConn = Math.min(Math.max(parseInt(maxConnections, 10) || 1, 1), 100)
+    // Validate credentialsKey required when auth is enabled
+    if (authType !== "none" && !credentialsKey.trim()) {
+      setError("Credentials Key is required when an auth type is selected.")
+      return
+    }
 
+    // Validate maxConnections range
+    const maxConn = parseInt(maxConnections, 10)
+    if (!Number.isInteger(maxConn) || maxConn < 1 || maxConn > 100) {
+      setError("Max Connections must be between 1 and 100.")
+      return
+    }
+
+    setIsSubmitting(true)
+
+    try {
       const commonPayload = {
         name,
         url,
@@ -91,6 +107,7 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="Canva"
+          maxLength={255}
           required
         />
       </div>
@@ -109,7 +126,10 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
 
       <div>
         <Label>Transport</Label>
-        <Select value={transport} onValueChange={setTransport}>
+        <Select
+          value={transport}
+          onValueChange={(v) => setTransport(v as "http" | "stdio" | "websocket")}
+        >
           <SelectTrigger>
             <SelectValue />
           </SelectTrigger>
@@ -123,7 +143,10 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
 
       <div>
         <Label>Auth Type</Label>
-        <Select value={authType} onValueChange={setAuthType}>
+        <Select
+          value={authType}
+          onValueChange={(v) => setAuthType(v as "none" | "oauth" | "api_key" | "jwt")}
+        >
           <SelectTrigger>
             <SelectValue />
           </SelectTrigger>
@@ -138,12 +161,16 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
 
       {authType !== "none" && (
         <div>
-          <Label htmlFor="credentialsKey">Credentials Key</Label>
+          <Label htmlFor="credentialsKey">
+            Credentials Key <span className="text-destructive">*</span>
+          </Label>
           <Input
             id="credentialsKey"
             value={credentialsKey}
             onChange={(e) => setCredentialsKey(e.target.value)}
             placeholder="AWS Secrets Manager key"
+            maxLength={255}
+            required
           />
           <p className="text-xs text-muted-foreground mt-1">
             Reference to credentials stored in AWS Secrets Manager
@@ -152,7 +179,7 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
       )}
 
       <div>
-        <Label htmlFor="maxConnections">Max Connections</Label>
+        <Label htmlFor="maxConnections">Max Connections (1–100)</Label>
         <Input
           id="maxConnections"
           type="number"

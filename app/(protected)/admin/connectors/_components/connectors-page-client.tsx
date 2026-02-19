@@ -40,15 +40,17 @@ import { Plus, Trash2, Pencil } from "lucide-react"
 
 interface Props {
   initialServers: McpServerWithStats[]
+  fetchError: string | null
 }
 
-export function ConnectorsPageClient({ initialServers }: Props) {
+export function ConnectorsPageClient({ initialServers, fetchError: initialFetchError }: Props) {
   const [servers, setServers] = useState(initialServers)
   const [sheetOpen, setSheetOpen] = useState(false)
   const [editingServer, setEditingServer] = useState<McpServerWithStats | null>(
     null
   )
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(initialFetchError)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   const refresh = useCallback(async () => {
     const result = await listMcpServers()
@@ -62,7 +64,9 @@ export function ConnectorsPageClient({ initialServers }: Props) {
 
   const handleDelete = useCallback(
     async (id: string) => {
+      setDeletingId(id)
       const result = await deleteMcpServer(id)
+      setDeletingId(null)
       if (!result.isSuccess) {
         setError(result.message || "Failed to delete connector")
         return
@@ -153,98 +157,107 @@ export function ConnectorsPageClient({ initialServers }: Props) {
         </div>
       )}
 
-      {servers.length === 0 ? (
-        <div className="text-center py-12 text-muted-foreground">
-          No MCP connectors registered yet.
-        </div>
-      ) : (
-        <div className="border rounded-lg">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>URL</TableHead>
-                <TableHead>Transport</TableHead>
-                <TableHead>Auth</TableHead>
-                <TableHead>Connections</TableHead>
-                <TableHead>Max</TableHead>
-                <TableHead className="w-24">Actions</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {servers.map((server) => (
-                <TableRow key={server.id}>
-                  <TableCell className="font-medium">{server.name}</TableCell>
-                  <TableCell>
-                    <code className="text-xs bg-muted px-1 py-0.5 rounded max-w-[200px] truncate block">
-                      {server.url}
-                    </code>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="outline">
-                      {transportLabel(server.transport)}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <Badge variant="secondary">
-                      {authLabel(server.authType)}
-                    </Badge>
-                  </TableCell>
-                  <TableCell>
-                    <span className="text-sm">
-                      {server.connectionCount}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    <span className="text-sm text-muted-foreground">
-                      {server.maxConnections ?? 10}
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex gap-1">
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => handleEdit(server)}
-                        aria-label={`Edit ${server.name}`}
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </Button>
-                      <AlertDialog>
-                        <AlertDialogTrigger asChild>
-                          <Button variant="ghost" size="sm" aria-label={`Delete ${server.name}`}>
-                            <Trash2 className="h-4 w-4 text-destructive" />
-                          </Button>
-                        </AlertDialogTrigger>
-                        <AlertDialogContent>
-                          <AlertDialogHeader>
-                            <AlertDialogTitle>
-                              Delete Connector
-                            </AlertDialogTitle>
-                            <AlertDialogDescription>
-                              This will permanently delete the MCP server &quot;
-                              {server.name}&quot; and all its connections.
-                              This action cannot be undone.
-                            </AlertDialogDescription>
-                          </AlertDialogHeader>
-                          <AlertDialogFooter>
-                            <AlertDialogCancel>Cancel</AlertDialogCancel>
-                            <AlertDialogAction
-                              onClick={() => handleDelete(server.id)}
-                            >
-                              Delete
-                            </AlertDialogAction>
-                          </AlertDialogFooter>
-                        </AlertDialogContent>
-                      </AlertDialog>
-                    </div>
-                  </TableCell>
+      {/* Only show table or empty state when there is no fetch error */}
+      {!error || servers.length > 0 ? (
+        servers.length === 0 ? (
+          <div className="text-center py-12 text-muted-foreground">
+            No MCP connectors registered yet.
+          </div>
+        ) : (
+          <div className="border rounded-lg">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Name</TableHead>
+                  <TableHead>URL</TableHead>
+                  <TableHead>Transport</TableHead>
+                  <TableHead>Auth</TableHead>
+                  <TableHead>Connections</TableHead>
+                  <TableHead>Max</TableHead>
+                  <TableHead className="w-24">Actions</TableHead>
                 </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        </div>
-      )}
+              </TableHeader>
+              <TableBody>
+                {servers.map((server) => (
+                  <TableRow key={server.id}>
+                    <TableCell className="font-medium">{server.name}</TableCell>
+                    <TableCell>
+                      <code className="text-xs bg-muted px-1 py-0.5 rounded max-w-[200px] truncate block">
+                        {server.url}
+                      </code>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="outline">
+                        {transportLabel(server.transport)}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <Badge variant="secondary">
+                        {authLabel(server.authType)}
+                      </Badge>
+                    </TableCell>
+                    <TableCell>
+                      <span className="text-sm">
+                        {server.connectionCount}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <span className="text-sm text-muted-foreground">
+                        {server.maxConnections ?? 10}
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <div className="flex gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => handleEdit(server)}
+                          aria-label={`Edit ${server.name}`}
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </Button>
+                        <AlertDialog>
+                          <AlertDialogTrigger asChild>
+                            <Button
+                              variant="ghost"
+                              size="sm"
+                              aria-label={`Delete ${server.name}`}
+                              disabled={deletingId === server.id}
+                            >
+                              <Trash2 className="h-4 w-4 text-destructive" />
+                            </Button>
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>
+                                Delete Connector
+                              </AlertDialogTitle>
+                              <AlertDialogDescription>
+                                This will permanently delete the MCP server &quot;
+                                {server.name}&quot; and all its connections.
+                                This action cannot be undone.
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>Cancel</AlertDialogCancel>
+                              <AlertDialogAction
+                                onClick={() => handleDelete(server.id)}
+                                disabled={deletingId === server.id}
+                              >
+                                {deletingId === server.id ? "Deleting…" : "Delete"}
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+                      </div>
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </div>
+        )
+      ) : null}
     </div>
   )
 }

@@ -1,8 +1,6 @@
-import { Suspense } from "react"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { listMcpServers } from "@/actions/admin/connector.actions"
 import { ConnectorsPageClient } from "./_components/connectors-page-client"
-import { Skeleton } from "@/components/ui/skeleton"
 import { PageBranding } from "@/components/ui/page-branding"
 
 export default async function ConnectorsPage() {
@@ -26,15 +24,7 @@ export default async function ConnectorsPage() {
         </p>
       </div>
 
-      {fetchError && (
-        <div className="mb-4 rounded-md border border-destructive/50 bg-destructive/10 p-3">
-          <p className="text-sm text-destructive">{fetchError}</p>
-        </div>
-      )}
-
-      <Suspense fallback={<Skeleton className="h-64 w-full" />}>
-        <ConnectorsPageClient initialServers={servers} />
-      </Suspense>
+      <ConnectorsPageClient initialServers={servers} fetchError={fetchError} />
     </div>
   )
 }
