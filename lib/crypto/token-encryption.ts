@@ -6,14 +6,15 @@
  * is insufficient for token-level data protection.
  *
  * - Data Encryption Key (DEK) fetched from AWS Secrets Manager
- * - In-process DEK cache with 5-minute TTL
+ * - Key derived via HKDF-SHA-256 (NIST SP 800-56C) with domain separation
+ * - In-process DEK cache with 5-minute TTL, concurrency-safe (single in-flight fetch)
  * - Store format: base64 JSON string containing { iv, tag, data }
  * - Provider-agnostic — works for any connector
  *
  * @see Issue #777 — Part of Epic #774 (Nexus MCP Connectors)
  */
 
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto"
+import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto"
 import {
   SecretsManagerClient,
   GetSecretValueCommand,
@@ -29,6 +30,10 @@ const IV_LENGTH = 12 // 96 bits — recommended for GCM
 const AUTH_TAG_LENGTH = 16 // 128 bits
 const DEK_CACHE_TTL = 5 * 60 * 1000 // 5 minutes
 
+// HKDF domain separation labels — changing these invalidates all existing ciphertext
+const HKDF_SALT = Buffer.from("aistudio-mcp-token-encryption")
+const HKDF_INFO = Buffer.from("aes-256-gcm-dek-v1")
+
 // ─── DEK Cache ───────────────────────────────────────────────────────────────
 
 interface CachedDEK {
@@ -37,6 +42,7 @@ interface CachedDEK {
 }
 
 let dekCache: CachedDEK | null = null
+let dekFetchPromise: Promise<Buffer> | null = null
 let smClient: SecretsManagerClient | null = null
 
 function getSecretsManagerClient(): SecretsManagerClient {
@@ -51,26 +57,60 @@ function getSecretsManagerClient(): SecretsManagerClient {
 
 /**
  * Resolves the Secrets Manager secret name for the token encryption DEK.
- * Uses the current deployment environment.
+ *
+ * Priority: ENVIRONMENT (set by ECS task definition) → DEPLOYMENT_ENV → "dev"
+ *
+ * Note: NODE_ENV is NOT used because the ECS task definition sets NODE_ENV=production
+ * for all environments (dev and prod alike). ENVIRONMENT is the correct discriminator.
  */
 function getSecretName(): string {
-  const env = process.env.DEPLOYMENT_ENV || process.env.NODE_ENV || "dev"
-  // Map NODE_ENV values to deployment environment names
-  const envMap: Record<string, string> = {
-    development: "dev",
-    production: "prod",
-    test: "dev",
-  }
-  const deployEnv = envMap[env] || env
-  return `aistudio/${deployEnv}/mcp/token-encryption-key`
+  const env = process.env.ENVIRONMENT || process.env.DEPLOYMENT_ENV || "dev"
+  return `aistudio/${env}/mcp/token-encryption-key`
 }
 
 /**
- * Fetches the Data Encryption Key from AWS Secrets Manager, with in-process caching.
- * Cache has a 5-minute TTL.
+ * Fetches and caches the DEK. Separated from getDEK for concurrency safety.
+ */
+async function fetchAndCacheDEK(): Promise<Buffer> {
+  const secretName = getSecretName()
+  log.info("Fetching token encryption DEK from Secrets Manager")
+
+  const client = getSecretsManagerClient()
+  const response = await client.send(
+    new GetSecretValueCommand({ SecretId: secretName })
+  )
+
+  if (!response.SecretString) {
+    log.warn("Token encryption DEK secret is empty", { secretName })
+    throw new Error("Token encryption DEK is unavailable: secret is empty")
+  }
+
+  // Derive a 32-byte key via HKDF-SHA-256 (NIST SP 800-56C Rev 2).
+  // HKDF provides:
+  // - Domain separation via salt and info labels
+  // - Proper key stretching beyond a raw hash
+  // - Compatibility with any secret string format from Secrets Manager
+  const key = Buffer.from(
+    hkdfSync(
+      "sha256",
+      Buffer.from(response.SecretString, "utf8"),
+      HKDF_SALT,
+      HKDF_INFO,
+      32
+    )
+  )
+
+  dekCache = { key, fetchedAt: Date.now() }
+  log.info("Token encryption DEK cached successfully")
+
+  return key
+}
+
+/**
+ * Fetches the Data Encryption Key with in-process caching and concurrency safety.
  *
- * The secret value can be any string (e.g. Secrets Manager auto-generated password).
- * It is deterministically derived into a 32-byte key via SHA-256.
+ * Cache TTL: 5 minutes. Concurrent callers on a cold cache share a single Secrets
+ * Manager fetch (thundering-herd protection via the shared in-flight promise).
  *
  * @throws Error if the secret cannot be retrieved
  */
@@ -80,26 +120,17 @@ async function getDEK(): Promise<Buffer> {
     return dekCache.key
   }
 
-  const secretName = getSecretName()
-  log.info("Fetching token encryption DEK from Secrets Manager", { secretName })
-
-  const client = getSecretsManagerClient()
-  const response = await client.send(
-    new GetSecretValueCommand({ SecretId: secretName })
-  )
-
-  if (!response.SecretString) {
-    throw new Error(`Token encryption DEK secret "${secretName}" is empty`)
+  // Concurrency guard: if a fetch is already in progress, join it
+  if (dekFetchPromise) {
+    return dekFetchPromise
   }
 
-  // Derive a 32-byte key from the secret via SHA-256.
-  // This allows any secret format (hex, base64, auto-generated password, etc.)
-  const key = createHash("sha256").update(response.SecretString).digest()
+  // Start a new fetch and share the promise with concurrent callers
+  dekFetchPromise = fetchAndCacheDEK().finally(() => {
+    dekFetchPromise = null
+  })
 
-  dekCache = { key, fetchedAt: Date.now() }
-  log.info("Token encryption DEK cached successfully")
-
-  return key
+  return dekFetchPromise
 }
 
 // ─── Encrypted Token Format ──────────────────────────────────────────────────
@@ -188,6 +219,7 @@ export async function decryptToken(ciphertext: string): Promise<string> {
  */
 export function invalidateDEKCache(): void {
   dekCache = null
+  dekFetchPromise = null
   log.info("Token encryption DEK cache invalidated")
 }
 
@@ -195,8 +227,13 @@ export function invalidateDEKCache(): void {
 
 /**
  * Resets internal module state. Only for use in tests.
+ * Throws in non-test environments to prevent accidental production use.
  */
 export function _resetForTesting(): void {
+  if (process.env.NODE_ENV !== "test") {
+    throw new Error("_resetForTesting is only available in test environments")
+  }
   dekCache = null
+  dekFetchPromise = null
   smClient = null
 }

@@ -4,10 +4,7 @@ import {
   invalidateDEKCache,
   _resetForTesting,
 } from "@/lib/crypto/token-encryption"
-import {
-  SecretsManagerClient,
-  GetSecretValueCommand,
-} from "@aws-sdk/client-secrets-manager"
+import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager"
 
 // Mock AWS SDK
 jest.mock("@aws-sdk/client-secrets-manager")
@@ -22,7 +19,7 @@ jest.mock("@/lib/logger", () => ({
   }),
 }))
 
-// Test secret — any string works since the module derives a 32-byte key via SHA-256
+// Test secret — any string works since the module derives a 32-byte key via HKDF-SHA-256
 const TEST_SECRET = "my-super-secret-encryption-key-from-secrets-manager"
 
 describe("Token Encryption (AES-256-GCM)", () => {
@@ -138,7 +135,9 @@ describe("Token Encryption (AES-256-GCM)", () => {
       payload.data = dataBytes.toString("base64")
       const tampered = Buffer.from(JSON.stringify(payload)).toString("base64")
 
-      await expect(decryptToken(tampered)).rejects.toThrow()
+      await expect(decryptToken(tampered)).rejects.toThrow(
+        /Unsupported state or unable to authenticate data/i
+      )
     })
   })
 
@@ -148,7 +147,7 @@ describe("Token Encryption (AES-256-GCM)", () => {
       await encryptToken("second")
       await encryptToken("third")
 
-      // SecretsManagerClient constructor called once, send called once
+      // Secrets Manager should only be called once
       expect(mockSend).toHaveBeenCalledTimes(1)
     })
 
@@ -161,22 +160,40 @@ describe("Token Encryption (AES-256-GCM)", () => {
       await encryptToken("second")
       expect(mockSend).toHaveBeenCalledTimes(2)
     })
+
+    it("should serialize concurrent DEK fetches (thundering-herd protection)", async () => {
+      // Fire 5 concurrent encryptions on a cold cache
+      const results = await Promise.all(
+        Array.from({ length: 5 }, (_, i) => encryptToken(`token-${i}`))
+      )
+
+      // Only one Secrets Manager call should have been made
+      expect(mockSend).toHaveBeenCalledTimes(1)
+      expect(results).toHaveLength(5)
+
+      // All ciphertexts should be decryptable
+      for (let i = 0; i < 5; i++) {
+        expect(await decryptToken(results[i])).toBe(`token-${i}`)
+      }
+    })
   })
 
   describe("DEK retrieval", () => {
     it("should throw when secret is empty", async () => {
       mockSend.mockResolvedValueOnce({ SecretString: undefined })
 
-      await expect(encryptToken("test")).rejects.toThrow("is empty")
+      await expect(encryptToken("test")).rejects.toThrow(
+        "DEK is unavailable: secret is empty"
+      )
     })
 
-    it("should work with any secret string format (derived via SHA-256)", async () => {
+    it("should work with any secret string format (derived via HKDF)", async () => {
       // Short secret
       mockSend.mockResolvedValueOnce({ SecretString: "short" })
       _resetForTesting()
       const encrypted1 = await encryptToken("test")
 
-      // Same secret should produce same key → decryptable
+      // Same secret → same HKDF key → decryptable
       mockSend.mockResolvedValueOnce({ SecretString: "short" })
       _resetForTesting()
       const decrypted1 = await decryptToken(encrypted1)
@@ -189,10 +206,32 @@ describe("Token Encryption (AES-256-GCM)", () => {
       _resetForTesting()
       const encrypted = await encryptToken("my-token")
 
-      // Try to decrypt with a different secret
+      // Try to decrypt with a different secret → different HKDF key → auth tag fails
       mockSend.mockResolvedValueOnce({ SecretString: "key-version-2" })
       _resetForTesting()
       await expect(decryptToken(encrypted)).rejects.toThrow()
+    })
+  })
+
+  describe("_resetForTesting guard", () => {
+    it("should throw when called outside test environment", () => {
+      const originalEnv = process.env.NODE_ENV
+      try {
+        Object.defineProperty(process.env, "NODE_ENV", {
+          value: "production",
+          writable: true,
+          configurable: true,
+        })
+        expect(() => _resetForTesting()).toThrow(
+          "_resetForTesting is only available in test environments"
+        )
+      } finally {
+        Object.defineProperty(process.env, "NODE_ENV", {
+          value: originalEnv,
+          writable: true,
+          configurable: true,
+        })
+      }
     })
   })
 })
