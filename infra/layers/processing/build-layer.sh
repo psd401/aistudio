@@ -6,7 +6,7 @@ rm -rf layer.zip
 
 # Install production dependencies
 cd nodejs
-npm ci --production
+bun install --production --frozen-lockfile
 
 # Remove .bin directory which contains symlinks that cause issues
 rm -rf node_modules/.bin

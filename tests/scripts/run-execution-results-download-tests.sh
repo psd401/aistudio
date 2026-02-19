@@ -39,8 +39,8 @@ if [ ! -f "package.json" ]; then
 fi
 
 # Check if Jest is available
-if ! npm list jest > /dev/null 2>&1; then
-    print_error "Jest is not installed. Please run 'npm install' first."
+if ! bun pm ls 2>/dev/null | grep -q jest; then
+    print_error "Jest is not installed. Please run 'bun install' first."
     exit 1
 fi
 
@@ -68,7 +68,7 @@ run_test_category() {
         if [ -f "$test_file" ]; then
             print_status "  • Running $test_file"
 
-            if npm test -- "$test_file" --verbose; then
+            if bun test -- "$test_file" --verbose; then
                 print_success "    ✅ $test_file passed"
             else
                 print_error "    ❌ $test_file failed"
@@ -88,7 +88,7 @@ run_with_coverage() {
     print_status "Running tests with coverage report..."
 
     # Run all execution results download tests with coverage
-    npm test -- \
+    bun test -- \
         --coverage \
         --collectCoverageFrom="app/api/execution-results/[id]/download/**/*.{ts,tsx}" \
         --coverageDirectory="coverage/execution-results-download" \
@@ -194,7 +194,7 @@ lint_test_files() {
 
     for pattern in "${test_files[@]}"; do
         if ls $pattern 1> /dev/null 2>&1; then
-            npx eslint $pattern --ext .ts,.tsx
+            bunx eslint $pattern --ext .ts,.tsx
         fi
     done
 
@@ -205,7 +205,7 @@ lint_test_files() {
 typecheck_test_files() {
     print_status "Type-checking test files..."
 
-    if npx tsc --noEmit --project tsconfig.json; then
+    if bunx tsc --noEmit --project tsconfig.json; then
         print_success "Type checking passed"
     else
         print_error "Type checking failed"
