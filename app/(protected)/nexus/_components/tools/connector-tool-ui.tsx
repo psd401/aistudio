@@ -162,10 +162,24 @@ function TextResult({ text }: { text: string }) {
 
 function ImageResult({ url, mimeType }: { url: string; mimeType?: string }) {
   const safeMime = mimeType && SAFE_IMAGE_MIME_TYPES.has(mimeType) ? mimeType : 'image/png'
+
+  // Validate pre-formed data URIs against the same MIME allowlist
+  if (url.startsWith('data:')) {
+    const declaredMime = url.slice(5, url.indexOf(';'))
+    if (!SAFE_IMAGE_MIME_TYPES.has(declaredMime)) {
+      return (
+        <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2.5">
+          <span className="text-sm text-amber-800">Unsupported image format</span>
+        </div>
+      )
+    }
+  }
+
+  const src = url.startsWith('data:') ? url : `data:${safeMime};base64,${url}`
   return (
     <div className="mt-2">
       <img
-        src={url.startsWith('data:') ? url : `data:${safeMime};base64,${url}`}
+        src={src}
         alt="Connector result"
         className="max-w-xs rounded-lg border shadow-sm"
       />
