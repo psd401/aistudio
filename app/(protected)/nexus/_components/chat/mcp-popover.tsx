@@ -53,10 +53,6 @@ const ConnectorItem = memo(function ConnectorItem({
   onToggle,
   onReconnect,
 }: ConnectorItemProps) {
-  const needsOAuth =
-    connector.authType !== 'none' &&
-    (connector.status === 'no_token' || connector.status === 'token_expired')
-
   const handleClick = useCallback(() => {
     if (isAuthenticating) return
     onToggle(connector.id)
@@ -68,10 +64,6 @@ const ConnectorItem = memo(function ConnectorItem({
       if (!isAuthenticating) onToggle(connector.id)
     }
   }, [connector.id, isAuthenticating, onToggle])
-
-  const handleSwitchClick = useCallback((e: React.MouseEvent) => {
-    e.stopPropagation()
-  }, [])
 
   const handleReconnect = useCallback((e: React.MouseEvent) => {
     e.stopPropagation()
@@ -118,13 +110,13 @@ const ConnectorItem = memo(function ConnectorItem({
         {isAuthenticating && (
           <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
         )}
+        {/* Switch is visual-only; row click handles toggle logic including OAuth */}
         <Switch
           checked={isEnabled}
-          onCheckedChange={handleClick}
-          onClick={handleSwitchClick}
-          disabled={isAuthenticating || needsOAuth}
-          aria-label={`${isEnabled ? 'Disable' : 'Enable'} ${connector.name} connector`}
-          className="shrink-0"
+          tabIndex={-1}
+          aria-hidden="true"
+          disabled={isAuthenticating}
+          className="shrink-0 pointer-events-none"
         />
       </div>
     </div>
@@ -145,19 +137,17 @@ export function MCPPopover({
   // Refs to avoid stale closures in async callbacks
   const enabledConnectorsRef = useRef(enabledConnectors)
   const onConnectorsChangeRef = useRef(onConnectorsChange)
-  const loadedRef = useRef(false)
 
   useEffect(() => {
     enabledConnectorsRef.current = enabledConnectors
     onConnectorsChangeRef.current = onConnectorsChange
   })
 
-  // Load connectors on first open (not on mount — deferred until needed)
+  // Load connectors when popover opens (refreshes on every open)
   useEffect(() => {
-    if (!open || loadedRef.current) return
+    if (!open) return
 
     let cancelled = false
-    loadedRef.current = true
     setIsLoading(true)
     setLoadError(false)
 
@@ -175,8 +165,6 @@ export function MCPPopover({
         }
       } else {
         setLoadError(true)
-        // Reset so next open retries
-        loadedRef.current = false
       }
     }).finally(() => {
       if (!cancelled) setIsLoading(false)
@@ -185,15 +173,44 @@ export function MCPPopover({
     return () => { cancelled = true }
   }, [open])
 
+  /**
+   * Shared OAuth flow — used by both toggle-on and reconnect.
+   * On success: updates connector status to 'connected' and auto-enables.
+   */
+  const performOAuth = useCallback(async (connectorId: string, toastPrefix: string) => {
+    setAuthenticatingIds((prev) => new Set([...prev, connectorId]))
+    try {
+      const result = await openOAuthPopup(connectorId)
+      if (result.success) {
+        setConnectors((prev) =>
+          prev.map((c) =>
+            c.id === connectorId ? { ...c, status: 'connected' as const } : c
+          )
+        )
+        const latest = enabledConnectorsRef.current
+        if (!latest.includes(connectorId)) {
+          onConnectorsChangeRef.current([...latest, connectorId])
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Authentication failed'
+      toast.error(`${toastPrefix} failed`, { description: message })
+    } finally {
+      setAuthenticatingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(connectorId)
+        return next
+      })
+    }
+  }, [])
+
   const handleToggle = useCallback(async (connectorId: string) => {
     const connector = connectors.find((c) => c.id === connectorId)
     if (!connector) return
 
-    // Use ref to get latest value and avoid stale closure when OAuth takes time
     const currentEnabled = enabledConnectorsRef.current
 
     if (currentEnabled.includes(connectorId)) {
-      // Disable — simple removal
       onConnectorsChangeRef.current(currentEnabled.filter((id) => id !== connectorId))
       return
     }
@@ -204,68 +221,20 @@ export function MCPPopover({
       (connector.status === 'no_token' || connector.status === 'token_expired')
 
     if (needsOAuth) {
-      setAuthenticatingIds((prev) => new Set([...prev, connectorId]))
-      try {
-        const result = await openOAuthPopup(connectorId)
-        if (result.success) {
-          setConnectors((prev) =>
-            prev.map((c) =>
-              c.id === connectorId ? { ...c, status: 'connected' as const } : c
-            )
-          )
-          // Use ref to get the most current list (may have changed during OAuth)
-          const latest = enabledConnectorsRef.current
-          if (!latest.includes(connectorId)) {
-            onConnectorsChangeRef.current([...latest, connectorId])
-          }
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : 'Authentication failed'
-        toast.error('Connection failed', { description: message })
-      } finally {
-        setAuthenticatingIds((prev) => {
-          const next = new Set(prev)
-          next.delete(connectorId)
-          return next
-        })
-      }
+      await performOAuth(connectorId, 'Connection')
       return
     }
 
-    // No auth needed — enable directly using latest ref value
+    // No auth needed — enable directly
     const latest = enabledConnectorsRef.current
     if (!latest.includes(connectorId)) {
       onConnectorsChangeRef.current([...latest, connectorId])
     }
-  }, [connectors])
+  }, [connectors, performOAuth])
 
   const handleReconnect = useCallback(async (connectorId: string) => {
-    setAuthenticatingIds((prev) => new Set([...prev, connectorId]))
-    try {
-      const result = await openOAuthPopup(connectorId)
-      if (result.success) {
-        setConnectors((prev) =>
-          prev.map((c) =>
-            c.id === connectorId ? { ...c, status: 'connected' as const } : c
-          )
-        )
-        // Auto-enable after successful reconnect
-        const latest = enabledConnectorsRef.current
-        if (!latest.includes(connectorId)) {
-          onConnectorsChangeRef.current([...latest, connectorId])
-        }
-      }
-    } catch (err) {
-      const message = err instanceof Error ? err.message : 'Authentication failed'
-      toast.error('Reconnection failed', { description: message })
-    } finally {
-      setAuthenticatingIds((prev) => {
-        const next = new Set(prev)
-        next.delete(connectorId)
-        return next
-      })
-    }
-  }, [])
+    await performOAuth(connectorId, 'Reconnection')
+  }, [performOAuth])
 
   const enabledCount = enabledConnectors.length
   const hasConnectors = connectors.length > 0

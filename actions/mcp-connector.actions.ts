@@ -35,7 +35,10 @@ export interface ConnectorWithStatus {
 /**
  * Fetches available MCP connectors for the current user with their connection status.
  *
- * Access rules (mirrors connector-service.ts getAvailableConnectors):
+ * ⚠️ SYNC: Access rules here MUST match connector-service.ts assertUserAccess().
+ * If you change access logic here, update connector-service.ts (and vice versa).
+ *
+ * Access rules:
  *   - If allowedUsers is non-empty, user must be in the list.
  *   - Otherwise, user must have "administrator" or "staff" role.
  *
@@ -138,9 +141,14 @@ export async function getConnectorsWithStatus(): Promise<ActionState<ConnectorWi
       }
 
       // Runtime validation — DB varchar has no enum enforcement at the ORM level
-      const authType = VALID_AUTH_TYPES.has(row.authType as McpAuthType)
-        ? (row.authType as McpAuthType)
-        : "none" // safe fallback; unexpected values treated as no-auth
+      const rawAuthType = row.authType as string
+      let authType: McpAuthType
+      if (VALID_AUTH_TYPES.has(rawAuthType as McpAuthType)) {
+        authType = rawAuthType as McpAuthType
+      } else {
+        log.warn("Unknown authType, falling back to 'none'", { serverId: row.id, authType: rawAuthType })
+        authType = "none"
+      }
 
       return { id: row.id, name: row.name, authType, status }
     })

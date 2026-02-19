@@ -59,19 +59,11 @@ export function ComposerControls({
       <SkillsPopover disabled />
 
       {/* MCP Connections */}
-      {onConnectorsChange ? (
-        <MCPPopover
-          enabledConnectors={enabledConnectors}
-          onConnectorsChange={onConnectorsChange}
-          disabled={!selectedModel}
-        />
-      ) : (
-        <MCPPopover
-          enabledConnectors={enabledConnectors}
-          onConnectorsChange={() => undefined}
-          disabled
-        />
-      )}
+      <MCPPopover
+        enabledConnectors={enabledConnectors}
+        onConnectorsChange={onConnectorsChange ?? (() => undefined)}
+        disabled={!onConnectorsChange || !selectedModel}
+      />
     </div>
   )
 }
