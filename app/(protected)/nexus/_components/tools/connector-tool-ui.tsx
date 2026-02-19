@@ -80,7 +80,7 @@ function parseResult(result: unknown): ParsedResult[] {
   if (result === undefined || result === null) return []
 
   // MCP tool results follow the McpToolResult format: { content: McpContentItem[] }
-  if (typeof result === 'object' && 'content' in (result as Record<string, unknown>)) {
+  if (typeof result === 'object' && result !== null && Object.hasOwn(result as Record<string, unknown>, 'content')) {
     const mcpResult = result as { content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>; isError?: boolean }
 
     if (mcpResult.isError) {

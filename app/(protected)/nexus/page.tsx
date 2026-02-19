@@ -53,6 +53,10 @@ interface ConversationRuntimeProviderProps {
   onConnectorReconnect?: (failedServerIds: string[]) => void
 }
 
+/** UUID format for validating X-Connector-Reconnect header values */
+const UUID_RE = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i
+const MAX_RECONNECT_IDS = 10
+
 function ConversationRuntimeProvider({
   children,
   conversationId,
@@ -133,8 +137,6 @@ function ConversationRuntimeProvider({
     const reconnectHeader = response.headers.get('X-Connector-Reconnect')
     if (reconnectHeader) {
       // Parse comma-separated server IDs — validate UUID format and cap count
-      const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-      const MAX_RECONNECT_IDS = 10
       const failedIds = reconnectHeader
         .split(',')
         .map(id => id.trim())
