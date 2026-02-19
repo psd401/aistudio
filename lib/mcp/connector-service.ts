@@ -410,7 +410,11 @@ async function resolveAuthHeaders(
       return { Authorization: `Bearer ${accessToken}` }
     case "api_key":
       return { "X-API-Key": accessToken }
-    default:
-      return {}
+    default: {
+      // authType is constrained by McpAuthType; "none" handled above.
+      // If a new type is added to the DB without updating this switch, fail loud.
+      const _exhaustive: never = authType
+      throw new Error(`Unsupported auth type: ${_exhaustive}`)
+    }
   }
 }
