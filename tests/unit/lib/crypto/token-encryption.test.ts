@@ -230,6 +230,48 @@ describe("Token Encryption (AES-256-GCM)", () => {
       // Two total fetches: the original slow one + the new one post-invalidation
       expect(mockSend).toHaveBeenCalledTimes(2)
     })
+
+    it("should not clobber a newer in-flight fetch when stale .finally fires", async () => {
+      // Fetch #1: slow, will be in-flight
+      let resolveSlowFetch: ((value: { SecretString: string }) => void) | undefined
+      const slowPromise = new Promise<{ SecretString: string }>((resolve) => {
+        resolveSlowFetch = resolve
+      })
+      mockSend.mockReturnValueOnce(slowPromise)
+
+      // Start fetch #1
+      const promise1 = encryptToken("with-old-key")
+
+      // Invalidate — clears dekFetchPromise and bumps generation
+      invalidateDEKCache()
+
+      // Fetch #2: new callers arrive post-invalidation and should coalesce
+      mockSend.mockResolvedValue({ SecretString: "new-rotated-secret" })
+      const concurrentResults = Promise.all([
+        encryptToken("concurrent-a"),
+        encryptToken("concurrent-b"),
+        encryptToken("concurrent-c"),
+      ])
+
+      // Now resolve fetch #1 — its .finally must NOT clobber the fetch #2 promise
+      resolveSlowFetch!({ SecretString: TEST_SECRET })
+      await promise1
+
+      await concurrentResults
+
+      // Expect: fetch #1 (slow) + fetch #2 (shared by 3 callers) = 2 total
+      expect(mockSend).toHaveBeenCalledTimes(2)
+    })
+
+    it("should allow retry after a failed fetch", async () => {
+      mockSend.mockRejectedValueOnce(new Error("Transient network error"))
+      await expect(encryptToken("test")).rejects.toThrow("Transient network error")
+
+      // Second call should retry and succeed (not hang on a stale promise)
+      mockSend.mockResolvedValueOnce({ SecretString: TEST_SECRET })
+      const encrypted = await encryptToken("test")
+      expect(await decryptToken(encrypted)).toBe("test")
+    })
   })
 
   describe("DEK retrieval", () => {

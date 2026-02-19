@@ -154,10 +154,16 @@ async function getDEK(): Promise<Buffer> {
   // Capture generation before starting fetch
   const gen = cacheGeneration
 
-  // Start a new fetch and share the promise with concurrent callers
-  dekFetchPromise = fetchAndCacheDEK(gen).finally(() => {
-    dekFetchPromise = null
+  // Start a new fetch and share the promise with concurrent callers.
+  // The .finally only clears dekFetchPromise if it still points to THIS promise,
+  // preventing a stale .finally callback from clobbering a newer in-flight fetch
+  // (e.g. when invalidateDEKCache() is called between two fetches).
+  const currentPromise: Promise<Buffer> = fetchAndCacheDEK(gen).finally(() => {
+    if (dekFetchPromise === currentPromise) {
+      dekFetchPromise = null
+    }
   })
+  dekFetchPromise = currentPromise
 
   return dekFetchPromise
 }
