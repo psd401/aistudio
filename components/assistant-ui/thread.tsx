@@ -154,37 +154,37 @@ export const Thread: FC<ThreadProps> = ({
 
   return (
     <AssistantContentComponentsContext.Provider value={contentComponents}>
-    <ConversationIdContext.Provider value={conversationId || null}>
-      <ThreadPrimitive.Root
-        className="bg-white flex h-full flex-col"
-        style={THREAD_ROOT_STYLE}
-      >
-        <ThreadPrimitive.Viewport className="relative flex min-w-0 flex-1 h-0 flex-col gap-6 overflow-y-auto">
-          <ThreadWelcome conversationId={conversationId} />
+      <ConversationIdContext.Provider value={conversationId || null}>
+        <ThreadPrimitive.Root
+          className="bg-white flex h-full flex-col"
+          style={THREAD_ROOT_STYLE}
+        >
+          <ThreadPrimitive.Viewport className="relative flex min-w-0 flex-1 h-0 flex-col gap-6 overflow-y-auto">
+            <ThreadWelcome conversationId={conversationId} />
 
-          <ThreadPrimitive.Messages
-            components={messageComponents}
+            <ThreadPrimitive.Messages
+              components={messageComponents}
+            />
+
+            <ThreadPrimitive.If empty={false}>
+              <motion.div className="min-h-6 min-w-6 shrink-0" />
+            </ThreadPrimitive.If>
+          </ThreadPrimitive.Viewport>
+
+          <Composer
+            processingAttachments={processingAttachments}
+            models={models}
+            selectedModel={selectedModel}
+            onModelChange={onModelChange}
+            isLoadingModels={isLoadingModels}
+            enabledTools={enabledTools}
+            onToolsChange={onToolsChange}
+            enabledConnectors={enabledConnectors}
+            onConnectorsChange={onConnectorsChange}
+            suggestedActions={suggestedActions}
           />
-
-          <ThreadPrimitive.If empty={false}>
-            <motion.div className="min-h-6 min-w-6 shrink-0" />
-          </ThreadPrimitive.If>
-        </ThreadPrimitive.Viewport>
-
-        <Composer
-          processingAttachments={processingAttachments}
-          models={models}
-          selectedModel={selectedModel}
-          onModelChange={onModelChange}
-          isLoadingModels={isLoadingModels}
-          enabledTools={enabledTools}
-          onToolsChange={onToolsChange}
-          enabledConnectors={enabledConnectors}
-          onConnectorsChange={onConnectorsChange}
-          suggestedActions={suggestedActions}
-        />
-      </ThreadPrimitive.Root>
-    </ConversationIdContext.Provider>
+        </ThreadPrimitive.Root>
+      </ConversationIdContext.Provider>
     </AssistantContentComponentsContext.Provider>
   );
 };

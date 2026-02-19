@@ -8,7 +8,9 @@ import { createContext, useContext, useCallback, useState, useMemo } from 'react
 export interface ConnectorServerInfo {
   serverId: string
   serverName: string
-  /** Optional icon URL or component key for the connector */
+  /** Optional icon URL for the connector.
+   * Trust boundary: sourced from admin-configured connector registrations, not end-user input.
+   * Validated via isSafeIconUrl (https-only) before rendering in <img src>. */
   iconUrl?: string
 }
 
@@ -27,8 +29,6 @@ interface ConnectorToolContextValue {
   registerConnectorTools: (serverInfo: ConnectorServerInfo, toolNames: string[]) => void
   /** Unregister all tools from a connector server */
   unregisterConnectorServer: (serverId: string) => void
-  /** Check if a tool name belongs to a connector */
-  isConnectorTool: (toolName: string) => boolean
   /** Get connector info for a tool name (returns undefined for non-connector tools) */
   getConnectorInfo: (toolName: string) => ConnectorServerInfo | undefined
   /** List of server IDs that failed reconnect (from X-Connector-Reconnect header) */
@@ -67,10 +67,6 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
     })
   }, [])
 
-  const isConnectorTool = useCallback((toolName: string) => {
-    return Object.hasOwn(toolMap, toolName)
-  }, [toolMap])
-
   const getConnectorInfo = useCallback((toolName: string) => {
     return toolMap[toolName]
   }, [toolMap])
@@ -87,7 +83,7 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
     toolMap,
     registerConnectorTools,
     unregisterConnectorServer,
-    isConnectorTool,
+
     getConnectorInfo,
     failedServerIds,
     addFailedServerIds,
@@ -96,7 +92,7 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
     toolMap,
     registerConnectorTools,
     unregisterConnectorServer,
-    isConnectorTool,
+
     getConnectorInfo,
     failedServerIds,
     addFailedServerIds,

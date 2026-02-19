@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useMemo, useEffect, useCallback } from 'react'
+import { useState, useMemo, useCallback } from 'react'
 import type { ToolCallMessagePartComponent } from '@assistant-ui/react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -292,8 +292,9 @@ function ResultTypeIcon({ parsed }: { parsed: ParsedResult[] }) {
  */
 export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
   const { toolName, argsText, result } = props
-  const [isExpanded, setIsExpanded] = useState(false)
-  const toggleExpanded = useCallback(() => setIsExpanded(prev => !prev), [])
+  // null = no user interaction yet; boolean = user has explicitly toggled
+  const [manualExpanded, setManualExpanded] = useState<boolean | null>(null)
+  const toggleExpanded = useCallback(() => setManualExpanded(prev => prev === null ? true : !prev), [])
   const connectorCtx = useConnectorToolsOptional()
 
   const connectorInfo = connectorCtx?.getConnectorInfo(toolName)
@@ -305,14 +306,9 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
   const isLoading = result === undefined
   const isError = parsedResult.some(p => p.type === 'error')
 
-  // Auto-expand when a tool transitions from loading to error state.
-  // Note: setState in useEffect is intentional here — tool results arrive
-  // asynchronously after mount (result starts as undefined while loading).
-  useEffect(() => {
-    if (isError) {
-      setIsExpanded(true)
-    }
-  }, [isError])
+  // Auto-expand on error unless user has explicitly toggled.
+  // Derived state avoids setState-in-useEffect cascading render pattern.
+  const isExpanded = manualExpanded !== null ? manualExpanded : isError
 
   // Not a connector tool — render the standard generic fallback
   if (!connectorInfo) {

@@ -62,19 +62,40 @@ export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<
     // Check if all tools are connector tools
     if (connectorCtx) {
       const allConnector = toolCalls.every(part =>
-        'toolName' in part && connectorCtx.isConnectorTool(part.toolName as string)
+        'toolName' in part && connectorCtx.getConnectorInfo(part.toolName as string)
       )
       if (allConnector) return 'connector'
     }
 
     // Check if this looks like a web search group (non-direct, non-connector)
     const hasConnectorTools = connectorCtx && toolCalls.some(part =>
-      'toolName' in part && connectorCtx.isConnectorTool(part.toolName as string)
+      'toolName' in part && connectorCtx.getConnectorInfo(part.toolName as string)
     )
     if (hasConnectorTools) return 'mixed'
 
     return 'web-search'
   }, [toolCalls, connectorCtx])
+
+  const isRunning = toolCalls.some(part =>
+    'result' in part && part.result === undefined
+  )
+
+  const toolCount = endIndex - startIndex + 1
+
+  // Collect unique server names for connector groups (memoized to avoid O(tools) on every render).
+  // Must be called before early returns to satisfy React hooks ordering rules.
+  // Depend on getConnectorInfo (stable useCallback) rather than full connectorCtx to avoid
+  // re-running when unrelated context state (e.g. failedServerIds) changes.
+  const getConnectorInfo = connectorCtx?.getConnectorInfo
+  const connectorServerNames = useMemo(() => {
+    if (groupType !== 'connector' || !getConnectorInfo) return []
+    return [...new Set(
+      toolCalls
+        .filter(part => 'toolName' in part)
+        .map(part => getConnectorInfo(part.toolName as string)?.serverName)
+        .filter((name): name is string => !!name)
+    )]
+  }, [groupType, toolCalls, getConnectorInfo])
 
   // Direct render (charts, etc.)
   if (groupType === 'direct') {
@@ -85,23 +106,6 @@ export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<
   if (groupType === 'mixed') {
     return <div className="space-y-4">{children}</div>
   }
-
-  const isRunning = toolCalls.some(part =>
-    'result' in part && part.result === undefined
-  )
-
-  const toolCount = endIndex - startIndex + 1
-
-  // Collect unique server names for connector groups (memoized to avoid O(tools) on every render)
-  const connectorServerNames = useMemo(() => {
-    if (groupType !== 'connector') return []
-    return [...new Set(
-      toolCalls
-        .filter(part => 'toolName' in part)
-        .map(part => connectorCtx?.getConnectorInfo(part.toolName as string)?.serverName)
-        .filter((name): name is string => !!name)
-    )]
-  }, [groupType, toolCalls, connectorCtx])
 
   // Connector tool group
   if (groupType === 'connector') {

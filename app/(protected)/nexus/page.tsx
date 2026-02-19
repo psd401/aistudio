@@ -219,7 +219,7 @@ function NexusRuntimeWrapper({
   onToolsChange,
   onConnectorsChange,
 }: NexusRuntimeWrapperProps) {
-  const { addFailedServerIds, removeFailedServerId, failedServerIds } = useConnectorTools()
+  const { addFailedServerIds, failedServerIds } = useConnectorTools()
 
   const handleConnectorReconnect = useCallback((ids: string[]) => {
     addFailedServerIds(ids)
