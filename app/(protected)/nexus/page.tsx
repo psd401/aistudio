@@ -222,9 +222,9 @@ function NexusRuntimeWrapper({
   const connectorCtx = useConnectorTools()
 
   const handleConnectorReconnect = useCallback((failedServerIds: string[]) => {
-    if (connectorCtx) {
-      connectorCtx.setFailedServerIds(failedServerIds)
-    }
+    // NexusRuntimeWrapper is always rendered inside ConnectorToolProvider, so connectorCtx is non-null
+    // Merge incoming IDs with existing ones (de-duplicated) to handle concurrent reconnect signals
+    connectorCtx!.setFailedServerIds(prev => [...new Set([...prev, ...failedServerIds])])
     // Show toast to guide user to reconnect
     toast.warning('Connector connection expired', {
       description: 'Some connector tools are unavailable. Use the Connect menu to reconnect.',
@@ -234,10 +234,8 @@ function NexusRuntimeWrapper({
 
   // Handle reconnect action from the inline prompt
   const handleReconnectAction = useCallback((serverId: string) => {
-    // Clear the failed status for this server
-    if (connectorCtx) {
-      connectorCtx.setFailedServerIds(prev => prev.filter(id => id !== serverId))
-    }
+    // NexusRuntimeWrapper is always rendered inside ConnectorToolProvider, so connectorCtx is non-null
+    connectorCtx!.setFailedServerIds(prev => prev.filter(id => id !== serverId))
     // Future: This will open the OAuth popup for the server (Task 5/6)
     // For now, show guidance toast
     toast.info('Reconnect', {

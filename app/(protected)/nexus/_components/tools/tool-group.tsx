@@ -128,6 +128,8 @@ export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<
               variant="ghost"
               size="sm"
               onClick={toggleExpanded}
+              aria-expanded={isExpanded}
+              aria-label={isExpanded ? 'Hide connector actions' : 'Show connector actions'}
               className="h-8 text-purple-700 hover:text-purple-900 hover:bg-purple-100"
             >
               {isExpanded ? (
@@ -177,6 +179,8 @@ export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<
             variant="ghost"
             size="sm"
             onClick={toggleExpanded}
+            aria-expanded={isExpanded}
+            aria-label={isExpanded ? 'Hide web searches' : 'Show web searches'}
             className="h-8 text-blue-700 hover:text-blue-900 hover:bg-blue-100"
           >
             {isExpanded ? (

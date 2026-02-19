@@ -35,8 +35,6 @@ interface ConnectorToolContextValue {
   failedServerIds: string[]
   /** Set failed server IDs from reconnect header (supports functional update form) */
   setFailedServerIds: Dispatch<SetStateAction<string[]>>
-  /** Clear failed server IDs (e.g., after successful reconnect) */
-  clearFailedServerIds: () => void
 }
 
 const ConnectorToolContext = createContext<ConnectorToolContextValue | null>(null)
@@ -75,10 +73,6 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
     return toolMap[toolName]
   }, [toolMap])
 
-  const clearFailedServerIds = useCallback(() => {
-    setFailedServerIds([])
-  }, [])
-
   const value = useMemo<ConnectorToolContextValue>(() => ({
     toolMap,
     registerConnectorTools,
@@ -87,7 +81,6 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
     getConnectorInfo,
     failedServerIds,
     setFailedServerIds,
-    clearFailedServerIds,
   }), [
     toolMap,
     registerConnectorTools,
@@ -96,7 +89,6 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
     getConnectorInfo,
     failedServerIds,
     setFailedServerIds,
-    clearFailedServerIds,
   ])
 
   return (

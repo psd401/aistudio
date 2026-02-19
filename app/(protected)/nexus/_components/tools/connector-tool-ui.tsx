@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { useConnectorTools, type ConnectorServerInfo } from './connector-tool-context'
 import type { McpToolResult } from '@/lib/mcp/types'
+import { ToolFallback } from '@/components/assistant-ui/tool-fallback'
 
 /**
  * Format a tool name for display.
@@ -59,10 +60,19 @@ function summarizeArgs(argsText: string): string {
   }
 }
 
-/** Allowlist of safe image MIME types for data URI construction */
+/** Allowlist of safe image MIME types for data URI construction.
+ * image/svg+xml is intentionally included: when rendered via <img> (not <object>/<embed>),
+ * SVG scripts are sandboxed by browsers and do not execute. */
 const SAFE_IMAGE_MIME_TYPES = new Set([
   'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp',
 ])
+
+/** Type guard for plain objects — excludes Date, RegExp, Array, and other built-ins */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== 'object' || value === null) return false
+  const proto = Object.getPrototypeOf(value)
+  return proto === Object.prototype || proto === null
+}
 
 /** Maximum content items to render from a single tool result */
 const MAX_CONTENT_ITEMS = 50
@@ -81,19 +91,18 @@ function parseResult(result: unknown): ParsedResult[] {
   if (result === undefined || result === null) return []
 
   // Non-MCP error objects (e.g. { isError: true, error: 'message' }) — surfaced by assistant-ui
-  if (typeof result === 'object' && result !== null) {
-    const obj = result as Record<string, unknown>
-    if (obj.isError === true && !Object.hasOwn(obj, 'content')) {
-      const errorText = typeof obj.error === 'string' ? obj.error
-        : typeof obj.message === 'string' ? obj.message
+  if (isPlainObject(result)) {
+    if (result.isError === true && !Object.hasOwn(result, 'content')) {
+      const errorText = typeof result.error === 'string' ? result.error
+        : typeof result.message === 'string' ? result.message
         : 'Tool execution failed'
       return [{ type: 'error', text: errorText }]
     }
   }
 
   // MCP tool results follow the McpToolResult format: { content: McpContentItem[] }
-  if (typeof result === 'object' && result !== null && Object.hasOwn(result as Record<string, unknown>, 'content')) {
-    const mcpResult = result as McpToolResult
+  if (isPlainObject(result) && Object.hasOwn(result, 'content')) {
+    const mcpResult = result as unknown as McpToolResult
 
     if (mcpResult.isError) {
       const errorText = mcpResult.content
@@ -108,8 +117,8 @@ function parseResult(result: unknown): ParsedResult[] {
         return { type: 'image' as const, url: item.data, mimeType: item.mimeType }
       }
       if (item.type === 'resource' && item.text) {
-        // Check if text looks like a URL
-        if (/^https?:\/\//.test(item.text)) {
+        // Restrict to https:// only — connector output is untrusted
+        if (/^https:\/\//.test(item.text)) {
           return { type: 'link' as const, url: item.text, mimeType: item.mimeType }
         }
       }
@@ -119,7 +128,8 @@ function parseResult(result: unknown): ParsedResult[] {
 
   // String result
   if (typeof result === 'string') {
-    if (/^https?:\/\//.test(result)) {
+    // Restrict to https:// only — connector output is untrusted
+    if (/^https:\/\//.test(result)) {
       return [{ type: 'link', url: result }]
     }
     return [{ type: 'text', text: result }]
@@ -129,13 +139,7 @@ function parseResult(result: unknown): ParsedResult[] {
   return [{ type: 'json', text: JSON.stringify(result, null, 2) }]
 }
 
-/**
- * Connector icon component.
- * Falls back to Plug icon if no custom icon URL.
- */
-/**
- * Validate that an icon URL is safe to render (https only, no data: or javascript:).
- */
+/** Validate that an icon URL is safe to render (https only, no data: or javascript:). */
 function isSafeIconUrl(url: string): boolean {
   try {
     const parsed = new URL(url)
@@ -273,7 +277,10 @@ function ResultTypeIcon({ parsed }: { parsed: ParsedResult[] }) {
  */
 export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
   const { toolName, argsText, result } = props
-  const [isExpanded, setIsExpanded] = useState(false)
+  // Auto-expand when the tool result is an error so users see it immediately
+  const [isExpanded, setIsExpanded] = useState(() =>
+    parseResult(result).some(p => p.type === 'error')
+  )
   const connectorCtx = useConnectorTools()
 
   const connectorInfo = connectorCtx?.getConnectorInfo(toolName)
@@ -285,9 +292,9 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
   const isLoading = result === undefined
   const isError = parsedResult.some(p => p.type === 'error')
 
-  // Not a connector tool — render generic fallback
+  // Not a connector tool — render the standard generic fallback
   if (!connectorInfo) {
-    return <GenericToolFallback {...props} />
+    return <ToolFallback {...props} />
   }
 
   return (
@@ -332,6 +339,8 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
             variant="ghost"
             size="sm"
             onClick={() => setIsExpanded(!isExpanded)}
+            aria-expanded={isExpanded}
+            aria-label={isExpanded ? 'Hide tool details' : 'Show tool details'}
             className="h-7 w-7 p-0 text-purple-700 hover:text-purple-900 hover:bg-purple-100"
           >
             {isExpanded ? (
@@ -381,53 +390,6 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
                   ? 'Image result'
                   : 'Result available'}
           </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-// ============================================================================
-// Generic fallback (for non-connector tools)
-// ============================================================================
-
-/**
- * Generic tool fallback — mirrors the original ToolFallback from
- * components/assistant-ui/tool-fallback.tsx but integrated here
- * to keep the connector detection logic in one place.
- */
-const GenericToolFallback: ToolCallMessagePartComponent = ({
-  toolName,
-  argsText,
-  result,
-}) => {
-  const [isCollapsed, setIsCollapsed] = useState(true)
-  return (
-    <div className="mb-4 flex w-full flex-col gap-3 rounded-lg border py-3">
-      <div className="flex items-center gap-2 px-4">
-        <CheckCircle2 className="size-4" />
-        <p className="flex-grow">
-          Used tool: <b>{toolName}</b>
-        </p>
-        <Button onClick={() => setIsCollapsed(!isCollapsed)}>
-          {isCollapsed ? <ChevronDown /> : <ChevronUp />}
-        </Button>
-      </div>
-      {!isCollapsed && (
-        <div className="flex flex-col gap-2 border-t pt-2">
-          <div className="px-4">
-            <pre className="whitespace-pre-wrap">{argsText}</pre>
-          </div>
-          {result !== undefined && (
-            <div className="border-t border-dashed px-4 pt-2">
-              <p className="font-semibold">Result:</p>
-              <pre className="whitespace-pre-wrap">
-                {typeof result === "string"
-                  ? result
-                  : JSON.stringify(result, null, 2)}
-              </pre>
-            </div>
-          )}
         </div>
       )}
     </div>
