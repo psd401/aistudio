@@ -162,6 +162,7 @@ function ConnectorIcon({ info, size = 16 }: { info: ConnectorServerInfo; size?: 
         width={size}
         height={size}
         className="rounded-sm"
+        referrerPolicy="no-referrer"
       />
     )
   }
@@ -377,7 +378,7 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
           <div>
             <div className="text-xs font-semibold text-purple-900 mb-1">Arguments</div>
             <pre className="text-xs bg-purple-50 p-2 rounded overflow-x-auto overflow-y-auto max-h-48 text-purple-800 whitespace-pre-wrap">
-              {argsText}
+              {argsText.length > 10_000 ? `${argsText.slice(0, 10_000)}…` : argsText}
             </pre>
           </div>
 

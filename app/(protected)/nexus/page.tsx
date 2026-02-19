@@ -446,7 +446,7 @@ function NexusPageContent() {
 
   return (
     <ErrorBoundary>
-      <ConnectorToolProvider>
+      <ConnectorToolProvider key={conversationId ?? 'new'}>
         <NexusLayout conversationId={conversationId}>
           <NexusShell>
             <div className="relative h-full">
