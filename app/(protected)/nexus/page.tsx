@@ -203,7 +203,6 @@ function NexusPageContent() {
   // This prevents remounting when ID is assigned during runtime
   const [stableConversationId] = useState<string | null>(validatedConversationId)
 
-
   // Conversation context for history adapter
   const conversationContext = useConversationContext()
   
