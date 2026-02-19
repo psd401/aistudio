@@ -97,6 +97,7 @@ async function executeStreaming(params: {
   enabledTools: string[];
   enabledConnectors: string[];
   connectorToolResults: McpConnectorToolsResult[];
+  failedConnectorIds: string[];
   reasoningEffort: 'minimal' | 'low' | 'medium' | 'high';
   responseMode: 'standard' | 'flex' | 'priority';
   requestId: string;
@@ -107,7 +108,7 @@ async function executeStreaming(params: {
   const {
     messages, modelConfig, userId, sessionId, conversationId,
     conversationIdValue, conversationTitle, enabledTools, enabledConnectors,
-    connectorToolResults, reasoningEffort, responseMode, requestId, dbModelId, log, timer
+    connectorToolResults, failedConnectorIds, reasoningEffort, responseMode, requestId, dbModelId, log, timer
   } = params;
 
   const systemPrompt = `You are a helpful AI assistant in the Nexus interface.`;
@@ -163,6 +164,10 @@ async function executeStreaming(params: {
     if (!conversationIdValue && conversationId) {
       responseHeaders['X-Conversation-Id'] = conversationId;
       responseHeaders['X-Conversation-Title'] = encodeURIComponent(conversationTitle || 'New Conversation');
+    }
+
+    if (failedConnectorIds.length > 0) {
+      responseHeaders['X-Connector-Reconnect'] = failedConnectorIds.join(',');
     }
 
     return streamResponse.result.toUIMessageStreamResponse({ headers: responseHeaders });
@@ -487,16 +492,20 @@ export async function POST(req: Request) {
 
     // 8. Resolve MCP connector tools (parallel fetch for all enabled connectors)
     const connectorToolResults: McpConnectorToolsResult[] = [];
+    const failedConnectorIds: string[] = [];
     if (enabledConnectors.length > 0) {
       log.info('Resolving MCP connector tools', { connectorCount: enabledConnectors.length });
       const results = await Promise.allSettled(
         enabledConnectors.map(serverId => getConnectorTools(serverId, userId, userRoleNames))
       );
-      for (const result of results) {
+      for (let i = 0; i < results.length; i++) {
+        const result = results[i];
         if (result.status === 'fulfilled') {
           connectorToolResults.push(result.value);
         } else {
+          failedConnectorIds.push(enabledConnectors[i]);
           log.warn('Failed to resolve connector tools', {
+            serverId: enabledConnectors[i],
             error: result.reason instanceof Error ? result.reason.message : String(result.reason)
           });
         }
@@ -504,6 +513,7 @@ export async function POST(req: Request) {
       log.info('MCP connector tools resolved', {
         requested: enabledConnectors.length,
         resolved: connectorToolResults.length,
+        failed: failedConnectorIds.length,
         totalTools: connectorToolResults.reduce((sum, r) => sum + Object.keys(r.tools).length, 0)
       });
     }
@@ -520,6 +530,7 @@ export async function POST(req: Request) {
       enabledTools,
       enabledConnectors,
       connectorToolResults,
+      failedConnectorIds,
       reasoningEffort: validation.data.reasoningEffort || 'medium',
       responseMode: validation.data.responseMode || 'standard',
       requestId,
