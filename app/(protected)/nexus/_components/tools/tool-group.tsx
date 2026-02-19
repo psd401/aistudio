@@ -52,7 +52,12 @@ export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<
       .filter(part => part.type === 'tool-call')
   }, [message.content, startIndex, endIndex])
 
-  // Determine group type
+  // Extract stable callback reference — avoids re-running memos when unrelated
+  // context state (e.g. failedServerIds) changes.
+  const getConnectorInfo = connectorCtx?.getConnectorInfo
+
+  // Determine group type. Depends on getConnectorInfo (stable useCallback) rather than
+  // full connectorCtx to avoid re-running when unrelated state (e.g. failedServerIds) changes.
   const groupType = useMemo<GroupType>(() => {
     const allDirect = toolCalls.every(part =>
       'toolName' in part && DIRECT_RENDER_TOOLS.includes(part.toolName as string)
@@ -60,21 +65,21 @@ export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<
     if (allDirect) return 'direct'
 
     // Check if all tools are connector tools
-    if (connectorCtx) {
+    if (getConnectorInfo) {
       const allConnector = toolCalls.every(part =>
-        'toolName' in part && connectorCtx.getConnectorInfo(part.toolName as string)
+        'toolName' in part && getConnectorInfo(part.toolName as string)
       )
       if (allConnector) return 'connector'
     }
 
     // Mixed: some connector, some not — render without wrapper
-    const hasConnectorTools = connectorCtx && toolCalls.some(part =>
-      'toolName' in part && connectorCtx.getConnectorInfo(part.toolName as string)
+    const hasConnectorTools = getConnectorInfo && toolCalls.some(part =>
+      'toolName' in part && getConnectorInfo(part.toolName as string)
     )
     if (hasConnectorTools) return 'mixed'
 
     return 'generic'
-  }, [toolCalls, connectorCtx])
+  }, [toolCalls, getConnectorInfo])
 
   const isRunning = toolCalls.some(part =>
     'result' in part && part.result === undefined
@@ -84,9 +89,6 @@ export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<
 
   // Collect unique server names for connector groups (memoized to avoid O(tools) on every render).
   // Must be called before early returns to satisfy React hooks ordering rules.
-  // Depend on getConnectorInfo (stable useCallback) rather than full connectorCtx to avoid
-  // re-running when unrelated context state (e.g. failedServerIds) changes.
-  const getConnectorInfo = connectorCtx?.getConnectorInfo
   const connectorServerNames = useMemo(() => {
     if (groupType !== 'connector' || !getConnectorInfo) return []
     return [...new Set(

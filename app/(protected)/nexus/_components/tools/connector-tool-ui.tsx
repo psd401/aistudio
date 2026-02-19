@@ -78,6 +78,9 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /** Maximum content items to render from a single tool result */
 const MAX_CONTENT_ITEMS = 50
 
+/** Maximum base64 string length for image rendering (~5MB decoded) */
+const MAX_IMAGE_BASE64_LENGTH = 5 * 1024 * 1024
+
 /**
  * Detect result type for rendering.
  */
@@ -190,6 +193,15 @@ function TextResult({ text }: { text: string }) {
 }
 
 function ImageResult({ url, mimeType }: { url: string; mimeType?: string }) {
+  // Guard against oversized payloads that could freeze the browser
+  if (url.length > MAX_IMAGE_BASE64_LENGTH) {
+    return (
+      <div className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 p-2.5">
+        <span className="text-sm text-amber-800">Image too large to display</span>
+      </div>
+    )
+  }
+
   const safeMime = mimeType && SAFE_IMAGE_MIME_TYPES.has(mimeType) ? mimeType : 'image/png'
 
   // Validate pre-formed data URIs against the same MIME allowlist
@@ -322,7 +334,9 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
   const isLoading = result === undefined
   const isError = parsedResult.some(p => p.type === 'error')
 
-  // null = no user interaction yet; boolean = user has explicitly toggled
+  // null = no user interaction yet; boolean = user has explicitly toggled.
+  // toggleExpanded closes over isError so the callback recreates when error state changes.
+  // This is intentional: the toggle needs to know the currently displayed state to invert it.
   const [manualExpanded, setManualExpanded] = useState<boolean | null>(null)
   const toggleExpanded = useCallback(
     () => setManualExpanded(prev => !(prev !== null ? prev : isError)),
