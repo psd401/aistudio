@@ -125,6 +125,17 @@ function ConversationRuntimeProvider({
       }
     }
 
+    // Signal when connectors failed (auth expiry, missing token, etc.)
+    const reconnectIds = response.headers.get('X-Connector-Reconnect')
+    if (reconnectIds) {
+      const count = reconnectIds.split(',').length
+      toast.warning('Connector Issue', {
+        description: `${count} connector${count > 1 ? 's' : ''} could not be reached. Open the Connect menu to reconnect.`,
+        duration: 8000
+      })
+      log.warn('Connectors need reconnection', { failedCount: count })
+    }
+
     return response
   }, [conversationId, onConversationIdChange])
 
