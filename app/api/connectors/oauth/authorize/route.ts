@@ -26,7 +26,7 @@ import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq } from "drizzle-orm"
 import { nexusMcpServers } from "@/lib/db/schema"
-import { loadOAuthCredentials } from "@/lib/mcp/connector-service"
+import { loadOAuthCredentials, validateMcpServerUrl } from "@/lib/mcp/connector-service"
 import { encryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 
@@ -162,7 +162,8 @@ export async function GET(req: Request): Promise<Response> {
     const baseUrl = getIssuerUrl()
     const redirectUri = `${baseUrl}/api/connectors/oauth/callback`
 
-    // 8. Build authorization URL
+    // 8. Build authorization URL (validate against SSRF before redirecting user)
+    validateMcpServerUrl(credentials.authorizationEndpointUrl)
     const authUrl = new URL(credentials.authorizationEndpointUrl)
     authUrl.searchParams.set("response_type", "code")
     authUrl.searchParams.set("client_id", credentials.clientId)

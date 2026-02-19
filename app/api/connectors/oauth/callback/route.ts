@@ -25,7 +25,7 @@ import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq, and } from "drizzle-orm"
 import { nexusMcpServers, nexusMcpUserTokens } from "@/lib/db/schema"
-import { loadOAuthCredentials } from "@/lib/mcp/connector-service"
+import { loadOAuthCredentials, validateMcpServerUrl } from "@/lib/mcp/connector-service"
 import { encryptToken, decryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { OAUTH_STATE_COOKIE } from "../authorize/route"
@@ -195,10 +195,11 @@ export async function GET(req: Request): Promise<Response> {
     const baseUrl = getIssuerUrl()
     const redirectUri = `${baseUrl}/api/connectors/oauth/callback`
 
-    // 9. Resolve token endpoint
+    // 9. Resolve token endpoint and validate against SSRF
     const tokenEndpoint = credentials.tokenEndpointUrl
       ? credentials.tokenEndpointUrl
       : new URL("/oauth/token", server.url).toString()
+    validateMcpServerUrl(tokenEndpoint)
 
     // 10. Exchange auth code for tokens (RFC 6749 §4.1.3 + RFC 7636 §4.5)
     const tokenBody: Record<string, string> = {

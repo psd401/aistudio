@@ -685,7 +685,7 @@ function truncateForAudit(
  * level to block outbound connections to RFC 1918 / link-local addresses.
  * Tracked as Issue #791 — must be resolved before production deployment.
  */
-function validateMcpServerUrl(rawUrl: string): void {
+export function validateMcpServerUrl(rawUrl: string): void {
   let parsed: URL
   try {
     parsed = new URL(rawUrl)
