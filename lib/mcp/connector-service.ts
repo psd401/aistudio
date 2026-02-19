@@ -122,9 +122,9 @@ export async function getUserConnectionStatus(
   }
 
   const token = rows[0]
-  const now = new Date()
+  const bufferThreshold = new Date(Date.now() + TOKEN_EXPIRY_BUFFER_MS)
   const status: McpConnectionStatus =
-    token.tokenExpiresAt && token.tokenExpiresAt < now
+    token.tokenExpiresAt && token.tokenExpiresAt < bufferThreshold
       ? "token_expired"
       : "connected"
 
@@ -155,16 +155,19 @@ export async function getConnectorTools(
   // 1. Load server config + user token in a single round trip
   const { server, tokenRow } = await loadServerAndToken(serverId, userId)
 
-  // 2. Validate transport — @ai-sdk/mcp only supports "http" for server-to-server
+  // 2. Verify user has access to this server
+  assertUserAccess(server, userId)
+
+  // 3. Validate transport — @ai-sdk/mcp only supports "http" for server-to-server
   assertHttpTransport(server.transport)
 
-  // 3. Validate URL — prevent SSRF against internal/metadata endpoints
+  // 4. Validate URL — prevent SSRF against internal/metadata endpoints
   validateMcpServerUrl(server.url)
 
-  // 4. Resolve auth headers from loaded token
+  // 5. Resolve auth headers from loaded token
   const headers = await buildAuthHeaders(server.authType as McpAuthType, tokenRow)
 
-  // 5. Create MCP client and fetch tools with timeout + cleanup on failure.
+  // 6. Create MCP client and fetch tools with timeout + cleanup on failure.
   // Both createMCPClient and client.tools() make outbound HTTP calls to
   // user-controlled URLs, so they must be guarded against indefinite hangs.
   const client = await withTimeout(
@@ -672,6 +675,18 @@ function validateMcpServerUrl(rawUrl: string): void {
 }
 
 /**
+ * Asserts that the user is in the server's allowedUsers list.
+ * If the list is empty, access is granted (role-based access is checked upstream
+ * by getAvailableConnectors). This prevents direct serverId access by unauthorized users.
+ */
+function assertUserAccess(server: ServerRow, userId: number): void {
+  const allowed = server.allowedUsers ?? []
+  if (allowed.length > 0 && !allowed.includes(userId)) {
+    throw new Error(`User ${userId} does not have access to MCP server ${server.id}`)
+  }
+}
+
+/**
  * Asserts the transport value from the DB is supported by @ai-sdk/mcp.
  * The DB schema allows stdio/http/websocket, but the SDK only supports http transport
  * for server-to-server communication.
@@ -684,8 +699,17 @@ function assertHttpTransport(transport: string): asserts transport is "http" {
   }
 }
 
-/** Maps a DB row to the McpConnector type */
+const VALID_TRANSPORTS = new Set<McpTransportType>(["stdio", "http", "websocket"])
+const VALID_AUTH_TYPES = new Set<McpAuthType>(["api_key", "oauth", "jwt", "none"])
+
+/** Maps a DB row to the McpConnector type with runtime validation */
 function toMcpConnector(row: typeof nexusMcpServers.$inferSelect): McpConnector {
+  if (!VALID_TRANSPORTS.has(row.transport as McpTransportType)) {
+    throw new Error(`Unknown transport in DB: ${row.transport}`)
+  }
+  if (!VALID_AUTH_TYPES.has(row.authType as McpAuthType)) {
+    throw new Error(`Unknown authType in DB: ${row.authType}`)
+  }
   return {
     id: row.id,
     name: row.name,
