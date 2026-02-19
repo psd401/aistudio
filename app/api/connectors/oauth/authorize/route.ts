@@ -26,7 +26,7 @@ import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq } from "drizzle-orm"
 import { nexusMcpServers } from "@/lib/db/schema"
-import { loadOAuthCredentials, validateMcpServerUrl } from "@/lib/mcp/connector-service"
+import { assertUserAccess, loadOAuthCredentials, validateMcpServerUrl } from "@/lib/mcp/connector-service"
 import { encryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 
@@ -87,14 +87,8 @@ export async function GET(req: Request): Promise<Response> {
       return NextResponse.json({ error: "serverId query parameter is required" }, { status: 400 })
     }
 
-    // UUID format validation (simple check: 36 chars, hex + dashes)
-    if (
-      serverId.length !== 36 ||
-      serverId[8] !== "-" ||
-      serverId[13] !== "-" ||
-      serverId[18] !== "-" ||
-      serverId[23] !== "-"
-    ) {
+    // UUID format validation (hex digits + dashes in canonical 8-4-4-4-12 form)
+    if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(serverId)) {
       timer({ status: "error", reason: "invalid_server_id" })
       return NextResponse.json({ error: "Invalid serverId format" }, { status: 400 })
     }
@@ -119,22 +113,13 @@ export async function GET(req: Request): Promise<Response> {
 
     const server = serverRows[0]
 
-    // Access control: mirrors assertUserAccess() in connector-service.ts
-    const allowedUsers: number[] = server.allowedUsers ?? []
-    if (allowedUsers.length > 0) {
-      if (!allowedUsers.includes(userId)) {
-        log.warn("User not in allowedUsers for connector", { requestId, serverId, userId })
-        timer({ status: "error", reason: "forbidden" })
-        return NextResponse.json({ error: "Forbidden" }, { status: 403 })
-      }
-    } else {
-      const hasDefaultAccess =
-        userRoleNames.includes("administrator") || userRoleNames.includes("staff")
-      if (!hasDefaultAccess) {
-        log.warn("User lacks role-based access to connector", { requestId, serverId, userId })
-        timer({ status: "error", reason: "forbidden" })
-        return NextResponse.json({ error: "Forbidden" }, { status: 403 })
-      }
+    // Access control: same rules as getConnectorTools / tool invocations
+    try {
+      assertUserAccess(server, userId, userRoleNames)
+    } catch {
+      log.warn("User lacks access to connector", { requestId, serverId, userId })
+      timer({ status: "error", reason: "forbidden" })
+      return NextResponse.json({ error: "Forbidden" }, { status: 403 })
     }
 
     if (server.authType !== "oauth") {

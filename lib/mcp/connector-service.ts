@@ -424,7 +424,7 @@ export async function logToolCall(entry: McpToolCallLogEntry): Promise<void> {
 // ─── Data Loading Helpers ────────────────────────────────────────────────────
 
 /** Server row type from nexusMcpServers */
-type ServerRow = typeof nexusMcpServers.$inferSelect
+export type ServerRow = typeof nexusMcpServers.$inferSelect
 
 /** Token row type from nexusMcpUserTokens (nullable — user may not have a token) */
 type TokenRow = typeof nexusMcpUserTokens.$inferSelect | null
@@ -592,7 +592,8 @@ const CREDENTIALS_CACHE_MAX = 100
 
 /**
  * Fetches OAuth client credentials from AWS Secrets Manager with 5-minute TTL cache.
- * The secret is expected to be a JSON string with { clientId, clientSecret, tokenEndpointUrl? }.
+ * The secret is expected to be a JSON string with
+ * { clientId, clientSecret, tokenEndpointUrl?, authorizationEndpointUrl?, scopes? }.
  */
 export async function loadOAuthCredentials(
   credentialsKey: string
@@ -731,7 +732,7 @@ export function validateMcpServerUrl(rawUrl: string): void {
  * - If allowedUsers is non-empty, user must be in the list.
  * - If allowedUsers is empty, user must have admin or staff role.
  */
-function assertUserAccess(server: ServerRow, userId: number, userRoleNames: string[]): void {
+export function assertUserAccess(server: ServerRow, userId: number, userRoleNames: string[]): void {
   const allowed = server.allowedUsers ?? []
   if (allowed.length > 0) {
     if (!allowed.includes(userId)) {

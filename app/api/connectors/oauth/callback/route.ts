@@ -23,7 +23,7 @@ import { cookies } from "next/headers"
 import { timingSafeEqual } from "node:crypto"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
-import { eq } from "drizzle-orm"
+import { eq, sql } from "drizzle-orm"
 import { nexusMcpServers, nexusMcpUserTokens } from "@/lib/db/schema"
 import { loadOAuthCredentials, validateMcpServerUrl } from "@/lib/mcp/connector-service"
 import { encryptToken, decryptToken } from "@/lib/crypto/token-encryption"
@@ -146,6 +146,13 @@ export async function GET(req: Request): Promise<Response> {
 
     serverId = cookieData.serverId
 
+    // Validate serverId from cookie is a UUID (defense-in-depth; also satisfies CodeQL taint analysis)
+    if (!/^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i.test(serverId)) {
+      log.warn("Invalid serverId in OAuth state cookie", { requestId })
+      timer({ status: "error", reason: "invalid_cookie_data" })
+      return renderCallbackHtml(false, "", "Invalid OAuth session. Please try again.")
+    }
+
     // 3. Validate state nonce (timing-safe comparison for CSRF prevention)
     const stateA = Buffer.from(cookieData.state, "utf8")
     const stateB = Buffer.from(state, "utf8")
@@ -203,9 +210,17 @@ export async function GET(req: Request): Promise<Response> {
     const redirectUri = `${baseUrl}/api/connectors/oauth/callback`
 
     // 9. Resolve token endpoint and validate against SSRF
-    const tokenEndpoint = credentials.tokenEndpointUrl
-      ? credentials.tokenEndpointUrl
-      : new URL("/oauth/token", server.url).toString()
+    let tokenEndpoint: string
+    if (credentials.tokenEndpointUrl) {
+      tokenEndpoint = credentials.tokenEndpointUrl
+    } else {
+      tokenEndpoint = new URL("/oauth/token", server.url).toString()
+      log.warn("No tokenEndpointUrl configured — falling back to /oauth/token", {
+        requestId,
+        serverId,
+        fallbackUrl: tokenEndpoint,
+      })
+    }
     validateMcpServerUrl(tokenEndpoint)
 
     // 10. Exchange auth code for tokens (RFC 6749 §4.1.3 + RFC 7636 §4.5)
@@ -270,7 +285,7 @@ export async function GET(req: Request): Promise<Response> {
               encryptedRefreshToken: encryptedRefresh,
               tokenExpiresAt: expiresAt,
               scope: tokens.scope ?? null,
-              updatedAt: new Date(),
+              updatedAt: sql`NOW()`,
             },
           }),
       "oauth-callback:upsertToken"
