@@ -9,6 +9,8 @@ export interface CognitoSession {
   email?: string;
   givenName?: string | null;
   familyName?: string | null;
+  /** Cognito ID token — available when session includes tokens (used for cognito_passthrough MCP auth) */
+  idToken?: string;
   [key: string]: unknown;
 }
 
@@ -47,6 +49,7 @@ export async function getServerSession(): Promise<CognitoSession | null> {
       email: session.user.email || undefined,
       givenName: session.user.givenName || undefined,
       familyName: session.user.familyName || undefined,
+      idToken: session.idToken || undefined,
     };
   } catch (error) {
     // Sanitize error to prevent exposing sensitive information

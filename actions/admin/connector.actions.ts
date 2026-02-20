@@ -32,7 +32,7 @@ export interface CreateMcpServerInput {
   name: string
   url: string
   transport: "http" | "stdio" | "websocket"
-  authType: "none" | "oauth" | "api_key" | "jwt"
+  authType: "none" | "oauth" | "api_key" | "jwt" | "cognito_passthrough"
   credentialsKey?: string
   allowedUsers?: number[]
   maxConnections?: number
@@ -43,7 +43,7 @@ export interface UpdateMcpServerInput {
   name?: string
   url?: string
   transport?: "http" | "stdio" | "websocket"
-  authType?: "none" | "oauth" | "api_key" | "jwt"
+  authType?: "none" | "oauth" | "api_key" | "jwt" | "cognito_passthrough"
   credentialsKey?: string | null
   allowedUsers?: number[]
   maxConnections?: number
@@ -69,7 +69,7 @@ type McpServerUpdate = Partial<
 // ============================================
 
 const VALID_TRANSPORTS = ["http", "stdio", "websocket"] as const
-const VALID_AUTH_TYPES = ["none", "oauth", "api_key", "jwt"] as const
+const VALID_AUTH_TYPES = ["none", "oauth", "api_key", "jwt", "cognito_passthrough"] as const
 const MAX_CONNECTIONS_LIMIT = 100
 
 /**

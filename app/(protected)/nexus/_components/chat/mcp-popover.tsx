@@ -233,9 +233,10 @@ export function MCPPopover({
       return
     }
 
-    // Enable — check if OAuth is needed
+    // Enable — check if OAuth is needed (cognito_passthrough uses session token, no OAuth)
     const needsOAuth =
       connector.authType !== 'none' &&
+      connector.authType !== 'cognito_passthrough' &&
       (connector.status === 'no_token' || connector.status === 'token_expired')
 
     if (needsOAuth) {

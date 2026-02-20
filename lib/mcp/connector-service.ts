@@ -151,7 +151,8 @@ export async function getUserConnectionStatus(
 export async function getConnectorTools(
   serverId: string,
   userId: number,
-  userRoleNames: string[]
+  userRoleNames: string[],
+  options?: { idToken?: string }
 ): Promise<McpConnectorToolsResult> {
   const requestId = generateRequestId()
   const timer = startTimer("getConnectorTools")
@@ -187,6 +188,16 @@ export async function getConnectorTools(
       type: "http",
       url: server.url,
       authProvider,
+    }
+  } else if (authType === "cognito_passthrough") {
+    // Cognito passthrough: forward session idToken as Bearer header
+    if (!options?.idToken) {
+      throw new Error("Cognito passthrough requires an active session with an ID token")
+    }
+    transportConfig = {
+      type: "http",
+      url: server.url,
+      headers: { Authorization: `Bearer ${options.idToken}` },
     }
   } else {
     // Static token auth (api_key, jwt, none)
@@ -530,7 +541,7 @@ async function loadServerAndToken(
  * Decrypts the stored access token and maps it to the appropriate header.
  */
 async function buildAuthHeaders(
-  authType: Exclude<McpAuthType, "oauth">,
+  authType: Exclude<McpAuthType, "oauth" | "cognito_passthrough">,
   tokenRow: TokenRow
 ): Promise<Record<string, string>> {
   if (authType === "none") {
@@ -859,7 +870,7 @@ function assertHttpTransport(transport: string): asserts transport is "http" {
 }
 
 const VALID_TRANSPORTS = new Set<McpTransportType>(["stdio", "http", "websocket"])
-const VALID_AUTH_TYPES = new Set<McpAuthType>(["api_key", "oauth", "jwt", "none"])
+const VALID_AUTH_TYPES = new Set<McpAuthType>(["api_key", "oauth", "jwt", "none", "cognito_passthrough"])
 
 /** Maps a DB row to the McpConnector type with runtime validation */
 function toMcpConnector(row: typeof nexusMcpServers.$inferSelect): McpConnector {
