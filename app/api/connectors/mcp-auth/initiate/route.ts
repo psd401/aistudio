@@ -32,7 +32,7 @@ import { requireUserAccess, rejectUnsafeMcpUrl } from "@/lib/mcp/connector-servi
 import { encryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { ServerSideOAuthProvider } from "@/lib/mcp/mcp-oauth-provider"
-import { UUID_RE, getMcpAuthCookieName } from "@/lib/mcp/mcp-auth-utils"
+import { UUID_RE, getMcpAuthCookieName, classifyMcpOAuthError } from "@/lib/mcp/mcp-auth-utils"
 
 const log = createLogger({ action: "mcp-auth-initiate" })
 
@@ -175,17 +175,16 @@ export async function GET(req: Request): Promise<Response> {
 
     // Return a specific error message for the frontend to display.
     // Internal details stay in server logs.
-    const userError = classifyInitiateError(errorMessage)
+    const category = classifyMcpOAuthError(errorMessage)
+    const userError = INITIATE_ERROR_MESSAGES[category] ?? INITIATE_ERROR_MESSAGES.unexpected
     return NextResponse.json({ error: userError }, { status: 500 })
   }
 }
 
 /**
- * Error categories for the initiate endpoint.
- * Lookup-based approach breaks CodeQL taint chain and avoids returning
- * user-influenced strings directly.
- *
- * String patterns tested against @ai-sdk/mcp v0.x and node-fetch error messages.
+ * User-facing error messages for the initiate endpoint.
+ * Keyed by McpOAuthErrorCategory from the shared classifier.
+ * Categories not applicable to this endpoint fall through to "unexpected".
  */
 const INITIATE_ERROR_MESSAGES: Record<string, string> = {
   timeout: "The MCP server took too long to respond. Please try again.",
@@ -195,26 +194,4 @@ const INITIATE_ERROR_MESSAGES: Record<string, string> = {
   blocked: "The MCP server URL is not allowed (private/internal address).",
   not_found: "The MCP server configuration was not found.",
   unexpected: "Failed to start OAuth flow. Check server logs for details.",
-}
-
-function classifyInitiateError(message: string): string {
-  const lower = message.toLowerCase()
-
-  let category = "unexpected"
-
-  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("aborted")) {
-    category = "timeout"
-  } else if (lower.includes("fetch failed") || lower.includes("econnrefused") || lower.includes("enotfound")) {
-    category = "connectivity"
-  } else if (lower.includes("metadata") || lower.includes("well-known") || lower.includes("discovery")) {
-    category = "discovery"
-  } else if (lower.includes("client registration") || lower.includes("dynamic registration")) {
-    category = "registration"
-  } else if (lower.includes("ssrf") || lower.includes("private network") || lower.includes("internal address")) {
-    category = "blocked"
-  } else if (lower.includes("mcp server not found")) {
-    category = "not_found"
-  }
-
-  return INITIATE_ERROR_MESSAGES[category]
 }

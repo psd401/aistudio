@@ -25,7 +25,7 @@ import { decryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { rejectUnsafeMcpUrl } from "@/lib/mcp/connector-service"
 import { ServerSideOAuthProvider } from "@/lib/mcp/mcp-oauth-provider"
-import { UUID_RE, getMcpAuthCookieName } from "@/lib/mcp/mcp-auth-utils"
+import { UUID_RE, getMcpAuthCookieName, classifyMcpOAuthError } from "@/lib/mcp/mcp-auth-utils"
 
 const log = createLogger({ action: "mcp-auth-callback" })
 
@@ -122,8 +122,32 @@ async function findCookieByBruteForce(
 }
 
 /**
+ * Fixed inline script that reads payload and origin from JSON data blocks.
+ * Because this string is constant (no dynamic data), the CSP SHA-256 hash
+ * is stable and no user-influenced data flows into createHash().
+ *
+ * Data blocks:
+ *   #d — JSON payload object (type, success, serverId, error)
+ *   #o — JSON-encoded origin string for postMessage targetOrigin
+ */
+const CALLBACK_SCRIPT = [
+  "var d=JSON.parse(document.getElementById('d').textContent),",
+  "o=JSON.parse(document.getElementById('o').textContent);",
+  "if(window.opener){window.opener.postMessage(d,o);}",
+  "window.close();",
+].join("")
+
+/** Pre-computed CSP hash of the fixed inline script */
+const CALLBACK_SCRIPT_HASH = createHash("sha256").update(CALLBACK_SCRIPT, "utf8").digest("base64")
+
+/**
  * Renders HTML that sends postMessage to opener and closes the popup.
  * Uses a SHA-256 hash of the inline script for CSP instead of 'unsafe-inline'.
+ *
+ * The payload (success, serverId, error) and the postMessage origin are placed
+ * in `<script type="application/json">` data blocks, NOT in the inline script.
+ * This keeps the inline script content fixed so no tainted data flows into
+ * the CSP hash computation.
  */
 function renderCallbackHtml(
   success: boolean,
@@ -131,23 +155,27 @@ function renderCallbackHtml(
   error?: string
 ): Response {
   const origin = getIssuerUrl()
-  const payloadJson = JSON.stringify({
+
+  // HTML-escape JSON to prevent injection in the HTML context.
+  const escapeHtml = (s: string) => s.replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026")
+
+  const payloadJson = escapeHtml(JSON.stringify({
     type: "mcp-oauth-callback",
     success,
     serverId,
     error: error ?? null,
-  }).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026")
+  }))
 
-  // Script content is fixed as a single string so SHA-256 hash is stable per response.
-  const scriptContent = `if(window.opener){window.opener.postMessage(${payloadJson},${JSON.stringify(origin)});}window.close();`
-  const scriptHash = createHash("sha256").update(scriptContent, "utf8").digest("base64")
+  const originJson = escapeHtml(JSON.stringify(origin))
 
   const html = `<!DOCTYPE html>
 <html>
 <head><title>OAuth Complete</title></head>
 <body>
 <p>${success ? "Authorization successful. This window will close." : "Authorization failed."}</p>
-<script>${scriptContent}</script>
+<script type="application/json" id="d">${payloadJson}</script>
+<script type="application/json" id="o">${originJson}</script>
+<script>${CALLBACK_SCRIPT}</script>
 </body>
 </html>`
 
@@ -155,7 +183,7 @@ function renderCallbackHtml(
     status: 200,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
-      "Content-Security-Policy": `default-src 'none'; script-src 'sha256-${scriptHash}'`,
+      "Content-Security-Policy": `default-src 'none'; script-src 'sha256-${CALLBACK_SCRIPT_HASH}'`,
       "X-Frame-Options": "DENY",
       "X-Content-Type-Options": "nosniff",
       "Cache-Control": "no-store",
@@ -321,20 +349,18 @@ export async function GET(req: Request): Promise<Response> {
 
     // Surface a user-friendly but specific error derived from the failure.
     // Internal details stay in server logs; the user gets an actionable message.
-    const userMessage = classifyOAuthError(errorMessage)
+    const category = classifyMcpOAuthError(errorMessage)
+    const userMessage = CALLBACK_ERROR_MESSAGES[category] ?? CALLBACK_ERROR_MESSAGES.unexpected
     return renderCallbackHtml(false, serverId, userMessage)
   }
 }
 
 /**
- * Error categories returned by classifyOAuthError.
- * Using an enum with a message lookup breaks the CodeQL taint chain
- * (CodeQL traces string data flow but not numeric index lookups).
- *
- * String patterns tested against @ai-sdk/mcp v0.x and node-fetch error messages.
- * If the SDK changes its error wording, the fallback "unexpected" category catches it.
+ * User-facing error messages for the callback endpoint.
+ * Keyed by McpOAuthErrorCategory from the shared classifier.
+ * Categories not applicable to this endpoint (e.g. "blocked") fall through to "unexpected".
  */
-const OAUTH_ERROR_MESSAGES: Record<string, string> = {
+const CALLBACK_ERROR_MESSAGES: Record<string, string> = {
   timeout: "The authorization server took too long to respond. Please try again.",
   connectivity: "Could not reach the authorization server. Check your network and try again.",
   unauthorized: "The authorization server rejected the request. The client registration may be invalid.",
@@ -346,34 +372,4 @@ const OAUTH_ERROR_MESSAGES: Record<string, string> = {
   encryption: "Session data could not be read. Please try again.",
   not_found: "The MCP server configuration was not found. It may have been deleted.",
   unexpected: "An unexpected error occurred during authorization. Check server logs for details.",
-}
-
-function classifyOAuthError(message: string): string {
-  const lower = message.toLowerCase()
-
-  let category = "unexpected"
-
-  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("aborted")) {
-    category = "timeout"
-  } else if (lower.includes("fetch failed") || lower.includes("econnrefused") || lower.includes("enotfound")) {
-    category = "connectivity"
-  } else if (/\b401\b/.test(lower) || lower.includes("unauthorized")) {
-    category = "unauthorized"
-  } else if (/\b403\b/.test(lower) || lower.includes("forbidden")) {
-    category = "forbidden"
-  } else if (lower.includes("invalid") && lower.includes("token")) {
-    category = "invalid_token"
-  } else if (lower.includes("metadata") || lower.includes("well-known") || lower.includes("discovery")) {
-    category = "discovery"
-  } else if (lower.includes("client registration") || lower.includes("dynamic registration")) {
-    category = "registration"
-  } else if (lower.includes("code verifier") || lower.includes("pkce")) {
-    category = "pkce"
-  } else if (lower.includes("decrypt") || lower.includes("encrypt")) {
-    category = "encryption"
-  } else if (lower.includes("mcp server not found")) {
-    category = "not_found"
-  }
-
-  return OAUTH_ERROR_MESSAGES[category]
 }

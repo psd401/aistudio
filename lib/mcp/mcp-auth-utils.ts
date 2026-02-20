@@ -44,3 +44,70 @@ export async function exchangeMcpOAuthTokens(
     throw new Error(`MCP OAuth exchange failed: ${message}`, { cause: error })
   }
 }
+
+/**
+ * Error category identifiers for MCP OAuth error classification.
+ * All categories are string literals — the classifier returns one, and each
+ * route maps it to a user-facing message via its own lookup table.
+ *
+ * String patterns tested against @ai-sdk/mcp v0.x and node-fetch error messages.
+ */
+export type McpOAuthErrorCategory =
+  | "timeout"
+  | "connectivity"
+  | "unauthorized"
+  | "forbidden"
+  | "invalid_token"
+  | "discovery"
+  | "registration"
+  | "pkce"
+  | "encryption"
+  | "blocked"
+  | "not_found"
+  | "unexpected"
+
+/**
+ * Classifies an error message into a known category for user-facing display.
+ * Returns a category string (not a user message) — callers map it to a message
+ * via their own lookup table. This separation keeps user-facing strings out of
+ * the shared utility and gives each route control over wording.
+ */
+export function classifyMcpOAuthError(message: string): McpOAuthErrorCategory {
+  const lower = message.toLowerCase()
+
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("aborted")) {
+    return "timeout"
+  }
+  if (lower.includes("fetch failed") || lower.includes("econnrefused") || lower.includes("enotfound")) {
+    return "connectivity"
+  }
+  if (/\b401\b/.test(lower) || lower.includes("unauthorized")) {
+    return "unauthorized"
+  }
+  if (/\b403\b/.test(lower) || lower.includes("forbidden")) {
+    return "forbidden"
+  }
+  if (lower.includes("invalid") && lower.includes("token")) {
+    return "invalid_token"
+  }
+  if (lower.includes("metadata") || lower.includes("well-known") || lower.includes("discovery")) {
+    return "discovery"
+  }
+  if (lower.includes("client registration") || lower.includes("dynamic registration")) {
+    return "registration"
+  }
+  if (lower.includes("code verifier") || lower.includes("pkce")) {
+    return "pkce"
+  }
+  if (lower.includes("decrypt") || lower.includes("encrypt")) {
+    return "encryption"
+  }
+  if (lower.includes("ssrf") || lower.includes("private network") || lower.includes("internal address")) {
+    return "blocked"
+  }
+  if (lower.includes("mcp server not found")) {
+    return "not_found"
+  }
+
+  return "unexpected"
+}

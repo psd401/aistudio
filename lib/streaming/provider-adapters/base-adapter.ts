@@ -184,9 +184,10 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
             }
           }
 
-          // NOTE: Tool results are NOT available in onStepFinish — AI SDK v6 fires this
+          // NOTE: Tool results are NOT available in onStepFinish — AI SDK v4+ fires this
           // callback when the LLM call finishes, before tool execution completes.
           // Tool results are extracted from event.steps in onFinish instead.
+          // See: https://ai-sdk.dev/docs/reference/ai-sdk-core/stream-text#on-step-finish
         },
         onFinish: async (event) => {
           logger.info('streamText onFinish triggered', {
