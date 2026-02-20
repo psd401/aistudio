@@ -60,9 +60,10 @@ export async function openOAuthPopup(
   )
 
   if (!response.ok) {
-    const body = await response.json().catch(() => ({ error: "Unknown error" }))
+    const body = await response.json().catch(() => ({}))
+    const serverError = (body as { error?: string }).error
     throw new Error(
-      (body as { error?: string }).error ?? `Failed to start OAuth flow (${response.status})`
+      serverError || `Failed to start OAuth flow (HTTP ${response.status})`
     )
   }
 
