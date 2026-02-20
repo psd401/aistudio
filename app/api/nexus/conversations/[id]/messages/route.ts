@@ -11,6 +11,7 @@ import {
   type MessagePart,
 } from '@/lib/db/drizzle'
 import { getDocumentSignedUrl } from '@/lib/aws/s3-client'
+import { decodeHtmlEntitiesDeep } from '@/lib/utils/text-sanitizer'
 
 // Broader content type for API response (less strict than MessagePart)
 type ContentPart = { type: string; text?: string; [key: string]: unknown }
@@ -71,9 +72,15 @@ async function convertPartToTextContent(part: MessagePart): Promise<ContentPart 
     return imageUrl ? { type: 'text', text: `![Generated Image](${imageUrl})` } : null
   }
 
-  // Pass through tool-call and tool-result parts as-is for UI rendering
+  // Pass through tool-call and tool-result parts for UI rendering.
+  // Strip argsText (the client recomputes it from args) and decode HTML entities
+  // in args to prevent argsText mismatch on conversation reload (Issue #798).
   if (partType === 'tool-call' || partType === 'tool-result') {
-    return part as unknown as ContentPart
+    const { argsText: _stripArgsText, ...rest } = part as unknown as ContentPart & { argsText?: string }
+    if (rest.args && typeof rest.args === 'object') {
+      rest.args = decodeHtmlEntitiesDeep(rest.args)
+    }
+    return rest as ContentPart
   }
 
   // Skip control types

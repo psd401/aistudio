@@ -119,6 +119,47 @@ export function validateTextEncoding(text: string): {
  * await saveToDatabase(result.sanitized);
  * ```
  */
+/**
+ * Decodes common HTML entities in a string.
+ * Handles: &amp; &lt; &gt; &quot; &#39; &#x27; and numeric character references.
+ *
+ * Used to clean tool call arguments where AI models may generate HTML-encoded
+ * characters (e.g., "Students &amp; Staff" instead of "Students & Staff").
+ */
+export function decodeHtmlEntities(text: string): string {
+  if (!text || typeof text !== 'string') return text;
+  return text
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&#x27;/g, "'")
+    .replace(/&#(\d+);/g, (_, num) => String.fromCharCode(Number.parseInt(num, 10)))
+    .replace(/&#x([\dA-Fa-f]+);/g, (_, hex) => String.fromCharCode(Number.parseInt(hex, 16)));
+}
+
+/**
+ * Recursively decodes HTML entities in all string values within an object.
+ * Traverses objects and arrays, decoding strings in-place (returns a new object).
+ */
+export function decodeHtmlEntitiesDeep(value: unknown): unknown {
+  if (typeof value === 'string') {
+    return decodeHtmlEntities(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(decodeHtmlEntitiesDeep);
+  }
+  if (value !== null && typeof value === 'object') {
+    const result: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+      result[key] = decodeHtmlEntitiesDeep(val);
+    }
+    return result;
+  }
+  return value;
+}
+
 export function sanitizeTextWithMetrics(text: string): {
   sanitized: string;
   originalLength: number;
