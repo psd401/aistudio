@@ -36,6 +36,8 @@ import type {
   McpConnectorToolsResult,
   McpToolCallLogEntry,
 } from "./connector-types"
+import { ServerSideOAuthProvider } from "./mcp-oauth-provider"
+import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 
 const log = createLogger({ action: "mcp-connector-service" })
 
@@ -168,18 +170,39 @@ export async function getConnectorTools(
   // 4. Validate URL — prevent SSRF against internal/metadata endpoints
   validateMcpServerUrl(server.url)
 
-  // 5. Resolve auth headers from loaded token
-  const headers = await buildAuthHeaders(server.authType as McpAuthType, tokenRow)
+  // 5. Build transport config — OAuth uses authProvider, others use static headers
+  const authType = server.authType as McpAuthType
+  let transportConfig: Parameters<typeof createMCPClient>[0]["transport"]
+
+  if (authType === "oauth") {
+    // MCP-native OAuth: let the SDK handle token injection via authProvider
+    const baseUrl = getIssuerUrl()
+    const redirectUrl = `${baseUrl}/api/connectors/mcp-auth/callback`
+    const authProvider = new ServerSideOAuthProvider({
+      serverId,
+      userId,
+      redirectUrl,
+    })
+    transportConfig = {
+      type: "http",
+      url: server.url,
+      authProvider,
+    }
+  } else {
+    // Static token auth (api_key, jwt, none)
+    const headers = await buildAuthHeaders(authType, tokenRow)
+    transportConfig = {
+      type: "http",
+      url: server.url,
+      headers,
+    }
+  }
 
   // 6. Create MCP client and fetch tools with timeout + cleanup on failure.
   // Both createMCPClient and client.tools() make outbound HTTP calls to
   // user-controlled URLs, so they must be guarded against indefinite hangs.
   const clientPromise = createMCPClient({
-    transport: {
-      type: "http",
-      url: server.url,
-      headers,
-    },
+    transport: transportConfig,
     name: "aistudio-connector",
   })
 

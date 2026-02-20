@@ -138,6 +138,7 @@ async function executeStreaming(params: {
     enabledTools: mergedTools ? undefined : enabledTools,
     enabledConnectors,
     tools: mergedTools,
+    maxSteps: connectorToolResults.length > 0 ? 10 : undefined,
     options: { reasoningEffort, responseMode },
     callbacks: {
       onFinish: createOnFinishCallback({ conversationId, dbModelId, log, timer })
@@ -171,6 +172,18 @@ async function executeStreaming(params: {
       if (safeIds.length > 0) {
         responseHeaders['X-Connector-Reconnect'] = safeIds.join(',');
       }
+    }
+
+    // Send tool-to-server mapping so the client can register connector tools
+    // for branded UI rendering (ConnectorToolContext)
+    if (connectorToolResults.length > 0) {
+      const toolMapping: Record<string, { serverId: string; serverName: string }> = {};
+      for (const result of connectorToolResults) {
+        for (const toolName of Object.keys(result.tools)) {
+          toolMapping[toolName] = { serverId: result.serverId, serverName: result.serverName };
+        }
+      }
+      responseHeaders['X-Connector-Tools'] = encodeURIComponent(JSON.stringify(toolMapping));
     }
 
     return streamResponse.result.toUIMessageStreamResponse({ headers: responseHeaders });

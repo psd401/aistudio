@@ -46,9 +46,10 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
     e.preventDefault()
     setError(null)
 
-    // Validate credentialsKey required when auth is enabled
-    if (authType !== "none" && !credentialsKey.trim()) {
-      setError("Credentials Key is required when an auth type is selected.")
+    // Validate credentialsKey required for api_key and jwt auth types
+    // OAuth uses MCP-native dynamic client registration — no admin credentials needed
+    if ((authType === "api_key" || authType === "jwt") && !credentialsKey.trim()) {
+      setError("Credentials Key is required for API Key and JWT auth types.")
       return
     }
 
@@ -162,7 +163,16 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
         </Select>
       </div>
 
-      {authType !== "none" && (
+      {authType === "oauth" && (
+        <div className="rounded-md border border-border bg-muted/50 p-3">
+          <p className="text-xs text-muted-foreground">
+            Users will authenticate directly with the service when connecting.
+            No admin credentials are needed — the MCP protocol handles client registration automatically.
+          </p>
+        </div>
+      )}
+
+      {(authType === "api_key" || authType === "jwt") && (
         <div>
           <Label htmlFor="credentialsKey">
             Credentials Key <span className="text-destructive">*</span>

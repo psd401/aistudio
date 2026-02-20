@@ -5,6 +5,7 @@
 
 import {
   integer,
+  jsonb,
   pgTable,
   text,
   timestamp,
@@ -24,6 +25,8 @@ export const nexusMcpServers = pgTable("nexus_mcp_servers", {
     .array()
     .default(sql`'{}'::integer[]`),
   maxConnections: integer("max_connections").default(10),
+  /** Dynamic OAuth client registration (client_id, encrypted_client_secret, etc). Set by MCP auth flow. */
+  mcpOauthRegistration: jsonb("mcp_oauth_registration"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });

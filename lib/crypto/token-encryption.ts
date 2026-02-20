@@ -140,10 +140,36 @@ async function fetchAndCacheDEK(fetchGeneration: number): Promise<Buffer> {
  *
  * @throws Error if the secret cannot be retrieved
  */
+/**
+ * Derives a DEK from a local env var (MCP_TOKEN_ENCRYPTION_KEY) using the same
+ * HKDF flow as the Secrets Manager path. For local dev only — avoids requiring
+ * AWS credentials just to encrypt/decrypt MCP tokens.
+ */
+function deriveLocalDEK(envKey: string): Buffer {
+  return Buffer.from(
+    hkdfSync(
+      "sha256",
+      Buffer.from(envKey, "utf8"),
+      HKDF_SALT,
+      HKDF_INFO,
+      32
+    )
+  )
+}
+
 async function getDEK(): Promise<Buffer> {
   // Return cached DEK if still valid
   if (dekCache && Date.now() - dekCache.fetchedAt < DEK_CACHE_TTL) {
     return dekCache.key
+  }
+
+  // Local dev fallback: derive from env var instead of Secrets Manager
+  const localKey = process.env.MCP_TOKEN_ENCRYPTION_KEY
+  if (localKey) {
+    log.warn("Using MCP_TOKEN_ENCRYPTION_KEY env var for DEK — local dev only")
+    const key = deriveLocalDEK(localKey)
+    dekCache = { key, fetchedAt: Date.now() }
+    return key
   }
 
   // Concurrency guard: if a fetch is already in progress, join it

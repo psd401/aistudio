@@ -122,6 +122,7 @@ interface ThreadProps {
   // Connector selection
   enabledConnectors?: string[];
   onConnectorsChange?: (connectors: string[]) => void;
+  onReconnectSuccess?: (serverId: string) => void;
   // Custom suggested actions (pass [] to hide, undefined for defaults)
   suggestedActions?: SuggestedAction[];
   /** Override the tool fallback component (e.g. ConnectorToolFallback in Nexus) */
@@ -139,6 +140,7 @@ export const Thread: FC<ThreadProps> = ({
   onToolsChange,
   enabledConnectors = EMPTY_CONNECTORS_ARRAY,
   onConnectorsChange,
+  onReconnectSuccess,
   suggestedActions,
   toolFallback,
 }) => {
@@ -184,6 +186,7 @@ export const Thread: FC<ThreadProps> = ({
             onToolsChange={onToolsChange}
             enabledConnectors={enabledConnectors}
             onConnectorsChange={onConnectorsChange}
+            onReconnectSuccess={onReconnectSuccess}
             suggestedActions={suggestedActions}
           />
         </ThreadPrimitive.Root>
@@ -295,6 +298,7 @@ interface ComposerProps {
   onToolsChange?: (tools: string[]) => void;
   enabledConnectors?: string[];
   onConnectorsChange?: (connectors: string[]) => void;
+  onReconnectSuccess?: (serverId: string) => void;
   suggestedActions?: SuggestedAction[];
 }
 
@@ -308,6 +312,7 @@ const Composer: FC<ComposerProps> = ({
   onToolsChange,
   enabledConnectors = EMPTY_CONNECTORS_ARRAY,
   onConnectorsChange,
+  onReconnectSuccess,
   suggestedActions,
 }) => {
   return (
@@ -328,6 +333,7 @@ const Composer: FC<ComposerProps> = ({
             onToolsChange={onToolsChange}
             enabledConnectors={enabledConnectors}
             onConnectorsChange={onConnectorsChange}
+            onReconnectSuccess={onReconnectSuccess}
           />
         )}
         <ComposerAttachments processingAttachments={processingAttachments} />

@@ -186,6 +186,7 @@ export async function listMcpServers(): Promise<
             credentialsKey: nexusMcpServers.credentialsKey,
             allowedUsers: nexusMcpServers.allowedUsers,
             maxConnections: nexusMcpServers.maxConnections,
+            mcpOauthRegistration: nexusMcpServers.mcpOauthRegistration,
             createdAt: nexusMcpServers.createdAt,
             updatedAt: nexusMcpServers.updatedAt,
             connectionCount: count(nexusMcpConnections.id),
