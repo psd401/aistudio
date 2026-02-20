@@ -50,21 +50,18 @@ const convertPartToText = (part: { type: string; text?: string; imageUrl?: strin
 type JSONObject = { readonly [key: string]: JSONValue }
 type JSONValue = string | number | boolean | null | JSONObject | readonly JSONValue[]
 
-// AI SDK v5 static tool state types
-type StaticToolState = 'input-available' | 'output-available' | 'output-error'
-
 // Type for assistant-ui content parts
-// Static tool format: type is 'tool-{toolName}' (e.g., 'tool-show_chart')
-// AISDKMessageConverter extracts toolName via type.replace("tool-", "")
+// Uses tool-call format for fromThreadMessageLike compatibility (Issue #798)
 type ContentPartLike =
   | { type: 'text'; text: string }
   | {
-      type: string;  // 'tool-{toolName}' format
+      type: 'tool-call';
       toolCallId: string;
-      state: StaticToolState;
-      input: JSONObject;
-      output?: unknown;
-      errorText?: string;
+      toolName: string;
+      args: JSONObject;
+      argsText: string;
+      result?: unknown;
+      isError?: boolean;
     }
 
 // We'll use a simple implementation since ExportedMessageRepository.fromArray may not be accessible
@@ -84,26 +81,21 @@ const createExportedMessageRepository = (messages: MessageData[]): ExportedMessa
             return { type: 'text', text: partData.text || '' }
           }
           if (partData.type === 'tool-call' && partData.toolName && partData.toolCallId) {
-            // Convert to static tool format: type: 'tool-{toolName}'
-            // AISDKMessageConverter extracts toolName via type.replace("tool-", "")
-            const args = (partData.args as JSONObject) || {}
-            const hasResult = partData.result !== undefined
-            const isError = partData.isError === true
+            // Use tool-call format (not static tool-{name} format) so that
+            // fromThreadMessageLike processes it correctly. The static format
+            // (type: 'tool-show_chart') is not handled by fromThreadMessageLike's
+            // switch and throws "Unsupported assistant message part type". (Issue #798)
+            const args: JSONObject = (partData.args ?? {}) as JSONObject
 
             const toolPart: ContentPartLike = {
-              type: `tool-${partData.toolName}`,  // e.g., 'tool-show_chart'
+              type: 'tool-call',
               toolCallId: partData.toolCallId,
-              state: isError ? 'output-error' : hasResult ? 'output-available' : 'input-available',
-              input: args,
+              toolName: partData.toolName,
+              args,
+              argsText: JSON.stringify(args),
+              result: partData.result,
+              isError: partData.isError === true,
             }
-
-            if (hasResult && !isError) {
-              (toolPart as { output?: unknown }).output = partData.result
-            }
-            if (isError) {
-              (toolPart as { errorText?: string }).errorText = typeof partData.result === 'string' ? partData.result : JSON.stringify(partData.result)
-            }
-
             return toolPart
           }
           if (partData.type === 'image' && partData.imageUrl) {
