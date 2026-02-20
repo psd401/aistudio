@@ -198,6 +198,9 @@ export class ServerSideOAuthProvider implements OAuthClientProvider {
   }
 
   async codeVerifier(): Promise<string> {
+    if (!this._codeVerifier) {
+      throw new Error("codeVerifier is empty — was saveCodeVerifier() called or preloadedCodeVerifier provided?")
+    }
     return this._codeVerifier
   }
 
@@ -253,6 +256,11 @@ export class ServerSideOAuthProvider implements OAuthClientProvider {
   /**
    * Save dynamic client registration info to nexus_mcp_servers.mcp_oauth_registration.
    * Encrypts client_secret if present.
+   *
+   * Note: This is a last-write-wins UPDATE — if two users trigger dynamic client
+   * registration concurrently, the second write silently overwrites the first.
+   * This is acceptable because registration info is per-server (not per-user) and
+   * the SDK calls this idempotently with the same provider-issued client_id.
    */
   async saveClientInformation(clientInformation: OAuthClientInformation): Promise<void> {
     log.info("Saving MCP OAuth client registration", {

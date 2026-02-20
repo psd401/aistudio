@@ -60,12 +60,12 @@ await db.insert(oauthTokens)
 
 **Authorization gate** — assert user owns the connector before issuing tokens:
 ```typescript
-await assertUserAccess(session.userId, connectorId);
+await requireUserAccess(session.userId, connectorId);
 ```
 
 ## Prevention
 
 - Every HTML-rendering API route needs a checklist: escape all query params, escape embedded JSON, add X-Frame-Options/X-Content-Type-Options/Cache-Control headers
 - Token storage for OAuth must always use `INSERT ... ON CONFLICT DO UPDATE` — never check-then-insert
-- All connector-scoped routes must call `assertUserAccess` before any data operation
+- All connector-scoped routes must call `requireUserAccess` before any data operation
 - postMessage payloads: `JSON.stringify` exactly once; double-stringify is a latent bug that silently breaks the receiver

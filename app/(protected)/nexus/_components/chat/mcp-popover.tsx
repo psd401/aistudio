@@ -23,7 +23,8 @@ interface MCPPopoverProps {
   enabledConnectors: string[]
   onConnectorsChange: (connectors: string[]) => void
   disabled?: boolean
-  /** Called after successful OAuth reconnect — used to dismiss reconnect prompt */
+  /** Called after successful OAuth reconnect — used to dismiss reconnect prompt.
+   *  TODO: Consider React Context to avoid prop drilling through thread → composer → popover. */
   onReconnectSuccess?: (serverId: string) => void
 }
 

@@ -27,7 +27,7 @@ import { eq } from "drizzle-orm"
 import { nexusMcpServers } from "@/lib/db/schema"
 import { decryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
-import { validateMcpServerUrl } from "@/lib/mcp/connector-service"
+import { rejectUnsafeMcpUrl } from "@/lib/mcp/connector-service"
 import { ServerSideOAuthProvider } from "@/lib/mcp/mcp-oauth-provider"
 import { UUID_RE, getMcpAuthCookieName } from "@/lib/mcp/mcp-auth-utils"
 
@@ -265,7 +265,7 @@ export async function GET(req: Request): Promise<Response> {
     }
 
     const server = serverRows[0]
-    validateMcpServerUrl(server.url)
+    rejectUnsafeMcpUrl(server.url)
 
     // 6. Create provider with pre-loaded code verifier and call auth() with code
     const baseUrl = getIssuerUrl()

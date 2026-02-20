@@ -28,7 +28,7 @@ import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq } from "drizzle-orm"
 import { nexusMcpServers } from "@/lib/db/schema"
-import { assertUserAccess, validateMcpServerUrl } from "@/lib/mcp/connector-service"
+import { requireUserAccess, rejectUnsafeMcpUrl } from "@/lib/mcp/connector-service"
 import { encryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { ServerSideOAuthProvider } from "@/lib/mcp/mcp-oauth-provider"
@@ -85,7 +85,7 @@ export async function GET(req: Request): Promise<Response> {
 
     // Access control
     try {
-      assertUserAccess(server, userId, userRoleNames)
+      requireUserAccess(server, userId, userRoleNames)
     } catch {
       log.warn("User lacks access to connector", { requestId, serverId, userId })
       timer({ status: "error", reason: "forbidden" })
@@ -101,7 +101,7 @@ export async function GET(req: Request): Promise<Response> {
     }
 
     // Validate server URL (SSRF prevention)
-    validateMcpServerUrl(server.url)
+    rejectUnsafeMcpUrl(server.url)
 
     // 4. Build callback URL
     const baseUrl = getIssuerUrl()

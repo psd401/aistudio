@@ -69,11 +69,10 @@ const raw = await fetch(tokenEndpoint, ...).then(r => r.json());
 const token = TokenResponseSchema.parse(raw); // throws on shape mismatch
 ```
 
-**CodeQL `js/user-controlled-bypass` — always a false positive on null/presence checks:**
-- Fires when input validation guard is detected (e.g., `if (!userId) throw`)
-- CodeQL interprets any user-input validation as a potential bypass
-- These are standard null/presence guards, not security bypasses
-- Dismiss via GitHub security API; do not change the guard logic
+**CodeQL `js/user-controlled-bypass` — context-dependent, not always a false positive:**
+- On null/presence guards (e.g., `if (!userId) throw`): false positive — dismiss
+- On OAuth callbacks: **inspect handler order first** — if `errorParam` is checked before state cookie validation, CodeQL is correct; fix the order, don't dismiss
+- See `security/2026-02-20-oauth-callback-validation-order.md` for the real-vulnerability case
 
 ## Prevention
 

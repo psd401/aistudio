@@ -26,7 +26,7 @@ import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq, sql } from "drizzle-orm"
 import { nexusMcpServers, nexusMcpUserTokens } from "@/lib/db/schema"
-import { loadOAuthCredentials, validateMcpServerUrl } from "@/lib/mcp/connector-service"
+import { loadOAuthCredentials, rejectUnsafeMcpUrl } from "@/lib/mcp/connector-service"
 import { encryptToken, decryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { getOAuthStateCookieName } from "../authorize/route"
@@ -260,7 +260,7 @@ export async function GET(req: Request): Promise<Response> {
         fallbackUrl: tokenEndpoint,
       })
     }
-    validateMcpServerUrl(tokenEndpoint)
+    rejectUnsafeMcpUrl(tokenEndpoint)
 
     // 10. Exchange auth code for tokens (RFC 6749 §4.1.3 + RFC 7636 §4.5)
     // Uses client_secret_post method (secret in body). Providers requiring

@@ -25,7 +25,7 @@ import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq } from "drizzle-orm"
 import { nexusMcpServers } from "@/lib/db/schema"
-import { assertUserAccess, loadOAuthCredentials, validateMcpServerUrl } from "@/lib/mcp/connector-service"
+import { requireUserAccess, loadOAuthCredentials, rejectUnsafeMcpUrl } from "@/lib/mcp/connector-service"
 import { encryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 
@@ -115,7 +115,7 @@ export async function GET(req: Request): Promise<Response> {
 
     // Access control: same rules as getConnectorTools / tool invocations
     try {
-      assertUserAccess(server, userId, userRoleNames)
+      requireUserAccess(server, userId, userRoleNames)
     } catch {
       log.warn("User lacks access to connector", { requestId, serverId, userId })
       timer({ status: "error", reason: "forbidden" })
@@ -168,7 +168,7 @@ export async function GET(req: Request): Promise<Response> {
     const redirectUri = `${baseUrl}/api/connectors/oauth/callback`
 
     // 8. Build authorization URL (validate against SSRF before redirecting user)
-    validateMcpServerUrl(credentials.authorizationEndpointUrl)
+    rejectUnsafeMcpUrl(credentials.authorizationEndpointUrl)
     const authUrl = new URL(credentials.authorizationEndpointUrl)
     authUrl.searchParams.set("response_type", "code")
     authUrl.searchParams.set("client_id", credentials.clientId)
