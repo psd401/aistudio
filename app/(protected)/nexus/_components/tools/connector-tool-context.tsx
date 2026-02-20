@@ -86,8 +86,6 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
     setFailedServerIds(prev => [...new Set([...prev, ...ids])])
   }, [])
 
-  // TODO(Task 6): MCPPopover must call removeFailedServerId(id) after successful OAuth reconnect.
-  // Without this call the reconnect prompt will persist indefinitely after re-authentication.
   const removeFailedServerId = useCallback((id: string) => {
     setFailedServerIds(prev => prev.filter(sid => sid !== id))
   }, [])

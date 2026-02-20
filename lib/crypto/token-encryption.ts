@@ -131,16 +131,6 @@ async function fetchAndCacheDEK(fetchGeneration: number): Promise<Buffer> {
 }
 
 /**
- * Fetches the Data Encryption Key with in-process caching and concurrency safety.
- *
- * Cache TTL: 5 minutes. Concurrent callers on a cold cache share a single Secrets
- * Manager fetch (thundering-herd protection via the shared in-flight promise).
- * A generation counter prevents a stale in-flight fetch from re-populating the
- * cache after an explicit invalidation.
- *
- * @throws Error if the secret cannot be retrieved
- */
-/**
  * Derives a DEK from a local env var (MCP_TOKEN_ENCRYPTION_KEY) using the same
  * HKDF flow as the Secrets Manager path. For local dev only — avoids requiring
  * AWS credentials just to encrypt/decrypt MCP tokens.
@@ -157,15 +147,33 @@ function deriveLocalDEK(envKey: string): Buffer {
   )
 }
 
+/**
+ * Fetches the Data Encryption Key with in-process caching and concurrency safety.
+ *
+ * Cache TTL: 5 minutes. Concurrent callers on a cold cache share a single Secrets
+ * Manager fetch (thundering-herd protection via the shared in-flight promise).
+ * A generation counter prevents a stale in-flight fetch from re-populating the
+ * cache after an explicit invalidation.
+ *
+ * @throws Error if the secret cannot be retrieved
+ */
 async function getDEK(): Promise<Buffer> {
   // Return cached DEK if still valid
   if (dekCache && Date.now() - dekCache.fetchedAt < DEK_CACHE_TTL) {
     return dekCache.key
   }
 
-  // Local dev fallback: derive from env var instead of Secrets Manager
+  // Local dev fallback: derive from env var instead of Secrets Manager.
+  // Blocked in non-dev environments to prevent accidental misconfiguration in ECS.
   const localKey = process.env.MCP_TOKEN_ENCRYPTION_KEY
   if (localKey) {
+    const environment = process.env.ENVIRONMENT // Set by ECS task definition; absent in local dev
+    if (environment && environment !== "dev") {
+      throw new Error(
+        `MCP_TOKEN_ENCRYPTION_KEY is not allowed in environment '${environment}'. ` +
+          "Use AWS Secrets Manager for token encryption in non-dev environments."
+      )
+    }
     log.warn("Using MCP_TOKEN_ENCRYPTION_KEY env var for DEK — local dev only")
     const key = deriveLocalDEK(localKey)
     dekCache = { key, fetchedAt: Date.now() }

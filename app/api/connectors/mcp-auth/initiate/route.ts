@@ -65,6 +65,7 @@ export async function GET(req: Request): Promise<Response> {
     // 2. Validate serverId param
     const { searchParams } = new URL(req.url)
     const serverId = searchParams.get("serverId")
+    // lgtm[js/user-controlled-bypass] — format-only check; authorization enforced by assertUserAccess() after DB load
     if (!serverId || !UUID_RE.test(serverId)) {
       timer({ status: "error", reason: "invalid_server_id" })
       return NextResponse.json({ error: "Invalid serverId" }, { status: 400 })
@@ -143,12 +144,15 @@ export async function GET(req: Request): Promise<Response> {
       )
     }
 
-    // 6. Encrypt code verifier + state into cookie for callback
+    // 6. Encrypt code verifier + state into cookie for callback.
+    // oauthState is the exact state param the SDK embedded in authUrl — stored so
+    // the callback can do a timing-safe comparison for CSRF protection.
     const cookiePayload = JSON.stringify({
       codeVerifier: await provider.codeVerifier(),
       serverId,
       userId,
       createdAt: Date.now(),
+      oauthState: authUrl.searchParams.get("state") ?? null,
     })
     const encryptedState = await encryptToken(cookiePayload)
 

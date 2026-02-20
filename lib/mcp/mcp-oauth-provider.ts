@@ -18,6 +18,7 @@
 import { eq, and } from "drizzle-orm"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { nexusMcpServers, nexusMcpUserTokens } from "@/lib/db/schema"
+import type { McpOauthRegistration } from "@/lib/db/schema/tables/nexus-mcp-servers"
 import { encryptToken, decryptToken } from "@/lib/crypto/token-encryption"
 import { createLogger } from "@/lib/logger"
 import type {
@@ -204,25 +205,31 @@ export class ServerSideOAuthProvider implements OAuthClientProvider {
       "mcp-oauth:clientInformation"
     )
 
-    if (rows.length === 0 || !rows[0].mcpOauthRegistration) {
+    const reg = rows[0].mcpOauthRegistration
+    if (!reg) {
       return undefined
     }
 
-    const reg = rows[0].mcpOauthRegistration as Record<string, unknown>
+    if (!reg.client_id) {
+      log.warn("Invalid or missing client_id in mcp_oauth_registration JSONB", {
+        serverId: this.serverId,
+      })
+      return undefined
+    }
 
     // Decrypt client_secret if present
     let clientSecret: string | undefined
-    if (typeof reg.encrypted_client_secret === "string") {
+    if (reg.encrypted_client_secret) {
       clientSecret = await decryptToken(reg.encrypted_client_secret)
     }
 
     return {
-      client_id: reg.client_id as string,
+      client_id: reg.client_id,
       ...(clientSecret && { client_secret: clientSecret }),
-      ...(typeof reg.client_id_issued_at === "number" && {
+      ...(reg.client_id_issued_at != null && {
         client_id_issued_at: reg.client_id_issued_at,
       }),
-      ...(typeof reg.client_secret_expires_at === "number" && {
+      ...(reg.client_secret_expires_at != null && {
         client_secret_expires_at: reg.client_secret_expires_at,
       }),
     }
@@ -239,7 +246,7 @@ export class ServerSideOAuthProvider implements OAuthClientProvider {
     })
 
     // Encrypt client_secret before storing
-    const registration: Record<string, unknown> = {
+    const registration: McpOauthRegistration = {
       client_id: clientInformation.client_id,
     }
 

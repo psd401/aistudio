@@ -14,6 +14,7 @@
  * Issue #797
  */
 
+import { createHash, timingSafeEqual } from "node:crypto"
 import { cookies } from "next/headers"
 import { auth } from "@ai-sdk/mcp"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
@@ -39,10 +40,78 @@ interface McpAuthStateCookie {
   serverId: string
   userId: number
   createdAt: number
+  /** OAuth state param stored by initiate endpoint for CSRF validation */
+  oauthState?: string | null
+}
+
+type ReadonlyCookieStore = Awaited<ReturnType<typeof cookies>>
+
+/**
+ * Looks up and validates the OAuth state cookie using the state query parameter.
+ * Performs a timing-safe comparison of the stored oauthState vs the callback's state param.
+ * Returns the decrypted cookie data on success, null if not found or validation fails.
+ */
+async function findCookieByState(
+  state: string,
+  cookieStore: ReadonlyCookieStore,
+  requestId: string
+): Promise<McpAuthStateCookie | null> {
+  const colonIdx = state.indexOf(":")
+  if (colonIdx !== 36) return null
+
+  const stateServerId = state.slice(0, 36)
+  if (!UUID_RE.test(stateServerId)) return null
+
+  const cookie = cookieStore.get(getMcpAuthCookieName(stateServerId))
+  if (!cookie?.value) return null
+
+  try {
+    const decrypted = await decryptToken(cookie.value)
+    const parsed = JSON.parse(decrypted) as McpAuthStateCookie
+
+    if (parsed.oauthState) {
+      const matches =
+        parsed.oauthState.length === state.length &&
+        timingSafeEqual(Buffer.from(parsed.oauthState), Buffer.from(state))
+      if (!matches) {
+        log.warn("MCP auth cookie state mismatch — possible CSRF", { requestId })
+        return null
+      }
+    }
+    // If cookie predates oauthState field, accept without state comparison
+
+    return parsed
+  } catch {
+    log.warn("Failed to decrypt MCP auth cookie from state", { requestId })
+    return null
+  }
+}
+
+/**
+ * Fallback: scans all mcp_auth_state_* cookies and returns the first non-expired one.
+ * Used only when the state query parameter was not preserved by the OAuth provider.
+ */
+async function findCookieByBruteForce(
+  cookieStore: ReadonlyCookieStore
+): Promise<McpAuthStateCookie | null> {
+  for (const cookie of cookieStore.getAll()) {
+    if (!cookie.name.startsWith("mcp_auth_state_") || !cookie.value) continue
+    try {
+      const decrypted = await decryptToken(cookie.value)
+      const parsed = JSON.parse(decrypted) as McpAuthStateCookie
+      if (Date.now() - parsed.createdAt < STATE_MAX_AGE_MS) {
+        return parsed
+      }
+    } catch {
+      // Skip invalid cookies
+    }
+  }
+  return null
 }
 
 /**
  * Renders HTML that sends postMessage to opener and closes the popup.
+ * Uses a SHA-256 hash of the inline script for CSP instead of 'unsafe-inline'.
  */
 function renderCallbackHtml(
   success: boolean,
@@ -57,17 +126,16 @@ function renderCallbackHtml(
     error: error ?? null,
   }).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026")
 
+  // Script content is fixed as a single string so SHA-256 hash is stable per response.
+  const scriptContent = `if(window.opener){window.opener.postMessage(${payloadJson},${JSON.stringify(origin)});}window.close();`
+  const scriptHash = createHash("sha256").update(scriptContent, "utf8").digest("base64")
+
   const html = `<!DOCTYPE html>
 <html>
 <head><title>OAuth Complete</title></head>
 <body>
 <p>${success ? "Authorization successful. This window will close." : "Authorization failed."}</p>
-<script>
-  if (window.opener) {
-    window.opener.postMessage(${payloadJson}, ${JSON.stringify(origin)});
-  }
-  window.close();
-</script>
+<script>${scriptContent}</script>
 </body>
 </html>`
 
@@ -75,7 +143,7 @@ function renderCallbackHtml(
     status: 200,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
-      "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'",
+      "Content-Security-Policy": `default-src 'none'; script-src 'sha256-${scriptHash}'`,
       "X-Frame-Options": "DENY",
       "X-Content-Type-Options": "nosniff",
       "Cache-Control": "no-store",
@@ -93,72 +161,24 @@ export async function GET(req: Request): Promise<Response> {
     const { searchParams } = new URL(req.url)
     const code = searchParams.get("code")
     const errorParam = searchParams.get("error")
-
-    // Handle OAuth error from provider
-    if (errorParam) {
-      log.warn("MCP OAuth provider returned error", { requestId, error: errorParam })
-      timer({ status: "error", reason: "provider_error" })
-      return renderCallbackHtml(false, serverId, "Authorization was denied by the provider.")
-    }
-
-    if (!code) {
-      log.warn("Missing code in MCP auth callback", { requestId })
-      timer({ status: "error", reason: "missing_code" })
-      return renderCallbackHtml(false, serverId, "Missing authorization code")
-    }
-
-    // 2. We need to find which server this callback belongs to.
-    // The @ai-sdk/mcp auth function may pass state as a query param.
-    // We also check cookies for all possible server IDs that have pending auth.
-    // Strategy: check state param for serverId prefix, or scan cookies.
     const state = searchParams.get("state")
 
-    // Try to extract serverId from state (some providers pass it through)
-    // The MCP SDK may encode serverId in the state, or we look at cookies
+    // 2. Validate the state cookie FIRST — this is the CSRF/session integrity check.
+    // Must run before any early return (including OAuth error responses) so that
+    // errorParam cannot be used to bypass cookie validation (CodeQL js/user-controlled-bypass).
     const cookieStore = await cookies()
 
-    // Find the matching cookie by checking all mcp_auth_state_ cookies
-    let cookieData: McpAuthStateCookie | null = null
+    // Deterministic state-based lookup first (preferred — timing-safe CSRF check)
+    let cookieData = state ? await findCookieByState(state, cookieStore, requestId) : null
 
-    if (state) {
-      // Try state-based approach: some OAuth servers preserve state
-      // Check if state contains a serverId prefix
-      const colonIdx = state.indexOf(":")
-      if (colonIdx === 36) {
-        const stateServerId = state.slice(0, 36)
-        if (UUID_RE.test(stateServerId)) {
-          const cookie = cookieStore.get(getMcpAuthCookieName(stateServerId))
-          if (cookie?.value) {
-            try {
-              const decrypted = await decryptToken(cookie.value)
-              cookieData = JSON.parse(decrypted) as McpAuthStateCookie
-              serverId = cookieData.serverId
-            } catch {
-              log.warn("Failed to decrypt MCP auth cookie from state", { requestId })
-            }
-          }
-        }
-      }
-    }
-
-    // If we couldn't find via state, scan all cookies
+    // Fallback: scan all cookies when state-based lookup failed (e.g. provider stripped state)
     if (!cookieData) {
-      const allCookies = cookieStore.getAll()
-      for (const cookie of allCookies) {
-        if (cookie.name.startsWith("mcp_auth_state_") && cookie.value) {
-          try {
-            const decrypted = await decryptToken(cookie.value)
-            const parsed = JSON.parse(decrypted) as McpAuthStateCookie
-            // Check if this cookie is still valid (not expired)
-            if (Date.now() - parsed.createdAt < STATE_MAX_AGE_MS) {
-              cookieData = parsed
-              serverId = parsed.serverId
-              break
-            }
-          } catch {
-            // Skip invalid cookies
-          }
-        }
+      cookieData = await findCookieByBruteForce(cookieStore)
+      if (cookieData) {
+        log.warn("MCP auth callback using cookie-scan fallback — state param not matched", {
+          requestId,
+          hasState: !!state,
+        })
       }
     }
 
@@ -168,7 +188,9 @@ export async function GET(req: Request): Promise<Response> {
       return renderCallbackHtml(false, serverId, "OAuth session expired. Please try again.")
     }
 
-    // Validate cookie data
+    serverId = cookieData.serverId
+
+    // Validate cookie fields
     if (!UUID_RE.test(cookieData.serverId)) {
       log.warn("Invalid serverId in MCP auth cookie", { requestId })
       timer({ status: "error", reason: "invalid_cookie" })
@@ -188,15 +210,32 @@ export async function GET(req: Request): Promise<Response> {
       return renderCallbackHtml(false, serverId, "OAuth session expired. Please try again.")
     }
 
-    log.info("Processing MCP auth callback", { requestId, serverId, userId: cookieData.userId })
-
-    // 3. Clear the state cookie (one-time use)
+    // 3. Clear the state cookie (one-time use) — done before token exchange
     cookieStore.delete({
       name: getMcpAuthCookieName(serverId),
       path: "/api/connectors/mcp-auth",
     })
 
-    // 4. Load server config
+    // 4. Handle OAuth error from provider (AFTER cookie validation — CSRF check already passed)
+    if (errorParam) {
+      log.warn("MCP OAuth provider returned error", {
+        requestId,
+        serverId,
+        error: errorParam.slice(0, 100),
+      })
+      timer({ status: "error", reason: "provider_error" })
+      return renderCallbackHtml(false, serverId, "Authorization was denied by the provider.")
+    }
+
+    if (!code) {
+      log.warn("Missing code in MCP auth callback", { requestId, serverId })
+      timer({ status: "error", reason: "missing_code" })
+      return renderCallbackHtml(false, serverId, "Missing authorization code")
+    }
+
+    log.info("Processing MCP auth callback", { requestId, serverId, userId: cookieData.userId })
+
+    // 5. Load server config
     const serverRows = await executeQuery(
       (db) =>
         db
@@ -216,7 +255,7 @@ export async function GET(req: Request): Promise<Response> {
     const server = serverRows[0]
     validateMcpServerUrl(server.url)
 
-    // 5. Create provider with pre-loaded code verifier and call auth() with code
+    // 6. Create provider with pre-loaded code verifier and call auth() with code
     const baseUrl = getIssuerUrl()
     const redirectUrl = `${baseUrl}/api/connectors/mcp-auth/callback`
 
