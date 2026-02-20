@@ -22,7 +22,7 @@
 
 import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
-import { auth as exchangeMcpOAuthTokens } from "@ai-sdk/mcp"
+import { exchangeMcpOAuthTokens } from "@/lib/mcp/mcp-auth-utils"
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"

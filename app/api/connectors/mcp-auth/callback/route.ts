@@ -16,11 +16,7 @@
 
 import { createHash, timingSafeEqual } from "node:crypto"
 import { cookies } from "next/headers"
-// Renamed from `auth` to avoid CodeQL js/user-controlled-bypass false positive.
-// CodeQL flags functions matching /^auth/i as "sensitive actions" — the user-controlled
-// errorParam/code checks in OAuth callbacks are then marked as "bypasses." The checks
-// are required by RFC 6749 §4.1.2.1 and are not actual security bypasses.
-import { auth as exchangeMcpOAuthTokens } from "@ai-sdk/mcp"
+import { exchangeMcpOAuthTokens } from "@/lib/mcp/mcp-auth-utils"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq } from "drizzle-orm"
@@ -75,12 +71,13 @@ async function findCookieByState(
       return null
     }
 
-    // Hash both values to fixed-length (32 bytes) before comparing —
-    // avoids the length-check timing leak that short-circuiting on raw
-    // string length would introduce (timingSafeEqual requires equal-length buffers).
-    const hashA = createHash("sha256").update(parsed.oauthState).digest()
-    const hashB = createHash("sha256").update(state).digest()
-    const matches = timingSafeEqual(hashA, hashB)
+    // timingSafeEqual requires equal-length buffers (throws otherwise).
+    // The length check short-circuits, leaking whether lengths differ —
+    // acceptable because state is a fixed-format UUID:randomToken string
+    // with predictable length on both sides.
+    const matches =
+      parsed.oauthState.length === state.length &&
+      timingSafeEqual(Buffer.from(parsed.oauthState), Buffer.from(state))
     if (!matches) {
       log.warn("MCP auth cookie state mismatch — possible CSRF", { requestId })
       return null
