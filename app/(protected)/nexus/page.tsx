@@ -12,6 +12,7 @@ import { NexusLayout } from './_components/layout/nexus-layout'
 import { ErrorBoundary } from './_components/error-boundary'
 import { PromptAutoLoader } from './_components/prompt-auto-loader'
 import { ConversationInitializer } from './_components/conversation-initializer'
+import { z } from 'zod'
 import { useConversationContext, createNexusHistoryAdapter } from '@/lib/nexus/history-adapter'
 import { MultiProviderToolUIs } from './_components/tools/multi-provider-tools'
 import { ConnectorToolProvider, useConnectorTools } from './_components/tools/connector-tool-context'
@@ -24,6 +25,12 @@ import { createLogger } from '@/lib/client-logger'
 import { toast } from 'sonner'
 
 const log = createLogger({ moduleName: 'nexus-page' })
+
+/** Zod schema for X-Connector-Tools response header — validates server-sent tool mapping */
+const ConnectorToolsSchema = z.record(z.string(), z.object({
+  serverId: z.string().uuid(),
+  serverName: z.string(),
+}))
 
 // Loading spinner component for Suspense fallback
 function NexusLoadingSpinner() {
@@ -51,6 +58,7 @@ interface ConversationRuntimeProviderProps {
   initialMessages?: UIMessage[]
   onConversationIdChange?: (conversationId: string) => void
   onConnectorReconnect?: (failedServerIds: string[]) => void
+  onConnectorToolsReceived?: (mapping: Record<string, { serverId: string; serverName: string }>) => void
 }
 
 /** UUID format for validating X-Connector-Reconnect header values */
@@ -66,7 +74,8 @@ function ConversationRuntimeProvider({
   attachmentAdapter,
   initialMessages = [],
   onConversationIdChange,
-  onConnectorReconnect
+  onConnectorReconnect,
+  onConnectorToolsReceived
 }: ConversationRuntimeProviderProps) {
   const historyAdapter = useMemo(
     () => createNexusHistoryAdapter(conversationId),
@@ -133,6 +142,17 @@ function ConversationRuntimeProvider({
       }
     }
 
+    // Parse connector tool mapping for branded UI rendering (Bug #2 fix)
+    const connectorToolsHeader = response.headers.get('X-Connector-Tools')
+    if (connectorToolsHeader && onConnectorToolsReceived) {
+      try {
+        const mapping = ConnectorToolsSchema.parse(JSON.parse(decodeURIComponent(connectorToolsHeader)))
+        onConnectorToolsReceived(mapping)
+      } catch {
+        log.warn('Failed to parse X-Connector-Tools header')
+      }
+    }
+
     // Handle connector reconnect signal (from failed MCP connector auth)
     const reconnectHeader = response.headers.get('X-Connector-Reconnect')
     if (reconnectHeader) {
@@ -151,7 +171,7 @@ function ConversationRuntimeProvider({
     }
 
     return response
-  }, [conversationId, onConversationIdChange, onConnectorReconnect])
+  }, [conversationId, onConversationIdChange, onConnectorReconnect, onConnectorToolsReceived])
 
   // Use official useChatRuntime from @assistant-ui/react-ai-sdk
   // This natively understands AI SDK's streaming format
@@ -219,7 +239,7 @@ function NexusRuntimeWrapper({
   onToolsChange,
   onConnectorsChange,
 }: NexusRuntimeWrapperProps) {
-  const { addFailedServerIds, failedServerIds } = useConnectorTools()
+  const { addFailedServerIds, failedServerIds, registerConnectorTools, removeFailedServerId } = useConnectorTools()
 
   const handleConnectorReconnect = useCallback((ids: string[]) => {
     addFailedServerIds(ids)
@@ -228,6 +248,24 @@ function NexusRuntimeWrapper({
       duration: 8000,
     })
   }, [addFailedServerIds])
+
+  const handleConnectorToolsReceived = useCallback((
+    mapping: Record<string, { serverId: string; serverName: string }>
+  ) => {
+    // Group tools by server for batch registration
+    const byServer = new Map<string, { info: { serverId: string; serverName: string }; tools: string[] }>()
+    for (const [toolName, info] of Object.entries(mapping)) {
+      const existing = byServer.get(info.serverId)
+      if (existing) {
+        existing.tools.push(toolName)
+      } else {
+        byServer.set(info.serverId, { info, tools: [toolName] })
+      }
+    }
+    for (const { info, tools } of byServer.values()) {
+      registerConnectorTools(info, tools)
+    }
+  }, [registerConnectorTools])
 
   return (
     <ConversationRuntimeProvider
@@ -239,6 +277,7 @@ function NexusRuntimeWrapper({
       initialMessages={initialMessages}
       onConversationIdChange={onConversationIdChange}
       onConnectorReconnect={handleConnectorReconnect}
+      onConnectorToolsReceived={handleConnectorToolsReceived}
     >
       {/* Register tool UI components for all providers */}
       <MultiProviderToolUIs />
@@ -268,6 +307,7 @@ function NexusRuntimeWrapper({
           onToolsChange={onToolsChange}
           enabledConnectors={enabledConnectors}
           onConnectorsChange={onConnectorsChange}
+          onReconnectSuccess={removeFailedServerId}
           toolFallback={ConnectorToolFallback}
         />
       </div>

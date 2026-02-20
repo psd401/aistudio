@@ -23,7 +23,8 @@ import type { SelectNexusMcpServer, InsertNexusMcpServer } from "@/lib/db/types"
 // Types
 // ============================================
 
-export interface McpServerWithStats extends SelectNexusMcpServer {
+/** Admin-facing server info — omits mcpOauthRegistration (contains encrypted_client_secret). */
+export interface McpServerWithStats extends Omit<SelectNexusMcpServer, "mcpOauthRegistration"> {
   connectionCount: number
 }
 

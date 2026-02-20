@@ -53,6 +53,7 @@
     "055-seed-decision-framework-prompt.sql",
     "056-graph-nodes-search-indexes.sql",
     "057-add-decision-capture-tool.sql",
-    "058-nexus-mcp-user-tokens.sql"
+    "058-nexus-mcp-user-tokens.sql",
+    "059-mcp-oauth-registration.sql"
   ]
 }

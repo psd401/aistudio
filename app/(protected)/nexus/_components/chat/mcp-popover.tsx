@@ -23,6 +23,9 @@ interface MCPPopoverProps {
   enabledConnectors: string[]
   onConnectorsChange: (connectors: string[]) => void
   disabled?: boolean
+  /** Called after successful OAuth reconnect — used to dismiss reconnect prompt.
+   *  TODO: Consider React Context to avoid prop drilling through thread → composer → popover. */
+  onReconnectSuccess?: (serverId: string) => void
 }
 
 /** Status indicator dot colors */
@@ -128,6 +131,7 @@ export function MCPPopover({
   enabledConnectors,
   onConnectorsChange,
   disabled = false,
+  onReconnectSuccess,
 }: MCPPopoverProps) {
   const [connectors, setConnectors] = useState<ConnectorWithStatus[]>([])
   const [isLoading, setIsLoading] = useState(false)
@@ -193,6 +197,10 @@ export function MCPPopover({
         if (!latest.includes(connectorId)) {
           onConnectorsChangeRef.current([...latest, connectorId])
         }
+        // Dismiss reconnect prompt after successful re-auth (Bug #3 fix)
+        if (onReconnectSuccess) {
+          onReconnectSuccess(connectorId)
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Authentication failed'
@@ -204,7 +212,7 @@ export function MCPPopover({
         return next
       })
     }
-  }, [])
+  }, [onReconnectSuccess])
 
   const handleToggle = useCallback(async (connectorId: string) => {
     // Guard against double-clicks while OAuth popup is already open

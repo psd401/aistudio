@@ -35,7 +35,7 @@ export interface ConnectorWithStatus {
 /**
  * Fetches available MCP connectors for the current user with their connection status.
  *
- * ⚠️ SYNC: Access rules here MUST match connector-service.ts assertUserAccess().
+ * ⚠️ SYNC: Access rules here MUST match connector-service.ts requireUserAccess().
  * If you change access logic here, update connector-service.ts (and vice versa).
  *
  * Access rules:

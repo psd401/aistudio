@@ -37,7 +37,7 @@ const DEFAULT_HEIGHT = 700
  * Opens an OAuth popup for the given MCP server and waits for completion.
  *
  * Flow:
- * 1. Calls /api/connectors/oauth/authorize?serverId=<id> to get the authorization URL
+ * 1. Calls /api/connectors/mcp-auth/initiate?serverId=<id> to get the authorization URL
  * 2. Opens the URL in a centered popup window
  * 3. Listens for postMessage from the callback page
  * 4. Resolves with the result (success/failure)
@@ -54,9 +54,9 @@ export async function openOAuthPopup(
     height = DEFAULT_HEIGHT,
   } = options
 
-  // 1. Get authorization URL from server
+  // 1. Get authorization URL from server (MCP-native OAuth flow)
   const response = await fetch(
-    `/api/connectors/oauth/authorize?serverId=${encodeURIComponent(serverId)}`
+    `/api/connectors/mcp-auth/initiate?serverId=${encodeURIComponent(serverId)}`
   )
 
   if (!response.ok) {
@@ -66,7 +66,21 @@ export async function openOAuthPopup(
     )
   }
 
-  const { url } = (await response.json()) as { url: string }
+  const data = (await response.json()) as { url?: string; authorized?: boolean }
+
+  // If already authorized (tokens still valid), return success immediately
+  if (data.authorized) {
+    return {
+      success: true,
+      serverId,
+      error: null,
+    }
+  }
+
+  const url = data.url
+  if (!url) {
+    throw new Error("No authorization URL returned from server")
+  }
 
   // 2. Open centered popup
   const left = Math.round(window.screenX + (window.outerWidth - width) / 2)

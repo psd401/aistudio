@@ -138,6 +138,10 @@ async function executeStreaming(params: {
     enabledTools: mergedTools ? undefined : enabledTools,
     enabledConnectors,
     tools: mergedTools,
+    // maxSteps enables multi-step tool use (agent loop). Only needed when MCP connector
+    // tools are active — without connectors, the model uses single-step tool calls only.
+    // 10 steps is a reasonable upper bound for MCP tool chains (fetch→process→respond).
+    maxSteps: connectorToolResults.length > 0 ? 10 : undefined,
     options: { reasoningEffort, responseMode },
     callbacks: {
       onFinish: createOnFinishCallback({ conversationId, dbModelId, log, timer })
@@ -170,6 +174,28 @@ async function executeStreaming(params: {
       const safeIds = failedConnectorIds.filter(id => /^[\da-f-]{36}$/i.test(id));
       if (safeIds.length > 0) {
         responseHeaders['X-Connector-Reconnect'] = safeIds.join(',');
+      }
+    }
+
+    // Send tool-to-server mapping so the client can register connector tools
+    // for branded UI rendering (ConnectorToolContext)
+    if (connectorToolResults.length > 0) {
+      const toolMapping: Record<string, { serverId: string; serverName: string }> = {};
+      for (const result of connectorToolResults) {
+        for (const toolName of Object.keys(result.tools)) {
+          toolMapping[toolName] = { serverId: result.serverId, serverName: result.serverName };
+        }
+      }
+      const toolMappingEncoded = encodeURIComponent(JSON.stringify(toolMapping));
+      // 8192 bytes: conservative limit for custom HTTP response headers.
+      // AWS ALB has 16 KB total header limit; this leaves room for standard headers.
+      if (toolMappingEncoded.length <= 8192) {
+        responseHeaders['X-Connector-Tools'] = toolMappingEncoded;
+      } else {
+        log.warn('X-Connector-Tools header too large, omitting — branded tool UI will use generic fallback', {
+          sizeBytes: toolMappingEncoded.length,
+          toolCount: Object.keys(toolMapping).length,
+        });
       }
     }
 

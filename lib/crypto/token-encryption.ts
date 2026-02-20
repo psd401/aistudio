@@ -131,6 +131,23 @@ async function fetchAndCacheDEK(fetchGeneration: number): Promise<Buffer> {
 }
 
 /**
+ * Derives a DEK from a local env var (MCP_TOKEN_ENCRYPTION_KEY) using the same
+ * HKDF flow as the Secrets Manager path. For local dev only — avoids requiring
+ * AWS credentials just to encrypt/decrypt MCP tokens.
+ */
+function deriveLocalDEK(envKey: string): Buffer {
+  return Buffer.from(
+    hkdfSync(
+      "sha256",
+      Buffer.from(envKey, "utf8"),
+      HKDF_SALT,
+      HKDF_INFO,
+      32
+    )
+  )
+}
+
+/**
  * Fetches the Data Encryption Key with in-process caching and concurrency safety.
  *
  * Cache TTL: 5 minutes. Concurrent callers on a cold cache share a single Secrets
@@ -144,6 +161,28 @@ async function getDEK(): Promise<Buffer> {
   // Return cached DEK if still valid
   if (dekCache && Date.now() - dekCache.fetchedAt < DEK_CACHE_TTL) {
     return dekCache.key
+  }
+
+  // Local dev fallback: derive from env var instead of Secrets Manager.
+  // ENVIRONMENT is set by ECS task definition (always "dev", "staging", or "prod") and is
+  // absent in local dev (Docker Compose / `bun run dev:local`). When ENVIRONMENT is absent,
+  // we're in local dev and MCP_TOKEN_ENCRYPTION_KEY is safe to use. When present, only "dev"
+  // is allowed — all other values (staging, prod) block the env var to force Secrets Manager.
+  // If a future ECS task definition omits ENVIRONMENT, this will fall through to the local
+  // path — ensure ENVIRONMENT is always set in ECS task definitions.
+  const localKey = process.env.MCP_TOKEN_ENCRYPTION_KEY
+  if (localKey) {
+    const environment = process.env.ENVIRONMENT
+    if (environment && environment !== "dev") {
+      throw new Error(
+        `MCP_TOKEN_ENCRYPTION_KEY is not allowed in environment '${environment}'. ` +
+          "Use AWS Secrets Manager for token encryption in non-dev environments."
+      )
+    }
+    log.warn("Using MCP_TOKEN_ENCRYPTION_KEY env var for DEK — local dev only")
+    const key = deriveLocalDEK(localKey)
+    dekCache = { key, fetchedAt: Date.now() }
+    return key
   }
 
   // Concurrency guard: if a fetch is already in progress, join it

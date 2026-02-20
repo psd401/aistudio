@@ -18,6 +18,7 @@ interface ComposerControlsProps {
   // Connector selection (optional — MCPPopover shows disabled when not provided)
   enabledConnectors?: string[]
   onConnectorsChange?: (connectors: string[]) => void
+  onReconnectSuccess?: (serverId: string) => void
 }
 
 /**
@@ -34,6 +35,7 @@ export function ComposerControls({
   onToolsChange,
   enabledConnectors = [],
   onConnectorsChange,
+  onReconnectSuccess,
 }: ComposerControlsProps) {
   return (
     <div className="flex items-center gap-1 px-2 py-1.5 border-b border-border/50">
@@ -63,6 +65,7 @@ export function ComposerControls({
         enabledConnectors={enabledConnectors}
         onConnectorsChange={onConnectorsChange ?? (() => undefined)}
         disabled={!onConnectorsChange || !selectedModel}
+        onReconnectSuccess={onReconnectSuccess}
       />
     </div>
   )
