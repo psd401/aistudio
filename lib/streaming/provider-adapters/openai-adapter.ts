@@ -321,6 +321,9 @@ export class OpenAIAdapter extends BaseProviderAdapter {
         }
       };
       
+      // Accumulate tool calls across steps (OpenAI Responses API path)
+      const accumulatedToolCalls: Array<{ toolCallId: string; toolName: string; args: Record<string, unknown>; result?: unknown }> = [];
+
       // Stream with Responses API enhancements
       const result = streamText({
         model: enhancedConfig.model,
@@ -330,14 +333,62 @@ export class OpenAIAdapter extends BaseProviderAdapter {
         toolChoice: enhancedConfig.toolChoice,
         temperature: enhancedConfig.temperature,
         ...(enhancedConfig.maxSteps && { stopWhen: stepCountIs(enhancedConfig.maxSteps) }),
+        // Capture tool calls as each step finishes
+        onStepFinish: (event) => {
+          if (event.toolCalls && Array.isArray(event.toolCalls)) {
+            for (const tc of event.toolCalls) {
+              const toolCall = tc as { toolCallId: string; toolName: string; args?: unknown; input?: unknown };
+              const toolArgs = (toolCall.input || toolCall.args || {}) as Record<string, unknown>;
+              accumulatedToolCalls.push({
+                toolCallId: toolCall.toolCallId,
+                toolName: toolCall.toolName,
+                args: toolArgs
+              });
+              logger.debug('OpenAI tool call captured from step', {
+                toolCallId: toolCall.toolCallId,
+                toolName: toolCall.toolName
+              });
+            }
+          }
+        },
         onFinish: async (event) => {
           logger.info('OpenAI streamText onFinish triggered', {
             hasText: !!event.text,
             hasUsage: !!event.usage,
             finishReason: event.finishReason,
-            textLength: event.text?.length || 0
+            textLength: event.text?.length || 0,
+            toolCallCount: accumulatedToolCalls.length
           });
-          
+
+          // Extract tool results from completed steps (same pattern as base adapter)
+          const steps = (event as unknown as { steps?: Array<{ toolResults?: Array<{ toolCallId: string; output: unknown }> }> }).steps;
+          if (steps && Array.isArray(steps)) {
+            for (const step of steps) {
+              if (step.toolResults && Array.isArray(step.toolResults)) {
+                for (const tr of step.toolResults) {
+                  const match = accumulatedToolCalls.find(tc => tc.toolCallId === tr.toolCallId);
+                  if (match) {
+                    match.result = tr.output;
+                    logger.debug('OpenAI tool result matched from steps', {
+                      toolCallId: tr.toolCallId,
+                      hasOutput: tr.output !== undefined
+                    });
+                  }
+                }
+              }
+            }
+          }
+
+          // Log tool result extraction summary
+          const withResults = accumulatedToolCalls.filter(tc => tc.result !== undefined).length;
+          if (accumulatedToolCalls.length > 0) {
+            logger.info('OpenAI tool result extraction complete', {
+              totalToolCalls: accumulatedToolCalls.length,
+              withResults,
+              withoutResults: accumulatedToolCalls.length - withResults
+            });
+          }
+
           // Define proper type for usage
           interface StreamUsage {
             promptTokens?: number;
@@ -345,7 +396,7 @@ export class OpenAIAdapter extends BaseProviderAdapter {
             totalTokens?: number;
             reasoningTokens?: number;
           }
-          
+
           // Transform to our expected format
           const usage = event.usage as StreamUsage;
           const transformedData = {
@@ -355,14 +406,16 @@ export class OpenAIAdapter extends BaseProviderAdapter {
               completionTokens: usage.completionTokens || 0,
               totalTokens: usage.totalTokens || 0
             } : undefined,
-            finishReason: event.finishReason || 'stop'
+            finishReason: event.finishReason || 'stop',
+            toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined
           };
-          
+
           // Call finish callbacks
           if (callbacks.onFinish) {
             logger.info('Calling onFinish callback from OpenAI adapter', {
               hasCallback: true,
-              textLength: event.text?.length || 0
+              textLength: event.text?.length || 0,
+              toolCallCount: accumulatedToolCalls.length
             });
             await callbacks.onFinish(transformedData);
           }

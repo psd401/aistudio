@@ -176,23 +176,9 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
             }
           }
 
-          // Capture tool results (required for assistant-ui makeAssistantToolUI to render completed tools)
-          // AI SDK v6 uses 'output' for the result, not 'result'
-          const toolResults = (event as unknown as { toolResults?: Array<{ toolCallId: string; output: unknown }> }).toolResults;
-          if (toolResults && Array.isArray(toolResults)) {
-            for (const tr of toolResults) {
-              // Find the matching tool call and attach the result
-              const existingToolCall = accumulatedToolCalls.find(tc => tc.toolCallId === tr.toolCallId);
-              if (existingToolCall) {
-                existingToolCall.result = tr.output;
-                logger.debug('Tool result captured from step', {
-                  provider: this.providerName,
-                  toolCallId: tr.toolCallId,
-                  hasResult: tr.output !== undefined
-                });
-              }
-            }
-          }
+          // NOTE: Tool results are NOT available in onStepFinish — AI SDK v6 fires this
+          // callback when the LLM call finishes, before tool execution completes.
+          // Tool results are extracted from event.steps in onFinish instead.
         },
         onFinish: async (event) => {
           logger.info('streamText onFinish triggered', {
@@ -211,6 +197,37 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
             completionTokens?: number;
             totalTokens?: number;
             reasoningTokens?: number;
+          }
+
+          // Extract tool results from completed steps.
+          // onStepFinish fires before tool execution completes, so toolResults is always [].
+          // onFinish has the complete steps array with populated toolResults.
+          const steps = (event as unknown as { steps?: Array<{ toolResults?: Array<{ toolCallId: string; output: unknown }> }> }).steps;
+          if (steps && Array.isArray(steps)) {
+            for (const step of steps) {
+              if (step.toolResults && Array.isArray(step.toolResults)) {
+                for (const tr of step.toolResults) {
+                  const match = accumulatedToolCalls.find(tc => tc.toolCallId === tr.toolCallId);
+                  if (match) {
+                    match.result = tr.output;
+                    logger.debug('Tool result matched from steps', {
+                      toolCallId: tr.toolCallId,
+                      hasOutput: tr.output !== undefined
+                    });
+                  }
+                }
+              }
+            }
+          }
+
+          // Log tool result extraction summary
+          const withResults = accumulatedToolCalls.filter(tc => tc.result !== undefined).length;
+          if (accumulatedToolCalls.length > 0) {
+            logger.info('Tool result extraction complete', {
+              totalToolCalls: accumulatedToolCalls.length,
+              withResults,
+              withoutResults: accumulatedToolCalls.length - withResults
+            });
           }
 
           // Transform to our expected format

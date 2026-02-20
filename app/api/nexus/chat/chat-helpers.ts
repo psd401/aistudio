@@ -282,7 +282,7 @@ function buildAssistantParts(
         toolName: tc.toolName,
         args: tc.args,
         argsText: JSON.stringify(tc.args),
-        result: tc.result ?? { success: true },
+        result: tc.result ?? null,
         isError: false,
       });
     }
