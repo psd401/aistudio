@@ -5,7 +5,7 @@
 # ============================================================================
 # Stage 1: Dependencies
 # ============================================================================
-FROM oven/bun:1.2-alpine AS deps
+FROM oven/bun:1.3-alpine AS deps
 WORKDIR /app
 
 # Install dependencies for native packages
