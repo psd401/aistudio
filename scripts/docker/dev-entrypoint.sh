@@ -13,7 +13,14 @@
 #
 # Issue #800 — MCP OAuth 404 caused by stale assertUserAccess reference
 
-CHECKSUM_FILE="/tmp/.source-checksum"
+# Store checksum inside the .next volume so it's co-located with the cache.
+# When .next is deleted the checksum goes with it, keeping logic self-consistent.
+# /tmp/ would survive container stop/start but not image rebuild, leaving stale
+# .next volumes undetected after Dockerfile changes.
+CHECKSUM_FILE="/app/.next/.source-checksum"
+
+# Ensure the directory exists (first run or after cache clear)
+mkdir -p /app/.next
 
 # Checksum all TypeScript source files that Turbopack compiles
 CURRENT=$(find /app/app /app/lib /app/actions /app/components \

@@ -53,9 +53,7 @@ async function closeMcpClients(
 ) {
   if (connectorToolResults.length === 0) return;
   log.debug('Closing MCP clients', { context, clientCount: connectorToolResults.length });
-  for (const result of connectorToolResults) {
-    try { await result.close(); } catch { /* ignore cleanup errors */ }
-  }
+  await Promise.allSettled(connectorToolResults.map(r => r.close()));
 }
 
 function createOnFinishCallback(params: {

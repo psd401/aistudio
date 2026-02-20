@@ -333,8 +333,7 @@ export async function refreshUserToken(
   const tokenResult = await exchangeRefreshToken(server, refreshToken)
 
   // Check if we got a structured failure instead of a token response
-  // Discriminated union: only TokenRefreshFailure has the `kind` property.
-  if ("kind" in tokenResult) {
+  if (tokenResult.kind === "failure") {
     log.warn("Token refresh failed", {
       requestId, userId, serverId,
       reason: tokenResult.reason,
@@ -403,6 +402,8 @@ export async function refreshUserToken(
 
 /** Minimal OAuth token response shape */
 interface OAuthTokenResponse {
+  /** Discriminant — absent on success, present on failure. Enables `tokenResult.kind === "failure"` narrowing. */
+  kind?: undefined
   access_token: string
   refresh_token?: string
   expires_in?: number

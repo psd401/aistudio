@@ -68,7 +68,8 @@ export function convertContentToParts(content?: ApiMessageContent): UIMessagePar
       // type: 'tool-{toolName}' -> converter extracts toolName via type.replace("tool-", "")
       if (isToolCallPart(part)) {
         const args = part.args ?? {}
-        const hasResult = part.result !== undefined
+        // null means stream error before onFinish — treat same as no result
+        const hasResult = part.result != null
         const isError = part.isError === true
         const input = typeof args === 'object' && args !== null ? args as Record<string, unknown> : {}
 

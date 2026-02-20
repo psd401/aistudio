@@ -71,6 +71,11 @@ export type McpOAuthErrorCategory =
  * Returns a category string (not a user message) — callers map it to a message
  * via their own lookup table. This separation keeps user-facing strings out of
  * the shared utility and gives each route control over wording.
+ *
+ * Pattern ordering matters: checks are evaluated top-to-bottom and the first
+ * match wins. HTTP status checks (401/403) run before the generic "invalid" +
+ * "token" check so that "401: invalid token" classifies as "unauthorized"
+ * (the actionable category) rather than "invalid_token".
  */
 export function classifyMcpOAuthError(message: string): McpOAuthErrorCategory {
   const lower = message.toLowerCase()
