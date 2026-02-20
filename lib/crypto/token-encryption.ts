@@ -164,10 +164,15 @@ async function getDEK(): Promise<Buffer> {
   }
 
   // Local dev fallback: derive from env var instead of Secrets Manager.
-  // Blocked in non-dev environments to prevent accidental misconfiguration in ECS.
+  // ENVIRONMENT is set by ECS task definition (always "dev", "staging", or "prod") and is
+  // absent in local dev (Docker Compose / `bun run dev:local`). When ENVIRONMENT is absent,
+  // we're in local dev and MCP_TOKEN_ENCRYPTION_KEY is safe to use. When present, only "dev"
+  // is allowed — all other values (staging, prod) block the env var to force Secrets Manager.
+  // If a future ECS task definition omits ENVIRONMENT, this will fall through to the local
+  // path — ensure ENVIRONMENT is always set in ECS task definitions.
   const localKey = process.env.MCP_TOKEN_ENCRYPTION_KEY
   if (localKey) {
-    const environment = process.env.ENVIRONMENT // Set by ECS task definition; absent in local dev
+    const environment = process.env.ENVIRONMENT
     if (environment && environment !== "dev") {
       throw new Error(
         `MCP_TOKEN_ENCRYPTION_KEY is not allowed in environment '${environment}'. ` +

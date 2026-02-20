@@ -183,7 +183,10 @@ async function executeStreaming(params: {
           toolMapping[toolName] = { serverId: result.serverId, serverName: result.serverName };
         }
       }
-      responseHeaders['X-Connector-Tools'] = encodeURIComponent(JSON.stringify(toolMapping));
+      const toolMappingEncoded = encodeURIComponent(JSON.stringify(toolMapping));
+      if (toolMappingEncoded.length <= 8192) {
+        responseHeaders['X-Connector-Tools'] = toolMappingEncoded;
+      }
     }
 
     return streamResponse.result.toUIMessageStreamResponse({ headers: responseHeaders });

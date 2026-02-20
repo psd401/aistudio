@@ -69,16 +69,18 @@ async function findCookieByState(
     const decrypted = await decryptToken(cookie.value)
     const parsed = JSON.parse(decrypted) as McpAuthStateCookie
 
-    if (parsed.oauthState) {
-      const matches =
-        parsed.oauthState.length === state.length &&
-        timingSafeEqual(Buffer.from(parsed.oauthState), Buffer.from(state))
-      if (!matches) {
-        log.warn("MCP auth cookie state mismatch — possible CSRF", { requestId })
-        return null
-      }
+    if (!parsed.oauthState) {
+      log.warn("MCP auth cookie missing oauthState — CSRF validation cannot proceed", { requestId })
+      return null
     }
-    // If cookie predates oauthState field, accept without state comparison
+
+    const matches =
+      parsed.oauthState.length === state.length &&
+      timingSafeEqual(Buffer.from(parsed.oauthState), Buffer.from(state))
+    if (!matches) {
+      log.warn("MCP auth cookie state mismatch — possible CSRF", { requestId })
+      return null
+    }
 
     return parsed
   } catch {
@@ -90,6 +92,15 @@ async function findCookieByState(
 /**
  * Fallback: scans all mcp_auth_state_* cookies and returns the first non-expired one.
  * Used only when the state query parameter was not preserved by the OAuth provider.
+ *
+ * CSRF note: This fallback has no timing-safe state comparison, so CSRF protection is
+ * weaker than the state-based path. It remains safe because:
+ * 1. Cookies are AES-256-GCM encrypted with the server DEK — they cannot be forged
+ * 2. Cookies are httpOnly, sameSite=lax, scoped to /api/connectors/mcp-auth
+ * 3. Cookie TTL is 5 minutes — limits the window for concurrent flow ambiguity
+ * If multiple OAuth flows are in flight simultaneously, the first non-expired cookie wins,
+ * which could bind the callback to the wrong server. This is an acceptable edge case
+ * (users rarely initiate two OAuth flows within 5 minutes on the same browser).
  */
 async function findCookieByBruteForce(
   cookieStore: ReadonlyCookieStore
@@ -216,7 +227,11 @@ export async function GET(req: Request): Promise<Response> {
       path: "/api/connectors/mcp-auth",
     })
 
-    // 4. Handle OAuth error from provider (AFTER cookie validation — CSRF check already passed)
+    // 4. Handle OAuth error/code from provider (AFTER cookie validation — CSRF check already passed).
+    // These checks are required by RFC 6749 §4.1.2.1 — the OAuth provider sends `error` when
+    // authorization is denied, and `code` when granted. Skipping token exchange on error is
+    // correct spec behavior, not a security bypass.
+    // lgtm[js/user-controlled-bypass]
     if (errorParam) {
       log.warn("MCP OAuth provider returned error", {
         requestId,
@@ -227,6 +242,7 @@ export async function GET(req: Request): Promise<Response> {
       return renderCallbackHtml(false, serverId, "Authorization was denied by the provider.")
     }
 
+    // lgtm[js/user-controlled-bypass]
     if (!code) {
       log.warn("Missing code in MCP auth callback", { requestId, serverId })
       timer({ status: "error", reason: "missing_code" })

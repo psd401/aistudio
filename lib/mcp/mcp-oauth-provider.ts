@@ -205,6 +205,10 @@ export class ServerSideOAuthProvider implements OAuthClientProvider {
       "mcp-oauth:clientInformation"
     )
 
+    if (rows.length === 0) {
+      return undefined
+    }
+
     const reg = rows[0].mcpOauthRegistration
     if (!reg) {
       return undefined
