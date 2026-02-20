@@ -12,6 +12,7 @@ import { NexusLayout } from './_components/layout/nexus-layout'
 import { ErrorBoundary } from './_components/error-boundary'
 import { PromptAutoLoader } from './_components/prompt-auto-loader'
 import { ConversationInitializer } from './_components/conversation-initializer'
+import { z } from 'zod'
 import { useConversationContext, createNexusHistoryAdapter } from '@/lib/nexus/history-adapter'
 import { MultiProviderToolUIs } from './_components/tools/multi-provider-tools'
 import { ConnectorToolProvider, useConnectorTools } from './_components/tools/connector-tool-context'
@@ -24,6 +25,12 @@ import { createLogger } from '@/lib/client-logger'
 import { toast } from 'sonner'
 
 const log = createLogger({ moduleName: 'nexus-page' })
+
+/** Zod schema for X-Connector-Tools response header — validates server-sent tool mapping */
+const ConnectorToolsSchema = z.record(z.string(), z.object({
+  serverId: z.string().uuid(),
+  serverName: z.string(),
+}))
 
 // Loading spinner component for Suspense fallback
 function NexusLoadingSpinner() {
@@ -139,7 +146,7 @@ function ConversationRuntimeProvider({
     const connectorToolsHeader = response.headers.get('X-Connector-Tools')
     if (connectorToolsHeader && onConnectorToolsReceived) {
       try {
-        const mapping = JSON.parse(decodeURIComponent(connectorToolsHeader)) as Record<string, { serverId: string; serverName: string }>
+        const mapping = ConnectorToolsSchema.parse(JSON.parse(decodeURIComponent(connectorToolsHeader)))
         onConnectorToolsReceived(mapping)
       } catch {
         log.warn('Failed to parse X-Connector-Tools header')

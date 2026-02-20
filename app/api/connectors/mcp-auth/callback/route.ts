@@ -75,9 +75,12 @@ async function findCookieByState(
       return null
     }
 
-    const matches =
-      parsed.oauthState.length === state.length &&
-      timingSafeEqual(Buffer.from(parsed.oauthState), Buffer.from(state))
+    // Hash both values to fixed-length (32 bytes) before comparing —
+    // avoids the length-check timing leak that short-circuiting on raw
+    // string length would introduce (timingSafeEqual requires equal-length buffers).
+    const hashA = createHash("sha256").update(parsed.oauthState).digest()
+    const hashB = createHash("sha256").update(state).digest()
+    const matches = timingSafeEqual(hashA, hashB)
     if (!matches) {
       log.warn("MCP auth cookie state mismatch — possible CSRF", { requestId })
       return null
@@ -265,6 +268,15 @@ export async function GET(req: Request): Promise<Response> {
     }
 
     const server = serverRows[0]
+
+    // Defense in depth: initiate validates authType, but a crafted cookie could
+    // reference a non-OAuth server. Reject early before attempting token exchange.
+    if (server.authType !== "oauth") {
+      log.warn("MCP auth callback against non-OAuth server", { requestId, serverId })
+      timer({ status: "error", reason: "not_oauth" })
+      return renderCallbackHtml(false, serverId, "Server is not configured for OAuth.")
+    }
+
     rejectUnsafeMcpUrl(server.url)
 
     // 6. Create provider with pre-loaded code verifier and call auth() with code

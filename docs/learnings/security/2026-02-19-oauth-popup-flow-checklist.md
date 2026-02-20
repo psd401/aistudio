@@ -36,13 +36,19 @@ const cookieName = `oauth_state_${serverId}`;
 res.setCookie(cookieName, encryptedState, { httpOnly: true, sameSite: "lax", path: "/" });
 ```
 
-**CSP header on inline-script callback pages:**
+**CSP header on inline-script callback pages (use SHA-256 hash, not unsafe-inline):**
 ```typescript
+import { createHash } from "node:crypto"
+
+// Compute SHA-256 hash of the exact inline script content
+const scriptHash = createHash("sha256").update(scriptContent, "utf8").digest("base64")
+
 res.setHeader(
   "Content-Security-Policy",
-  "default-src 'none'; script-src 'unsafe-inline'"
+  `default-src 'none'; script-src 'sha256-${scriptHash}'`
 );
-// postMessage pages need script-src 'unsafe-inline'; everything else blocked
+// SHA-256 hash is strictly stronger than 'unsafe-inline' — only the exact
+// script content matching the hash will execute, preventing injection.
 ```
 
 **State parameter can carry routing metadata:**
@@ -77,7 +83,7 @@ const token = TokenResponseSchema.parse(raw); // throws on shape mismatch
 ## Prevention
 
 - OAuth multi-step flows: cookie name must include the full resource ID (`oauth_state_${serverId}`)
-- HTML pages with `<script>` blocks: add `Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'`
+- HTML pages with `<script>` blocks: add `Content-Security-Policy: default-src 'none'; script-src 'sha256-<hash>'` (SHA-256 hash of the exact inline script content — never use `'unsafe-inline'`)
 - State parameter validation: extract and UUID-validate `stateServerId` before first database use
 - Any external API response (provider token endpoint, third-party service): parse with Zod, never `as T`
 - CodeQL `js/user-controlled-bypass` on validation guards: dismiss as false positive
