@@ -167,6 +167,7 @@ describe('decodeHtmlEntities', () => {
     expect(decodeHtmlEntities('x &lt; y')).toBe('x < y');
     expect(decodeHtmlEntities('x &gt; y')).toBe('x > y');
     expect(decodeHtmlEntities('say &quot;hello&quot;')).toBe('say "hello"');
+    expect(decodeHtmlEntities("it&apos;s")).toBe("it's");
   });
 
   it('decodes decimal numeric entities', () => {
@@ -259,14 +260,20 @@ describe('decodeHtmlEntitiesDeep', () => {
     expect(decodeHtmlEntitiesDeep(re)).toBe(re);
   });
 
-  it('handles deeply nested structures without stack overflow', () => {
+  it('preserves encoded values beyond depth limit without decoding', () => {
     // Build a 25-deep nested object (exceeds depth=20 guard)
     let deep: unknown = 'leaf &amp; value';
     for (let i = 0; i < 25; i++) {
       deep = { child: deep };
     }
-    // Should not throw; leaf past depth 20 is returned as-is
-    expect(() => decodeHtmlEntitiesDeep(deep)).not.toThrow();
+    const result = decodeHtmlEntitiesDeep(deep);
+    // Navigate to the leaf — the first 20 levels are traversed, then it stops
+    let node: Record<string, unknown> = result as Record<string, unknown>;
+    for (let i = 0; i < 24; i++) {
+      node = node.child as Record<string, unknown>;
+    }
+    // Leaf at depth 25 should still be encoded (depth guard stopped decoding)
+    expect(node.child).toBe('leaf &amp; value');
   });
 
   it('handles mixed arrays and objects', () => {

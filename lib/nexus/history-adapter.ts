@@ -85,9 +85,9 @@ const createExportedMessageRepository = (messages: MessageData[]): ExportedMessa
             // fromThreadMessageLike processes it correctly. The static format
             // (type: 'tool-show_chart') is not handled by fromThreadMessageLike's
             // switch and throws "Unsupported assistant message part type". (Issue #798)
-            const args = (partData.args as JSONObject) || {}
+            const args: JSONObject = (partData.args ?? {}) as JSONObject
 
-            return {
+            const toolPart: ContentPartLike = {
               type: 'tool-call',
               toolCallId: partData.toolCallId,
               toolName: partData.toolName,
@@ -95,7 +95,8 @@ const createExportedMessageRepository = (messages: MessageData[]): ExportedMessa
               argsText: JSON.stringify(args),
               result: partData.result,
               isError: partData.isError === true,
-            } as unknown as ContentPartLike
+            }
+            return toolPart
           }
           if (partData.type === 'image' && partData.imageUrl) {
             return { type: 'text', text: `![Generated Image](${partData.imageUrl})` }

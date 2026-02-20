@@ -191,7 +191,7 @@ function isSafeCodePoint(cp: number): boolean {
 
 /**
  * Decodes common HTML entities in a string using a single-pass replacement.
- * Handles: &amp; &lt; &gt; &quot; and numeric character references (decimal and hex).
+ * Handles: &amp; &lt; &gt; &quot; &apos; and numeric character references (decimal and hex).
  *
  * Uses a single regex pass to avoid double-decoding (e.g., &amp;lt; decoding twice
  * to produce <). Numeric entities that decode to control characters (null bytes,
@@ -205,7 +205,7 @@ function isSafeCodePoint(cp: number): boolean {
 export function decodeHtmlEntities(text: string): string {
   if (typeof text !== 'string') return '';
   return text.replace(
-    /&amp;|&lt;|&gt;|&quot;|&#(\d+);|&#x([\dA-Fa-f]+);/g,
+    /&amp;|&lt;|&gt;|&quot;|&apos;|&#(\d+);|&#x([\dA-Fa-f]+);/g,
     (match, dec, hex) => {
       if (dec !== undefined) {
         const cp = Number.parseInt(dec, 10);
@@ -220,6 +220,7 @@ export function decodeHtmlEntities(text: string): string {
         case '&lt;': return '<';
         case '&gt;': return '>';
         case '&quot;': return '"';
+        case '&apos;': return "'";
         default: return match;
       }
     }
@@ -234,19 +235,23 @@ export function decodeHtmlEntities(text: string): string {
  *
  * Depth-limited to 20 levels to guard against pathologically nested tool call arguments.
  */
-export function decodeHtmlEntitiesDeep(value: unknown, _depth = 0): unknown {
-  if (_depth > 20) return value;
+export function decodeHtmlEntitiesDeep(value: unknown): unknown {
+  return decodeDeep(value, 0);
+}
+
+function decodeDeep(value: unknown, depth: number): unknown {
+  if (depth > 20) return value;
   if (typeof value === 'string') {
     return decodeHtmlEntities(value);
   }
   if (Array.isArray(value)) {
-    return value.map(item => decodeHtmlEntitiesDeep(item, _depth + 1));
+    return value.map(item => decodeDeep(item, depth + 1));
   }
   // Only traverse plain objects — pass through Date, RegExp, and other class instances unchanged
   if (value !== null && typeof value === 'object' && Object.prototype.toString.call(value) === '[object Object]') {
     const result: Record<string, unknown> = {};
     for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
-      result[key] = decodeHtmlEntitiesDeep(val, _depth + 1);
+      result[key] = decodeDeep(val, depth + 1);
     }
     return result;
   }

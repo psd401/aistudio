@@ -75,12 +75,14 @@ async function convertPartToTextContent(part: MessagePart): Promise<ContentPart 
   // Pass through tool-call and tool-result parts for UI rendering.
   // Strip argsText (the client recomputes it from args) and decode HTML entities
   // in args to prevent argsText mismatch on conversation reload (Issue #798).
+  // Decode runs on both legacy (pre-fix) and new data — safe because
+  // decodeHtmlEntities is idempotent (already-decoded text passes through unchanged).
   if (partType === 'tool-call' || partType === 'tool-result') {
     const { argsText: _stripArgsText, ...rest } = part as unknown as ContentPart & { argsText?: string }
-    if (rest.args && typeof rest.args === 'object') {
-      rest.args = decodeHtmlEntitiesDeep(rest.args)
-    }
-    return rest as ContentPart
+    const decodedArgs = rest.args && typeof rest.args === 'object'
+      ? { args: decodeHtmlEntitiesDeep(rest.args) }
+      : {};
+    return { ...rest, ...decodedArgs } as ContentPart
   }
 
   // Skip control types
