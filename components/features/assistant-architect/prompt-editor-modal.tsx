@@ -922,9 +922,13 @@ export function PromptEditorModal({
   // Available variables for insertion
   const availableVariables = useMemo(() => {
     const fieldVars = inputFields.map(f => f.name)
-    const promptVars = prompts
+    const previousPrompts = prompts
       .filter((p, idx) => !editingPrompt ? true : prompts.findIndex(pp => pp.id === editingPrompt.id) > idx)
-      .map(prevPrompt => slugify(prevPrompt.name))
+    // Show both slugified name and prompt_N_output for each previous prompt
+    const promptVars = previousPrompts.flatMap((prevPrompt, idx) => [
+      slugify(prevPrompt.name),
+      `prompt_${idx}_output`,
+    ])
     return [...fieldVars, ...promptVars]
   }, [inputFields, prompts, editingPrompt])
 

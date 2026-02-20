@@ -335,7 +335,8 @@ async function executePromptChain(
           requestId,
           log,
           prompts.length,
-          isLastPosition && idx === 0
+          isLastPosition && idx === 0,
+          prompts
         )
       )
 
@@ -366,7 +367,8 @@ async function executePromptChain(
         requestId,
         log,
         prompts.length,
-        isLastPrompt
+        isLastPrompt,
+        prompts
       )
 
       if (streamResponse) {
@@ -418,7 +420,8 @@ async function executePromptChainForText(
         requestId,
         log,
         prompts.length,
-        isLast
+        isLast,
+        prompts
       )
 
       if (isLast) {
@@ -442,7 +445,8 @@ async function executeSinglePromptWithCompletion(
   requestId: string,
   log: ReturnType<typeof createLogger>,
   totalPrompts: number,
-  isLastPrompt: boolean
+  isLastPrompt: boolean,
+  prompts: ChainPrompt[]
 ) {
   const promptStartTime = Date.now()
   const promptTimer = startTimer(`prompt.${prompt.id}.execution`)
@@ -509,7 +513,9 @@ async function executeSinglePromptWithCompletion(
       prompt.content,
       inputs,
       context.previousOutputs,
-      inputMapping
+      inputMapping,
+      prompts,
+      prompt.position
     )
 
     // 3. Build messages
@@ -703,7 +709,8 @@ async function executeSinglePromptCollectText(
   requestId: string,
   log: ReturnType<typeof createLogger>,
   totalPrompts: number,
-  isLastPrompt: boolean
+  isLastPrompt: boolean,
+  prompts: ChainPrompt[]
 ): Promise<{ text: string; usage?: { promptTokens: number; completionTokens: number; totalTokens: number } }> {
   const promptStartTime = Date.now()
   const promptTimer = startTimer(`prompt.${prompt.id}.execution`)
@@ -749,7 +756,9 @@ async function executeSinglePromptCollectText(
       prompt.content,
       inputs,
       context.previousOutputs,
-      inputMapping
+      inputMapping,
+      prompts,
+      prompt.position
     )
 
     // Build messages
@@ -890,11 +899,24 @@ async function executeSinglePromptCollectText(
 // Variable Substitution
 // ============================================
 
+/**
+ * Slugify a string into a variable-safe name with hyphens.
+ * Must match the slugify in prompt-editor-modal.tsx so UI variables resolve at runtime.
+ */
+function slugify(str: string): string {
+  return str
+    .toLowerCase()
+    .replace(/[^\da-z]+/g, "-")
+    .replace(/(^-|-$)+/g, "")
+}
+
 function substituteVariables(
   content: string,
   inputs: Record<string, unknown>,
   previousOutputs: Map<number, string>,
-  mapping: Record<string, string>
+  mapping: Record<string, string>,
+  allPrompts: ChainPrompt[],
+  currentPromptPosition: number
 ): string {
   if (content.length > MAX_PROMPT_CONTENT_SIZE) {
     throw ErrorFactories.validationFailed([{
@@ -903,7 +925,8 @@ function substituteVariables(
     }])
   }
 
-  const placeholderMatches = content.match(/\${(\w+)}|{{(\w+)}}/g)
+  // Updated regex: [\w-]+ to match hyphenated slugified names (regression from #685)
+  const placeholderMatches = content.match(/\${([\w-]+)}|{{([\w-]+)}}/g)
   const placeholderCount = placeholderMatches ? placeholderMatches.length : 0
 
   if (placeholderCount > MAX_VARIABLE_REPLACEMENTS) {
@@ -913,9 +936,31 @@ function substituteVariables(
     }])
   }
 
-  return content.replace(/\${(\w+)}|{{(\w+)}}/g, (match, dollarVar, braceVar) => {
+  // Auto-inject previous prompt outputs as slugified variables (restored from pre-#685 behavior)
+  const slugifiedOutputs = new Map<string, string>()
+  const positionToPromptId = new Map<number, number>()
+  const sortedPrevPrompts = allPrompts
+    .filter(p => p.position < currentPromptPosition)
+    .sort((a, b) => a.position - b.position)
+
+  for (let i = 0; i < sortedPrevPrompts.length; i++) {
+    const prevPrompt = sortedPrevPrompts[i]
+    const output = previousOutputs.get(prevPrompt.id)
+    // Always map position → prompt ID for prompt_N_output (even if no output yet)
+    positionToPromptId.set(i, prevPrompt.id)
+    if (output !== undefined) {
+      // Map slugified name → output (e.g., "facilitator-opening" → output text)
+      const slug = slugify(prevPrompt.name)
+      // Handle duplicate/empty slugs by appending prompt ID for uniqueness
+      const uniqueKey = slug || `prompt-${prevPrompt.id}`
+      slugifiedOutputs.set(uniqueKey, output)
+    }
+  }
+
+  return content.replace(/\${([\w-]+)}|{{([\w-]+)}}/g, (match, dollarVar, braceVar) => {
     const varName = dollarVar || braceVar
 
+    // Path 1: Explicit inputMapping (backward compatible)
     if (mapping[varName]) {
       const mappedPath = mapping[varName]
       const promptMatch = mappedPath.match(/^prompt_(\d+)\.output$/)
@@ -929,9 +974,26 @@ function substituteVariables(
       if (value !== undefined && value !== null) return String(value)
     }
 
+    // Path 2: User input fields
     if (varName in inputs) {
       const value = inputs[varName]
       return value !== undefined && value !== null ? String(value) : match
+    }
+
+    // Path 3: Slugified previous prompt names (restored from pre-#685)
+    if (slugifiedOutputs.has(varName)) {
+      return slugifiedOutputs.get(varName)!
+    }
+
+    // Path 4: prompt_N_output positional syntax
+    const positionalMatch = varName.match(/^prompt_(\d+)_output$/)
+    if (positionalMatch) {
+      const position = Number.parseInt(positionalMatch[1], 10)
+      const promptId = positionToPromptId.get(position)
+      if (promptId !== undefined) {
+        const output = previousOutputs.get(promptId)
+        if (output !== undefined) return output
+      }
     }
 
     return match

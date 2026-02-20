@@ -38,6 +38,8 @@ export interface GuardrailCheckResult {
   blockedCategories?: string[];
   /** Issue #742: Topics detected in detect-only mode (not blocked) */
   detectedTopics?: string[];
+  /** Issue #761: Content filters detected in detect-only mode (not blocked) */
+  detectedFilters?: string[];
 }
 
 /**
@@ -177,7 +179,8 @@ export interface GuardrailAssessment {
     filters?: Array<{
       type: ContentFilterType;
       confidence: string;
-      action: 'BLOCKED' | 'ALLOWED';
+      /** BLOCKED = filter triggered and blocked, NONE = filter triggered but detect-only, other = not triggered */
+      action: 'BLOCKED' | 'NONE' | string;
     }>;
   };
   topicPolicy?: {

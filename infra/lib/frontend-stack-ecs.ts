@@ -98,6 +98,30 @@ export class FrontendStackEcs extends cdk.Stack {
     });
 
     // ============================================================================
+    // MCP Token Encryption Key (AES-256-GCM DEK)
+    // ============================================================================
+    // Random 64-character alphanumeric password used as HKDF input key material.
+    // The token-encryption module derives the actual 32-byte AES key via HKDF-SHA-256.
+    // ECS task role has wildcard access to aistudio/{env}/* secrets (ecs-service.ts:257).
+    //
+    // ROTATION WARNING: Do NOT enable automatic rotation on this secret.
+    // Rotating the secret value will make all existing encrypted tokens in
+    // nexus_mcp_user_tokens unreadable (AES-GCM auth tag verification will fail).
+    // Key versioning (ver/kid in payload) must be implemented first, along with
+    // a re-encryption migration script. See lib/crypto/token-encryption.ts module doc.
+    // See: lib/crypto/token-encryption.ts, Issue #777
+    new secretsmanager.Secret(this, 'McpTokenEncryptionKey', {
+      secretName: `aistudio/${environment}/mcp/token-encryption-key`,
+      description: 'AES-256-GCM data encryption key for MCP connector OAuth tokens',
+      generateSecretString: {
+        excludePunctuation: true,
+        includeSpace: false,
+        passwordLength: 64,
+      },
+      removalPolicy: environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ============================================================================
     // Create ECS Service with ALB
     // ============================================================================
     this.ecsService = new EcsServiceConstruct(this, 'EcsService', {

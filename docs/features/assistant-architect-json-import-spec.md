@@ -280,6 +280,7 @@ Reference output from previous prompts using position-based syntax:
 |------------------|-------------|
 | `{{field_name}}` | Value from input field with matching name |
 | `{{prompt_N_output}}` | Output from prompt at position N (0-based) |
+| `{{slugified-prompt-name}}` | Output from previous prompt by slugified name (e.g., `{{facilitator-opening}}` for prompt named "Facilitator Opening") |
 
 ### Input Mapping
 
@@ -298,7 +299,7 @@ Use `input_mapping` for explicit variable substitution:
 
 **Constraints:**
 - Maximum 50 variable substitutions per prompt
-- Variable names must match input field names or use `prompt_N_output` pattern
+- Variable names must match input field names, use `prompt_N_output` pattern, or use slugified prompt names
 
 ## Execution Patterns
 

@@ -52,6 +52,7 @@
     "054-oauth-consent-decisions.sql",
     "055-seed-decision-framework-prompt.sql",
     "056-graph-nodes-search-indexes.sql",
-    "057-add-decision-capture-tool.sql"
+    "057-add-decision-capture-tool.sql",
+    "058-nexus-mcp-user-tokens.sql"
   ]
 }

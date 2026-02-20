@@ -18,7 +18,7 @@ echo "Google Client ID: $GOOGLE_CLIENT_ID"
 echo "Base Domain: $BASE_DOMAIN"
 
 # Deploy all dev stacks
-npx cdk deploy \
+bunx cdk deploy \
   AIStudio-DatabaseStack-Dev \
   AIStudio-AuthStack-Dev \
   AIStudio-StorageStack-Dev \

@@ -15,33 +15,28 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-    
-    strategy:
-      matrix:
-        node-version: [20.x]
-        # Can add more versions if needed: [18.x, 20.x]
-    
+
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
-    
-    - name: Setup Node.js ${{ matrix.node-version }}
-      uses: actions/setup-node@v6
+
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3  # v2
       with:
-        node-version: ${{ matrix.node-version }}
-        cache: 'npm'
-    
+        bun-version: "1.2.x"
+        cache: true
+
     - name: Install dependencies
-      run: npm ci --legacy-peer-deps
-    
+      run: bun install --frozen-lockfile
+
     - name: Run linter
-      run: npm run lint
-    
+      run: bun run lint
+
     - name: Run type checking
-      run: npm run typecheck
-    
+      run: bun run typecheck
+
     - name: Run tests
-      run: npm run test:ci
+      run: bun run test:ci
       env:
         # Prevent tests from timing out in CI
         CI: true
@@ -62,40 +57,38 @@ jobs:
     steps:
     - name: Checkout code
       uses: actions/checkout@v6
-    
+
     - name: Setup Node.js
       uses: actions/setup-node@v6
       with:
         node-version: 20.x
-    
-    - name: Cache root dependencies
-      uses: actions/cache@v5
+
+    - name: Setup Bun
+      uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3  # v2
       with:
-        path: ~/.npm
-        key: ${{ runner.os }}-node-${{ hashFiles('**/package-lock.json') }}
-        restore-keys: |
-          ${{ runner.os }}-node-
-    
+        bun-version: "1.2.x"
+        cache: true
+
     - name: Install dependencies
       run: |
-        npm ci --legacy-peer-deps
-        cd infra && npm ci --legacy-peer-deps
-    
+        bun install --frozen-lockfile
+        cd infra && bun install --frozen-lockfile
+
     - name: Install CDK CLI
-      run: npm install -g aws-cdk@2
-    
+      run: bun install -g aws-cdk@2
+
     - name: Build CDK TypeScript
-      run: cd infra && npm run build
-    
+      run: cd infra && bun run build
+
     - name: Synthesize CDK stacks
       run: |
         cd infra
-        cdk synth --all --no-lookups --context baseDomain=example.com
+        bunx cdk synth --all --no-lookups --context baseDomain=example.com
       env:
         # Dummy values for synthesis only - not for deployment
         CDK_DEFAULT_ACCOUNT: '123456789012'
         CDK_DEFAULT_REGION: 'us-east-1'
-    
+
     # Show infrastructure changes on PRs
     - name: CDK Diff
       if: github.event_name == 'pull_request'
@@ -103,7 +96,7 @@ jobs:
         cd infra
         echo "## Infrastructure Changes" >> $GITHUB_STEP_SUMMARY
         echo "```" >> $GITHUB_STEP_SUMMARY
-        npx cdk diff --context baseDomain=example.com 2>&1 | tee -a $GITHUB_STEP_SUMMARY || true
+        bunx cdk diff --context baseDomain=example.com 2>&1 | tee -a $GITHUB_STEP_SUMMARY || true
         echo "```" >> $GITHUB_STEP_SUMMARY
       env:
         CDK_DEFAULT_ACCOUNT: '123456789012'

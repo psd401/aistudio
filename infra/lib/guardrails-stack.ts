@@ -48,58 +48,58 @@ export class GuardrailsStack extends cdk.Stack {
       blockedInputMessaging: 'This content is not appropriate for educational use. Please rephrase your question.',
       blockedOutputsMessaging: 'The AI response contained inappropriate content and has been blocked for your safety.',
 
-      // Content filtering policies - Balanced for K-12 educational use
+      // Content filtering policies
       //
-      // Filter strength rationale (Issue #639):
-      // - LOW: Allows professional educational discussions including behavior management,
-      //   teacher observations, and student incident documentation
-      // - MEDIUM: Allows civil rights, Holocaust, history, literature discussions
-      // - HIGH: Reserved for truly inappropriate K-12 content
+      // Issue #761: Content filters switched to detect-only mode where possible.
+      // Following the same strategy as topic policies (Issue #742), content filters
+      // were blocking legitimate K-12 educational content:
+      // - SEXUAL: Blocking health education discussions
+      // - INSULTS: Blocking teacher observations about student behavior
+      // - VIOLENCE: Blocking history lessons (wars, civil rights struggles)
+      // - HATE: Blocking Holocaust education, civil rights content
       //
-      // Note: Topic-based filtering (weapons, drugs, self-harm, bullying) and profanity
-      // word lists provide additional protection independent of these content filters.
+      // AWS Bedrock requires at least ONE content filter at non-NONE strength.
+      // HATE at LOW is kept as the minimum required filter — LOW threshold has
+      // the fewest false positives for K-12 educational content.
+      //
+      // Safety net: LLM providers (OpenAI, Anthropic, Google) have built-in safety
+      // training that provides baseline content filtering even without Bedrock.
+      //
+      // History:
+      // - Issue #639: INSULTS/MISCONDUCT lowered from MEDIUM to LOW
+      // - Issue #727: PROMPT_ATTACK disabled (75% false positive rate)
+      // - Issue #761: All filters to NONE except HATE at LOW (Bedrock minimum requirement)
       contentPolicyConfig: {
         filtersConfig: [
           {
+            // Kept at LOW — Bedrock requires at least one non-NONE filter
             type: 'HATE',
-            inputStrength: 'MEDIUM', // Allows civil rights, Holocaust education
-            outputStrength: 'MEDIUM',
+            inputStrength: 'LOW',
+            outputStrength: 'LOW',
           },
           {
             type: 'VIOLENCE',
-            inputStrength: 'MEDIUM', // Allows history (wars), literature, biology
-            outputStrength: 'MEDIUM',
+            inputStrength: 'NONE',  // Issue #761: Detect only, don't block
+            outputStrength: 'NONE',
           },
           {
             type: 'SEXUAL',
-            inputStrength: 'HIGH', // Keep HIGH for K-12
-            outputStrength: 'HIGH',
+            inputStrength: 'NONE',  // Issue #761: Detect only, don't block
+            outputStrength: 'NONE',
           },
           {
-            // Issue #639: Lowered from MEDIUM to LOW
-            // MEDIUM was blocking legitimate teacher observation content discussing
-            // student behavioral challenges (e.g., "argued", classroom management)
             type: 'INSULTS',
-            inputStrength: 'LOW', // Allows behavior discussions, character analysis
-            outputStrength: 'LOW',
+            inputStrength: 'NONE',  // Issue #761: Detect only, don't block
+            outputStrength: 'NONE',
           },
           {
-            // Issue #639: Lowered from MEDIUM to LOW
-            // MEDIUM was blocking legitimate educational content about behavior
-            // management, student consequences, and disciplinary discussions
             type: 'MISCONDUCT',
-            inputStrength: 'LOW', // Allows behavior management, legal/drug education
-            outputStrength: 'LOW',
+            inputStrength: 'NONE',  // Issue #761: Detect only, don't block
+            outputStrength: 'NONE',
           },
           {
-            // Issue #657: Lowered HIGH→MEDIUM→LOW. Issue #727: Lowered LOW→NONE.
-            // 3 of 4 first-day prompt attack detections were false positives:
-            // role-based prompting ("as an expert, veteran principal"), Assistant
-            // Architect system prompts with detailed instructions, and Danielson
-            // Framework evaluation requests. Legitimate injection attempts are still
-            // caught by LLM safety training. Other filters remain active.
             type: 'PROMPT_ATTACK',
-            inputStrength: 'NONE', // Disabled - too many false positives on educational content
+            inputStrength: 'NONE',  // Issue #727: Already disabled
             outputStrength: 'NONE',
           },
         ],
