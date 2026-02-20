@@ -6,7 +6,7 @@
 # ============================================================================
 # Stage 1: Dependencies
 # ============================================================================
-FROM --platform=linux/arm64 oven/bun:1.2-alpine AS deps
+FROM --platform=linux/arm64 oven/bun:1.3-alpine AS deps
 WORKDIR /app
 
 # Install dependencies for native packages on ARM64
