@@ -41,5 +41,10 @@ ENV WATCHPACK_POLLING=true
 
 EXPOSE 3000
 
+# Entrypoint clears stale .next cache when source files change (Issue #800)
+COPY scripts/docker/dev-entrypoint.sh /usr/local/bin/dev-entrypoint.sh
+RUN chmod +x /usr/local/bin/dev-entrypoint.sh
+ENTRYPOINT ["dev-entrypoint.sh"]
+
 # Run Next.js dev server
 CMD ["bun", "run", "dev"]
