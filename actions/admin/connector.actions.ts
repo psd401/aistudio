@@ -4,6 +4,7 @@ import {
   createLogger,
   generateRequestId,
   startTimer,
+  sanitizeForLogging,
 } from "@/lib/logger"
 import {
   handleError,
@@ -13,7 +14,7 @@ import {
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { nexusMcpServers, nexusMcpConnections } from "@/lib/db/schema"
-import { eq, sql, count } from "drizzle-orm"
+import { eq, count } from "drizzle-orm"
 import { revalidatePath } from "next/cache"
 import type { ActionState } from "@/types/actions-types"
 import type { SelectNexusMcpServer, InsertNexusMcpServer } from "@/lib/db/types"
@@ -47,14 +48,6 @@ export interface UpdateMcpServerInput {
   maxConnections?: number
 }
 
-export interface McpServerHealthInfo {
-  serverId: string
-  totalConnections: number
-  connectedCount: number
-  errorCount: number
-  disconnectedCount: number
-}
-
 // Typed update payload — uses Drizzle's inferred insert type for type safety
 type McpServerUpdate = Partial<
   Pick<
@@ -66,6 +59,7 @@ type McpServerUpdate = Partial<
     | "credentialsKey"
     | "allowedUsers"
     | "maxConnections"
+    | "updatedAt"
   >
 >
 
@@ -110,10 +104,10 @@ function validateMcpUrl(rawUrl: string): void {
     /^172\.(1[6-9]|2\d|3[01])\./,
     /^192\.168\./,
     /^169\.254\./, // AWS EC2 instance metadata
-    /^::1$/,
-    /^fc/i,   // IPv6 ULA fc00::/7
-    /^fd/i,   // IPv6 ULA fd00::/8
-    /^fe80/i, // IPv6 link-local
+    /^\[?::1\]?$/,       // IPv6 loopback (bare or bracketed)
+    /^\[fc/i,             // IPv6 ULA fc00::/7 (bracket notation in URLs)
+    /^\[fd/i,             // IPv6 ULA fd00::/8
+    /^\[fe80/i,           // IPv6 link-local
   ]
 
   if (privateRanges.some((p) => p.test(parsed.hostname))) {
@@ -237,12 +231,8 @@ export async function createMcpServer(
   try {
     await requireRole("administrator")
 
-    // Log without credentialsKey — Secrets Manager key names should not appear in logs
     log.info("Admin action started: Creating MCP server", {
-      name: input.name,
-      url: input.url,
-      transport: input.transport,
-      authType: input.authType,
+      input: sanitizeForLogging({ name: input.name, url: input.url, transport: input.transport, authType: input.authType }),
       hasCredentials: !!input.credentialsKey,
     })
 
@@ -297,18 +287,14 @@ export async function updateMcpServer(
   const log = createLogger({ requestId, action: "admin.updateMcpServer" })
 
   try {
-    // Log without credentialsKey — Secrets Manager key names should not appear in logs
+    await requireRole("administrator")
+
     log.info("Admin action started: Updating MCP server", {
-      serverId: input.id,
-      name: input.name,
-      url: input.url,
-      transport: input.transport,
-      authType: input.authType,
+      input: sanitizeForLogging({ serverId: input.id, name: input.name, url: input.url, transport: input.transport, authType: input.authType }),
       hasCredentials: input.credentialsKey !== undefined
         ? input.credentialsKey !== null
         : undefined,
     })
-    await requireRole("administrator")
 
     if (input.url !== undefined) validateMcpUrl(input.url)
     validateServerInput(input)
@@ -327,7 +313,10 @@ export async function updateMcpServer(
     if (fields.maxConnections !== undefined)
       updateData.maxConnections = fields.maxConnections
 
-    if (Object.keys(updateData).length === 0) {
+    // Drizzle does not auto-update timestamps — set explicitly
+    updateData.updatedAt = new Date()
+
+    if (Object.keys(updateData).length <= 1) {
       const [current] = await executeQuery(
         (db) =>
           db
@@ -427,75 +416,3 @@ export async function deleteMcpServer(
   }
 }
 
-// ============================================
-// Get MCP Server Health
-// ============================================
-
-export async function getMcpServerHealth(
-  serverId: string
-): Promise<ActionState<McpServerHealthInfo>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("admin.getMcpServerHealth")
-  const log = createLogger({ requestId, action: "admin.getMcpServerHealth" })
-
-  try {
-    log.debug("Admin action started: Getting MCP server health", { serverId })
-    await requireRole("administrator")
-
-    // Single LEFT JOIN query: existence check + aggregation in one round-trip.
-    // No rows returned means server doesn't exist; one row with all-zero counts
-    // means server exists but has no connections.
-    const [row] = await executeQuery(
-      (db) =>
-        db
-          .select({
-            totalConnections: count(nexusMcpConnections.id),
-            connectedCount: count(
-              sql`CASE WHEN ${nexusMcpConnections.status} = 'connected' THEN 1 END`
-            ),
-            errorCount: count(
-              sql`CASE WHEN ${nexusMcpConnections.status} = 'error' THEN 1 END`
-            ),
-            disconnectedCount: count(
-              sql`CASE WHEN ${nexusMcpConnections.status} = 'disconnected' THEN 1 END`
-            ),
-          })
-          .from(nexusMcpServers)
-          .leftJoin(
-            nexusMcpConnections,
-            eq(nexusMcpServers.id, nexusMcpConnections.serverId)
-          )
-          .where(eq(nexusMcpServers.id, serverId))
-          .groupBy(nexusMcpServers.id),
-      "getMcpServerHealth"
-    )
-
-    if (!row) {
-      throw ErrorFactories.dbRecordNotFound("nexus_mcp_servers", serverId)
-    }
-
-    const result: McpServerHealthInfo = {
-      serverId,
-      totalConnections: Number(row.totalConnections),
-      connectedCount: Number(row.connectedCount),
-      errorCount: Number(row.errorCount),
-      disconnectedCount: Number(row.disconnectedCount),
-    }
-
-    timer({ status: "success" })
-    log.debug("MCP server health retrieved", { serverId, total: result.totalConnections })
-    return createSuccess(result, "Health data loaded")
-  } catch (error) {
-    timer({ status: "error" })
-    return handleError(
-      error,
-      "Failed to get connector health. Please try again.",
-      {
-        context: "admin.getMcpServerHealth",
-        requestId,
-        operation: "admin.getMcpServerHealth",
-        metadata: { serverId },
-      }
-    )
-  }
-}

@@ -16,7 +16,7 @@ export default async function ConnectorsPage() {
     <div className="p-6">
       <div className="mb-6">
         <PageBranding />
-        <h1 className="text-2xl font-semibold text-gray-900">
+        <h1 className="text-2xl font-semibold text-foreground">
           MCP Connectors
         </h1>
         <p className="text-sm text-muted-foreground mt-1">

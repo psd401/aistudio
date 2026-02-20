@@ -157,14 +157,10 @@ export function ConnectorsPageClient({ initialServers, fetchError: initialFetchE
         </div>
       )}
 
-      {/* Only show table or empty state when there is no fetch error */}
-      {!error || servers.length > 0 ? (
-        servers.length === 0 ? (
-          <div className="text-center py-12 text-muted-foreground">
-            No MCP connectors registered yet.
-          </div>
-        ) : (
-          <div className="border rounded-lg">
+      {/* Show table when servers exist, empty state when no servers and no error.
+         When error + no servers, only the error banner above is shown. */}
+      {servers.length > 0 ? (
+        <div className="border rounded-lg">
             <Table>
               <TableHeader>
                 <TableRow>
@@ -256,7 +252,10 @@ export function ConnectorsPageClient({ initialServers, fetchError: initialFetchE
               </TableBody>
             </Table>
           </div>
-        )
+      ) : !error ? (
+        <div className="text-center py-12 text-muted-foreground">
+          No MCP connectors registered yet.
+        </div>
       ) : null}
     </div>
   )
