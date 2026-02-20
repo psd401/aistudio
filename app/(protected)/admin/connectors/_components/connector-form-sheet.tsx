@@ -145,7 +145,10 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
         <Label>Auth Type</Label>
         <Select
           value={authType}
-          onValueChange={(v) => setAuthType(v as "none" | "oauth" | "api_key" | "jwt")}
+          onValueChange={(v) => {
+            setAuthType(v as "none" | "oauth" | "api_key" | "jwt")
+            if (v === "none") setError(null)
+          }}
         >
           <SelectTrigger>
             <SelectValue />

@@ -74,6 +74,11 @@ const MAX_CONNECTIONS_LIMIT = 100
 /**
  * Block private/loopback IP ranges and non-HTTP(S)/WS(S) protocols.
  * Prevents SSRF when admin-configured URLs are later used to establish connections.
+ *
+ * Known limitation: hostname-only checks do not mitigate DNS rebinding attacks.
+ * An attacker controlling DNS could register a public IP, then re-point to a
+ * private range (e.g., 169.254.169.254) after validation. Connection-time IP
+ * pinning would be needed to fully mitigate this — tracked for a future iteration.
  */
 function validateMcpUrl(rawUrl: string): void {
   let parsed: URL
