@@ -20,7 +20,7 @@
  */
 
 import { cookies } from "next/headers"
-import { timingSafeEqual } from "node:crypto"
+import { createHash, timingSafeEqual } from "node:crypto"
 import { z } from "zod"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
@@ -60,8 +60,31 @@ const oauthTokenResponseSchema = z.object({
 type OAuthTokenResponse = z.infer<typeof oauthTokenResponseSchema>
 
 /**
+ * Fixed inline script that reads payload and origin from JSON data blocks.
+ * Because this string is constant (no dynamic data), the CSP SHA-256 hash
+ * is stable and no user-influenced data flows into createHash().
+ *
+ * Data blocks:
+ *   #d — JSON payload object (type, success, serverId, error)
+ *   #o — JSON-encoded origin string for postMessage targetOrigin
+ */
+const CALLBACK_SCRIPT = [
+  "var d=JSON.parse(document.getElementById('d').textContent),",
+  "o=JSON.parse(document.getElementById('o').textContent);",
+  "if(window.opener){window.opener.postMessage(d,o);}",
+  "window.close();",
+].join("")
+
+/** Pre-computed CSP hash of the fixed inline script */
+const CALLBACK_SCRIPT_HASH = createHash("sha256").update(CALLBACK_SCRIPT, "utf8").digest("base64")
+
+/**
  * Renders an HTML page that sends a postMessage to the opener window and closes.
- * The origin is restricted to our app URL to prevent cross-origin leaks.
+ * Uses a SHA-256 hash of the inline script for CSP instead of 'unsafe-inline'.
+ *
+ * The payload and origin are placed in `<script type="application/json">` data blocks,
+ * NOT in the inline script, keeping the inline script content fixed so no tainted
+ * data flows into the CSP hash computation.
  */
 function renderCallbackHtml(
   success: boolean,
@@ -69,25 +92,27 @@ function renderCallbackHtml(
   error?: string
 ): Response {
   const origin = getIssuerUrl()
-  // Escape '<' to prevent </script> injection; embed as JS object (not a string)
-  const payloadJson = JSON.stringify({
+
+  // HTML-escape JSON to prevent injection in the HTML context.
+  const escapeHtml = (s: string) => s.replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026")
+
+  const payloadJson = escapeHtml(JSON.stringify({
     type: "mcp-oauth-callback",
     success,
     serverId,
     error: error ?? null,
-  }).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/&/g, "\\u0026")
+  }))
+
+  const originJson = escapeHtml(JSON.stringify(origin))
 
   const html = `<!DOCTYPE html>
 <html>
 <head><title>OAuth Complete</title></head>
 <body>
 <p>${success ? "Authorization successful. This window will close." : "Authorization failed."}</p>
-<script>
-  if (window.opener) {
-    window.opener.postMessage(${payloadJson}, ${JSON.stringify(origin)});
-  }
-  window.close();
-</script>
+<script type="application/json" id="d">${payloadJson}</script>
+<script type="application/json" id="o">${originJson}</script>
+<script>${CALLBACK_SCRIPT}</script>
 </body>
 </html>`
 
@@ -95,7 +120,7 @@ function renderCallbackHtml(
     status: 200,
     headers: {
       "Content-Type": "text/html; charset=utf-8",
-      "Content-Security-Policy": "default-src 'none'; script-src 'unsafe-inline'",
+      "Content-Security-Policy": `default-src 'none'; script-src 'sha256-${CALLBACK_SCRIPT_HASH}'`,
       "X-Frame-Options": "DENY",
       "X-Content-Type-Options": "nosniff",
       "Cache-Control": "no-store",

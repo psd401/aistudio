@@ -164,7 +164,11 @@ async function executeStreaming(params: {
     maxSteps: connectorToolResults.length > 0 ? 10 : undefined,
     options: { reasoningEffort, responseMode },
     callbacks: {
-      onFinish: createOnFinishCallback({ conversationId, dbModelId, connectorToolResults, log, timer })
+      onFinish: createOnFinishCallback({ conversationId, dbModelId, connectorToolResults, log, timer }),
+      onError: async (error: Error) => {
+        log.warn('Stream error — closing MCP clients', { conversationId, error: error.message });
+        await closeMcpClients(connectorToolResults, log, 'onError');
+      }
     }
   };
 
