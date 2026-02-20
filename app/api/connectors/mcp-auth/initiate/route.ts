@@ -56,6 +56,8 @@ export async function GET(req: Request): Promise<Response> {
     const userRoleNames = currentUser.data.roles.map((r: { name: string }) => r.name)
 
     // 2. Validate serverId param
+    // CodeQL js/user-controlled-bypass dismissed (alert #394): RFC 6749 requires serverId
+    // validation. User authenticated above. Sink is auth() from @ai-sdk/mcp.
     const { searchParams } = new URL(req.url)
     const serverId = searchParams.get("serverId")
     if (!serverId || !UUID_RE.test(serverId)) {

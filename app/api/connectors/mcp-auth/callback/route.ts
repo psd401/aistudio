@@ -229,6 +229,8 @@ export async function GET(req: Request): Promise<Response> {
     })
 
     // 4. Handle OAuth error/code from provider (AFTER cookie validation — CSRF check already passed).
+    // CodeQL js/user-controlled-bypass dismissed (alerts #395, #396): RFC 6749 §4.1.2 requires
+    // checking errorParam/code. CSRF cookie validated unconditionally above (lines 181-201).
     if (errorParam) {
       log.warn("MCP OAuth provider returned error", {
         requestId,
