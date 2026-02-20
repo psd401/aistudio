@@ -190,10 +190,17 @@ export async function getConnectorTools(
       authProvider,
     }
   } else if (authType === "cognito_passthrough") {
-    // Cognito passthrough: forward session idToken as Bearer header
+    // Cognito passthrough: forward session idToken as Bearer header.
+    // idToken is populated in auth.ts jwt callback (account.id_token → token.idToken)
+    // and surfaced via session callback (session.idToken → CognitoSession.idToken).
     if (!options?.idToken) {
-      throw new Error("Cognito passthrough requires an active session with an ID token")
+      throw new Error(
+        "Cognito passthrough requires an active session with an ID token. " +
+        "If this persists, reload the page to refresh your session."
+      )
     }
+    // type: "http" is safe here — assertHttpTransport() above already rejects
+    // non-HTTP transports before this branch is reached.
     transportConfig = {
       type: "http",
       url: server.url,

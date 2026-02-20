@@ -6,7 +6,9 @@ import { Download } from "lucide-react"
  * Regex to match PSD Data MCP export URL markers.
  * Format: [EXPORT_URL: <url> | rows: <count>]
  */
-const EXPORT_URL_PATTERN = /\[EXPORT_URL:\s*(https?:\/\/[^\s|]+)\s*\|\s*rows:\s*(\d+)\]/g
+// Only match HTTPS — presigned S3 URLs are always HTTPS.
+// Rejecting http:// prevents accidental plaintext token exposure.
+const EXPORT_URL_PATTERN = /\[EXPORT_URL:\s*(https:\/\/[^\s|]+)\s*\|\s*rows:\s*(\d+)\]/g
 
 interface ExportLink {
   url: string
@@ -39,16 +41,18 @@ export function stripExportUrls(text: string): string {
 /**
  * Renders export URL markers as styled download links.
  * Presigned URLs expire after 5 minutes — this is shown to the user.
+ *
+ * Accepts pre-parsed links to avoid redundant parsing when the caller
+ * has already called parseExportUrls().
  */
-export function ExportUrlLinks({ text }: { text: string }) {
-  const links = parseExportUrls(text)
+export function ExportUrlLinks({ links }: { links: ExportLink[] }) {
   if (links.length === 0) return null
 
   return (
     <div className="my-2 space-y-2">
-      {links.map((link, i) => (
+      {links.map((link) => (
         <a
-          key={i}
+          key={link.url}
           href={link.url}
           target="_blank"
           rel="noopener noreferrer"

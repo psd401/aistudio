@@ -18,7 +18,7 @@ import type { McpAuthType, McpConnectionStatus } from "@/lib/mcp/connector-types
 /** Token expiry buffer — proactively mark tokens expiring within 60 seconds as expired */
 const TOKEN_EXPIRY_BUFFER_MS = 60_000
 
-/** Valid authType values — mirrors CHECK constraint in 028-nexus-schema.sql */
+/** Valid authType values — mirrors CHECK constraint (updated in 060-mcp-cognito-passthrough-auth.sql) */
 const VALID_AUTH_TYPES = new Set<McpAuthType>(["api_key", "oauth", "jwt", "none", "cognito_passthrough"])
 
 /**

@@ -24,7 +24,7 @@ export type McpTransportType = "stdio" | "http" | "websocket"
 
 /**
  * Authentication types for MCP server connections.
- * Must match CHECK constraint in 028-nexus-schema.sql.
+ * Must match CHECK constraint (updated in 060-mcp-cognito-passthrough-auth.sql).
  */
 export type McpAuthType = "api_key" | "oauth" | "jwt" | "none" | "cognito_passthrough"
 

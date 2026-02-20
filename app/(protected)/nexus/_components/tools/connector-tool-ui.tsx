@@ -200,7 +200,7 @@ function TextResult({ text }: { text: string }) {
       <div className="text-sm text-gray-800 whitespace-pre-wrap break-words">
         {displayText}
       </div>
-      {exportLinks.length > 0 && <ExportUrlLinks text={text} />}
+      {exportLinks.length > 0 && <ExportUrlLinks links={exportLinks} />}
     </div>
   )
 }

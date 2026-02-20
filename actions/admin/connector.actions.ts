@@ -18,6 +18,7 @@ import { eq, count } from "drizzle-orm"
 import { revalidatePath } from "next/cache"
 import type { ActionState } from "@/types/actions-types"
 import type { SelectNexusMcpServer, InsertNexusMcpServer } from "@/lib/db/types"
+import type { McpAuthType } from "@/lib/mcp/connector-types"
 
 // ============================================
 // Types
@@ -32,7 +33,7 @@ export interface CreateMcpServerInput {
   name: string
   url: string
   transport: "http" | "stdio" | "websocket"
-  authType: "none" | "oauth" | "api_key" | "jwt" | "cognito_passthrough"
+  authType: McpAuthType
   credentialsKey?: string
   allowedUsers?: number[]
   maxConnections?: number
@@ -43,7 +44,7 @@ export interface UpdateMcpServerInput {
   name?: string
   url?: string
   transport?: "http" | "stdio" | "websocket"
-  authType?: "none" | "oauth" | "api_key" | "jwt" | "cognito_passthrough"
+  authType?: McpAuthType
   credentialsKey?: string | null
   allowedUsers?: number[]
   maxConnections?: number
