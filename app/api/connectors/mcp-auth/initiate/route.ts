@@ -9,7 +9,7 @@
  * Flow:
  * 1. Authenticate user, load server config
  * 2. Create ServerSideOAuthProvider instance
- * 3. Call auth(provider, { serverUrl }) from @ai-sdk/mcp
+ * 3. Call exchangeMcpOAuthTokens(provider, { serverUrl }) from @ai-sdk/mcp
  *    - SDK discovers server metadata (.well-known/oauth-authorization-server)
  *    - SDK performs dynamic client registration if needed
  *    - SDK calls provider.redirectToAuthorization(url) → we capture it
@@ -22,7 +22,7 @@
 
 import { cookies } from "next/headers"
 import { NextResponse } from "next/server"
-import { auth } from "@ai-sdk/mcp"
+import { auth as exchangeMcpOAuthTokens } from "@ai-sdk/mcp"
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
@@ -65,7 +65,6 @@ export async function GET(req: Request): Promise<Response> {
     // 2. Validate serverId param
     const { searchParams } = new URL(req.url)
     const serverId = searchParams.get("serverId")
-    // lgtm[js/user-controlled-bypass] — format-only check; authorization enforced by assertUserAccess() after DB load
     if (!serverId || !UUID_RE.test(serverId)) {
       timer({ status: "error", reason: "invalid_server_id" })
       return NextResponse.json({ error: "Invalid serverId" }, { status: 400 })
@@ -122,7 +121,7 @@ export async function GET(req: Request): Promise<Response> {
       redirectUrl,
     })
 
-    const result = await auth(provider, {
+    const result = await exchangeMcpOAuthTokens(provider, {
       serverUrl: server.url,
     })
 
