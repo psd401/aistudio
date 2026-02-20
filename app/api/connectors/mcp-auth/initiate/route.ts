@@ -32,7 +32,7 @@ import { requireUserAccess, rejectUnsafeMcpUrl } from "@/lib/mcp/connector-servi
 import { encryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { ServerSideOAuthProvider } from "@/lib/mcp/mcp-oauth-provider"
-import { UUID_RE, getMcpAuthCookieName } from "@/lib/mcp/mcp-auth-utils"
+import { UUID_RE, getMcpAuthCookieName, classifyMcpOAuthError } from "@/lib/mcp/mcp-auth-utils"
 
 const log = createLogger({ action: "mcp-auth-initiate" })
 
@@ -164,11 +164,34 @@ export async function GET(req: Request): Promise<Response> {
 
     return NextResponse.json({ url: authUrl.toString() })
   } catch (error) {
-    log.error("MCP auth initiate failed", { requestId, error: String(error) })
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    log.error("MCP auth initiate failed", {
+      requestId,
+      error: errorMessage,
+      errorType: error instanceof Error ? error.constructor.name : typeof error,
+      cause: error instanceof Error && error.cause ? String(error.cause) : undefined,
+    })
     timer({ status: "error" })
-    return NextResponse.json(
-      { error: "Failed to initiate MCP OAuth flow" },
-      { status: 500 }
-    )
+
+    // Return a specific error message for the frontend to display.
+    // Internal details stay in server logs.
+    const category = classifyMcpOAuthError(errorMessage)
+    const userError = INITIATE_ERROR_MESSAGES[category] ?? INITIATE_ERROR_MESSAGES.unexpected
+    return NextResponse.json({ error: userError }, { status: 500 })
   }
+}
+
+/**
+ * User-facing error messages for the initiate endpoint.
+ * Keyed by McpOAuthErrorCategory from the shared classifier.
+ * Categories not applicable to this endpoint fall through to "unexpected".
+ */
+const INITIATE_ERROR_MESSAGES: Record<string, string> = {
+  timeout: "The MCP server took too long to respond. Please try again.",
+  connectivity: "Could not reach the MCP server. Check that the server URL is correct.",
+  discovery: "Could not discover OAuth configuration from the MCP server. The server URL may be incorrect.",
+  registration: "Dynamic client registration failed. The MCP server may not support automatic registration.",
+  blocked: "The MCP server URL is not allowed (private/internal address).",
+  not_found: "The MCP server configuration was not found.",
+  unexpected: "Failed to start OAuth flow. Check server logs for details.",
 }

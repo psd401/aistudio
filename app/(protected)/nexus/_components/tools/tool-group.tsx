@@ -81,8 +81,11 @@ export function ToolGroup({ startIndex, endIndex, children }: PropsWithChildren<
     return 'generic'
   }, [toolCalls, getConnectorInfo])
 
+  // Treat both undefined (streaming, not yet resolved) and null (stream error
+  // before onFinish — result never captured) as "still running" so the spinner
+  // shows rather than silently completing with no output.
   const isRunning = toolCalls.some(part =>
-    'result' in part && part.result === undefined
+    'result' in part && (part.result === undefined || part.result === null)
   )
 
   const toolCount = endIndex - startIndex + 1

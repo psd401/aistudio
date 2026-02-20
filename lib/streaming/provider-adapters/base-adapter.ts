@@ -11,6 +11,14 @@ import type {
 
 const log = createLogger({ module: 'base-provider-adapter' });
 
+/** Tool call accumulated across streaming steps */
+export type AccumulatedToolCall = {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  result?: unknown;
+};
+
 /**
  * Base class for all provider adapters
  * Provides common functionality and interface implementation
@@ -126,7 +134,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
 
       // Accumulate tool calls from steps (captured via onStepFinish)
       // Includes result field for persistence (required for assistant-ui to render completed tool calls)
-      const accumulatedToolCalls: Array<{ toolCallId: string; toolName: string; args: Record<string, unknown>; result?: unknown }> = [];
+      const accumulatedToolCalls: AccumulatedToolCall[] = [];
 
       // Start streaming with AI SDK
       const result = streamText({
@@ -176,23 +184,10 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
             }
           }
 
-          // Capture tool results (required for assistant-ui makeAssistantToolUI to render completed tools)
-          // AI SDK v6 uses 'output' for the result, not 'result'
-          const toolResults = (event as unknown as { toolResults?: Array<{ toolCallId: string; output: unknown }> }).toolResults;
-          if (toolResults && Array.isArray(toolResults)) {
-            for (const tr of toolResults) {
-              // Find the matching tool call and attach the result
-              const existingToolCall = accumulatedToolCalls.find(tc => tc.toolCallId === tr.toolCallId);
-              if (existingToolCall) {
-                existingToolCall.result = tr.output;
-                logger.debug('Tool result captured from step', {
-                  provider: this.providerName,
-                  toolCallId: tr.toolCallId,
-                  hasResult: tr.output !== undefined
-                });
-              }
-            }
-          }
+          // NOTE: Tool results are NOT available in onStepFinish — AI SDK v4+ fires this
+          // callback when the LLM call finishes, before tool execution completes.
+          // Tool results are extracted from event.steps in onFinish instead.
+          // See: https://ai-sdk.dev/docs/reference/ai-sdk-core/stream-text#on-step-finish
         },
         onFinish: async (event) => {
           logger.info('streamText onFinish triggered', {
@@ -212,6 +207,9 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
             totalTokens?: number;
             reasoningTokens?: number;
           }
+
+          // Extract tool results from event.steps (shared method handles runtime validation)
+          this.extractToolResultsFromSteps(event, accumulatedToolCalls, logger);
 
           // Transform to our expected format
           const usage = event.usage as StreamUsage;
@@ -353,6 +351,56 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
     });
   }
   
+  /**
+   * Extract tool results from AI SDK v6 onFinish event.steps and match them
+   * to accumulated tool calls. AI SDK v6's onStepFinish fires before tool
+   * execution completes (toolResults is always []), so results must be read
+   * from the complete steps array available in onFinish.
+   *
+   * Uses runtime type checks instead of unsafe `as unknown as` casts.
+   */
+  protected extractToolResultsFromSteps(
+    event: unknown,
+    accumulatedToolCalls: AccumulatedToolCall[],
+    logger: ReturnType<typeof createLogger>
+  ): void {
+    if (typeof event !== 'object' || event === null) return;
+
+    const steps = (event as Record<string, unknown>).steps;
+    if (!Array.isArray(steps)) return;
+
+    for (const step of steps) {
+      if (typeof step !== 'object' || step === null) continue;
+      const toolResults = (step as Record<string, unknown>).toolResults;
+      if (!Array.isArray(toolResults)) continue;
+
+      for (const tr of toolResults) {
+        if (typeof tr !== 'object' || tr === null) continue;
+        const { toolCallId, output } = tr as { toolCallId?: string; output?: unknown };
+        if (typeof toolCallId !== 'string') continue;
+
+        const match = accumulatedToolCalls.find(tc => tc.toolCallId === toolCallId);
+        if (match) {
+          match.result = output;
+          logger.debug('Tool result matched from steps', {
+            toolCallId,
+            hasOutput: output !== undefined
+          });
+        }
+      }
+    }
+
+    // Log extraction summary
+    const withResults = accumulatedToolCalls.filter(tc => tc.result !== undefined).length;
+    if (accumulatedToolCalls.length > 0) {
+      logger.info('Tool result extraction complete', {
+        totalToolCalls: accumulatedToolCalls.length,
+        withResults,
+        withoutResults: accumulatedToolCalls.length - withResults
+      });
+    }
+  }
+
   /**
    * Get default capabilities for unknown models
    * Used as fallback when specific model capabilities are unknown

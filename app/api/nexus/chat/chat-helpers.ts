@@ -282,7 +282,10 @@ function buildAssistantParts(
         toolName: tc.toolName,
         args: tc.args,
         argsText: JSON.stringify(tc.args),
-        result: tc.result ?? { success: true },
+        // null when extraction missed the result (e.g. stream error before onFinish).
+        // UI tool components handle null with loading/fallback states — verified in
+        // web-search-ui.tsx, code-interpreter-ui.tsx, chart-visualization-ui.tsx.
+        result: tc.result ?? null,
         isError: false,
       });
     }

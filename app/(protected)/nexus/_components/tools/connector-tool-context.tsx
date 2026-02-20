@@ -39,6 +39,8 @@ interface ConnectorToolContextValue {
   addFailedServerIds: (ids: string[]) => void
   /** Remove a single server ID from the failed list (e.g., after successful reconnect) */
   removeFailedServerId: (id: string) => void
+  /** Clear all tool mappings and failed server state (used on conversation switch) */
+  reset: () => void
 }
 
 const ConnectorToolContext = createContext<ConnectorToolContextValue | null>(null)
@@ -90,6 +92,11 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
     setFailedServerIds(prev => prev.filter(sid => sid !== id))
   }, [])
 
+  const reset = useCallback(() => {
+    setToolMap({})
+    setFailedServerIds([])
+  }, [])
+
   const value = useMemo<ConnectorToolContextValue>(() => ({
     toolMap,
     serverMap,
@@ -99,6 +106,7 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
     failedServerIds,
     addFailedServerIds,
     removeFailedServerId,
+    reset,
   }), [
     toolMap,
     serverMap,
@@ -108,6 +116,7 @@ export function ConnectorToolProvider({ children }: { children: React.ReactNode 
     failedServerIds,
     addFailedServerIds,
     removeFailedServerId,
+    reset,
   ])
 
   return (

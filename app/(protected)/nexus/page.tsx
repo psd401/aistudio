@@ -239,7 +239,17 @@ function NexusRuntimeWrapper({
   onToolsChange,
   onConnectorsChange,
 }: NexusRuntimeWrapperProps) {
-  const { addFailedServerIds, failedServerIds, registerConnectorTools, removeFailedServerId } = useConnectorTools()
+  const { addFailedServerIds, failedServerIds, registerConnectorTools, removeFailedServerId, reset: resetConnectorTools } = useConnectorTools()
+
+  // Reset connector tool state when conversation ID is cleared (user navigated away).
+  // This replaces the old key={conversationId} pattern which destroyed the entire React tree
+  // mid-stream whenever conversationId changed (null → UUID on first message).
+  // We only reset on null (conversation cleared), NOT on null → UUID (first assignment).
+  useEffect(() => {
+    if (conversationId === null) {
+      resetConnectorTools()
+    }
+  }, [conversationId, resetConnectorTools])
 
   const handleConnectorReconnect = useCallback((ids: string[]) => {
     addFailedServerIds(ids)
@@ -472,7 +482,7 @@ function NexusPageContent() {
 
   return (
     <ErrorBoundary>
-      <ConnectorToolProvider key={conversationId ?? 'new'}>
+      <ConnectorToolProvider>
         <NexusLayout conversationId={conversationId}>
           <NexusShell>
             <div className="relative h-full">

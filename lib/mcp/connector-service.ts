@@ -210,6 +210,12 @@ export async function getConnectorTools(
   try {
     client = await withTimeout(clientPromise, MCP_CLIENT_TIMEOUT_MS, "MCP client creation timed out")
   } catch (err) {
+    const errorMessage = err instanceof Error ? err.message : String(err)
+    log.warn("Failed to create MCP client", {
+      requestId, serverId, serverName: server.name,
+      error: errorMessage,
+      isTimeout: errorMessage.includes("timed out"),
+    })
     // If the timeout fires but createMCPClient resolves later, close the orphaned client
     clientPromise.then(c => c.close().catch(() => {})).catch(() => {})
     throw err
@@ -223,6 +229,12 @@ export async function getConnectorTools(
       "MCP tool fetch timed out"
     )
   } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    log.warn("Failed to fetch tools from MCP server", {
+      requestId, serverId, serverName: server.name,
+      error: errorMessage,
+      isTimeout: errorMessage.includes("timed out"),
+    })
     try { await client.close() } catch { /* ignore cleanup errors */ }
     throw error
   }
@@ -318,12 +330,24 @@ export async function refreshUserToken(
 
   // Phase 2: Exchange — outbound HTTP call (no DB connection held)
   rejectUnsafeMcpUrl(server.url)
-  const tokenResponse = await exchangeRefreshToken(server, refreshToken)
-  if (!tokenResponse) {
-    log.warn("Token refresh failed", { requestId, userId, serverId })
+  const tokenResult = await exchangeRefreshToken(server, refreshToken)
+
+  // Check if we got a structured failure instead of a token response
+  if (tokenResult.kind === "failure") {
+    log.warn("Token refresh failed", {
+      requestId, userId, serverId,
+      reason: tokenResult.reason,
+      detail: tokenResult.detail,
+      httpStatus: tokenResult.httpStatus,
+    })
     timer({ status: "error" })
-    return { success: false, reconnectRequired: true }
+    // Only require full reconnect for auth failures; network/timeout errors
+    // may resolve on retry without forcing the user through OAuth again.
+    const reconnectRequired = tokenResult.reason === "unauthorized" || tokenResult.reason === "invalid_response"
+    return { success: false, reconnectRequired }
   }
+
+  const tokenResponse = tokenResult
 
   // Phase 3: Write — encrypt and persist new tokens (short transaction)
   const newEncryptedAccess = await encryptToken(tokenResponse.access_token)
@@ -378,11 +402,25 @@ export async function refreshUserToken(
 
 /** Minimal OAuth token response shape */
 interface OAuthTokenResponse {
+  /** Discriminant — absent on success, present on failure. Enables `tokenResult.kind === "failure"` narrowing. */
+  kind?: undefined
   access_token: string
   refresh_token?: string
   expires_in?: number
   scope?: string
   token_type: string
+}
+
+/** Structured result for token refresh failures (replaces opaque null return) */
+interface TokenRefreshFailure {
+  /** Discriminant tag — use `tokenResult.kind === 'failure'` for type narrowing */
+  kind: "failure"
+  /** Failure category for callers to decide on retry vs reconnect */
+  reason: "unauthorized" | "server_error" | "network_error" | "invalid_response" | "timeout"
+  /** Human-readable description for logging (never shown to end user) */
+  detail: string
+  /** HTTP status code if available */
+  httpStatus?: number
 }
 
 /** Runtime validation for external OAuth token responses (no zod dependency) */
@@ -535,12 +573,13 @@ async function buildAuthHeaders(
  * Performs the OAuth token refresh exchange (RFC 6749 §6).
  * Loads client credentials from Secrets Manager if configured, resolves the
  * token endpoint, and exchanges the refresh token for a new access token.
- * Returns null on any failure (caller handles reconnect flow).
+ * Returns a structured failure on error so callers can distinguish between
+ * "token revoked" (reconnect needed) vs "server down" (retry later).
  */
 async function exchangeRefreshToken(
   server: ServerRow,
   refreshToken: string
-): Promise<OAuthTokenResponse | null> {
+): Promise<OAuthTokenResponse | TokenRefreshFailure> {
   // Load client credentials from Secrets Manager if configured
   const credentials = server.credentialsKey
     ? await loadOAuthCredentials(server.credentialsKey)
@@ -572,15 +611,34 @@ async function exchangeRefreshToken(
     })
 
     if (!resp.ok) {
-      log.warn("Token refresh request failed", { status: resp.status })
-      return null
+      const reason = resp.status === 401 || resp.status === 403 ? "unauthorized" as const : "server_error" as const
+      log.warn("Token refresh request failed", {
+        status: resp.status,
+        reason,
+        serverId: server.id,
+        tokenEndpoint,
+      })
+      return {
+        kind: "failure",
+        reason,
+        detail: `Token endpoint returned HTTP ${resp.status}`,
+        httpStatus: resp.status,
+      }
     }
 
     const json = await resp.json()
     return parseOAuthTokenResponse(json)
   } catch (err) {
-    log.warn("Token exchange failed", { error: String(err) })
-    return null
+    const message = err instanceof Error ? err.message : String(err)
+    const isTimeout = message.includes("timeout") || message.includes("aborted")
+    const reason = isTimeout ? "timeout" as const : "network_error" as const
+    log.warn("Token exchange failed", {
+      error: message,
+      reason,
+      serverId: server.id,
+      tokenEndpoint,
+    })
+    return { kind: "failure", reason, detail: message }
   }
 }
 

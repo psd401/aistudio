@@ -201,6 +201,11 @@ export function MCPPopover({
         if (onReconnectSuccess) {
           onReconnectSuccess(connectorId)
         }
+      } else {
+        // OAuth callback returned success=false with an error message
+        toast.error(`${toastPrefix} failed`, {
+          description: result.error || 'Authorization was not completed.',
+        })
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Authentication failed'
