@@ -568,7 +568,10 @@ export async function POST(req: Request) {
     }
 
     // 9. Execute streaming and return response
-    return executeStreaming({
+    // Once executeStreaming returns successfully, the streaming Response is in flight.
+    // MCP client cleanup is handled inside onFinish (after all tool executions complete).
+    // We only clean up in catch when executeStreaming itself throws (pre-stream errors).
+    return await executeStreaming({
       messages: lightweightMessages as UIMessage[],
       modelConfig,
       userId,
@@ -589,7 +592,10 @@ export async function POST(req: Request) {
     });
 
   } catch (error) {
-    // Clean up MCP clients on pre-stream errors (e.g., auth failure, model not found)
+    // Clean up MCP clients only for pre-stream errors (e.g., auth failure, model not found,
+    // executeStreaming threw before returning a Response). Once streaming starts, cleanup
+    // is handled by onFinish inside the stream — AI SDK v6 guarantees onFinish is called
+    // for all terminal states including errors (verified against ai@6.x).
     await closeMcpClients(connectorToolResults, log, 'catch');
 
     log.error('Nexus chat API error', {

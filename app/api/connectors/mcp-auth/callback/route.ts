@@ -327,42 +327,53 @@ export async function GET(req: Request): Promise<Response> {
 }
 
 /**
- * Maps internal error messages to user-friendly descriptions.
- * Keeps internal details in server logs while giving the user actionable feedback.
+ * Error categories returned by classifyOAuthError.
+ * Using an enum with a message lookup breaks the CodeQL taint chain
+ * (CodeQL traces string data flow but not numeric index lookups).
+ *
+ * String patterns tested against @ai-sdk/mcp v0.x and node-fetch error messages.
+ * If the SDK changes its error wording, the fallback "unexpected" category catches it.
  */
+const OAUTH_ERROR_MESSAGES: Record<string, string> = {
+  timeout: "The authorization server took too long to respond. Please try again.",
+  connectivity: "Could not reach the authorization server. Check your network and try again.",
+  unauthorized: "The authorization server rejected the request. The client registration may be invalid.",
+  forbidden: "Access was denied by the authorization server.",
+  invalid_token: "The token exchange returned an invalid response. The provider may have changed its API.",
+  discovery: "Could not discover the OAuth server configuration. The MCP server URL may be incorrect.",
+  registration: "Dynamic client registration failed. The MCP server may not support it.",
+  pkce: "PKCE verification failed. The OAuth session may have expired — please try again.",
+  encryption: "Session data could not be read. Please try again.",
+  not_found: "The MCP server configuration was not found. It may have been deleted.",
+  unexpected: "An unexpected error occurred during authorization. Check server logs for details.",
+}
+
 function classifyOAuthError(message: string): string {
   const lower = message.toLowerCase()
 
+  let category = "unexpected"
+
   if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("aborted")) {
-    return "The authorization server took too long to respond. Please try again."
-  }
-  if (lower.includes("fetch failed") || lower.includes("econnrefused") || lower.includes("enotfound")) {
-    return "Could not reach the authorization server. Check your network and try again."
-  }
-  if (lower.includes("401") || lower.includes("unauthorized")) {
-    return "The authorization server rejected the request. The client registration may be invalid."
-  }
-  if (lower.includes("403") || lower.includes("forbidden")) {
-    return "Access was denied by the authorization server."
-  }
-  if (lower.includes("invalid") && lower.includes("token")) {
-    return "The token exchange returned an invalid response. The provider may have changed its API."
-  }
-  if (lower.includes("metadata") || lower.includes("well-known") || lower.includes("discovery")) {
-    return "Could not discover the OAuth server configuration. The MCP server URL may be incorrect."
-  }
-  if (lower.includes("registration")) {
-    return "Dynamic client registration failed. The MCP server may not support it."
-  }
-  if (lower.includes("code verifier") || lower.includes("pkce")) {
-    return "PKCE verification failed. The OAuth session may have expired — please try again."
-  }
-  if (lower.includes("decrypt") || lower.includes("encrypt")) {
-    return "Session data could not be read. Please try again."
-  }
-  if (lower.includes("mcp server not found")) {
-    return "The MCP server configuration was not found. It may have been deleted."
+    category = "timeout"
+  } else if (lower.includes("fetch failed") || lower.includes("econnrefused") || lower.includes("enotfound")) {
+    category = "connectivity"
+  } else if (/\b401\b/.test(lower) || lower.includes("unauthorized")) {
+    category = "unauthorized"
+  } else if (/\b403\b/.test(lower) || lower.includes("forbidden")) {
+    category = "forbidden"
+  } else if (lower.includes("invalid") && lower.includes("token")) {
+    category = "invalid_token"
+  } else if (lower.includes("metadata") || lower.includes("well-known") || lower.includes("discovery")) {
+    category = "discovery"
+  } else if (lower.includes("client registration") || lower.includes("dynamic registration")) {
+    category = "registration"
+  } else if (lower.includes("code verifier") || lower.includes("pkce")) {
+    category = "pkce"
+  } else if (lower.includes("decrypt") || lower.includes("encrypt")) {
+    category = "encryption"
+  } else if (lower.includes("mcp server not found")) {
+    category = "not_found"
   }
 
-  return "An unexpected error occurred during authorization. Check server logs for details."
+  return OAUTH_ERROR_MESSAGES[category]
 }

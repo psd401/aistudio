@@ -3,7 +3,7 @@ import { streamText, stepCountIs, type ModelMessage, type ToolSet } from 'ai';
 import { createLogger } from '@/lib/logger';
 import { Settings } from '@/lib/settings-manager';
 import { ErrorFactories } from '@/lib/error-utils';
-import { BaseProviderAdapter } from './base-adapter';
+import { BaseProviderAdapter, type AccumulatedToolCall } from './base-adapter';
 import { createUniversalTools } from '@/lib/tools/provider-native-tools';
 import type { StreamingCallbacks, StreamConfig, ProviderCapabilities, StreamRequest } from '../types';
 
@@ -322,7 +322,7 @@ export class OpenAIAdapter extends BaseProviderAdapter {
       };
       
       // Accumulate tool calls across steps (OpenAI Responses API path)
-      const accumulatedToolCalls: Array<{ toolCallId: string; toolName: string; args: Record<string, unknown>; result?: unknown }> = [];
+      const accumulatedToolCalls: AccumulatedToolCall[] = [];
 
       // Stream with Responses API enhancements
       const result = streamText({
@@ -360,34 +360,8 @@ export class OpenAIAdapter extends BaseProviderAdapter {
             toolCallCount: accumulatedToolCalls.length
           });
 
-          // Extract tool results from completed steps (same pattern as base adapter)
-          const steps = (event as unknown as { steps?: Array<{ toolResults?: Array<{ toolCallId: string; output: unknown }> }> }).steps;
-          if (steps && Array.isArray(steps)) {
-            for (const step of steps) {
-              if (step.toolResults && Array.isArray(step.toolResults)) {
-                for (const tr of step.toolResults) {
-                  const match = accumulatedToolCalls.find(tc => tc.toolCallId === tr.toolCallId);
-                  if (match) {
-                    match.result = tr.output;
-                    logger.debug('OpenAI tool result matched from steps', {
-                      toolCallId: tr.toolCallId,
-                      hasOutput: tr.output !== undefined
-                    });
-                  }
-                }
-              }
-            }
-          }
-
-          // Log tool result extraction summary
-          const withResults = accumulatedToolCalls.filter(tc => tc.result !== undefined).length;
-          if (accumulatedToolCalls.length > 0) {
-            logger.info('OpenAI tool result extraction complete', {
-              totalToolCalls: accumulatedToolCalls.length,
-              withResults,
-              withoutResults: accumulatedToolCalls.length - withResults
-            });
-          }
+          // Extract tool results from event.steps (shared method from base adapter)
+          this.extractToolResultsFromSteps(event, accumulatedToolCalls, logger);
 
           // Define proper type for usage
           interface StreamUsage {
