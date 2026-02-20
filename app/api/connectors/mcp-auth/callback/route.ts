@@ -309,8 +309,60 @@ export async function GET(req: Request): Promise<Response> {
 
     return renderCallbackHtml(true, serverId)
   } catch (error) {
-    log.error("MCP auth callback failed", { requestId, serverId, error: String(error) })
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    log.error("MCP auth callback failed", {
+      requestId,
+      serverId,
+      error: errorMessage,
+      errorType: error instanceof Error ? error.constructor.name : typeof error,
+      cause: error instanceof Error && error.cause ? String(error.cause) : undefined,
+    })
     timer({ status: "error" })
-    return renderCallbackHtml(false, serverId, "An unexpected error occurred")
+
+    // Surface a user-friendly but specific error derived from the failure.
+    // Internal details stay in server logs; the user gets an actionable message.
+    const userMessage = classifyOAuthError(errorMessage)
+    return renderCallbackHtml(false, serverId, userMessage)
   }
+}
+
+/**
+ * Maps internal error messages to user-friendly descriptions.
+ * Keeps internal details in server logs while giving the user actionable feedback.
+ */
+function classifyOAuthError(message: string): string {
+  const lower = message.toLowerCase()
+
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("aborted")) {
+    return "The authorization server took too long to respond. Please try again."
+  }
+  if (lower.includes("fetch failed") || lower.includes("econnrefused") || lower.includes("enotfound")) {
+    return "Could not reach the authorization server. Check your network and try again."
+  }
+  if (lower.includes("401") || lower.includes("unauthorized")) {
+    return "The authorization server rejected the request. The client registration may be invalid."
+  }
+  if (lower.includes("403") || lower.includes("forbidden")) {
+    return "Access was denied by the authorization server."
+  }
+  if (lower.includes("invalid") && lower.includes("token")) {
+    return "The token exchange returned an invalid response. The provider may have changed its API."
+  }
+  if (lower.includes("metadata") || lower.includes("well-known") || lower.includes("discovery")) {
+    return "Could not discover the OAuth server configuration. The MCP server URL may be incorrect."
+  }
+  if (lower.includes("registration")) {
+    return "Dynamic client registration failed. The MCP server may not support it."
+  }
+  if (lower.includes("code verifier") || lower.includes("pkce")) {
+    return "PKCE verification failed. The OAuth session may have expired — please try again."
+  }
+  if (lower.includes("decrypt") || lower.includes("encrypt")) {
+    return "Session data could not be read. Please try again."
+  }
+  if (lower.includes("mcp server not found")) {
+    return "The MCP server configuration was not found. It may have been deleted."
+  }
+
+  return "An unexpected error occurred during authorization. Check server logs for details."
 }

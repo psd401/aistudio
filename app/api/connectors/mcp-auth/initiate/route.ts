@@ -164,11 +164,46 @@ export async function GET(req: Request): Promise<Response> {
 
     return NextResponse.json({ url: authUrl.toString() })
   } catch (error) {
-    log.error("MCP auth initiate failed", { requestId, error: String(error) })
+    const errorMessage = error instanceof Error ? error.message : String(error)
+    log.error("MCP auth initiate failed", {
+      requestId,
+      error: errorMessage,
+      errorType: error instanceof Error ? error.constructor.name : typeof error,
+      cause: error instanceof Error && error.cause ? String(error.cause) : undefined,
+    })
     timer({ status: "error" })
-    return NextResponse.json(
-      { error: "Failed to initiate MCP OAuth flow" },
-      { status: 500 }
-    )
+
+    // Return a specific error message for the frontend to display.
+    // Internal details stay in server logs.
+    const userError = classifyInitiateError(errorMessage)
+    return NextResponse.json({ error: userError }, { status: 500 })
   }
+}
+
+/**
+ * Maps internal error messages to user-friendly descriptions for the initiate endpoint.
+ */
+function classifyInitiateError(message: string): string {
+  const lower = message.toLowerCase()
+
+  if (lower.includes("timeout") || lower.includes("timed out") || lower.includes("aborted")) {
+    return "The MCP server took too long to respond. Please try again."
+  }
+  if (lower.includes("fetch failed") || lower.includes("econnrefused") || lower.includes("enotfound")) {
+    return "Could not reach the MCP server. Check that the server URL is correct."
+  }
+  if (lower.includes("metadata") || lower.includes("well-known") || lower.includes("discovery")) {
+    return "Could not discover OAuth configuration from the MCP server. The server URL may be incorrect."
+  }
+  if (lower.includes("registration")) {
+    return "Dynamic client registration failed. The MCP server may not support automatic registration."
+  }
+  if (lower.includes("ssrf") || lower.includes("private") || lower.includes("internal address")) {
+    return "The MCP server URL is not allowed (private/internal address)."
+  }
+  if (lower.includes("mcp server not found")) {
+    return "The MCP server configuration was not found."
+  }
+
+  return "Failed to start OAuth flow. Check server logs for details."
 }

@@ -33,5 +33,14 @@ export async function exchangeMcpOAuthTokens(
   provider: OAuthClientProvider,
   options: { serverUrl: string; authorizationCode?: string }
 ): Promise<"AUTHORIZED" | "REDIRECT"> {
-  return auth(provider, options)
+  try {
+    return await auth(provider, options)
+  } catch (error) {
+    // Re-throw with context so callers can log the SDK-level failure reason.
+    // The original error from @ai-sdk/mcp often has useful details (e.g.
+    // "token endpoint returned 401", "metadata discovery failed") that would
+    // otherwise be hidden by the caller's generic catch block.
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`MCP OAuth exchange failed: ${message}`, { cause: error })
+  }
 }

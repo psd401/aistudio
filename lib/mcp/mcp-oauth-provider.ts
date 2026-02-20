@@ -115,7 +115,17 @@ export class ServerSideOAuthProvider implements OAuthClientProvider {
       return undefined
     }
 
-    const accessToken = await decryptToken(row.encryptedAccessToken)
+    let accessToken: string
+    try {
+      accessToken = await decryptToken(row.encryptedAccessToken)
+    } catch (err) {
+      log.warn("Failed to decrypt stored access token — returning undefined to trigger re-auth", {
+        serverId: this.serverId,
+        userId: this.userId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return undefined
+    }
 
     const tokens: OAuthTokens = {
       access_token: accessToken,
