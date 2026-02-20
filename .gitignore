@@ -52,3 +52,6 @@ next-env.d.ts
 /tests/e2e/screenshots/
 /tests/e2e/videos/
 /.playwright-mcp/
+
+# Claude agent internal state
+.claude/agent-memory/

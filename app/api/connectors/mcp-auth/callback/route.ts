@@ -29,15 +29,12 @@ import { decryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { validateMcpServerUrl } from "@/lib/mcp/connector-service"
 import { ServerSideOAuthProvider } from "@/lib/mcp/mcp-oauth-provider"
-import { getMcpAuthCookieName } from "../initiate/route"
+import { UUID_RE, getMcpAuthCookieName } from "@/lib/mcp/mcp-auth-utils"
 
 const log = createLogger({ action: "mcp-auth-callback" })
 
 /** Max age of the state cookie before it's considered expired (5 minutes) */
 const STATE_MAX_AGE_MS = 5 * 60 * 1000
-
-/** UUID format regex */
-const UUID_RE = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i
 
 interface McpAuthStateCookie {
   codeVerifier: string

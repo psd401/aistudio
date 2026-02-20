@@ -32,19 +32,12 @@ import { assertUserAccess, validateMcpServerUrl } from "@/lib/mcp/connector-serv
 import { encryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { ServerSideOAuthProvider } from "@/lib/mcp/mcp-oauth-provider"
+import { UUID_RE, getMcpAuthCookieName } from "@/lib/mcp/mcp-auth-utils"
 
 const log = createLogger({ action: "mcp-auth-initiate" })
 
-/** Cookie name for the encrypted code verifier (per-server) */
-export function getMcpAuthCookieName(serverId: string): string {
-  return `mcp_auth_state_${serverId}`
-}
-
 /** Max age for the state cookie (5 minutes) */
 const STATE_COOKIE_MAX_AGE = 300
-
-/** UUID format regex */
-const UUID_RE = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i
 
 export async function GET(req: Request): Promise<Response> {
   const requestId = generateRequestId()

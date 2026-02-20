@@ -103,6 +103,18 @@ export class ServerSideOAuthProvider implements OAuthClientProvider {
     }
 
     const row = rows[0]
+
+    // Return undefined for expired tokens so the SDK triggers a refresh/re-auth
+    // instead of sending an expired access_token that will be rejected with 401.
+    // Uses the same 60-second buffer as connector-service.ts:TOKEN_EXPIRY_BUFFER_MS.
+    if (row.tokenExpiresAt && row.tokenExpiresAt.getTime() < Date.now() + 60_000) {
+      log.info("Token expired or expiring within buffer — returning undefined to trigger refresh", {
+        serverId: this.serverId,
+        userId: this.userId,
+      })
+      return undefined
+    }
+
     const accessToken = await decryptToken(row.encryptedAccessToken)
 
     const tokens: OAuthTokens = {
@@ -115,9 +127,8 @@ export class ServerSideOAuthProvider implements OAuthClientProvider {
     }
 
     if (row.tokenExpiresAt) {
-      tokens.expires_in = Math.max(
-        0,
-        Math.floor((row.tokenExpiresAt.getTime() - Date.now()) / 1000)
+      tokens.expires_in = Math.floor(
+        (row.tokenExpiresAt.getTime() - Date.now()) / 1000
       )
     }
 

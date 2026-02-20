@@ -186,6 +186,11 @@ async function executeStreaming(params: {
       const toolMappingEncoded = encodeURIComponent(JSON.stringify(toolMapping));
       if (toolMappingEncoded.length <= 8192) {
         responseHeaders['X-Connector-Tools'] = toolMappingEncoded;
+      } else {
+        log.warn('X-Connector-Tools header too large, omitting — branded tool UI will use generic fallback', {
+          sizeBytes: toolMappingEncoded.length,
+          toolCount: Object.keys(toolMapping).length,
+        });
       }
     }
 

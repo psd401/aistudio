@@ -492,7 +492,7 @@ async function loadServerAndToken(
  * Decrypts the stored access token and maps it to the appropriate header.
  */
 async function buildAuthHeaders(
-  authType: McpAuthType,
+  authType: Exclude<McpAuthType, "oauth">,
   tokenRow: TokenRow
 ): Promise<Record<string, string>> {
   if (authType === "none") {
@@ -515,8 +515,9 @@ async function buildAuthHeaders(
 
   const accessToken = await decryptToken(tokenRow.encryptedAccessToken)
 
+  // Note: authType "oauth" is handled via authProvider in getConnectorTools() and never
+  // reaches buildAuthHeaders. Only static-token auth types use this path.
   switch (authType) {
-    case "oauth":
     case "jwt":
       return { Authorization: `Bearer ${accessToken}` }
     case "api_key":
@@ -717,7 +718,10 @@ export function validateMcpServerUrl(rawUrl: string): void {
     throw new Error("Invalid MCP server URL")
   }
 
-  const isProduction = process.env.NODE_ENV === "production"
+  // Use ENVIRONMENT (set by ECS task def) not NODE_ENV — ECS sets NODE_ENV=production
+  // for all environments including dev. See docs/learnings/aws/2026-02-18-ecs-node-env-vs-environment.md
+  const environment = process.env.ENVIRONMENT || process.env.DEPLOYMENT_ENV
+  const isProduction = environment === "prod" || environment === "staging"
 
   if (isProduction && parsed.protocol !== "https:") {
     throw new Error("MCP server URL must use HTTPS in production")
