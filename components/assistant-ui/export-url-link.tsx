@@ -18,10 +18,8 @@ interface ExportLink {
  */
 export function parseExportUrls(text: string): ExportLink[] {
   const links: ExportLink[] = []
-  let match: RegExpExecArray | null
-  const regex = new RegExp(EXPORT_URL_PATTERN.source, "g")
-  while ((match = regex.exec(text)) !== null) {
-    links.push({ url: match[1], rows: parseInt(match[2], 10) })
+  for (const match of text.matchAll(EXPORT_URL_PATTERN)) {
+    links.push({ url: match[1], rows: Number.parseInt(match[2], 10) })
   }
   return links
 }
