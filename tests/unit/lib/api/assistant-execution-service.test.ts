@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from '@jest/globals'
+import { describe, it, expect } from '@jest/globals'
 
 /**
  * Unit tests for variable substitution in assistant-execution-service.ts
@@ -122,12 +122,6 @@ describe('Variable Substitution Logic (substituteVariables)', () => {
         { id: 2, position: 1, name: "Prompt B" },
         { id: 3, position: 2, name: "Prompt C" }
       ]
-
-      // previousOutputs only has B and C (A failed or hasn't executed)
-      const previousOutputs = new Map<number, string>([
-        [2, "Output B"],
-        [3, "Output C"]
-      ])
 
       // Current: executing prompt at position 3 (after C)
       const currentPromptPosition = 3

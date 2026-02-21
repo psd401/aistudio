@@ -113,6 +113,8 @@ export function ConnectorsPageClient({ initialServers, fetchError: initialFetchE
         return "API Key"
       case "jwt":
         return "JWT"
+      case "cognito_passthrough":
+        return "Cognito Passthrough"
       case "none":
         return "None"
       default:

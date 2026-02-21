@@ -87,9 +87,12 @@ export async function openOAuthPopup(
   const left = Math.round(window.screenX + (window.outerWidth - width) / 2)
   const top = Math.round(window.screenY + (window.outerHeight - height) / 2)
 
+  // Use a unique window name per attempt to prevent browsers from reusing the same
+  // popup window if a second OAuth flow is initiated before the first completes.
+  const windowName = `mcp-oauth-popup-${Date.now()}`
   const popup = window.open(
     url,
-    "mcp-oauth-popup",
+    windowName,
     // noopener=no: popup intentionally needs window.opener for postMessage back to parent.
     // Mitigation: parent validates event.origin before acting on messages (line ~107).
     `width=${width},height=${height},left=${left},top=${top},popup=yes,noopener=no`

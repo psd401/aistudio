@@ -164,7 +164,11 @@ async function executeStreaming(params: {
     maxSteps: connectorToolResults.length > 0 ? 10 : undefined,
     options: { reasoningEffort, responseMode },
     callbacks: {
-      onFinish: createOnFinishCallback({ conversationId, dbModelId, connectorToolResults, log, timer })
+      onFinish: createOnFinishCallback({ conversationId, dbModelId, connectorToolResults, log, timer }),
+      onError: async (error: Error) => {
+        log.warn('Stream error — closing MCP clients', { conversationId, error: error.message });
+        await closeMcpClients(connectorToolResults, log, 'onError');
+      }
     }
   };
 
@@ -397,7 +401,7 @@ function validateConversationId(id: string | undefined, requestId: string, log: 
 async function authenticateUser(
   log: ReturnType<typeof createLogger>,
   timer: (data: Record<string, unknown>) => void
-): Promise<{ userId: number; userRoleNames: string[]; session: { sub: string } } | { error: Response }> {
+): Promise<{ userId: number; userRoleNames: string[]; session: { sub: string; idToken?: string } } | { error: Response }> {
   const session = await getServerSession();
   if (!session) {
     log.warn('Unauthorized request - no session');
@@ -543,8 +547,9 @@ export async function POST(req: Request) {
     const failedConnectorIds: string[] = [];
     if (enabledConnectors.length > 0) {
       log.info('Resolving MCP connector tools', { connectorCount: enabledConnectors.length });
+      const connectorOptions = session.idToken ? { idToken: session.idToken } : undefined;
       const results = await Promise.allSettled(
-        enabledConnectors.map(serverId => getConnectorTools(serverId, userId, userRoleNames))
+        enabledConnectors.map(serverId => getConnectorTools(serverId, userId, userRoleNames, connectorOptions))
       );
       for (const [i, result] of results.entries()) {
         if (result.status === 'fulfilled') {

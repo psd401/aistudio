@@ -16,6 +16,7 @@ import {
   updateMcpServer,
   type McpServerWithStats,
 } from "@/actions/admin/connector.actions"
+import type { McpAuthType } from "@/lib/mcp/connector-types"
 
 interface Props {
   server: McpServerWithStats | null
@@ -30,8 +31,8 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
   const [transport, setTransport] = useState<"http" | "stdio" | "websocket">(
     (server?.transport as "http" | "stdio" | "websocket") ?? "http"
   )
-  const [authType, setAuthType] = useState<"none" | "oauth" | "api_key" | "jwt">(
-    (server?.authType as "none" | "oauth" | "api_key" | "jwt") ?? "none"
+  const [authType, setAuthType] = useState<McpAuthType>(
+    (server?.authType as McpAuthType) ?? "none"
   )
   const [credentialsKey, setCredentialsKey] = useState(
     server?.credentialsKey ?? ""
@@ -147,8 +148,8 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
         <Select
           value={authType}
           onValueChange={(v) => {
-            setAuthType(v as "none" | "oauth" | "api_key" | "jwt")
-            if (v === "none") setError(null)
+            setAuthType(v as McpAuthType)
+            if (v === "none" || v === "cognito_passthrough") setError(null)
           }}
         >
           <SelectTrigger>
@@ -159,6 +160,7 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
             <SelectItem value="oauth">OAuth</SelectItem>
             <SelectItem value="api_key">API Key</SelectItem>
             <SelectItem value="jwt">JWT</SelectItem>
+            <SelectItem value="cognito_passthrough">Cognito Passthrough</SelectItem>
           </SelectContent>
         </Select>
       </div>
@@ -168,6 +170,16 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
           <p className="text-xs text-muted-foreground">
             Users will authenticate directly with the service when connecting.
             No admin credentials are needed — the MCP protocol handles client registration automatically.
+          </p>
+        </div>
+      )}
+
+      {authType === "cognito_passthrough" && (
+        <div className="rounded-md border border-border bg-muted/50 p-3">
+          <p className="text-xs text-muted-foreground">
+            The user&apos;s Cognito ID token is forwarded as a Bearer token.
+            No per-user token storage needed — the token comes from the active session.
+            The MCP server must trust this Cognito pool&apos;s JWKS for JWT validation.
           </p>
         </div>
       )}

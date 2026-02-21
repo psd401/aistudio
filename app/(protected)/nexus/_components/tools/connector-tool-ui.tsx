@@ -19,6 +19,7 @@ import {
 import { useConnectorToolsOptional, type ConnectorServerInfo } from './connector-tool-context'
 import type { McpToolResult } from '@/lib/mcp/types'
 import { ToolFallback } from '@/components/assistant-ui/tool-fallback'
+import { ExportUrlLinks, parseExportUrls, stripExportUrls } from '@/components/assistant-ui/export-url-link'
 
 /**
  * Format a tool name for display.
@@ -191,9 +192,15 @@ function ConnectorIcon({ info, size = 16 }: { info: ConnectorServerInfo; size?: 
 // ============================================================================
 
 function TextResult({ text }: { text: string }) {
+  const exportLinks = parseExportUrls(text)
+  const displayText = exportLinks.length > 0 ? stripExportUrls(text) : text
+
   return (
-    <div className="text-sm text-gray-800 whitespace-pre-wrap break-words">
-      {text}
+    <div>
+      <div className="text-sm text-gray-800 whitespace-pre-wrap break-words">
+        {displayText}
+      </div>
+      {exportLinks.length > 0 && <ExportUrlLinks links={exportLinks} />}
     </div>
   )
 }
