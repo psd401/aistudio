@@ -19,14 +19,28 @@ import { revalidatePath } from "next/cache"
 import type { ActionState } from "@/types/actions-types"
 import type { SelectNexusMcpServer, InsertNexusMcpServer } from "@/lib/db/types"
 import type { McpAuthType } from "@/lib/mcp/connector-types"
+import type { OAuthCredentialsConfig } from "@/lib/db/schema/tables/nexus-mcp-servers"
+import { encryptToken } from "@/lib/crypto/token-encryption"
+import { sql } from "drizzle-orm"
 
 // ============================================
 // Types
 // ============================================
 
-/** Admin-facing server info — omits mcpOauthRegistration (contains encrypted_client_secret). */
-export interface McpServerWithStats extends Omit<SelectNexusMcpServer, "mcpOauthRegistration"> {
+/** Admin-facing server info — omits secrets (mcpOauthRegistration, oauthCredentials). */
+export interface McpServerWithStats extends Omit<SelectNexusMcpServer, "mcpOauthRegistration" | "oauthCredentials"> {
   connectionCount: number
+  /** True when inline OAuth credentials are configured on this connector */
+  hasOAuthCredentials: boolean
+}
+
+/** Plaintext OAuth credentials from the admin form — clientSecret encrypted before storage */
+export interface OAuthCredentialsInput {
+  clientId: string
+  clientSecret: string
+  authorizationEndpointUrl?: string
+  tokenEndpointUrl?: string
+  scopes?: string
 }
 
 export interface CreateMcpServerInput {
@@ -35,6 +49,7 @@ export interface CreateMcpServerInput {
   transport: "http" | "stdio" | "websocket"
   authType: McpAuthType
   credentialsKey?: string
+  oauthCredentials?: OAuthCredentialsInput | null
   allowedUsers?: number[]
   maxConnections?: number
 }
@@ -46,6 +61,7 @@ export interface UpdateMcpServerInput {
   transport?: "http" | "stdio" | "websocket"
   authType?: McpAuthType
   credentialsKey?: string | null
+  oauthCredentials?: OAuthCredentialsInput | null
   allowedUsers?: number[]
   maxConnections?: number
 }
@@ -59,6 +75,7 @@ type McpServerUpdate = Partial<
     | "transport"
     | "authType"
     | "credentialsKey"
+    | "oauthCredentials"
     | "allowedUsers"
     | "maxConnections"
     | "updatedAt"
@@ -191,6 +208,7 @@ export async function listMcpServers(): Promise<
             createdAt: nexusMcpServers.createdAt,
             updatedAt: nexusMcpServers.updatedAt,
             connectionCount: count(nexusMcpConnections.id),
+            hasOAuthCredentials: sql<boolean>`CASE WHEN ${nexusMcpServers.oauthCredentials} IS NOT NULL THEN true ELSE false END`,
           })
           .from(nexusMcpServers)
           .leftJoin(
@@ -205,6 +223,7 @@ export async function listMcpServers(): Promise<
     const result: McpServerWithStats[] = servers.map((s) => ({
       ...s,
       connectionCount: Number(s.connectionCount),
+      hasOAuthCredentials: Boolean(s.hasOAuthCredentials),
     }))
 
     timer({ status: "success", count: result.length })
@@ -246,6 +265,18 @@ export async function createMcpServer(
     validateMcpUrl(input.url)
     validateServerInput(input)
 
+    // Encrypt OAuth client secret if inline credentials are provided
+    let oauthCredentialsValue: OAuthCredentialsConfig | null = null
+    if (input.oauthCredentials) {
+      oauthCredentialsValue = {
+        clientId: input.oauthCredentials.clientId,
+        encryptedClientSecret: await encryptToken(input.oauthCredentials.clientSecret),
+        authorizationEndpointUrl: input.oauthCredentials.authorizationEndpointUrl,
+        tokenEndpointUrl: input.oauthCredentials.tokenEndpointUrl,
+        scopes: input.oauthCredentials.scopes,
+      }
+    }
+
     const [server] = await executeQuery(
       (db) =>
         db
@@ -256,6 +287,7 @@ export async function createMcpServer(
             transport: input.transport,
             authType: input.authType,
             credentialsKey: input.credentialsKey ?? null,
+            oauthCredentials: oauthCredentialsValue,
             allowedUsers: input.allowedUsers ?? [],
             maxConnections: input.maxConnections ?? 10,
           })
@@ -315,6 +347,20 @@ export async function updateMcpServer(
     if (fields.authType !== undefined) updateData.authType = fields.authType
     if (fields.credentialsKey !== undefined)
       updateData.credentialsKey = fields.credentialsKey
+    if (fields.oauthCredentials !== undefined) {
+      if (fields.oauthCredentials === null) {
+        // null clears inline credentials
+        updateData.oauthCredentials = null
+      } else {
+        updateData.oauthCredentials = {
+          clientId: fields.oauthCredentials.clientId,
+          encryptedClientSecret: await encryptToken(fields.oauthCredentials.clientSecret),
+          authorizationEndpointUrl: fields.oauthCredentials.authorizationEndpointUrl,
+          tokenEndpointUrl: fields.oauthCredentials.tokenEndpointUrl,
+          scopes: fields.oauthCredentials.scopes,
+        }
+      }
+    }
     if (fields.allowedUsers !== undefined)
       updateData.allowedUsers = fields.allowedUsers
     if (fields.maxConnections !== undefined)

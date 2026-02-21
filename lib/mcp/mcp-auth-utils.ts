@@ -5,8 +5,28 @@
  * with Next.js bundling, route detection, and tree-shaking).
  */
 
+import { randomBytes, createHash } from "node:crypto"
 import { auth } from "@ai-sdk/mcp"
 import type { OAuthClientProvider } from "@ai-sdk/mcp"
+
+// ─── PKCE Helpers ────────────────────────────────────────────────────────────
+
+/** Generate a cryptographically random PKCE code_verifier (43-128 chars, base64url) */
+export function generateCodeVerifier(): string {
+  return randomBytes(32).toString("base64url")
+}
+
+/** Generate S256 code_challenge from a code_verifier */
+export function generateCodeChallenge(verifier: string): string {
+  return createHash("sha256").update(verifier).digest("base64url")
+}
+
+/** Generate a random state token */
+export function generateStateToken(): string {
+  return randomBytes(16).toString("base64url")
+}
+
+// ─── Shared Constants ────────────────────────────────────────────────────────
 
 /** UUID v4 format regex */
 export const UUID_RE = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i

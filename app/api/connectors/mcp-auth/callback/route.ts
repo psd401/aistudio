@@ -23,7 +23,7 @@ import { eq } from "drizzle-orm"
 import { nexusMcpServers } from "@/lib/db/schema"
 import { decryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
-import { rejectUnsafeMcpUrl } from "@/lib/mcp/connector-service"
+import { rejectUnsafeMcpUrl, getOAuthCredentials } from "@/lib/mcp/connector-service"
 import { ServerSideOAuthProvider } from "@/lib/mcp/mcp-oauth-provider"
 import { UUID_RE, getMcpAuthCookieName, classifyMcpOAuthError } from "@/lib/mcp/mcp-auth-utils"
 
@@ -306,10 +306,89 @@ export async function GET(req: Request): Promise<Response> {
 
     rejectUnsafeMcpUrl(server.url)
 
-    // 6. Create provider with pre-loaded code verifier and call auth() with code
+    // 6. Build callback URL
     const baseUrl = getIssuerUrl()
     const redirectUrl = `${baseUrl}/api/connectors/mcp-auth/callback`
 
+    // ── Pre-registered OAuth flow ──────────────────────────────────────────
+    // When the server has inline or Secrets Manager credentials, exchange the
+    // authorization code at the custom token endpoint instead of using the
+    // SDK's auth() function.
+    const credentials = await getOAuthCredentials(server)
+    if (credentials) {
+      if (!credentials.tokenEndpointUrl) {
+        log.error("Missing tokenEndpointUrl in credentials", { requestId, serverId })
+        timer({ status: "error", reason: "missing_token_endpoint" })
+        return renderCallbackHtml(false, serverId, "OAuth credentials are missing the token endpoint URL.")
+      }
+
+      // Exchange authorization code for tokens (RFC 6749 §4.1.3)
+      const body = new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirectUrl,
+        code_verifier: cookieData.codeVerifier,
+      })
+
+      // Canva (and many providers) use HTTP Basic auth for token exchange
+      const basicAuth = Buffer.from(`${credentials.clientId}:${credentials.clientSecret}`).toString("base64")
+
+      const resp = await fetch(credentials.tokenEndpointUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Authorization": `Basic ${basicAuth}`,
+        },
+        body,
+        signal: AbortSignal.timeout(15_000),
+      })
+
+      if (!resp.ok) {
+        const respBody = await resp.text().catch(() => "(unreadable)")
+        log.error("Pre-registered OAuth token exchange failed", {
+          requestId, serverId,
+          status: resp.status,
+          body: respBody.slice(0, 500),
+        })
+        timer({ status: "error", reason: "token_exchange_failed" })
+        return renderCallbackHtml(false, serverId, "Token exchange failed. Please try again.")
+      }
+
+      const tokens = await resp.json() as Record<string, unknown>
+
+      // Validate required fields
+      if (typeof tokens.access_token !== "string" || typeof tokens.token_type !== "string") {
+        log.error("Invalid token response from pre-registered OAuth", { requestId, serverId })
+        timer({ status: "error", reason: "invalid_token_response" })
+        return renderCallbackHtml(false, serverId, "Invalid token response from provider.")
+      }
+
+      // Store tokens using ServerSideOAuthProvider.saveTokens()
+      const provider = new ServerSideOAuthProvider({
+        serverId,
+        userId: cookieData.userId,
+        redirectUrl,
+      })
+      await provider.saveTokens({
+        access_token: tokens.access_token as string,
+        token_type: (tokens.token_type as string) ?? "bearer",
+        refresh_token: typeof tokens.refresh_token === "string" ? tokens.refresh_token : undefined,
+        expires_in: typeof tokens.expires_in === "number" ? tokens.expires_in : undefined,
+        scope: typeof tokens.scope === "string" ? tokens.scope : undefined,
+      })
+
+      timer({ status: "success" })
+      log.info("Pre-registered OAuth callback completed successfully", {
+        requestId,
+        serverId,
+        userId: cookieData.userId,
+      })
+
+      return renderCallbackHtml(true, serverId)
+    }
+
+    // ── MCP-native OAuth flow (no credentialsKey) ──────────────────────────
+    // 7. Create provider with pre-loaded code verifier and call auth() with code
     const provider = new ServerSideOAuthProvider({
       serverId,
       userId: cookieData.userId,

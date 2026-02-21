@@ -4,6 +4,7 @@ import { useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import {
   Select,
   SelectContent,
@@ -37,20 +38,33 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
   const [credentialsKey, setCredentialsKey] = useState(
     server?.credentialsKey ?? ""
   )
+  // OAuth credential fields
+  const [oauthClientId, setOauthClientId] = useState("")
+  const [oauthClientSecret, setOauthClientSecret] = useState("")
+  const [oauthAuthEndpoint, setOauthAuthEndpoint] = useState("")
+  const [oauthTokenEndpoint, setOauthTokenEndpoint] = useState("")
+  const [oauthScopes, setOauthScopes] = useState("")
   const [maxConnections, setMaxConnections] = useState(
     String(server?.maxConnections ?? 10)
   )
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
+  const hasExistingOAuthCredentials = isEditing && server?.hasOAuthCredentials
+
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
     setError(null)
 
     // Validate credentialsKey required for api_key and jwt auth types
-    // OAuth uses MCP-native dynamic client registration — no admin credentials needed
     if ((authType === "api_key" || authType === "jwt") && !credentialsKey.trim()) {
       setError("Credentials Key is required for API Key and JWT auth types.")
+      return
+    }
+
+    // Validate OAuth credentials: if clientId is provided, clientSecret is required on create
+    if (authType === "oauth" && oauthClientId.trim() && !isEditing && !oauthClientSecret.trim()) {
+      setError("Client Secret is required when setting OAuth credentials.")
       return
     }
 
@@ -64,6 +78,33 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
     setIsSubmitting(true)
 
     try {
+      // Build OAuth credentials payload if the admin filled in the fields
+      let oauthCredentials: {
+        clientId: string
+        clientSecret: string
+        authorizationEndpointUrl?: string
+        tokenEndpointUrl?: string
+        scopes?: string
+      } | null | undefined = undefined
+
+      if (authType === "oauth" && oauthClientId.trim()) {
+        if (isEditing && !oauthClientSecret.trim()) {
+          // Editing with existing credentials but no new secret — don't send (keeps existing)
+          oauthCredentials = undefined
+        } else {
+          oauthCredentials = {
+            clientId: oauthClientId.trim(),
+            clientSecret: oauthClientSecret,
+            authorizationEndpointUrl: oauthAuthEndpoint.trim() || undefined,
+            tokenEndpointUrl: oauthTokenEndpoint.trim() || undefined,
+            scopes: oauthScopes.trim() || undefined,
+          }
+        }
+      } else if (authType === "oauth" && !oauthClientId.trim() && hasExistingOAuthCredentials) {
+        // Admin cleared clientId → remove inline credentials
+        oauthCredentials = null
+      }
+
       const commonPayload = {
         name,
         url,
@@ -78,10 +119,12 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
               id: server.id,
               ...commonPayload,
               credentialsKey: credentialsKey || null,
+              oauthCredentials,
             })
           : await createMcpServer({
               ...commonPayload,
               credentialsKey: credentialsKey || undefined,
+              oauthCredentials: oauthCredentials ?? undefined,
             })
 
       if (!result.isSuccess) {
@@ -166,12 +209,78 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
       </div>
 
       {authType === "oauth" && (
-        <div className="rounded-md border border-border bg-muted/50 p-3">
-          <p className="text-xs text-muted-foreground">
-            Users will authenticate directly with the service when connecting.
-            No admin credentials are needed — the MCP protocol handles client registration automatically.
-          </p>
-        </div>
+        <>
+          <div className="rounded-md border border-border bg-muted/50 p-3">
+            <p className="text-xs text-muted-foreground">
+              {oauthClientId.trim() || hasExistingOAuthCredentials
+                ? "Uses pre-registered OAuth credentials. Required for providers like Canva that restrict redirect URIs to pre-configured values."
+                : "Users authenticate directly with the service when connecting. The MCP protocol handles client registration automatically."}
+            </p>
+          </div>
+
+          <div>
+            <Label htmlFor="oauthClientId">Client ID</Label>
+            <Input
+              id="oauthClientId"
+              value={oauthClientId}
+              onChange={(e) => setOauthClientId(e.target.value)}
+              placeholder="OAuth client ID"
+            />
+          </div>
+
+          <div>
+            <Label htmlFor="oauthClientSecret">Client Secret</Label>
+            <Input
+              id="oauthClientSecret"
+              type="password"
+              value={oauthClientSecret}
+              onChange={(e) => setOauthClientSecret(e.target.value)}
+              placeholder={hasExistingOAuthCredentials ? "Leave blank to keep existing" : "OAuth client secret"}
+            />
+          </div>
+
+          <div>
+            <Label htmlFor="oauthAuthEndpoint">Authorization Endpoint URL</Label>
+            <Input
+              id="oauthAuthEndpoint"
+              type="url"
+              value={oauthAuthEndpoint}
+              onChange={(e) => setOauthAuthEndpoint(e.target.value)}
+              placeholder="https://provider.com/oauth/authorize"
+            />
+            <p className="text-xs text-muted-foreground mt-1">
+              Optional. Required for providers with custom authorization URLs.
+            </p>
+          </div>
+
+          <div>
+            <Label htmlFor="oauthTokenEndpoint">Token Endpoint URL</Label>
+            <Input
+              id="oauthTokenEndpoint"
+              type="url"
+              value={oauthTokenEndpoint}
+              onChange={(e) => setOauthTokenEndpoint(e.target.value)}
+              placeholder="https://provider.com/oauth/token"
+            />
+            <p className="text-xs text-muted-foreground mt-1">
+              Optional. Required for providers with custom token endpoints.
+            </p>
+          </div>
+
+          <div>
+            <Label htmlFor="oauthScopes">Scopes</Label>
+            <Textarea
+              id="oauthScopes"
+              value={oauthScopes}
+              onChange={(e) => setOauthScopes(e.target.value)}
+              placeholder="design:content:read design:content:write"
+              rows={2}
+            />
+            <p className="text-xs text-muted-foreground mt-1">
+              Optional. Space-separated OAuth scopes.
+            </p>
+          </div>
+        </>
       )}
 
       {authType === "cognito_passthrough" && (
