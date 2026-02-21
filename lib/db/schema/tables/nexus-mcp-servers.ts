@@ -21,6 +21,8 @@ export interface McpOauthRegistration {
   client_secret_expires_at?: number
   /** AES-256-GCM encrypted client secret — use token-encryption module to decrypt */
   encrypted_client_secret?: string
+  /** The redirect_uri used when this client was registered. If missing or mismatched, the registration is stale and must be re-done. */
+  registered_redirect_uri?: string
 }
 
 export const nexusMcpServers = pgTable("nexus_mcp_servers", {
