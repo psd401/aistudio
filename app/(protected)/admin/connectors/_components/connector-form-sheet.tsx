@@ -2,6 +2,7 @@
 
 import { useState } from "react"
 import { Button } from "@/components/ui/button"
+import { Checkbox } from "@/components/ui/checkbox"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
@@ -44,6 +45,7 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
   const [oauthAuthEndpoint, setOauthAuthEndpoint] = useState("")
   const [oauthTokenEndpoint, setOauthTokenEndpoint] = useState("")
   const [oauthScopes, setOauthScopes] = useState("")
+  const [clearOAuthCredentials, setClearOAuthCredentials] = useState(false)
   const [maxConnections, setMaxConnections] = useState(
     String(server?.maxConnections ?? 10)
   )
@@ -87,7 +89,10 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
         scopes?: string
       } | null | undefined = undefined
 
-      if (authType === "oauth" && oauthClientId.trim()) {
+      if (authType === "oauth" && clearOAuthCredentials) {
+        // Admin explicitly requested credential removal
+        oauthCredentials = null
+      } else if (authType === "oauth" && oauthClientId.trim()) {
         if (isEditing && !oauthClientSecret.trim()) {
           // Editing with existing credentials but no new secret — don't send (keeps existing)
           oauthCredentials = undefined
@@ -100,11 +105,6 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
             scopes: oauthScopes.trim() || undefined,
           }
         }
-      } else if (authType === "oauth" && !oauthClientId.trim() && hasExistingOAuthCredentials) {
-        // clientId is never pre-populated (it's excluded from the API response for
-        // consistency with the secret), so empty clientId on edit means "no change",
-        // not "delete credentials". Leave as undefined (no-op).
-        oauthCredentials = undefined
       }
 
       const commonPayload = {
@@ -282,6 +282,19 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
               Optional. Space-separated OAuth scopes.
             </p>
           </div>
+
+          {hasExistingOAuthCredentials && (
+            <div className="flex items-center space-x-2">
+              <Checkbox
+                id="clearOAuthCredentials"
+                checked={clearOAuthCredentials}
+                onCheckedChange={(checked) => setClearOAuthCredentials(checked === true)}
+              />
+              <Label htmlFor="clearOAuthCredentials" className="text-sm font-normal">
+                Clear stored credentials
+              </Label>
+            </div>
+          )}
         </>
       )}
 

@@ -224,7 +224,7 @@ export async function GET(req: Request): Promise<Response> {
     const cookieStore = await cookies()
     cookieStore.set(getMcpAuthCookieName(serverId), encryptedState, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      secure: process.env.ENVIRONMENT === "prod" || process.env.ENVIRONMENT === "staging" || process.env.NODE_ENV === "production",
       sameSite: "lax",
       maxAge: STATE_COOKIE_MAX_AGE,
       path: "/api/connectors/mcp-auth",

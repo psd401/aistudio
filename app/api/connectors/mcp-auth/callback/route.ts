@@ -326,23 +326,31 @@ export async function GET(req: Request): Promise<Response> {
       rejectUnsafeMcpUrl(credentials.tokenEndpointUrl)
 
       // Exchange authorization code for tokens (RFC 6749 §4.1.3)
-      const body = new URLSearchParams({
+      const body: Record<string, string> = {
         grant_type: "authorization_code",
         code,
         redirect_uri: redirectUrl,
         code_verifier: cookieData.codeVerifier,
-      })
+      }
 
-      // Canva (and many providers) use HTTP Basic auth for token exchange
-      const basicAuth = Buffer.from(`${credentials.clientId}:${credentials.clientSecret}`).toString("base64")
+      // Use Basic auth when both clientId and clientSecret are available
+      // (required by Canva and many OAuth providers), otherwise fall back to
+      // client_secret_post (credentials in request body). Matches the logic
+      // in exchangeRefreshToken() for consistency.
+      const headers: Record<string, string> = {
+        "Content-Type": "application/x-www-form-urlencoded",
+      }
+      if (credentials.clientId && credentials.clientSecret) {
+        headers["Authorization"] = `Basic ${Buffer.from(`${credentials.clientId}:${credentials.clientSecret}`).toString("base64")}`
+      } else {
+        if (credentials.clientId) body.client_id = credentials.clientId
+        if (credentials.clientSecret) body.client_secret = credentials.clientSecret
+      }
 
       const resp = await fetch(credentials.tokenEndpointUrl, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "Authorization": `Basic ${basicAuth}`,
-        },
-        body,
+        headers,
+        body: new URLSearchParams(body),
         signal: AbortSignal.timeout(15_000),
       })
 
