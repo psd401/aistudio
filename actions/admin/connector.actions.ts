@@ -107,10 +107,14 @@ function validateMcpUrl(rawUrl: string): void {
     throw ErrorFactories.invalidInput("url", "[redacted]", "Must be a valid URL")
   }
 
-  const allowedProtocols =
-    process.env.NODE_ENV === "production"
-      ? ["https:", "wss:"]
-      : ["https:", "wss:", "http:", "ws:"]
+  // Use ENVIRONMENT (set by ECS task def) not NODE_ENV — ECS sets NODE_ENV=production
+  // for all environments including dev. Mirrors rejectUnsafeMcpUrl() in connector-service.ts.
+  const environment = process.env.ENVIRONMENT || process.env.DEPLOYMENT_ENV
+  const isProduction = environment === "prod" || environment === "staging"
+
+  const allowedProtocols = isProduction
+    ? ["https:", "wss:"]
+    : ["https:", "wss:", "http:", "ws:"]
 
   if (!allowedProtocols.includes(parsed.protocol)) {
     throw ErrorFactories.invalidInput(
@@ -120,6 +124,8 @@ function validateMcpUrl(rawUrl: string): void {
     )
   }
 
+  // Private range patterns — kept in sync with rejectUnsafeMcpUrl() in connector-service.ts
+  const hostname = parsed.hostname.toLowerCase()
   const privateRanges = [
     /^localhost$/i,
     /^0\.0\.0\.0$/,
@@ -127,14 +133,16 @@ function validateMcpUrl(rawUrl: string): void {
     /^10\./,
     /^172\.(1[6-9]|2\d|3[01])\./,
     /^192\.168\./,
-    /^169\.254\./, // AWS EC2 instance metadata
-    /^\[?::1\]?$/,       // IPv6 loopback (bare or bracketed)
-    /^\[fc/i,             // IPv6 ULA fc00::/7 (bracket notation in URLs)
-    /^\[fd/i,             // IPv6 ULA fd00::/8
-    /^\[fe80/i,           // IPv6 link-local
+    /^169\.254\./, // link-local / AWS IMDS
+    /^\[?::1\]?$/,            // IPv6 loopback (bare or bracketed)
+    /^\[?fc[\da-f]{2}:/i,     // IPv6 unique-local fc00::/7 (bare or bracketed)
+    /^\[?fd[\da-f]{2}:/i,     // IPv6 unique-local fd00::/8
+    /^\[?fe80:/i,             // IPv6 link-local
+    /^\[?::ffff:/i,           // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1)
+    /^metadata\.google\.internal$/,
   ]
 
-  if (privateRanges.some((p) => p.test(parsed.hostname))) {
+  if (privateRanges.some((p) => p.test(hostname))) {
     throw ErrorFactories.invalidInput(
       "url",
       "[redacted]",
