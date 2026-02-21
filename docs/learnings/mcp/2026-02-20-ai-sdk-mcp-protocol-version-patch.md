@@ -1,8 +1,17 @@
-# @ai-sdk/mcp Protocol Version Patch
+---
+title: "@ai-sdk/mcp Protocol Version Patch"
+category: mcp
+tags:
+  - mcp
+  - dependencies
+  - protocol-version
+  - patch
+severity: blocker
+date: 2026-02-20
+source: auto — /review-pr
+---
 
-**Date:** 2026-02-20
-**Category:** MCP / Dependencies
-**Severity:** Blocker (PSD Data connector unusable without patch)
+# @ai-sdk/mcp Protocol Version Patch
 
 ## Problem
 
@@ -23,7 +32,7 @@ Applied a bun patch (`patches/@ai-sdk%2Fmcp@1.0.21.patch`) that:
 - MCP `2025-11-25` is backward compatible with `2025-06-18`
 - The patch only extends an allowlist, no logic changes
 - Verified on `vercel/ai` main branch (2026-02-20): still no native `2025-11-25` support
-- See `patches/README.md` for removal instructions
+- See [../../../patches/README.md](../../../patches/README.md) for removal instructions
 
 ## Watch for
 

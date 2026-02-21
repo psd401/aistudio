@@ -322,6 +322,9 @@ export async function GET(req: Request): Promise<Response> {
         return renderCallbackHtml(false, serverId, "OAuth credentials are missing the token endpoint URL.")
       }
 
+      // Validate token endpoint URL (SSRF prevention) — same guard as exchangeRefreshToken
+      rejectUnsafeMcpUrl(credentials.tokenEndpointUrl)
+
       // Exchange authorization code for tokens (RFC 6749 §4.1.3)
       const body = new URLSearchParams({
         grant_type: "authorization_code",

@@ -143,6 +143,26 @@ function validateMcpUrl(rawUrl: string): void {
   }
 }
 
+/**
+ * Validates OAuth credential endpoint URLs and clientId.
+ * Reuses validateMcpUrl for SSRF prevention on stored endpoint URLs.
+ */
+function validateOAuthCredentials(creds: OAuthCredentialsInput): void {
+  const trimmedId = creds.clientId.trim()
+  if (trimmedId.length === 0 || trimmedId.length > 255) {
+    throw ErrorFactories.invalidInput("clientId", "[redacted]", "Client ID must be 1–255 characters")
+  }
+  if (!creds.clientSecret) {
+    throw ErrorFactories.invalidInput("clientSecret", "[redacted]", "Client Secret must not be empty")
+  }
+  if (creds.authorizationEndpointUrl) {
+    validateMcpUrl(creds.authorizationEndpointUrl)
+  }
+  if (creds.tokenEndpointUrl) {
+    validateMcpUrl(creds.tokenEndpointUrl)
+  }
+}
+
 function validateServerInput(
   input: Pick<Partial<CreateMcpServerInput>, "name" | "transport" | "authType" | "maxConnections">
 ): void {
@@ -175,6 +195,28 @@ function validateServerInput(
     if (!Number.isInteger(n) || n < 1 || n > MAX_CONNECTIONS_LIMIT) {
       throw ErrorFactories.valueOutOfRange("maxConnections", n, 1, MAX_CONNECTIONS_LIMIT)
     }
+  }
+}
+
+/**
+ * Strips secret fields (oauthCredentials, mcpOauthRegistration) from a DB row
+ * before returning it to the client. The connectionCount defaults to 0 when
+ * derived from a create/update (not a join query).
+ */
+function stripSecrets(row: SelectNexusMcpServer, connectionCount = 0): McpServerWithStats {
+  return {
+    id: row.id,
+    name: row.name,
+    url: row.url,
+    transport: row.transport,
+    authType: row.authType,
+    credentialsKey: row.credentialsKey,
+    allowedUsers: row.allowedUsers,
+    maxConnections: row.maxConnections,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    connectionCount,
+    hasOAuthCredentials: row.oauthCredentials !== null,
   }
 }
 
@@ -249,7 +291,7 @@ export async function listMcpServers(): Promise<
 
 export async function createMcpServer(
   input: CreateMcpServerInput
-): Promise<ActionState<SelectNexusMcpServer>> {
+): Promise<ActionState<McpServerWithStats>> {
   const requestId = generateRequestId()
   const timer = startTimer("admin.createMcpServer")
   const log = createLogger({ requestId, action: "admin.createMcpServer" })
@@ -268,6 +310,7 @@ export async function createMcpServer(
     // Encrypt OAuth client secret if inline credentials are provided
     let oauthCredentialsValue: OAuthCredentialsConfig | null = null
     if (input.oauthCredentials) {
+      validateOAuthCredentials(input.oauthCredentials)
       oauthCredentialsValue = {
         clientId: input.oauthCredentials.clientId,
         encryptedClientSecret: await encryptToken(input.oauthCredentials.clientSecret),
@@ -277,7 +320,7 @@ export async function createMcpServer(
       }
     }
 
-    const [server] = await executeQuery(
+    const [serverRow] = await executeQuery(
       (db) =>
         db
           .insert(nexusMcpServers)
@@ -295,11 +338,11 @@ export async function createMcpServer(
       "createMcpServer"
     )
 
-    timer({ status: "success", serverId: server.id })
-    log.info("MCP server created", { serverId: server.id, name: server.name })
+    timer({ status: "success", serverId: serverRow.id })
+    log.info("MCP server created", { serverId: serverRow.id, name: serverRow.name })
 
     revalidatePath("/admin/connectors")
-    return createSuccess(server, "Connector created successfully")
+    return createSuccess(stripSecrets(serverRow), "Connector created successfully")
   } catch (error) {
     timer({ status: "error" })
     return handleError(
@@ -320,7 +363,7 @@ export async function createMcpServer(
 
 export async function updateMcpServer(
   input: UpdateMcpServerInput
-): Promise<ActionState<SelectNexusMcpServer>> {
+): Promise<ActionState<McpServerWithStats>> {
   const requestId = generateRequestId()
   const timer = startTimer("admin.updateMcpServer")
   const log = createLogger({ requestId, action: "admin.updateMcpServer" })
@@ -352,6 +395,7 @@ export async function updateMcpServer(
         // null clears inline credentials
         updateData.oauthCredentials = null
       } else {
+        validateOAuthCredentials(fields.oauthCredentials)
         updateData.oauthCredentials = {
           clientId: fields.oauthCredentials.clientId,
           encryptedClientSecret: await encryptToken(fields.oauthCredentials.clientSecret),
@@ -370,7 +414,7 @@ export async function updateMcpServer(
     updateData.updatedAt = new Date()
 
     if (Object.keys(updateData).length <= 1) {
-      const [current] = await executeQuery(
+      const [currentRow] = await executeQuery(
         (db) =>
           db
             .select()
@@ -379,15 +423,16 @@ export async function updateMcpServer(
             .limit(1),
         "updateMcpServer.noOp"
       )
-      if (!current) {
+      if (!currentRow) {
         throw ErrorFactories.dbRecordNotFound("nexus_mcp_servers", input.id)
       }
       timer({ status: "noop" })
       log.info("Update called with no fields to change", { serverId: input.id })
-      return createSuccess(current, "No changes to update")
+      const stripped: McpServerWithStats = stripSecrets(currentRow)
+      return createSuccess(stripped, "No changes to update")
     }
 
-    const [server] = await executeQuery(
+    const [serverRow] = await executeQuery(
       (db) =>
         db
           .update(nexusMcpServers)
@@ -397,15 +442,15 @@ export async function updateMcpServer(
       "updateMcpServer"
     )
 
-    if (!server) {
+    if (!serverRow) {
       throw ErrorFactories.dbRecordNotFound("nexus_mcp_servers", input.id)
     }
 
-    timer({ status: "success", serverId: server.id })
-    log.info("MCP server updated", { serverId: server.id })
+    timer({ status: "success", serverId: serverRow.id })
+    log.info("MCP server updated", { serverId: serverRow.id })
 
     revalidatePath("/admin/connectors")
-    return createSuccess(server, "Connector updated successfully")
+    return createSuccess(stripSecrets(serverRow), "Connector updated successfully")
   } catch (error) {
     timer({ status: "error" })
     return handleError(

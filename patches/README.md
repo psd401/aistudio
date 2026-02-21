@@ -10,9 +10,11 @@ This directory contains bun patches for npm dependencies where upstream hasn't y
 
 ### What the patch changes
 
-- Sets `LATEST_PROTOCOL_VERSION` from `"2025-06-18"` to `"2025-11-25"`
-- Adds `"2025-06-18"` to the `SUPPORTED_PROTOCOL_VERSIONS` array (so older servers still work)
+- Sets `LATEST_PROTOCOL_VERSION` from `"2025-06-18"` to `"2025-11-25"` — this is the version announced to MCP servers during the handshake
+- Keeps `"2025-06-18"` in `SUPPORTED_PROTOCOL_VERSIONS` — without this, bumping `LATEST_PROTOCOL_VERSION` would drop `2025-06-18` from the accepted list, breaking older servers
 - Files modified: `dist/index.js` and `dist/index.mjs`
+
+> **Note on versioning:** The patch is pinned to `@ai-sdk/mcp@1.0.21`. If the lockfile resolves a different version (e.g., after `bun update`), the patch will silently stop applying. Always keep `@ai-sdk/mcp` locked to `1.0.21` while this patch is active, or run `bun install --frozen-lockfile` in CI to catch version drift.
 
 ### Why this is safe
 
