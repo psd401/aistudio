@@ -6,12 +6,13 @@
 
 /**
  * Get the OAuth/OIDC issuer URL from environment.
- * Checks NEXTAUTH_URL, NEXT_PUBLIC_APP_URL, falls back to localhost.
+ * Checks NEXTAUTH_URL, AUTH_URL (NextAuth v5 standard), NEXT_PUBLIC_APP_URL, falls back to localhost.
  */
 export function getIssuerUrl(override?: string): string {
   return (
     override ??
     process.env.NEXTAUTH_URL ??
+    process.env.AUTH_URL ??
     process.env.NEXT_PUBLIC_APP_URL ??
     "http://localhost:3000"
   )

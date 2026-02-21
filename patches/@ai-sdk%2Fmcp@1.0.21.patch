@@ -1,0 +1,32 @@
+diff --git a/dist/index.js b/dist/index.js
+index 685e2a7641754a8ee48b93c8f2ddea77aceb6ba3..318d7cea2cf93b58bc721e32313160264d23b5b6 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -74,9 +74,10 @@ var import_v42 = require("zod/v4");
+ 
+ // src/tool/types.ts
+ var import_v4 = require("zod/v4");
+-var LATEST_PROTOCOL_VERSION = "2025-06-18";
++var LATEST_PROTOCOL_VERSION = "2025-11-25";
+ var SUPPORTED_PROTOCOL_VERSIONS = [
+   LATEST_PROTOCOL_VERSION,
++  "2025-06-18",
+   "2025-03-26",
+   "2024-11-05"
+ ];
+diff --git a/dist/index.mjs b/dist/index.mjs
+index 7a361ab16875ee539ed89c213b404d66f676d377..a86dc0083b40e9c898f2506cea3750ee8b8d58fb 100644
+--- a/dist/index.mjs
++++ b/dist/index.mjs
+@@ -44,9 +44,10 @@ import { z as z2 } from "zod/v4";
+ 
+ // src/tool/types.ts
+ import { z } from "zod/v4";
+-var LATEST_PROTOCOL_VERSION = "2025-06-18";
++var LATEST_PROTOCOL_VERSION = "2025-11-25";
+ var SUPPORTED_PROTOCOL_VERSIONS = [
+   LATEST_PROTOCOL_VERSION,
++  "2025-06-18",
+   "2025-03-26",
+   "2024-11-05"
+ ];

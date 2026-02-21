@@ -203,5 +203,8 @@
     "ai": "~6.0.91",
     "@ai-sdk/provider": "~3.0.8",
     "@ai-sdk/provider-utils": "~4.0.15"
+  },
+  "patchedDependencies": {
+    "@ai-sdk/mcp@1.0.21": "patches/@ai-sdk%2Fmcp@1.0.21.patch"
   }
 }

@@ -21,8 +21,9 @@ WORKDIR /app
 # Install dependencies for native packages
 RUN apk add --no-cache libc6-compat
 
-# Copy package files first (for layer caching)
+# Copy package files and patches first (for layer caching)
 COPY package.json bun.lock ./
+COPY patches/ ./patches/
 
 # Install ALL dependencies including devDependencies
 RUN bun install --frozen-lockfile
