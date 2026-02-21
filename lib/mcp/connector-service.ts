@@ -248,11 +248,20 @@ export async function getConnectorTools(
     )
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error)
+    // Extract Zod validation details from the cause chain — @ai-sdk/mcp wraps
+    // schema parse failures (e.g. ListToolsResultSchema) in MCPClientError.cause.
+    let causeDetail: string | undefined
+    if (error instanceof Error && error.cause) {
+      const cause = error.cause as Error
+      causeDetail = cause.message?.slice(0, 500)
+    }
     log.warn("Failed to fetch tools from MCP server", {
       requestId, serverId, serverName: server.name,
       error: errorMessage,
+      causeDetail,
       isTimeout: errorMessage.includes("timed out"),
     })
+
     try { await client.close() } catch { /* ignore cleanup errors */ }
     throw error
   }
