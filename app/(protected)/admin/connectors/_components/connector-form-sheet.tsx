@@ -101,8 +101,10 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
           }
         }
       } else if (authType === "oauth" && !oauthClientId.trim() && hasExistingOAuthCredentials) {
-        // Admin cleared clientId → remove inline credentials
-        oauthCredentials = null
+        // clientId is never pre-populated (it's excluded from the API response for
+        // consistency with the secret), so empty clientId on edit means "no change",
+        // not "delete credentials". Leave as undefined (no-op).
+        oauthCredentials = undefined
       }
 
       const commonPayload = {
