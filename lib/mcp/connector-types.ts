@@ -28,6 +28,13 @@ export type McpTransportType = "stdio" | "http" | "websocket"
  */
 export type McpAuthType = "api_key" | "oauth" | "jwt" | "none" | "cognito_passthrough"
 
+/**
+ * How tools are provided for a connector.
+ * - "mcp": Fetch tools from the MCP server at runtime (default)
+ * - "custom": Use built-in tool definitions (e.g., Canva Connect API)
+ */
+export type McpToolSource = "mcp" | "custom"
+
 /** A registered MCP server with access control metadata */
 export interface McpConnector {
   id: string

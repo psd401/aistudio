@@ -18,7 +18,7 @@ import { eq, count } from "drizzle-orm"
 import { revalidatePath } from "next/cache"
 import type { ActionState } from "@/types/actions-types"
 import type { SelectNexusMcpServer, InsertNexusMcpServer } from "@/lib/db/types"
-import type { McpAuthType } from "@/lib/mcp/connector-types"
+import type { McpAuthType, McpToolSource } from "@/lib/mcp/connector-types"
 import type { OAuthCredentialsConfig } from "@/lib/db/schema/tables/nexus-mcp-servers"
 import { encryptToken } from "@/lib/crypto/token-encryption"
 import { sql } from "drizzle-orm"
@@ -32,6 +32,8 @@ export interface McpServerWithStats extends Omit<SelectNexusMcpServer, "mcpOauth
   connectionCount: number
   /** True when inline OAuth credentials are configured on this connector */
   hasOAuthCredentials: boolean
+  /** How tools are provided: 'mcp' (fetch from server) or 'custom' (built-in definitions) */
+  toolSource: string | null
 }
 
 /** Plaintext OAuth credentials from the admin form — clientSecret encrypted before storage */
@@ -48,6 +50,7 @@ export interface CreateMcpServerInput {
   url: string
   transport: "http" | "stdio" | "websocket"
   authType: McpAuthType
+  toolSource?: McpToolSource
   credentialsKey?: string
   oauthCredentials?: OAuthCredentialsInput | null
   allowedUsers?: number[]
@@ -60,6 +63,7 @@ export interface UpdateMcpServerInput {
   url?: string
   transport?: "http" | "stdio" | "websocket"
   authType?: McpAuthType
+  toolSource?: McpToolSource
   credentialsKey?: string | null
   oauthCredentials?: OAuthCredentialsInput | null
   allowedUsers?: number[]
@@ -74,6 +78,7 @@ type McpServerUpdate = Partial<
     | "url"
     | "transport"
     | "authType"
+    | "toolSource"
     | "credentialsKey"
     | "oauthCredentials"
     | "allowedUsers"
@@ -218,6 +223,7 @@ function stripSecrets(row: SelectNexusMcpServer, connectionCount = 0): McpServer
     url: row.url,
     transport: row.transport,
     authType: row.authType,
+    toolSource: row.toolSource,
     credentialsKey: row.credentialsKey,
     allowedUsers: row.allowedUsers,
     maxConnections: row.maxConnections,
@@ -252,6 +258,7 @@ export async function listMcpServers(): Promise<
             url: nexusMcpServers.url,
             transport: nexusMcpServers.transport,
             authType: nexusMcpServers.authType,
+            toolSource: nexusMcpServers.toolSource,
             credentialsKey: nexusMcpServers.credentialsKey,
             allowedUsers: nexusMcpServers.allowedUsers,
             maxConnections: nexusMcpServers.maxConnections,
@@ -337,6 +344,7 @@ export async function createMcpServer(
             url: input.url,
             transport: input.transport,
             authType: input.authType,
+            toolSource: input.toolSource ?? "mcp",
             credentialsKey: input.credentialsKey ?? null,
             oauthCredentials: oauthCredentialsValue,
             allowedUsers: input.allowedUsers ?? [],
@@ -396,6 +404,7 @@ export async function updateMcpServer(
     if (fields.url !== undefined) updateData.url = fields.url
     if (fields.transport !== undefined) updateData.transport = fields.transport
     if (fields.authType !== undefined) updateData.authType = fields.authType
+    if (fields.toolSource !== undefined) updateData.toolSource = fields.toolSource
     if (fields.credentialsKey !== undefined)
       updateData.credentialsKey = fields.credentialsKey
     if (fields.oauthCredentials !== undefined) {

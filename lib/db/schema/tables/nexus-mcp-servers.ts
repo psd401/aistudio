@@ -50,6 +50,8 @@ export const nexusMcpServers = pgTable("nexus_mcp_servers", {
   oauthCredentials: jsonb("oauth_credentials").$type<OAuthCredentialsConfig>(),
   /** Dynamic OAuth client registration (client_id, encrypted_client_secret, etc). Set by MCP auth flow. */
   mcpOauthRegistration: jsonb("mcp_oauth_registration").$type<McpOauthRegistration>(),
+  /** How tools are provided: 'mcp' (fetch from server) or 'custom' (built-in tool definitions) */
+  toolSource: varchar("tool_source", { length: 50 }).default("mcp"),
   createdAt: timestamp("created_at").defaultNow(),
   updatedAt: timestamp("updated_at").defaultNow(),
 });

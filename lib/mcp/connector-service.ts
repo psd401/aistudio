@@ -29,6 +29,7 @@ import {
 import type {
   McpConnector,
   McpAuthType,
+  McpToolSource,
   McpTransportType,
   McpUserConnectionStatus,
   McpConnectionStatus,
@@ -36,6 +37,8 @@ import type {
   McpConnectorToolsResult,
   McpToolCallLogEntry,
 } from "./connector-types"
+import type { McpToolSet } from "./connector-types"
+import { loadCustomTools } from "./custom-tools/registry"
 import { ServerSideOAuthProvider } from "./mcp-oauth-provider"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 
@@ -164,6 +167,29 @@ export async function getConnectorTools(
 
   // 2. Verify user has access to this server (same rules as getAvailableConnectors)
   requireUserAccess(server, userId, userRoleNames)
+
+  // 2b. Custom tool source — skip MCP client entirely, return built-in tool definitions
+  const toolSource = (server.toolSource ?? "mcp") as McpToolSource
+  if (toolSource === "custom") {
+    const accessToken = tokenRow?.encryptedAccessToken
+      ? await decryptToken(tokenRow.encryptedAccessToken)
+      : null
+    if (!accessToken) {
+      throw new Error("No OAuth token stored. Please connect to the service first.")
+    }
+    // Cast ToolSet → McpToolSet: both are Record<string, Tool> with compatible shapes.
+    // The AI SDK merges them as ToolSet in the chat route (Object.assign).
+    const tools = loadCustomTools(server.url, accessToken) as unknown as McpToolSet
+    const toolCount = Object.keys(tools).length
+    timer({ status: "success", toolCount, toolSource: "custom" })
+    log.info("Custom connector tools loaded", { requestId, serverId, serverName: server.name, toolCount })
+    return {
+      serverId,
+      serverName: server.name,
+      tools,
+      close: async () => {},
+    }
+  }
 
   // 3. Validate transport — @ai-sdk/mcp only supports "http" for server-to-server
   assertHttpTransport(server.transport)

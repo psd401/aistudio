@@ -18,7 +18,7 @@ import {
   updateMcpServer,
   type McpServerWithStats,
 } from "@/actions/admin/connector.actions"
-import type { McpAuthType } from "@/lib/mcp/connector-types"
+import type { McpAuthType, McpToolSource } from "@/lib/mcp/connector-types"
 
 interface Props {
   server: McpServerWithStats | null
@@ -35,6 +35,9 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
   )
   const [authType, setAuthType] = useState<McpAuthType>(
     (server?.authType as McpAuthType) ?? "none"
+  )
+  const [toolSource, setToolSource] = useState<McpToolSource>(
+    (server?.toolSource as McpToolSource) ?? "mcp"
   )
   const [credentialsKey, setCredentialsKey] = useState(
     server?.credentialsKey ?? ""
@@ -112,6 +115,7 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
         url,
         transport,
         authType,
+        toolSource: authType === "oauth" ? toolSource : "mcp" as McpToolSource,
         maxConnections: maxConn,
       }
 
@@ -209,6 +213,29 @@ export function ConnectorFormSheet({ server, onSuccess }: Props) {
           </SelectContent>
         </Select>
       </div>
+
+      {authType === "oauth" && (
+        <div>
+          <Label>Tool Source</Label>
+          <Select
+            value={toolSource}
+            onValueChange={(v) => setToolSource(v as McpToolSource)}
+          >
+            <SelectTrigger>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="mcp">MCP Server (default)</SelectItem>
+              <SelectItem value="custom">Custom (REST API)</SelectItem>
+            </SelectContent>
+          </Select>
+          <p className="text-xs text-muted-foreground mt-1">
+            {toolSource === "custom"
+              ? "Uses built-in tool definitions that call the provider\u2019s REST API directly."
+              : "Fetches tool definitions from the MCP server at runtime."}
+          </p>
+        </div>
+      )}
 
       {authType === "oauth" && (
         <>
