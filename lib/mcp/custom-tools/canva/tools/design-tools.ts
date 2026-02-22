@@ -46,7 +46,7 @@ export function createDesignTools(client: CanvaApiClient): Record<string, unknow
       description:
         "Search and list Canva designs. Returns design IDs, titles, thumbnails, and metadata. " +
         "Use query parameter to filter by title. Results are paginated.",
-      parameters: listDesignsSchema,
+      inputSchema: listDesignsSchema,
       execute: async (args) => {
         const params: Record<string, string> = {}
         if (args.query) params.query = args.query
@@ -61,7 +61,7 @@ export function createDesignTools(client: CanvaApiClient): Record<string, unknow
       description:
         "Get details of a specific Canva design by ID. Returns title, owner, " +
         "thumbnail URL, page count, and timestamps.",
-      parameters: getDesignSchema,
+      inputSchema: getDesignSchema,
       execute: async ({ design_id }) => {
         return client.get(`/v1/designs/${design_id}`)
       },
@@ -72,7 +72,7 @@ export function createDesignTools(client: CanvaApiClient): Record<string, unknow
         "Create a new Canva design. Specify either a design_type preset " +
         "(e.g., 'Presentation', 'Poster') or custom dimensions in pixels. " +
         "Returns the new design ID and edit URL.",
-      parameters: createDesignSchema,
+      inputSchema: createDesignSchema,
       execute: async (args) => {
         const body: Record<string, unknown> = {}
         if (args.title) body.title = args.title
@@ -94,7 +94,7 @@ export function createDesignTools(client: CanvaApiClient): Record<string, unknow
         "Export a Canva design to a file format (PDF, PNG, JPG, etc.). " +
         "This is an async operation — the tool polls until export completes " +
         "and returns download URLs. Exports expire after a short period.",
-      parameters: exportDesignSchema,
+      inputSchema: exportDesignSchema,
       execute: async (args) => {
         const body: Record<string, unknown> = {
           design_id: args.design_id,
@@ -112,7 +112,7 @@ export function createDesignTools(client: CanvaApiClient): Record<string, unknow
       description:
         "Import an external file (PDF, image, etc.) as a new Canva design. " +
         "Provide a publicly accessible URL to the file. This is an async operation.",
-      parameters: importDesignSchema,
+      inputSchema: importDesignSchema,
       execute: async (args) => {
         const body: Record<string, unknown> = {
           import_data: { type: "url", url: args.url },

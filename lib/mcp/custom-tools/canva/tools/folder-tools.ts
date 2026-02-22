@@ -26,7 +26,7 @@ export function createFolderTools(client: CanvaApiClient): Record<string, unknow
       description:
         "List items (designs, folders, images) in a Canva folder. " +
         "Results are paginated — use the continuation token for more results.",
-      parameters: listFolderItemsSchema,
+      inputSchema: listFolderItemsSchema,
       execute: async (args) => {
         const params: Record<string, string> = {}
         if (args.continuation) params.continuation = args.continuation
@@ -37,7 +37,7 @@ export function createFolderTools(client: CanvaApiClient): Record<string, unknow
 
     canva_create_folder: canvaTool({
       description: "Create a new folder in Canva.",
-      parameters: createFolderSchema,
+      inputSchema: createFolderSchema,
       execute: async (args) => {
         const body: Record<string, unknown> = { name: args.name }
         if (args.parent_folder_id) body.parent_folder_id = args.parent_folder_id

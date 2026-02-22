@@ -25,7 +25,7 @@ export function createAssetTools(client: CanvaApiClient): Record<string, unknown
       description:
         "Get metadata for a specific Canva asset by ID. Returns name, " +
         "type, thumbnail URL, dimensions, and tags.",
-      parameters: getAssetSchema,
+      inputSchema: getAssetSchema,
       execute: async ({ asset_id }) => {
         return client.get(`/v1/assets/${asset_id}`)
       },
@@ -35,7 +35,7 @@ export function createAssetTools(client: CanvaApiClient): Record<string, unknown
       description:
         "Upload an asset (image, video) to Canva from a publicly accessible URL. " +
         "This is an async operation — the tool polls until upload completes.",
-      parameters: uploadAssetSchema,
+      inputSchema: uploadAssetSchema,
       execute: async (args) => {
         const body: Record<string, unknown> = {
           upload_data: { type: "url", url: args.url },

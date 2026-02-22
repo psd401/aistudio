@@ -17,7 +17,7 @@ export function createUserTools(client: CanvaApiClient): Record<string, unknown>
       description:
         "Get the current authenticated Canva user's profile. Returns " +
         "display name, user ID, and team information.",
-      parameters: getUserSchema,
+      inputSchema: getUserSchema,
       execute: async () => {
         return client.get("/v1/users/me")
       },

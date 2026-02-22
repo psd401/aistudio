@@ -49,12 +49,11 @@ export function createVectorSearchTool(options: RepositoryToolOptions): unknown 
 
   return tool({
     description: `Search repository knowledge base using semantic vector similarity. Best for finding conceptually related content even if exact keywords don't match. Searches repositories: ${repositoryIds.join(', ')}`,
-    parameters: z.object({
+    inputSchema: z.object({
       query: z.string().describe('The search query to find relevant content'),
       limit: z.number().min(1).max(100).optional().default(5).describe('Maximum number of results to return (1-100, default: 5)'),
       threshold: z.number().min(0).max(1).optional().default(0.7).describe('Similarity threshold 0-1 (default: 0.7)')
     }),
-    // @ts-expect-error - AI SDK v5 tool() function has complex type inference that doesn't match TypeScript's requirements
     execute: async ({ query, limit, threshold }: { query: string; limit?: number; threshold?: number }) => {
       log.info('Vector search executed', { query, limit, threshold, repositoryIds });
 
@@ -135,11 +134,10 @@ export function createKeywordSearchTool(options: RepositoryToolOptions): unknown
 
   return tool({
     description: `Search repository knowledge base using exact keyword matching. Best for finding specific terms, phrases, or technical names. Searches repositories: ${repositoryIds.join(', ')}`,
-    parameters: z.object({
+    inputSchema: z.object({
       query: z.string().describe('The keyword or phrase to search for'),
       limit: z.number().min(1).max(100).optional().default(5).describe('Maximum number of results to return (1-100, default: 5)')
     }),
-    // @ts-expect-error - AI SDK v5 tool() function has complex type inference that doesn't match TypeScript's requirements
     execute: async ({ query, limit }: { query: string; limit?: number }) => {
       log.info('Keyword search executed', { query, limit, repositoryIds });
 
@@ -219,13 +217,12 @@ export function createHybridSearchTool(options: RepositoryToolOptions): unknown 
 
   return tool({
     description: `Search repository knowledge base using combined semantic and keyword matching. Best for comprehensive search that balances conceptual similarity with exact matches. Searches repositories: ${repositoryIds.join(', ')}`,
-    parameters: z.object({
+    inputSchema: z.object({
       query: z.string().describe('The search query'),
       limit: z.number().min(1).max(100).optional().default(5).describe('Maximum number of results to return (1-100, default: 5)'),
       threshold: z.number().min(0).max(1).optional().default(0.7).describe('Similarity threshold 0-1 (default: 0.7)'),
       vectorWeight: z.number().min(0).max(1).optional().default(0.7).describe('Weight for vector search 0-1 (default: 0.7, keyword gets remainder)')
     }),
-    // @ts-expect-error - AI SDK v5 tool() function has complex type inference that doesn't match TypeScript's requirements
     execute: async ({ query, limit, threshold, vectorWeight }: { query: string; limit?: number; threshold?: number; vectorWeight?: number }) => {
       log.info('Hybrid search executed', { query, limit, threshold, vectorWeight, repositoryIds });
 

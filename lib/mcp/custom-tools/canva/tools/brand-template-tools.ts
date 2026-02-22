@@ -47,7 +47,7 @@ export function createBrandTemplateTools(client: CanvaApiClient): Record<string,
         "List available brand templates in the Canva account. " +
         "Returns template IDs, titles, and thumbnails. " +
         "May require Canva Enterprise access.",
-      parameters: listBrandTemplatesSchema,
+      inputSchema: listBrandTemplatesSchema,
       execute: async (args) => {
         const params: Record<string, string> = {}
         if (args.query) params.query = args.query
@@ -60,7 +60,7 @@ export function createBrandTemplateTools(client: CanvaApiClient): Record<string,
       description:
         "Get details of a specific brand template by ID. Returns title, " +
         "thumbnail, page count, and metadata.",
-      parameters: getBrandTemplateSchema,
+      inputSchema: getBrandTemplateSchema,
       execute: async ({ brand_template_id }) => {
         return client.get(`/v1/brand-templates/${brand_template_id}`)
       },
@@ -71,7 +71,7 @@ export function createBrandTemplateTools(client: CanvaApiClient): Record<string,
         "Get the autofillable fields (dataset) for a brand template. " +
         "Returns field names, types, and current values. Use this to " +
         "understand what data can be injected before calling autofill.",
-      parameters: getTemplateDatasetSchema,
+      inputSchema: getTemplateDatasetSchema,
       execute: async ({ brand_template_id }) => {
         return client.get(`/v1/brand-templates/${brand_template_id}/dataset`)
       },
@@ -83,7 +83,7 @@ export function createBrandTemplateTools(client: CanvaApiClient): Record<string,
         "Provide field values matching the template dataset. This is an " +
         "async operation — the tool polls until the design is created. " +
         "Returns the new design ID and edit URL.",
-      parameters: autofillTemplateSchema,
+      inputSchema: autofillTemplateSchema,
       execute: async (args) => {
         const body: Record<string, unknown> = {
           brand_template_id: args.brand_template_id,

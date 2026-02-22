@@ -4,9 +4,13 @@
  * AI SDK v6's `tool()` function has 4 overloads that don't resolve correctly
  * when `execute` is provided without an `outputSchema`. This wrapper casts
  * through `unknown` to produce the correct runtime shape while satisfying
- * TypeScript's strict mode. The same pattern is used in repository-tools.ts.
+ * TypeScript's strict mode.
  *
- * @see lib/tools/repository-tools.ts for precedent
+ * IMPORTANT: Uses `inputSchema` (not `parameters`) — AI SDK v6's `tool()` is
+ * an identity pass-through, and `streamText` reads `tool.inputSchema` to build
+ * the JSON schema sent to providers. Using `parameters` leaves `inputSchema`
+ * undefined, which produces a schema without `type: "object"` and breaks
+ * Bedrock's tool validation.
  */
 
 import { tool as sdkTool } from "ai"
@@ -14,7 +18,7 @@ import type { z } from "zod"
 
 interface ToolConfig<S extends z.ZodType> {
   description: string
-  parameters: S
+  inputSchema: S
   execute: (args: z.infer<S>) => Promise<unknown>
 }
 
