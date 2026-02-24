@@ -12,20 +12,21 @@
 # Key differences from production Dockerfile:
 # - Uses dev dependencies
 # - No build step (source mounted at runtime)
-# - Runs `npm run dev` instead of production server
+# - Runs `bun run dev` instead of production server
 
-FROM node:22-alpine
+FROM oven/bun:1.3-alpine
 
 WORKDIR /app
 
 # Install dependencies for native packages
-RUN apk add --no-cache libc6-compat python3 make g++
+RUN apk add --no-cache libc6-compat
 
-# Copy package files first (for layer caching)
-COPY package.json package-lock.json* ./
+# Copy package files and patches first (for layer caching)
+COPY package.json bun.lock ./
+COPY patches/ ./patches/
 
 # Install ALL dependencies including devDependencies
-RUN npm ci --legacy-peer-deps
+RUN bun install --frozen-lockfile
 
 # Don't copy source code - it's mounted as a volume
 # The app will be run via docker-compose with volume mounts
@@ -41,5 +42,10 @@ ENV WATCHPACK_POLLING=true
 
 EXPOSE 3000
 
+# Entrypoint clears stale .next cache when source files change (Issue #800)
+COPY scripts/docker/dev-entrypoint.sh /usr/local/bin/dev-entrypoint.sh
+RUN chmod +x /usr/local/bin/dev-entrypoint.sh
+ENTRYPOINT ["dev-entrypoint.sh"]
+
 # Run Next.js dev server
-CMD ["npm", "run", "dev"]
+CMD ["bun", "run", "dev"]

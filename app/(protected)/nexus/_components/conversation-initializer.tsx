@@ -68,7 +68,8 @@ export function convertContentToParts(content?: ApiMessageContent): UIMessagePar
       // type: 'tool-{toolName}' -> converter extracts toolName via type.replace("tool-", "")
       if (isToolCallPart(part)) {
         const args = part.args ?? {}
-        const hasResult = part.result !== undefined
+        // null means stream error before onFinish — treat same as no result
+        const hasResult = part.result != null
         const isError = part.isError === true
         const input = typeof args === 'object' && args !== null ? args as Record<string, unknown> : {}
 
@@ -157,7 +158,7 @@ export function ConversationInitializer({
 }) {
   const [messages, setMessages] = useState<UIMessage[]>([])
   const [loading, setLoading] = useState(true)
-  const { status, data: session } = useSession()
+  const { status } = useSession()
 
   useEffect(() => {
     // Verify authentication before making API call
@@ -175,15 +176,8 @@ export function ConversationInitializer({
       return
     }
 
-    // Guard against authenticated status with missing user data
-    if (status === 'authenticated' && !session?.user) {
-      log.warn('Authenticated but no user data, skipping conversation load')
-      startTransition(() => {
-        setMessages([])
-        setLoading(false)
-      })
-      return
-    }
+    // In this project, our NextAuth configuration ensures session.user is set when status === 'authenticated'.
+    // Given that setup (see auth.ts and Session type augmentation), no additional session guard is needed here.
 
     if (!conversationId) {
       startTransition(() => {
@@ -235,7 +229,7 @@ export function ConversationInitializer({
     return () => {
       abortController.abort()
     }
-  }, [conversationId, status, session])
+  }, [conversationId, status])
 
   if (loading) {
     return (

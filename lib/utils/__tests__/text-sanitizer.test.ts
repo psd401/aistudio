@@ -1,7 +1,9 @@
 import {
   sanitizeTextForDatabase,
   validateTextEncoding,
-  sanitizeTextWithMetrics
+  sanitizeTextWithMetrics,
+  decodeHtmlEntities,
+  decodeHtmlEntitiesDeep
 } from '../text-sanitizer';
 
 describe('sanitizeTextForDatabase', () => {
@@ -156,6 +158,128 @@ describe('sanitizeTextWithMetrics', () => {
     expect(result.sanitized).toBe('');
     expect(result.originalLength).toBe(0);
     expect(result.sanitizedLength).toBe(0);
+  });
+});
+
+describe('decodeHtmlEntities', () => {
+  it('decodes named entities', () => {
+    expect(decodeHtmlEntities('a &amp; b')).toBe('a & b');
+    expect(decodeHtmlEntities('x &lt; y')).toBe('x < y');
+    expect(decodeHtmlEntities('x &gt; y')).toBe('x > y');
+    expect(decodeHtmlEntities('say &quot;hello&quot;')).toBe('say "hello"');
+    expect(decodeHtmlEntities("it&apos;s")).toBe("it's");
+  });
+
+  it('decodes decimal numeric entities', () => {
+    expect(decodeHtmlEntities('&#65;')).toBe('A');         // ASCII
+    expect(decodeHtmlEntities('&#39;')).toBe("'");          // single quote
+    expect(decodeHtmlEntities('&#128512;')).toBe('😀');    // emoji (above U+FFFF)
+  });
+
+  it('decodes hex numeric entities', () => {
+    expect(decodeHtmlEntities('&#x41;')).toBe('A');         // A
+    expect(decodeHtmlEntities('&#x27;')).toBe("'");         // single quote
+    expect(decodeHtmlEntities('&#x1F600;')).toBe('😀');    // emoji
+  });
+
+  it('strips null byte entity &#0; instead of decoding', () => {
+    expect(decodeHtmlEntities('&#0;')).toBe('');
+    expect(decodeHtmlEntities('&#x00;')).toBe('');
+    expect(decodeHtmlEntities('abc&#0;def')).toBe('abcdef');
+  });
+
+  it('strips other control character entities', () => {
+    expect(decodeHtmlEntities('&#1;')).toBe('');   // SOH
+    expect(decodeHtmlEntities('&#8;')).toBe('');   // BS
+    expect(decodeHtmlEntities('&#127;')).toBe(''); // DEL
+  });
+
+  it('preserves safe whitespace entities', () => {
+    expect(decodeHtmlEntities('&#9;')).toBe('\t');   // tab
+    expect(decodeHtmlEntities('&#10;')).toBe('\n');  // newline
+    expect(decodeHtmlEntities('&#13;')).toBe('\r');  // carriage return
+  });
+
+  it('is idempotent — second decode does not alter already-decoded text', () => {
+    const once = decodeHtmlEntities('Students &amp; Staff');
+    const twice = decodeHtmlEntities(once);
+    expect(twice).toBe('Students & Staff');
+    expect(once).toBe(twice);
+  });
+
+  it('does not double-decode — &amp;lt; decodes to &lt; not <', () => {
+    // Single-pass: &amp;lt; → &lt; (not further decoded to <)
+    expect(decodeHtmlEntities('&amp;lt;')).toBe('&lt;');
+  });
+
+  it('returns empty string for non-string input', () => {
+    expect(decodeHtmlEntities(null as unknown as string)).toBe('');
+    expect(decodeHtmlEntities(undefined as unknown as string)).toBe('');
+    expect(decodeHtmlEntities(42 as unknown as string)).toBe('');
+  });
+
+  it('passes through plain text unchanged', () => {
+    expect(decodeHtmlEntities('Hello World')).toBe('Hello World');
+    expect(decodeHtmlEntities('')).toBe('');
+  });
+
+  it('handles real-world tool arg scenario from Issue #798', () => {
+    const encoded = 'Students &amp; Staff at Peninsula SD';
+    expect(decodeHtmlEntities(encoded)).toBe('Students & Staff at Peninsula SD');
+  });
+});
+
+describe('decodeHtmlEntitiesDeep', () => {
+  it('decodes string values in plain objects', () => {
+    expect(decodeHtmlEntitiesDeep({ query: 'a &amp; b' }))
+      .toEqual({ query: 'a & b' });
+  });
+
+  it('decodes nested object string values', () => {
+    expect(decodeHtmlEntitiesDeep({ a: { b: 'x &amp; y' } }))
+      .toEqual({ a: { b: 'x & y' } });
+  });
+
+  it('decodes string values in arrays', () => {
+    expect(decodeHtmlEntitiesDeep(['a &amp; b', 'c &lt; d']))
+      .toEqual(['a & b', 'c < d']);
+  });
+
+  it('passes through non-string primitives unchanged', () => {
+    expect(decodeHtmlEntitiesDeep({ count: 42, flag: true, nothing: null }))
+      .toEqual({ count: 42, flag: true, nothing: null });
+  });
+
+  it('passes through Date instances without converting to plain object', () => {
+    const d = new Date('2024-01-01');
+    expect(decodeHtmlEntitiesDeep(d)).toBe(d);
+  });
+
+  it('passes through non-plain objects unchanged', () => {
+    const re = /foo/;
+    expect(decodeHtmlEntitiesDeep(re)).toBe(re);
+  });
+
+  it('preserves encoded values beyond depth limit without decoding', () => {
+    // Build a 25-deep nested object (exceeds depth=20 guard)
+    let deep: unknown = 'leaf &amp; value';
+    for (let i = 0; i < 25; i++) {
+      deep = { child: deep };
+    }
+    const result = decodeHtmlEntitiesDeep(deep);
+    // Navigate to the leaf — the first 20 levels are traversed, then it stops
+    let node: Record<string, unknown> = result as Record<string, unknown>;
+    for (let i = 0; i < 24; i++) {
+      node = node.child as Record<string, unknown>;
+    }
+    // Leaf at depth 25 should still be encoded (depth guard stopped decoding)
+    expect(node.child).toBe('leaf &amp; value');
+  });
+
+  it('handles mixed arrays and objects', () => {
+    const input = { items: ['a &amp; b', { label: 'x &gt; y' }] };
+    expect(decodeHtmlEntitiesDeep(input))
+      .toEqual({ items: ['a & b', { label: 'x > y' }] });
   });
 });
 

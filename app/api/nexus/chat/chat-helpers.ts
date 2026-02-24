@@ -6,7 +6,7 @@ import { UIMessage } from 'ai';
 import { sql, eq } from 'drizzle-orm';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { nexusConversations, nexusMessages } from '@/lib/db/schema';
-import { sanitizeTextForDatabase } from '@/lib/utils/text-sanitizer';
+import { sanitizeTextForDatabase, decodeHtmlEntitiesDeep } from '@/lib/utils/text-sanitizer';
 import { safeJsonbStringify } from '@/lib/db/json-utils';
 import { createLogger } from '@/lib/logger';
 
@@ -276,13 +276,21 @@ function buildAssistantParts(
 
   if (toolCalls) {
     for (const tc of toolCalls) {
+      // Decode HTML entities in args to prevent argsText mismatch on conversation reload.
+      // AI models may generate HTML-encoded characters (e.g., &amp; for &) in tool args,
+      // which causes assistant-ui's append-only argsText check to fail when the conversation
+      // is reloaded and argsText is recomputed from the parsed args object. (Issue #798)
+      const decodedArgs = decodeHtmlEntitiesDeep(tc.args) as Record<string, unknown>;
       parts.push({
         type: 'tool-call',
         toolCallId: tc.toolCallId,
         toolName: tc.toolName,
-        args: tc.args,
-        argsText: JSON.stringify(tc.args),
-        result: tc.result ?? { success: true },
+        args: decodedArgs,
+        argsText: JSON.stringify(decodedArgs),
+        // null when extraction missed the result (e.g. stream error before onFinish).
+        // UI tool components handle null with loading/fallback states — verified in
+        // web-search-ui.tsx, code-interpreter-ui.tsx, chart-visualization-ui.tsx.
+        result: tc.result ?? null,
         isError: false,
       });
     }

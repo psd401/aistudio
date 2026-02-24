@@ -4,7 +4,7 @@ on:
   pull_request:
     paths:
       - 'package.json'
-      - 'package-lock.json'
+      - 'bun.lock'
       - 'lib/streaming/**'
   workflow_dispatch:
   schedule:
@@ -28,7 +28,12 @@ jobs:
         uses: actions/setup-node@v6
         with:
           node-version: '20'
-          cache: 'npm'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@3d267786b128fe76c2f16a390aa2448b815359f3  # v2
+        with:
+          bun-version: "1.2.x"
+          cache: true
 
       - name: Check for AI SDK version changes
         id: version-check
@@ -77,11 +82,11 @@ jobs:
 
       - name: Install dependencies
         if: steps.version-check.outputs.version_changed == 'true'
-        run: npm ci
+        run: bun install --frozen-lockfile
 
       - name: Run contract tests
         if: steps.version-check.outputs.version_changed == 'true'
-        run: npm run test:streaming:contract
+        run: bun run test:streaming:contract
         continue-on-error: true
         id: contract-tests
         env:
@@ -91,7 +96,7 @@ jobs:
 
       - name: Run regular streaming tests
         if: steps.version-check.outputs.version_changed == 'true'
-        run: npm run test -- lib/streaming
+        run: bun run test -- lib/streaming
         continue-on-error: false
 
       - name: Comment on PR - Major version change
@@ -114,7 +119,7 @@ jobs:
 
             - [ ] **Review** [Vercel AI SDK Changelog](https://github.com/vercel/ai/blob/main/CHANGELOG.md) for breaking changes
             - [ ] **Update** compatibility adapter in \`lib/streaming/sdk-compatibility-adapter.ts\` if needed
-            - [ ] **Run** contract tests manually: \`npm run test:streaming-contract\`
+            - [ ] **Run** contract tests manually: \`bun run test:streaming:contract\`
             - [ ] **Test** all streaming features:
               - Assistant Architect execution
               - Nexus Chat streaming

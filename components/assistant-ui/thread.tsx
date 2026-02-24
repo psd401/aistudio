@@ -6,6 +6,7 @@ import {
   BranchPickerPrimitive,
   ErrorPrimitive,
   useMessage,
+  type ToolCallMessagePartComponent,
 } from "@assistant-ui/react";
 import type { FC } from "react";
 import { createContext, useContext, useMemo } from "react";
@@ -29,7 +30,7 @@ import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { MarkdownText } from "./markdown-text";
 import { WebSearchSource } from "./web-search-sources";
-import { ToolFallback } from "./tool-fallback";
+import { ToolFallback } from "@/components/assistant-ui/tool-fallback";
 import { ToolGroup } from "@/app/(protected)/nexus/_components/tools/tool-group";
 import {
   ComposerAttachments,
@@ -48,18 +49,27 @@ export const useConversationId = () => useContext(ConversationIdContext);
 // Pre-defined constants to avoid creating new objects/arrays on every render
 const EMPTY_MODELS_ARRAY: SelectAiModel[] = [];
 const EMPTY_TOOLS_ARRAY: string[] = [];
+const EMPTY_CONNECTORS_ARRAY: string[] = [];
 
 const THREAD_ROOT_STYLE = {
   ["--thread-max-width" as string]: "48rem",
   ["--thread-padding-x" as string]: "1rem",
 };
 
-const ASSISTANT_MESSAGE_CONTENT_COMPONENTS = {
+const DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS = {
   Text: MarkdownText,
   Source: WebSearchSource,
   ToolGroup: ToolGroup,
-  tools: { Fallback: ToolFallback },
+  tools: { Fallback: ToolFallback as ToolCallMessagePartComponent },
 };
+
+type AssistantContentComponents = typeof DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS;
+
+/** Allows the rendering layer (e.g. Nexus) to inject a custom tool fallback without coupling
+ * thread.tsx to feature-specific imports. Intentionally not exported — override is via the
+ * Thread `toolFallback` prop only. If other components need to override content components,
+ * extend the Thread props interface rather than exporting this context directly. */
+const AssistantContentComponentsContext = createContext<AssistantContentComponents>(DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS);
 
 const USER_MESSAGE_CONTENT_COMPONENTS = { Text: MarkdownText };
 
@@ -109,8 +119,14 @@ interface ThreadProps {
   isLoadingModels?: boolean;
   enabledTools?: string[];
   onToolsChange?: (tools: string[]) => void;
+  // Connector selection
+  enabledConnectors?: string[];
+  onConnectorsChange?: (connectors: string[]) => void;
+  onReconnectSuccess?: (serverId: string) => void;
   // Custom suggested actions (pass [] to hide, undefined for defaults)
   suggestedActions?: SuggestedAction[];
+  /** Override the tool fallback component (e.g. ConnectorToolFallback in Nexus) */
+  toolFallback?: ToolCallMessagePartComponent;
 }
 
 export const Thread: FC<ThreadProps> = ({
@@ -122,8 +138,18 @@ export const Thread: FC<ThreadProps> = ({
   isLoadingModels = false,
   enabledTools = EMPTY_TOOLS_ARRAY,
   onToolsChange,
+  enabledConnectors = EMPTY_CONNECTORS_ARRAY,
+  onConnectorsChange,
+  onReconnectSuccess,
   suggestedActions,
+  toolFallback,
 }) => {
+  const contentComponents = useMemo(() =>
+    toolFallback
+      ? { ...DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS, tools: { Fallback: toolFallback } }
+      : DEFAULT_ASSISTANT_MESSAGE_CONTENT_COMPONENTS
+  , [toolFallback]);
+
   // Memoize message components to avoid recreation on every render
   const messageComponents = useMemo(() => ({
     UserMessage,
@@ -132,35 +158,40 @@ export const Thread: FC<ThreadProps> = ({
   }), []);
 
   return (
-    <ConversationIdContext.Provider value={conversationId || null}>
-      <ThreadPrimitive.Root
-        className="bg-white flex h-full flex-col"
-        style={THREAD_ROOT_STYLE}
-      >
-        <ThreadPrimitive.Viewport className="relative flex min-w-0 flex-1 h-0 flex-col gap-6 overflow-y-auto">
-          <ThreadWelcome conversationId={conversationId} />
+    <AssistantContentComponentsContext.Provider value={contentComponents}>
+      <ConversationIdContext.Provider value={conversationId || null}>
+        <ThreadPrimitive.Root
+          className="bg-white flex h-full flex-col"
+          style={THREAD_ROOT_STYLE}
+        >
+          <ThreadPrimitive.Viewport className="relative flex min-w-0 flex-1 h-0 flex-col gap-6 overflow-y-auto">
+            <ThreadWelcome conversationId={conversationId} />
 
-          <ThreadPrimitive.Messages
-            components={messageComponents}
+            <ThreadPrimitive.Messages
+              components={messageComponents}
+            />
+
+            <ThreadPrimitive.If empty={false}>
+              <motion.div className="min-h-6 min-w-6 shrink-0" />
+            </ThreadPrimitive.If>
+          </ThreadPrimitive.Viewport>
+
+          <Composer
+            processingAttachments={processingAttachments}
+            models={models}
+            selectedModel={selectedModel}
+            onModelChange={onModelChange}
+            isLoadingModels={isLoadingModels}
+            enabledTools={enabledTools}
+            onToolsChange={onToolsChange}
+            enabledConnectors={enabledConnectors}
+            onConnectorsChange={onConnectorsChange}
+            onReconnectSuccess={onReconnectSuccess}
+            suggestedActions={suggestedActions}
           />
-
-          <ThreadPrimitive.If empty={false}>
-            <motion.div className="min-h-6 min-w-6 shrink-0" />
-          </ThreadPrimitive.If>
-        </ThreadPrimitive.Viewport>
-
-        <Composer
-          processingAttachments={processingAttachments}
-          models={models}
-          selectedModel={selectedModel}
-          onModelChange={onModelChange}
-          isLoadingModels={isLoadingModels}
-          enabledTools={enabledTools}
-          onToolsChange={onToolsChange}
-          suggestedActions={suggestedActions}
-        />
-      </ThreadPrimitive.Root>
-    </ConversationIdContext.Provider>
+        </ThreadPrimitive.Root>
+      </ConversationIdContext.Provider>
+    </AssistantContentComponentsContext.Provider>
   );
 };
 
@@ -265,6 +296,9 @@ interface ComposerProps {
   isLoadingModels?: boolean;
   enabledTools?: string[];
   onToolsChange?: (tools: string[]) => void;
+  enabledConnectors?: string[];
+  onConnectorsChange?: (connectors: string[]) => void;
+  onReconnectSuccess?: (serverId: string) => void;
   suggestedActions?: SuggestedAction[];
 }
 
@@ -276,6 +310,9 @@ const Composer: FC<ComposerProps> = ({
   isLoadingModels = false,
   enabledTools = EMPTY_TOOLS_ARRAY,
   onToolsChange,
+  enabledConnectors = EMPTY_CONNECTORS_ARRAY,
+  onConnectorsChange,
+  onReconnectSuccess,
   suggestedActions,
 }) => {
   return (
@@ -294,6 +331,9 @@ const Composer: FC<ComposerProps> = ({
             isLoadingModels={isLoadingModels}
             enabledTools={enabledTools}
             onToolsChange={onToolsChange}
+            enabledConnectors={enabledConnectors}
+            onConnectorsChange={onConnectorsChange}
+            onReconnectSuccess={onReconnectSuccess}
           />
         )}
         <ComposerAttachments processingAttachments={processingAttachments} />
@@ -368,6 +408,7 @@ const MessageError: FC = () => {
 };
 
 const AssistantMessage: FC = () => {
+  const contentComponents = useContext(AssistantContentComponentsContext);
   return (
     <MessagePrimitive.Root asChild>
       <motion.div
@@ -382,7 +423,7 @@ const AssistantMessage: FC = () => {
 
         <div className="text-foreground col-span-2 col-start-2 row-start-1 ml-4 break-words leading-7">
           <MessagePrimitive.Content
-            components={ASSISTANT_MESSAGE_CONTENT_COMPONENTS}
+            components={contentComponents}
           />
           <MessageError />
         </div>

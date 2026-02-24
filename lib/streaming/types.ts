@@ -31,6 +31,7 @@ export interface StreamRequest {
   // Tools configuration
   tools?: ToolSet;
   enabledTools?: string[]; // Tool names to enable (tools will be created by adapter)
+  enabledConnectors?: string[]; // MCP connector server IDs to enable
   maxSteps?: number; // Max tool-use round-trips (default: 1, set higher for multi-step tool use)
 
   // Advanced model options

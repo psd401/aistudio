@@ -117,10 +117,34 @@ Must be one of:
 
 ### Step 1: Identify the Model
 
-Get the exact model identifier from the provider:
+Get the exact model identifier from the provider. **The `modelId` must match the provider's API format exactly.**
+
 - OpenAI: `gpt-4-turbo`, `gpt-4o`, `gpt-4o-mini`
-- Anthropic: `claude-3-5-sonnet-20241022`, `claude-3-opus-20240229`
-- Google: `gemini-1.5-pro`, `gemini-1.5-flash`
+- Google: `gemini-1.5-pro`, `gemini-1.5-flash`, `gemini-2.0-flash`
+
+#### Amazon Bedrock Model IDs (Critical)
+
+**⚠️ Bedrock model IDs are NOT the same as Anthropic API model IDs.** Using the wrong format will cause API calls to fail silently.
+
+| ID Type | Format | Example | When to Use |
+|---------|--------|---------|-------------|
+| Anthropic API ID | `claude-{tier}-{version}` | `claude-sonnet-4-6` | **NEVER** — this is for Anthropic's direct API only |
+| Bedrock Base Model ID | `anthropic.claude-{tier}-{version}` | `anthropic.claude-opus-4-6-v1` | Rarely — only for single-region access |
+| **Bedrock Inference Profile (US)** | `us.anthropic.claude-{tier}-{version}` | `us.anthropic.claude-opus-4-6-v1` | **USE THIS** — cross-region inference in US |
+
+**Always use the US inference profile ID** (`us.anthropic.claude-*`) for Bedrock models. This is the format our codebase expects (see `claude-adapter.ts`).
+
+**How to find the correct Bedrock model ID:**
+1. Go to https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html
+2. Find the model in the "US inference profiles" table
+3. Copy the exact inference profile ID string
+4. **Do NOT guess or construct the ID** — naming conventions vary between models (some have `-v1` suffix, some don't, some have date suffixes)
+
+**Known Bedrock ID examples (verify before use — these change):**
+- `us.anthropic.claude-opus-4-6-v1`
+- `us.anthropic.claude-sonnet-4-6`
+- `us.anthropic.claude-sonnet-4-5-20250929-v1:0`
+- `us.anthropic.claude-haiku-4-5-20251001-v1:0`
 
 ### Step 2: Search for Current Information
 
@@ -129,18 +153,22 @@ Get the exact model identifier from the provider:
 2. Pricing page (current rates)
 3. Capabilities/features list
 4. Context window/limits
+5. **Bedrock inference profile IDs** (for `amazon-bedrock` provider)
 
 **Sources to check:**
 - OpenAI: https://platform.openai.com/docs/models
-- Anthropic: https://docs.anthropic.com/claude/docs
+- Anthropic models overview: https://platform.claude.com/docs/en/about-claude/models/overview
+- Anthropic pricing: https://platform.claude.com/docs/en/about-claude/pricing
+- **Bedrock model IDs**: https://docs.aws.amazon.com/bedrock/latest/userguide/model-ids.html
+- **Bedrock inference profiles**: https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html
 - Google: https://ai.google.dev/models/gemini
-- Pricing pages (search for "[provider] API pricing 2025")
+- Pricing pages (search for "[provider] API pricing [current year]")
 
 ### Step 3: Gather Information
 
 **Document:**
-- ✅ Exact model ID (e.g., `gpt-4-turbo-2024-04-09`)
-- ✅ Display name (e.g., "GPT-4 Turbo")
+- ✅ Exact model ID **in the correct format for the provider** (see Step 1 — Bedrock IDs are different from Anthropic API IDs)
+- ✅ Display name (e.g., "Claude Sonnet 4.6")
 - ✅ Maximum tokens (context window)
 - ✅ Input pricing per 1K tokens
 - ✅ Output pricing per 1K tokens
@@ -223,14 +251,16 @@ Combine all gathered information into the JSON structure.
 }
 ```
 
-### Example 2: Anthropic Claude 3.5 Sonnet
+### Example 2: Anthropic Claude on Bedrock (US Inference Profile)
+
+**⚠️ Note:** The `modelId` uses the Bedrock US inference profile format (`us.anthropic.claude-*`), NOT the Anthropic API format. Always verify the exact ID at https://docs.aws.amazon.com/bedrock/latest/userguide/inference-profiles-support.html
 
 ```json
 {
-  "name": "Claude 3.5 Sonnet",
-  "modelId": "claude-3-5-sonnet-20241022",
+  "name": "Claude Sonnet 4.6",
+  "modelId": "us.anthropic.claude-sonnet-4-6",
   "provider": "amazon-bedrock",
-  "description": "Anthropic's most intelligent model with exceptional writing and analysis skills, ideal for essay feedback and creative writing projects",
+  "description": "Fast and highly capable model with strong coding and reasoning skills, great for everyday assignments, writing help, and classroom questions",
   "capabilities": [
     "chat",
     "function_calling",
@@ -408,6 +438,6 @@ Check the models table to confirm successful import
 
 ---
 
-**Last Updated:** January 2025
+**Last Updated:** February 2026
 
-**Note:** This guide assumes you're using Claude Code or similar AI assistant with web search capabilities. Always search for current information - never rely on cached knowledge for pricing or capabilities.
+**Note:** This guide assumes you're using Claude Code or similar AI assistant with web search capabilities. Always search for current information - never rely on cached knowledge for pricing, capabilities, or model IDs. **For Bedrock models, always verify the exact inference profile ID from AWS docs — do not construct IDs by pattern-matching.**

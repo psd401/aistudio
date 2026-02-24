@@ -171,3 +171,89 @@ export function sanitizeTextWithMetrics(text: string): {
     bytesRemoved,
   };
 }
+
+/**
+ * Returns true if the Unicode code point is safe for database storage and UI rendering.
+ * Rejects null bytes and the same control character ranges stripped by sanitizeTextForDatabase:
+ * 0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F, 0x7F (DEL).
+ * Preserves tab (0x09), newline (0x0A), and carriage return (0x0D).
+ */
+function isSafeCodePoint(cp: number): boolean {
+  return !(
+    cp === 0 ||
+    (cp >= 0x01 && cp <= 0x08) ||
+    cp === 0x0B ||
+    cp === 0x0C ||
+    (cp >= 0x0E && cp <= 0x1F) ||
+    cp === 0x7F
+  );
+}
+
+/**
+ * Decodes common HTML entities in a string using a single-pass replacement.
+ * Handles: &amp; &lt; &gt; &quot; &apos; and numeric character references (decimal and hex).
+ *
+ * Uses a single regex pass to avoid double-decoding (e.g., &amp;lt; decoding twice
+ * to produce <). Numeric entities that decode to control characters (null bytes,
+ * 0x01-0x08, 0x0B, 0x0C, 0x0E-0x1F, 0x7F) are stripped rather than decoded.
+ * Uses String.fromCodePoint to correctly handle supplementary-plane characters
+ * (emoji, rare CJK symbols above U+FFFF).
+ *
+ * Used to clean tool call arguments where AI models may generate HTML-encoded
+ * characters (e.g., "Students &amp; Staff" instead of "Students & Staff").
+ */
+export function decodeHtmlEntities(text: string): string {
+  if (typeof text !== 'string') return '';
+  return text.replace(
+    /&amp;|&lt;|&gt;|&quot;|&apos;|&#(\d+);|&#x([\dA-Fa-f]+);/g,
+    (match, dec, hex) => {
+      if (dec !== undefined) {
+        const cp = Number.parseInt(dec, 10);
+        return isSafeCodePoint(cp) ? String.fromCodePoint(cp) : '';
+      }
+      if (hex !== undefined) {
+        const cp = Number.parseInt(hex, 16);
+        return isSafeCodePoint(cp) ? String.fromCodePoint(cp) : '';
+      }
+      switch (match) {
+        case '&amp;': return '&';
+        case '&lt;': return '<';
+        case '&gt;': return '>';
+        case '&quot;': return '"';
+        case '&apos;': return "'";
+        default: return match;
+      }
+    }
+  );
+}
+
+/**
+ * Recursively decodes HTML entities in all string values within an object.
+ * Traverses plain objects and arrays, returning a new structure (no mutation).
+ * Only decodes string values — object keys and non-string primitives are unchanged.
+ * Non-plain objects (Date, RegExp, etc.) are passed through without traversal.
+ *
+ * Depth-limited to 20 levels to guard against pathologically nested tool call arguments.
+ */
+export function decodeHtmlEntitiesDeep(value: unknown): unknown {
+  return decodeDeep(value, 0);
+}
+
+function decodeDeep(value: unknown, depth: number): unknown {
+  if (depth > 20) return value;
+  if (typeof value === 'string') {
+    return decodeHtmlEntities(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(item => decodeDeep(item, depth + 1));
+  }
+  // Only traverse plain objects — pass through Date, RegExp, and other class instances unchanged
+  if (value !== null && typeof value === 'object' && Object.prototype.toString.call(value) === '[object Object]') {
+    const result: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+      result[key] = decodeDeep(val, depth + 1);
+    }
+    return result;
+  }
+  return value;
+}

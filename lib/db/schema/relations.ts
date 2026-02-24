@@ -49,6 +49,7 @@ import { nexusMcpServers } from "./tables/nexus-mcp-servers";
 import { nexusMcpConnections } from "./tables/nexus-mcp-connections";
 import { nexusMcpCapabilities } from "./tables/nexus-mcp-capabilities";
 import { nexusMcpAuditLogs } from "./tables/nexus-mcp-audit-logs";
+import { nexusMcpUserTokens } from "./tables/nexus-mcp-user-tokens";
 
 // Documents
 import { documents } from "./tables/documents";
@@ -108,6 +109,7 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   nexusShares: many(nexusShares),
   nexusTemplates: many(nexusTemplates),
   nexusMcpConnections: many(nexusMcpConnections),
+  nexusMcpUserTokens: many(nexusMcpUserTokens),
   nexusMcpAuditLogs: many(nexusMcpAuditLogs),
   documents: many(documents),
   knowledgeRepositories: many(knowledgeRepositories),
@@ -378,6 +380,7 @@ export const nexusUserPreferencesRelations = relations(
 
 export const nexusMcpServersRelations = relations(nexusMcpServers, ({ many }) => ({
   connections: many(nexusMcpConnections),
+  userTokens: many(nexusMcpUserTokens),
   capabilities: many(nexusMcpCapabilities),
   auditLogs: many(nexusMcpAuditLogs),
 }));
@@ -392,6 +395,20 @@ export const nexusMcpConnectionsRelations = relations(
     user: one(users, {
       fields: [nexusMcpConnections.userId],
       references: [users.id],
+    }),
+  })
+);
+
+export const nexusMcpUserTokensRelations = relations(
+  nexusMcpUserTokens,
+  ({ one }) => ({
+    user: one(users, {
+      fields: [nexusMcpUserTokens.userId],
+      references: [users.id],
+    }),
+    server: one(nexusMcpServers, {
+      fields: [nexusMcpUserTokens.serverId],
+      references: [nexusMcpServers.id],
     }),
   })
 );

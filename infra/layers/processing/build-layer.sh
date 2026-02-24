@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 
 # Clean up previous builds
 rm -rf nodejs/node_modules
@@ -6,7 +7,7 @@ rm -rf layer.zip
 
 # Install production dependencies
 cd nodejs
-npm ci --production
+bun install --production
 
 # Remove .bin directory which contains symlinks that cause issues
 rm -rf node_modules/.bin

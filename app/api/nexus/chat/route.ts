@@ -1,4 +1,4 @@
-import { UIMessage } from 'ai';
+import { UIMessage, type ToolSet } from 'ai';
 import { z } from 'zod';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
@@ -10,6 +10,9 @@ import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-servi
 import type { StreamRequest } from '@/lib/streaming/types';
 import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { getModelConfig } from '@/lib/ai/model-config';
+import { getConnectorTools } from '@/lib/mcp/connector-service';
+import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
+import { createUniversalTools } from '@/lib/tools/provider-native-tools';
 
 import {
   extractImagePrompt,
@@ -39,13 +42,28 @@ export const maxDuration = 300;
 /**
  * Build the onFinish callback for streaming
  */
+/**
+ * Close all MCP connector clients, ignoring errors.
+ * Called after streaming completes (onFinish) or on error to release connections.
+ */
+async function closeMcpClients(
+  connectorToolResults: McpConnectorToolsResult[],
+  log: ReturnType<typeof createLogger>,
+  context: string
+) {
+  if (connectorToolResults.length === 0) return;
+  log.debug('Closing MCP clients', { context, clientCount: connectorToolResults.length });
+  await Promise.allSettled(connectorToolResults.map(r => r.close()));
+}
+
 function createOnFinishCallback(params: {
   conversationId: string;
   dbModelId: number;
+  connectorToolResults: McpConnectorToolsResult[];
   log: ReturnType<typeof createLogger>;
   timer: (data: Record<string, unknown>) => void;
 }) {
-  const { conversationId, dbModelId, log, timer } = params;
+  const { conversationId, dbModelId, connectorToolResults, log, timer } = params;
 
   return async ({
     text,
@@ -76,6 +94,11 @@ function createOnFinishCallback(params: {
       log.error('Failed to save assistant message', { error: saveError, conversationId });
     }
 
+    // Close MCP clients AFTER all tool executions and message saving complete.
+    // Previously in a try/finally that ran immediately after Response creation,
+    // which closed clients before the stream's multi-step tool calls could execute.
+    await closeMcpClients(connectorToolResults, log, 'onFinish');
+
     timer({ status: 'success', conversationId, tokensUsed: usage?.totalTokens });
   };
 }
@@ -92,6 +115,9 @@ async function executeStreaming(params: {
   conversationIdValue?: string;
   conversationTitle: string;
   enabledTools: string[];
+  enabledConnectors: string[];
+  connectorToolResults: McpConnectorToolsResult[];
+  failedConnectorIds: string[];
   reasoningEffort: 'minimal' | 'low' | 'medium' | 'high';
   responseMode: 'standard' | 'flex' | 'priority';
   requestId: string;
@@ -101,11 +127,24 @@ async function executeStreaming(params: {
 }): Promise<Response> {
   const {
     messages, modelConfig, userId, sessionId, conversationId,
-    conversationIdValue, conversationTitle, enabledTools,
-    reasoningEffort, responseMode, requestId, dbModelId, log, timer
+    conversationIdValue, conversationTitle, enabledTools, enabledConnectors,
+    connectorToolResults, failedConnectorIds, reasoningEffort, responseMode, requestId, dbModelId, log, timer
   } = params;
 
   const systemPrompt = `You are a helpful AI assistant in the Nexus interface.`;
+
+  // When MCP connectors are enabled, pre-merge adapter tools + connector tools
+  // and pass as request.tools so the streaming service uses them directly
+  // (skipping adapter.createTools to avoid redundant work).
+  // Connector tools take precedence on name collision.
+  let mergedTools: ToolSet | undefined;
+  if (connectorToolResults.length > 0) {
+    const adapterTools = await createUniversalTools(enabledTools);
+    mergedTools = { ...adapterTools };
+    for (const result of connectorToolResults) {
+      Object.assign(mergedTools, result.tools);
+    }
+  }
 
   const streamRequest: StreamRequest = {
     messages,
@@ -116,10 +155,20 @@ async function executeStreaming(params: {
     conversationId,
     source: 'nexus',
     systemPrompt,
-    enabledTools,
+    enabledTools: mergedTools ? undefined : enabledTools,
+    enabledConnectors,
+    tools: mergedTools,
+    // maxSteps enables multi-step tool use (agent loop). Only needed when MCP connector
+    // tools are active — without connectors, the model uses single-step tool calls only.
+    // 10 steps is a reasonable upper bound for MCP tool chains (fetch→process→respond).
+    maxSteps: connectorToolResults.length > 0 ? 10 : undefined,
     options: { reasoningEffort, responseMode },
     callbacks: {
-      onFinish: createOnFinishCallback({ conversationId, dbModelId, log, timer })
+      onFinish: createOnFinishCallback({ conversationId, dbModelId, connectorToolResults, log, timer }),
+      onError: async (error: Error) => {
+        log.warn('Stream error — closing MCP clients', { conversationId, error: error.message });
+        await closeMcpClients(connectorToolResults, log, 'onError');
+      }
     }
   };
 
@@ -129,6 +178,11 @@ async function executeStreaming(params: {
     conversationId
   });
 
+  // MCP client cleanup is handled in onFinish (after all tool executions complete)
+  // and in the catch block below (for pre-stream errors).
+  // Do NOT use try/finally here — the finally block runs immediately after the
+  // Response is created, before the streaming body is consumed, which closes
+  // MCP clients while tool calls are still in-flight.
   const streamResponse = await unifiedStreamingService.stream(streamRequest);
 
   const responseHeaders: Record<string, string> = {
@@ -140,6 +194,35 @@ async function executeStreaming(params: {
   if (!conversationIdValue && conversationId) {
     responseHeaders['X-Conversation-Id'] = conversationId;
     responseHeaders['X-Conversation-Title'] = encodeURIComponent(conversationTitle || 'New Conversation');
+  }
+
+  if (failedConnectorIds.length > 0) {
+    const safeIds = failedConnectorIds.filter(id => /^[\da-f-]{36}$/i.test(id));
+    if (safeIds.length > 0) {
+      responseHeaders['X-Connector-Reconnect'] = safeIds.join(',');
+    }
+  }
+
+  // Send tool-to-server mapping so the client can register connector tools
+  // for branded UI rendering (ConnectorToolContext)
+  if (connectorToolResults.length > 0) {
+    const toolMapping: Record<string, { serverId: string; serverName: string }> = {};
+    for (const result of connectorToolResults) {
+      for (const toolName of Object.keys(result.tools)) {
+        toolMapping[toolName] = { serverId: result.serverId, serverName: result.serverName };
+      }
+    }
+    const toolMappingEncoded = encodeURIComponent(JSON.stringify(toolMapping));
+    // 8192 bytes: conservative limit for custom HTTP response headers.
+    // AWS ALB has 16 KB total header limit; this leaves room for standard headers.
+    if (toolMappingEncoded.length <= 8192) {
+      responseHeaders['X-Connector-Tools'] = toolMappingEncoded;
+    } else {
+      log.warn('X-Connector-Tools header too large, omitting — branded tool UI will use generic fallback', {
+        sizeBytes: toolMappingEncoded.length,
+        toolCount: Object.keys(toolMapping).length,
+      });
+    }
   }
 
   return streamResponse.result.toUIMessageStreamResponse({ headers: responseHeaders });
@@ -158,6 +241,7 @@ const ChatRequestSchema = z.object({
   provider: z.string().optional(),
   conversationId: z.string().nullable().optional(),
   enabledTools: z.array(z.string()).optional(),
+  enabledConnectors: z.array(z.string().uuid()).max(10).optional(),
   reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high']).optional(),
   responseMode: z.enum(['standard', 'priority', 'flex']).optional()
 });
@@ -317,7 +401,7 @@ function validateConversationId(id: string | undefined, requestId: string, log: 
 async function authenticateUser(
   log: ReturnType<typeof createLogger>,
   timer: (data: Record<string, unknown>) => void
-): Promise<{ userId: number; session: { sub: string } } | { error: Response }> {
+): Promise<{ userId: number; userRoleNames: string[]; session: { sub: string; idToken?: string } } | { error: Response }> {
   const session = await getServerSession();
   if (!session) {
     log.warn('Unauthorized request - no session');
@@ -331,7 +415,8 @@ async function authenticateUser(
     return { error: new Response('Unauthorized', { status: 401 }) };
   }
 
-  return { userId: currentUser.data.user.id, session };
+  const userRoleNames = currentUser.data.roles.map(r => r.name);
+  return { userId: currentUser.data.user.id, userRoleNames, session };
 }
 
 /**
@@ -406,13 +491,16 @@ export async function POST(req: Request) {
 
   log.info('POST /api/nexus/chat - Processing chat request with native streaming');
 
+  // Hoisted outside try so catch block can clean up MCP clients on pre-stream errors
+  const connectorToolResults: McpConnectorToolsResult[] = [];
+
   try {
     // 1. Parse and validate request
     const body = await req.json();
     const validation = validateRequest(body, requestId, log);
     if (!validation.valid) return validation.error;
 
-    const { messages, modelId, provider = 'openai', conversationId: existingConversationId, enabledTools = [] } = validation.data;
+    const { messages, modelId, provider = 'openai', conversationId: existingConversationId, enabledTools = [], enabledConnectors = [] } = validation.data;
     const conversationIdValue = existingConversationId || undefined;
 
     // 2. Validate conversation ID format
@@ -424,7 +512,7 @@ export async function POST(req: Request) {
     // 3. Authenticate user
     const authResult = await authenticateUser(log, timer);
     if ('error' in authResult) return authResult.error;
-    const { userId, session } = authResult;
+    const { userId, userRoleNames, session } = authResult;
 
     // 4. Get model configuration
     const modelResult = await getValidatedModelConfig(modelId, log);
@@ -455,8 +543,38 @@ export async function POST(req: Request) {
       messagesWithParts
     );
 
+    // 8. Resolve MCP connector tools (parallel fetch for all enabled connectors)
+    const failedConnectorIds: string[] = [];
+    if (enabledConnectors.length > 0) {
+      log.info('Resolving MCP connector tools', { connectorCount: enabledConnectors.length });
+      const connectorOptions = session.idToken ? { idToken: session.idToken } : undefined;
+      const results = await Promise.allSettled(
+        enabledConnectors.map(serverId => getConnectorTools(serverId, userId, userRoleNames, connectorOptions))
+      );
+      for (const [i, result] of results.entries()) {
+        if (result.status === 'fulfilled') {
+          connectorToolResults.push(result.value);
+        } else {
+          failedConnectorIds.push(enabledConnectors[i]);
+          log.warn('Failed to resolve connector tools', {
+            serverId: enabledConnectors[i],
+            error: result.reason instanceof Error ? result.reason.message : String(result.reason)
+          });
+        }
+      }
+      log.info('MCP connector tools resolved', {
+        requested: enabledConnectors.length,
+        resolved: connectorToolResults.length,
+        failed: failedConnectorIds.length,
+        totalTools: connectorToolResults.reduce((sum, r) => sum + Object.keys(r.tools).length, 0)
+      });
+    }
+
     // 9. Execute streaming and return response
-    return executeStreaming({
+    // Once executeStreaming returns successfully, the streaming Response is in flight.
+    // MCP client cleanup is handled inside onFinish (after all tool executions complete).
+    // We only clean up in catch when executeStreaming itself throws (pre-stream errors).
+    return await executeStreaming({
       messages: lightweightMessages as UIMessage[],
       modelConfig,
       userId,
@@ -465,6 +583,9 @@ export async function POST(req: Request) {
       conversationIdValue,
       conversationTitle,
       enabledTools,
+      enabledConnectors,
+      connectorToolResults,
+      failedConnectorIds,
       reasoningEffort: validation.data.reasoningEffort || 'medium',
       responseMode: validation.data.responseMode || 'standard',
       requestId,
@@ -474,6 +595,12 @@ export async function POST(req: Request) {
     });
 
   } catch (error) {
+    // Clean up MCP clients only for pre-stream errors (e.g., auth failure, model not found,
+    // executeStreaming threw before returning a Response). Once streaming starts, cleanup
+    // is handled by onFinish inside the stream — AI SDK v6 guarantees onFinish is called
+    // for all terminal states including errors (verified against ai@6.x).
+    await closeMcpClients(connectorToolResults, log, 'catch');
+
     log.error('Nexus chat API error', {
       error: error instanceof Error ? { message: error.message, name: error.name } : String(error)
     });

@@ -6,28 +6,28 @@ AI Studio codebase guidance for Claude Code. Optimized for token efficiency and 
 
 ```bash
 # Local Development (Issue #607)
-npm run db:up              # Start local PostgreSQL (Docker)
-npm run dev:local          # Run Next.js with local database
-npm run db:studio          # Open Drizzle Studio to inspect DB
-npm run db:psql            # Connect to local DB via psql
-npm run db:seed            # Create test users (admin/staff/student)
-npm run db:reset           # Reset database (destroys all data)
+bun run db:up              # Start local PostgreSQL (Docker)
+bun run dev:local          # Run Next.js with local database
+bun run db:studio          # Open Drizzle Studio to inspect DB
+bun run db:psql            # Connect to local DB via psql
+bun run db:seed            # Create test users (admin/staff/student)
+bun run db:reset           # Reset database (destroys all data)
 
 # Development (without Docker)
-npm run dev                # Start dev server (port 3000)
-npm run build              # Build for production
-npm run lint               # MUST pass before commit
-npm run typecheck          # MUST pass before commit
-npm run test:e2e           # Run E2E tests
+bun run dev                # Start dev server (port 3000)
+bun run build              # Build for production
+bun run lint               # MUST pass before commit
+bun run typecheck          # MUST pass before commit
+bun run test:e2e           # Run E2E tests
 
 # Infrastructure (from /infra)
-cd infra && npx cdk deploy --all                          # Deploy all stacks
-cd infra && npx cdk deploy AIStudio-FrontendStack-Dev     # Deploy single stack
+cd infra && bunx cdk deploy --all                          # Deploy all stacks
+cd infra && bunx cdk deploy AIStudio-FrontendStack-Dev     # Deploy single stack
 ```
 
 ## 🎯 Critical Rules
 
-1. **Type Safety**: NO `any` types. Full TypeScript. Run `npm run lint` and `npm run typecheck` on ENTIRE codebase before commits.
+1. **Type Safety**: NO `any` types. Full TypeScript. Run `bun run lint` and `bun run typecheck` on ENTIRE codebase before commits.
 2. **Database Migrations**: Files 001-005 are IMMUTABLE. Only add migrations 010+. Add filename to `MIGRATION_FILES` array in `/infra/database/lambda/db-init-handler.ts`.
 3. **Logging**: NEVER use `console.log/error`. Always use `@/lib/logger`. See patterns below.
 4. **Git Flow**: PRs target `dev` branch, never `main`. Write detailed commit messages.
@@ -153,9 +153,9 @@ user.settings.theme;  // "light" | "dark" | "system"
 
 **Migrations** (see `/docs/database/drizzle-migration-guide.md`):
 ```bash
-npm run drizzle:generate        # Generate from schema changes
-npm run migration:prepare       # Format for Lambda
-npm run migration:list          # List all migrations
+bun run drizzle:generate        # Generate from schema changes
+bun run migration:prepare       # Format for Lambda
+bun run migration:list          # List all migrations
 # Then add to MIGRATION_FILES in db-init-handler.ts
 ```
 
@@ -181,16 +181,16 @@ mcp__awslabs_postgres-mcp-server__run_query
 **Local Development Setup** (Issue #607):
 ```bash
 # Quick Start (first time)
-npm run db:up              # Start PostgreSQL container
-npm run db:seed            # Create test users
-npm run dev:local          # Start Next.js with local DB
+bun run db:up              # Start PostgreSQL container
+bun run db:seed            # Create test users
+bun run dev:local          # Start Next.js with local DB
 
 # Daily workflow
-npm run db:up && npm run dev:local   # Start everything
+bun run db:up && bun run dev:local   # Start everything
 
 # Reset if database gets corrupted
-npm run db:reset           # Destroys all data, re-runs migrations
-npm run db:seed            # Re-create test users
+bun run db:reset           # Destroys all data, re-runs migrations
+bun run db:seed            # Re-create test users
 ```
 
 **Local vs AWS Configuration**:
@@ -199,7 +199,7 @@ npm run db:seed            # Re-create test users
 | Local Docker | `postgresql://postgres:postgres@localhost:5432/aistudio` | `false` |
 | AWS Aurora | `postgresql://user:pass@aurora-cluster:5432/aistudio` | `true` (default) |
 
-**Test Users** (after `npm run db:seed`):
+**Test Users** (after `bun run db:seed`):
 - `test@example.com` - administrator role
 - `staff@example.com` - staff role
 - `student@example.com` - student role
@@ -412,7 +412,7 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 - **Don't** use `Vpc.fromVpcAttributes` - use `VPCProvider.getOrCreate()`
 - **Don't** hardcode secrets - use AWS Secrets Manager
 - **Don't** trust app code for DB schema - use MCP tools
-- **Don't** deploy infrastructure without running `npx cdk synth` first
+- **Don't** deploy infrastructure without running `bunx cdk synth` first
 
 ### Security
 - **Don't** grant `resources: ['*']` in IAM policies (except where AWS requires it)
