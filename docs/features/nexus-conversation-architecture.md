@@ -495,6 +495,27 @@ useEffect(() => {
 // The component doesn't remount, so useEffect only runs once
 ```
 
+### ❌ Pitfall 6: Session object reference in useEffect deps
+
+```typescript
+// WRONG - new session object on every refetch triggers re-mount
+const { status, data: session } = useSession()
+useEffect(() => { ... }, [conversationId, status, session])
+// ← session is a new object reference on every SessionProvider refetch,
+//    even if auth state hasn't changed. This causes the effect to re-run,
+//    setting loading=true and unmounting the conversation tree (losing draft text).
+```
+
+```typescript
+// CORRECT - use only the stable `status` string
+const { status } = useSession()
+useEffect(() => { ... }, [conversationId, status])
+// ← status is a primitive string ('loading' | 'authenticated' | 'unauthenticated')
+//    that only changes on actual auth state transitions.
+```
+
+See #811 for the full root cause analysis.
+
 ---
 
 ## Troubleshooting Guide
