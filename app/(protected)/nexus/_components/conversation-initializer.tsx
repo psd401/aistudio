@@ -176,8 +176,8 @@ export function ConversationInitializer({
       return
     }
 
-    // Note: NextAuth guarantees session.user exists when status === 'authenticated'.
-    // No additional guard needed — status check above is sufficient.
+    // In this project, our NextAuth configuration ensures session.user is set when status === 'authenticated'.
+    // Given that setup (see auth.ts and Session type augmentation), no additional session guard is needed here.
 
     if (!conversationId) {
       startTransition(() => {

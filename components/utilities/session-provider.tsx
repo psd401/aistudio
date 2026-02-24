@@ -7,5 +7,12 @@ export default function AuthSessionProvider({
 }: {
   children: React.ReactNode;
 }) {
-  return <SessionProvider refetchOnWindowFocus={false}>{children}</SessionProvider>;
+  // refetchOnWindowFocus disabled to prevent unnecessary session object churn on tab switch
+  // (which would trigger useEffect deps that include `status`). A 5-minute background interval
+  // preserves session expiry detection without requiring window focus events.
+  return (
+    <SessionProvider refetchOnWindowFocus={false} refetchInterval={5 * 60}>
+      {children}
+    </SessionProvider>
+  );
 }
