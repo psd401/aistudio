@@ -35,7 +35,7 @@ describe('show-chart-tool', () => {
       expect(args).toEqual(originalArgs)
     })
 
-    it('should not encode ampersands in data values', async () => {
+    it('should not mutate original args when data contains HTML-encodable characters', async () => {
       const args = {
         type: 'bar' as const,
         title: 'Test & Chart',

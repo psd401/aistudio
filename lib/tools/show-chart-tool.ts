@@ -103,9 +103,15 @@ function sanitizeChartArgs(args: ShowChartArgs): ShowChartArgs {
       label: escapeHtml(s.label),
     })),
     data: args.data.map(item => {
-      const sanitized: Record<string, string | number | boolean | null> = {}
+      // Use null-prototype object to prevent prototype pollution from
+      // model-controlled keys (e.g., __proto__, constructor, prototype)
+      const sanitized = Object.create(null) as Record<string, string | number | boolean | null>
       for (const [key, value] of Object.entries(item)) {
-        sanitized[escapeHtml(key)] = typeof value === 'string' ? escapeHtml(value) : value
+        const escapedKey = escapeHtml(key)
+        if (escapedKey === '__proto__' || escapedKey === 'constructor' || escapedKey === 'prototype') {
+          continue
+        }
+        sanitized[escapedKey] = typeof value === 'string' ? escapeHtml(value) : value
       }
       return sanitized
     }),
@@ -215,12 +221,12 @@ export function createShowChartTool(): Tool<ShowChartArgs, ChartToolResult> {
           return validationError
         }
 
-        // Sanitize into a separate copy — do NOT mutate `args` in place.
-        // The AI SDK holds a reference to `args` for streaming argsText;
-        // mutating it causes &/&amp; drift that breaks assistant-ui. (#808)
-        const sanitized = sanitizeChartArgs(args)
-
-        log.info('Chart generated successfully', { chartId, type: sanitized.type })
+        // sanitizeChartArgs() is defined for future server-side use (e.g., stored
+        // chart data), but is intentionally NOT called here. The execute function
+        // only returns { id, success } — the frontend renders directly from the
+        // AI SDK's args object, and React JSX escapes all text at render time.
+        // Calling sanitizeChartArgs here would allocate a deep copy with no consumer.
+        log.info('Chart generated successfully', { chartId, type: args.type })
         return { id: chartId, success: true }
       } catch (error) {
         log.error('Chart generation failed', {
