@@ -158,7 +158,7 @@ export function ConversationInitializer({
 }) {
   const [messages, setMessages] = useState<UIMessage[]>([])
   const [loading, setLoading] = useState(true)
-  const { status, data: session } = useSession()
+  const { status } = useSession()
 
   useEffect(() => {
     // Verify authentication before making API call
@@ -176,15 +176,8 @@ export function ConversationInitializer({
       return
     }
 
-    // Guard against authenticated status with missing user data
-    if (status === 'authenticated' && !session?.user) {
-      log.warn('Authenticated but no user data, skipping conversation load')
-      startTransition(() => {
-        setMessages([])
-        setLoading(false)
-      })
-      return
-    }
+    // Note: NextAuth guarantees session.user exists when status === 'authenticated'.
+    // No additional guard needed — status check above is sufficient.
 
     if (!conversationId) {
       startTransition(() => {
@@ -236,7 +229,7 @@ export function ConversationInitializer({
     return () => {
       abortController.abort()
     }
-  }, [conversationId, status, session])
+  }, [conversationId, status])
 
   if (loading) {
     return (
