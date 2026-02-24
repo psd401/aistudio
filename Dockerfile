@@ -11,8 +11,9 @@ WORKDIR /app
 # Install dependencies for native packages
 RUN apk add --no-cache libc6-compat
 
-# Copy package files
+# Copy package files and patches (see patches/README.md)
 COPY package.json bun.lock ./
+COPY patches/ ./patches/
 
 # Install ALL dependencies (including dev) with BuildKit cache mount
 # Dev dependencies needed for build stage

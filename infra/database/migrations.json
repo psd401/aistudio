@@ -55,6 +55,8 @@
     "057-add-decision-capture-tool.sql",
     "058-nexus-mcp-user-tokens.sql",
     "059-mcp-oauth-registration.sql",
-    "060-mcp-cognito-passthrough-auth.sql"
+    "060-mcp-cognito-passthrough-auth.sql",
+    "061-mcp-oauth-credentials.sql",
+    "062-mcp-tool-source.sql"
   ]
 }

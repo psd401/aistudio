@@ -47,7 +47,7 @@
     "@ai-sdk/amazon-bedrock": "~4.0.61",
     "@ai-sdk/azure": "~3.0.31",
     "@ai-sdk/google": "~3.0.29",
-    "@ai-sdk/mcp": "~1.0.21",
+    "@ai-sdk/mcp": "1.0.21",
     "@ai-sdk/openai": "~3.0.30",
     "@ai-sdk/react": "~3.0.93",
     "@assistant-ui/react": "^0.12.3",
@@ -203,5 +203,8 @@
     "ai": "~6.0.91",
     "@ai-sdk/provider": "~3.0.8",
     "@ai-sdk/provider-utils": "~4.0.15"
+  },
+  "patchedDependencies": {
+    "@ai-sdk/mcp@1.0.21": "patches/@ai-sdk%2Fmcp@1.0.21.patch"
   }
 }

@@ -28,11 +28,18 @@ import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { eq } from "drizzle-orm"
 import { nexusMcpServers } from "@/lib/db/schema"
-import { requireUserAccess, rejectUnsafeMcpUrl } from "@/lib/mcp/connector-service"
+import { requireUserAccess, rejectUnsafeMcpUrl, getOAuthCredentials } from "@/lib/mcp/connector-service"
 import { encryptToken } from "@/lib/crypto/token-encryption"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { ServerSideOAuthProvider } from "@/lib/mcp/mcp-oauth-provider"
-import { UUID_RE, getMcpAuthCookieName, classifyMcpOAuthError } from "@/lib/mcp/mcp-auth-utils"
+import {
+  UUID_RE,
+  getMcpAuthCookieName,
+  classifyMcpOAuthError,
+  generateCodeVerifier,
+  generateCodeChallenge,
+  generateStateToken,
+} from "@/lib/mcp/mcp-auth-utils"
 
 const log = createLogger({ action: "mcp-auth-initiate" })
 
@@ -109,6 +116,70 @@ export async function GET(req: Request): Promise<Response> {
     const baseUrl = getIssuerUrl()
     const redirectUrl = `${baseUrl}/api/connectors/mcp-auth/callback`
 
+    // ── Pre-registered OAuth flow ──────────────────────────────────────────
+    // When the server has inline or Secrets Manager credentials, bypass the
+    // SDK's auth() and dynamic registration. Build the authorization URL
+    // ourselves using the custom authorize endpoint from credentials.
+    const credentials = await getOAuthCredentials(server)
+    if (credentials) {
+
+      if (!credentials.authorizationEndpointUrl) {
+        log.error("Missing authorizationEndpointUrl in credentials", { requestId, serverId })
+        timer({ status: "error", reason: "missing_auth_endpoint" })
+        return NextResponse.json(
+          { error: "OAuth credentials are missing the authorization endpoint URL." },
+          { status: 500 }
+        )
+      }
+
+      // Validate authorization endpoint URL (SSRF prevention) — same guard as server.url
+      rejectUnsafeMcpUrl(credentials.authorizationEndpointUrl)
+
+      // Generate PKCE code_verifier + S256 code_challenge
+      const codeVerifier = generateCodeVerifier()
+      const codeChallenge = generateCodeChallenge(codeVerifier)
+
+      // Generate state token for CSRF (format: serverId:randomToken)
+      const stateToken = `${serverId}:${generateStateToken()}`
+
+      // Build authorization URL
+      const authUrl = new URL(credentials.authorizationEndpointUrl)
+      authUrl.searchParams.set("response_type", "code")
+      authUrl.searchParams.set("client_id", credentials.clientId)
+      authUrl.searchParams.set("redirect_uri", redirectUrl)
+      authUrl.searchParams.set("code_challenge", codeChallenge)
+      authUrl.searchParams.set("code_challenge_method", "S256")
+      authUrl.searchParams.set("state", stateToken)
+      if (credentials.scopes) {
+        authUrl.searchParams.set("scope", credentials.scopes)
+      }
+
+      // Store state cookie (same pattern as MCP-native flow)
+      const cookiePayload = JSON.stringify({
+        codeVerifier,
+        serverId,
+        userId,
+        createdAt: Date.now(),
+        oauthState: stateToken,
+      })
+      const encryptedState = await encryptToken(cookiePayload)
+
+      const cookieStore = await cookies()
+      cookieStore.set(getMcpAuthCookieName(serverId), encryptedState, {
+        httpOnly: true,
+        secure: process.env.ENVIRONMENT === "prod" || process.env.ENVIRONMENT === "staging" || process.env.NODE_ENV === "production",
+        sameSite: "lax",
+        maxAge: STATE_COOKIE_MAX_AGE,
+        path: "/api/connectors/mcp-auth",
+      })
+
+      timer({ status: "success" })
+      log.info("Pre-registered OAuth authorization URL generated", { requestId, serverId })
+
+      return NextResponse.json({ url: authUrl.toString() })
+    }
+
+    // ── MCP-native OAuth flow (no credentialsKey) ──────────────────────────
     // 5. Create provider and call auth()
     const provider = new ServerSideOAuthProvider({
       serverId,
@@ -153,7 +224,7 @@ export async function GET(req: Request): Promise<Response> {
     const cookieStore = await cookies()
     cookieStore.set(getMcpAuthCookieName(serverId), encryptedState, {
       httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
+      secure: process.env.ENVIRONMENT === "prod" || process.env.ENVIRONMENT === "staging" || process.env.NODE_ENV === "production",
       sameSite: "lax",
       maxAge: STATE_COOKIE_MAX_AGE,
       path: "/api/connectors/mcp-auth",

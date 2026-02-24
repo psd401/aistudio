@@ -18,15 +18,31 @@ import { eq, count } from "drizzle-orm"
 import { revalidatePath } from "next/cache"
 import type { ActionState } from "@/types/actions-types"
 import type { SelectNexusMcpServer, InsertNexusMcpServer } from "@/lib/db/types"
-import type { McpAuthType } from "@/lib/mcp/connector-types"
+import type { McpAuthType, McpToolSource } from "@/lib/mcp/connector-types"
+import type { OAuthCredentialsConfig } from "@/lib/db/schema/tables/nexus-mcp-servers"
+import { encryptToken } from "@/lib/crypto/token-encryption"
+import { sql } from "drizzle-orm"
 
 // ============================================
 // Types
 // ============================================
 
-/** Admin-facing server info — omits mcpOauthRegistration (contains encrypted_client_secret). */
-export interface McpServerWithStats extends Omit<SelectNexusMcpServer, "mcpOauthRegistration"> {
+/** Admin-facing server info — omits secrets (mcpOauthRegistration, oauthCredentials). */
+export interface McpServerWithStats extends Omit<SelectNexusMcpServer, "mcpOauthRegistration" | "oauthCredentials"> {
   connectionCount: number
+  /** True when inline OAuth credentials are configured on this connector */
+  hasOAuthCredentials: boolean
+  /** How tools are provided: 'mcp' (fetch from server) or 'custom' (built-in definitions) */
+  toolSource: string | null
+}
+
+/** Plaintext OAuth credentials from the admin form — clientSecret encrypted before storage */
+export interface OAuthCredentialsInput {
+  clientId: string
+  clientSecret: string
+  authorizationEndpointUrl?: string
+  tokenEndpointUrl?: string
+  scopes?: string
 }
 
 export interface CreateMcpServerInput {
@@ -34,7 +50,9 @@ export interface CreateMcpServerInput {
   url: string
   transport: "http" | "stdio" | "websocket"
   authType: McpAuthType
+  toolSource?: McpToolSource
   credentialsKey?: string
+  oauthCredentials?: OAuthCredentialsInput | null
   allowedUsers?: number[]
   maxConnections?: number
 }
@@ -45,7 +63,9 @@ export interface UpdateMcpServerInput {
   url?: string
   transport?: "http" | "stdio" | "websocket"
   authType?: McpAuthType
+  toolSource?: McpToolSource
   credentialsKey?: string | null
+  oauthCredentials?: OAuthCredentialsInput | null
   allowedUsers?: number[]
   maxConnections?: number
 }
@@ -58,7 +78,9 @@ type McpServerUpdate = Partial<
     | "url"
     | "transport"
     | "authType"
+    | "toolSource"
     | "credentialsKey"
+    | "oauthCredentials"
     | "allowedUsers"
     | "maxConnections"
     | "updatedAt"
@@ -90,10 +112,14 @@ function validateMcpUrl(rawUrl: string): void {
     throw ErrorFactories.invalidInput("url", "[redacted]", "Must be a valid URL")
   }
 
-  const allowedProtocols =
-    process.env.NODE_ENV === "production"
-      ? ["https:", "wss:"]
-      : ["https:", "wss:", "http:", "ws:"]
+  // Use ENVIRONMENT (set by ECS task def) not NODE_ENV — ECS sets NODE_ENV=production
+  // for all environments including dev. Mirrors rejectUnsafeMcpUrl() in connector-service.ts.
+  const environment = process.env.ENVIRONMENT || process.env.DEPLOYMENT_ENV
+  const isProduction = environment === "prod" || environment === "staging"
+
+  const allowedProtocols = isProduction
+    ? ["https:", "wss:"]
+    : ["https:", "wss:", "http:", "ws:"]
 
   if (!allowedProtocols.includes(parsed.protocol)) {
     throw ErrorFactories.invalidInput(
@@ -103,6 +129,8 @@ function validateMcpUrl(rawUrl: string): void {
     )
   }
 
+  // Private range patterns — kept in sync with rejectUnsafeMcpUrl() in connector-service.ts
+  const hostname = parsed.hostname.toLowerCase()
   const privateRanges = [
     /^localhost$/i,
     /^0\.0\.0\.0$/,
@@ -110,19 +138,41 @@ function validateMcpUrl(rawUrl: string): void {
     /^10\./,
     /^172\.(1[6-9]|2\d|3[01])\./,
     /^192\.168\./,
-    /^169\.254\./, // AWS EC2 instance metadata
-    /^\[?::1\]?$/,       // IPv6 loopback (bare or bracketed)
-    /^\[fc/i,             // IPv6 ULA fc00::/7 (bracket notation in URLs)
-    /^\[fd/i,             // IPv6 ULA fd00::/8
-    /^\[fe80/i,           // IPv6 link-local
+    /^169\.254\./, // link-local / AWS IMDS
+    /^\[?::1\]?$/,            // IPv6 loopback (bare or bracketed)
+    /^\[?fc[\da-f]{2}:/i,     // IPv6 unique-local fc00::/7 (bare or bracketed)
+    /^\[?fd[\da-f]{2}:/i,     // IPv6 unique-local fd00::/8
+    /^\[?fe80:/i,             // IPv6 link-local
+    /^\[?::ffff:/i,           // IPv4-mapped IPv6 (e.g. ::ffff:127.0.0.1)
+    /^metadata\.google\.internal$/,
   ]
 
-  if (privateRanges.some((p) => p.test(parsed.hostname))) {
+  if (privateRanges.some((p) => p.test(hostname))) {
     throw ErrorFactories.invalidInput(
       "url",
       "[redacted]",
       "URL must not target internal network ranges"
     )
+  }
+}
+
+/**
+ * Validates OAuth credential endpoint URLs and clientId.
+ * Reuses validateMcpUrl for SSRF prevention on stored endpoint URLs.
+ */
+function validateOAuthCredentials(creds: OAuthCredentialsInput): void {
+  const trimmedId = creds.clientId.trim()
+  if (trimmedId.length === 0 || trimmedId.length > 255) {
+    throw ErrorFactories.invalidInput("clientId", "[redacted]", "Client ID must be 1–255 characters")
+  }
+  if (!creds.clientSecret) {
+    throw ErrorFactories.invalidInput("clientSecret", "[redacted]", "Client Secret must not be empty")
+  }
+  if (creds.authorizationEndpointUrl) {
+    validateMcpUrl(creds.authorizationEndpointUrl)
+  }
+  if (creds.tokenEndpointUrl) {
+    validateMcpUrl(creds.tokenEndpointUrl)
   }
 }
 
@@ -161,6 +211,29 @@ function validateServerInput(
   }
 }
 
+/**
+ * Strips secret fields (oauthCredentials, mcpOauthRegistration) from a DB row
+ * before returning it to the client. The connectionCount defaults to 0 when
+ * derived from a create/update (not a join query).
+ */
+function stripSecrets(row: SelectNexusMcpServer, connectionCount = 0): McpServerWithStats {
+  return {
+    id: row.id,
+    name: row.name,
+    url: row.url,
+    transport: row.transport,
+    authType: row.authType,
+    toolSource: row.toolSource,
+    credentialsKey: row.credentialsKey,
+    allowedUsers: row.allowedUsers,
+    maxConnections: row.maxConnections,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+    connectionCount,
+    hasOAuthCredentials: row.oauthCredentials !== null,
+  }
+}
+
 // ============================================
 // List MCP Servers
 // ============================================
@@ -185,12 +258,14 @@ export async function listMcpServers(): Promise<
             url: nexusMcpServers.url,
             transport: nexusMcpServers.transport,
             authType: nexusMcpServers.authType,
+            toolSource: nexusMcpServers.toolSource,
             credentialsKey: nexusMcpServers.credentialsKey,
             allowedUsers: nexusMcpServers.allowedUsers,
             maxConnections: nexusMcpServers.maxConnections,
             createdAt: nexusMcpServers.createdAt,
             updatedAt: nexusMcpServers.updatedAt,
             connectionCount: count(nexusMcpConnections.id),
+            hasOAuthCredentials: sql<boolean>`CASE WHEN ${nexusMcpServers.oauthCredentials} IS NOT NULL THEN true ELSE false END`,
           })
           .from(nexusMcpServers)
           .leftJoin(
@@ -205,6 +280,7 @@ export async function listMcpServers(): Promise<
     const result: McpServerWithStats[] = servers.map((s) => ({
       ...s,
       connectionCount: Number(s.connectionCount),
+      hasOAuthCredentials: Boolean(s.hasOAuthCredentials),
     }))
 
     timer({ status: "success", count: result.length })
@@ -230,7 +306,7 @@ export async function listMcpServers(): Promise<
 
 export async function createMcpServer(
   input: CreateMcpServerInput
-): Promise<ActionState<SelectNexusMcpServer>> {
+): Promise<ActionState<McpServerWithStats>> {
   const requestId = generateRequestId()
   const timer = startTimer("admin.createMcpServer")
   const log = createLogger({ requestId, action: "admin.createMcpServer" })
@@ -246,7 +322,20 @@ export async function createMcpServer(
     validateMcpUrl(input.url)
     validateServerInput(input)
 
-    const [server] = await executeQuery(
+    // Encrypt OAuth client secret if inline credentials are provided
+    let oauthCredentialsValue: OAuthCredentialsConfig | null = null
+    if (input.oauthCredentials) {
+      validateOAuthCredentials(input.oauthCredentials)
+      oauthCredentialsValue = {
+        clientId: input.oauthCredentials.clientId,
+        encryptedClientSecret: await encryptToken(input.oauthCredentials.clientSecret),
+        authorizationEndpointUrl: input.oauthCredentials.authorizationEndpointUrl,
+        tokenEndpointUrl: input.oauthCredentials.tokenEndpointUrl,
+        scopes: input.oauthCredentials.scopes,
+      }
+    }
+
+    const [serverRow] = await executeQuery(
       (db) =>
         db
           .insert(nexusMcpServers)
@@ -255,7 +344,9 @@ export async function createMcpServer(
             url: input.url,
             transport: input.transport,
             authType: input.authType,
+            toolSource: input.toolSource ?? "mcp",
             credentialsKey: input.credentialsKey ?? null,
+            oauthCredentials: oauthCredentialsValue,
             allowedUsers: input.allowedUsers ?? [],
             maxConnections: input.maxConnections ?? 10,
           })
@@ -263,11 +354,11 @@ export async function createMcpServer(
       "createMcpServer"
     )
 
-    timer({ status: "success", serverId: server.id })
-    log.info("MCP server created", { serverId: server.id, name: server.name })
+    timer({ status: "success", serverId: serverRow.id })
+    log.info("MCP server created", { serverId: serverRow.id, name: serverRow.name })
 
     revalidatePath("/admin/connectors")
-    return createSuccess(server, "Connector created successfully")
+    return createSuccess(stripSecrets(serverRow), "Connector created successfully")
   } catch (error) {
     timer({ status: "error" })
     return handleError(
@@ -288,7 +379,7 @@ export async function createMcpServer(
 
 export async function updateMcpServer(
   input: UpdateMcpServerInput
-): Promise<ActionState<SelectNexusMcpServer>> {
+): Promise<ActionState<McpServerWithStats>> {
   const requestId = generateRequestId()
   const timer = startTimer("admin.updateMcpServer")
   const log = createLogger({ requestId, action: "admin.updateMcpServer" })
@@ -313,8 +404,24 @@ export async function updateMcpServer(
     if (fields.url !== undefined) updateData.url = fields.url
     if (fields.transport !== undefined) updateData.transport = fields.transport
     if (fields.authType !== undefined) updateData.authType = fields.authType
+    if (fields.toolSource !== undefined) updateData.toolSource = fields.toolSource
     if (fields.credentialsKey !== undefined)
       updateData.credentialsKey = fields.credentialsKey
+    if (fields.oauthCredentials !== undefined) {
+      if (fields.oauthCredentials === null) {
+        // null clears inline credentials
+        updateData.oauthCredentials = null
+      } else {
+        validateOAuthCredentials(fields.oauthCredentials)
+        updateData.oauthCredentials = {
+          clientId: fields.oauthCredentials.clientId,
+          encryptedClientSecret: await encryptToken(fields.oauthCredentials.clientSecret),
+          authorizationEndpointUrl: fields.oauthCredentials.authorizationEndpointUrl,
+          tokenEndpointUrl: fields.oauthCredentials.tokenEndpointUrl,
+          scopes: fields.oauthCredentials.scopes,
+        }
+      }
+    }
     if (fields.allowedUsers !== undefined)
       updateData.allowedUsers = fields.allowedUsers
     if (fields.maxConnections !== undefined)
@@ -324,7 +431,7 @@ export async function updateMcpServer(
     updateData.updatedAt = new Date()
 
     if (Object.keys(updateData).length <= 1) {
-      const [current] = await executeQuery(
+      const [currentRow] = await executeQuery(
         (db) =>
           db
             .select()
@@ -333,15 +440,16 @@ export async function updateMcpServer(
             .limit(1),
         "updateMcpServer.noOp"
       )
-      if (!current) {
+      if (!currentRow) {
         throw ErrorFactories.dbRecordNotFound("nexus_mcp_servers", input.id)
       }
       timer({ status: "noop" })
       log.info("Update called with no fields to change", { serverId: input.id })
-      return createSuccess(current, "No changes to update")
+      const stripped: McpServerWithStats = stripSecrets(currentRow)
+      return createSuccess(stripped, "No changes to update")
     }
 
-    const [server] = await executeQuery(
+    const [serverRow] = await executeQuery(
       (db) =>
         db
           .update(nexusMcpServers)
@@ -351,15 +459,15 @@ export async function updateMcpServer(
       "updateMcpServer"
     )
 
-    if (!server) {
+    if (!serverRow) {
       throw ErrorFactories.dbRecordNotFound("nexus_mcp_servers", input.id)
     }
 
-    timer({ status: "success", serverId: server.id })
-    log.info("MCP server updated", { serverId: server.id })
+    timer({ status: "success", serverId: serverRow.id })
+    log.info("MCP server updated", { serverId: serverRow.id })
 
     revalidatePath("/admin/connectors")
-    return createSuccess(server, "Connector updated successfully")
+    return createSuccess(stripSecrets(serverRow), "Connector updated successfully")
   } catch (error) {
     timer({ status: "error" })
     return handleError(

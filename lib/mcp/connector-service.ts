@@ -29,6 +29,7 @@ import {
 import type {
   McpConnector,
   McpAuthType,
+  McpToolSource,
   McpTransportType,
   McpUserConnectionStatus,
   McpConnectionStatus,
@@ -36,6 +37,8 @@ import type {
   McpConnectorToolsResult,
   McpToolCallLogEntry,
 } from "./connector-types"
+import type { McpToolSet } from "./connector-types"
+import { loadCustomTools } from "./custom-tools/registry"
 import { ServerSideOAuthProvider } from "./mcp-oauth-provider"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 
@@ -165,6 +168,29 @@ export async function getConnectorTools(
   // 2. Verify user has access to this server (same rules as getAvailableConnectors)
   requireUserAccess(server, userId, userRoleNames)
 
+  // 2b. Custom tool source — skip MCP client entirely, return built-in tool definitions
+  const toolSource = (server.toolSource ?? "mcp") as McpToolSource
+  if (toolSource === "custom") {
+    const accessToken = tokenRow?.encryptedAccessToken
+      ? await decryptToken(tokenRow.encryptedAccessToken)
+      : null
+    if (!accessToken) {
+      throw new Error("No OAuth token stored. Please connect to the service first.")
+    }
+    // Cast ToolSet → McpToolSet: both are Record<string, Tool> with compatible shapes.
+    // The AI SDK merges them as ToolSet in the chat route (Object.assign).
+    const tools = loadCustomTools(server.url, accessToken) as unknown as McpToolSet
+    const toolCount = Object.keys(tools).length
+    timer({ status: "success", toolCount, toolSource: "custom" })
+    log.info("Custom connector tools loaded", { requestId, serverId, serverName: server.name, toolCount })
+    return {
+      serverId,
+      serverName: server.name,
+      tools,
+      close: async () => {},
+    }
+  }
+
   // 3. Validate transport — @ai-sdk/mcp only supports "http" for server-to-server
   assertHttpTransport(server.transport)
 
@@ -176,18 +202,35 @@ export async function getConnectorTools(
   let transportConfig: Parameters<typeof createMCPClient>[0]["transport"]
 
   if (authType === "oauth") {
-    // MCP-native OAuth: let the SDK handle token injection via authProvider
-    const baseUrl = getIssuerUrl()
-    const redirectUrl = `${baseUrl}/api/connectors/mcp-auth/callback`
-    const authProvider = new ServerSideOAuthProvider({
-      serverId,
-      userId,
-      redirectUrl,
-    })
-    transportConfig = {
-      type: "http",
-      url: server.url,
-      authProvider,
+    if (server.oauthCredentials || server.credentialsKey) {
+      // Pre-registered OAuth: inject stored token as static Bearer header.
+      // Don't use authProvider — it triggers MCP metadata discovery which
+      // would hit the host-restricted authorize endpoint.
+      const accessToken = tokenRow?.encryptedAccessToken
+        ? await decryptToken(tokenRow.encryptedAccessToken)
+        : null
+      if (!accessToken) {
+        throw new Error("No OAuth token stored. Please connect to the service first.")
+      }
+      transportConfig = {
+        type: "http",
+        url: server.url,
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }
+    } else {
+      // MCP-native OAuth: let the SDK handle token injection via authProvider
+      const baseUrl = getIssuerUrl()
+      const redirectUrl = `${baseUrl}/api/connectors/mcp-auth/callback`
+      const authProvider = new ServerSideOAuthProvider({
+        serverId,
+        userId,
+        redirectUrl,
+      })
+      transportConfig = {
+        type: "http",
+        url: server.url,
+        authProvider,
+      }
     }
   } else if (authType === "cognito_passthrough") {
     // Cognito passthrough: forward session idToken as Bearer header.
@@ -607,10 +650,8 @@ async function exchangeRefreshToken(
   server: ServerRow,
   refreshToken: string
 ): Promise<OAuthTokenResponse | TokenRefreshFailure> {
-  // Load client credentials from Secrets Manager if configured
-  const credentials = server.credentialsKey
-    ? await loadOAuthCredentials(server.credentialsKey)
-    : null
+  // Load client credentials: inline DB credentials > Secrets Manager > none
+  const credentials = await getOAuthCredentials(server)
 
   // Resolve token endpoint: credentials secret > fallback to root-relative /oauth/token.
   // new URL("/oauth/token", base) intentionally strips the base path — OAuth token
@@ -626,13 +667,24 @@ async function exchangeRefreshToken(
     grant_type: "refresh_token",
     refresh_token: refreshToken,
   }
-  if (credentials?.clientId) body.client_id = credentials.clientId
-  if (credentials?.clientSecret) body.client_secret = credentials.clientSecret
+
+  // Build headers — use Basic auth when both clientId and clientSecret are
+  // available (required by Canva and many OAuth providers), otherwise fall
+  // back to client_secret_post (credentials in request body).
+  const headers: Record<string, string> = {
+    "Content-Type": "application/x-www-form-urlencoded",
+  }
+  if (credentials?.clientId && credentials?.clientSecret) {
+    headers["Authorization"] = `Basic ${Buffer.from(`${credentials.clientId}:${credentials.clientSecret}`).toString("base64")}`
+  } else {
+    if (credentials?.clientId) body.client_id = credentials.clientId
+    if (credentials?.clientSecret) body.client_secret = credentials.clientSecret
+  }
 
   try {
     const resp = await fetch(tokenEndpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers,
       signal: AbortSignal.timeout(15_000),
       body: new URLSearchParams(body),
     })
@@ -670,6 +722,30 @@ async function exchangeRefreshToken(
 }
 
 // ─── OAuth Credentials Helper ────────────────────────────────────────────────
+
+/**
+ * Resolves OAuth client credentials for a server.
+ * Priority: inline oauthCredentials (DB) > credentialsKey (Secrets Manager)
+ * Returns null if no credentials are configured (MCP-native OAuth).
+ */
+export async function getOAuthCredentials(
+  server: ServerRow
+): Promise<OAuthClientCredentials | null> {
+  if (server.oauthCredentials) {
+    const decryptedSecret = await decryptToken(server.oauthCredentials.encryptedClientSecret)
+    return {
+      clientId: server.oauthCredentials.clientId,
+      clientSecret: decryptedSecret,
+      authorizationEndpointUrl: server.oauthCredentials.authorizationEndpointUrl,
+      tokenEndpointUrl: server.oauthCredentials.tokenEndpointUrl,
+      scopes: server.oauthCredentials.scopes,
+    }
+  }
+  if (server.credentialsKey) {
+    return loadOAuthCredentials(server.credentialsKey)
+  }
+  return null
+}
 
 /** Shape of the JSON stored in Secrets Manager under credentialsKey */
 export interface OAuthClientCredentials {

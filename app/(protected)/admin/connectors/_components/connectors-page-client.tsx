@@ -12,13 +12,13 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import {
-  Sheet,
-  SheetContent,
-  SheetDescription,
-  SheetHeader,
-  SheetTitle,
-  SheetTrigger,
-} from "@/components/ui/sheet"
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog"
 import {
   AlertDialog,
   AlertDialogAction,
@@ -45,7 +45,7 @@ interface Props {
 
 export function ConnectorsPageClient({ initialServers, fetchError: initialFetchError }: Props) {
   const [servers, setServers] = useState(initialServers)
-  const [sheetOpen, setSheetOpen] = useState(false)
+  const [dialogOpen, setDialogOpen] = useState(false)
   const [editingServer, setEditingServer] = useState<McpServerWithStats | null>(
     null
   )
@@ -78,16 +78,16 @@ export function ConnectorsPageClient({ initialServers, fetchError: initialFetchE
 
   const handleEdit = useCallback((server: McpServerWithStats) => {
     setEditingServer(server)
-    setSheetOpen(true)
+    setDialogOpen(true)
   }, [])
 
   const handleAdd = useCallback(() => {
     setEditingServer(null)
-    setSheetOpen(true)
+    setDialogOpen(true)
   }, [])
 
   const handleFormSuccess = useCallback(() => {
-    setSheetOpen(false)
+    setDialogOpen(false)
     setEditingServer(null)
     void refresh()
   }, [refresh])
@@ -125,32 +125,32 @@ export function ConnectorsPageClient({ initialServers, fetchError: initialFetchE
   return (
     <div>
       <div className="flex justify-end mb-4">
-        <Sheet open={sheetOpen} onOpenChange={setSheetOpen}>
-          <SheetTrigger asChild>
+        <Dialog open={dialogOpen} onOpenChange={setDialogOpen}>
+          <DialogTrigger asChild>
             <Button onClick={handleAdd}>
               <Plus className="mr-2 h-4 w-4" />
               Add Connector
             </Button>
-          </SheetTrigger>
-          <SheetContent className="sm:max-w-lg">
-            <SheetHeader>
-              <SheetTitle>
+          </DialogTrigger>
+          <DialogContent className="sm:max-w-lg max-h-[85vh] overflow-y-auto">
+            <DialogHeader>
+              <DialogTitle>
                 {editingServer ? "Edit Connector" : "Add Connector"}
-              </SheetTitle>
-              <SheetDescription>
+              </DialogTitle>
+              <DialogDescription>
                 {editingServer
                   ? "Update MCP server configuration."
                   : "Register a new MCP server as a Nexus connector."}
-              </SheetDescription>
-            </SheetHeader>
+              </DialogDescription>
+            </DialogHeader>
             {/* key forces remount when switching between servers, resetting form state */}
             <ConnectorFormSheet
               key={editingServer?.id ?? "new"}
               server={editingServer}
               onSuccess={handleFormSuccess}
             />
-          </SheetContent>
-        </Sheet>
+          </DialogContent>
+        </Dialog>
       </div>
 
       {error && (

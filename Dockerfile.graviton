@@ -12,8 +12,9 @@ WORKDIR /app
 # Install dependencies for native packages on ARM64
 RUN apk add --no-cache libc6-compat
 
-# Copy package files
+# Copy package files and patches (see patches/README.md)
 COPY package.json bun.lock ./
+COPY patches/ ./patches/
 
 # Install ALL dependencies with BuildKit cache mount
 # Native modules will be compiled for ARM64

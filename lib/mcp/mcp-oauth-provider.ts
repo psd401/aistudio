@@ -245,6 +245,18 @@ export class ServerSideOAuthProvider implements OAuthClientProvider {
       return undefined
     }
 
+    // Stale registration check: if the redirect_uri is missing (pre-fix registration)
+    // or doesn't match the current one (e.g. env migration), the registration is invalid.
+    // Return undefined to trigger fresh dynamic client registration.
+    if (reg.registered_redirect_uri !== this._redirectUrl) {
+      log.warn("MCP OAuth registration has stale or missing redirect_uri — triggering re-registration", {
+        serverId: this.serverId,
+        stored: reg.registered_redirect_uri ?? "(not set)",
+        current: this._redirectUrl,
+      })
+      return undefined
+    }
+
     // Decrypt client_secret if present
     let clientSecret: string | undefined
     if (reg.encrypted_client_secret) {
@@ -295,6 +307,8 @@ export class ServerSideOAuthProvider implements OAuthClientProvider {
     if (clientInformation.client_secret_expires_at != null) {
       registration.client_secret_expires_at = clientInformation.client_secret_expires_at
     }
+
+    registration.registered_redirect_uri = this._redirectUrl
 
     await executeQuery(
       (db) =>
