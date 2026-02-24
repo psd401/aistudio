@@ -1,7 +1,12 @@
 import { createShowChartTool } from '../show-chart-tool'
+import type { ChartToolResult } from '../show-chart-tool'
 
 describe('show-chart-tool', () => {
   const tool = createShowChartTool()
+
+  // AI SDK Tool.execute requires a second options arg; cast for test harness
+  const execute = (args: Parameters<NonNullable<typeof tool.execute>>[0]) =>
+    tool.execute!(args, {} as Parameters<NonNullable<typeof tool.execute>>[1]) as Promise<ChartToolResult>
 
   describe('sanitizeChartArgs does not mutate args in place', () => {
     it('should not modify the original args object when data contains HTML-encodable characters', async () => {
@@ -23,7 +28,7 @@ describe('show-chart-tool', () => {
       // Deep clone to compare after execution
       const originalArgs = JSON.parse(JSON.stringify(args))
 
-      await tool.execute!(args)
+      await execute(args)
 
       // The args object passed to execute must NOT be mutated
       // This is the root cause of issue #808 — mutation causes argsText drift
@@ -42,7 +47,7 @@ describe('show-chart-tool', () => {
         series: [{ key: 'value', label: 'Value' }],
       }
 
-      await tool.execute!(args)
+      await execute(args)
 
       // Original values must be preserved (not HTML-encoded)
       expect(args.title).toBe('Test & Chart')
@@ -61,7 +66,7 @@ describe('show-chart-tool', () => {
         series: [{ key: 'value', label: 'Value' }],
       }
 
-      const result = await tool.execute!(args)
+      const result = await execute(args)
 
       expect(result.success).toBe(true)
       expect(result.id).toBeDefined()
@@ -77,7 +82,7 @@ describe('show-chart-tool', () => {
         series: [{ key: 'value', label: 'Value' }],
       }
 
-      const result = await tool.execute!(args)
+      const result = await execute(args)
 
       expect(result.success).toBe(false)
       expect(result.error).toContain('No data')
@@ -92,7 +97,7 @@ describe('show-chart-tool', () => {
         series: [{ key: 'value', label: 'Value' }],
       }
 
-      const result = await tool.execute!(args)
+      const result = await execute(args)
 
       expect(result.success).toBe(false)
       expect(result.error).toContain('nonexistent')
