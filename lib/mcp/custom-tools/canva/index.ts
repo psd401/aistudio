@@ -37,7 +37,9 @@ function buildTools(accessToken: string): ToolSet {
 export const canvaProvider: CustomToolProvider = {
   key: "canva",
   urlPatterns: [
-    /canva\.com/i,
+    // Anchored patterns prevent evil-canva.com or canva.com.evil.com from matching.
+    /^https?:\/\/canva\.com/i,
+    /^https?:\/\/[\w-]+\.canva\.com/i,
   ],
   buildTools,
 }
