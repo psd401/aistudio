@@ -2,7 +2,6 @@ import type { Tool } from 'ai'
 import { jsonSchema } from 'ai'
 import { createLogger } from '@/lib/logger'
 import { v4 as uuidv4 } from 'uuid'
-import escapeHtml from 'escape-html'
 
 /**
  * Show Chart Tool for AI Assistants
@@ -77,45 +76,6 @@ function validateChartArgs(
   }
 
   return null // Validation passed
-}
-
-/**
- * Sanitize chart arguments to prevent XSS attacks.
- *
- * Returns a NEW object — the original must never be mutated because the AI SDK
- * holds a reference to it for streaming argsText consistency. Mutating in place
- * causes `&` → `&amp;` drift that breaks assistant-ui's append-only check.
- *
- * NOTE: React already escapes text content rendered via JSX, so this is
- * defense-in-depth only. The primary XSS boundary is React's rendering layer.
- *
- * @see https://github.com/psd401/aistudio/issues/808
- */
-function sanitizeChartArgs(args: ShowChartArgs): ShowChartArgs {
-  return {
-    ...args,
-    title: escapeHtml(args.title),
-    description: args.description ? escapeHtml(args.description) : args.description,
-    xKey: escapeHtml(args.xKey),
-    series: args.series.map(s => ({
-      ...s,
-      key: escapeHtml(s.key),
-      label: escapeHtml(s.label),
-    })),
-    data: args.data.map(item => {
-      // Use null-prototype object to prevent prototype pollution from
-      // model-controlled keys (e.g., __proto__, constructor, prototype)
-      const sanitized = Object.create(null) as Record<string, string | number | boolean | null>
-      for (const [key, value] of Object.entries(item)) {
-        const escapedKey = escapeHtml(key)
-        if (escapedKey === '__proto__' || escapedKey === 'constructor' || escapedKey === 'prototype') {
-          continue
-        }
-        sanitized[escapedKey] = typeof value === 'string' ? escapeHtml(value) : value
-      }
-      return sanitized
-    }),
-  }
 }
 
 /**
@@ -221,11 +181,11 @@ export function createShowChartTool(): Tool<ShowChartArgs, ChartToolResult> {
           return validationError
         }
 
-        // sanitizeChartArgs() is defined for future server-side use (e.g., stored
-        // chart data), but is intentionally NOT called here. The execute function
-        // only returns { id, success } — the frontend renders directly from the
-        // AI SDK's args object, and React JSX escapes all text at render time.
-        // Calling sanitizeChartArgs here would allocate a deep copy with no consumer.
+        // NOTE: No server-side HTML sanitization here. The execute function only
+        // returns { id, success } — the frontend renders chart data directly from
+        // the AI SDK's args object, and React JSX escapes all text at render time.
+        // Previously sanitizeChartArgs() mutated args in place, breaking assistant-ui's
+        // append-only argsText invariant during streaming. See #808.
         log.info('Chart generated successfully', { chartId, type: args.type })
         return { id: chartId, success: true }
       } catch (error) {
