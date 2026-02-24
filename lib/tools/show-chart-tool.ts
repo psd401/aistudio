@@ -81,29 +81,35 @@ function validateChartArgs(
 
 /**
  * Sanitize chart arguments to prevent XSS attacks.
- * AI-generated content must be escaped before rendering in the UI.
+ *
+ * Returns a NEW object — the original must never be mutated because the AI SDK
+ * holds a reference to it for streaming argsText consistency. Mutating in place
+ * causes `&` → `&amp;` drift that breaks assistant-ui's append-only check.
+ *
+ * NOTE: React already escapes text content rendered via JSX, so this is
+ * defense-in-depth only. The primary XSS boundary is React's rendering layer.
+ *
+ * @see https://github.com/psd401/aistudio/issues/808
  */
-function sanitizeChartArgs(args: ShowChartArgs): void {
-  args.title = escapeHtml(args.title)
-  if (args.description) {
-    args.description = escapeHtml(args.description)
+function sanitizeChartArgs(args: ShowChartArgs): ShowChartArgs {
+  return {
+    ...args,
+    title: escapeHtml(args.title),
+    description: args.description ? escapeHtml(args.description) : args.description,
+    xKey: escapeHtml(args.xKey),
+    series: args.series.map(s => ({
+      ...s,
+      key: escapeHtml(s.key),
+      label: escapeHtml(s.label),
+    })),
+    data: args.data.map(item => {
+      const sanitized: Record<string, string | number | boolean | null> = {}
+      for (const [key, value] of Object.entries(item)) {
+        sanitized[escapeHtml(key)] = typeof value === 'string' ? escapeHtml(value) : value
+      }
+      return sanitized
+    }),
   }
-
-  args.series = args.series.map(s => ({
-    ...s,
-    key: escapeHtml(s.key),
-    label: escapeHtml(s.label)
-  }))
-
-  args.data = args.data.map(item => {
-    const sanitized: Record<string, string | number | boolean | null> = {}
-    for (const [key, value] of Object.entries(item)) {
-      sanitized[escapeHtml(key)] = typeof value === 'string' ? escapeHtml(value) : value
-    }
-    return sanitized
-  })
-
-  args.xKey = escapeHtml(args.xKey)
 }
 
 /**
@@ -209,9 +215,12 @@ export function createShowChartTool(): Tool<ShowChartArgs, ChartToolResult> {
           return validationError
         }
 
-        sanitizeChartArgs(args)
+        // Sanitize into a separate copy — do NOT mutate `args` in place.
+        // The AI SDK holds a reference to `args` for streaming argsText;
+        // mutating it causes &/&amp; drift that breaks assistant-ui. (#808)
+        const sanitized = sanitizeChartArgs(args)
 
-        log.info('Chart generated successfully', { chartId, type: args.type })
+        log.info('Chart generated successfully', { chartId, type: sanitized.type })
         return { id: chartId, success: true }
       } catch (error) {
         log.error('Chart generation failed', {
