@@ -112,7 +112,7 @@ export async function createPrompt(
       sourceMessageId: string | null
       sourceConversationId: string | null
       deletedAt: Date | null
-      settings: import("@/lib/db/types/jsonb").PromptLibrarySettings | null
+      settings: PromptLibrarySettings | null
     }
 
     const prompt: Prompt = {
@@ -265,8 +265,8 @@ export async function getPromptSettings(
       throw ErrorFactories.dbRecordNotFound("prompt_library", id)
     }
 
-    timer({ status: "success" })
     log.info("Prompt settings retrieved", { promptId: id })
+    timer({ status: "success" })
     return createSuccess(result.settings ?? null)
   } catch (error) {
     timer({ status: "error" })

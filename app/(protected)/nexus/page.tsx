@@ -363,11 +363,11 @@ function NexusPageContent() {
     isLoading: isLoadingModels
   } = useModelsWithPersistence('nexus-model', ['chat'], preferredModelId)
 
-  // Tool management state — initialize from URL params
-  const [enabledTools, setEnabledTools] = useState<string[]>(() => searchParams.getAll('tool').slice(0, 50))
+  // Tool management state — single source of truth from urlTools
+  const [enabledTools, setEnabledTools] = useState<string[]>(() => urlTools)
 
-  // Connector management state — initialize from URL params
-  const [enabledConnectors, setEnabledConnectors] = useState<string[]>(() => searchParams.getAll('connector').slice(0, 50))
+  // Connector management state — single source of truth from urlConnectors
+  const [enabledConnectors, setEnabledConnectors] = useState<string[]>(() => urlConnectors)
 
   // Load prompt settings when promptId is present (lower priority than URL params)
   // Uses getPromptSettings to avoid incrementing view count (PromptAutoLoader handles the full view)
@@ -400,11 +400,20 @@ function NexusPageContent() {
     })
   }, [urlPromptId, urlModelId, urlTools.length, urlConnectors.length])
 
-  // Model fallback state for archived conversations
-  const [modelFallbackInfo, setModelFallbackInfo] = useState<{
-    originalModel: string
-    fallbackModel: string
-  } | null>(null)
+  // Model fallback for archived conversations — derived from conversationModelId + available models.
+  // Setting conversationModelId to null (on dismiss or navigation) hides the banner.
+  const [conversationModelId, setConversationModelId] = useState<string | null>(null)
+  const modelFallbackInfo = useMemo(() => {
+    if (!conversationModelId || models.length === 0) return null
+    const modelExists = models.some(m => m.modelId === conversationModelId)
+    if (!modelExists) {
+      return {
+        originalModel: conversationModelId,
+        fallbackModel: selectedModel?.name || 'default model'
+      }
+    }
+    return null
+  }, [conversationModelId, models, selectedModel?.name])
 
   // Attachment processing state
   const [processingAttachments, setProcessingAttachments] = useState<Set<string>>(new Set())
@@ -430,31 +439,19 @@ function NexusPageContent() {
     // Clear enabled tools and connectors when switching models
     setEnabledTools([]);
     setEnabledConnectors([]);
-    // Clear conversation ID and fallback banner when switching models
+    // Clear conversation ID and fallback state when switching models
     setConversationId(null);
-    setModelFallbackInfo(null);
+    setConversationModelId(null);
     // Force page reload to ensure clean state
     if (model && selectedModel && model.modelId !== selectedModel.modelId) {
       window.location.reload();
     }
   }, [originalSetSelectedModel, selectedModel])
 
-  // Handle model info from loaded conversation
-  const handleModelUsed = useCallback((conversationModelId: string | null) => {
-    if (!conversationModelId || models.length === 0) return
-    const modelExists = models.some(m => m.modelId === conversationModelId)
-    if (!modelExists) {
-      const fallback = selectedModel?.name || 'default model'
-      setModelFallbackInfo({
-        originalModel: conversationModelId,
-        fallbackModel: fallback
-      })
-      log.info('Conversation model not available, showing fallback banner', {
-        originalModel: conversationModelId,
-        fallbackModel: fallback
-      })
-    }
-  }, [models, selectedModel?.name])
+  // Store the conversation's model ID when received — availability check is derived via useMemo above
+  const handleModelUsed = useCallback((modelId: string | null) => {
+    setConversationModelId(modelId)
+  }, [])
 
   // Memoized callback for tool changes to prevent unnecessary re-renders
   const onToolsChange = useCallback((tools: string[]) => {
@@ -484,8 +481,8 @@ function NexusPageContent() {
   // Conversation ID callback for maintaining conversation continuity
   const handleConversationIdChange = useCallback((newConversationId: string) => {
     setConversationId(newConversationId)
-    // Clear fallback banner — it's only relevant to the previously loaded conversation
-    setModelFallbackInfo(null)
+    // Clear fallback state — it's only relevant to the previously loaded conversation
+    setConversationModelId(null)
     conversationContext.setConversationId(newConversationId)
 
     // Update URL to reflect the current conversation
@@ -560,7 +557,7 @@ function NexusPageContent() {
                       <ModelFallbackBanner
                         originalModel={modelFallbackInfo.originalModel}
                         fallbackModel={modelFallbackInfo.fallbackModel}
-                        onDismiss={() => setModelFallbackInfo(null)}
+                        onDismiss={() => setConversationModelId(null)}
                       />
                     </div>
                   )}

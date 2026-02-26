@@ -628,7 +628,8 @@ export async function replaceModelReferences(
             .where(eq(modelComparisons.model2Id, targetModelId));
         }
 
-        // Update prompt_library settings
+        // Update prompt_library settings — raw SQL required because Drizzle ORM
+        // doesn't support jsonb_set() for partial JSONB field updates
         if (counts.promptLibraryCount > 0) {
           await tx.execute(sql`
             UPDATE prompt_library

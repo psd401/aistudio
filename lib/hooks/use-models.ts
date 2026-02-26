@@ -8,6 +8,18 @@ import { createLogger } from "@/lib/client-logger"
 
 const log = createLogger({ module: 'use-models' })
 
+/** Check if a model meets all required capabilities */
+function meetsRequiredCapabilities(model: SelectAiModel, required: string[]): boolean {
+  try {
+    const caps = typeof model.capabilities === 'string'
+      ? JSON.parse(model.capabilities)
+      : model.capabilities
+    return Array.isArray(caps) && required.every(cap => caps.includes(cap))
+  } catch {
+    return false
+  }
+}
+
 // Validation schema for localStorage model data
 // This is a partial schema - we only validate the fields we actually use
 const StoredModelSchema = z.object({
@@ -164,19 +176,9 @@ export function useModelsWithPersistence(
       const preferredModel = models.find(m => m.modelId === preferredModelId)
       if (preferredModel) {
         // Verify the preferred model meets required capabilities before selecting
-        let meetsCapabilities = true
-        if (requiredCapabilities && requiredCapabilities.length > 0) {
-          try {
-            const caps = typeof preferredModel.capabilities === 'string'
-              ? JSON.parse(preferredModel.capabilities)
-              : preferredModel.capabilities
-            meetsCapabilities = Array.isArray(caps) && requiredCapabilities.every(cap => caps.includes(cap))
-          } catch {
-            meetsCapabilities = false
-          }
-        }
+        const capsSatisfied = !requiredCapabilities?.length || meetsRequiredCapabilities(preferredModel, requiredCapabilities)
 
-        if (meetsCapabilities) {
+        if (capsSatisfied) {
           if (currentModelId !== preferredModelId) {
             setSelectedModel(preferredModel)
             lastValidatedModelId.current = preferredModel.modelId
@@ -217,29 +219,7 @@ export function useModelsWithPersistence(
       let candidateModel: SelectAiModel | null = null
 
       if (requiredCapabilities && requiredCapabilities.length > 0) {
-        candidateModel = models.find(model => {
-          try {
-            const capabilities = typeof model.capabilities === 'string'
-              ? JSON.parse(model.capabilities)
-              : model.capabilities
-
-            if (!Array.isArray(capabilities)) {
-              log.warn('Model has invalid capabilities format', {
-                modelId: model.modelId,
-                capabilitiesType: typeof capabilities
-              })
-              return false
-            }
-
-            return requiredCapabilities.every(cap => capabilities.includes(cap))
-          } catch (error) {
-            log.warn('Failed to parse model capabilities', {
-              modelId: model.modelId,
-              error: error instanceof Error ? error.message : String(error)
-            })
-            return false
-          }
-        }) ?? null
+        candidateModel = models.find(model => meetsRequiredCapabilities(model, requiredCapabilities)) ?? null
 
         // If no model matches required capabilities, don't fall back to models[0]
         // Instead, leave it null to prompt user selection

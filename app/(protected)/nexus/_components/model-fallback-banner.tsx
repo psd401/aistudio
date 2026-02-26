@@ -19,7 +19,7 @@ export function ModelFallbackBanner({
     <Alert className="mx-auto w-full max-w-[48rem] relative">
       <Info className="h-4 w-4" />
       <AlertDescription className="pr-8">
-        This conversation was created with <strong>{originalModel}</strong>, which is no longer available.
+        This conversation was created with model <strong>{originalModel}</strong>, which is no longer available.
         Using <strong>{fallbackModel}</strong> instead.
       </AlertDescription>
       <Button
