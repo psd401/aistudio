@@ -216,6 +216,36 @@ INSERT INTO ai_models (
     0.120000,
     NULL
 ),
+(
+    'Gemini 3.1 Pro',
+    'gemini-3.1-pro-preview',
+    'google',
+    'Google''s most advanced reasoning model with a massive context window, ideal for complex research projects, detailed essay feedback, and multi-step problem solving',
+    '["chat", "function_calling", "json_mode", "image_analysis", "streaming", "thinking", "code_execution", "web_search"]',
+    1048576,
+    true,
+    true,
+    true,
+    NULL,
+    0.002000,
+    0.012000,
+    0.000200
+),
+(
+    'Nano Banana 2',
+    'gemini-3.1-flash-image-preview',
+    'google',
+    'Fast and affordable image generation model that creates high-quality images up to 4K resolution, perfect for art projects, presentations, and visual learning activities',
+    '["chat", "image_generation", "image_analysis", "streaming"]',
+    1048576,
+    true,
+    true,
+    false,
+    NULL,
+    0.000250,
+    0.001500,
+    NULL
+),
 
 -- OpenAI GPT-5.2 Models
 (
@@ -410,6 +440,7 @@ BEGIN
     RAISE NOTICE '';
     RAISE NOTICE 'AI Models seeded:';
     RAISE NOTICE '  - Gemini 3 Pro, Gemini 3 Flash, Gemini 3 Pro Image';
+    RAISE NOTICE '  - Gemini 3.1 Pro, Nano Banana 2';
     RAISE NOTICE '  - GPT-5.2, GPT-5.2 Pro, GPT Image 1.5';
     RAISE NOTICE '  - Claude Opus 4.5, Claude Sonnet 4.5 (Bedrock)';
     RAISE NOTICE '==========================================';
