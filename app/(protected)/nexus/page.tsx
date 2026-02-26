@@ -349,16 +349,24 @@ function NexusPageContent() {
     return null
   }, [urlConversationId])
 
-  // Parse URL configuration params — slice arrays and validate formats
+  // Parse URL configuration params — validate formats, cap at 50 entries
   const urlModelId = searchParams.get('model')
-  const urlTools = useMemo(
-    () => searchParams.getAll('tool').slice(0, 50).filter(t => toolNameSchema.safeParse(t).success),
-    [searchParams]
-  )
-  const urlConnectors = useMemo(
-    () => searchParams.getAll('connector').slice(0, 50).filter(c => uuidSchema.safeParse(c).success),
-    [searchParams]
-  )
+  const urlTools = useMemo(() => {
+    const raw = searchParams.getAll('tool')
+    const validated = raw.filter(t => toolNameSchema.safeParse(t).success).slice(0, 50)
+    if (raw.length > validated.length) {
+      log.warn('URL tool params truncated or filtered', { rawCount: raw.length, validCount: validated.length })
+    }
+    return validated
+  }, [searchParams])
+  const urlConnectors = useMemo(() => {
+    const raw = searchParams.getAll('connector')
+    const validated = raw.filter(c => uuidSchema.safeParse(c).success).slice(0, 50)
+    if (raw.length > validated.length) {
+      log.warn('URL connector params truncated or filtered', { rawCount: raw.length, validCount: validated.length })
+    }
+    return validated
+  }, [searchParams])
 
   // Load models and manage model selection
   const [preferredModelId, setPreferredModelId] = useState<string | null>(urlModelId)

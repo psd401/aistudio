@@ -6,6 +6,7 @@ import {
   setPromptTags,
   getTagsForPrompt,
   getPromptById,
+  getPromptSettingsById,
   incrementViewCount,
   incrementUseCount,
   listPrompts as drizzleListPrompts,
@@ -13,9 +14,6 @@ import {
   deletePrompt as drizzleDeletePrompt,
   trackUsageEvent
 } from "@/lib/db/drizzle"
-import { executeQuery } from "@/lib/db/drizzle-client"
-import { promptLibrary } from "@/lib/db/schema"
-import { eq, and, isNull } from "drizzle-orm"
 import { type ActionState } from "@/types/actions-types"
 import {
   handleError,
@@ -266,22 +264,11 @@ export async function getPromptSettings(
       throw ErrorFactories.authzResourceNotFound("Prompt", id)
     }
 
-    // Targeted query: only fetch settings column, not full prompt content
-    const [row] = await executeQuery(
-      (db) => db.select({ settings: promptLibrary.settings })
-        .from(promptLibrary)
-        .where(and(eq(promptLibrary.id, id), isNull(promptLibrary.deletedAt)))
-        .limit(1),
-      "getPromptSettings"
-    )
-
-    if (!row) {
-      throw ErrorFactories.dbRecordNotFound("prompt_library", id)
-    }
+    const settings = await getPromptSettingsById(id)
 
     log.info("Prompt settings retrieved", { promptId: id })
     timer({ status: "success" })
-    return createSuccess(row.settings ?? null)
+    return createSuccess(settings)
   } catch (error) {
     timer({ status: "error" })
     return handleError(error, "Failed to retrieve prompt settings", {

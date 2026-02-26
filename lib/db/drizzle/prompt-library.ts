@@ -20,7 +20,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, desc, or, ilike, sql, inArray } from "drizzle-orm";
+import { eq, and, desc, or, ilike, sql, inArray, isNull } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   promptLibrary,
@@ -193,6 +193,26 @@ export async function getPromptById(id: string): Promise<{
     ownerName: firstName && lastName ? `${firstName} ${lastName}` : null,
     tags: tagResult.map((t) => t.name),
   };
+}
+
+/**
+ * Get only the settings JSONB field for a prompt by ID.
+ * Targeted query that avoids fetching full content — used for
+ * URL-driven configuration preloading without view count tracking.
+ */
+export async function getPromptSettingsById(
+  promptId: string
+): Promise<PromptLibrarySettings | null> {
+  const [row] = await executeQuery(
+    (db) =>
+      db
+        .select({ settings: promptLibrary.settings })
+        .from(promptLibrary)
+        .where(and(eq(promptLibrary.id, promptId), isNull(promptLibrary.deletedAt)))
+        .limit(1),
+    "getPromptSettingsById"
+  );
+  return row?.settings ?? null;
 }
 
 /**

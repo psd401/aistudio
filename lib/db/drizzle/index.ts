@@ -562,6 +562,7 @@ export {
   type PromptSearchOptions,
   // Prompt query operations
   getPromptById,
+  getPromptSettingsById,
   listPrompts,
   getPendingPrompts,
   // Prompt CRUD operations

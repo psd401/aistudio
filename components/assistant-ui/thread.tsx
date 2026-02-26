@@ -10,6 +10,8 @@ import {
 } from "@assistant-ui/react";
 import type { FC } from "react";
 import { createContext, useContext, useMemo } from "react";
+import { ChatConfigContext, useChatConfig } from "@/lib/contexts/chat-config-context";
+import type { ChatConfig } from "@/lib/contexts/chat-config-context";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
@@ -46,14 +48,7 @@ const ConversationIdContext = createContext<string | null>(null);
 
 export const useConversationId = () => useContext(ConversationIdContext);
 
-// Context for passing current chat configuration to message components (prompt save)
-interface ChatConfig {
-  modelId?: string;
-  tools: string[];
-  connectors: string[];
-}
-const ChatConfigContext = createContext<ChatConfig>({ tools: [], connectors: [] });
-const useChatConfig = () => useContext(ChatConfigContext);
+// ChatConfigContext and useChatConfig imported from @/lib/contexts/chat-config-context
 
 // Pre-defined constants to avoid creating new objects/arrays on every render
 const EMPTY_MODELS_ARRAY: SelectAiModel[] = [];
