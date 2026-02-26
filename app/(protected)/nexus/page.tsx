@@ -23,6 +23,9 @@ import { validateConversationId } from '@/lib/nexus/conversation-navigation'
 import type { SelectAiModel } from '@/types'
 import { createLogger } from '@/lib/client-logger'
 import { toast } from 'sonner'
+import { getPrompt } from '@/actions/prompt-library.actions'
+import type { PromptLibrarySettings } from '@/lib/db/types/jsonb'
+import { ModelFallbackBanner } from './_components/model-fallback-banner'
 
 const log = createLogger({ moduleName: 'nexus-page' })
 
@@ -337,27 +340,66 @@ function NexusPageContent() {
     if (validateConversationId(urlConversationId)) {
       return urlConversationId
     }
-    
+
     if (urlConversationId) {
       log.warn('Invalid conversation ID in URL parameter', { urlConversationId })
     }
-    
+
     return null
   }, [urlConversationId])
-  
-  // Load models and manage model selection
-  const { 
-    models, 
-    selectedModel, 
-    setSelectedModel: originalSetSelectedModel, 
-    isLoading: isLoadingModels 
-  } = useModelsWithPersistence('nexus-model', ['chat'])
-  
-  // Tool management state
-  const [enabledTools, setEnabledTools] = useState<string[]>([])
 
-  // Connector management state (per-conversation)
-  const [enabledConnectors, setEnabledConnectors] = useState<string[]>([])
+  // Parse URL configuration params (lazy — stable from initial searchParams)
+  const urlModelId = searchParams.get('model')
+  const urlTools = useMemo(() => searchParams.getAll('tool'), [searchParams])
+  const urlConnectors = useMemo(() => searchParams.getAll('connector'), [searchParams])
+
+  // Load models and manage model selection
+  // preferredModelId will be resolved in Task 5 to include prompt settings
+  const [preferredModelId, setPreferredModelId] = useState<string | null>(urlModelId)
+  const {
+    models,
+    selectedModel,
+    setSelectedModel: originalSetSelectedModel,
+    isLoading: isLoadingModels
+  } = useModelsWithPersistence('nexus-model', ['chat'], preferredModelId)
+
+  // Tool management state — initialize from URL params
+  const [enabledTools, setEnabledTools] = useState<string[]>(() => urlTools)
+
+  // Connector management state — initialize from URL params
+  const [enabledConnectors, setEnabledConnectors] = useState<string[]>(() => urlConnectors)
+
+  // Load prompt settings when promptId is present (lower priority than URL params)
+  const urlPromptId = searchParams.get('promptId')
+  useEffect(() => {
+    if (!urlPromptId) return
+    getPrompt(urlPromptId).then(result => {
+      if (!result.isSuccess || !result.data?.settings) return
+      const settings = result.data.settings as PromptLibrarySettings
+
+      // URL params take priority over prompt settings
+      if (!urlModelId && settings.modelId) {
+        setPreferredModelId(settings.modelId)
+      }
+      if (urlTools.length === 0 && settings.tools?.length) {
+        setEnabledTools(settings.tools)
+      }
+      if (urlConnectors.length === 0 && settings.connectors?.length) {
+        setEnabledConnectors(settings.connectors)
+      }
+    }).catch(err => {
+      log.warn('Failed to load prompt settings', {
+        promptId: urlPromptId,
+        error: err instanceof Error ? err.message : String(err)
+      })
+    })
+  }, [urlPromptId, urlModelId, urlTools.length, urlConnectors.length])
+
+  // Model fallback state for archived conversations
+  const [modelFallbackInfo, setModelFallbackInfo] = useState<{
+    originalModel: string
+    fallbackModel: string
+  } | null>(null)
 
   // Attachment processing state
   const [processingAttachments, setProcessingAttachments] = useState<Set<string>>(new Set())
@@ -390,6 +432,23 @@ function NexusPageContent() {
       window.location.reload();
     }
   }, [originalSetSelectedModel, selectedModel])
+
+  // Handle model info from loaded conversation
+  const handleModelUsed = useCallback((conversationModelId: string | null) => {
+    if (!conversationModelId || models.length === 0) return
+    const modelExists = models.some(m => m.modelId === conversationModelId)
+    if (!modelExists) {
+      const fallback = selectedModel?.name || 'default model'
+      setModelFallbackInfo({
+        originalModel: conversationModelId,
+        fallbackModel: fallback
+      })
+      log.info('Conversation model not available, showing fallback banner', {
+        originalModel: conversationModelId,
+        fallbackModel: fallback
+      })
+    }
+  }, [models, selectedModel?.name])
 
   // Memoized callback for tool changes to prevent unnecessary re-renders
   const onToolsChange = useCallback((tools: string[]) => {
@@ -487,25 +546,39 @@ function NexusPageContent() {
           <NexusShell>
             <div className="relative h-full">
               {selectedModel ? (
-                <ConversationInitializer conversationId={stableConversationId}>
-                  {(initialMessages) => (
-                    <NexusRuntimeWrapper
-                      conversationId={conversationId}
-                      selectedModel={selectedModel}
-                      enabledTools={enabledTools}
-                      enabledConnectors={enabledConnectors}
-                      attachmentAdapter={attachmentAdapter}
-                      initialMessages={initialMessages}
-                      onConversationIdChange={handleConversationIdChange}
-                      processingAttachments={processingAttachments}
-                      models={models}
-                      onModelChange={setSelectedModel}
-                      isLoadingModels={isLoadingModels}
-                      onToolsChange={onToolsChange}
-                      onConnectorsChange={onConnectorsChange}
-                    />
+                <>
+                  {modelFallbackInfo && (
+                    <div className="px-4 pt-2">
+                      <ModelFallbackBanner
+                        originalModel={modelFallbackInfo.originalModel}
+                        fallbackModel={modelFallbackInfo.fallbackModel}
+                        onDismiss={() => setModelFallbackInfo(null)}
+                      />
+                    </div>
                   )}
-                </ConversationInitializer>
+                  <ConversationInitializer
+                    conversationId={stableConversationId}
+                    onModelUsed={handleModelUsed}
+                  >
+                    {(initialMessages) => (
+                      <NexusRuntimeWrapper
+                        conversationId={conversationId}
+                        selectedModel={selectedModel}
+                        enabledTools={enabledTools}
+                        enabledConnectors={enabledConnectors}
+                        attachmentAdapter={attachmentAdapter}
+                        initialMessages={initialMessages}
+                        onConversationIdChange={handleConversationIdChange}
+                        processingAttachments={processingAttachments}
+                        models={models}
+                        onModelChange={setSelectedModel}
+                        isLoadingModels={isLoadingModels}
+                        onToolsChange={onToolsChange}
+                        onConnectorsChange={onConnectorsChange}
+                      />
+                    )}
+                  </ConversationInitializer>
+                </>
               ) : (
                 <div className="flex h-full items-center justify-center">
                   <div className="text-center">

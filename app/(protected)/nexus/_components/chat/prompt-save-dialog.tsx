@@ -24,12 +24,16 @@ import { TagInput } from "@/components/ui/tag-input"
 import { usePromptSave } from "../hooks/use-prompt-save"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import type { PromptVisibility } from "@/lib/prompt-library/types"
+import type { PromptLibrarySettings } from "@/lib/db/types/jsonb"
 
 interface PromptSaveDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
   content: string
   conversationId: string | null
+  currentModelId?: string
+  currentTools?: string[]
+  currentConnectors?: string[]
 }
 
 /**
@@ -39,7 +43,10 @@ export function PromptSaveDialog({
   open,
   onOpenChange,
   content,
-  conversationId
+  conversationId,
+  currentModelId,
+  currentTools,
+  currentConnectors
 }: PromptSaveDialogProps) {
   // Generate default title from content (first 100 chars)
   const defaultTitle = content.slice(0, 100).trim() || "Untitled Prompt"
@@ -62,6 +69,15 @@ export function PromptSaveDialog({
     }
   }, [open, defaultTitle])
 
+  // Build settings from current chat configuration
+  const settings: PromptLibrarySettings | undefined = (() => {
+    const s: PromptLibrarySettings = {}
+    if (currentModelId) s.modelId = currentModelId
+    if (currentTools && currentTools.length > 0) s.tools = currentTools
+    if (currentConnectors && currentConnectors.length > 0) s.connectors = currentConnectors
+    return Object.keys(s).length > 0 ? s : undefined
+  })()
+
   const handleSave = async () => {
     const result = await savePrompt({
       title: title.trim() || defaultTitle,
@@ -69,7 +85,8 @@ export function PromptSaveDialog({
       description: description.trim() || undefined,
       visibility,
       tags: tags.length > 0 ? tags : undefined,
-      sourceConversationId: conversationId || undefined
+      sourceConversationId: conversationId || undefined,
+      settings
     })
 
     if (result.success) {
@@ -169,6 +186,23 @@ export function PromptSaveDialog({
                 Add up to 10 tags to help organize and find this prompt
               </div>
             </div>
+
+            {settings && (
+              <div className="grid gap-2">
+                <Label className="text-xs text-muted-foreground">
+                  Saved Configuration
+                </Label>
+                <div className="rounded-md bg-muted p-3 text-sm text-muted-foreground space-y-1">
+                  {settings.modelId && <div>Model: {settings.modelId}</div>}
+                  {settings.tools && settings.tools.length > 0 && (
+                    <div>Tools: {settings.tools.join(", ")}</div>
+                  )}
+                  {settings.connectors && settings.connectors.length > 0 && (
+                    <div>Connectors: {settings.connectors.length} connected</div>
+                  )}
+                </div>
+              </div>
+            )}
 
             <div className="grid gap-2">
               <Label className="text-xs text-muted-foreground">

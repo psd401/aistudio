@@ -135,7 +135,11 @@ export function useModelPersistence(storageKey: string) {
  * Combined hook for models with persistence
  * Convenience wrapper that combines fetching and persistence
  */
-export function useModelsWithPersistence(storageKey: string, requiredCapabilities?: string[]) {
+export function useModelsWithPersistence(
+  storageKey: string,
+  requiredCapabilities?: string[],
+  preferredModelId?: string | null
+) {
   const { models, isLoading, error, refetch } = useModels()
   const [selectedModel, setSelectedModel] = useModelPersistence(storageKey)
   // Tracks the last model ID this effect validated to prevent redundant runs.
@@ -144,6 +148,7 @@ export function useModelsWithPersistence(storageKey: string, requiredCapabilitie
   const lastValidatedModelId = useRef<string | null | undefined>(undefined)
 
   // Auto-select a valid model if none selected or if persisted model is no longer available
+  // Priority: preferredModelId > localStorage > first available
   useEffect(() => {
     if (models.length === 0 || isLoading) return
 
@@ -153,6 +158,30 @@ export function useModelsWithPersistence(storageKey: string, requiredCapabilitie
     if (currentModelId === lastValidatedModelId.current) return
 
     const isStale = currentModelId && !models.some(m => m.modelId === currentModelId)
+
+    // If a preferred model ID is specified (e.g. from URL), try to use it first
+    if (preferredModelId) {
+      const preferredModel = models.find(m => m.modelId === preferredModelId)
+      if (preferredModel) {
+        if (currentModelId !== preferredModelId) {
+          setSelectedModel(preferredModel)
+          lastValidatedModelId.current = preferredModel.modelId
+          log.info('Selected preferred model', {
+            modelId: preferredModel.modelId,
+            name: preferredModel.name
+          })
+          return
+        }
+        // Already selected — just record validation
+        lastValidatedModelId.current = currentModelId
+        return
+      }
+      // Preferred model not available — warn and fall through to default selection
+      log.warn('Preferred model not available, falling back', {
+        preferredModelId,
+        availableModels: models.map(m => m.modelId)
+      })
+    }
 
     if (!currentModelId || isStale) {
       if (isStale && selectedModel) {
@@ -216,7 +245,7 @@ export function useModelsWithPersistence(storageKey: string, requiredCapabilitie
       // Current model is valid — record it so we don't re-validate
       lastValidatedModelId.current = currentModelId
     }
-  }, [models, isLoading, requiredCapabilities, setSelectedModel, selectedModel])
+  }, [models, isLoading, requiredCapabilities, setSelectedModel, selectedModel, preferredModelId])
 
   return {
     models,

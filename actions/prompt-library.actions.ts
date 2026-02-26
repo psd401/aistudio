@@ -98,7 +98,8 @@ export async function createPrompt(
       description: validated.description,
       visibility: validated.visibility,
       sourceMessageId: validated.sourceMessageId,
-      sourceConversationId: validated.sourceConversationId
+      sourceConversationId: validated.sourceConversationId,
+      settings: validated.settings ?? null
     })
 
     // Build prompt object with type conversion
@@ -110,6 +111,7 @@ export async function createPrompt(
       sourceMessageId: string | null
       sourceConversationId: string | null
       deletedAt: Date | null
+      settings: import("@/lib/db/types/jsonb").PromptLibrarySettings | null
     }
 
     const prompt: Prompt = {
@@ -130,6 +132,7 @@ export async function createPrompt(
       createdAt: resultWithAllFields.createdAt.toISOString(),
       updatedAt: resultWithAllFields.updatedAt.toISOString(),
       deletedAt: resultWithAllFields.deletedAt?.toISOString() ?? null,
+      settings: resultWithAllFields.settings ?? null,
       tags: []
     }
 
@@ -214,6 +217,7 @@ export async function getPrompt(id: string): Promise<ActionState<Prompt>> {
       createdAt: result.createdAt.toISOString(),
       updatedAt: result.updatedAt.toISOString(),
       deletedAt: result.deletedAt?.toISOString() ?? null,
+      settings: result.settings ?? null,
       tags: result.tags,
       ownerName: result.ownerName ?? undefined
     }
@@ -362,7 +366,8 @@ export async function updatePrompt(
     const hasFieldUpdates = validated.title !== undefined ||
                            validated.content !== undefined ||
                            validated.description !== undefined ||
-                           validated.visibility !== undefined
+                           validated.visibility !== undefined ||
+                           validated.settings !== undefined
 
     if (!hasFieldUpdates && !validated.tags) {
       // No changes requested, fetch and return current prompt
@@ -379,7 +384,8 @@ export async function updatePrompt(
         title: validated.title,
         content: validated.content,
         description: validated.description,
-        visibility: validated.visibility
+        visibility: validated.visibility,
+        settings: validated.settings
       })
 
       if (!result) {

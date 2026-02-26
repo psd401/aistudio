@@ -46,6 +46,15 @@ const ConversationIdContext = createContext<string | null>(null);
 
 export const useConversationId = () => useContext(ConversationIdContext);
 
+// Context for passing current chat configuration to message components (prompt save)
+interface ChatConfig {
+  modelId?: string;
+  tools: string[];
+  connectors: string[];
+}
+const ChatConfigContext = createContext<ChatConfig>({ tools: [], connectors: [] });
+const useChatConfig = () => useContext(ChatConfigContext);
+
 // Pre-defined constants to avoid creating new objects/arrays on every render
 const EMPTY_MODELS_ARRAY: SelectAiModel[] = [];
 const EMPTY_TOOLS_ARRAY: string[] = [];
@@ -157,8 +166,16 @@ export const Thread: FC<ThreadProps> = ({
     AssistantMessage,
   }), []);
 
+  // Memoize chat config for prompt save context
+  const chatConfig = useMemo<ChatConfig>(() => ({
+    modelId: selectedModel?.modelId,
+    tools: enabledTools,
+    connectors: enabledConnectors,
+  }), [selectedModel?.modelId, enabledTools, enabledConnectors]);
+
   return (
     <AssistantContentComponentsContext.Provider value={contentComponents}>
+      <ChatConfigContext.Provider value={chatConfig}>
       <ConversationIdContext.Provider value={conversationId || null}>
         <ThreadPrimitive.Root
           className="bg-white flex h-full flex-col"
@@ -191,6 +208,7 @@ export const Thread: FC<ThreadProps> = ({
           />
         </ThreadPrimitive.Root>
       </ConversationIdContext.Provider>
+      </ChatConfigContext.Provider>
     </AssistantContentComponentsContext.Provider>
   );
 };
@@ -499,6 +517,7 @@ const UserMessage: FC = () => {
 const UserActionBar: FC = () => {
   const message = useMessage();
   const conversationId = useConversationId();
+  const chatConfig = useChatConfig();
 
   // Extract text content from message
   const messageContent = message.content
@@ -522,6 +541,9 @@ const UserActionBar: FC = () => {
         <PromptSaveButton
           content={messageContent}
           conversationId={conversationId}
+          currentModelId={chatConfig.modelId}
+          currentTools={chatConfig.tools}
+          currentConnectors={chatConfig.connectors}
         />
       )}
     </ActionBarPrimitive.Root>

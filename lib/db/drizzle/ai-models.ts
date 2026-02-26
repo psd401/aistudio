@@ -44,6 +44,7 @@ import {
   nexusConversations,
   modelComparisons,
   modelReplacementAudit,
+  promptLibrary,
 } from "@/lib/db/schema";
 import { createLogger, generateRequestId } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
@@ -426,10 +427,23 @@ export async function getModelReferenceCounts(modelId: number) {
           ),
       "countModelComparisons"
     ),
+    executeQuery(
+      (db) =>
+        db
+          .select({ count: countAsInt })
+          .from(promptLibrary)
+          .where(
+            and(
+              sql`${promptLibrary.settings}->>'modelId' = (SELECT model_id FROM ai_models WHERE id = ${modelId})`,
+              sql`${promptLibrary.deletedAt} IS NULL`
+            )
+          ),
+      "countPromptLibrarySettings"
+    ),
   ]);
 
   // Check for failures and provide detailed error context
-  const labels = ["chainPrompts", "nexusMessages", "nexusConversations", "modelComparisons"];
+  const labels = ["chainPrompts", "nexusMessages", "nexusConversations", "modelComparisons", "promptLibrary"];
   const failedQueries = results
     .map((result, index) => (result.status === "rejected" ? labels[index] : null))
     .filter(Boolean);
@@ -440,7 +454,7 @@ export async function getModelReferenceCounts(modelId: number) {
   }
 
   // Extract successful results
-  const [chainPromptsResult, nexusMessagesResult, nexusConversationsResult, modelComparisonsResult] =
+  const [chainPromptsResult, nexusMessagesResult, nexusConversationsResult, modelComparisonsResult, promptLibraryResult] =
     results.map((r) => (r.status === "fulfilled" ? r.value : []));
 
   return {
@@ -448,6 +462,7 @@ export async function getModelReferenceCounts(modelId: number) {
     nexusMessagesCount: nexusMessagesResult[0]?.count ?? 0,
     nexusConversationsCount: nexusConversationsResult[0]?.count ?? 0,
     modelComparisonsCount: modelComparisonsResult[0]?.count ?? 0,
+    promptLibraryCount: promptLibraryResult[0]?.count ?? 0,
   };
 }
 
@@ -564,12 +579,14 @@ export async function replaceModelReferences(
         const nexusMessagesResult = await tx.select({ count: countAsInt }).from(nexusMessages).where(eq(nexusMessages.modelId, targetModelId));
         const nexusConversationsResult = await tx.select({ count: countAsInt }).from(nexusConversations).where(sql`${nexusConversations.modelUsed} = ${targetModel.modelId}`);
         const modelComparisonsResult = await tx.select({ count: countAsInt }).from(modelComparisons).where(or(eq(modelComparisons.model1Id, targetModelId), eq(modelComparisons.model2Id, targetModelId)));
+        const promptLibraryResult = await tx.select({ count: countAsInt }).from(promptLibrary).where(and(sql`${promptLibrary.settings}->>'modelId' = ${targetModel.modelId}`, sql`${promptLibrary.deletedAt} IS NULL`));
 
         const counts = {
           chainPromptsCount: chainPromptsResult[0]?.count ?? 0,
           nexusMessagesCount: nexusMessagesResult[0]?.count ?? 0,
           nexusConversationsCount: nexusConversationsResult[0]?.count ?? 0,
           modelComparisonsCount: modelComparisonsResult[0]?.count ?? 0,
+          promptLibraryCount: promptLibraryResult[0]?.count ?? 0,
         };
         // Update chain_prompts
         if (counts.chainPromptsCount > 0) {
@@ -611,6 +628,17 @@ export async function replaceModelReferences(
             .where(eq(modelComparisons.model2Id, targetModelId));
         }
 
+        // Update prompt_library settings
+        if (counts.promptLibraryCount > 0) {
+          await tx.execute(sql`
+            UPDATE prompt_library
+            SET settings = jsonb_set(settings, '{modelId}', to_jsonb(${replacementModel.modelId}::text)),
+                updated_at = NOW()
+            WHERE settings->>'modelId' = ${targetModel.modelId}
+            AND deleted_at IS NULL
+          `);
+        }
+
         // Record in audit table with generated ID
         // FIXME: COLLISION RISK - Epoch-based ID generation is dangerous
         //
@@ -639,6 +667,7 @@ export async function replaceModelReferences(
           nexusMessagesUpdated: counts.nexusMessagesCount,
           nexusConversationsUpdated: counts.nexusConversationsCount,
           modelComparisonsUpdated: counts.modelComparisonsCount,
+          promptLibraryUpdated: counts.promptLibraryCount,
         });
 
         // Delete the original model
@@ -656,12 +685,14 @@ export async function replaceModelReferences(
             nexusMessages: counts.nexusMessagesCount,
             nexusConversations: counts.nexusConversationsCount,
             modelComparisons: counts.modelComparisonsCount,
+            promptLibrary: counts.promptLibraryCount,
           },
           totalUpdated:
             counts.chainPromptsCount +
             counts.nexusMessagesCount +
             counts.nexusConversationsCount +
-            counts.modelComparisonsCount,
+            counts.modelComparisonsCount +
+            counts.promptLibraryCount,
         };
       },
       "replaceModelReferencesTransaction"

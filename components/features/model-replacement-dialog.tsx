@@ -30,6 +30,7 @@ interface ModelReplacementDialogProps {
     chainPrompts: number;
     conversations: number;
     modelComparisons: number;
+    promptLibrary: number;
   };
   onConfirm: (replacementModelId: number) => Promise<void>;
 }
@@ -46,10 +47,11 @@ export function ModelReplacementDialog({
   const [isReplacing, setIsReplacing] = useState(false);
   const [validationWarnings, setValidationWarnings] = useState<string[]>([]);
   
-  const totalReferences = 
-    referenceCounts.chainPrompts + 
-    referenceCounts.conversations + 
-    referenceCounts.modelComparisons;
+  const totalReferences =
+    referenceCounts.chainPrompts +
+    referenceCounts.conversations +
+    referenceCounts.modelComparisons +
+    referenceCounts.promptLibrary;
   
   // Filter out the model being deleted and inactive models
   const replacementOptions = useMemo(() => {
@@ -129,6 +131,9 @@ export function ModelReplacementDialog({
               )}
               {referenceCounts.modelComparisons > 0 && (
                 <div>• {referenceCounts.modelComparisons} Model Comparison{referenceCounts.modelComparisons !== 1 ? 's' : ''}</div>
+              )}
+              {referenceCounts.promptLibrary > 0 && (
+                <div>• {referenceCounts.promptLibrary} Prompt Library {referenceCounts.promptLibrary !== 1 ? 'entries' : 'entry'}</div>
               )}
               <div className="font-medium pt-1">
                 Total: {totalReferences} record{totalReferences !== 1 ? 's' : ''} will be updated

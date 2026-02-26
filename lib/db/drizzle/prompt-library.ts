@@ -31,6 +31,7 @@ import {
   nexusConversations,
 } from "@/lib/db/schema";
 import { createLogger, sanitizeForLogging } from "@/lib/logger";
+import type { PromptLibrarySettings } from "@/lib/db/types/jsonb";
 
 // ============================================
 // Types
@@ -62,6 +63,7 @@ export interface CreatePromptData {
   visibility?: PromptVisibility;
   sourceMessageId?: string | null;
   sourceConversationId?: string | null;
+  settings?: PromptLibrarySettings | null;
 }
 
 /**
@@ -72,6 +74,7 @@ export interface UpdatePromptData {
   content?: string;
   description?: string | null;
   visibility?: PromptVisibility;
+  settings?: PromptLibrarySettings | null;
 }
 
 /**
@@ -132,6 +135,7 @@ export async function getPromptById(id: string): Promise<{
   createdAt: Date;
   updatedAt: Date;
   deletedAt: Date | null;
+  settings: PromptLibrarySettings | null;
   ownerName: string | null;
   tags: string[];
 } | null> {
@@ -156,6 +160,7 @@ export async function getPromptById(id: string): Promise<{
           createdAt: promptLibrary.createdAt,
           updatedAt: promptLibrary.updatedAt,
           deletedAt: promptLibrary.deletedAt,
+          settings: promptLibrary.settings,
           firstName: users.firstName,
           lastName: users.lastName,
         })
@@ -184,6 +189,7 @@ export async function getPromptById(id: string): Promise<{
   const { firstName, lastName, ...prompt } = result[0];
   return {
     ...prompt,
+    settings: prompt.settings ?? null,
     ownerName: firstName && lastName ? `${firstName} ${lastName}` : null,
     tags: tagResult.map((t) => t.name),
   };
@@ -435,6 +441,7 @@ export async function createPrompt(data: CreatePromptData): Promise<{
           moderationStatus,
           sourceMessageId: data.sourceMessageId ?? null,
           sourceConversationId: data.sourceConversationId ?? null,
+          settings: data.settings ?? null,
         })
         .returning(),
     "createPrompt"
@@ -479,6 +486,9 @@ export async function updatePrompt(
   }
   if (data.description !== undefined) {
     updateData.description = data.description;
+  }
+  if (data.settings !== undefined) {
+    updateData.settings = data.settings;
   }
   if (data.visibility !== undefined) {
     updateData.visibility = data.visibility;

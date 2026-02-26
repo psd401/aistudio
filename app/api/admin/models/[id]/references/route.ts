@@ -40,7 +40,8 @@ export async function GET(
       counts.chainPromptsCount +
       counts.nexusMessagesCount +
       counts.nexusConversationsCount +
-      counts.modelComparisonsCount;
+      counts.modelComparisonsCount +
+      counts.promptLibraryCount;
 
     log.info("Reference counts retrieved successfully", {
       modelId,
@@ -62,7 +63,8 @@ export async function GET(
             nexusMessages: counts.nexusMessagesCount,
             nexusConversations: counts.nexusConversationsCount,
             toolExecutions: 0, // toolExecutions tracking removed in Drizzle migration
-            modelComparisons: counts.modelComparisonsCount
+            modelComparisons: counts.modelComparisonsCount,
+            promptLibrary: counts.promptLibraryCount
           }
         }
       },

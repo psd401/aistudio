@@ -19,11 +19,12 @@ export const AiModelsClient = memo(function AiModelsClient({ initialModels = [] 
       chainPrompts: number;
       conversations: number;
       modelComparisons: number;
+      promptLibrary: number;
     };
   }>({
     isOpen: false,
     model: null,
-    referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0 }
+    referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0, promptLibrary: 0 }
   });
   const { toast } = useToast();
 
@@ -159,7 +160,7 @@ export const AiModelsClient = memo(function AiModelsClient({ initialModels = [] 
       setReplacementDialog({
         isOpen: false,
         model: null,
-        referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0 }
+        referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0, promptLibrary: 0 }
       });
       
       toast({
@@ -191,7 +192,7 @@ export const AiModelsClient = memo(function AiModelsClient({ initialModels = [] 
           onClose={() => setReplacementDialog({
             isOpen: false,
             model: null,
-            referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0 }
+            referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0, promptLibrary: 0 }
           })}
           modelToDelete={replacementDialog.model}
           availableModels={models}
