@@ -28,6 +28,7 @@ import { ModelFallbackBanner } from './_components/model-fallback-banner'
 
 const log = createLogger({ moduleName: 'nexus-page' })
 const uuidSchema = z.string().uuid()
+const toolNameSchema = z.string().max(100).regex(/^[\w:-]+$/)
 
 /** Zod schema for X-Connector-Tools response header — validates server-sent tool mapping */
 const ConnectorToolsSchema = z.record(z.string(), z.object({
@@ -350,7 +351,10 @@ function NexusPageContent() {
 
   // Parse URL configuration params — slice arrays and validate formats
   const urlModelId = searchParams.get('model')
-  const urlTools = useMemo(() => searchParams.getAll('tool').slice(0, 50), [searchParams])
+  const urlTools = useMemo(
+    () => searchParams.getAll('tool').slice(0, 50).filter(t => toolNameSchema.safeParse(t).success),
+    [searchParams]
+  )
   const urlConnectors = useMemo(
     () => searchParams.getAll('connector').slice(0, 50).filter(c => uuidSchema.safeParse(c).success),
     [searchParams]

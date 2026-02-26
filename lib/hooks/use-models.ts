@@ -144,7 +144,14 @@ export function useModelPersistence(storageKey: string) {
     }
   }, [storageKey])
   
-  return [selectedModel, setSelectedModel] as const
+  // setTransientModel updates in-memory state without persisting to localStorage.
+  // Used for URL-driven or prompt-settings-driven model selections that should not
+  // overwrite the user's stored preference.
+  const setTransientModel = useCallback((model: SelectAiModel | null) => {
+    setSelectedModelState(model)
+  }, [])
+
+  return [selectedModel, setSelectedModel, setTransientModel] as const
 }
 
 /**
@@ -157,7 +164,7 @@ export function useModelsWithPersistence(
   preferredModelId?: string | null
 ) {
   const { models, isLoading, error, refetch } = useModels()
-  const [selectedModel, setSelectedModel] = useModelPersistence(storageKey)
+  const [selectedModel, setSelectedModel, setTransientModel] = useModelPersistence(storageKey)
   // Tracks the last model ID this effect validated to prevent redundant runs.
   // This allows selectedModel in the dependency array (no stale closure)
   // while preventing infinite loops from setSelectedModel triggering re-runs.
@@ -184,7 +191,9 @@ export function useModelsWithPersistence(
 
         if (capsSatisfied) {
           if (currentModelId !== preferredModelId) {
-            setSelectedModel(preferredModel)
+            // Use transient setter — URL/prompt-driven selection should not overwrite
+            // the user's persisted localStorage preference
+            setTransientModel(preferredModel)
             lastValidatedModelId.current = preferredModel.modelId
             log.info('Selected preferred model', {
               modelId: preferredModel.modelId,
@@ -250,7 +259,7 @@ export function useModelsWithPersistence(
       // Current model is valid — record it so we don't re-validate
       lastValidatedModelId.current = currentModelId
     }
-  }, [models, isLoading, requiredCapabilities, setSelectedModel, selectedModel, preferredModelId])
+  }, [models, isLoading, requiredCapabilities, setSelectedModel, setTransientModel, selectedModel, preferredModelId])
 
   return {
     models,
