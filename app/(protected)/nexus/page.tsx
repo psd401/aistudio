@@ -6,7 +6,7 @@ import { type UIMessage } from '@ai-sdk/react'
 import { Thread } from '@/components/assistant-ui/thread'
 import { useSession } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { useEffect, useMemo, useCallback, useState, Suspense } from 'react'
+import { useEffect, useMemo, useCallback, useState, useRef, Suspense } from 'react'
 import { NexusShell } from './_components/layout/nexus-shell'
 import { NexusLayout } from './_components/layout/nexus-layout'
 import { ErrorBoundary } from './_components/error-boundary'
@@ -23,11 +23,12 @@ import { validateConversationId } from '@/lib/nexus/conversation-navigation'
 import type { SelectAiModel } from '@/types'
 import { createLogger } from '@/lib/client-logger'
 import { toast } from 'sonner'
-import { getPrompt } from '@/actions/prompt-library.actions'
+import { getPromptSettings } from '@/actions/prompt-library.actions'
 import type { PromptLibrarySettings } from '@/lib/db/types/jsonb'
 import { ModelFallbackBanner } from './_components/model-fallback-banner'
 
 const log = createLogger({ moduleName: 'nexus-page' })
+const uuidSchema = z.string().uuid()
 
 /** Zod schema for X-Connector-Tools response header — validates server-sent tool mapping */
 const ConnectorToolsSchema = z.record(z.string(), z.object({
@@ -348,13 +349,12 @@ function NexusPageContent() {
     return null
   }, [urlConversationId])
 
-  // Parse URL configuration params (lazy — stable from initial searchParams)
+  // Parse URL configuration params — slice arrays to prevent unbounded input
   const urlModelId = searchParams.get('model')
-  const urlTools = useMemo(() => searchParams.getAll('tool'), [searchParams])
-  const urlConnectors = useMemo(() => searchParams.getAll('connector'), [searchParams])
+  const urlTools = useMemo(() => searchParams.getAll('tool').slice(0, 50), [searchParams])
+  const urlConnectors = useMemo(() => searchParams.getAll('connector').slice(0, 50), [searchParams])
 
   // Load models and manage model selection
-  // preferredModelId will be resolved in Task 5 to include prompt settings
   const [preferredModelId, setPreferredModelId] = useState<string | null>(urlModelId)
   const {
     models,
@@ -364,18 +364,23 @@ function NexusPageContent() {
   } = useModelsWithPersistence('nexus-model', ['chat'], preferredModelId)
 
   // Tool management state — initialize from URL params
-  const [enabledTools, setEnabledTools] = useState<string[]>(() => urlTools)
+  const [enabledTools, setEnabledTools] = useState<string[]>(() => searchParams.getAll('tool').slice(0, 50))
 
   // Connector management state — initialize from URL params
-  const [enabledConnectors, setEnabledConnectors] = useState<string[]>(() => urlConnectors)
+  const [enabledConnectors, setEnabledConnectors] = useState<string[]>(() => searchParams.getAll('connector').slice(0, 50))
 
   // Load prompt settings when promptId is present (lower priority than URL params)
+  // Uses getPromptSettings to avoid incrementing view count (PromptAutoLoader handles the full view)
   const urlPromptId = searchParams.get('promptId')
+  const promptSettingsLoadedRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!urlPromptId) return
-    getPrompt(urlPromptId).then(result => {
-      if (!result.isSuccess || !result.data?.settings) return
-      const settings = result.data.settings as PromptLibrarySettings
+    if (!urlPromptId || !uuidSchema.safeParse(urlPromptId).success) return
+    // Guard: only load settings once per promptId
+    if (promptSettingsLoadedRef.current === urlPromptId) return
+    promptSettingsLoadedRef.current = urlPromptId
+    getPromptSettings(urlPromptId).then(result => {
+      if (!result.isSuccess || !result.data) return
+      const settings = result.data as PromptLibrarySettings
 
       // URL params take priority over prompt settings
       if (!urlModelId && settings.modelId) {
@@ -425,8 +430,9 @@ function NexusPageContent() {
     // Clear enabled tools and connectors when switching models
     setEnabledTools([]);
     setEnabledConnectors([]);
-    // Clear conversation ID when switching models for fresh conversation
+    // Clear conversation ID and fallback banner when switching models
     setConversationId(null);
+    setModelFallbackInfo(null);
     // Force page reload to ensure clean state
     if (model && selectedModel && model.modelId !== selectedModel.modelId) {
       window.location.reload();
@@ -478,6 +484,8 @@ function NexusPageContent() {
   // Conversation ID callback for maintaining conversation continuity
   const handleConversationIdChange = useCallback((newConversationId: string) => {
     setConversationId(newConversationId)
+    // Clear fallback banner — it's only relevant to the previously loaded conversation
+    setModelFallbackInfo(null)
     conversationContext.setConversationId(newConversationId)
 
     // Update URL to reflect the current conversation

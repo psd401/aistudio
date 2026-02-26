@@ -46,6 +46,7 @@ import type {
   PromptListItem,
   PromptListResult
 } from "@/lib/prompt-library/types"
+import type { PromptLibrarySettings } from "@/lib/db/types/jsonb"
 
 /**
  * Create a new prompt
@@ -232,6 +233,47 @@ export async function getPrompt(id: string): Promise<ActionState<Prompt>> {
       context: "getPrompt",
       requestId,
       operation: "getPrompt"
+    })
+  }
+}
+
+/**
+ * Get only the settings for a prompt without incrementing view count.
+ * Used for pre-loading URL-driven configuration without skewing analytics.
+ */
+export async function getPromptSettings(
+  id: string
+): Promise<ActionState<PromptLibrarySettings | null>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("getPromptSettings")
+  const log = createLogger({ requestId, action: "getPromptSettings" })
+
+  try {
+    const session = await getServerSession()
+    if (!session) {
+      throw ErrorFactories.authNoSession()
+    }
+
+    const userId = await getUserIdFromSession(session.sub)
+    const canRead = await canReadPrompt(id, userId)
+    if (!canRead) {
+      throw ErrorFactories.authzResourceNotFound("Prompt", id)
+    }
+
+    const result = await getPromptById(id)
+    if (!result) {
+      throw ErrorFactories.dbRecordNotFound("prompt_library", id)
+    }
+
+    timer({ status: "success" })
+    log.info("Prompt settings retrieved", { promptId: id })
+    return createSuccess(result.settings ?? null)
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to retrieve prompt settings", {
+      context: "getPromptSettings",
+      requestId,
+      operation: "getPromptSettings"
     })
   }
 }

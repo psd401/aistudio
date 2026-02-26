@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, startTransition } from "react"
+import { useState, useEffect, startTransition, useMemo } from "react"
 import {
   Dialog,
   DialogContent,
@@ -69,14 +69,14 @@ export function PromptSaveDialog({
     }
   }, [open, defaultTitle])
 
-  // Build settings from current chat configuration
-  const settings: PromptLibrarySettings | undefined = (() => {
+  // Build settings from current chat configuration (memoized to avoid recalculation on every render)
+  const settings = useMemo((): PromptLibrarySettings | undefined => {
     const s: PromptLibrarySettings = {}
     if (currentModelId) s.modelId = currentModelId
     if (currentTools && currentTools.length > 0) s.tools = currentTools
     if (currentConnectors && currentConnectors.length > 0) s.connectors = currentConnectors
     return Object.keys(s).length > 0 ? s : undefined
-  })()
+  }, [currentModelId, currentTools, currentConnectors])
 
   const handleSave = async () => {
     const result = await savePrompt({

@@ -163,24 +163,45 @@ export function useModelsWithPersistence(
     if (preferredModelId) {
       const preferredModel = models.find(m => m.modelId === preferredModelId)
       if (preferredModel) {
-        if (currentModelId !== preferredModelId) {
-          setSelectedModel(preferredModel)
-          lastValidatedModelId.current = preferredModel.modelId
-          log.info('Selected preferred model', {
-            modelId: preferredModel.modelId,
-            name: preferredModel.name
-          })
+        // Verify the preferred model meets required capabilities before selecting
+        let meetsCapabilities = true
+        if (requiredCapabilities && requiredCapabilities.length > 0) {
+          try {
+            const caps = typeof preferredModel.capabilities === 'string'
+              ? JSON.parse(preferredModel.capabilities)
+              : preferredModel.capabilities
+            meetsCapabilities = Array.isArray(caps) && requiredCapabilities.every(cap => caps.includes(cap))
+          } catch {
+            meetsCapabilities = false
+          }
+        }
+
+        if (meetsCapabilities) {
+          if (currentModelId !== preferredModelId) {
+            setSelectedModel(preferredModel)
+            lastValidatedModelId.current = preferredModel.modelId
+            log.info('Selected preferred model', {
+              modelId: preferredModel.modelId,
+              name: preferredModel.name
+            })
+            return
+          }
+          // Already selected — just record validation
+          lastValidatedModelId.current = currentModelId
           return
         }
-        // Already selected — just record validation
-        lastValidatedModelId.current = currentModelId
-        return
+
+        log.warn('Preferred model does not meet required capabilities, falling back', {
+          preferredModelId,
+          requiredCapabilities
+        })
+      } else {
+        // Preferred model not available — warn and fall through to default selection
+        log.warn('Preferred model not available, falling back', {
+          preferredModelId,
+          availableModelCount: models.length
+        })
       }
-      // Preferred model not available — warn and fall through to default selection
-      log.warn('Preferred model not available, falling back', {
-        preferredModelId,
-        availableModels: models.map(m => m.modelId)
-      })
     }
 
     if (!currentModelId || isStale) {
@@ -225,7 +246,7 @@ export function useModelsWithPersistence(
         if (!candidateModel) {
           log.warn('No models match required capabilities', {
             requiredCapabilities,
-            availableModels: models.map(m => m.modelId)
+            availableModelCount: models.length
           })
         }
       } else {
