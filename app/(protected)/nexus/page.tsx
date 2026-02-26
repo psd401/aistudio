@@ -348,10 +348,13 @@ function NexusPageContent() {
     return null
   }, [urlConversationId])
 
-  // Parse URL configuration params — slice arrays to prevent unbounded input
+  // Parse URL configuration params — slice arrays and validate formats
   const urlModelId = searchParams.get('model')
   const urlTools = useMemo(() => searchParams.getAll('tool').slice(0, 50), [searchParams])
-  const urlConnectors = useMemo(() => searchParams.getAll('connector').slice(0, 50), [searchParams])
+  const urlConnectors = useMemo(
+    () => searchParams.getAll('connector').slice(0, 50).filter(c => uuidSchema.safeParse(c).success),
+    [searchParams]
+  )
 
   // Load models and manage model selection
   const [preferredModelId, setPreferredModelId] = useState<string | null>(urlModelId)
@@ -371,15 +374,18 @@ function NexusPageContent() {
   // Load prompt settings when promptId is present (lower priority than URL params)
   // Uses getPromptSettings to avoid incrementing view count (PromptAutoLoader handles the full view)
   const urlPromptId = searchParams.get('promptId')
-  // Tracks which promptId we've already applied settings for. Prevents re-applying
-  // settings on subsequent renders, which would override any tool/connector changes
-  // the user has made since the initial prompt load.
-  const promptSettingsLoadedRef = useRef<string | null>(null)
+  // Tracks which promptId settings were last requested. Used both to prevent
+  // re-applying settings (which would override user changes after initial load)
+  // and to discard stale responses when the user rapidly switches prompts.
+  const promptSettingsRequestedRef = useRef<string | null>(null)
   useEffect(() => {
     if (!urlPromptId || !uuidSchema.safeParse(urlPromptId).success) return
-    if (promptSettingsLoadedRef.current === urlPromptId) return
-    promptSettingsLoadedRef.current = urlPromptId
-    getPromptSettings(urlPromptId).then(result => {
+    if (promptSettingsRequestedRef.current === urlPromptId) return
+    promptSettingsRequestedRef.current = urlPromptId
+    const requestedId = urlPromptId
+    getPromptSettings(requestedId).then(result => {
+      // Discard stale response if user has already navigated to a different prompt
+      if (promptSettingsRequestedRef.current !== requestedId) return
       if (!result.isSuccess || !result.data) return
       const settings = result.data
 
@@ -395,7 +401,7 @@ function NexusPageContent() {
       }
     }).catch(err => {
       log.warn('Failed to load prompt settings', {
-        promptId: urlPromptId,
+        promptId: requestedId,
         error: err instanceof Error ? err.message : String(err)
       })
     })
