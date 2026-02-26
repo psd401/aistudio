@@ -6,6 +6,7 @@ import {
   setPromptTags,
   getTagsForPrompt,
   getPromptById,
+  getPromptSettingsById,
   incrementViewCount,
   incrementUseCount,
   listPrompts as drizzleListPrompts,
@@ -46,6 +47,7 @@ import type {
   PromptListItem,
   PromptListResult
 } from "@/lib/prompt-library/types"
+import type { PromptLibrarySettings } from "@/lib/db/types/jsonb"
 
 /**
  * Create a new prompt
@@ -98,7 +100,8 @@ export async function createPrompt(
       description: validated.description,
       visibility: validated.visibility,
       sourceMessageId: validated.sourceMessageId,
-      sourceConversationId: validated.sourceConversationId
+      sourceConversationId: validated.sourceConversationId,
+      settings: validated.settings ?? null
     })
 
     // Build prompt object with type conversion
@@ -110,6 +113,7 @@ export async function createPrompt(
       sourceMessageId: string | null
       sourceConversationId: string | null
       deletedAt: Date | null
+      settings: PromptLibrarySettings | null
     }
 
     const prompt: Prompt = {
@@ -130,6 +134,7 @@ export async function createPrompt(
       createdAt: resultWithAllFields.createdAt.toISOString(),
       updatedAt: resultWithAllFields.updatedAt.toISOString(),
       deletedAt: resultWithAllFields.deletedAt?.toISOString() ?? null,
+      settings: resultWithAllFields.settings ?? null,
       tags: []
     }
 
@@ -214,6 +219,7 @@ export async function getPrompt(id: string): Promise<ActionState<Prompt>> {
       createdAt: result.createdAt.toISOString(),
       updatedAt: result.updatedAt.toISOString(),
       deletedAt: result.deletedAt?.toISOString() ?? null,
+      settings: result.settings ?? null,
       tags: result.tags,
       ownerName: result.ownerName ?? undefined
     }
@@ -228,6 +234,47 @@ export async function getPrompt(id: string): Promise<ActionState<Prompt>> {
       context: "getPrompt",
       requestId,
       operation: "getPrompt"
+    })
+  }
+}
+
+/**
+ * Get only the settings for a prompt without incrementing view count.
+ * Uses a targeted query (settings column only) to avoid fetching full content.
+ * Used for pre-loading URL-driven configuration without skewing analytics.
+ */
+export async function getPromptSettings(
+  id: string
+): Promise<ActionState<PromptLibrarySettings | null>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("getPromptSettings")
+  const log = createLogger({ requestId, action: "getPromptSettings" })
+
+  try {
+    log.info("Action started", { params: sanitizeForLogging({ id }) })
+
+    const session = await getServerSession()
+    if (!session) {
+      throw ErrorFactories.authNoSession()
+    }
+
+    const userId = await getUserIdFromSession(session.sub)
+    const canRead = await canReadPrompt(id, userId)
+    if (!canRead) {
+      throw ErrorFactories.authzResourceNotFound("Prompt", id)
+    }
+
+    const settings = await getPromptSettingsById(id)
+
+    log.info("Prompt settings retrieved", { promptId: id })
+    timer({ status: "success" })
+    return createSuccess(settings)
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to retrieve prompt settings", {
+      context: "getPromptSettings",
+      requestId,
+      operation: "getPromptSettings"
     })
   }
 }
@@ -362,7 +409,8 @@ export async function updatePrompt(
     const hasFieldUpdates = validated.title !== undefined ||
                            validated.content !== undefined ||
                            validated.description !== undefined ||
-                           validated.visibility !== undefined
+                           validated.visibility !== undefined ||
+                           validated.settings !== undefined
 
     if (!hasFieldUpdates && !validated.tags) {
       // No changes requested, fetch and return current prompt
@@ -379,7 +427,8 @@ export async function updatePrompt(
         title: validated.title,
         content: validated.content,
         description: validated.description,
-        visibility: validated.visibility
+        visibility: validated.visibility,
+        settings: validated.settings
       })
 
       if (!result) {

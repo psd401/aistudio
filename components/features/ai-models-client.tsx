@@ -19,11 +19,12 @@ export const AiModelsClient = memo(function AiModelsClient({ initialModels = [] 
       chainPrompts: number;
       conversations: number;
       modelComparisons: number;
+      promptLibrary: number;
     };
   }>({
     isOpen: false,
     model: null,
-    referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0 }
+    referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0, promptLibrary: 0 }
   });
   const { toast } = useToast();
 
@@ -102,10 +103,16 @@ export const AiModelsClient = memo(function AiModelsClient({ initialModels = [] 
         // Model has references, show replacement dialog
         const modelToDelete = models.find(m => m.id === modelId);
         if (modelToDelete) {
+          const apiCounts = referenceData.data.counts;
           setReplacementDialog({
             isOpen: true,
             model: modelToDelete,
-            referenceCounts: referenceData.data.counts
+            referenceCounts: {
+              chainPrompts: apiCounts.chainPrompts ?? 0,
+              conversations: (apiCounts.nexusMessages ?? 0) + (apiCounts.nexusConversations ?? 0),
+              modelComparisons: apiCounts.modelComparisons ?? 0,
+              promptLibrary: apiCounts.promptLibrary ?? 0,
+            }
           });
         }
       } else {
@@ -159,7 +166,7 @@ export const AiModelsClient = memo(function AiModelsClient({ initialModels = [] 
       setReplacementDialog({
         isOpen: false,
         model: null,
-        referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0 }
+        referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0, promptLibrary: 0 }
       });
       
       toast({
@@ -191,7 +198,7 @@ export const AiModelsClient = memo(function AiModelsClient({ initialModels = [] 
           onClose={() => setReplacementDialog({
             isOpen: false,
             model: null,
-            referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0 }
+            referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0, promptLibrary: 0 }
           })}
           modelToDelete={replacementDialog.model}
           availableModels={models}

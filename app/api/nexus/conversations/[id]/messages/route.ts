@@ -260,7 +260,11 @@ export async function GET(
 
     return Response.json({
       messages: aiSdkMessages,
-      conversation: { id: conversation.id, title: conversation.title },
+      conversation: {
+        id: conversation.id,
+        title: conversation.title,
+        modelUsed: conversation.modelUsed ?? null
+      },
       pagination: { limit: pagination.limit, offset: pagination.offset, total: totalCount }
     })
 

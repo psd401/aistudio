@@ -31,4 +31,5 @@ export const modelReplacementAudit = pgTable("model_replacement_audit", {
   nexusMessagesUpdated: integer("nexus_messages_updated").default(0),
   nexusConversationsUpdated: integer("nexus_conversations_updated").default(0),
   toolExecutionsUpdated: integer("tool_executions_updated").default(0),
+  promptLibraryUpdated: integer("prompt_library_updated").default(0),
 });

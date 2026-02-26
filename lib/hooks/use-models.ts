@@ -8,6 +8,22 @@ import { createLogger } from "@/lib/client-logger"
 
 const log = createLogger({ module: 'use-models' })
 
+/** Check if a model meets all required capabilities */
+function meetsRequiredCapabilities(model: SelectAiModel, required: string[]): boolean {
+  try {
+    const caps = typeof model.capabilities === 'string'
+      ? JSON.parse(model.capabilities)
+      : model.capabilities
+    return Array.isArray(caps) && required.every(cap => caps.includes(cap))
+  } catch (error) {
+    log.warn('Failed to parse model capabilities', {
+      modelId: model.modelId,
+      error: error instanceof Error ? error.message : String(error)
+    })
+    return false
+  }
+}
+
 // Validation schema for localStorage model data
 // This is a partial schema - we only validate the fields we actually use
 const StoredModelSchema = z.object({
@@ -128,22 +144,34 @@ export function useModelPersistence(storageKey: string) {
     }
   }, [storageKey])
   
-  return [selectedModel, setSelectedModel] as const
+  // setTransientModel updates in-memory state without persisting to localStorage.
+  // Used for URL-driven or prompt-settings-driven model selections that should not
+  // overwrite the user's stored preference.
+  const setTransientModel = useCallback((model: SelectAiModel | null) => {
+    setSelectedModelState(model)
+  }, [])
+
+  return [selectedModel, setSelectedModel, setTransientModel] as const
 }
 
 /**
  * Combined hook for models with persistence
  * Convenience wrapper that combines fetching and persistence
  */
-export function useModelsWithPersistence(storageKey: string, requiredCapabilities?: string[]) {
+export function useModelsWithPersistence(
+  storageKey: string,
+  requiredCapabilities?: string[],
+  preferredModelId?: string | null
+) {
   const { models, isLoading, error, refetch } = useModels()
-  const [selectedModel, setSelectedModel] = useModelPersistence(storageKey)
+  const [selectedModel, setSelectedModel, setTransientModel] = useModelPersistence(storageKey)
   // Tracks the last model ID this effect validated to prevent redundant runs.
   // This allows selectedModel in the dependency array (no stale closure)
   // while preventing infinite loops from setSelectedModel triggering re-runs.
   const lastValidatedModelId = useRef<string | null | undefined>(undefined)
 
   // Auto-select a valid model if none selected or if persisted model is no longer available
+  // Priority: preferredModelId > localStorage > first available
   useEffect(() => {
     if (models.length === 0 || isLoading) return
 
@@ -153,6 +181,43 @@ export function useModelsWithPersistence(storageKey: string, requiredCapabilitie
     if (currentModelId === lastValidatedModelId.current) return
 
     const isStale = currentModelId && !models.some(m => m.modelId === currentModelId)
+
+    // If a preferred model ID is specified (e.g. from URL), try to use it first
+    if (preferredModelId) {
+      const preferredModel = models.find(m => m.modelId === preferredModelId)
+      if (preferredModel) {
+        // Verify the preferred model meets required capabilities before selecting
+        const capsSatisfied = !requiredCapabilities?.length || meetsRequiredCapabilities(preferredModel, requiredCapabilities)
+
+        if (capsSatisfied) {
+          if (currentModelId !== preferredModelId) {
+            // Use transient setter — URL/prompt-driven selection should not overwrite
+            // the user's persisted localStorage preference
+            setTransientModel(preferredModel)
+            lastValidatedModelId.current = preferredModel.modelId
+            log.info('Selected preferred model', {
+              modelId: preferredModel.modelId,
+              name: preferredModel.name
+            })
+            return
+          }
+          // Already selected — just record validation
+          lastValidatedModelId.current = currentModelId
+          return
+        }
+
+        log.warn('Preferred model does not meet required capabilities, falling back', {
+          preferredModelId,
+          requiredCapabilities
+        })
+      } else {
+        // Preferred model not available — warn and fall through to default selection
+        log.warn('Preferred model not available, falling back', {
+          preferredModelId,
+          availableModelCount: models.length
+        })
+      }
+    }
 
     if (!currentModelId || isStale) {
       if (isStale && selectedModel) {
@@ -167,36 +232,14 @@ export function useModelsWithPersistence(storageKey: string, requiredCapabilitie
       let candidateModel: SelectAiModel | null = null
 
       if (requiredCapabilities && requiredCapabilities.length > 0) {
-        candidateModel = models.find(model => {
-          try {
-            const capabilities = typeof model.capabilities === 'string'
-              ? JSON.parse(model.capabilities)
-              : model.capabilities
-
-            if (!Array.isArray(capabilities)) {
-              log.warn('Model has invalid capabilities format', {
-                modelId: model.modelId,
-                capabilitiesType: typeof capabilities
-              })
-              return false
-            }
-
-            return requiredCapabilities.every(cap => capabilities.includes(cap))
-          } catch (error) {
-            log.warn('Failed to parse model capabilities', {
-              modelId: model.modelId,
-              error: error instanceof Error ? error.message : String(error)
-            })
-            return false
-          }
-        }) ?? null
+        candidateModel = models.find(model => meetsRequiredCapabilities(model, requiredCapabilities)) ?? null
 
         // If no model matches required capabilities, don't fall back to models[0]
         // Instead, leave it null to prompt user selection
         if (!candidateModel) {
           log.warn('No models match required capabilities', {
             requiredCapabilities,
-            availableModels: models.map(m => m.modelId)
+            availableModelCount: models.length
           })
         }
       } else {
@@ -216,7 +259,7 @@ export function useModelsWithPersistence(storageKey: string, requiredCapabilitie
       // Current model is valid — record it so we don't re-validate
       lastValidatedModelId.current = currentModelId
     }
-  }, [models, isLoading, requiredCapabilities, setSelectedModel, selectedModel])
+  }, [models, isLoading, requiredCapabilities, setSelectedModel, setTransientModel, selectedModel, preferredModelId])
 
   return {
     models,

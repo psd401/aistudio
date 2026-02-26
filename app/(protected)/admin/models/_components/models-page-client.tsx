@@ -61,11 +61,12 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
       chainPrompts: number
       conversations: number
       modelComparisons: number
+      promptLibrary: number
     }
   }>({
     isOpen: false,
     model: null,
-    referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0 },
+    referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0, promptLibrary: 0 },
   })
 
   // Calculate stats from models
@@ -439,10 +440,16 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
           // Model has references, show replacement dialog
           const fullModel = models.find((m) => m.id === model.id)
           if (fullModel) {
+            const apiCounts = referenceData.data.counts
             setReplacementDialog({
               isOpen: true,
               model: fullModel,
-              referenceCounts: referenceData.data.counts,
+              referenceCounts: {
+                chainPrompts: apiCounts.chainPrompts ?? 0,
+                conversations: (apiCounts.nexusMessages ?? 0) + (apiCounts.nexusConversations ?? 0),
+                modelComparisons: apiCounts.modelComparisons ?? 0,
+                promptLibrary: apiCounts.promptLibrary ?? 0,
+              },
             })
           }
         } else {
@@ -502,7 +509,7 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
         setReplacementDialog({
           isOpen: false,
           model: null,
-          referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0 },
+          referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0, promptLibrary: 0 },
         })
 
         toast({
@@ -708,7 +715,7 @@ export function ModelsPageClient({ initialModels }: ModelsPageClientProps) {
             setReplacementDialog({
               isOpen: false,
               model: null,
-              referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0 },
+              referenceCounts: { chainPrompts: 0, conversations: 0, modelComparisons: 0, promptLibrary: 0 },
             })
           }
           modelToDelete={replacementDialog.model}

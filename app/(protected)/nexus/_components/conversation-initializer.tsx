@@ -151,10 +151,12 @@ interface ApiMessage {
  */
 export function ConversationInitializer({
   conversationId,
-  children
+  children,
+  onModelUsed
 }: {
   conversationId: string | null
   children: (messages: UIMessage[]) => React.ReactNode
+  onModelUsed?: (modelId: string | null) => void
 }) {
   const [messages, setMessages] = useState<UIMessage[]>([])
   const [loading, setLoading] = useState(true)
@@ -198,11 +200,19 @@ export function ConversationInitializer({
         if (!res.ok) {
           throw new Error(`Failed to load messages: ${res.status}`)
         }
-        return res.json() as Promise<{ messages: ApiMessage[] }>
+        return res.json() as Promise<{
+          messages: ApiMessage[]
+          conversation?: { modelUsed?: string | null }
+        }>
       })
       .then(data => {
         const loadedMessages = data.messages || []
         log.debug('Messages loaded from API', { count: loadedMessages.length })
+
+        // Pass conversation model info up to parent
+        if (onModelUsed && data.conversation?.modelUsed) {
+          onModelUsed(data.conversation.modelUsed)
+        }
 
         // Convert to UIMessage format (required by useChatRuntime)
         const threadMessages: UIMessage[] = loadedMessages.map((msg) => ({
