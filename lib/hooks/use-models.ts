@@ -15,7 +15,11 @@ function meetsRequiredCapabilities(model: SelectAiModel, required: string[]): bo
       ? JSON.parse(model.capabilities)
       : model.capabilities
     return Array.isArray(caps) && required.every(cap => caps.includes(cap))
-  } catch {
+  } catch (error) {
+    log.warn('Failed to parse model capabilities', {
+      modelId: model.modelId,
+      error: error instanceof Error ? error.message : String(error)
+    })
     return false
   }
 }

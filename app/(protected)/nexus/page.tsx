@@ -24,7 +24,6 @@ import type { SelectAiModel } from '@/types'
 import { createLogger } from '@/lib/client-logger'
 import { toast } from 'sonner'
 import { getPromptSettings } from '@/actions/prompt-library.actions'
-import type { PromptLibrarySettings } from '@/lib/db/types/jsonb'
 import { ModelFallbackBanner } from './_components/model-fallback-banner'
 
 const log = createLogger({ moduleName: 'nexus-page' })
@@ -372,15 +371,17 @@ function NexusPageContent() {
   // Load prompt settings when promptId is present (lower priority than URL params)
   // Uses getPromptSettings to avoid incrementing view count (PromptAutoLoader handles the full view)
   const urlPromptId = searchParams.get('promptId')
+  // Tracks which promptId we've already applied settings for. Prevents re-applying
+  // settings on subsequent renders, which would override any tool/connector changes
+  // the user has made since the initial prompt load.
   const promptSettingsLoadedRef = useRef<string | null>(null)
   useEffect(() => {
     if (!urlPromptId || !uuidSchema.safeParse(urlPromptId).success) return
-    // Guard: only load settings once per promptId
     if (promptSettingsLoadedRef.current === urlPromptId) return
     promptSettingsLoadedRef.current = urlPromptId
     getPromptSettings(urlPromptId).then(result => {
       if (!result.isSuccess || !result.data) return
-      const settings = result.data as PromptLibrarySettings
+      const settings = result.data
 
       // URL params take priority over prompt settings
       if (!urlModelId && settings.modelId) {
@@ -398,7 +399,7 @@ function NexusPageContent() {
         error: err instanceof Error ? err.message : String(err)
       })
     })
-  }, [urlPromptId, urlModelId, urlTools.length, urlConnectors.length])
+  }, [urlPromptId, urlModelId, urlTools, urlConnectors])
 
   // Model fallback for archived conversations — derived from conversationModelId + available models.
   // Setting conversationModelId to null (on dismiss or navigation) hides the banner.

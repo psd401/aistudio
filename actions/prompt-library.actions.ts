@@ -13,6 +13,9 @@ import {
   deletePrompt as drizzleDeletePrompt,
   trackUsageEvent
 } from "@/lib/db/drizzle"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { promptLibrary } from "@/lib/db/schema"
+import { eq, and, isNull } from "drizzle-orm"
 import { type ActionState } from "@/types/actions-types"
 import {
   handleError,
@@ -239,6 +242,7 @@ export async function getPrompt(id: string): Promise<ActionState<Prompt>> {
 
 /**
  * Get only the settings for a prompt without incrementing view count.
+ * Uses a targeted query (settings column only) to avoid fetching full content.
  * Used for pre-loading URL-driven configuration without skewing analytics.
  */
 export async function getPromptSettings(
@@ -249,6 +253,8 @@ export async function getPromptSettings(
   const log = createLogger({ requestId, action: "getPromptSettings" })
 
   try {
+    log.info("Action started", { params: sanitizeForLogging({ id }) })
+
     const session = await getServerSession()
     if (!session) {
       throw ErrorFactories.authNoSession()
@@ -260,14 +266,22 @@ export async function getPromptSettings(
       throw ErrorFactories.authzResourceNotFound("Prompt", id)
     }
 
-    const result = await getPromptById(id)
-    if (!result) {
+    // Targeted query: only fetch settings column, not full prompt content
+    const [row] = await executeQuery(
+      (db) => db.select({ settings: promptLibrary.settings })
+        .from(promptLibrary)
+        .where(and(eq(promptLibrary.id, id), isNull(promptLibrary.deletedAt)))
+        .limit(1),
+      "getPromptSettings"
+    )
+
+    if (!row) {
       throw ErrorFactories.dbRecordNotFound("prompt_library", id)
     }
 
     log.info("Prompt settings retrieved", { promptId: id })
     timer({ status: "success" })
-    return createSuccess(result.settings ?? null)
+    return createSuccess(row.settings ?? null)
   } catch (error) {
     timer({ status: "error" })
     return handleError(error, "Failed to retrieve prompt settings", {
