@@ -3,6 +3,8 @@
  * Based on schema: 039-prompt-library-schema.sql
  */
 
+import type { PromptLibrarySettings } from "@/lib/db/types/jsonb"
+
 export type PromptVisibility = 'private' | 'public'
 export type ModerationStatus = 'pending' | 'approved' | 'rejected'
 export type EventType = 'view' | 'use' | 'share'
@@ -25,6 +27,7 @@ export interface Prompt {
   createdAt: string
   updatedAt: string
   deletedAt: string | null
+  settings?: PromptLibrarySettings | null
   // Joined fields
   tags?: string[]
   ownerName?: string

@@ -10,6 +10,8 @@ import {
 } from "@assistant-ui/react";
 import type { FC } from "react";
 import { createContext, useContext, useMemo } from "react";
+import { ChatConfigContext, useChatConfig } from "@/lib/contexts/chat-config-context";
+import type { ChatConfig } from "@/lib/contexts/chat-config-context";
 import {
   ArrowDownIcon,
   ArrowUpIcon,
@@ -45,6 +47,8 @@ import type { SelectAiModel } from "@/types";
 const ConversationIdContext = createContext<string | null>(null);
 
 export const useConversationId = () => useContext(ConversationIdContext);
+
+// ChatConfigContext and useChatConfig imported from @/lib/contexts/chat-config-context
 
 // Pre-defined constants to avoid creating new objects/arrays on every render
 const EMPTY_MODELS_ARRAY: SelectAiModel[] = [];
@@ -157,8 +161,16 @@ export const Thread: FC<ThreadProps> = ({
     AssistantMessage,
   }), []);
 
+  // Memoize chat config for prompt save context
+  const chatConfig = useMemo<ChatConfig>(() => ({
+    modelId: selectedModel?.modelId,
+    tools: enabledTools,
+    connectors: enabledConnectors,
+  }), [selectedModel?.modelId, enabledTools, enabledConnectors]);
+
   return (
     <AssistantContentComponentsContext.Provider value={contentComponents}>
+      <ChatConfigContext.Provider value={chatConfig}>
       <ConversationIdContext.Provider value={conversationId || null}>
         <ThreadPrimitive.Root
           className="bg-white flex h-full flex-col"
@@ -191,6 +203,7 @@ export const Thread: FC<ThreadProps> = ({
           />
         </ThreadPrimitive.Root>
       </ConversationIdContext.Provider>
+      </ChatConfigContext.Provider>
     </AssistantContentComponentsContext.Provider>
   );
 };
@@ -499,6 +512,7 @@ const UserMessage: FC = () => {
 const UserActionBar: FC = () => {
   const message = useMessage();
   const conversationId = useConversationId();
+  const chatConfig = useChatConfig();
 
   // Extract text content from message
   const messageContent = message.content
@@ -522,6 +536,9 @@ const UserActionBar: FC = () => {
         <PromptSaveButton
           content={messageContent}
           conversationId={conversationId}
+          currentModelId={chatConfig.modelId}
+          currentTools={chatConfig.tools}
+          currentConnectors={chatConfig.connectors}
         />
       )}
     </ActionBarPrimitive.Root>

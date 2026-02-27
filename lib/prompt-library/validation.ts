@@ -13,6 +13,12 @@ export const eventTypeSchema = z.enum(['view', 'use', 'share'])
 
 export const sortOptionsSchema = z.enum(['created', 'usage', 'views']).default('created')
 
+export const promptSettingsSchema = z.object({
+  modelId: z.string().max(100).optional(),
+  tools: z.array(z.string().max(100)).max(50).optional(),
+  connectors: z.array(z.string().uuid()).max(50).optional(),
+}).optional().nullable()
+
 // Create Prompt Schema
 export const createPromptSchema = z.object({
   title: z.string()
@@ -31,6 +37,7 @@ export const createPromptSchema = z.object({
     .optional(),
   sourceMessageId: z.string().uuid().optional().nullable(),
   sourceConversationId: z.string().uuid().optional().nullable(),
+  settings: promptSettingsSchema,
 })
 
 export type CreatePromptInput = z.infer<typeof createPromptSchema>
@@ -53,6 +60,7 @@ export const updatePromptSchema = z.object({
   tags: z.array(z.string().min(1).max(50))
     .max(10, 'Maximum 10 tags allowed')
     .optional(),
+  settings: promptSettingsSchema,
 })
 
 export type UpdatePromptInput = z.infer<typeof updatePromptSchema>

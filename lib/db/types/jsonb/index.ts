@@ -253,6 +253,20 @@ export interface UserProfile {
 }
 
 // ============================================
+// Prompt Library JSONB Types
+// ============================================
+
+/**
+ * Settings for prompt library entries
+ * Stores model, tools, and connector configuration
+ */
+export interface PromptLibrarySettings {
+  modelId?: string;
+  tools?: string[];
+  connectors?: string[];
+}
+
+// ============================================
 // Context Graph JSONB Types
 // ============================================
 

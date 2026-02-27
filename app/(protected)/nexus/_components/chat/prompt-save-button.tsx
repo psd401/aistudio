@@ -13,6 +13,9 @@ interface PromptSaveButtonProps {
   content: string
   conversationId: string | null
   className?: string
+  currentModelId?: string
+  currentTools?: string[]
+  currentConnectors?: string[]
 }
 
 /**
@@ -22,7 +25,10 @@ interface PromptSaveButtonProps {
 export function PromptSaveButton({
   content,
   conversationId,
-  className = ""
+  className = "",
+  currentModelId,
+  currentTools,
+  currentConnectors
 }: PromptSaveButtonProps) {
   const [showDialog, setShowDialog] = useState(false)
   const { savePrompt, isSaving } = usePromptSave()
@@ -69,6 +75,9 @@ export function PromptSaveButton({
         onOpenChange={setShowDialog}
         content={content}
         conversationId={conversationId}
+        currentModelId={currentModelId}
+        currentTools={currentTools}
+        currentConnectors={currentConnectors}
       />
     </>
   )

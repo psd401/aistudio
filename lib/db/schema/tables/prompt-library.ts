@@ -5,12 +5,14 @@
 
 import {
   integer,
+  jsonb,
   pgTable,
   text,
   timestamp,
   uuid,
   varchar,
 } from "drizzle-orm/pg-core";
+import type { PromptLibrarySettings } from "@/lib/db/types/jsonb";
 import { users } from "./users";
 import { nexusConversations } from "./nexus-conversations";
 import { nexusMessages } from "./nexus-messages";
@@ -39,4 +41,5 @@ export const promptLibrary = pgTable("prompt_library", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at").defaultNow().notNull(),
   deletedAt: timestamp("deleted_at"),
+  settings: jsonb("settings").$type<PromptLibrarySettings>(),
 });

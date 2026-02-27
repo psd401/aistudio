@@ -6,7 +6,7 @@ import { type UIMessage } from '@ai-sdk/react'
 import { Thread } from '@/components/assistant-ui/thread'
 import { useSession } from 'next-auth/react'
 import { useRouter, useSearchParams } from 'next/navigation'
-import { useEffect, useMemo, useCallback, useState, Suspense } from 'react'
+import { useEffect, useMemo, useCallback, useState, useRef, Suspense } from 'react'
 import { NexusShell } from './_components/layout/nexus-shell'
 import { NexusLayout } from './_components/layout/nexus-layout'
 import { ErrorBoundary } from './_components/error-boundary'
@@ -23,8 +23,12 @@ import { validateConversationId } from '@/lib/nexus/conversation-navigation'
 import type { SelectAiModel } from '@/types'
 import { createLogger } from '@/lib/client-logger'
 import { toast } from 'sonner'
+import { getPromptSettings } from '@/actions/prompt-library.actions'
+import { ModelFallbackBanner } from './_components/model-fallback-banner'
 
 const log = createLogger({ moduleName: 'nexus-page' })
+const uuidSchema = z.string().uuid()
+const toolNameSchema = z.string().max(100).regex(/^[\w:-]+$/)
 
 /** Zod schema for X-Connector-Tools response header — validates server-sent tool mapping */
 const ConnectorToolsSchema = z.record(z.string(), z.object({
@@ -337,27 +341,98 @@ function NexusPageContent() {
     if (validateConversationId(urlConversationId)) {
       return urlConversationId
     }
-    
+
     if (urlConversationId) {
       log.warn('Invalid conversation ID in URL parameter', { urlConversationId })
     }
-    
+
     return null
   }, [urlConversationId])
-  
-  // Load models and manage model selection
-  const { 
-    models, 
-    selectedModel, 
-    setSelectedModel: originalSetSelectedModel, 
-    isLoading: isLoadingModels 
-  } = useModelsWithPersistence('nexus-model', ['chat'])
-  
-  // Tool management state
-  const [enabledTools, setEnabledTools] = useState<string[]>([])
 
-  // Connector management state (per-conversation)
-  const [enabledConnectors, setEnabledConnectors] = useState<string[]>([])
+  // Parse URL configuration params — validate formats, cap at 50 entries
+  const urlModelId = searchParams.get('model')
+  const urlTools = useMemo(() => {
+    const raw = searchParams.getAll('tool')
+    const validated = raw.filter(t => toolNameSchema.safeParse(t).success).slice(0, 50)
+    if (raw.length > validated.length) {
+      log.warn('URL tool params truncated or filtered', { rawCount: raw.length, validCount: validated.length })
+    }
+    return validated
+  }, [searchParams])
+  const urlConnectors = useMemo(() => {
+    const raw = searchParams.getAll('connector')
+    const validated = raw.filter(c => uuidSchema.safeParse(c).success).slice(0, 50)
+    if (raw.length > validated.length) {
+      log.warn('URL connector params truncated or filtered', { rawCount: raw.length, validCount: validated.length })
+    }
+    return validated
+  }, [searchParams])
+
+  // Load models and manage model selection
+  const [preferredModelId, setPreferredModelId] = useState<string | null>(urlModelId)
+  const {
+    models,
+    selectedModel,
+    setSelectedModel: originalSetSelectedModel,
+    isLoading: isLoadingModels
+  } = useModelsWithPersistence('nexus-model', ['chat'], preferredModelId)
+
+  // Tool management state — single source of truth from urlTools
+  const [enabledTools, setEnabledTools] = useState<string[]>(() => urlTools)
+
+  // Connector management state — single source of truth from urlConnectors
+  const [enabledConnectors, setEnabledConnectors] = useState<string[]>(() => urlConnectors)
+
+  // Load prompt settings when promptId is present (lower priority than URL params)
+  // Uses getPromptSettings to avoid incrementing view count (PromptAutoLoader handles the full view)
+  const urlPromptId = searchParams.get('promptId')
+  // Tracks which promptId settings were last requested. Used both to prevent
+  // re-applying settings (which would override user changes after initial load)
+  // and to discard stale responses when the user rapidly switches prompts.
+  const promptSettingsRequestedRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!urlPromptId || !uuidSchema.safeParse(urlPromptId).success) return
+    if (promptSettingsRequestedRef.current === urlPromptId) return
+    promptSettingsRequestedRef.current = urlPromptId
+    const requestedId = urlPromptId
+    getPromptSettings(requestedId).then(result => {
+      // Discard stale response if user has already navigated to a different prompt
+      if (promptSettingsRequestedRef.current !== requestedId) return
+      if (!result.isSuccess || !result.data) return
+      const settings = result.data
+
+      // URL params take priority over prompt settings
+      if (!urlModelId && settings.modelId) {
+        setPreferredModelId(settings.modelId)
+      }
+      if (urlTools.length === 0 && settings.tools?.length) {
+        setEnabledTools(settings.tools)
+      }
+      if (urlConnectors.length === 0 && settings.connectors?.length) {
+        setEnabledConnectors(settings.connectors)
+      }
+    }).catch(err => {
+      log.warn('Failed to load prompt settings', {
+        promptId: requestedId,
+        error: err instanceof Error ? err.message : String(err)
+      })
+    })
+  }, [urlPromptId, urlModelId, urlTools, urlConnectors])
+
+  // Model fallback for archived conversations — derived from conversationModelId + available models.
+  // Setting conversationModelId to null (on dismiss or navigation) hides the banner.
+  const [conversationModelId, setConversationModelId] = useState<string | null>(null)
+  const modelFallbackInfo = useMemo(() => {
+    if (!conversationModelId || models.length === 0) return null
+    const modelExists = models.some(m => m.modelId === conversationModelId)
+    if (!modelExists) {
+      return {
+        originalModel: conversationModelId,
+        fallbackModel: selectedModel?.name || 'default model'
+      }
+    }
+    return null
+  }, [conversationModelId, models, selectedModel?.name])
 
   // Attachment processing state
   const [processingAttachments, setProcessingAttachments] = useState<Set<string>>(new Set())
@@ -383,13 +458,19 @@ function NexusPageContent() {
     // Clear enabled tools and connectors when switching models
     setEnabledTools([]);
     setEnabledConnectors([]);
-    // Clear conversation ID when switching models for fresh conversation
+    // Clear conversation ID and fallback state when switching models
     setConversationId(null);
+    setConversationModelId(null);
     // Force page reload to ensure clean state
     if (model && selectedModel && model.modelId !== selectedModel.modelId) {
       window.location.reload();
     }
   }, [originalSetSelectedModel, selectedModel])
+
+  // Store the conversation's model ID when received — availability check is derived via useMemo above
+  const handleModelUsed = useCallback((modelId: string | null) => {
+    setConversationModelId(modelId)
+  }, [])
 
   // Memoized callback for tool changes to prevent unnecessary re-renders
   const onToolsChange = useCallback((tools: string[]) => {
@@ -419,6 +500,8 @@ function NexusPageContent() {
   // Conversation ID callback for maintaining conversation continuity
   const handleConversationIdChange = useCallback((newConversationId: string) => {
     setConversationId(newConversationId)
+    // Clear fallback state — it's only relevant to the previously loaded conversation
+    setConversationModelId(null)
     conversationContext.setConversationId(newConversationId)
 
     // Update URL to reflect the current conversation
@@ -487,25 +570,39 @@ function NexusPageContent() {
           <NexusShell>
             <div className="relative h-full">
               {selectedModel ? (
-                <ConversationInitializer conversationId={stableConversationId}>
-                  {(initialMessages) => (
-                    <NexusRuntimeWrapper
-                      conversationId={conversationId}
-                      selectedModel={selectedModel}
-                      enabledTools={enabledTools}
-                      enabledConnectors={enabledConnectors}
-                      attachmentAdapter={attachmentAdapter}
-                      initialMessages={initialMessages}
-                      onConversationIdChange={handleConversationIdChange}
-                      processingAttachments={processingAttachments}
-                      models={models}
-                      onModelChange={setSelectedModel}
-                      isLoadingModels={isLoadingModels}
-                      onToolsChange={onToolsChange}
-                      onConnectorsChange={onConnectorsChange}
-                    />
+                <>
+                  {modelFallbackInfo && (
+                    <div className="px-4 pt-2">
+                      <ModelFallbackBanner
+                        originalModel={modelFallbackInfo.originalModel}
+                        fallbackModel={modelFallbackInfo.fallbackModel}
+                        onDismiss={() => setConversationModelId(null)}
+                      />
+                    </div>
                   )}
-                </ConversationInitializer>
+                  <ConversationInitializer
+                    conversationId={stableConversationId}
+                    onModelUsed={handleModelUsed}
+                  >
+                    {(initialMessages) => (
+                      <NexusRuntimeWrapper
+                        conversationId={conversationId}
+                        selectedModel={selectedModel}
+                        enabledTools={enabledTools}
+                        enabledConnectors={enabledConnectors}
+                        attachmentAdapter={attachmentAdapter}
+                        initialMessages={initialMessages}
+                        onConversationIdChange={handleConversationIdChange}
+                        processingAttachments={processingAttachments}
+                        models={models}
+                        onModelChange={setSelectedModel}
+                        isLoadingModels={isLoadingModels}
+                        onToolsChange={onToolsChange}
+                        onConnectorsChange={onConnectorsChange}
+                      />
+                    )}
+                  </ConversationInitializer>
+                </>
               ) : (
                 <div className="flex h-full items-center justify-center">
                   <div className="text-center">

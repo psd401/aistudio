@@ -28,7 +28,7 @@ cd infra && bunx cdk deploy AIStudio-FrontendStack-Dev     # Deploy single stack
 ## 🎯 Critical Rules
 
 1. **Type Safety**: NO `any` types. Full TypeScript. Run `bun run lint` and `bun run typecheck` on ENTIRE codebase before commits.
-2. **Database Migrations**: Files 001-005 are IMMUTABLE. Only add migrations 010+. Add filename to `MIGRATION_FILES` array in `/infra/database/lambda/db-init-handler.ts`.
+2. **Database Migrations**: Files 001-005 are IMMUTABLE. Only add migrations 010+. Add filename to `migrationFiles` array in `/infra/database/migrations.json`.
 3. **Logging**: NEVER use `console.log/error`. Always use `@/lib/logger`. See patterns below.
 4. **Git Flow**: PRs target `dev` branch, never `main`. Write detailed commit messages.
 5. **Testing**: Add E2E tests for new features. Use Playwright MCP during development.
@@ -156,7 +156,7 @@ user.settings.theme;  // "light" | "dark" | "system"
 bun run drizzle:generate        # Generate from schema changes
 bun run migration:prepare       # Format for Lambda
 bun run migration:list          # List all migrations
-# Then add to MIGRATION_FILES in db-init-handler.ts
+# Then add to migrationFiles array in /infra/database/migrations.json
 ```
 
 **MCP tools for schema verification**:
