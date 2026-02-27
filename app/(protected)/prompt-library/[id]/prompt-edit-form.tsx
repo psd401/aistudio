@@ -70,7 +70,7 @@ export function PromptEditForm({
           <Label htmlFor="description">Description ({(formData.description ?? '').length}/1000)</Label>
           <Textarea
             id="description"
-            value={formData.description || ''}
+            value={formData.description ?? ''}
             onChange={(e) => onFormDataChange({ ...formData, description: e.target.value })}
             placeholder="Enter a brief description"
             rows={3}

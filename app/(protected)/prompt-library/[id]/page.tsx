@@ -1,10 +1,21 @@
 "use client"
 
-import { useState, useEffect, useRef, startTransition } from "react"
+import { useState, useEffect, useRef } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { useAction } from "@/lib/hooks/use-action"
 import { getPrompt, updatePrompt, deletePrompt } from "@/actions/prompt-library.actions"
 import { Button } from "@/components/ui/button"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog"
 import { toast } from "sonner"
 import { ArrowLeft, Save, Trash2 } from "lucide-react"
 import { PageBranding } from "@/components/ui/page-branding"
@@ -41,7 +52,7 @@ export default function PromptEditPage() {
         setPromptData(result.data)
         setFormData({
           title: result.data.title, content: result.data.content,
-          description: result.data.description || '', visibility: result.data.visibility,
+          description: result.data.description ?? '', visibility: result.data.visibility,
           tags: result.data.tags || []
         })
         if (result.data.settings) {
@@ -54,13 +65,19 @@ export default function PromptEditPage() {
     if (promptId) loadPrompt()
   }, [promptId]) // eslint-disable-line react-hooks/exhaustive-deps -- executeGet is stable (useAction returns stable ref)
 
+  // Reset model initialization flag when navigating between prompts
+  // (Next.js App Router may reuse the component instance across route changes)
   const modelInitialized = useRef(false)
   useEffect(() => {
+    modelInitialized.current = false
+  }, [promptId])
+
+  useEffect(() => {
     if (models.length === 0 || !promptData?.settings?.modelId || modelInitialized.current) return
-    const match = models.find(m => m.modelId === promptData.settings?.modelId)
+    const match = models.find(m => m.modelId === promptData?.settings?.modelId)
     if (match) {
       modelInitialized.current = true
-      startTransition(() => { setSelectedModel(match) })
+      setSelectedModel(match)
     }
   }, [models, promptData])
 
@@ -68,9 +85,9 @@ export default function PromptEditPage() {
     if (!formData.title || !formData.content) { toast.error("Title and content are required"); return }
     const hasSettings = selectedModel || enabledTools.length > 0 || enabledConnectors.length > 0
     const settings: PromptLibrarySettings | null = hasSettings ? {
-      ...(selectedModel ? { modelId: selectedModel.modelId } : {}),
-      ...(enabledTools.length > 0 ? { tools: enabledTools } : {}),
-      ...(enabledConnectors.length > 0 ? { connectors: enabledConnectors } : {}),
+      ...(selectedModel && { modelId: selectedModel.modelId }),
+      ...(enabledTools.length > 0 && { tools: enabledTools }),
+      ...(enabledConnectors.length > 0 && { connectors: enabledConnectors }),
     } : null
 
     setIsUpdating(true)
@@ -92,10 +109,12 @@ export default function PromptEditPage() {
   }
 
   const handleDelete = async () => {
-    if (confirm("Are you sure you want to delete this prompt?")) {
-      const result = await executeDelete(promptId)
-      if (result?.isSuccess) { toast.success("Prompt deleted successfully"); router.push('/prompt-library') }
-      else { toast.error(result?.message || "Failed to delete prompt") }
+    const result = await executeDelete(promptId)
+    if (result?.isSuccess) {
+      toast.success("Prompt deleted successfully")
+      router.push('/prompt-library')
+    } else {
+      toast.error(result?.message || "Failed to delete prompt")
     }
   }
 
@@ -121,7 +140,7 @@ export default function PromptEditPage() {
         <PageBranding />
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-4">
-            <Button variant="ghost" size="icon" onClick={() => router.push('/prompt-library')}>
+            <Button variant="ghost" size="icon" aria-label="Back to prompt library" onClick={() => router.push('/prompt-library')}>
               <ArrowLeft className="h-4 w-4" />
             </Button>
             <div>
@@ -130,9 +149,27 @@ export default function PromptEditPage() {
             </div>
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" onClick={handleDelete} disabled={isDeleting}>
-              <Trash2 className="mr-2 h-4 w-4" /> Delete
-            </Button>
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button variant="outline" disabled={isDeleting}>
+                  <Trash2 className="mr-2 h-4 w-4" /> Delete
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Delete Prompt</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    This will permanently delete this prompt. This action cannot be undone.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Cancel</AlertDialogCancel>
+                  <AlertDialogAction onClick={handleDelete} disabled={isDeleting}>
+                    {isDeleting ? "Deleting…" : "Delete"}
+                  </AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
             <Button onClick={handleSave} disabled={isUpdating}>
               <Save className="mr-2 h-4 w-4" /> {isUpdating ? 'Saving...' : 'Save Changes'}
             </Button>
