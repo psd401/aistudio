@@ -1,26 +1,18 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useCallback } from "react"
 import { useRouter } from "next/navigation"
 import { createPrompt } from "@/actions/prompt-library.actions"
 import { useAction } from "@/lib/hooks/use-action"
 import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Textarea } from "@/components/ui/textarea"
-import { Label } from "@/components/ui/label"
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue
-} from "@/components/ui/select"
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { toast } from "sonner"
 import { ArrowLeft, Save } from "lucide-react"
-import { TagInput } from "../_components/tag-input"
 import { PageBranding } from "@/components/ui/page-branding"
+import { useModels } from "@/lib/hooks/use-models"
+import { PromptCreateForm } from "./prompt-create-form"
+import type { SelectAiModel } from "@/types"
 import type { PromptVisibility } from "@/lib/prompt-library/types"
+import type { PromptLibrarySettings } from "@/lib/db/types/jsonb"
 import { createPromptSchema } from "@/lib/prompt-library/validation"
 
 interface NewPromptFormData {
@@ -41,16 +33,26 @@ export default function NewPromptPage() {
     tags: []
   })
 
+  // Settings state
+  const [selectedModel, setSelectedModel] = useState<SelectAiModel | null>(null)
+  const [enabledTools, setEnabledTools] = useState<string[]>([])
+  const [enabledConnectors, setEnabledConnectors] = useState<string[]>([])
+
+  const { models, isLoading: modelsLoading } = useModels()
+
   const { execute: executeCreate, isPending: isCreating } = useAction(createPrompt, {
     onSuccess: (data) => {
       toast.success("Prompt created successfully")
-      // Redirect to view the newly created prompt
       router.push(`/prompt-library/${data.id}`)
     },
     onError: (error) => {
       toast.error(error)
     }
   })
+
+  const handleModelChange = useCallback((model: SelectAiModel) => {
+    setSelectedModel(model)
+  }, [])
 
   const handleCreate = async () => {
     // Validate using Zod schema for consistency with server-side validation
@@ -61,12 +63,19 @@ export default function NewPromptPage() {
       return
     }
 
+    // Build settings from current selections
+    const settings: PromptLibrarySettings = {}
+    if (selectedModel) settings.modelId = selectedModel.modelId
+    if (enabledTools.length > 0) settings.tools = enabledTools
+    if (enabledConnectors.length > 0) settings.connectors = enabledConnectors
+
     await executeCreate({
       title: formData.title,
       content: formData.content,
       description: formData.description || undefined,
       visibility: formData.visibility,
-      tags: formData.tags
+      tags: formData.tags,
+      settings: Object.keys(settings).length > 0 ? settings : undefined
     })
   }
 
@@ -93,111 +102,27 @@ export default function NewPromptPage() {
           </div>
 
           <Button
-          onClick={handleCreate}
-          disabled={isCreating}
-        >
-          <Save className="mr-2 h-4 w-4" />
-          {isCreating ? 'Creating...' : 'Create Prompt'}
-        </Button>
+            onClick={handleCreate}
+            disabled={isCreating}
+          >
+            <Save className="mr-2 h-4 w-4" />
+            {isCreating ? 'Creating...' : 'Create Prompt'}
+          </Button>
         </div>
       </div>
 
-      {/* Form */}
-      <Card>
-        <CardHeader>
-          <CardTitle>Prompt Details</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-6">
-          {/* Title */}
-          <div className="space-y-2">
-            <Label htmlFor="title">
-              Title * ({formData.title.length}/255)
-            </Label>
-            <Input
-              id="title"
-              value={formData.title}
-              onChange={(e) =>
-                setFormData({ ...formData, title: e.target.value })
-              }
-              placeholder="Enter prompt title"
-              maxLength={255}
-              aria-required="true"
-              aria-invalid={!formData.title}
-            />
-          </div>
-
-          {/* Description */}
-          <div className="space-y-2">
-            <Label htmlFor="description">
-              Description ({formData.description.length}/1000)
-            </Label>
-            <Textarea
-              id="description"
-              value={formData.description}
-              onChange={(e) =>
-                setFormData({ ...formData, description: e.target.value })
-              }
-              placeholder="Enter a brief description"
-              rows={3}
-              maxLength={1000}
-            />
-          </div>
-
-          {/* Content */}
-          <div className="space-y-2">
-            <Label htmlFor="content">
-              Prompt Content * ({formData.content.length}/50000)
-            </Label>
-            <Textarea
-              id="content"
-              value={formData.content}
-              onChange={(e) =>
-                setFormData({ ...formData, content: e.target.value })
-              }
-              placeholder="Enter your prompt content"
-              rows={10}
-              className="font-mono"
-              maxLength={50000}
-              aria-required="true"
-              aria-invalid={!formData.content}
-            />
-            <p className="text-xs text-muted-foreground">
-              Use variables like {`{{variable_name}}`} for dynamic content
-            </p>
-          </div>
-
-          {/* Tags */}
-          <div className="space-y-2">
-            <Label htmlFor="tags">Tags</Label>
-            <TagInput
-              value={formData.tags}
-              onChange={(tags) => setFormData({ ...formData, tags })}
-            />
-          </div>
-
-          {/* Visibility */}
-          <div className="space-y-2">
-            <Label htmlFor="visibility">Visibility</Label>
-            <Select
-              value={formData.visibility}
-              onValueChange={(value: PromptVisibility) =>
-                setFormData({ ...formData, visibility: value })
-              }
-            >
-              <SelectTrigger className="w-48">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="private">Private</SelectItem>
-                <SelectItem value="public">Public</SelectItem>
-              </SelectContent>
-            </Select>
-            <p className="text-xs text-muted-foreground">
-              Public prompts will be visible to all users after moderation
-            </p>
-          </div>
-        </CardContent>
-      </Card>
+      <PromptCreateForm
+        formData={formData}
+        onFormDataChange={setFormData}
+        models={models}
+        modelsLoading={modelsLoading}
+        selectedModel={selectedModel}
+        onModelChange={handleModelChange}
+        enabledTools={enabledTools}
+        onToolsChange={setEnabledTools}
+        enabledConnectors={enabledConnectors}
+        onConnectorsChange={setEnabledConnectors}
+      />
     </div>
   )
 }

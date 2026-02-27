@@ -167,6 +167,7 @@ export function ConnectorsPageClient({ initialServers, fetchError: initialFetchE
               <TableHeader>
                 <TableRow>
                   <TableHead>Name</TableHead>
+                  <TableHead>ID</TableHead>
                   <TableHead>URL</TableHead>
                   <TableHead>Transport</TableHead>
                   <TableHead>Auth</TableHead>
@@ -179,6 +180,11 @@ export function ConnectorsPageClient({ initialServers, fetchError: initialFetchE
                 {servers.map((server) => (
                   <TableRow key={server.id}>
                     <TableCell className="font-medium">{server.name}</TableCell>
+                    <TableCell>
+                      <code className="text-xs bg-muted px-1 py-0.5 rounded font-mono select-all">
+                        {server.id}
+                      </code>
+                    </TableCell>
                     <TableCell>
                       <code className="text-xs bg-muted px-1 py-0.5 rounded max-w-[200px] truncate block">
                         {server.url}
