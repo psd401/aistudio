@@ -62,9 +62,9 @@ export default function NewPromptPage() {
     // Build settings from current selections; null means explicitly no settings
     const hasSettings = selectedModel || enabledTools.length > 0 || enabledConnectors.length > 0
     const settings: PromptLibrarySettings | null = hasSettings ? {
-      ...(selectedModel ? { modelId: selectedModel.modelId } : {}),
-      ...(enabledTools.length > 0 ? { tools: enabledTools } : {}),
-      ...(enabledConnectors.length > 0 ? { connectors: enabledConnectors } : {}),
+      ...(selectedModel && { modelId: selectedModel.modelId }),
+      ...(enabledTools.length > 0 && { tools: enabledTools }),
+      ...(enabledConnectors.length > 0 && { connectors: enabledConnectors }),
     } : null
 
     await executeCreate({

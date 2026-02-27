@@ -34,6 +34,7 @@ export default function PromptEditPage() {
     title: '', content: '', description: '', visibility: 'private', tags: []
   })
   const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [promptData, setPromptData] = useState<Prompt | null>(null)
   const [selectedModel, setSelectedModel] = useState<SelectAiModel | null>(null)
   const [enabledTools, setEnabledTools] = useState<string[]>([])
@@ -47,6 +48,7 @@ export default function PromptEditPage() {
   useEffect(() => {
     async function loadPrompt() {
       setLoading(true)
+      setLoadError(null)
       const result = await executeGet(promptId)
       if (result?.isSuccess && result.data) {
         setPromptData(result.data)
@@ -59,27 +61,27 @@ export default function PromptEditPage() {
           setEnabledTools(result.data.settings.tools || [])
           setEnabledConnectors(result.data.settings.connectors || [])
         }
+      } else {
+        setLoadError(result?.message || "Failed to load prompt")
       }
       setLoading(false)
     }
     if (promptId) loadPrompt()
   }, [promptId]) // eslint-disable-line react-hooks/exhaustive-deps -- executeGet is stable (useAction returns stable ref)
 
-  // Reset model initialization flag when navigating between prompts
-  // (Next.js App Router may reuse the component instance across route changes)
-  const modelInitialized = useRef(false)
+  // Track which promptId we've already initialized the model for.
+  // Using promptId (not a boolean) handles Next.js App Router reusing the
+  // component instance across route changes without needing a separate reset effect.
+  const modelInitializedForId = useRef<string | null>(null)
   useEffect(() => {
-    modelInitialized.current = false
-  }, [promptId])
-
-  useEffect(() => {
-    if (models.length === 0 || !promptData?.settings?.modelId || modelInitialized.current) return
-    const match = models.find(m => m.modelId === promptData?.settings?.modelId)
+    if (models.length === 0 || !promptData?.settings?.modelId) return
+    if (modelInitializedForId.current === promptId) return
+    const match = models.find(m => m.modelId === promptData.settings!.modelId)
     if (match) {
-      modelInitialized.current = true
+      modelInitializedForId.current = promptId
       setSelectedModel(match)
     }
-  }, [models, promptData])
+  }, [models, promptData, promptId])
 
   const handleSave = async () => {
     if (!formData.title || !formData.content) { toast.error("Title and content are required"); return }
@@ -128,8 +130,11 @@ export default function PromptEditPage() {
 
   if (!promptData) {
     return (
-      <div className="flex h-screen items-center justify-center">
-        <p className="text-destructive">Prompt not found</p>
+      <div className="flex h-screen flex-col items-center justify-center gap-2">
+        <p className="text-destructive">{loadError ?? "Prompt not found"}</p>
+        <Button variant="ghost" onClick={() => router.push('/prompt-library')}>
+          <ArrowLeft className="mr-2 h-4 w-4" /> Back to library
+        </Button>
       </div>
     )
   }

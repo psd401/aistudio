@@ -59,24 +59,23 @@ export function PromptCreateForm({
       <CardContent className="space-y-6">
         {/* Title */}
         <div className="space-y-2">
-          <Label htmlFor="title">Title * ({formData.title.length}/255)</Label>
+          <Label htmlFor="title">Title * ({(formData.title ?? '').length}/255)</Label>
           <Input
             id="title"
-            value={formData.title}
+            value={formData.title ?? ''}
             onChange={(e) => onFormDataChange({ ...formData, title: e.target.value })}
             placeholder="Enter prompt title"
             maxLength={255}
             aria-required="true"
-            aria-invalid={!formData.title}
           />
         </div>
 
         {/* Description */}
         <div className="space-y-2">
-          <Label htmlFor="description">Description ({formData.description.length}/1000)</Label>
+          <Label htmlFor="description">Description ({(formData.description ?? '').length}/1000)</Label>
           <Textarea
             id="description"
-            value={formData.description}
+            value={formData.description ?? ''}
             onChange={(e) => onFormDataChange({ ...formData, description: e.target.value })}
             placeholder="Enter a brief description"
             rows={3}
@@ -86,17 +85,16 @@ export function PromptCreateForm({
 
         {/* Content */}
         <div className="space-y-2">
-          <Label htmlFor="content">Prompt Content * ({formData.content.length}/50000)</Label>
+          <Label htmlFor="content">Prompt Content * ({(formData.content ?? '').length}/50000)</Label>
           <Textarea
             id="content"
-            value={formData.content}
+            value={formData.content ?? ''}
             onChange={(e) => onFormDataChange({ ...formData, content: e.target.value })}
             placeholder="Enter your prompt content"
             rows={10}
             className="font-mono"
             maxLength={50000}
             aria-required="true"
-            aria-invalid={!formData.content}
           />
           <p className="text-xs text-muted-foreground">
             Use variables like {`{{variable_name}}`} for dynamic content

@@ -61,7 +61,6 @@ export function PromptEditForm({
             placeholder="Enter prompt title"
             maxLength={255}
             aria-required="true"
-            aria-invalid={!formData.title}
           />
         </div>
 
@@ -90,7 +89,6 @@ export function PromptEditForm({
             className="font-mono"
             maxLength={50000}
             aria-required="true"
-            aria-invalid={!formData.content}
           />
           <p className="text-xs text-muted-foreground">
             Use variables like {`{{variable_name}}`} for dynamic content
