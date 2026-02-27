@@ -177,12 +177,11 @@ export function useModelsWithPersistence(
 
     const currentModelId = selectedModel?.modelId ?? null
 
-    // Skip if we've already validated this model ID against this models list
-    // BUT don't skip if a preferred model arrived async and differs from current
-    // (e.g. prompt settings loaded after initial model selection from localStorage)
-    if (currentModelId === lastValidatedModelId.current) {
-      if (!preferredModelId || preferredModelId === currentModelId) return
-    }
+    // Skip if we've already validated this model ID against this models list.
+    // Exception: if a preferredModelId arrived async (e.g. prompt settings loaded after
+    // localStorage model was already selected), allow re-validation so it gets applied.
+    const preferredPending = preferredModelId && preferredModelId !== currentModelId
+    if (currentModelId === lastValidatedModelId.current && !preferredPending) return
 
     const isStale = currentModelId && !models.some(m => m.modelId === currentModelId)
 

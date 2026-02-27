@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback, useRef, startTransition } from "react"
+import { useState, useEffect, useRef, startTransition } from "react"
 import { useParams, useRouter } from "next/navigation"
 import { useAction } from "@/lib/hooks/use-action"
 import { getPrompt, updatePrompt, deletePrompt } from "@/actions/prompt-library.actions"
@@ -52,7 +52,7 @@ export default function PromptEditPage() {
       setLoading(false)
     }
     if (promptId) loadPrompt()
-  }, [promptId]) // eslint-disable-line react-hooks/exhaustive-deps
+  }, [promptId]) // eslint-disable-line react-hooks/exhaustive-deps -- executeGet is stable (useAction returns stable ref)
 
   const modelInitialized = useRef(false)
   useEffect(() => {
@@ -64,28 +64,31 @@ export default function PromptEditPage() {
     }
   }, [models, promptData])
 
-  const handleModelChange = useCallback((model: SelectAiModel) => { setSelectedModel(model) }, [])
-
   const handleSave = async () => {
     if (!formData.title || !formData.content) { toast.error("Title and content are required"); return }
-    const settings: PromptLibrarySettings = {}
-    if (selectedModel) settings.modelId = selectedModel.modelId
-    if (enabledTools.length > 0) settings.tools = enabledTools
-    if (enabledConnectors.length > 0) settings.connectors = enabledConnectors
+    const hasSettings = selectedModel || enabledTools.length > 0 || enabledConnectors.length > 0
+    const settings: PromptLibrarySettings | null = hasSettings ? {
+      ...(selectedModel ? { modelId: selectedModel.modelId } : {}),
+      ...(enabledTools.length > 0 ? { tools: enabledTools } : {}),
+      ...(enabledConnectors.length > 0 ? { connectors: enabledConnectors } : {}),
+    } : null
 
     setIsUpdating(true)
-    const result = await updatePrompt(promptId, {
-      title: formData.title, content: formData.content,
-      description: formData.description || undefined, visibility: formData.visibility,
-      tags: formData.tags, settings: Object.keys(settings).length > 0 ? settings : undefined
-    })
-    if (result?.isSuccess) {
-      toast.success("Prompt updated successfully")
-      if (result.data) setPromptData(result.data)
-    } else {
-      toast.error(result?.message || "Failed to update prompt")
+    try {
+      const result = await updatePrompt(promptId, {
+        title: formData.title, content: formData.content,
+        description: formData.description || undefined, visibility: formData.visibility,
+        tags: formData.tags, settings
+      })
+      if (result?.isSuccess) {
+        toast.success("Prompt updated successfully")
+        if (result.data) setPromptData(result.data)
+      } else {
+        toast.error(result?.message || "Failed to update prompt")
+      }
+    } finally {
+      setIsUpdating(false)
     }
-    setIsUpdating(false)
   }
 
   const handleDelete = async () => {
@@ -140,7 +143,7 @@ export default function PromptEditPage() {
       <PromptEditForm
         formData={formData} onFormDataChange={setFormData} promptData={promptData}
         models={models} modelsLoading={modelsLoading}
-        selectedModel={selectedModel} onModelChange={handleModelChange}
+        selectedModel={selectedModel} onModelChange={setSelectedModel}
         enabledTools={enabledTools} onToolsChange={setEnabledTools}
         enabledConnectors={enabledConnectors} onConnectorsChange={setEnabledConnectors}
       />

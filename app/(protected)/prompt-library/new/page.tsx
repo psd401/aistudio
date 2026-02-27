@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback } from "react"
+import { useState } from "react"
 import { useRouter } from "next/navigation"
 import { createPrompt } from "@/actions/prompt-library.actions"
 import { useAction } from "@/lib/hooks/use-action"
@@ -50,10 +50,6 @@ export default function NewPromptPage() {
     }
   })
 
-  const handleModelChange = useCallback((model: SelectAiModel) => {
-    setSelectedModel(model)
-  }, [])
-
   const handleCreate = async () => {
     // Validate using Zod schema for consistency with server-side validation
     const validation = createPromptSchema.safeParse(formData)
@@ -63,11 +59,13 @@ export default function NewPromptPage() {
       return
     }
 
-    // Build settings from current selections
-    const settings: PromptLibrarySettings = {}
-    if (selectedModel) settings.modelId = selectedModel.modelId
-    if (enabledTools.length > 0) settings.tools = enabledTools
-    if (enabledConnectors.length > 0) settings.connectors = enabledConnectors
+    // Build settings from current selections; null means explicitly no settings
+    const hasSettings = selectedModel || enabledTools.length > 0 || enabledConnectors.length > 0
+    const settings: PromptLibrarySettings | null = hasSettings ? {
+      ...(selectedModel ? { modelId: selectedModel.modelId } : {}),
+      ...(enabledTools.length > 0 ? { tools: enabledTools } : {}),
+      ...(enabledConnectors.length > 0 ? { connectors: enabledConnectors } : {}),
+    } : null
 
     await executeCreate({
       title: formData.title,
@@ -75,7 +73,7 @@ export default function NewPromptPage() {
       description: formData.description || undefined,
       visibility: formData.visibility,
       tags: formData.tags,
-      settings: Object.keys(settings).length > 0 ? settings : undefined
+      settings: settings ?? undefined
     })
   }
 
@@ -117,7 +115,7 @@ export default function NewPromptPage() {
         models={models}
         modelsLoading={modelsLoading}
         selectedModel={selectedModel}
-        onModelChange={handleModelChange}
+        onModelChange={setSelectedModel}
         enabledTools={enabledTools}
         onToolsChange={setEnabledTools}
         enabledConnectors={enabledConnectors}
