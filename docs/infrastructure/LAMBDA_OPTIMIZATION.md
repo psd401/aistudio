@@ -49,20 +49,20 @@ npm install
 npm run build
 
 # Development
-npx cdk deploy --all --profile dev
+bunx cdk deploy --all --profile dev
 
 # Production
-npx cdk deploy --all --profile prod --require-approval never
+bunx cdk deploy --all --profile prod --require-approval never
 ```
 
 ### Deploy Single Stack
 
 ```bash
 # Deploy database only
-npx cdk deploy AIStudio-DatabaseStack-Dev
+bunx cdk deploy AIStudio-DatabaseStack-Dev
 
 # Deploy with hotswap for faster development
-npx cdk deploy AIStudio-FrontendStack-ECS-Dev --hotswap
+bunx cdk deploy AIStudio-FrontendStack-ECS-Dev --hotswap
 ```
 
 ## 📊 Cost Optimization
@@ -207,7 +207,7 @@ npm test
 
 ```bash
 # Deploy to dev environment
-npx cdk deploy --all --profile dev
+bunx cdk deploy --all --profile dev
 
 # Run integration tests
 npm run test:integration
@@ -286,7 +286,7 @@ aws stepfunctions start-execution \
 rm -rf cdk.out
 
 # Rebuild and deploy
-npm run build && npx cdk deploy <stack-name>
+npm run build && bunx cdk deploy <stack-name>
 ```
 
 #### PowerTuning Execution Failures

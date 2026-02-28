@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env bunx tsx
 /**
  * Drizzle Migration Preparation Script
  *
@@ -15,7 +15,7 @@
  * Issue #539 - Integrate Drizzle-Kit with existing Lambda migration system
  *
  * Usage:
- *   npx tsx scripts/drizzle-helpers/prepare-migration.ts "add-user-preferences"
+ *   bunx tsx scripts/drizzle-helpers/prepare-migration.ts "add-user-preferences"
  *   npm run migration:prepare -- "add-user-preferences"
  */
 
@@ -173,8 +173,8 @@ function main(): void {
     console.error("❌ Missing migration description");
     console.error("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     console.error("");
-    console.error("Usage: npx tsx scripts/drizzle-helpers/prepare-migration.ts <description>");
-    console.error("Example: npx tsx scripts/drizzle-helpers/prepare-migration.ts 'add-user-preferences'");
+    console.error("Usage: bunx tsx scripts/drizzle-helpers/prepare-migration.ts <description>");
+    console.error("Example: bunx tsx scripts/drizzle-helpers/prepare-migration.ts 'add-user-preferences'");
     console.error("");
     process.exit(1);
   }
@@ -290,7 +290,7 @@ function main(): void {
   console.log(`   - Add export to lib/db/schema/index.ts`);
   console.log("");
   console.log(`4. Test the migration:`);
-  console.log(`   cd infra && npx cdk deploy AIStudio-DatabaseStack-Dev`);
+  console.log(`   cd infra && bunx cdk deploy AIStudio-DatabaseStack-Dev`);
   console.log("");
   console.log(`5. Verify in migration_log table that it ran successfully`);
   console.log("");

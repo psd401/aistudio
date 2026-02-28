@@ -17,7 +17,7 @@
 ### Deploy All Stacks (Dev Environment)
 ```bash
 # With all required parameters
-npx cdk deploy --all \
+bunx cdk deploy --all \
   --parameters AIStudio-AuthStack-Dev:GoogleClientId=YOUR_GOOGLE_CLIENT_ID \
   --context baseDomain=aistudio.psd401.ai
 
@@ -27,7 +27,7 @@ npx cdk deploy --all \
 
 ### Deploy All Stacks (Prod Environment)
 ```bash
-npx cdk deploy \
+bunx cdk deploy \
   AIStudio-DatabaseStack-Prod \
   AIStudio-AuthStack-Prod \
   AIStudio-StorageStack-Prod \
@@ -42,22 +42,22 @@ npx cdk deploy \
 ### DatabaseStack (No parameters needed)
 ```bash
 # Dev
-npx cdk deploy AIStudio-DatabaseStack-Dev --exclusively
+bunx cdk deploy AIStudio-DatabaseStack-Dev --exclusively
 
 # Prod
-npx cdk deploy AIStudio-DatabaseStack-Prod --exclusively
+bunx cdk deploy AIStudio-DatabaseStack-Prod --exclusively
 ```
 
 ### AuthStack (Requires GoogleClientId)
 ```bash
 # Dev
-npx cdk deploy AIStudio-AuthStack-Dev \
+bunx cdk deploy AIStudio-AuthStack-Dev \
   --parameters AIStudio-AuthStack-Dev:GoogleClientId=YOUR_GOOGLE_CLIENT_ID \
   --context baseDomain=aistudio.psd401.ai \
   --exclusively
 
 # Prod
-npx cdk deploy AIStudio-AuthStack-Prod \
+bunx cdk deploy AIStudio-AuthStack-Prod \
   --parameters AIStudio-AuthStack-Prod:GoogleClientId=YOUR_PROD_GOOGLE_CLIENT_ID \
   --context baseDomain=aistudio.psd401.ai \
   --exclusively
@@ -66,30 +66,30 @@ npx cdk deploy AIStudio-AuthStack-Prod \
 ### StorageStack (No parameters needed)
 ```bash
 # Dev
-npx cdk deploy AIStudio-StorageStack-Dev --exclusively
+bunx cdk deploy AIStudio-StorageStack-Dev --exclusively
 
 # Prod
-npx cdk deploy AIStudio-StorageStack-Prod --exclusively
+bunx cdk deploy AIStudio-StorageStack-Prod --exclusively
 ```
 
 ### ProcessingStack (No parameters needed after SSM setup)
 ```bash
 # Dev
-npx cdk deploy AIStudio-ProcessingStack-Dev --exclusively
+bunx cdk deploy AIStudio-ProcessingStack-Dev --exclusively
 
 # Prod
-npx cdk deploy AIStudio-ProcessingStack-Prod --exclusively
+bunx cdk deploy AIStudio-ProcessingStack-Prod --exclusively
 ```
 
 ### FrontendStack (Requires baseDomain)
 ```bash
 # Dev
-npx cdk deploy AIStudio-FrontendStack-Dev \
+bunx cdk deploy AIStudio-FrontendStack-Dev \
   --context baseDomain=aistudio.psd401.ai \
   --exclusively
 
 # Prod
-npx cdk deploy AIStudio-FrontendStack-Prod \
+bunx cdk deploy AIStudio-FrontendStack-Prod \
   --context baseDomain=aistudio.psd401.ai \
   --exclusively
 ```
@@ -110,7 +110,7 @@ npx cdk deploy AIStudio-FrontendStack-Prod \
 ### 3. First Deployment After SSM Changes
 ```bash
 # Deploy all at once to ensure SSM parameters are created
-npx cdk deploy --all \
+bunx cdk deploy --all \
   --parameters AIStudio-AuthStack-Dev:GoogleClientId=YOUR_GOOGLE_CLIENT_ID \
   --context baseDomain=aistudio.psd401.ai
 ```
@@ -130,13 +130,13 @@ npx cdk deploy --all \
 ./deploy-dev.sh YOUR_GOOGLE_CLIENT_ID aistudio.psd401.ai
 
 # Update just the database
-npx cdk deploy AIStudio-DatabaseStack-Dev --exclusively
+bunx cdk deploy AIStudio-DatabaseStack-Dev --exclusively
 
 # Update just the frontend
-npx cdk deploy AIStudio-FrontendStack-Dev --context baseDomain=aistudio.psd401.ai --exclusively
+bunx cdk deploy AIStudio-FrontendStack-Dev --context baseDomain=aistudio.psd401.ai --exclusively
 
 # Update auth (if Google OAuth changes)
-npx cdk deploy AIStudio-AuthStack-Dev \
+bunx cdk deploy AIStudio-AuthStack-Dev \
   --parameters AIStudio-AuthStack-Dev:GoogleClientId=NEW_GOOGLE_CLIENT_ID \
   --context baseDomain=aistudio.psd401.ai \
   --exclusively

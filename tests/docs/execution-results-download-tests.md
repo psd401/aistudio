@@ -287,12 +287,12 @@ jest.mock('@/lib/rate-limit')
 
 1. **Lint Test Files**: Ensure code quality
    ```bash
-   npx eslint tests/**/execution-results*download*.test.ts
+   bunx eslint tests/**/execution-results*download*.test.ts
    ```
 
 2. **Type Check**: Verify TypeScript correctness
    ```bash
-   npx tsc --noEmit
+   bunx tsc --noEmit
    ```
 
 3. **Validate Setup**: Check test configuration

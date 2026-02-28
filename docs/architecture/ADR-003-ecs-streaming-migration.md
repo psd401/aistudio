@@ -338,8 +338,8 @@ CREATE TABLE ai_streaming_jobs (
 1. **Phase 1**: Deploy infrastructure changes
    ```bash
    cd infra
-   npx cdk deploy AIStudio-ProcessingStack-Dev  # Removes Lambda/SQS
-   npx cdk deploy AIStudio-ECSServiceStack-Dev  # Removes env vars
+   bunx cdk deploy AIStudio-ProcessingStack-Dev  # Removes Lambda/SQS
+   bunx cdk deploy AIStudio-ECSServiceStack-Dev  # Removes env vars
    ```
 
 2. **Phase 2**: Verify no orphaned resources
@@ -420,8 +420,8 @@ If critical issues arise:
    ```bash
    git checkout <previous-commit-with-lambda>
    cd infra
-   npx cdk deploy AIStudio-ProcessingStack-Dev
-   npx cdk deploy AIStudio-ECSServiceStack-Dev
+   bunx cdk deploy AIStudio-ProcessingStack-Dev
+   bunx cdk deploy AIStudio-ECSServiceStack-Dev
    ```
 
 2. **Revert code changes**:

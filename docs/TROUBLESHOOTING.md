@@ -52,7 +52,7 @@ Type 'X' is not assignable to type 'Y'
 npm run typecheck
 
 # If using Prisma (legacy):
-npx prisma generate
+bunx prisma generate
 ```
 
 ### Issue: Environment variables not loading
@@ -122,8 +122,8 @@ SELECT * FROM migration_log ORDER BY executed_at DESC;
 ```bash
 # WARNING: Destroys all data
 cd infra
-npx cdk destroy AIStudio-DatabaseStack-Dev
-npx cdk deploy AIStudio-DatabaseStack-Dev
+bunx cdk destroy AIStudio-DatabaseStack-Dev
+bunx cdk deploy AIStudio-DatabaseStack-Dev
 ```
 
 3. For production, create new migration to fix inconsistency
@@ -238,11 +238,11 @@ Stack [StackName] already exists
 **Solutions:**
 ```bash
 # Update existing stack instead
-npx cdk deploy StackName --require-approval never
+bunx cdk deploy StackName --require-approval never
 
 # Or force recreate (WARNING: destroys resources)
-npx cdk destroy StackName
-npx cdk deploy StackName
+bunx cdk destroy StackName
+bunx cdk deploy StackName
 ```
 
 ### Issue: ECS task fails to start

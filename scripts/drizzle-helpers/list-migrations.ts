@@ -1,4 +1,4 @@
-#!/usr/bin/env npx tsx
+#!/usr/bin/env bunx tsx
 /**
  * List Migrations Script
  *
@@ -9,7 +9,7 @@
  * Issue #539 - Integrate Drizzle-Kit with existing Lambda migration system
  *
  * Usage:
- *   npx tsx scripts/drizzle-helpers/list-migrations.ts
+ *   bunx tsx scripts/drizzle-helpers/list-migrations.ts
  *   npm run migration:list
  */
 

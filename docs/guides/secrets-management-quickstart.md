@@ -24,10 +24,10 @@ From the `infra` directory:
 cd infra
 
 # Deploy to dev environment
-npx cdk deploy AIStudio-SecretsManagerStack-Dev
+bunx cdk deploy AIStudio-SecretsManagerStack-Dev
 
 # Deploy to prod environment (requires SECURITY_ALERT_EMAIL)
-SECURITY_ALERT_EMAIL="security@psd401.ai" npx cdk deploy AIStudio-SecretsManagerStack-Prod
+SECURITY_ALERT_EMAIL="security@psd401.ai" bunx cdk deploy AIStudio-SecretsManagerStack-Prod
 ```
 
 ### 2. Verify Deployment

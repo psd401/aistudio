@@ -81,7 +81,7 @@ app.synth();
 EOF
 
 # Synthesize the CloudFormation template
-npx cdk synth -a "npx ts-node bin/test-new-constructs.ts"
+bunx cdk synth -a "bunx ts-node bin/test-new-constructs.ts"
 ```
 
 **What to Verify in Output:**
@@ -158,7 +158,7 @@ new StorageStackV2(app, 'TestNewConstructs', {
 EOF
 
 # Step 2: Deploy the test stack
-npx cdk deploy -a "npx ts-node bin/test-deployment.ts" TestNewConstructs
+bunx cdk deploy -a "bunx ts-node bin/test-deployment.ts" TestNewConstructs
 
 # Step 3: Verify in AWS Console
 # - Check S3 bucket was created with correct tags
@@ -166,7 +166,7 @@ npx cdk deploy -a "npx ts-node bin/test-deployment.ts" TestNewConstructs
 # - Verify CloudFormation stack outputs
 
 # Step 4: Clean up when done testing
-npx cdk destroy -a "npx ts-node bin/test-deployment.ts" TestNewConstructs
+bunx cdk destroy -a "bunx ts-node bin/test-deployment.ts" TestNewConstructs
 ```
 
 **What to Verify in AWS Console:**
@@ -220,10 +220,10 @@ const testNewStack = new StorageStackV2(app, 'StorageStackV2-Test', {
 });
 
 # Then deploy just this new stack
-npx cdk deploy AIStudio-StorageStackV2-Test-dev --context baseDomain=example.com
+bunx cdk deploy AIStudio-StorageStackV2-Test-dev --context baseDomain=example.com
 
 # Verify it works, then destroy
-npx cdk destroy AIStudio-StorageStackV2-Test-dev
+bunx cdk destroy AIStudio-StorageStackV2-Test-dev
 ```
 
 ---
@@ -265,7 +265,7 @@ npx cdk destroy AIStudio-StorageStackV2-Test-dev
 
 2. ✅ **Synthesize CloudFormation** (2 minutes)
    ```bash
-   npx cdk synth -a "npx ts-node bin/test-new-constructs.ts"
+   bunx cdk synth -a "bunx ts-node bin/test-new-constructs.ts"
    ```
 
 3. ✅ **Optional: Deploy test stack** (5 minutes)
@@ -335,7 +335,7 @@ npm test
 **Solution:**
 ```bash
 # Bootstrap your AWS account/region for CDK
-npx cdk bootstrap aws://ACCOUNT-ID/REGION
+bunx cdk bootstrap aws://ACCOUNT-ID/REGION
 ```
 
 ### Issue: "Tests fail with import errors"

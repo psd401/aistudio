@@ -46,7 +46,7 @@ Based on the test output:
 ### Option 1: Safe Full Deployment (Recommended)
 ```bash
 # Deploy all stacks together to ensure SSM parameters are created
-npx cdk deploy --all --context baseDomain=aistudio.psd401.ai
+bunx cdk deploy --all --context baseDomain=aistudio.psd401.ai
 
 # This will:
 # 1. Create SSM parameters in Database and Storage stacks
@@ -57,13 +57,13 @@ npx cdk deploy --all --context baseDomain=aistudio.psd401.ai
 ### Option 2: Staged Deployment (More Control)
 ```bash
 # 1. Deploy stacks that create SSM parameters first
-npx cdk deploy AIStudio-DatabaseStack-Dev AIStudio-StorageStack-Dev --context baseDomain=aistudio.psd401.ai
+bunx cdk deploy AIStudio-DatabaseStack-Dev AIStudio-StorageStack-Dev --context baseDomain=aistudio.psd401.ai
 
 # 2. Verify SSM parameters were created
 aws ssm get-parameters-by-path --path '/aistudio/dev' --recursive
 
 # 3. Deploy stacks that consume SSM parameters
-npx cdk deploy AIStudio-ProcessingStack-Dev AIStudio-FrontendStack-Dev --context baseDomain=aistudio.psd401.ai
+bunx cdk deploy AIStudio-ProcessingStack-Dev AIStudio-FrontendStack-Dev --context baseDomain=aistudio.psd401.ai
 ```
 
 ## Post-Deployment Verification
@@ -91,7 +91,7 @@ aws lambda list-functions --query 'Functions[?starts_with(FunctionName, `AIStudi
 ### 3. Test Independent Stack Deployment
 ```bash
 # After initial deployment, test updating a single stack
-npx cdk deploy AIStudio-DatabaseStack-Dev --exclusively --context baseDomain=aistudio.psd401.ai
+bunx cdk deploy AIStudio-DatabaseStack-Dev --exclusively --context baseDomain=aistudio.psd401.ai
 ```
 
 ## Troubleshooting
@@ -101,7 +101,7 @@ npx cdk deploy AIStudio-DatabaseStack-Dev --exclusively --context baseDomain=ais
 1. **SSM Parameter Not Found Error**:
    ```bash
    # Deploy Database and Storage stacks first
-   npx cdk deploy AIStudio-DatabaseStack-Dev AIStudio-StorageStack-Dev
+   bunx cdk deploy AIStudio-DatabaseStack-Dev AIStudio-StorageStack-Dev
    ```
 
 2. **CloudFormation Rollback**:
@@ -116,7 +116,7 @@ npx cdk deploy AIStudio-DatabaseStack-Dev --exclusively --context baseDomain=ais
    git checkout dev
    
    # Deploy with old code
-   npx cdk deploy --all --context baseDomain=aistudio.psd401.ai
+   bunx cdk deploy --all --context baseDomain=aistudio.psd401.ai
    ```
 
 ## Success Indicators

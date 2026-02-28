@@ -262,7 +262,7 @@ describe('BedrockGuardrailsService', () => {
    * (service behavior when AWS is unavailable), NOT actual guardrail filtering.
    * To verify actual Bedrock Guardrails behavior, you must:
    *
-   * 1. Deploy to dev environment: `cd infra && npx cdk deploy AIStudio-GuardrailsStack-Dev`
+   * 1. Deploy to dev environment: `cd infra && bunx cdk deploy AIStudio-GuardrailsStack-Dev`
    * 2. Manually test with the content below (see manual test checklist in PR description)
    * 3. Monitor CloudWatch logs for 48 hours post-deployment
    * 4. Use CloudWatch Logs Insights queries to validate:

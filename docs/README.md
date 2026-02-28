@@ -266,7 +266,7 @@ Drizzle ORM with postgres.js driver and connection pooling. See [database/drizzl
 ### Deploying Updates
 1. Test locally with `npm run dev`
 2. Run `npm run lint` and `npm run typecheck` (entire codebase)
-3. Deploy with CDK: `npx cdk deploy`
+3. Deploy with CDK: `bunx cdk deploy`
 4. Monitor CloudWatch for errors
 5. See [/infra/README.md](../infra/README.md) for detailed deployment commands
 

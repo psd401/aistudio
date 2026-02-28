@@ -84,7 +84,7 @@ node --version  # Should be v20.x
 3. **CDK Bootstrap (one-time):**
 ```bash
 cd infra
-npx cdk bootstrap aws://ACCOUNT-ID/us-west-2
+bunx cdk bootstrap aws://ACCOUNT-ID/us-west-2
 ```
 
 ### First-Time Deployment
@@ -95,30 +95,30 @@ Deploy stacks in dependency order:
 cd infra
 
 # 1. Database (creates VPC + Aurora)
-npx cdk deploy AIStudio-DatabaseStack-Dev
+bunx cdk deploy AIStudio-DatabaseStack-Dev
 
 # 2. Auth (creates Cognito)
-npx cdk deploy AIStudio-AuthStack-Dev
+bunx cdk deploy AIStudio-AuthStack-Dev
 
 # 3. Storage (creates S3 buckets)
-npx cdk deploy AIStudio-StorageStack-Dev
+bunx cdk deploy AIStudio-StorageStack-Dev
 
 # 4. Document Processing (creates Lambdas)
-npx cdk deploy AIStudio-DocumentProcessingStack-Dev
+bunx cdk deploy AIStudio-DocumentProcessingStack-Dev
 
 # 5. Frontend (creates ECS + ALB)
-npx cdk deploy AIStudio-FrontendStack-Dev
+bunx cdk deploy AIStudio-FrontendStack-Dev
 
 # 6. Scheduling (creates EventBridge)
-npx cdk deploy AIStudio-SchedulingStack-Dev
+bunx cdk deploy AIStudio-SchedulingStack-Dev
 
 # 7. Monitoring (creates CloudWatch dashboards)
-npx cdk deploy AIStudio-MonitoringStack-Dev
+bunx cdk deploy AIStudio-MonitoringStack-Dev
 ```
 
 **Or deploy all at once:**
 ```bash
-npx cdk deploy --all --require-approval never
+bunx cdk deploy --all --require-approval never
 ```
 
 ### Subsequent Deployments
@@ -127,13 +127,13 @@ Deploy only changed stacks:
 
 ```bash
 # Check what changed
-npx cdk diff AIStudio-FrontendStack-Dev
+bunx cdk diff AIStudio-FrontendStack-Dev
 
 # Deploy single stack
-npx cdk deploy AIStudio-FrontendStack-Dev
+bunx cdk deploy AIStudio-FrontendStack-Dev
 
 # Deploy multiple specific stacks
-npx cdk deploy AIStudio-FrontendStack-Dev AIStudio-DatabaseStack-Dev
+bunx cdk deploy AIStudio-FrontendStack-Dev AIStudio-DatabaseStack-Dev
 ```
 
 ## CDK Commands
@@ -142,66 +142,66 @@ npx cdk deploy AIStudio-FrontendStack-Dev AIStudio-DatabaseStack-Dev
 
 ```bash
 # Generate CloudFormation templates
-npx cdk synth
+bunx cdk synth
 
 # Validate all stacks without deploying
-npx cdk synth --all
+bunx cdk synth --all
 
 # Show diff between deployed and local
-npx cdk diff
+bunx cdk diff
 
 # Diff specific stack
-npx cdk diff AIStudio-FrontendStack-Dev
+bunx cdk diff AIStudio-FrontendStack-Dev
 ```
 
 ### Deployment
 
 ```bash
 # Deploy with approval prompts
-npx cdk deploy AIStudio-FrontendStack-Dev
+bunx cdk deploy AIStudio-FrontendStack-Dev
 
 # Deploy without prompts (CI/CD)
-npx cdk deploy AIStudio-FrontendStack-Dev --require-approval never
+bunx cdk deploy AIStudio-FrontendStack-Dev --require-approval never
 
 # Deploy with specific parameters
-npx cdk deploy AIStudio-FrontendStack-Dev \
+bunx cdk deploy AIStudio-FrontendStack-Dev \
   --parameters DatabaseMinCapacity=0.5 \
   --parameters DatabaseMaxCapacity=2
 
 # Deploy to different region
-npx cdk deploy --all --region us-east-1
+bunx cdk deploy --all --region us-east-1
 ```
 
 ### Destroy
 
 ```bash
 # Destroy single stack
-npx cdk destroy AIStudio-FrontendStack-Dev
+bunx cdk destroy AIStudio-FrontendStack-Dev
 
 # Destroy all stacks (WARNING: deletes all data)
-npx cdk destroy --all
+bunx cdk destroy --all
 
 # Destroy in reverse dependency order
-npx cdk destroy AIStudio-MonitoringStack-Dev
-npx cdk destroy AIStudio-SchedulingStack-Dev
-npx cdk destroy AIStudio-FrontendStack-Dev
-npx cdk destroy AIStudio-DocumentProcessingStack-Dev
-npx cdk destroy AIStudio-StorageStack-Dev
-npx cdk destroy AIStudio-AuthStack-Dev
-npx cdk destroy AIStudio-DatabaseStack-Dev
+bunx cdk destroy AIStudio-MonitoringStack-Dev
+bunx cdk destroy AIStudio-SchedulingStack-Dev
+bunx cdk destroy AIStudio-FrontendStack-Dev
+bunx cdk destroy AIStudio-DocumentProcessingStack-Dev
+bunx cdk destroy AIStudio-StorageStack-Dev
+bunx cdk destroy AIStudio-AuthStack-Dev
+bunx cdk destroy AIStudio-DatabaseStack-Dev
 ```
 
 ### List & Metadata
 
 ```bash
 # List all stacks
-npx cdk list
+bunx cdk list
 
 # Show stack metadata
-npx cdk metadata AIStudio-FrontendStack-Dev
+bunx cdk metadata AIStudio-FrontendStack-Dev
 
 # Watch deployment progress
-npx cdk deploy AIStudio-FrontendStack-Dev --watch
+bunx cdk deploy AIStudio-FrontendStack-Dev --watch
 ```
 
 ## Environment Configuration
@@ -261,11 +261,11 @@ export const environmentConfigs: Record<Environment, EnvironmentConfig> = {
 ```bash
 # Deploy to staging
 export ENVIRONMENT=staging
-npx cdk deploy --all
+bunx cdk deploy --all
 
 # Deploy to production
 export ENVIRONMENT=prod
-npx cdk deploy --all
+bunx cdk deploy --all
 ```
 
 ## Development Workflow
@@ -283,10 +283,10 @@ npm run build
 npm run watch
 
 # 3. Synthesize to validate
-npx cdk synth AIStudio-FrontendStack-Dev
+bunx cdk synth AIStudio-FrontendStack-Dev
 
 # 4. Deploy to dev
-npx cdk deploy AIStudio-FrontendStack-Dev
+bunx cdk deploy AIStudio-FrontendStack-Dev
 ```
 
 ### Testing
@@ -306,13 +306,13 @@ npm test -- --coverage
 
 ```bash
 # Enable verbose logging
-npx cdk deploy --verbose
+bunx cdk deploy --verbose
 
 # Enable CDK debug mode
-CDK_DEBUG=true npx cdk deploy
+CDK_DEBUG=true bunx cdk deploy
 
 # Validate CloudFormation template
-npx cdk synth AIStudio-FrontendStack-Dev > template.yaml
+bunx cdk synth AIStudio-FrontendStack-Dev > template.yaml
 aws cloudformation validate-template --template-body file://template.yaml
 ```
 
@@ -409,15 +409,15 @@ VPCProvider.createVpcEndpoints(vpc, this);
 **Issue: Stack deployment fails with "Resource already exists"**
 ```bash
 # Update existing stack
-npx cdk deploy AIStudio-FrontendStack-Dev --force
+bunx cdk deploy AIStudio-FrontendStack-Dev --force
 ```
 
 **Issue: Parameter {X} not found in SSM**
 ```bash
 # Deploy dependency stack first
-npx cdk deploy AIStudio-DatabaseStack-Dev
+bunx cdk deploy AIStudio-DatabaseStack-Dev
 # Then deploy dependent stack
-npx cdk deploy AIStudio-FrontendStack-Dev
+bunx cdk deploy AIStudio-FrontendStack-Dev
 ```
 
 **Issue: Lambda runs out of memory**
