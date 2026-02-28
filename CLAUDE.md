@@ -274,8 +274,8 @@ export async function actionName(params: ParamsType): Promise<ActionState<Return
 ## 🧪 Testing
 
 **E2E Testing**:
-- Development: Use Playwright MCP (`/e2e-test` command)
-- Add specs to `tests/e2e/` — all files are run by `bun run test:e2e`
+- Development: Use Playwright MCP (`/e2e-test` command) or `npx playwright test tests/e2e/`
+- Add specs to `tests/e2e/` — run locally via Playwright
 - See `docs/guides/TESTING.md` (E2E Expectations section) for when tests are required
 
 ## 🏗️ Infrastructure Patterns
