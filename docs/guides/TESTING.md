@@ -302,8 +302,8 @@ New features and significant bug fixes **must** include E2E test coverage. This 
 
 ### Where to Add Tests
 
-- **CI-compatible** (no auth needed): Add to any existing spec under `tests/e2e/` — run locally via `npx playwright test tests/e2e/` or Playwright MCP. Seeded test users available: `test@example.com`, `staff@example.com`, `student@example.com`
-- **Auth-required (manual only)**: Tests that require real OAuth flows or external service auth cannot run in CI. Run these via Playwright MCP during development only. Mark them with `test.skip` or place in a separate `tests/e2e-manual/` directory to prevent CI failures
+- **CI-compatible** (no auth needed): Add to any existing spec under `tests/e2e/` — run locally via `npx playwright test tests/e2e/`. Seeded test users available: `test@example.com`, `staff@example.com`, `student@example.com`
+- **Auth-required (manual only)**: Tests that require real OAuth flows or external service auth cannot run in CI. Run these locally with `npx playwright test`. Mark them with `test.skip` or place in a separate `tests/e2e-manual/` directory to prevent CI failures
 
 ### PR Review Enforcement
 
