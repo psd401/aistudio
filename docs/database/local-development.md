@@ -110,7 +110,7 @@ Note: These users require Cognito authentication in the actual app. For local te
 
 5. **Deploy to AWS**:
    ```bash
-   cd infra && npx cdk deploy AIStudio-DatabaseStack-Dev
+   cd infra && bunx cdk deploy AIStudio-DatabaseStack-Dev
    ```
 
 ## Docker Compose Services

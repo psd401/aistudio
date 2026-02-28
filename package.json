@@ -15,7 +15,7 @@
     "test:streaming": "jest lib/streaming/__tests__ --testPathIgnorePatterns=contracts",
     "test:streaming:integration": "jest --testMatch='**/*streaming*.test.ts' --testPathIgnorePatterns='contracts|mock-sse-factory'",
     "test:streaming:contract": "jest lib/streaming/__tests__/contracts --testTimeout=60000",
-    "test:e2e:streaming": "npx playwright test tests/e2e/assistant-architect-streaming.spec.ts",
+    "test:e2e:streaming": "bunx playwright test tests/e2e/assistant-architect-streaming.spec.ts",
     "test:perf": "jest --testMatch='**/performance/**/*.test.ts' --runInBand",
     "test:perf:ttft": "jest --testMatch='**/streaming-performance.test.ts' --runInBand",
     "test:perf:concurrent": "jest --testMatch='**/concurrent-streams.test.ts' --runInBand",

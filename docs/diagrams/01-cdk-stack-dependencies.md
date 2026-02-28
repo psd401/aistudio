@@ -117,28 +117,28 @@ graph LR
 cd infra
 
 # Step 1: Foundation stacks (parallel)
-npx cdk deploy AIStudio-DatabaseStack-Dev AIStudio-AuthStack-Dev AIStudio-StorageStack-Dev
+bunx cdk deploy AIStudio-DatabaseStack-Dev AIStudio-AuthStack-Dev AIStudio-StorageStack-Dev
 
 # Step 2: Processing layer (parallel, after foundation)
-npx cdk deploy AIStudio-ProcessingStack-Dev AIStudio-DocumentProcessingStack-Dev
+bunx cdk deploy AIStudio-ProcessingStack-Dev AIStudio-DocumentProcessingStack-Dev
 
 # Step 3: Frontend (requires foundation + processing)
-npx cdk deploy AIStudio-FrontendStack-ECS-Dev
+bunx cdk deploy AIStudio-FrontendStack-ECS-Dev
 
 # Step 4: Monitoring (after all services deployed)
-npx cdk deploy AIStudio-MonitoringStack-Dev AIStudio-SchedulerStack-Dev
+bunx cdk deploy AIStudio-MonitoringStack-Dev AIStudio-SchedulerStack-Dev
 ```
 
 ### Deploy Single Stack (For Incremental Updates)
 ```bash
 # Frontend only (for UI changes)
-npx cdk deploy AIStudio-FrontendStack-ECS-Dev
+bunx cdk deploy AIStudio-FrontendStack-ECS-Dev
 
 # Database only (for schema changes)
-npx cdk deploy AIStudio-DatabaseStack-Dev
+bunx cdk deploy AIStudio-DatabaseStack-Dev
 
 # Processing only (for Lambda updates)
-npx cdk deploy AIStudio-ProcessingStack-Dev
+bunx cdk deploy AIStudio-ProcessingStack-Dev
 ```
 
 ## Key Benefits of SSM Parameter Store Pattern
@@ -174,7 +174,7 @@ npx cdk deploy AIStudio-ProcessingStack-Dev
 aws ssm get-parameter --name "/aistudio/dev/db-cluster-arn"
 
 # If missing, redeploy DatabaseStack
-npx cdk deploy AIStudio-DatabaseStack-Dev
+bunx cdk deploy AIStudio-DatabaseStack-Dev
 ```
 
 ### Parameter Store Cleanup

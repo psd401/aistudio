@@ -24,7 +24,7 @@ This checklist ensures upgrades are safe and tested.
 ### 1. Check Current Version
 
 ```bash
-npm run check-sdk-version
+bun run check-sdk-version
 ```
 
 **Expected Output:**
@@ -49,10 +49,10 @@ Visit the official changelog and check for:
 Ensure all tests pass before upgrading:
 
 ```bash
-npm run test:streaming
-npm run test:streaming:contract
-npm run typecheck
-npm run lint
+bun run test:streaming
+bun run test:streaming:contract
+bun run typecheck
+bun run lint
 ```
 
 **All tests must pass before proceeding.**
@@ -68,32 +68,32 @@ Choose your upgrade strategy:
 #### Option A: Patch Update Only (Safest)
 ```bash
 # Updates to latest patch version (e.g., 5.0.0 → 5.0.3)
-npm install ai@~5.0.0
+bun install ai@~5.0.0
 ```
 
 #### Option B: Minor Update (Moderate Risk)
 ```bash
 # Updates to latest minor version (e.g., 5.0.0 → 5.2.0)
-npm install ai@~5.2.0
+bun install ai@~5.2.0
 ```
 
 #### Option C: Major Update (Highest Risk)
 ```bash
 # Updates to next major version (e.g., 5.x → 6.x)
 # ⚠️ ONLY do this after completing entire checklist
-npm install ai@~6.0.0
+bun install ai@~6.0.0
 ```
 
 ### 2. Install Dependencies
 
 ```bash
-npm install
+bun install
 ```
 
 ### 3. Check for TypeScript Errors
 
 ```bash
-npm run typecheck
+bun run typecheck
 ```
 
 **If errors appear:**
@@ -107,7 +107,7 @@ These tests verify the SDK's actual behavior:
 
 ```bash
 export OPENAI_API_KEY=sk-...
-npm run test:streaming:contract
+bun run test:streaming:contract
 ```
 
 **If tests fail:**
@@ -157,11 +157,11 @@ export interface TextDeltaEvent extends BaseSSEEvent {
 ### 7. Run All Tests
 
 ```bash
-npm run test
-npm run test:streaming
-npm run test:e2e
-npm run typecheck
-npm run lint
+bun run test
+bun run test:streaming
+bun run test:e2e
+bun run typecheck
+bun run lint
 ```
 
 **All tests must pass.**
@@ -192,7 +192,7 @@ Test critical streaming flows:
 ```bash
 # From /infra directory
 cd infra
-npx cdk deploy AIStudio-FrontendStack-ECS-Dev
+bunx cdk deploy AIStudio-FrontendStack-ECS-Dev
 ```
 
 **Test in staging environment:**
@@ -293,7 +293,7 @@ Document lessons learned:
 - Type mismatch errors
 
 **Solution:**
-1. Run `npm run typecheck` to see all errors
+1. Run `bun run typecheck` to see all errors
 2. Update type definitions in `sse-event-types.ts`
 3. Update code to use new field names
 4. Add compatibility layer for old code
@@ -307,10 +307,10 @@ Document lessons learned:
 
 **Solution:**
 1. Check CloudWatch logs for error messages
-2. Verify SDK version: `npm run check-sdk-version`
+2. Verify SDK version: `bun run check-sdk-version`
 3. Test locally with same SDK version
 4. Check if event format changed unexpectedly
-5. Roll back if necessary: `npm install ai@<previous-version>`
+5. Roll back if necessary: `bun install ai@<previous-version>`
 
 ### Issue: Unknown Event Type Warnings
 
@@ -339,14 +339,14 @@ git checkout HEAD~1 package.json package-lock.json
 ### 2. Reinstall Dependencies
 
 ```bash
-npm install
+bun install
 ```
 
 ### 3. Rebuild and Deploy
 
 ```bash
-npm run build
-cd infra && npx cdk deploy AIStudio-FrontendStack-ECS-Prod
+bun run build
+cd infra && bunx cdk deploy AIStudio-FrontendStack-ECS-Prod
 ```
 
 ### 4. Verify Rollback
@@ -400,19 +400,19 @@ The **SDK Version Guard** workflow automatically:
 
 ```bash
 # Check current SDK version
-npm run check-sdk-version
+bun run check-sdk-version
 
 # Run pre-flight checks before upgrade
-npm run preflight:ai-sdk-upgrade
+bun run preflight:ai-sdk-upgrade
 
 # Run contract tests (requires API key)
-npm run test:streaming:contract
+bun run test:streaming:contract
 
 # Run all streaming tests
-npm run test:streaming
+bun run test:streaming
 
 # Type check entire codebase
-npm run typecheck
+bun run typecheck
 ```
 
 ### Key Files

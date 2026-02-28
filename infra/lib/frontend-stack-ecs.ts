@@ -359,7 +359,7 @@ export class FrontendStackEcs extends cdk.Stack {
         `CDK automatically builds and pushes Docker images during deployment.`,
         ``,
         `To deploy updates:`,
-        `  cd infra && npx cdk deploy ${this.stackName}`,
+        `  cd infra && bunx cdk deploy ${this.stackName}`,
         ``,
         `To monitor deployment:`,
         `  aws ecs describe-services --cluster ${this.ecsService.cluster.clusterName} --services ${this.ecsService.service.serviceName}`,

@@ -31,7 +31,7 @@ cd infra && bunx cdk deploy AIStudio-FrontendStack-Dev     # Deploy single stack
 2. **Database Migrations**: Files 001-005 are IMMUTABLE. Only add migrations 010+. Add filename to `migrationFiles` array in `/infra/database/migrations.json`.
 3. **Logging**: NEVER use `console.log/error`. Always use `@/lib/logger`. See patterns below.
 4. **Git Flow**: PRs target `dev` branch, never `main`. Write detailed commit messages.
-5. **Testing**: Add E2E tests for new features. Use Playwright MCP during development.
+5. **Testing**: Add E2E tests for new features (see `docs/guides/TESTING.md` — E2E Expectations section). Run locally via `bunx playwright test tests/e2e/`.
 6. **Nexus Conversations**: MUST read `/docs/features/nexus-conversation-architecture.md` before modifying conversation code. This system has broken multiple times - follow documented patterns exactly.
 7. **API Documentation**: When adding or modifying `/api/v1/` endpoints, update both `docs/API/v1/openapi.yaml` (OpenAPI spec) and `docs/API/v1/context-graph.md` (human-readable reference). Include request/response examples, error codes, and auth/scope requirements.
 
@@ -274,9 +274,9 @@ export async function actionName(params: ParamsType): Promise<ActionState<Return
 ## 🧪 Testing
 
 **E2E Testing**:
-- Development: Use Playwright MCP (`/e2e-test` command)
-- CI/CD: Add to `/tests/e2e/working-tests.spec.ts`
-- Documentation: Update `/tests/e2e/playwright-mcp-examples.md`
+- Run locally: `bunx playwright test tests/e2e/`
+- Add specs to `tests/e2e/`
+- See `docs/guides/TESTING.md` (E2E Expectations section) for when tests are required
 
 ## 🏗️ Infrastructure Patterns
 
@@ -418,6 +418,22 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 - **Don't** grant `resources: ['*']` in IAM policies (except where AWS requires it)
 - **Don't** allow cross-environment access (dev → prod blocked by tags)
 - **Don't** skip tag-based conditions in custom IAM policies
+- **Review** `docs/guides/auth-security-checklist.md` for any PR touching OAuth/auth flows
+
+### Silent Failures (see `docs/guides/silent-failure-patterns.md`)
+- **Don't** use `undefined` in Drizzle `.set()` for clearable fields — use `?? null`
+- **Don't** read `toolResults` from `onStepFinish` — always use `onFinish` `event.steps`
+- **Don't** mutate AI SDK tool `args` in-place — return new objects from sanitization
+- **Don't** put `session` (object) in `useEffect` deps — use `status` (primitive)
+- **Don't** create tables with `updated_at` without the PostgreSQL trigger
+- **Don't** use `{}` as an accumulator for model/user-controlled keys — use `Object.create(null)`
+- **Don't** use static tool-call format (`tool-show_chart`) with `fromThreadMessageLike` — use `type: 'tool-call'` dynamic format
+- **Don't** chain `.replace()` for HTML entity decoding — use single-pass regex (see `lib/utils/text-sanitizer.ts`)
+
+### React (see `docs/guides/react-patterns.md`)
+- **Don't** put `key` on Provider/context wrapper components
+- **Don't** use boolean `useRef` for init guards on parameterized routes — use ID-tracking refs
+- **Don't** place hooks after conditional returns
 
 ## 📖 Documentation
 

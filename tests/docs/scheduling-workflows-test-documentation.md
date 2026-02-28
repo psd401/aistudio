@@ -136,7 +136,7 @@ WCAG compliance and accessibility validation:
 
 2. **Install Playwright browsers**:
    ```bash
-   npx playwright install
+   bunx playwright install
    ```
 
 3. **Configure test environment variables**:
@@ -200,10 +200,10 @@ npm run test:scheduling:ci
 npm run test:e2e:scheduling -- --headed
 
 # Run specific test file
-npx playwright test tests/e2e/scheduling-workflows.spec.ts
+bunx playwright test tests/e2e/scheduling-workflows.spec.ts
 
 # Run with debug mode
-npx playwright test --debug tests/e2e/scheduling-workflows.spec.ts
+bunx playwright test --debug tests/e2e/scheduling-workflows.spec.ts
 
 # Run tests against specific environment
 ENVIRONMENT=staging npm run test:e2e:scheduling
@@ -327,7 +327,7 @@ The accessibility tests validate:
    npm run db:reset:test
 
    # Clear browser state
-   npx playwright test --project=chromium --reset-state
+   bunx playwright test --project=chromium --reset-state
    ```
 
 2. **AWS Service Connectivity**

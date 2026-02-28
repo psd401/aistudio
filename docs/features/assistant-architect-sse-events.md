@@ -439,7 +439,7 @@ The migration is automatically applied on deployment:
 ```bash
 # Local development (if needed)
 cd infra
-npx cdk deploy AIStudio-FrontendStack-Dev
+bunx cdk deploy AIStudio-FrontendStack-Dev
 ```
 
 ### Rollback (if needed)

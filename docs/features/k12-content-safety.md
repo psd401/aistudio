@@ -206,8 +206,8 @@ The guardrails infrastructure is deployed via the `GuardrailsStack`:
 
 ```bash
 cd infra
-npx cdk deploy AIStudio-GuardrailsStack-Dev
-npx cdk deploy AIStudio-GuardrailsStack-Prod
+bunx cdk deploy AIStudio-GuardrailsStack-Dev
+bunx cdk deploy AIStudio-GuardrailsStack-Prod
 ```
 
 This creates:
@@ -221,15 +221,15 @@ This creates:
 Automated unit tests validate graceful degradation but **cannot test actual guardrail behavior** due to cost/latency of Bedrock API calls. After deploying guardrail changes, perform manual validation:
 
 **Pre-Deployment Checklist:**
-1. ✅ `npm run typecheck` passes
-2. ✅ `npm run lint` passes
-3. ✅ Unit tests pass: `npx jest --testPathPatterns='bedrock-guardrails-service'`
-4. ✅ CDK synth succeeds: `cd infra && npx cdk synth`
+1. ✅ `bun run typecheck` passes
+2. ✅ `bun run lint` passes
+3. ✅ Unit tests pass: `bunx jest --testPathPatterns='bedrock-guardrails-service'`
+4. ✅ CDK synth succeeds: `cd infra && bunx cdk synth`
 
 **Deploy to Dev:**
 ```bash
 cd infra
-npx cdk deploy AIStudio-GuardrailsStack-Dev
+bunx cdk deploy AIStudio-GuardrailsStack-Dev
 ```
 
 **Manual Test Cases (Dev Environment):**
@@ -313,7 +313,7 @@ fields @timestamp, requestId, sessionId, patterns, contentPreview
 **Promote to Prod (if validation passes):**
 ```bash
 cd infra
-npx cdk deploy AIStudio-GuardrailsStack-Prod
+bunx cdk deploy AIStudio-GuardrailsStack-Prod
 ```
 
 Repeat manual testing in production and monitor for 1 week before considering deployment successful.
@@ -440,7 +440,7 @@ contentPolicyConfig: {
 
 After editing, redeploy:
 ```bash
-cd infra && npx cdk deploy AIStudio-GuardrailsStack-Dev
+cd infra && bunx cdk deploy AIStudio-GuardrailsStack-Dev
 ```
 
 ### Customizing Topic Policies

@@ -131,7 +131,7 @@ When enabled, creates a CloudFront distribution with:
 
 ```bash
 cd infra
-npx cdk deploy AIStudio-StorageStack-Dev
+bunx cdk deploy AIStudio-StorageStack-Dev
 ```
 
 ### With Email Alerts
