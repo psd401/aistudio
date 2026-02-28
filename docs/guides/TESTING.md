@@ -302,8 +302,8 @@ New features and significant bug fixes **must** include E2E test coverage. This 
 
 ### Where to Add Tests
 
-- **CI-compatible** (no auth needed): Add to any existing spec under `tests/e2e/` that fits the feature domain, or create a new `tests/e2e/<feature>.spec.ts` — all files are run by `bun run test:e2e`
-- **Auth-required**: Spec files in `tests/e2e/` — run via Playwright MCP during development
+- **CI-compatible** (no auth needed): Add to any existing spec under `tests/e2e/` — all files in this directory are run by `bun run test:e2e` in CI using seeded test users (`test@example.com`, `staff@example.com`, `student@example.com`)
+- **Auth-required (manual only)**: Tests that require real OAuth flows or external service auth cannot run in CI. Run these via Playwright MCP during development only. Mark them with `test.skip` or place in a separate `tests/e2e-manual/` directory to prevent CI failures
 
 ### PR Review Enforcement
 

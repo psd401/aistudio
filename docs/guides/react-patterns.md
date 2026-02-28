@@ -66,9 +66,11 @@ const toggle = useCallback(() => {
 }, [])
 
 // CORRECT — inverts what user actually sees
+// derivedAutoExpand must be stable (useMemo or derived from stable state) —
+// otherwise the callback recreates every render, defeating the optimization.
 const toggle = useCallback(() => {
   setManualExpanded(prev => !(prev !== null ? prev : derivedAutoExpand))
-}, [derivedAutoExpand])
+}, [derivedAutoExpand])  // deps array shown explicitly — derivedAutoExpand must be memoized
 ```
 
 ## Deferred Data Loading for Popovers
@@ -89,7 +91,7 @@ const handleOpenChange = async (isOpen: boolean) => {
       const result = await fetchData()
       setData(result)
     } catch (error) {
-      showErrorToast(error.message)
+      showErrorToast(error instanceof Error ? error.message : 'Failed to load data')
       loadedRef.current = false  // reset for retry
     } finally {
       setIsLoading(false)

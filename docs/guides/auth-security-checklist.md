@@ -3,6 +3,8 @@
 Review checklist for any PR that modifies OAuth flows, auth callbacks, or token handling.
 Consolidated from 6 security learnings (2026-02-18 through 2026-02-20).
 
+> **Scope:** Primarily covers MCP OAuth flows (items marked with MCP-specific helpers like `rejectUnsafeMcpUrl()`, `getOAuthStateCookieName()`, `requireUserAccess()`). For non-MCP auth changes, apply the general sections (XSS vectors, SSRF patterns, token storage, CodeQL triage) and skip MCP-specific items.
+
 ## Callback Handler Order
 
 - [ ] State cookie CSRF validation runs before any non-static behavior (using user-controlled `errorParam`, `code`, or similar params)
@@ -50,8 +52,10 @@ Three vectors to check on any HTML-rendering endpoint:
 - [ ] `js/user-controlled-bypass` on null/presence guards: likely false positive — requires investigation + second reviewer approval before dismissing
 - [ ] `js/user-controlled-bypass` on OAuth callback branches: **likely real** — fix handler order
 - [ ] `js/insufficiently-hashed-password`: restructure to remove tainted data from sink path (renames/wrappers don't work)
-- [ ] CodeQL has no inline suppression comments — dismiss via `gh api repos/:owner/:repo/code-scanning/alerts/{N} -X PATCH -f state=dismissed -f dismissed_reason="false positive" -f dismissed_comment="Investigated: <explanation under 280 chars>"` (requires second reviewer approval)
+- [ ] Unlike ESLint, CodeQL does not support inline suppression — dismiss via `gh api repos/:owner/:repo/code-scanning/alerts/{N} -X PATCH -f state=dismissed -f dismissed_reason="false positive" -f dismissed_comment="Investigated: <explanation under 280 chars>"` (requires second reviewer approval)
 
 ---
+
+> **Staleness warning:** This checklist references specific internal function names and signatures (`rejectUnsafeMcpUrl`, `requireUserAccess`, `getOAuthStateCookieName`). These may be renamed over time — verify against actual source in `lib/mcp/connector-service.ts` before flagging a PR for non-compliance.
 
 *Source learnings: `docs/learnings/security/2026-02-18-dek-cache-promise-reference-clobber.md` through `2026-02-20-codeql-taint-break-static-data-block.md`*

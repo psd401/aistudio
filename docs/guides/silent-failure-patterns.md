@@ -30,7 +30,8 @@ Drizzle `defaultNow()` only runs at INSERT. Without a PostgreSQL trigger, `updat
 
 ```sql
 -- Required in every migration with updated_at
--- update_updated_at_column() is defined in migration 017, re-declared safely in 028 (CREATE OR REPLACE)
+-- update_updated_at_column() is defined in /infra/database/schema/ (migration 017, re-declared in 028)
+-- Verify the function exists before relying on it in a new migration
 CREATE TRIGGER set_updated_at
   BEFORE UPDATE ON your_table_name
   FOR EACH ROW
@@ -131,14 +132,10 @@ useEffect(() => { ... }, [status, conversationId]) // not [session, conversation
 // WRONG — two-pass, triggers CodeQL; fromCharCode breaks surrogate pairs
 text.replace(/&amp;/g, '&').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
 
-// CORRECT — single-pass, control-char-safe
-function decodeHtmlEntities(text: string): string {
-  return text.replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|(\w+));/g, (match, dec, hex, named) => {
-    const cp = dec ? parseInt(dec, 10) : hex ? parseInt(hex, 16) : namedEntities[named]
-    if (!cp || isControlChar(cp)) return match // keep original entity — never store U+0000
-    return String.fromCodePoint(cp)
-  })
-}
+// CORRECT — single-pass regex that decodes all entity types in one .replace() call.
+// Reject control chars (U+0000–U+001F minus tab/newline/CR) at decode time, not just at save time.
+// Use String.fromCodePoint (not fromCharCode) for correct supplementary-plane handling.
+// See actual implementation: lib/utils/text-sanitizer.ts
 ```
 
 **Review rule:** Test with `&#0;`, `&#x0;`, and surrogate-pair entities (`&#55357;&#56832;`) when touching any entity decoder.

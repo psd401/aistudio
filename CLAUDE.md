@@ -275,8 +275,8 @@ export async function actionName(params: ParamsType): Promise<ActionState<Return
 
 **E2E Testing**:
 - Development: Use Playwright MCP (`/e2e-test` command)
-- CI/CD: Add to `/tests/e2e/working-tests.spec.ts`
-- Documentation: Update `/tests/e2e/playwright-mcp-examples.md`
+- Add specs to `tests/e2e/` — all files are run by `bun run test:e2e`
+- See `docs/guides/TESTING.md` (E2E Expectations section) for when tests are required
 
 ## 🏗️ Infrastructure Patterns
 
@@ -426,6 +426,7 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 - **Don't** mutate AI SDK tool `args` in-place — return new objects from sanitization
 - **Don't** put `session` (object) in `useEffect` deps — use `status` (primitive)
 - **Don't** create tables with `updated_at` without the PostgreSQL trigger
+- **Don't** use `{}` as an accumulator for model/user-controlled keys — use `Object.create(null)`
 
 ### React (see `docs/guides/react-patterns.md`)
 - **Don't** put `key` on Provider/context wrapper components
