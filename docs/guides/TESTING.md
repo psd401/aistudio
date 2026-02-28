@@ -280,6 +280,38 @@ it('should handle network errors gracefully', async () => {
 })
 ```
 
+## E2E Testing Expectations for PRs
+
+New features and significant bug fixes **must** include E2E test coverage. This is not optional.
+
+### When E2E Tests Are Required
+
+| Change Type | E2E Required? | Example |
+|-------------|---------------|---------|
+| New user-facing feature | Yes | New page, new form, new workflow |
+| Bug fix with user-visible symptom | Yes | Broken navigation, lost form state |
+| API endpoint change | Yes (if UI consumes it) | New/modified REST or server action |
+| Refactor with no behavior change | No (but run existing tests) | Code reorganization |
+| Docs/config only | No | README, CLAUDE.md, CDK config |
+
+### Minimum E2E Coverage Per Feature
+
+1. **Happy path** — the primary user flow works end-to-end
+2. **Auth gate** — unauthenticated access is blocked where expected
+3. **Error state** — at least one error case (e.g., invalid input, missing data)
+
+### Where to Add Tests
+
+- **CI-compatible** (no auth needed): `tests/e2e/working-tests.spec.ts`
+- **Auth-required**: Separate spec files in `tests/e2e/` — run via Playwright MCP during development
+
+### PR Review Enforcement
+
+Reviewers should check:
+- [ ] New user-facing behavior has at least one E2E test
+- [ ] Test covers happy path + one error case
+- [ ] Test does not depend on hardcoded data or timing
+
 ## Coverage Requirements
 
 - Minimum 80% code coverage for new features
