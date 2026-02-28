@@ -30,6 +30,7 @@ Drizzle `defaultNow()` only runs at INSERT. Without a PostgreSQL trigger, `updat
 
 ```sql
 -- Required in every migration with updated_at
+-- update_updated_at_column() is defined in migration 017 and available to all subsequent migrations
 CREATE TRIGGER set_updated_at
   BEFORE UPDATE ON your_table_name
   FOR EACH ROW
@@ -82,6 +83,16 @@ function sanitize(args: ChartArgs): ChartArgs { return { ...args, title: escapeH
 
 Only accepts `type: 'tool-call'` (dynamic format). Static formats like `tool-show_chart` silently fail to deserialize.
 
+```typescript
+// WRONG — static format, silently skipped during history reload
+{ type: 'tool-show_chart', args: { ... } }
+
+// CORRECT — dynamic format fromThreadMessageLike expects
+{ type: 'tool-call', toolName: 'show_chart', args: { ... } }
+```
+
+Also: HTML entities in tool args (e.g. `&amp;`) must be decoded at save boundary and at history load — `argsText` must match `JSON.stringify(args)` exactly or the append-only check fails.
+
 ## Prototype Pollution
 
 ### Model-controlled key accumulators
@@ -116,7 +127,21 @@ useEffect(() => { ... }, [status, conversationId]) // not [session, conversation
 
 `&#0;` decodes to U+0000, which PostgreSQL rejects. Sequential `.replace()` chains trigger CodeQL double-unescaping alerts.
 
-**Fix:** Use single-pass regex with control char filtering and `String.fromCodePoint` (not `fromCharCode`).
+```typescript
+// WRONG — two-pass, triggers CodeQL; fromCharCode breaks surrogate pairs
+text.replace(/&amp;/g, '&').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+n))
+
+// CORRECT — single-pass, control-char-safe
+function decodeHtmlEntities(text: string): string {
+  return text.replace(/&(?:#(\d+)|#x([0-9a-fA-F]+)|(\w+));/g, (match, dec, hex, named) => {
+    const cp = dec ? parseInt(dec, 10) : hex ? parseInt(hex, 16) : namedEntities[named]
+    if (!cp || isControlChar(cp)) return match // keep original entity — never store U+0000
+    return String.fromCodePoint(cp)
+  })
+}
+```
+
+**Review rule:** Test with `&#0;`, `&#x0;`, and surrogate-pair entities (`&#55357;&#56832;`) when touching any entity decoder.
 
 ---
 

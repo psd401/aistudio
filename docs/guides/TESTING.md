@@ -302,14 +302,14 @@ New features and significant bug fixes **must** include E2E test coverage. This 
 
 ### Where to Add Tests
 
-- **CI-compatible** (no auth needed): `tests/e2e/working-tests.spec.ts`
-- **Auth-required**: Separate spec files in `tests/e2e/` — run via Playwright MCP during development
+- **CI-compatible** (no auth needed): Add to any existing spec under `tests/e2e/` that fits the feature domain, or create a new `tests/e2e/<feature>.spec.ts` — all files are run by `bun run test:e2e`
+- **Auth-required**: Spec files in `tests/e2e/` — run via Playwright MCP during development
 
 ### PR Review Enforcement
 
 Reviewers should check:
 - [ ] New user-facing behavior has at least one E2E test
-- [ ] Test covers happy path + one error case
+- [ ] Test covers happy path + auth gate (unauthenticated access blocked) + one error case
 - [ ] Test does not depend on hardcoded data or timing
 
 ## Coverage Requirements

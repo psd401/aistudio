@@ -75,6 +75,8 @@ const toggle = useCallback(() => {
 
 Load data on first open, not on mount. Prevents unnecessary backend queries on every page visit.
 
+> **Note on boolean `useRef` here:** `loadedRef = useRef(false)` is appropriate for single-mounted-instance patterns like popovers where the component doesn't serve multiple parameterized routes. Use ID-tracking refs (see above) only when the same component instance is reused across route changes.
+
 ```typescript
 const loadedRef = useRef(false)
 
@@ -111,6 +113,8 @@ const handleOpenChange = async (isOpen: boolean) => {
 - `refetchOnWindowFocus={false}` — prevents new session object reference on every tab switch
 - `refetchInterval={5 * 60}` — compensates by checking session validity every 5 minutes
 - In `useEffect` deps: use `status` (primitive string), never `session` (object reference)
+
+*See also: `docs/guides/silent-failure-patterns.md` — NextAuth SessionProvider section for the root cause explanation.*
 
 ## Form Extraction Checklist
 
