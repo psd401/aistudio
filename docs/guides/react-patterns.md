@@ -103,7 +103,7 @@ const handleOpenChange = async (isOpen: boolean) => {
 
 **Rules:**
 - In **event handlers**: call `setIsLoading(true)` directly — `startTransition` delays the spinner
-- In **`useEffect` bodies**: the React Compiler requires `startTransition` for synchronous `setState` to avoid cascading render warnings — use it there
+- In **`useEffect` bodies**: if the React Compiler flags synchronous `setState`, wrap it in `startTransition`
 - Set `loadedRef.current = true` **before** the async call (prevents duplicate requests)
 - Reset on error if retry is desired
 

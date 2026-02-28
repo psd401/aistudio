@@ -300,7 +300,7 @@ New features and significant bug fixes **must** include E2E test coverage. This 
 ### Where to Add Tests
 
 - **CI-compatible** (no auth needed): Add to any existing spec under `tests/e2e/` — run locally via `bunx playwright test tests/e2e/`. Seeded test users available: `test@example.com`, `staff@example.com`, `student@example.com`
-- **Auth-required (manual only)**: Tests that require real OAuth flows or external service auth cannot run in CI. Run these locally with `bunx playwright test`. Mark them with `test.skip` to prevent CI failures
+- **Auth-required (manual only)**: Tests that require real OAuth flows or external service auth cannot run in CI. Run these locally with `bunx playwright test`. Auto-skip in CI with: `test.skip(!!process.env.CI, 'Requires OAuth — run locally with seeded users')`
 
 ### PR Review Enforcement
 
