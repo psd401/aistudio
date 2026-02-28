@@ -30,7 +30,7 @@ Drizzle `defaultNow()` only runs at INSERT. Without a PostgreSQL trigger, `updat
 
 ```sql
 -- Required in every migration with updated_at
--- update_updated_at_column() is defined in migration 017 and available to all subsequent migrations
+-- update_updated_at_column() is defined in migration 017, re-declared safely in 028 (CREATE OR REPLACE)
 CREATE TRIGGER set_updated_at
   BEFORE UPDATE ON your_table_name
   FOR EACH ROW

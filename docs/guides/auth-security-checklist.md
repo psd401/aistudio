@@ -50,7 +50,7 @@ Three vectors to check on any HTML-rendering endpoint:
 - [ ] `js/user-controlled-bypass` on null/presence guards: likely false positive — requires investigation + second reviewer approval before dismissing
 - [ ] `js/user-controlled-bypass` on OAuth callback branches: **likely real** — fix handler order
 - [ ] `js/insufficiently-hashed-password`: restructure to remove tainted data from sink path (renames/wrappers don't work)
-- [ ] CodeQL has no inline suppression comments — dismiss via `gh api repos/:owner/:repo/code-scanning/alerts/{N} -X PATCH -f state='dismissed' -f reason='false_positive'` (requires comment explaining investigation)
+- [ ] CodeQL has no inline suppression comments — dismiss via `gh api repos/:owner/:repo/code-scanning/alerts/{N} -X PATCH -f state=dismissed -f dismissed_reason="false positive" -f dismissed_comment="Investigated: <explanation under 280 chars>"` (requires second reviewer approval)
 
 ---
 
