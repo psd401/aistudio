@@ -427,6 +427,8 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 - **Don't** put `session` (object) in `useEffect` deps — use `status` (primitive)
 - **Don't** create tables with `updated_at` without the PostgreSQL trigger
 - **Don't** use `{}` as an accumulator for model/user-controlled keys — use `Object.create(null)`
+- **Don't** use static tool-call format (`tool-show_chart`) with `fromThreadMessageLike` — use `type: 'tool-call'` dynamic format
+- **Don't** chain `.replace()` for HTML entity decoding — use single-pass regex (see `lib/utils/text-sanitizer.ts`)
 
 ### React (see `docs/guides/react-patterns.md`)
 - **Don't** put `key` on Provider/context wrapper components
