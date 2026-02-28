@@ -74,7 +74,7 @@ export function ToolSelectionSection({
       return
     }
 
-    startTransition(() => { setIsLoading(true) })
+    setIsLoading(true)
     log.debug('Loading tools for model', {
       modelId: selectedModel.modelId,
       modelName: selectedModel.name
