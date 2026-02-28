@@ -10,7 +10,7 @@
  *
  * Usage:
  *   bunx tsx scripts/drizzle-helpers/create-migration.ts "add-user-preferences"
- *   npm run migration:create -- "add-user-preferences"
+ *   bun run migration:create -- "add-user-preferences"
  */
 
 import * as fs from "node:fs";

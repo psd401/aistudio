@@ -16,7 +16,7 @@
  *
  * Usage:
  *   bunx tsx scripts/drizzle-helpers/prepare-migration.ts "add-user-preferences"
- *   npm run migration:prepare -- "add-user-preferences"
+ *   bun run migration:prepare -- "add-user-preferences"
  */
 
 import * as fs from "node:fs";
@@ -192,7 +192,7 @@ function main(): void {
     console.error("");
     console.error("❌ No drizzle-generated migrations found in", DRIZZLE_MIGRATIONS_DIR);
     console.error("");
-    console.error("Run 'npm run drizzle:generate' first to generate migrations from schema changes.");
+    console.error("Run 'bun run drizzle:generate' first to generate migrations from schema changes.");
     console.error("");
     process.exit(1);
   }

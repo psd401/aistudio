@@ -10,7 +10,7 @@
  *
  * Usage:
  *   bunx tsx scripts/drizzle-helpers/list-migrations.ts
- *   npm run migration:list
+ *   bun run migration:list
  */
 
 import * as fs from "node:fs";
@@ -132,9 +132,9 @@ function main(): void {
   }
 
   console.log("📝 Commands:");
-  console.log("  npm run drizzle:generate     Generate migration from schema changes");
-  console.log("  npm run migration:prepare    Prepare drizzle migration for Lambda");
-  console.log("  npm run migration:create     Create empty migration file");
+  console.log("  bun run drizzle:generate     Generate migration from schema changes");
+  console.log("  bun run migration:prepare    Prepare drizzle migration for Lambda");
+  console.log("  bun run migration:create     Create empty migration file");
   console.log("");
 }
 
