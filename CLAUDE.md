@@ -274,7 +274,7 @@ export async function actionName(params: ParamsType): Promise<ActionState<Return
 ## 🧪 Testing
 
 **E2E Testing**:
-- Run locally: `npx playwright test tests/e2e/`
+- Run locally: `bunx playwright test tests/e2e/`
 - Add specs to `tests/e2e/`
 - See `docs/guides/TESTING.md` (E2E Expectations section) for when tests are required
 
