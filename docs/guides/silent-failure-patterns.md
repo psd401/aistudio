@@ -30,8 +30,8 @@ Drizzle `defaultNow()` only runs at INSERT. Without a PostgreSQL trigger, `updat
 
 ```sql
 -- Required in every migration with updated_at
--- update_updated_at_column() is defined in /infra/database/schema/ (migration 017, re-declared in 028)
--- Verify the function exists before relying on it in a new migration
+-- update_updated_at_column() is defined in /infra/database/schema/
+-- Verify the function exists before relying on it: \df update_updated_at_column
 CREATE TRIGGER set_updated_at
   BEFORE UPDATE ON your_table_name
   FOR EACH ROW
@@ -66,6 +66,18 @@ onFinish: async (event) => {
 
 If `execute()` returns `{ id, success }`, any arg sanitization inside it is **dead code**. The frontend reads args from the streaming tool invocation object, not from `execute()` return.
 
+```typescript
+// WRONG — sanitizing inside execute() has no effect on what the frontend displays
+execute: async (args) => {
+  args.title = escapeHtml(args.title) // dead code — frontend already has raw args
+  return { id: args.chartId, success: true }
+}
+
+// CORRECT — sanitize in the render/display layer
+// In the tool result renderer component:
+const safeTitle = escapeHtml(toolInvocation.args.title)
+```
+
 **Review rule:** Check what `execute()` actually returns. Sanitize at the render layer, not the execute layer.
 
 ### In-place mutation of tool args
@@ -81,6 +93,8 @@ function sanitize(args: ChartArgs): ChartArgs { return { ...args, title: escapeH
 ```
 
 ### `fromThreadMessageLike` format
+
+> **Version note:** This applies to `@assistant-ui/react` v0.12.x. Check the assistant-ui changelog if upgrading — the format may change.
 
 Only accepts `type: 'tool-call'` (dynamic format). Static formats like `tool-show_chart` silently fail to deserialize.
 

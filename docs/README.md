@@ -55,6 +55,15 @@ Testing strategies including unit tests, integration tests, and E2E testing with
 #### [guides/TYPESCRIPT.md](./guides/TYPESCRIPT.md)
 TypeScript best practices, conventions, and guidelines for maintaining type safety.
 
+#### [guides/auth-security-checklist.md](./guides/auth-security-checklist.md)
+OAuth and auth security review checklist for PRs modifying auth flows or token handling.
+
+#### [guides/silent-failure-patterns.md](./guides/silent-failure-patterns.md)
+Catalog of silent failure patterns (Drizzle ORM, AI SDK v6, prototype pollution, SessionProvider).
+
+#### [guides/react-patterns.md](./guides/react-patterns.md)
+React pitfalls and patterns specific to this codebase (initialization guards, derived state, deferred loading).
+
 #### [guides/adding-ai-providers.md](./guides/adding-ai-providers.md)
 Step-by-step provider integration guide for adding new AI providers.
 

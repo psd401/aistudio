@@ -56,6 +56,8 @@ Three vectors to check on any HTML-rendering endpoint:
 
 ---
 
-> **Staleness warning:** This checklist references specific internal function names and signatures (`rejectUnsafeMcpUrl`, `requireUserAccess`, `getOAuthStateCookieName`). These may be renamed over time — verify against actual source in `lib/mcp/connector-service.ts` before flagging a PR for non-compliance.
+> **Staleness warning:** This checklist references specific internal function names and signatures. These may be renamed over time — verify against actual source before flagging a PR for non-compliance:
+> - `rejectUnsafeMcpUrl()`, `requireUserAccess()` → `lib/mcp/connector-service.ts`
+> - `getOAuthStateCookieName()` → `app/api/connectors/oauth/authorize/route.ts`
 
 *Source learnings: `docs/learnings/security/2026-02-18-dek-cache-promise-reference-clobber.md` through `2026-02-20-codeql-taint-break-static-data-block.md`*

@@ -6,19 +6,16 @@ Comprehensive testing guide for AI Studio covering unit tests, integration tests
 
 ```bash
 # Run all tests
-npm test
+bun run test
 
 # Run unit tests in watch mode
-npm run test:watch
+bun run test:watch
 
 # Run E2E tests
-npm run test:e2e
-
-# Run E2E tests with UI
-npm run test:e2e:ui
+bunx playwright test tests/e2e/
 
 # Run specific test file
-npm test -- path/to/test.test.ts
+bun run test -- path/to/test.test.ts
 ```
 
 ## Test Structure
@@ -28,8 +25,11 @@ npm test -- path/to/test.test.ts
 ├── unit/                 # Unit tests for individual functions
 ├── integration/          # Integration tests for features
 ├── e2e/                  # End-to-end tests with Playwright
-│   ├── working-tests.spec.ts    # CI/CD compatible tests
-│   └── playwright-mcp-examples.md # MCP testing examples
+│   ├── accessibility-scheduling.spec.ts
+│   ├── assistant-architect-*.spec.ts
+│   ├── model-compare-polling.spec.ts
+│   ├── nexus-tools.spec.ts
+│   └── scheduling-workflows.spec.ts
 └── security/             # Security-specific tests
 ```
 
@@ -174,20 +174,17 @@ test('user can navigate to chat', async ({ page }) => {
 })
 ```
 
-### Authenticated Tests with Playwright MCP
+### Authenticated Tests
 
-When developing, use Playwright MCP for authenticated testing:
+Run authenticated E2E tests locally with seeded test users:
 
 ```bash
-# In Claude Code terminal
-/e2e-test Navigate to /admin/users and verify user table loads
-/e2e-test Test chat - send "Hello" and verify response
-/e2e-test Upload a PDF to /documents and verify processing
+bunx playwright test tests/e2e/
 ```
 
-### CI/CD Compatible Tests
+### Adding New Tests
 
-Add tests that don't require authentication to `working-tests.spec.ts`:
+Add tests to an existing spec under `tests/e2e/` or create a new spec file:
 
 ```typescript
 test('public pages load', async ({ page }) => {
@@ -303,7 +300,7 @@ New features and significant bug fixes **must** include E2E test coverage. This 
 ### Where to Add Tests
 
 - **CI-compatible** (no auth needed): Add to any existing spec under `tests/e2e/` — run locally via `bunx playwright test tests/e2e/`. Seeded test users available: `test@example.com`, `staff@example.com`, `student@example.com`
-- **Auth-required (manual only)**: Tests that require real OAuth flows or external service auth cannot run in CI. Run these locally with `bunx playwright test`. Mark them with `test.skip` or place in a separate `tests/e2e-manual/` directory to prevent CI failures
+- **Auth-required (manual only)**: Tests that require real OAuth flows or external service auth cannot run in CI. Run these locally with `bunx playwright test`. Mark them with `test.skip` to prevent CI failures
 
 ### PR Review Enforcement
 
@@ -316,7 +313,7 @@ Reviewers should check:
 
 - Minimum 80% code coverage for new features
 - 100% coverage for critical paths (auth, payments)
-- Run coverage report: `npm test -- --coverage`
+- Run coverage report: `bun run test -- --coverage`
 
 ## Continuous Integration
 

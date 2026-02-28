@@ -221,8 +221,8 @@ This creates:
 Automated unit tests validate graceful degradation but **cannot test actual guardrail behavior** due to cost/latency of Bedrock API calls. After deploying guardrail changes, perform manual validation:
 
 **Pre-Deployment Checklist:**
-1. ✅ `npm run typecheck` passes
-2. ✅ `npm run lint` passes
+1. ✅ `bun run typecheck` passes
+2. ✅ `bun run lint` passes
 3. ✅ Unit tests pass: `bunx jest --testPathPatterns='bedrock-guardrails-service'`
 4. ✅ CDK synth succeeds: `cd infra && bunx cdk synth`
 

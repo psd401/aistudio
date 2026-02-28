@@ -68,6 +68,7 @@ const toggle = useCallback(() => {
 // CORRECT — inverts what user actually sees
 // derivedAutoExpand must be stable (useMemo or derived from stable state) —
 // otherwise the callback recreates every render, defeating the optimization.
+const derivedAutoExpand = useMemo(() => items.length > 0, [items.length])
 const toggle = useCallback(() => {
   setManualExpanded(prev => !(prev !== null ? prev : derivedAutoExpand))
 }, [derivedAutoExpand])  // deps array shown explicitly — derivedAutoExpand must be memoized
@@ -125,7 +126,7 @@ When refactoring inline form fields into extracted components:
 - [ ] `maxLength`, `minLength`, `required` carried to new component props
 - [ ] `aria-required`, `aria-invalid`, `aria-describedby` carried over
 - [ ] Character counters and `onBlur` validation triggers preserved
-- [ ] Don't wrap `useState` setters in `useCallback` — they're already referentially stable
+- [ ] Don't wrap `useState` setters in `useCallback` — React guarantees they're referentially stable across renders, so wrapping is redundant
 
 ---
 

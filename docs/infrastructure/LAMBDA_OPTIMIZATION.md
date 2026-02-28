@@ -45,8 +45,8 @@ AI Studio uses AWS CDK for infrastructure as code, organized into modular stacks
 
 ```bash
 cd infra
-npm install
-npm run build
+bun install
+bun run build
 
 # Development
 bunx cdk deploy --all --profile dev
@@ -200,7 +200,7 @@ EnvironmentConfig.override('dev', {
 
 ```bash
 cd infra
-npm test
+bun run test
 ```
 
 ### Integration Tests
@@ -210,7 +210,7 @@ npm test
 bunx cdk deploy --all --profile dev
 
 # Run integration tests
-npm run test:integration
+bun run test:integration
 ```
 
 ### PowerTuning Tests
@@ -286,7 +286,7 @@ aws stepfunctions start-execution \
 rm -rf cdk.out
 
 # Rebuild and deploy
-npm run build && bunx cdk deploy <stack-name>
+bun run build && bunx cdk deploy <stack-name>
 ```
 
 #### PowerTuning Execution Failures
