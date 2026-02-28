@@ -418,6 +418,19 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 - **Don't** grant `resources: ['*']` in IAM policies (except where AWS requires it)
 - **Don't** allow cross-environment access (dev → prod blocked by tags)
 - **Don't** skip tag-based conditions in custom IAM policies
+- **Review** `docs/guides/auth-security-checklist.md` for any PR touching OAuth/auth flows
+
+### Silent Failures (see `docs/guides/silent-failure-patterns.md`)
+- **Don't** use `undefined` in Drizzle `.set()` for clearable fields — use `?? null`
+- **Don't** read `toolResults` from `onStepFinish` — always use `onFinish` `event.steps`
+- **Don't** mutate AI SDK tool `args` in-place — return new objects from sanitization
+- **Don't** put `session` (object) in `useEffect` deps — use `status` (primitive)
+- **Don't** create tables with `updated_at` without the PostgreSQL trigger
+
+### React (see `docs/guides/react-patterns.md`)
+- **Don't** put `key` on Provider/context wrapper components
+- **Don't** use boolean `useRef` for init guards on parameterized routes — use ID-tracking refs
+- **Don't** place hooks after conditional returns
 
 ## 📖 Documentation
 
