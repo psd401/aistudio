@@ -9,6 +9,26 @@ import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import Image from 'next/image'
 
+// Mirror the allowlist from connector-tool-ui.tsx for consistent plot data validation
+const SAFE_PLOT_MIME_TYPES = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+])
+
+const MAX_PLOT_BASE64_LENGTH = 5 * 1024 * 1024 // 5MB
+
+/** Returns true if plot.data is a safe, reasonably-sized image data URI */
+function isSafePlotData(data: string): boolean {
+  if (!data || data.length > MAX_PLOT_BASE64_LENGTH) return false
+  if (!data.startsWith('data:')) return false
+  const semiIdx = data.indexOf(';')
+  if (semiIdx === -1) return false
+  const declaredMime = data.slice(5, semiIdx)
+  return SAFE_PLOT_MIME_TYPES.has(declaredMime)
+}
+
 interface CodeInterpreterArgs {
   code: string
   language: 'python' | 'javascript' | 'sql' | 'bash'
@@ -206,7 +226,10 @@ const CodeInterpreterRenderer = ({ args, result }: { args: CodeInterpreterArgs; 
                     <span className="text-xs font-medium text-indigo-900">📊 Generated Plots</span>
                   </div>
                   <div className="space-y-2">
-                    {result.output.plots.map((plot, index) => (
+                    {result.output.plots.map((plot, index) => {
+                      // Validate plot data URI before rendering — reject non-image or oversized payloads
+                      if (!isSafePlotData(plot.data)) return null
+                      return (
                       <div key={index} className="border border-indigo-200 rounded overflow-hidden">
                         {plot.title && (
                           <div className="bg-indigo-50 px-3 py-2 border-b border-indigo-200">
@@ -222,7 +245,7 @@ const CodeInterpreterRenderer = ({ args, result }: { args: CodeInterpreterArgs; 
                           unoptimized // For dynamic plot data
                         />
                       </div>
-                    ))}
+                    )})}
                   </div>
                 </div>
               )}

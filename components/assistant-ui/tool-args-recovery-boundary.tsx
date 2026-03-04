@@ -7,6 +7,10 @@ const log = createLogger({ module: 'tool-args-recovery-boundary' })
 
 const ARGS_TEXT_ERROR_PATTERN = /argsText can only be appended/
 
+// Cap recovery attempts to prevent infinite render loops when the argsText
+// error is persistent (not a transient streaming glitch).
+const MAX_RECOVERY_ATTEMPTS = 3
+
 interface ToolArgsRecoveryBoundaryProps {
   children: ReactNode
   /** Tool name for logging context */
@@ -28,7 +32,9 @@ interface ToolArgsRecoveryBoundaryState {
  * transient streaming glitch.
  *
  * This boundary catches the specific argsText error and auto-recovers by re-rendering
- * children on the next frame. All other errors pass through to the parent error boundary.
+ * children on the next frame. All other errors re-throw to the parent error boundary
+ * via `getDerivedStateFromError`. After MAX_RECOVERY_ATTEMPTS failed recoveries, the
+ * boundary permanently renders null to avoid infinite render loops.
  *
  * @see https://github.com/assistant-ui/assistant-ui/issues/2775
  * @see https://github.com/assistant-ui/assistant-ui/issues/3471
@@ -44,26 +50,24 @@ export class ToolArgsRecoveryBoundary extends Component<
     this.state = { hasArgsTextError: false, recoveryAttempt: 0 }
   }
 
-  static getDerivedStateFromError(error: Error): ToolArgsRecoveryBoundaryState | null {
+  static getDerivedStateFromError(error: Error): ToolArgsRecoveryBoundaryState {
     if (ARGS_TEXT_ERROR_PATTERN.test(error.message)) {
       return { hasArgsTextError: true, recoveryAttempt: 0 }
     }
-    // Re-throw non-argsText errors to parent boundary
-    return null
+    // Re-throw non-argsText errors so they propagate to the parent boundary.
+    // React supports re-throwing from getDerivedStateFromError to achieve this.
+    throw error
   }
 
-  componentDidCatch(error: Error): void {
-    if (!ARGS_TEXT_ERROR_PATTERN.test(error.message)) {
-      // Not our error — let it propagate
-      throw error
-    }
-
+  componentDidCatch(_error: Error): void {
+    // Only argsText errors reach here (non-matching errors re-throw above).
+    // Log the violation using a static pattern string rather than error.message
+    // to avoid forwarding potentially PII-containing error content to server logs.
     log.warn('argsText invariant violation caught — auto-recovering', {
       toolName: this.props.toolName,
-      message: error.message,
+      errorPattern: 'argsText can only be appended',
     })
 
-    // Schedule auto-recovery on next frame so the streaming can stabilize
     this.scheduleRecovery()
   }
 
@@ -78,7 +82,17 @@ export class ToolArgsRecoveryBoundary extends Component<
       clearTimeout(this.recoveryTimer)
     }
 
-    // Use a short delay to let the streaming frame stabilize
+    // Cap recovery attempts: if the error is persistent (not a transient glitch),
+    // stay in error state permanently rather than looping indefinitely.
+    if (this.state.recoveryAttempt >= MAX_RECOVERY_ATTEMPTS) {
+      log.warn('argsText recovery limit reached — rendering permanent fallback', {
+        toolName: this.props.toolName,
+        attempts: this.state.recoveryAttempt,
+      })
+      return
+    }
+
+    // Short delay to let the streaming frame stabilize before re-rendering
     this.recoveryTimer = setTimeout(() => {
       this.recoveryTimer = null
       this.setState((prev) => ({
@@ -90,8 +104,8 @@ export class ToolArgsRecoveryBoundary extends Component<
 
   render(): ReactNode {
     if (this.state.hasArgsTextError) {
-      // Return null during the brief recovery window — the tool UI will
-      // re-render on the next stable streaming frame (50ms delay)
+      // Return null during the recovery window — tool UI re-renders on next
+      // stable streaming frame. Stays null permanently after MAX_RECOVERY_ATTEMPTS.
       return null
     }
 
