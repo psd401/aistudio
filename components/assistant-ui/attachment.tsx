@@ -1,6 +1,7 @@
 "use client";
 
-import { PropsWithChildren, useEffect, useState, startTransition, type FC } from "react";
+import { PropsWithChildren, useEffect, useMemo, useState, startTransition, type FC } from "react";
+import { createLogger } from "@/lib/client-logger";
 import { CircleXIcon, FileIcon, PaperclipIcon, Loader2, CheckCircle2 } from "lucide-react";
 import {
   AttachmentPrimitive,
@@ -14,6 +15,8 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+const log = createLogger({ module: 'attachment' });
+
 import {
   Dialog,
   DialogTitle,
@@ -185,6 +188,7 @@ const AttachmentUI: FC<AttachmentUIProps> = ({ processingAttachments }) => {
       case "file":
         return "File";
       default:
+        log.warn('Unknown attachment type encountered — rendering as File', { type });
         return "File";
     }
   });
@@ -241,8 +245,13 @@ interface ComposerAttachmentsProps {
 }
 
 export const ComposerAttachments: FC<ComposerAttachmentsProps> = ({ processingAttachments }) => {
-  const AttachmentWithProcessing = (props: Record<string, unknown>) => <AttachmentUI {...props} processingAttachments={processingAttachments} />;
-  
+  const AttachmentWithProcessing = useMemo(
+    () => function AttachmentWithProcessing(props: AttachmentUIProps) {
+      return <AttachmentUI {...props} processingAttachments={processingAttachments} />;
+    },
+    [processingAttachments],
+  );
+
   return (
     <div className="flex w-full flex-row gap-3 overflow-x-auto">
       <ComposerPrimitive.Attachments

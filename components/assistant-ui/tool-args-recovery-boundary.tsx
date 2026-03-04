@@ -50,9 +50,14 @@ export class ToolArgsRecoveryBoundary extends Component<
     this.state = { hasArgsTextError: false, recoveryAttempt: 0 }
   }
 
-  static getDerivedStateFromError(error: Error): ToolArgsRecoveryBoundaryState {
+  static getDerivedStateFromError(
+    error: Error,
+  ): Partial<ToolArgsRecoveryBoundaryState> {
     if (ARGS_TEXT_ERROR_PATTERN.test(error.message)) {
-      return { hasArgsTextError: true, recoveryAttempt: 0 }
+      // Return only hasArgsTextError — intentionally do NOT reset recoveryAttempt
+      // so the counter accumulates correctly across multiple errors and the
+      // MAX_RECOVERY_ATTEMPTS cap in componentDidCatch functions correctly.
+      return { hasArgsTextError: true }
     }
     // Re-throw non-argsText errors so they propagate to the parent boundary.
     // React supports re-throwing from getDerivedStateFromError to achieve this.
@@ -60,12 +65,24 @@ export class ToolArgsRecoveryBoundary extends Component<
   }
 
   componentDidCatch(_error: Error): void {
-    // Only argsText errors reach here (non-matching errors re-throw above).
+    // Only argsText errors reach here (non-matching errors re-throw in getDerivedStateFromError).
+    // Check the cap before scheduling recovery — recoveryAttempt reflects cumulative attempts
+    // since constructor (getDerivedStateFromError does not reset it).
+    if (this.state.recoveryAttempt >= MAX_RECOVERY_ATTEMPTS) {
+      log.warn('argsText recovery limit reached — rendering permanent fallback', {
+        toolName: this.props.toolName,
+        attempts: this.state.recoveryAttempt,
+      })
+      // Do not schedule recovery — boundary stays in null-render state permanently.
+      return
+    }
+
     // Log the violation using a static pattern string rather than error.message
     // to avoid forwarding potentially PII-containing error content to server logs.
     log.warn('argsText invariant violation caught — auto-recovering', {
       toolName: this.props.toolName,
       errorPattern: 'argsText can only be appended',
+      recoveryAttempt: this.state.recoveryAttempt + 1,
     })
 
     this.scheduleRecovery()
@@ -80,16 +97,6 @@ export class ToolArgsRecoveryBoundary extends Component<
   private scheduleRecovery(): void {
     if (this.recoveryTimer) {
       clearTimeout(this.recoveryTimer)
-    }
-
-    // Cap recovery attempts: if the error is persistent (not a transient glitch),
-    // stay in error state permanently rather than looping indefinitely.
-    if (this.state.recoveryAttempt >= MAX_RECOVERY_ATTEMPTS) {
-      log.warn('argsText recovery limit reached — rendering permanent fallback', {
-        toolName: this.props.toolName,
-        attempts: this.state.recoveryAttempt,
-      })
-      return
     }
 
     // Short delay to let the streaming frame stabilize before re-rendering
