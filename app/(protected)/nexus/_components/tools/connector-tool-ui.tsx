@@ -19,6 +19,7 @@ import {
 import { useConnectorToolsOptional, type ConnectorServerInfo } from './connector-tool-context'
 import type { McpToolResult } from '@/lib/mcp/types'
 import { ToolFallback } from '@/components/assistant-ui/tool-fallback'
+import { ToolArgsRecoveryBoundary } from '@/components/assistant-ui/tool-args-recovery-boundary'
 import { ExportUrlLinks, parseExportUrls, stripExportUrls } from '@/components/assistant-ui/export-url-link'
 
 /**
@@ -344,10 +345,18 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
   // Not a connector tool — render the standard generic fallback.
   // Early return avoids computing displayName, argsSummary, parsedResult for non-connector tools.
   if (!connectorInfo) {
-    return <ToolFallback {...props} />
+    return (
+      <ToolArgsRecoveryBoundary toolName={toolName}>
+        <ToolFallback {...props} />
+      </ToolArgsRecoveryBoundary>
+    )
   }
 
-  return <ConnectorToolCard toolName={toolName} argsText={argsText} result={result} connectorInfo={connectorInfo} />
+  return (
+    <ToolArgsRecoveryBoundary toolName={toolName}>
+      <ConnectorToolCard toolName={toolName} argsText={argsText} result={result} connectorInfo={connectorInfo} />
+    </ToolArgsRecoveryBoundary>
+  )
 }
 
 /** Inner component for connector tools — avoids conditional hooks in the parent. */

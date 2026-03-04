@@ -1,6 +1,7 @@
 'use client'
 
 import { makeAssistantToolUI } from '@assistant-ui/react'
+import { ToolArgsRecoveryBoundary } from '@/components/assistant-ui/tool-args-recovery-boundary'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { ExternalLink, Globe, Clock } from 'lucide-react'
@@ -24,9 +25,7 @@ interface WebSearchResult {
   totalResults: number
 }
 
-export const WebSearchUI = makeAssistantToolUI<WebSearchArgs, WebSearchResult>({
-  toolName: 'webSearch',
-  render: ({ args, result }) => {
+const WebSearchRenderer = ({ args, result }: { args: WebSearchArgs; result?: WebSearchResult }) => {
     if (!result) {
       // Loading state
       return (
@@ -117,5 +116,13 @@ export const WebSearchUI = makeAssistantToolUI<WebSearchArgs, WebSearchResult>({
         </CardContent>
       </Card>
     )
-  }
+}
+
+export const WebSearchUI = makeAssistantToolUI<WebSearchArgs, WebSearchResult>({
+  toolName: 'webSearch',
+  render: (props) => (
+    <ToolArgsRecoveryBoundary toolName="webSearch">
+      <WebSearchRenderer {...props} />
+    </ToolArgsRecoveryBoundary>
+  ),
 })

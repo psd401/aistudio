@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge'
 import { Globe, Clock, Code2, Terminal, ExternalLink } from 'lucide-react'
 import { ChartVisualizationUI } from './chart-visualization-ui'
+import { ToolArgsRecoveryBoundary } from '@/components/assistant-ui/tool-args-recovery-boundary'
 
 /**
  * Multi-Provider Tool UIs
@@ -165,13 +166,21 @@ const WebSearchRenderer = ({
 // OpenAI web search tool
 export const OpenAIWebSearchUI = makeAssistantToolUI<WebSearchArgs, WebSearchResult>({
   toolName: 'web_search_preview',
-  render: WebSearchRenderer,
+  render: (props) => (
+    <ToolArgsRecoveryBoundary toolName="web_search_preview">
+      <WebSearchRenderer {...props} />
+    </ToolArgsRecoveryBoundary>
+  ),
 })
 
 // Google search tool
 export const GoogleSearchUI = makeAssistantToolUI<WebSearchArgs, WebSearchResult>({
   toolName: 'google_search',
-  render: WebSearchRenderer,
+  render: (props) => (
+    <ToolArgsRecoveryBoundary toolName="google_search">
+      <WebSearchRenderer {...props} />
+    </ToolArgsRecoveryBoundary>
+  ),
 })
 
 // ============================================================================
@@ -331,7 +340,11 @@ const CodeInterpreterRenderer = ({
 
 export const CodeInterpreterUI = makeAssistantToolUI<CodeInterpreterArgs, CodeInterpreterResult>({
   toolName: 'code_interpreter',
-  render: CodeInterpreterRenderer,
+  render: (props) => (
+    <ToolArgsRecoveryBoundary toolName="code_interpreter">
+      <CodeInterpreterRenderer {...props} />
+    </ToolArgsRecoveryBoundary>
+  ),
 })
 
 // ============================================================================

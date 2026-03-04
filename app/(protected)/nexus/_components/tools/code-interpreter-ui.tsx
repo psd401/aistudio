@@ -1,6 +1,7 @@
 'use client'
 
 import { makeAssistantToolUI } from '@assistant-ui/react'
+import { ToolArgsRecoveryBoundary } from '@/components/assistant-ui/tool-args-recovery-boundary'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Code2, PlayCircle, CheckCircle, XCircle, Terminal, FileText } from 'lucide-react'
@@ -49,9 +50,7 @@ const getStatusIcon = (status: string) => {
   }
 }
 
-export const CodeInterpreterUI = makeAssistantToolUI<CodeInterpreterArgs, CodeInterpreterResult>({
-  toolName: 'code_interpreter',
-  render: ({ args, result }) => {
+const CodeInterpreterRenderer = ({ args, result }: { args: CodeInterpreterArgs; result?: CodeInterpreterResult }) => {
     if (!result) {
       // Loading state
       return (
@@ -243,5 +242,13 @@ export const CodeInterpreterUI = makeAssistantToolUI<CodeInterpreterArgs, CodeIn
         </CardContent>
       </Card>
     )
-  }
+}
+
+export const CodeInterpreterUI = makeAssistantToolUI<CodeInterpreterArgs, CodeInterpreterResult>({
+  toolName: 'code_interpreter',
+  render: (props) => (
+    <ToolArgsRecoveryBoundary toolName="code_interpreter">
+      <CodeInterpreterRenderer {...props} />
+    </ToolArgsRecoveryBoundary>
+  ),
 })

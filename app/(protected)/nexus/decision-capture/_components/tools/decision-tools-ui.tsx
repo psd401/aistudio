@@ -1,6 +1,7 @@
 'use client'
 
 import { makeAssistantToolUI, type ToolCallMessagePartStatus } from '@assistant-ui/react'
+import { ToolArgsRecoveryBoundary } from '@/components/assistant-ui/tool-args-recovery-boundary'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { CheckCircle2, AlertCircle, Search, GitBranch, Loader2, XCircle } from 'lucide-react'
@@ -122,7 +123,11 @@ const SearchResultsRenderer = ({
 
 export const SearchGraphNodesUI = makeAssistantToolUI<SearchGraphNodesArgs, SearchGraphNodesResult>({
   toolName: 'search_graph_nodes',
-  render: SearchResultsRenderer,
+  render: (props) => (
+    <ToolArgsRecoveryBoundary toolName="search_graph_nodes">
+      <SearchResultsRenderer {...props} />
+    </ToolArgsRecoveryBoundary>
+  ),
 })
 
 // ============================================================================
@@ -263,7 +268,11 @@ const ProposedDecisionRenderer = ({
 
 export const ProposedDecisionUI = makeAssistantToolUI<ProposeDecisionArgs, ProposeDecisionResult>({
   toolName: 'propose_decision',
-  render: ProposedDecisionRenderer,
+  render: (props) => (
+    <ToolArgsRecoveryBoundary toolName="propose_decision">
+      <ProposedDecisionRenderer {...props} />
+    </ToolArgsRecoveryBoundary>
+  ),
 })
 
 // ============================================================================
@@ -343,7 +352,11 @@ const CommittedDecisionRenderer = ({
 
 export const CommittedDecisionUI = makeAssistantToolUI<CommitDecisionArgs, CommitDecisionResult>({
   toolName: 'commit_decision',
-  render: CommittedDecisionRenderer,
+  render: (props) => (
+    <ToolArgsRecoveryBoundary toolName="commit_decision">
+      <CommittedDecisionRenderer {...props} />
+    </ToolArgsRecoveryBoundary>
+  ),
 })
 
 // ============================================================================
