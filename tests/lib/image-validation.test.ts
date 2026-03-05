@@ -1,6 +1,6 @@
-import { isSafePlotData } from '@/lib/utils/image-validation'
+import { isSafePlotData, MAX_IMAGE_BASE64_LENGTH } from '@/lib/utils/image-validation'
 
-const MAX_SIZE = 5 * 1024 * 1024 // 5MB (matches module constant)
+const MAX_SIZE = MAX_IMAGE_BASE64_LENGTH
 
 describe('isSafePlotData', () => {
   it('accepts a valid image/png data URI', () => {

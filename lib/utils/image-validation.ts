@@ -30,7 +30,11 @@ export const SAFE_PLOT_MIME_TYPES = new Set([
   'image/webp',
 ])
 
-const MAX_PLOT_BASE64_LENGTH = 5 * 1024 * 1024 // 5MB
+/** Maximum base64 string length for image data URIs (~3.75MB decoded). */
+export const MAX_IMAGE_BASE64_LENGTH = 5 * 1024 * 1024 // 5MB
+
+// Alias used internally by isSafePlotData — same limit applies to plot output.
+const MAX_PLOT_BASE64_LENGTH = MAX_IMAGE_BASE64_LENGTH
 
 /**
  * Returns true if `data` is a safe, reasonably-sized image data URI for plot output.

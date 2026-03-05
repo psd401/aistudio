@@ -21,7 +21,7 @@ import type { McpToolResult } from '@/lib/mcp/types'
 import { ToolFallback } from '@/components/assistant-ui/tool-fallback'
 import { ToolArgsRecoveryBoundary } from '@/components/assistant-ui/tool-args-recovery-boundary'
 import { ExportUrlLinks, parseExportUrls, stripExportUrls } from '@/components/assistant-ui/export-url-link'
-import { SAFE_IMAGE_MIME_TYPES } from '@/lib/utils/image-validation'
+import { SAFE_IMAGE_MIME_TYPES, MAX_IMAGE_BASE64_LENGTH } from '@/lib/utils/image-validation'
 
 /**
  * Format a tool name for display.
@@ -65,7 +65,6 @@ function summarizeArgs(argsText: string): string {
   }
 }
 
-/** Allowlist of safe image MIME types for data URI construction.
 /** Type guard for plain objects — excludes Date, RegExp, Array, and other built-ins */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null) return false
@@ -76,8 +75,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /** Maximum content items to render from a single tool result */
 const MAX_CONTENT_ITEMS = 50
 
-/** Maximum base64 string length for image rendering (~5MB decoded) */
-const MAX_IMAGE_BASE64_LENGTH = 5 * 1024 * 1024
 
 /**
  * Detect result type for rendering.
