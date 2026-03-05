@@ -273,7 +273,7 @@ function GeneratedFiles({ files }: { files: CodeFile[] }) {
     <div>
       <div className="text-xs font-semibold text-green-900 mb-1">Generated Files:</div>
       <div className="space-y-1">
-        {files.map((file, index) => (
+        {files.filter(file => file.url.startsWith('https://')).map((file, index) => (
           <a
             key={index}
             href={file.url}

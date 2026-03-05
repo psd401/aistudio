@@ -1,7 +1,7 @@
 /**
  * Shared image data URI validation utilities.
  *
- * Used by tool UI components (multi-provider-tools, connector-tool-ui) to
+ * Used by tool UI components (connector-tool-ui) to
  * validate AI-generated image data URIs before rendering. Centralised here
  * to prevent allowlist drift between consumers.
  */

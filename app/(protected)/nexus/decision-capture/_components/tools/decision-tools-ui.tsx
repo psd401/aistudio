@@ -176,12 +176,14 @@ const ProposedDecisionRenderer = ({
   const summary = result?.summary || args?.summary || ''
 
   // Group nodes by type
+  // Use Object.create(null) to avoid prototype pollution — nodeType is AI-generated
+  // content and could be a prototype key like 'constructor' or '__proto__'.
   const groupedNodes = nodes.reduce<Record<string, typeof nodes>>((acc, node) => {
     const type = node.nodeType || 'unknown'
     if (!acc[type]) acc[type] = []
     acc[type].push(node)
     return acc
-  }, {})
+  }, Object.create(null) as Record<string, typeof nodes>)
 
   return (
     <Card className="border-amber-200 bg-amber-50/50">

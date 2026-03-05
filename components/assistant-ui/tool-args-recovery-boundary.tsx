@@ -127,7 +127,7 @@ export class ToolArgsRecoveryBoundary extends Component<
         // No new recovery is scheduled because componentDidCatch returns early
         // when the cap is reached, so hasArgsTextError stays true permanently.
         return (
-          <div className="text-xs text-muted-foreground italic p-2">
+          <div role="alert" className="text-xs text-muted-foreground italic p-2">
             Tool result unavailable
           </div>
         )
