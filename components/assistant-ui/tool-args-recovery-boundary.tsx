@@ -60,7 +60,8 @@ export class ToolArgsRecoveryBoundary extends Component<
       return { hasArgsTextError: true }
     }
     // Re-throw non-argsText errors so they propagate to the parent boundary.
-    // React supports re-throwing from getDerivedStateFromError to achieve this.
+    // Requires React 19+ — React 18 does not support re-throwing from
+    // getDerivedStateFromError and will silently swallow the error.
     throw error
   }
 
@@ -68,6 +69,11 @@ export class ToolArgsRecoveryBoundary extends Component<
     // Only argsText errors reach here (non-matching errors re-throw in getDerivedStateFromError).
     // Check the cap before scheduling recovery — recoveryAttempt reflects cumulative attempts
     // since constructor (getDerivedStateFromError does not reset it).
+    //
+    // Note: this.state.recoveryAttempt may be stale if componentDidCatch fires multiple times
+    // before the 50ms timer in scheduleRecovery resolves (the increment is in the async
+    // setState callback). In practice, clearTimeout deduplication in scheduleRecovery prevents
+    // multiple timers from running concurrently, so at most one extra recovery may slip through.
     if (this.state.recoveryAttempt >= MAX_RECOVERY_ATTEMPTS) {
       log.warn('argsText recovery limit reached — rendering permanent fallback', {
         toolName: this.props.toolName,
@@ -111,8 +117,16 @@ export class ToolArgsRecoveryBoundary extends Component<
 
   render(): ReactNode {
     if (this.state.hasArgsTextError) {
-      // Return null during the recovery window — tool UI re-renders on next
-      // stable streaming frame. Stays null permanently after MAX_RECOVERY_ATTEMPTS.
+      if (this.state.recoveryAttempt >= MAX_RECOVERY_ATTEMPTS) {
+        // Permanent fallback — recovery exhausted, show user-visible message
+        return (
+          <div className="text-xs text-muted-foreground italic p-2">
+            Tool result unavailable
+          </div>
+        )
+      }
+      // Transient null during recovery window — tool UI re-renders on next
+      // stable streaming frame after the 50ms timer fires.
       return null
     }
 

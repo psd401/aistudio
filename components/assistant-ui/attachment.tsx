@@ -15,8 +15,6 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-const log = createLogger({ module: 'attachment' });
-
 import {
   Dialog,
   DialogTitle,
@@ -27,6 +25,8 @@ import {
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { DialogContent as DialogPrimitiveContent } from "@radix-ui/react-dialog";
+
+const log = createLogger({ module: 'attachment' });
 
 const useFileSrc = (file: File | undefined) => {
   const [src, setSrc] = useState<string | undefined>(undefined);
