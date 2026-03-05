@@ -61,7 +61,7 @@ describe('ToolArgsRecoveryBoundary', () => {
     expect(screen.getByTestId('child')).toHaveTextContent('Hello')
   })
 
-  it('shows permanent fallback after MAX_RECOVERY_ATTEMPTS exhausted on persistent argsText errors', async () => {
+  it('shows permanent fallback after RECOVERY_ATTEMPT_THRESHOLD exhausted on persistent argsText errors', async () => {
     // ThrowOnRender always throws — boundary catches, schedules recovery,
     // re-renders children which throw again, eventually hitting the cap.
     render(
@@ -70,7 +70,7 @@ describe('ToolArgsRecoveryBoundary', () => {
       </ToolArgsRecoveryBoundary>,
     )
 
-    // Cycle through recovery attempts (MAX_RECOVERY_ATTEMPTS = 3)
+    // Cycle through recovery attempts (RECOVERY_ATTEMPT_THRESHOLD = 3)
     for (let i = 0; i < 3; i++) {
       await act(async () => {
         jest.advanceTimersByTime(60)
@@ -147,7 +147,7 @@ describe('ToolArgsRecoveryBoundary', () => {
     )
 
     // Before advancing timers — boundary is in the transient null state
-    // (recoveryAttempt is 0, below MAX_RECOVERY_ATTEMPTS, so it renders null not fallback)
+    // (recoveryAttempt is 0, below RECOVERY_ATTEMPT_THRESHOLD, so it renders null not fallback)
     expect(container).toBeEmptyDOMElement()
   })
 

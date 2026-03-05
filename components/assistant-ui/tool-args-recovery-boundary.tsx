@@ -7,11 +7,13 @@ const log = createLogger({ module: 'tool-args-recovery-boundary' })
 
 const ARGS_TEXT_ERROR_PATTERN = /argsText can only be appended/
 
-// Cap recovery attempts to prevent infinite render loops when the argsText
-// error is persistent (not a transient streaming glitch).
-// Note: due to stale-state reads in componentDidCatch (the counter increments
-// in an async setState 50ms later), the effective cap is MAX + 1 (i.e. 4).
-const MAX_RECOVERY_ATTEMPTS = 3
+// Comparison threshold for capping recovery attempts.
+// componentDidCatch stops scheduling new recovery timers once recoveryAttempt
+// reaches this value. Due to stale-state reads (the counter increments in an
+// async setState 50ms later), the effective cap is THRESHOLD + 1 (i.e. 4) — the
+// threshold is intentionally named to reflect that it is a >= comparison value,
+// not the exact maximum count.
+const RECOVERY_ATTEMPT_THRESHOLD = 3
 
 interface ToolArgsRecoveryBoundaryProps {
   children: ReactNode
@@ -35,7 +37,7 @@ interface ToolArgsRecoveryBoundaryState {
  *
  * This boundary catches the specific argsText error and auto-recovers by re-rendering
  * children on the next frame. All other errors re-throw to the parent error boundary
- * via `getDerivedStateFromError`. After MAX_RECOVERY_ATTEMPTS failed recoveries, the
+ * via `getDerivedStateFromError`. After RECOVERY_ATTEMPT_THRESHOLD failed recoveries, the
  * boundary permanently renders null to avoid infinite render loops.
  *
  * @see https://github.com/assistant-ui/assistant-ui/issues/2775
@@ -58,7 +60,7 @@ export class ToolArgsRecoveryBoundary extends Component<
     if (ARGS_TEXT_ERROR_PATTERN.test(error.message)) {
       // Return only hasArgsTextError — intentionally do NOT reset recoveryAttempt
       // so the counter accumulates correctly across multiple errors and the
-      // MAX_RECOVERY_ATTEMPTS cap in componentDidCatch functions correctly.
+      // RECOVERY_ATTEMPT_THRESHOLD cap in componentDidCatch functions correctly.
       return { hasArgsTextError: true }
     }
     // Re-throw non-argsText errors so they propagate to the parent boundary.
@@ -76,7 +78,7 @@ export class ToolArgsRecoveryBoundary extends Component<
     // before the 50ms timer in scheduleRecovery resolves (the increment is in the async
     // setState callback). In practice, clearTimeout deduplication in scheduleRecovery prevents
     // multiple timers from running concurrently, so at most one extra recovery may slip through.
-    if (this.state.recoveryAttempt >= MAX_RECOVERY_ATTEMPTS) {
+    if (this.state.recoveryAttempt >= RECOVERY_ATTEMPT_THRESHOLD) {
       log.warn('argsText recovery limit reached — rendering permanent fallback', {
         toolName: this.props.toolName,
         attempts: this.state.recoveryAttempt,
@@ -119,7 +121,7 @@ export class ToolArgsRecoveryBoundary extends Component<
 
   render(): ReactNode {
     if (this.state.hasArgsTextError) {
-      if (this.state.recoveryAttempt >= MAX_RECOVERY_ATTEMPTS) {
+      if (this.state.recoveryAttempt >= RECOVERY_ATTEMPT_THRESHOLD) {
         // Permanent fallback — recovery exhausted, show user-visible message.
         // No new recovery is scheduled because componentDidCatch returns early
         // when the cap is reached, so hasArgsTextError stays true permanently.
