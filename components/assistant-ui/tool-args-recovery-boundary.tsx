@@ -9,6 +9,8 @@ const ARGS_TEXT_ERROR_PATTERN = /argsText can only be appended/
 
 // Cap recovery attempts to prevent infinite render loops when the argsText
 // error is persistent (not a transient streaming glitch).
+// Note: due to stale-state reads in componentDidCatch (the counter increments
+// in an async setState 50ms later), the effective cap is MAX + 1 (i.e. 4).
 const MAX_RECOVERY_ATTEMPTS = 3
 
 interface ToolArgsRecoveryBoundaryProps {
@@ -118,7 +120,9 @@ export class ToolArgsRecoveryBoundary extends Component<
   render(): ReactNode {
     if (this.state.hasArgsTextError) {
       if (this.state.recoveryAttempt >= MAX_RECOVERY_ATTEMPTS) {
-        // Permanent fallback — recovery exhausted, show user-visible message
+        // Permanent fallback — recovery exhausted, show user-visible message.
+        // No new recovery is scheduled because componentDidCatch returns early
+        // when the cap is reached, so hasArgsTextError stays true permanently.
         return (
           <div className="text-xs text-muted-foreground italic p-2">
             Tool result unavailable

@@ -137,6 +137,20 @@ describe('ToolArgsRecoveryBoundary', () => {
     expect(screen.getByTestId('parent-caught')).toBeInTheDocument()
   })
 
+  it('renders null during the transient recovery window before the timer fires', () => {
+    // ThrowOnRender always throws, so boundary catches and enters error state.
+    // Before any timer fires, the boundary should render null (not children, not fallback).
+    const { container } = render(
+      <ToolArgsRecoveryBoundary toolName="test_tool">
+        <ThrowOnRender error={ARGS_TEXT_ERROR} />
+      </ToolArgsRecoveryBoundary>,
+    )
+
+    // Before advancing timers — boundary is in the transient null state
+    // (recoveryAttempt is 0, below MAX_RECOVERY_ATTEMPTS, so it renders null not fallback)
+    expect(container).toBeEmptyDOMElement()
+  })
+
   it('passes toolName prop for logging context', () => {
     render(
       <ToolArgsRecoveryBoundary toolName="web_search">

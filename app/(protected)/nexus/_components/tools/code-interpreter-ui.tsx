@@ -8,26 +8,7 @@ import { Code2, PlayCircle, CheckCircle, XCircle, Terminal, FileText } from 'luc
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import Image from 'next/image'
-
-// Mirror the allowlist from connector-tool-ui.tsx for consistent plot data validation
-const SAFE_PLOT_MIME_TYPES = new Set([
-  'image/png',
-  'image/jpeg',
-  'image/gif',
-  'image/webp',
-])
-
-const MAX_PLOT_BASE64_LENGTH = 5 * 1024 * 1024 // 5MB
-
-/** Returns true if plot.data is a safe, reasonably-sized image data URI */
-function isSafePlotData(data: string): boolean {
-  if (!data || data.length > MAX_PLOT_BASE64_LENGTH) return false
-  if (!data.startsWith('data:')) return false
-  const semiIdx = data.indexOf(';')
-  if (semiIdx === -1) return false
-  const declaredMime = data.slice(5, semiIdx)
-  return SAFE_PLOT_MIME_TYPES.has(declaredMime)
-}
+import { isSafePlotData } from '@/lib/utils/image-validation'
 
 interface CodeInterpreterArgs {
   code: string

@@ -21,6 +21,7 @@ import type { McpToolResult } from '@/lib/mcp/types'
 import { ToolFallback } from '@/components/assistant-ui/tool-fallback'
 import { ToolArgsRecoveryBoundary } from '@/components/assistant-ui/tool-args-recovery-boundary'
 import { ExportUrlLinks, parseExportUrls, stripExportUrls } from '@/components/assistant-ui/export-url-link'
+import { SAFE_IMAGE_MIME_TYPES } from '@/lib/utils/image-validation'
 
 /**
  * Format a tool name for display.
@@ -65,14 +66,6 @@ function summarizeArgs(argsText: string): string {
 }
 
 /** Allowlist of safe image MIME types for data URI construction.
- * image/svg+xml is intentionally included: when rendered via <img> (not <object>/<embed>),
- * SVG scripts are sandboxed by browsers and do not execute.
- * WARNING: This allowlist is only safe for <img src> rendering. If these MIME types are ever
- * used in CSS backgrounds, <object>, or <embed> tags, SVG script execution is possible. */
-const SAFE_IMAGE_MIME_TYPES = new Set([
-  'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp',
-])
-
 /** Type guard for plain objects — excludes Date, RegExp, Array, and other built-ins */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null) return false
