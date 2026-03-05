@@ -5,6 +5,7 @@ import { makeAssistantToolUI, type ToolCallMessagePartStatus } from '@assistant-
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Globe, Clock, Code2, Terminal, ExternalLink } from 'lucide-react'
+import { isSafeUrl } from '@/lib/utils'
 import { ChartVisualizationUI } from './chart-visualization-ui'
 import { ToolArgsRecoveryBoundary } from '@/components/assistant-ui/tool-args-recovery-boundary'
 
@@ -273,7 +274,7 @@ function GeneratedFiles({ files }: { files: CodeFile[] }) {
     <div>
       <div className="text-xs font-semibold text-green-900 mb-1">Generated Files:</div>
       <div className="space-y-1">
-        {files.filter(file => file.url.startsWith('https://')).map((file, index) => (
+        {files.filter(file => isSafeUrl(file.url)).map((file, index) => (
           <a
             key={index}
             href={file.url}
