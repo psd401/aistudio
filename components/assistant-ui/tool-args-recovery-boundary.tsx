@@ -64,8 +64,9 @@ export class ToolArgsRecoveryBoundary extends Component<
       return { hasArgsTextError: true }
     }
     // Re-throw non-argsText errors so they propagate to the parent boundary.
-    // Requires React 19+ — React 18 does not support re-throwing from
-    // getDerivedStateFromError and will silently swallow the error.
+    // This project requires react@^19.2.4 (see package.json), which supports
+    // re-throwing from getDerivedStateFromError. React 18 silently swallows
+    // such re-throws — do not downgrade below React 19 without updating this.
     throw error
   }
 
