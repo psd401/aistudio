@@ -7,6 +7,7 @@ import { ChartErrorBoundary } from '@/components/tool-ui/chart-error-boundary'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
 import { BarChart3, AlertCircle } from 'lucide-react'
+import { ToolArgsRecoveryBoundary } from '@/components/assistant-ui/tool-args-recovery-boundary'
 
 /**
  * Tool arguments for the show_chart tool
@@ -190,5 +191,9 @@ const ChartVisualizationRenderer = ({
  */
 export const ChartVisualizationUI = makeAssistantToolUI<ChartToolArgs, ChartToolResult>({
   toolName: 'show_chart',
-  render: ChartVisualizationRenderer,
+  render: (props) => (
+    <ToolArgsRecoveryBoundary toolName="show_chart">
+      <ChartVisualizationRenderer {...props} />
+    </ToolArgsRecoveryBoundary>
+  ),
 })

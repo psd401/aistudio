@@ -1,6 +1,7 @@
 'use client'
 
 import { makeAssistantToolUI, type ToolCallMessagePartStatus } from '@assistant-ui/react'
+import { ToolArgsRecoveryBoundary } from '@/components/assistant-ui/tool-args-recovery-boundary'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { CheckCircle2, AlertCircle, Search, GitBranch, Loader2, XCircle } from 'lucide-react'
@@ -122,7 +123,11 @@ const SearchResultsRenderer = ({
 
 export const SearchGraphNodesUI = makeAssistantToolUI<SearchGraphNodesArgs, SearchGraphNodesResult>({
   toolName: 'search_graph_nodes',
-  render: SearchResultsRenderer,
+  render: (props) => (
+    <ToolArgsRecoveryBoundary toolName="search_graph_nodes">
+      <SearchResultsRenderer {...props} />
+    </ToolArgsRecoveryBoundary>
+  ),
 })
 
 // ============================================================================
@@ -171,12 +176,14 @@ const ProposedDecisionRenderer = ({
   const summary = result?.summary || args?.summary || ''
 
   // Group nodes by type
+  // Use Object.create(null) to avoid prototype pollution — nodeType is AI-generated
+  // content and could be a prototype key like 'constructor' or '__proto__'.
   const groupedNodes = nodes.reduce<Record<string, typeof nodes>>((acc, node) => {
     const type = node.nodeType || 'unknown'
     if (!acc[type]) acc[type] = []
     acc[type].push(node)
     return acc
-  }, {})
+  }, Object.create(null) as Record<string, typeof nodes>)
 
   return (
     <Card className="border-amber-200 bg-amber-50/50">
@@ -263,7 +270,11 @@ const ProposedDecisionRenderer = ({
 
 export const ProposedDecisionUI = makeAssistantToolUI<ProposeDecisionArgs, ProposeDecisionResult>({
   toolName: 'propose_decision',
-  render: ProposedDecisionRenderer,
+  render: (props) => (
+    <ToolArgsRecoveryBoundary toolName="propose_decision">
+      <ProposedDecisionRenderer {...props} />
+    </ToolArgsRecoveryBoundary>
+  ),
 })
 
 // ============================================================================
@@ -343,7 +354,11 @@ const CommittedDecisionRenderer = ({
 
 export const CommittedDecisionUI = makeAssistantToolUI<CommitDecisionArgs, CommitDecisionResult>({
   toolName: 'commit_decision',
-  render: CommittedDecisionRenderer,
+  render: (props) => (
+    <ToolArgsRecoveryBoundary toolName="commit_decision">
+      <CommittedDecisionRenderer {...props} />
+    </ToolArgsRecoveryBoundary>
+  ),
 })
 
 // ============================================================================

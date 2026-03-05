@@ -228,7 +228,7 @@ export function createNexusHistoryAdapter(conversationId: string | null): Thread
       return
     },
 
-    withFormat<TMessage, TStorageFormat>(
+    withFormat<TMessage, TStorageFormat extends Record<string, unknown>>(
       formatAdapter: MessageFormatAdapter<TMessage, TStorageFormat>
     ): GenericThreadHistoryAdapter<TMessage> {
       return {
@@ -273,7 +273,7 @@ export function createNexusHistoryAdapter(conversationId: string | null): Thread
           // Encode the message to storage format
           const encoded = formatAdapter.encode(item);
           // Parts may include AI SDK v5 control types (step-start, step-finish) that need filtering
-          const encodedAny = encoded as {
+          const encodedAny = encoded as unknown as {
             role: 'user' | 'assistant' | 'system';
             parts: Array<{ type: string; text?: string }>;
             createdAt?: Date;
