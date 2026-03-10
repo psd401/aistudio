@@ -32,6 +32,15 @@ jest.mock('@/lib/logger', () => ({
 jest.mock('@/lib/rate-limit', () => ({
   withRateLimit: mockWithRateLimit
 }))
+jest.mock('@/lib/branding', () => ({
+  getBrandingConfig: jest.fn(() => Promise.resolve({
+    orgName: 'Your Organization',
+    appName: 'AI Studio',
+    primaryColor: '#1B365D',
+    logoSrc: '/logo.png',
+    supportUrl: '',
+  }))
+}))
 
 // Import after mocks to ensure proper mock application
 import { downloadHandler } from '@/app/api/execution-results/[id]/download/handler'

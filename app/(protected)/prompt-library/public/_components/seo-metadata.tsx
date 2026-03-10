@@ -65,18 +65,17 @@ export function generatePromptStructuredData(prompt: Prompt) {
 /**
  * Generate structured data for the public gallery
  */
-export function generateGalleryStructuredData(orgName = 'Your Organization') {
+export function generateGalleryStructuredData(orgName = 'Your Organization', orgUrl = '') {
   return {
     "@context": "https://schema.org",
     "@type": "CollectionPage",
     name: "AI Prompt Library",
     description:
       "Browse and discover community-created AI prompts for education and administration",
-    url: "https://aistudio.psd401.ai/prompt-library/public",
     provider: {
       "@type": "Organization",
       name: orgName,
-      url: "https://www.psd401.net"
+      ...(orgUrl ? { url: orgUrl } : {}),
     },
     about: {
       "@type": "Thing",

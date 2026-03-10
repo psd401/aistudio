@@ -35,14 +35,14 @@ export default async function PublicPromptLibraryPage({
   const page = Number.parseInt(params.page || "1", 10)
 
   const branding = await getBrandingConfig()
-  const structuredData = generateGalleryStructuredData(branding.orgName)
+  const structuredData = generateGalleryStructuredData(branding.orgName, branding.supportUrl)
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-background to-muted/20">
       {/* Structured Data for SEO */}
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }}
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData).replace(/<\/script>/gi, '<\\/script>') }}
       />
 
       {/* Hero Section */}
