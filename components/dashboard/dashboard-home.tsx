@@ -27,7 +27,6 @@ interface ToolCardProps {
   ctaColor?: AccentColor;
   accentColor: AccentColor;
   featured?: boolean;
-  image?: string;
 }
 
 const ACCENT_CLASSES: Record<AccentColor, string> = {
@@ -51,7 +50,47 @@ const CTA_COLOR_CLASSES: Record<AccentColor, string> = {
   green: 'text-[#6B9E78]',
 };
 
-function FeaturedToolCard({ title, description, href, icon, ctaText, accentColor, image }: ToolCardProps) {
+function ChatBubbleGraphic() {
+  return (
+    <div className="relative w-[180px] flex-shrink-0 bg-[var(--brand-primary)] hidden sm:flex items-center justify-center overflow-hidden">
+      {/* Subtle radial glow */}
+      <div className="absolute inset-0 bg-gradient-to-br from-white/10 via-transparent to-black/10" />
+      <svg
+        viewBox="0 0 180 280"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+        className="w-full h-full opacity-90 transition-transform duration-500 group-hover:scale-105"
+        aria-hidden="true"
+      >
+        {/* Large chat bubble - right aligned (AI response) */}
+        <rect x="30" y="50" width="120" height="60" rx="16" fill="white" fillOpacity="0.2" />
+        {/* Text lines inside large bubble */}
+        <rect x="46" y="68" width="72" height="6" rx="3" fill="white" fillOpacity="0.3" />
+        <rect x="46" y="82" width="88" height="6" rx="3" fill="white" fillOpacity="0.25" />
+        <rect x="46" y="96" width="52" height="6" rx="3" fill="white" fillOpacity="0.2" />
+
+        {/* Small chat bubble - left aligned (user message) */}
+        <rect x="20" y="130" width="90" height="44" rx="14" fill="white" fillOpacity="0.15" />
+        <rect x="34" y="145" width="56" height="5" rx="2.5" fill="white" fillOpacity="0.25" />
+        <rect x="34" y="156" width="36" height="5" rx="2.5" fill="white" fillOpacity="0.2" />
+
+        {/* Typing indicator bubble */}
+        <rect x="55" y="194" width="72" height="36" rx="12" fill="white" fillOpacity="0.12" />
+        <circle cx="77" cy="212" r="4" fill="white" fillOpacity="0.35">
+          <animate attributeName="opacity" values="0.2;0.5;0.2" dur="1.5s" repeatCount="indefinite" begin="0s" />
+        </circle>
+        <circle cx="93" cy="212" r="4" fill="white" fillOpacity="0.35">
+          <animate attributeName="opacity" values="0.2;0.5;0.2" dur="1.5s" repeatCount="indefinite" begin="0.3s" />
+        </circle>
+        <circle cx="109" cy="212" r="4" fill="white" fillOpacity="0.35">
+          <animate attributeName="opacity" values="0.2;0.5;0.2" dur="1.5s" repeatCount="indefinite" begin="0.6s" />
+        </circle>
+      </svg>
+    </div>
+  );
+}
+
+function FeaturedToolCard({ title, description, href, icon, ctaText, accentColor }: ToolCardProps) {
   return (
     <Link
       href={href}
@@ -86,11 +125,7 @@ function FeaturedToolCard({ title, description, href, icon, ctaText, accentColor
             <span className="transition-transform group-hover:translate-x-0.5">&rarr;</span>
           </span>
         </div>
-        {image && (
-          <div className="relative w-[180px] flex-shrink-0 bg-[var(--brand-primary)]/95 hidden sm:block">
-            <Image src={image} alt="" fill className="object-contain p-4 opacity-90" sizes="180px" />
-          </div>
-        )}
+        <ChatBubbleGraphic />
       </div>
     </Link>
   );
