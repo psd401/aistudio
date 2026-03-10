@@ -768,7 +768,7 @@ function NavigationContent({ isExpanded }: { isExpanded: boolean }) {
   const { data: session } = useSession();
   const [navItems, setNavItems] = useState<NavigationItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const { orgName, appName, logoSrc } = useBranding();
+  const { orgName, appName, logoSrc, logoIsExternal } = useBranding();
 
   const { fullName, userInitials } = useMemo(() => {
     const givenName = session?.user?.givenName || session?.user?.name?.split(' ')[0] || 'User';
@@ -812,6 +812,7 @@ function NavigationContent({ isExpanded }: { isExpanded: boolean }) {
             width={isExpanded ? 28 : 24}
             height={isExpanded ? 28 : 24}
             className="object-contain"
+            unoptimized={logoIsExternal}
           />
           {isExpanded && <span className="text-[var(--brand-primary)] text-base font-bold">{appName}</span>}
         </Link>

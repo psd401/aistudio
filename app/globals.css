@@ -147,3 +147,13 @@ html.dark .shiki span {
   min-width: 95vw !important;
   max-width: 95vw !important;
 }
+
+/* Accessibility: disable all animations and transitions for users who prefer reduced motion.
+   Covers CSS transitions/animations globally and suppresses SMIL <animate> in Chromium/Firefox. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -46,6 +46,7 @@ export default async function RootLayout({
             orgName: branding.orgName,
             appName: branding.appName,
             logoSrc: branding.logoSrc,
+            logoIsExternal: !branding.logoSrc.startsWith('/'),
           }}>
             <NotificationProvider>
               <ErrorCaptureInit />

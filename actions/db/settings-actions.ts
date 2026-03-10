@@ -15,7 +15,7 @@ import {
   startTimer,
   sanitizeForLogging
 } from "@/lib/logger"
-import { revalidateSettingsCache, getSetting } from "@/lib/settings-manager"
+import { revalidateSettingsCache, getSetting, maskKey } from "@/lib/settings-manager"
 
 export interface Setting {
   id: number
@@ -94,16 +94,18 @@ export async function getSettingValueAction(key: string): Promise<string | null>
   const timer = startTimer("getSettingValue")
   const log = createLogger({ requestId, action: "getSettingValue" })
   
+  const safeKey = maskKey(key)
+
   try {
-    log.debug("Getting setting value", { key })
+    log.debug("Getting setting value", { key: safeKey })
 
     const value = await getSettingValueDrizzle(key)
 
-    log.debug("Setting value retrieved", { key, hasValue: !!value })
-    timer({ status: value ? "success" : "not_found", key })
+    log.debug("Setting value retrieved", { key: safeKey, hasValue: !!value })
+    timer({ status: value ? "success" : "not_found" })
     return value
   } catch (error) {
-    log.error("Error getting setting value", { key, error })
+    log.error("Error getting setting value", { key: safeKey, error })
     timer({ status: "error" })
     return null
   }

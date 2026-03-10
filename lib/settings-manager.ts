@@ -2,61 +2,117 @@ import { getSettingValueAction } from "@/actions/db/settings-actions"
 import logger from "@/lib/logger"
 
 // Cache for settings to avoid repeated database queries
+// Uses stale-while-revalidate: serves stale value immediately while refreshing in background
 const settingsCache = new Map<string, { value: string | null; timestamp: number }>()
 const CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+// On DB error, retry after this shorter window rather than waiting the full TTL
+const RETRY_AFTER_ERROR_MS = 30 * 1000 // 30 seconds
+
+// Track in-flight background refreshes to avoid duplicate fetches
+const pendingRefreshes = new Set<string>()
+
+// Mask credential/secret key names in log output to avoid leaking config surface
+const SENSITIVE_KEY_PATTERN = /KEY|SECRET|PASSWORD|TOKEN|CREDENTIAL/i
+export function maskKey(key: string): string {
+  return SENSITIVE_KEY_PATTERN.test(key) ? `${key.substring(0, 4)}***` : key
+}
+
+// Background refresh: fetch fresh value without blocking the caller.
+// IMPORTANT: Only called from within the `!(isAwsLambda && isBedrockCredential)` block,
+// so Lambda+Bedrock keys (which must use IAM role, not env vars) never reach this function.
+// Do not call backgroundRefresh() for Lambda+Bedrock keys from other code paths.
+function backgroundRefresh(key: string): void {
+  if (pendingRefreshes.has(key)) return
+  pendingRefreshes.add(key)
+
+  getSettingValueAction(key)
+    .then((dbValue) => {
+      if (dbValue !== null) {
+        // Fresh value from DB — update cache
+        settingsCache.set(key, { value: dbValue, timestamp: Date.now() })
+      } else {
+        // getSettingValueAction() returns null both when the setting is missing
+        // and when a DB error occurs. To avoid clobbering a previously-good
+        // cached value on transient errors, only fall back to env when there is
+        // no existing cache entry.
+        const existing = settingsCache.get(key)
+        if (existing) {
+          // Preserve existing value, just refresh timestamp
+          settingsCache.set(key, { value: existing.value, timestamp: Date.now() })
+        } else {
+          const envValue = process.env[key] || null
+          settingsCache.set(key, { value: envValue, timestamp: Date.now() })
+        }
+      }
+    })
+    .catch((error) => {
+      logger.error(`[SettingsManager] Background refresh failed for ${maskKey(key)}:`, error)
+      // On error, retry after a short window (not full TTL) so we recover quickly when DB is back
+      const stale = settingsCache.get(key)
+      if (stale) {
+        settingsCache.set(key, {
+          value: stale.value,
+          timestamp: Date.now() - CACHE_TTL + RETRY_AFTER_ERROR_MS,
+        })
+      }
+    })
+    .finally(() => {
+      pendingRefreshes.delete(key)
+    })
+}
 
 // Get a setting value with caching and fallback to environment variable
 export async function getSetting(key: string): Promise<string | null> {
   // Special handling for Bedrock credentials in Lambda
   const isAwsLambda = !!process.env.AWS_LAMBDA_FUNCTION_NAME
   const isBedrockCredential = key === 'BEDROCK_ACCESS_KEY_ID' || key === 'BEDROCK_SECRET_ACCESS_KEY'
-  
+
   // Don't use cache for Bedrock credentials in Lambda
   if (!(isAwsLambda && isBedrockCredential)) {
-    // Check cache first
     const cached = settingsCache.get(key)
-    if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
-      // Cache hit
+    if (cached) {
+      const isStale = Date.now() - cached.timestamp >= CACHE_TTL
+      if (!isStale) {
+        // Cache hit — fresh
+        return cached.value
+      }
+      // Stale-while-revalidate: return stale value immediately, refresh in background
+      backgroundRefresh(key)
       return cached.value
     }
   }
 
+  // Cold start — no cached value, must fetch synchronously
   try {
     // Try to get from database
     const dbValue = await getSettingValueAction(key)
-    
+
     if (dbValue !== null) {
       // Database value found - cache it and return
       settingsCache.set(key, { value: dbValue, timestamp: Date.now() })
       return dbValue
     }
   } catch (error) {
-    logger.error(`[SettingsManager] Error fetching setting ${key} from database:`, error)
+    logger.error(`[SettingsManager] Error fetching setting ${maskKey(key)} from database:`, error)
   }
 
   // Fall back to environment variable
   // IMPORTANT: In AWS Lambda, ignore Bedrock credentials from env vars
   // to force use of IAM role credentials
-  
+
   if (isAwsLambda && isBedrockCredential) {
     // In Lambda, ignore Bedrock credential env vars to use IAM role
-    logger.info(`[SettingsManager] Ignoring env var ${key} in Lambda environment`)
+    logger.info(`[SettingsManager] Ignoring env var ${maskKey(key)} in Lambda environment`)
     // Cache the null for Lambda to avoid repeated DB queries
     settingsCache.set(key, { value: null, timestamp: Date.now() })
     return null
   }
-  
+
   const envValue = process.env[key] || null
-  
+
   // Only cache the final result to avoid blocking env var fallback
   settingsCache.set(key, { value: envValue, timestamp: Date.now() })
-  
-  if (envValue) {
-    // Falling back to env var
-  } else {
-    // No value found
-  }
-  
+
   return envValue
 }
 
@@ -74,13 +130,15 @@ export async function getSettings(keys: string[]): Promise<Record<string, string
 }
 
 // Clear the cache (useful after updates)
-export async function revalidateSettingsCache(key?: string) {
+// Also cancels any pending background refresh for the key to prevent a stale
+// in-flight promise from writing old data back into the cache after invalidation.
+export async function revalidateSettingsCache(key?: string): Promise<void> {
   if (key) {
     settingsCache.delete(key)
-    // Cache cleared for key
+    pendingRefreshes.delete(key)
   } else {
     settingsCache.clear()
-    // Cache cleared
+    pendingRefreshes.clear()
   }
   
   // Also clear S3 cache when settings are updated
