@@ -29,6 +29,8 @@ const standardTags = {
 // Get configuration from context
 const baseDomain = app.node.tryGetContext('baseDomain');
 const alertEmail = app.node.tryGetContext('alertEmail');
+const brandingOrgName = app.node.tryGetContext('brandingOrgName');
+const brandingAppName = app.node.tryGetContext('brandingAppName');
 
 // Helper to get callback/logout URLs for any environment
 function getCallbackAndLogoutUrls(environment: string, baseDomain?: string): { callbackUrls: string[], logoutUrls: string[] } {
@@ -137,6 +139,7 @@ Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAuthStack)
 
 const devStorageStack = new StorageStack(app, 'AIStudio-StorageStack-Dev', {
   environment: 'dev',
+  baseDomain,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(devStorageStack).add('Environment', 'Dev');
@@ -200,6 +203,9 @@ if (devEmailDomain) {
     fromEmail: `noreply@${devEmailDomain}`,
     appBaseUrl: baseDomain ? `https://dev.${baseDomain}` : undefined,
     useDomainIdentity: false, // Dev uses email identity by default
+    // Branding for email templates (passed as Lambda env vars)
+    brandingOrgName,
+    brandingAppName,
     env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
   });
   devEmailNotificationStack.addDependency(devDbStack);
@@ -248,6 +254,7 @@ Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAuthStack
 
 const prodStorageStack = new StorageStack(app, 'AIStudio-StorageStack-Prod', {
   environment: 'prod',
+  baseDomain,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(prodStorageStack).add('Environment', 'Prod');
@@ -311,6 +318,9 @@ if (prodEmailDomain) {
     fromEmail: `noreply@${prodEmailDomain}`,
     appBaseUrl: baseDomain ? `https://${baseDomain}` : undefined,
     useDomainIdentity: prodUseDomainIdentity, // Defaults to true for production
+    // Branding for email templates (passed as Lambda env vars)
+    brandingOrgName,
+    brandingAppName,
     env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
   });
   prodEmailNotificationStack.addDependency(prodDbStack);
@@ -325,8 +335,8 @@ if (baseDomain) {
 
   const devFrontendStack = new FrontendStackEcs(app, 'AIStudio-FrontendStack-ECS-Dev', {
     environment: 'dev',
-    baseDomain: 'aistudio.psd401.ai', // The subdomain for AI Studio
-    customSubdomain: 'dev', // Creates dev.aistudio.psd401.ai
+    baseDomain, // Passed via CDK context (e.g., aistudio.psd401.ai)
+    customSubdomain: 'dev', // Creates dev.<baseDomain>
     documentsBucketName: devStorageStack.documentsBucketName,
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation
     setupDns, // Enable DNS/certificate setup (false for CI validation with example.com)
@@ -344,8 +354,8 @@ if (baseDomain) {
 
   const prodFrontendStack = new FrontendStackEcs(app, 'AIStudio-FrontendStack-ECS-Prod', {
     environment: 'prod',
-    baseDomain: 'aistudio.psd401.ai', // The subdomain for AI Studio
-    // No customSubdomain for prod - will use root: aistudio.psd401.ai
+    baseDomain, // Passed via CDK context (e.g., aistudio.psd401.ai)
+    // No customSubdomain for prod - uses root baseDomain
     documentsBucketName: prodStorageStack.documentsBucketName,
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation
     setupDns, // Enable DNS/certificate setup (false for CI validation with example.com)
