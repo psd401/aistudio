@@ -105,7 +105,7 @@ function SearchBar() {
           'w-full h-12 pl-12 pr-4 rounded-xl',
           'bg-white border border-border/40 shadow-sm',
           'text-sm placeholder:text-muted-foreground',
-          'focus:outline-none focus:ring-2 focus:ring-[#1B365D]/20 focus:border-[#1B365D]/40',
+          'focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]/40',
           'transition-all duration-200'
         )}
       />
@@ -119,12 +119,12 @@ function VideoThumbnail({ video, size = 'normal' }: { video: VideoTutorial; size
   return (
     <div
       className={cn(
-        'relative bg-[#1B365D]/10 rounded-xl overflow-hidden group cursor-pointer',
+        'relative bg-[var(--brand-primary)]/10 rounded-xl overflow-hidden group cursor-pointer',
         isFeatured ? 'aspect-video' : 'aspect-video'
       )}
     >
       {/* Placeholder background with play icon */}
-      <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-[#1B365D]/80 to-[#1B365D]/95">
+      <div className="absolute inset-0 flex items-center justify-center bg-gradient-to-br from-[var(--brand-primary)]/80 to-[var(--brand-primary)]/95">
         <div className="flex flex-col items-center gap-2">
           <div
             className={cn(
@@ -177,7 +177,7 @@ function FeaturedVideoCard({ video }: { video: VideoTutorial }) {
             <IconPlayerPlay size={14} />
             Featured Tutorial
           </div>
-          <h2 className="text-xl lg:text-2xl font-bold text-[#1B365D] mb-3">
+          <h2 className="text-xl lg:text-2xl font-bold text-[var(--brand-primary)] mb-3">
             {video.title}
           </h2>
           <p className="text-muted-foreground leading-relaxed">
@@ -241,14 +241,14 @@ function ResourceCard({ resource }: { resource: WrittenResource }) {
         <Icon size={24} />
       </div>
       <div className="flex-1 min-w-0">
-        <h3 className="font-semibold text-foreground mb-1 group-hover:text-[#1B365D] transition-colors">
+        <h3 className="font-semibold text-foreground mb-1 group-hover:text-[var(--brand-primary)] transition-colors">
           {resource.title}
         </h3>
         <p className="text-sm text-muted-foreground line-clamp-2">
           {resource.description}
         </p>
       </div>
-      <span className="text-muted-foreground/60 group-hover:text-[#1B365D] group-hover:translate-x-0.5 transition-all">
+      <span className="text-muted-foreground/60 group-hover:text-[var(--brand-primary)] group-hover:translate-x-0.5 transition-all">
         &rarr;
       </span>
     </Link>
@@ -257,7 +257,7 @@ function ResourceCard({ resource }: { resource: WrittenResource }) {
 
 function SectionHeader({ title }: { title: string }) {
   return (
-    <h2 className="text-lg font-bold text-[#1B365D] mb-4">
+    <h2 className="text-lg font-bold text-[var(--brand-primary)] mb-4">
       {title}
     </h2>
   );
@@ -270,7 +270,7 @@ export default function TutorialsPage() {
         {/* Header */}
         <div className="mb-6">
           <PageBranding />
-          <h1 className="text-2xl sm:text-3xl font-bold text-[#1B365D]">
+          <h1 className="text-2xl sm:text-3xl font-bold text-[var(--brand-primary)]">
             AI Studio Tutorials Library
           </h1>
           <p className="text-muted-foreground mt-1">

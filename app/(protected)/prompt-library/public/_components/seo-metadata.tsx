@@ -65,7 +65,7 @@ export function generatePromptStructuredData(prompt: Prompt) {
 /**
  * Generate structured data for the public gallery
  */
-export function generateGalleryStructuredData() {
+export function generateGalleryStructuredData(orgName = 'Your Organization') {
   return {
     "@context": "https://schema.org",
     "@type": "CollectionPage",
@@ -75,7 +75,7 @@ export function generateGalleryStructuredData() {
     url: "https://aistudio.psd401.ai/prompt-library/public",
     provider: {
       "@type": "Organization",
-      name: "Peninsula School District",
+      name: orgName,
       url: "https://www.psd401.net"
     },
     about: {
