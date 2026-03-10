@@ -656,6 +656,8 @@ function buildHtmlEmail(data: {
   manageSchedulesUrl: string;
   unsubscribeUrl: string;
   preferencesUrl: string;
+  orgName: string;
+  appName: string;
 }): string {
   return `<!DOCTYPE html>
 <html lang="en">
@@ -680,8 +682,8 @@ function buildHtmlEmail(data: {
 <body>
     <div class="container">
         <div class="header">
-            <div class="logo">${env.BRANDING_ORG_NAME || 'Your Organization'}</div>
-            <div>${env.BRANDING_APP_NAME || 'AI Studio'}</div>
+            <div class="logo">${data.orgName}</div>
+            <div>${data.appName}</div>
         </div>
         <div class="content">
             <h2>${data.greeting}</h2>
@@ -708,7 +710,7 @@ function buildHtmlEmail(data: {
             </div>
         </div>
         <div class="footer">
-            <p>${env.BRANDING_ORG_NAME || 'Your Organization'} ${env.BRANDING_APP_NAME || 'AI Studio'}</p>
+            <p>${data.orgName} ${data.appName}</p>
             <p><a href="${data.unsubscribeUrl}">Unsubscribe</a> | <a href="${data.preferencesUrl}">Email Preferences</a></p>
         </div>
     </div>
@@ -730,9 +732,10 @@ function buildTextEmail(data: {
   manageSchedulesUrl: string;
   unsubscribeUrl: string;
   preferencesUrl: string;
+  orgName: string;
+  appName: string;
 }): string {
-  const orgName = env.BRANDING_ORG_NAME || 'Your Organization';
-  const appName = env.BRANDING_APP_NAME || 'AI Studio';
+  const { orgName, appName } = data;
 
   let text = `${orgName} ${appName}
 
@@ -789,6 +792,10 @@ async function sendEmailNotification(userEmail: string, executionResult: Executi
     // Create markdown attachment
     const markdownContent = generateMarkdownAttachment(executionResult, scheduleName);
 
+    // Sanitize operator-configured branding values before HTML insertion
+    const safeOrgName = sanitizeEmailContent(env.BRANDING_ORG_NAME || 'Your Organization', 100);
+    const safeAppName = sanitizeEmailContent(env.BRANDING_APP_NAME || 'AI Studio', 100);
+
     // Create email subject
     const subject = `${sanitizeEmailContent(scheduleName)} - ${isSuccess ? 'Execution Complete' : 'Execution Failed'}`;
 
@@ -805,7 +812,9 @@ async function sendEmailNotification(userEmail: string, executionResult: Executi
       resultsUrl: `${env.APP_BASE_URL}/execution-results/${executionResult.id}`,
       manageSchedulesUrl: `${env.APP_BASE_URL}/schedules`,
       unsubscribeUrl: `${env.APP_BASE_URL}/preferences/unsubscribe`,
-      preferencesUrl: `${env.APP_BASE_URL}/preferences`
+      preferencesUrl: `${env.APP_BASE_URL}/preferences`,
+      orgName: safeOrgName,
+      appName: safeAppName,
     });
 
     // Build text content for fallback
@@ -819,7 +828,9 @@ async function sendEmailNotification(userEmail: string, executionResult: Executi
       resultsUrl: `${env.APP_BASE_URL}/execution-results/${executionResult.id}`,
       manageSchedulesUrl: `${env.APP_BASE_URL}/schedules`,
       unsubscribeUrl: `${env.APP_BASE_URL}/preferences/unsubscribe`,
-      preferencesUrl: `${env.APP_BASE_URL}/preferences`
+      preferencesUrl: `${env.APP_BASE_URL}/preferences`,
+      orgName: safeOrgName,
+      appName: safeAppName,
     });
 
     log.info('Sending email with SES v2', {

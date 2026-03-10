@@ -191,6 +191,12 @@ const devSesIdentityExists = app.node.tryGetContext('devSesIdentityExists') === 
                              app.node.tryGetContext('sesIdentityExists') === 'true';
 
 // Only create dev email notification stack if emailDomain is provided
+if (devEmailDomain && !baseDomain) {
+  throw new Error(
+    'CDK context: baseDomain is required when emailDomain is set (used for appBaseUrl). ' +
+    'Deploy with: --context baseDomain=<your-domain> --context devEmailDomain=<email-domain>'
+  );
+}
 let devEmailNotificationStack: EmailNotificationStack | undefined;
 if (devEmailDomain) {
   devEmailNotificationStack = new EmailNotificationStack(app, 'AIStudio-EmailNotificationStack-Dev', {
@@ -201,7 +207,7 @@ if (devEmailDomain) {
     createSesIdentity: !devSesIdentityExists,
     emailDomain: devEmailDomain,
     fromEmail: `noreply@${devEmailDomain}`,
-    appBaseUrl: baseDomain ? `https://dev.${baseDomain}` : undefined,
+    appBaseUrl: `https://dev.${baseDomain}`, // baseDomain is guaranteed non-null by guard above
     useDomainIdentity: false, // Dev uses email identity by default
     // Branding for email templates (passed as Lambda env vars)
     brandingOrgName,
@@ -306,6 +312,12 @@ const prodSesIdentityExists = app.node.tryGetContext('prodSesIdentityExists') ==
 const prodUseDomainIdentity = app.node.tryGetContext('prodUseDomainIdentity') !== 'false';
 
 // Only create prod email notification stack if emailDomain is provided
+if (prodEmailDomain && !baseDomain) {
+  throw new Error(
+    'CDK context: baseDomain is required when emailDomain is set (used for appBaseUrl). ' +
+    'Deploy with: --context baseDomain=<your-domain> --context prodEmailDomain=<email-domain>'
+  );
+}
 let prodEmailNotificationStack: EmailNotificationStack | undefined;
 if (prodEmailDomain) {
   prodEmailNotificationStack = new EmailNotificationStack(app, 'AIStudio-EmailNotificationStack-Prod', {
@@ -316,7 +328,7 @@ if (prodEmailDomain) {
     createSesIdentity: !prodSesIdentityExists,
     emailDomain: prodEmailDomain,
     fromEmail: `noreply@${prodEmailDomain}`,
-    appBaseUrl: baseDomain ? `https://${baseDomain}` : undefined,
+    appBaseUrl: `https://${baseDomain}`, // baseDomain is guaranteed non-null by guard above
     useDomainIdentity: prodUseDomainIdentity, // Defaults to true for production
     // Branding for email templates (passed as Lambda env vars)
     brandingOrgName,

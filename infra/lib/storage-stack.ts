@@ -62,16 +62,24 @@ export class StorageStack extends cdk.Stack {
             s3.HttpMethods.POST,
             s3.HttpMethods.HEAD,
           ],
-          allowedOrigins: [
-            ...(props.baseDomain
-              ? [
-                  props.environment === 'prod'
-                    ? `https://${props.baseDomain}`
-                    : `https://dev.${props.baseDomain}`,
-                ]
-              : []),
-            'http://localhost:3000', // For local development
-          ],
+          allowedOrigins: (() => {
+            if (!props.baseDomain && props.environment === 'prod') {
+              cdk.Annotations.of(this).addWarning(
+                'baseDomain not set — S3 CORS will only allow localhost:3000. ' +
+                'Pass --context baseDomain=<domain> for production deployments.'
+              );
+            }
+            return [
+              ...(props.baseDomain
+                ? [
+                    props.environment === 'prod'
+                      ? `https://${props.baseDomain}`
+                      : `https://dev.${props.baseDomain}`,
+                  ]
+                : []),
+              'http://localhost:3000', // For local development
+            ];
+          })(),
           allowedHeaders: ['*'],
           exposedHeaders: ['ETag'],
           maxAge: 3000,

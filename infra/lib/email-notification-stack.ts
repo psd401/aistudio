@@ -14,10 +14,10 @@ export interface EmailNotificationStackProps extends cdk.StackProps {
   // Cross-stack dependencies retrieved from SSM Parameter Store
   databaseResourceArn?: string;
   databaseSecretArn?: string;
-  // Email configuration - allows different organizations to customize
-  emailDomain?: string;
+  // Email configuration - required for stack creation
+  emailDomain: string;
+  appBaseUrl: string;
   fromEmail?: string;
-  appBaseUrl?: string;
   // Branding configuration for email templates
   brandingOrgName?: string;
   brandingAppName?: string;
@@ -35,12 +35,6 @@ export class EmailNotificationStack extends cdk.Stack {
     super(scope, id, props);
 
     // Email configuration — values provided via CDK context in infra.ts
-    if (!props.emailDomain) {
-      throw new Error('emailDomain is required for EmailNotificationStack');
-    }
-    if (!props.appBaseUrl) {
-      throw new Error('appBaseUrl is required for EmailNotificationStack');
-    }
     const emailDomain = props.emailDomain;
     const fromEmail = props.fromEmail || `noreply@${emailDomain}`;
     const appBaseUrl = props.appBaseUrl;
