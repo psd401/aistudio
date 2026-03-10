@@ -1,4 +1,4 @@
-import { getSettingValueAction } from "@/actions/db/settings-actions"
+import { getSettingValue as getSettingValueDrizzle } from "@/lib/db/drizzle"
 import logger from "@/lib/logger"
 
 // Cache for settings to avoid repeated database queries
@@ -25,14 +25,15 @@ function backgroundRefresh(key: string): void {
   if (pendingRefreshes.has(key)) return
   pendingRefreshes.add(key)
 
-  getSettingValueAction(key)
+  getSettingValueDrizzle(key)
     .then((dbValue) => {
       if (dbValue !== null) {
         // Fresh value from DB — update cache
         settingsCache.set(key, { value: dbValue, timestamp: Date.now() })
       } else {
-        // getSettingValueAction() returns null both when the setting is missing
-        // and when a DB error occurs. To avoid clobbering a previously-good
+        // getSettingValueDrizzle() returns null both when the setting is missing
+        // and when a DB error occurs (via executeQuery retry/circuit breaker).
+        // To avoid clobbering a previously-good
         // cached value on transient errors, only fall back to env when there is
         // no existing cache entry.
         const existing = settingsCache.get(key)
@@ -85,7 +86,7 @@ export async function getSetting(key: string): Promise<string | null> {
   // Cold start — no cached value, must fetch synchronously
   try {
     // Try to get from database
-    const dbValue = await getSettingValueAction(key)
+    const dbValue = await getSettingValueDrizzle(key)
 
     if (dbValue !== null) {
       // Database value found - cache it and return
