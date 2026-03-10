@@ -35,7 +35,7 @@ export default async function PublicPromptLibraryPage({
   const page = Number.parseInt(params.page || "1", 10)
 
   const branding = await getBrandingConfig()
-  const structuredData = generateGalleryStructuredData(branding.orgName, branding.supportUrl)
+  const structuredData = generateGalleryStructuredData(branding.orgName, branding.appUrl)
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-background to-muted/20">

@@ -8,6 +8,7 @@ export interface BrandingConfig {
   primaryColor: string
   logoSrc: string
   supportUrl: string
+  appUrl: string
 }
 
 /**
@@ -40,6 +41,7 @@ export const getBrandingConfig = cache(async (): Promise<BrandingConfig> => {
       primaryColor: branding.primaryColor,
       logoSrc,
       supportUrl: branding.supportUrl,
+      appUrl: branding.appUrl,
     }
   } catch {
     // Return safe defaults so the app remains functional if settings DB is unavailable
@@ -49,6 +51,7 @@ export const getBrandingConfig = cache(async (): Promise<BrandingConfig> => {
       primaryColor: '#1B365D',
       logoSrc: '/logo.png',
       supportUrl: '',
+      appUrl: '',
     }
   }
 })

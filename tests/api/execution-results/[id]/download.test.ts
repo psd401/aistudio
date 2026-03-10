@@ -39,6 +39,7 @@ jest.mock('@/lib/branding', () => ({
     primaryColor: '#1B365D',
     logoSrc: '/logo.png',
     supportUrl: '',
+    appUrl: 'https://test.example.com',
   }))
 }))
 
