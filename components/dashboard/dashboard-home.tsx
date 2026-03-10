@@ -218,6 +218,7 @@ const AssistantArchitectIcon = <IconTools size={20} />;
 const TutorialsIcon = <IconSchool size={20} />;
 
 function ToolCardsGrid() {
+  const { logoSrc } = useBranding();
   return (
     <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 auto-rows-auto">
       {/* Nexus Chat - spans 3 columns on large screens, 2 rows */}
@@ -230,7 +231,7 @@ function ToolCardsGrid() {
           accentColor="navy"
           ctaText="Start Chatting"
           featured
-          image="/logo.png"
+          image={logoSrc}
         />
       </div>
 

@@ -13,4 +13,4 @@ describe('Home', () => {
     const heading = screen.getByText(/Welcome to AI Studio/i);
     expect(heading).toBeInTheDocument();
   });
-}); 
+});
