@@ -812,6 +812,7 @@ function NavigationContent({ isExpanded }: { isExpanded: boolean }) {
             width={isExpanded ? 28 : 24}
             height={isExpanded ? 28 : 24}
             className="object-contain"
+            unoptimized={!logoSrc.startsWith('/')}
           />
           {isExpanded && <span className="text-[var(--brand-primary)] text-base font-bold">{appName}</span>}
         </Link>
