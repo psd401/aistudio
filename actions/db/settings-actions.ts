@@ -374,6 +374,61 @@ export async function getBrandingLogoUrlAction(): Promise<ActionState<string>> {
   }
 }
 
+// Reset the branding logo to the built-in default (admin only)
+export async function resetBrandingLogoAction(): Promise<ActionState<void>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("resetBrandingLogo")
+  const log = createLogger({ requestId, action: "resetBrandingLogo" })
+
+  try {
+    log.info("Action started: Resetting branding logo to default")
+
+    const session = await getServerSession()
+    if (!session) {
+      log.warn("Unauthorized branding logo reset attempt")
+      throw ErrorFactories.authNoSession()
+    }
+
+    const isAdmin = await hasRole("administrator")
+    if (!isAdmin) {
+      log.warn("Branding logo reset denied - not admin", { userId: session.sub })
+      throw ErrorFactories.authzAdminRequired("reset branding logo")
+    }
+
+    // Delete the current S3 object if one exists, then reset to local default
+    const currentKey = await getSetting("BRANDING_LOGO_URL")
+    if (currentKey && !currentKey.startsWith("/")) {
+      const { deleteDocument } = await import("@/lib/aws/s3-client")
+      try {
+        await deleteDocument(currentKey)
+        log.debug("Deleted S3 logo during reset", { currentKey })
+      } catch {
+        log.warn("Could not delete S3 logo during reset", { currentKey })
+      }
+    }
+
+    await upsertSetting({
+      key: "BRANDING_LOGO_URL",
+      value: "/logo.png",
+      description: "Logo image S3 key (uploaded via admin settings)",
+      category: "branding",
+      isSecret: false
+    })
+    await revalidateSettingsCache("BRANDING_LOGO_URL")
+
+    log.info("Branding logo reset to default")
+    timer({ status: "success" })
+    return createSuccess(undefined, "Logo reset to default")
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to reset logo. Please try again.", {
+      context: "resetBrandingLogo",
+      requestId,
+      operation: "resetBrandingLogo"
+    })
+  }
+}
+
 // Get actual (unmasked) value for a secret setting (admin only)
 export async function getSettingActualValueAction(key: string): Promise<ActionState<string | null>> {
   const requestId = generateRequestId()

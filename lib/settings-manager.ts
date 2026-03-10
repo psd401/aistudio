@@ -183,16 +183,35 @@ export const Settings = {
       getSetting('BRANDING_LOGO_URL'),
       getSetting('BRANDING_SUPPORT_URL')
     ])
+    // Validate primaryColor as a CSS hex color to prevent CSS injection
+    // when embedded in style attributes (e.g. `color: ${primaryColor}`)
+    const HEX_COLOR_RE = /^#[0-9A-Fa-f]{6}$/
+    const validatedColor = primaryColor && HEX_COLOR_RE.test(primaryColor)
+      ? primaryColor
+      : '#1B365D'
+
+    // Validate supportUrl to prevent javascript: URI injection in <a href>
+    const validatedSupportUrl = supportUrl &&
+      (supportUrl.startsWith('https://') || supportUrl.startsWith('http://'))
+      ? supportUrl
+      : ''
+
+    const rawLogoValue = logoUrl || '/logo.png'
     return {
       orgName: orgName || 'Your Organization',
       appName: appName || 'AI Studio',
-      primaryColor: primaryColor || '#1B365D',
-      // NOTE: when BRANDING_LOGO_URL is an S3 key (not a "/" path), callers
-      // must resolve it to a signed URL via getBrandingLogoUrlAction() before
-      // passing to <Image> or any HTTP consumer. Use this value directly only
-      // for local paths (e.g. "/logo.png").
-      logoUrl: logoUrl || '/logo.png',
-      supportUrl: supportUrl || ''
+      primaryColor: validatedColor,
+      // logoPath: the raw stored value. Either a local "/" path or an S3 key.
+      // isLogoS3Key: true when the value must be resolved to a signed URL
+      //   via getBrandingLogoUrlAction() before rendering.
+      // @example Server component usage:
+      //   const { logoPath, isLogoS3Key } = await Settings.getBranding()
+      //   const logoSrc = isLogoS3Key
+      //     ? (await getBrandingLogoUrlAction()).data ?? '/logo.png'
+      //     : logoPath
+      logoPath: rawLogoValue,
+      isLogoS3Key: !rawLogoValue.startsWith('/'),
+      supportUrl: validatedSupportUrl
     }
   },
 

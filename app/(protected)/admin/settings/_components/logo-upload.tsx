@@ -4,8 +4,8 @@ import { useState, useRef, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { useToast } from "@/components/ui/use-toast"
-import { Upload, ImageIcon } from "lucide-react"
-import { uploadBrandingLogoAction } from "@/actions/db/settings-actions"
+import { Upload, ImageIcon, RotateCcw } from "lucide-react"
+import { uploadBrandingLogoAction, resetBrandingLogoAction } from "@/actions/db/settings-actions"
 import Image from "next/image"
 
 interface LogoUploadProps {
@@ -14,6 +14,7 @@ interface LogoUploadProps {
 
 export function LogoUpload({ currentLogoUrl }: LogoUploadProps) {
   const [isUploading, setIsUploading] = useState(false)
+  const [isResetting, setIsResetting] = useState(false)
   const [previewUrl, setPreviewUrl] = useState<string>(currentLogoUrl)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { toast } = useToast()
@@ -81,6 +82,36 @@ export function LogoUpload({ currentLogoUrl }: LogoUploadProps) {
     }
   }
 
+  const handleReset = async () => {
+    setIsResetting(true)
+    try {
+      const result = await resetBrandingLogoAction()
+      if (result.isSuccess) {
+        setPreviewUrl("/logo.png")
+        toast({
+          title: "Logo reset",
+          description: "The logo has been reset to the application default."
+        })
+      } else {
+        toast({
+          title: "Reset failed",
+          description: result.message,
+          variant: "destructive"
+        })
+      }
+    } catch {
+      toast({
+        title: "Reset failed",
+        description: "An unexpected error occurred",
+        variant: "destructive"
+      })
+    } finally {
+      setIsResetting(false)
+    }
+  }
+
+  const isCustomLogo = previewUrl !== "/logo.png" && previewUrl !== ""
+
   return (
     <Card>
       <CardHeader>
@@ -113,15 +144,28 @@ export function LogoUpload({ currentLogoUrl }: LogoUploadProps) {
               onChange={handleFileSelect}
               className="hidden"
             />
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => fileInputRef.current?.click()}
-              disabled={isUploading}
-            >
-              <Upload className="h-4 w-4 mr-2" />
-              {isUploading ? "Uploading..." : "Upload Logo"}
-            </Button>
+            <div className="flex gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => fileInputRef.current?.click()}
+                disabled={isUploading || isResetting}
+              >
+                <Upload className="h-4 w-4 mr-2" />
+                {isUploading ? "Uploading..." : "Upload Logo"}
+              </Button>
+              {isCustomLogo && (
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={handleReset}
+                  disabled={isUploading || isResetting}
+                >
+                  <RotateCcw className="h-4 w-4 mr-2" />
+                  {isResetting ? "Resetting..." : "Reset to Default"}
+                </Button>
+              )}
+            </div>
             <p className="text-xs text-muted-foreground">
               This logo appears in the navigation bar and page headers. Accepted: PNG, JPEG, WebP (max 2MB).
             </p>
