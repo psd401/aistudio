@@ -8,6 +8,8 @@ import { CostMonitor } from './constructs/storage/cost-monitor';
 
 export interface StorageStackProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
+  /** Base domain for CORS origins (e.g., 'aistudio.example.com') */
+  baseDomain?: string;
   /** Email address for cost alerts (optional) */
   alertEmail?: string;
   /** Enable CloudFront CDN (default: false) */
@@ -61,9 +63,13 @@ export class StorageStack extends cdk.Stack {
             s3.HttpMethods.HEAD,
           ],
           allowedOrigins: [
-            props.environment === 'prod'
-              ? 'https://aistudio.psd401.ai'
-              : 'https://dev.aistudio.psd401.ai',
+            ...(props.baseDomain
+              ? [
+                  props.environment === 'prod'
+                    ? `https://${props.baseDomain}`
+                    : `https://dev.${props.baseDomain}`,
+                ]
+              : []),
             'http://localhost:3000', // For local development
           ],
           allowedHeaders: ['*'],
