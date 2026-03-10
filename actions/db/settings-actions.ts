@@ -278,18 +278,10 @@ export async function uploadBrandingLogoAction(formData: FormData): Promise<Acti
 
     const { uploadDocument, getDocumentSignedUrl, deleteDocument } = await import("@/lib/aws/s3-client")
 
-    // Delete previous logo from S3 to prevent orphaned files accumulating
-    // when the admin uploads a new logo in a different format
+    // Read the previous key before uploading so we can clean it up afterward.
+    // Must happen before uploadDocument() to avoid a data-loss window where
+    // the old object is deleted but the upload then fails — leaving no logo at all.
     const previousKey = await getSetting("BRANDING_LOGO_URL")
-    if (previousKey && !previousKey.startsWith("/")) {
-      try {
-        await deleteDocument(previousKey)
-        log.debug("Deleted previous branding logo", { previousKey })
-      } catch {
-        // Non-fatal: old file stays in S3 but new logo still uploads correctly
-        log.warn("Could not delete previous branding logo", { previousKey })
-      }
-    }
 
     const { key } = await uploadDocument({
       userId: "_branding",
@@ -310,6 +302,18 @@ export async function uploadBrandingLogoAction(formData: FormData): Promise<Acti
 
     // Invalidate only the logo URL cache entry, not the entire settings cache
     await revalidateSettingsCache("BRANDING_LOGO_URL")
+
+    // Delete the previous logo only after the new one is fully saved.
+    // This order prevents data loss: if upload fails above, the old logo survives.
+    // Deletion failure is non-fatal — the orphaned file wastes storage but causes no user impact.
+    if (previousKey && !previousKey.startsWith("/")) {
+      try {
+        await deleteDocument(previousKey)
+        log.debug("Deleted previous branding logo", { previousKey })
+      } catch {
+        log.warn("Could not delete previous branding logo", { previousKey })
+      }
+    }
 
     // Return a signed URL for immediate client-side preview
     const signedUrl = await getDocumentSignedUrl({ key, expiresIn: 3600 })
@@ -362,7 +366,6 @@ export async function getBrandingLogoUrlAction(): Promise<ActionState<string>> {
   } catch (error) {
     log.error("Failed to get branding logo URL", { error })
     timer({ status: "error" })
-    // Only fall back silently for settings-not-found errors; propagate auth/infra failures
     return handleError(error, "Failed to retrieve branding logo URL", {
       context: "getBrandingLogoUrl",
       requestId,
