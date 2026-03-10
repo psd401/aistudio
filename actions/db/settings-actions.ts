@@ -15,7 +15,7 @@ import {
   startTimer,
   sanitizeForLogging
 } from "@/lib/logger"
-import { revalidateSettingsCache, getSetting } from "@/lib/settings-manager"
+import { revalidateSettingsCache, getSetting, maskKey } from "@/lib/settings-manager"
 
 export interface Setting {
   id: number
@@ -94,9 +94,7 @@ export async function getSettingValueAction(key: string): Promise<string | null>
   const timer = startTimer("getSettingValue")
   const log = createLogger({ requestId, action: "getSettingValue" })
   
-  // Mask credential/secret key names in logs to avoid leaking config surface
-  const SENSITIVE_KEY_PATTERN = /KEY|SECRET|PASSWORD|TOKEN|CREDENTIAL/i
-  const safeKey = SENSITIVE_KEY_PATTERN.test(key) ? `${key.substring(0, 4)}***` : key
+  const safeKey = maskKey(key)
 
   try {
     log.debug("Getting setting value", { key: safeKey })

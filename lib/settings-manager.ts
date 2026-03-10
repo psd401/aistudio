@@ -13,7 +13,7 @@ const pendingRefreshes = new Set<string>()
 
 // Mask credential/secret key names in log output to avoid leaking config surface
 const SENSITIVE_KEY_PATTERN = /KEY|SECRET|PASSWORD|TOKEN|CREDENTIAL/i
-function maskKey(key: string): string {
+export function maskKey(key: string): string {
   return SENSITIVE_KEY_PATTERN.test(key) ? `${key.substring(0, 4)}***` : key
 }
 

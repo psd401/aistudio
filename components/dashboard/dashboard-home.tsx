@@ -192,13 +192,14 @@ interface DashboardHeaderProps {
   orgName: string;
   appName: string;
   logoSrc: string;
+  logoIsExternal: boolean;
 }
 
-function DashboardHeader({ firstName, orgName, appName, logoSrc }: DashboardHeaderProps) {
+function DashboardHeader({ firstName, orgName, appName, logoSrc, logoIsExternal }: DashboardHeaderProps) {
   return (
     <div className="mb-6">
       <div className="flex items-center gap-2 mb-1">
-        <Image src={logoSrc} alt={orgName} width={20} height={20} className="opacity-70" unoptimized={!logoSrc.startsWith('/')} />
+        <Image src={logoSrc} alt={orgName} width={20} height={20} className="opacity-70" unoptimized={logoIsExternal} />
         <span className="text-xs uppercase tracking-wider text-muted-foreground font-medium">
           {orgName} - {appName}
         </span>
@@ -332,7 +333,7 @@ function ToolCardsGrid() {
 
 export function DashboardHome() {
   const { data: session } = useSession();
-  const { orgName, appName, logoSrc } = useBranding();
+  const { orgName, appName, logoSrc, logoIsExternal } = useBranding();
 
   const firstName = useMemo(() => {
     return session?.user?.givenName || session?.user?.name?.split(' ')[0] || 'there';
@@ -341,7 +342,7 @@ export function DashboardHome() {
   return (
     <div className="min-h-screen bg-[#FBF7F4]">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        <DashboardHeader firstName={firstName} orgName={orgName} appName={appName} logoSrc={logoSrc} />
+        <DashboardHeader firstName={firstName} orgName={orgName} appName={appName} logoSrc={logoSrc} logoIsExternal={logoIsExternal} />
         <SearchBar />
         <FeaturedToolsHeader />
         <ToolCardsGrid />
