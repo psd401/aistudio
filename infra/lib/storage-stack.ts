@@ -20,6 +20,22 @@ export interface StorageStackProps extends cdk.StackProps {
   replicationRegions?: string[];
 }
 
+/** Returns CORS allowed origins based on baseDomain, with a CDK warning if prod is missing it. */
+function getCorsOrigins(scope: Construct, environment: string, baseDomain?: string): string[] {
+  if (!baseDomain && environment === 'prod') {
+    cdk.Annotations.of(scope).addWarning(
+      'baseDomain not set — S3 CORS will only allow localhost:3000. ' +
+      'Pass --context baseDomain=<domain> for production deployments.'
+    );
+  }
+  return [
+    ...(baseDomain
+      ? [environment === 'prod' ? `https://${baseDomain}` : `https://dev.${baseDomain}`]
+      : []),
+    'http://localhost:3000', // For local development
+  ];
+}
+
 export class StorageStack extends cdk.Stack {
   public readonly documentsBucketName: string;
   public readonly documentsBucket: s3.IBucket;
@@ -62,24 +78,7 @@ export class StorageStack extends cdk.Stack {
             s3.HttpMethods.POST,
             s3.HttpMethods.HEAD,
           ],
-          allowedOrigins: (() => {
-            if (!props.baseDomain && props.environment === 'prod') {
-              cdk.Annotations.of(this).addWarning(
-                'baseDomain not set — S3 CORS will only allow localhost:3000. ' +
-                'Pass --context baseDomain=<domain> for production deployments.'
-              );
-            }
-            return [
-              ...(props.baseDomain
-                ? [
-                    props.environment === 'prod'
-                      ? `https://${props.baseDomain}`
-                      : `https://dev.${props.baseDomain}`,
-                  ]
-                : []),
-              'http://localhost:3000', // For local development
-            ];
-          })(),
+          allowedOrigins: getCorsOrigins(this, props.environment, props.baseDomain),
           allowedHeaders: ['*'],
           exposedHeaders: ['ETag'],
           maxAge: 3000,
