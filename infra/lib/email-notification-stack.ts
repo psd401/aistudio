@@ -18,6 +18,9 @@ export interface EmailNotificationStackProps extends cdk.StackProps {
   emailDomain?: string;
   fromEmail?: string;
   appBaseUrl?: string;
+  // Branding configuration for email templates
+  brandingOrgName?: string;
+  brandingAppName?: string;
   // SES resource management
   createSesIdentity?: boolean; // Set to false if SES identity already exists
   useDomainIdentity?: boolean; // Use domain identity for prod, email identity for dev
@@ -31,11 +34,13 @@ export class EmailNotificationStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: EmailNotificationStackProps) {
     super(scope, id, props);
 
-    // Email configuration with defaults for PSD401
-    const emailDomain = props.emailDomain || 'psd401.net';
+    // Email configuration — values provided via CDK context in infra.ts
+    if (!props.emailDomain) {
+      throw new Error('emailDomain is required for EmailNotificationStack');
+    }
+    const emailDomain = props.emailDomain;
     const fromEmail = props.fromEmail || `noreply@${emailDomain}`;
-    const appBaseUrl = props.appBaseUrl ||
-      (props.environment === 'prod' ? 'https://aistudio.psd401.ai' : 'https://dev.aistudio.psd401.ai');
+    const appBaseUrl = props.appBaseUrl;
 
     // Retrieve values from SSM Parameter Store (or use provided props for backward compatibility)
     const databaseResourceArn = props.databaseResourceArn ||
@@ -168,9 +173,11 @@ export class EmailNotificationStack extends cdk.Stack {
         ENVIRONMENT: props.environment,
         SES_CONFIGURATION_SET: configurationSet.configurationSetName,
         SES_FROM_EMAIL: fromEmail,
-        APP_BASE_URL: appBaseUrl,
+        ...(appBaseUrl && { APP_BASE_URL: appBaseUrl }),
         SES_REGION: 'us-east-1', // SES identities are configured in us-east-1
         MAX_SUMMARY_LENGTH: '10000', // Increased from 2000 to allow more content
+        ...(props.brandingOrgName && { BRANDING_ORG_NAME: props.brandingOrgName }),
+        ...(props.brandingAppName && { BRANDING_APP_NAME: props.brandingAppName }),
       },
       logGroup: notificationLogGroup,
       // Conservative concurrency to avoid SES rate limits
