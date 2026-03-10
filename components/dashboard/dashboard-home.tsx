@@ -59,7 +59,7 @@ function ChatBubbleGraphic() {
         viewBox="0 0 180 280"
         fill="none"
         xmlns="http://www.w3.org/2000/svg"
-        className="w-full h-full opacity-90 transition-transform duration-500 group-hover:scale-105"
+        className="w-full h-full opacity-90 motion-safe:transition-transform motion-safe:duration-500 group-hover:motion-safe:scale-105"
         aria-hidden="true"
       >
         {/* Large chat bubble - right aligned (AI response) */}
@@ -74,7 +74,7 @@ function ChatBubbleGraphic() {
         <rect x="34" y="145" width="56" height="5" rx="2.5" fill="white" fillOpacity="0.25" />
         <rect x="34" y="156" width="36" height="5" rx="2.5" fill="white" fillOpacity="0.2" />
 
-        {/* Typing indicator bubble */}
+        {/* Typing indicator bubble — static dots when prefers-reduced-motion is set */}
         <rect x="55" y="194" width="72" height="36" rx="12" fill="white" fillOpacity="0.12" />
         <circle cx="77" cy="212" r="4" fill="white" fillOpacity="0.35">
           <animate attributeName="opacity" values="0.2;0.5;0.2" dur="1.5s" repeatCount="indefinite" begin="0s" />
@@ -122,7 +122,7 @@ function FeaturedToolCard({ title, description, href, icon, ctaText, accentColor
             )}
           >
             {ctaText || 'Get Started'}
-            <span className="transition-transform group-hover:translate-x-0.5">&rarr;</span>
+            <span className="motion-safe:transition-transform group-hover:translate-x-0.5 group-focus-visible:translate-x-0.5">&rarr;</span>
           </span>
         </div>
         <ChatBubbleGraphic />
@@ -199,7 +199,7 @@ function DashboardHeader({ firstName, orgName, appName, logoSrc, logoIsExternal 
   return (
     <div className="mb-6">
       <div className="flex items-center gap-2 mb-1">
-        <Image src={logoSrc} alt={orgName} width={20} height={20} className="opacity-70" unoptimized={logoIsExternal} />
+        <Image src={logoSrc} alt="" width={20} height={20} className="opacity-70" unoptimized={logoIsExternal} aria-hidden="true" />
         <span className="text-xs uppercase tracking-wider text-muted-foreground font-medium">
           {orgName} - {appName}
         </span>
@@ -214,16 +214,18 @@ function DashboardHeader({ firstName, orgName, appName, logoSrc, logoIsExternal 
 function SearchBar() {
   return (
     <div className="relative mb-8">
-      <IconSearch size={20} className="absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground" />
+      <IconSearch size={20} className="absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
       <input
+        id="dashboard-search"
         type="search"
         placeholder="Search tools, prompts, or assistants..."
+        aria-label="Search tools, prompts, or assistants"
         className={cn(
           'w-full h-12 pl-12 pr-4 rounded-xl',
           'bg-white border border-border/40 shadow-sm',
           'text-sm placeholder:text-muted-foreground',
           'focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]/40',
-          'transition-all duration-200'
+          'motion-safe:transition-all motion-safe:duration-200'
         )}
       />
     </div>

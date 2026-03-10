@@ -132,7 +132,7 @@ export async function getSettings(keys: string[]): Promise<Record<string, string
 // Clear the cache (useful after updates)
 // Also cancels any pending background refresh for the key to prevent a stale
 // in-flight promise from writing old data back into the cache after invalidation.
-export async function revalidateSettingsCache(key?: string) {
+export async function revalidateSettingsCache(key?: string): Promise<void> {
   if (key) {
     settingsCache.delete(key)
     pendingRefreshes.delete(key)
