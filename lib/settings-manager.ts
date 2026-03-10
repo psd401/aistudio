@@ -17,7 +17,10 @@ function maskKey(key: string): string {
   return SENSITIVE_KEY_PATTERN.test(key) ? `${key.substring(0, 4)}***` : key
 }
 
-// Background refresh: fetch fresh value without blocking the caller
+// Background refresh: fetch fresh value without blocking the caller.
+// IMPORTANT: Only called from within the `!(isAwsLambda && isBedrockCredential)` block,
+// so Lambda+Bedrock keys (which must use IAM role, not env vars) never reach this function.
+// Do not call backgroundRefresh() for Lambda+Bedrock keys from other code paths.
 function backgroundRefresh(key: string): void {
   if (pendingRefreshes.has(key)) return
   pendingRefreshes.add(key)
@@ -25,11 +28,21 @@ function backgroundRefresh(key: string): void {
   getSettingValueAction(key)
     .then((dbValue) => {
       if (dbValue !== null) {
+        // Fresh value from DB — update cache
         settingsCache.set(key, { value: dbValue, timestamp: Date.now() })
       } else {
-        // DB returned null — cache env fallback
-        const envValue = process.env[key] || null
-        settingsCache.set(key, { value: envValue, timestamp: Date.now() })
+        // getSettingValueAction() returns null both when the setting is missing
+        // and when a DB error occurs. To avoid clobbering a previously-good
+        // cached value on transient errors, only fall back to env when there is
+        // no existing cache entry.
+        const existing = settingsCache.get(key)
+        if (existing) {
+          // Preserve existing value, just refresh timestamp
+          settingsCache.set(key, { value: existing.value, timestamp: Date.now() })
+        } else {
+          const envValue = process.env[key] || null
+          settingsCache.set(key, { value: envValue, timestamp: Date.now() })
+        }
       }
     })
     .catch((error) => {
@@ -117,13 +130,15 @@ export async function getSettings(keys: string[]): Promise<Record<string, string
 }
 
 // Clear the cache (useful after updates)
+// Also cancels any pending background refresh for the key to prevent a stale
+// in-flight promise from writing old data back into the cache after invalidation.
 export async function revalidateSettingsCache(key?: string) {
   if (key) {
     settingsCache.delete(key)
-    // Cache cleared for key
+    pendingRefreshes.delete(key)
   } else {
     settingsCache.clear()
-    // Cache cleared
+    pendingRefreshes.clear()
   }
   
   // Also clear S3 cache when settings are updated

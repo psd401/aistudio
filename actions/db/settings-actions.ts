@@ -94,16 +94,20 @@ export async function getSettingValueAction(key: string): Promise<string | null>
   const timer = startTimer("getSettingValue")
   const log = createLogger({ requestId, action: "getSettingValue" })
   
+  // Mask credential/secret key names in logs to avoid leaking config surface
+  const SENSITIVE_KEY_PATTERN = /KEY|SECRET|PASSWORD|TOKEN|CREDENTIAL/i
+  const safeKey = SENSITIVE_KEY_PATTERN.test(key) ? `${key.substring(0, 4)}***` : key
+
   try {
-    log.debug("Getting setting value", { key })
+    log.debug("Getting setting value", { key: safeKey })
 
     const value = await getSettingValueDrizzle(key)
 
-    log.debug("Setting value retrieved", { key, hasValue: !!value })
-    timer({ status: value ? "success" : "not_found", key })
+    log.debug("Setting value retrieved", { key: safeKey, hasValue: !!value })
+    timer({ status: value ? "success" : "not_found" })
     return value
   } catch (error) {
-    log.error("Error getting setting value", { key, error })
+    log.error("Error getting setting value", { key: safeKey, error })
     timer({ status: "error" })
     return null
   }
