@@ -14,7 +14,7 @@ export default async function SettingsPage() {
     getBrandingLogoUrlAction()
   ])
   const settings = settingsResult.isSuccess ? settingsResult.data : []
-  const currentLogoUrl = logoResult.isSuccess ? logoResult.data : "/logo.png"
+  const currentLogoUrl = (logoResult.isSuccess && logoResult.data) ? logoResult.data : "/logo.png"
 
   return (
     <div className="p-6">

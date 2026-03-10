@@ -15,7 +15,7 @@ import {
   startTimer,
   sanitizeForLogging
 } from "@/lib/logger"
-import { revalidateSettingsCache, Settings } from "@/lib/settings-manager"
+import { revalidateSettingsCache, getSetting } from "@/lib/settings-manager"
 
 export interface Setting {
   id: number
@@ -233,10 +233,12 @@ export async function uploadBrandingLogoAction(formData: FormData): Promise<Acti
       throw ErrorFactories.authzAdminRequired("upload branding logo")
     }
 
-    const file = formData.get("file") as File | null
-    if (!file) {
+    // Validate file is actually a File object (not a string — FormDataEntryValue is string | File)
+    const rawFile = formData.get("file")
+    if (!(rawFile instanceof File)) {
       throw ErrorFactories.missingRequiredField("file")
     }
+    const file = rawFile
 
     // Server-side MIME allowlist — SVG excluded due to stored XSS risk
     const MIME_TO_EXT: Record<string, { ext: string; magic: number[] }> = {
@@ -267,7 +269,7 @@ export async function uploadBrandingLogoAction(formData: FormData): Promise<Acti
     // Extension derived from server-validated MIME type, never from user-supplied filename
     const fileName = `branding-logo.${typeConfig.ext}`
 
-    const { uploadDocument } = await import("@/lib/aws/s3-client")
+    const { uploadDocument, getDocumentSignedUrl } = await import("@/lib/aws/s3-client")
 
     const { key } = await uploadDocument({
       userId: "_branding",
@@ -276,10 +278,6 @@ export async function uploadBrandingLogoAction(formData: FormData): Promise<Acti
       contentType: file.type,
       metadata: { purpose: "branding-logo" }
     })
-
-    // Signed URL for immediate preview — same 1-hour expiry as getBrandingLogoUrlAction
-    const { getDocumentSignedUrl } = await import("@/lib/aws/s3-client")
-    const signedUrl = await getDocumentSignedUrl({ key, expiresIn: 3600 })
 
     // Save the S3 key as the setting value (not the signed URL, which expires)
     await upsertSetting({
@@ -290,7 +288,11 @@ export async function uploadBrandingLogoAction(formData: FormData): Promise<Acti
       isSecret: false
     })
 
-    await revalidateSettingsCache()
+    // Invalidate only the logo URL cache entry, not the entire settings cache
+    await revalidateSettingsCache("BRANDING_LOGO_URL")
+
+    // Return a signed URL for immediate client-side preview
+    const signedUrl = await getDocumentSignedUrl({ key, expiresIn: 3600 })
 
     log.info("Branding logo uploaded successfully", { key })
     timer({ status: "success" })
@@ -319,10 +321,11 @@ export async function getBrandingLogoUrlAction(): Promise<ActionState<string>> {
       throw ErrorFactories.authNoSession()
     }
 
-    const branding = await Settings.getBranding()
-    const logoValue = branding.logoUrl
+    // Use getSetting() directly to avoid importing the Settings object (which would
+    // deepen the existing circular dependency: settings-manager → settings-actions → settings-manager)
+    const logoValue = (await getSetting("BRANDING_LOGO_URL")) ?? "/logo.png"
 
-    // If the value looks like a local path (starts with /), return as-is
+    // If the value is a local path (starts with /), return as-is — no S3 involved
     if (logoValue.startsWith("/")) {
       timer({ status: "success" })
       return createSuccess(logoValue, "Logo URL retrieved")
@@ -337,8 +340,12 @@ export async function getBrandingLogoUrlAction(): Promise<ActionState<string>> {
   } catch (error) {
     log.error("Failed to get branding logo URL", { error })
     timer({ status: "error" })
-    // Fall back to default logo on error
-    return createSuccess("/logo.png", "Falling back to default logo")
+    // Only fall back silently for settings-not-found errors; propagate auth/infra failures
+    return handleError(error, "Failed to retrieve branding logo URL", {
+      context: "getBrandingLogoUrl",
+      requestId,
+      operation: "getBrandingLogoUrl"
+    })
   }
 }
 

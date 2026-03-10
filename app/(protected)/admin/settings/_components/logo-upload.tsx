@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useRef } from "react"
+import { useState, useRef, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { useToast } from "@/components/ui/use-toast"
@@ -17,6 +17,10 @@ export function LogoUpload({ currentLogoUrl }: LogoUploadProps) {
   const [previewUrl, setPreviewUrl] = useState<string>(currentLogoUrl)
   const fileInputRef = useRef<HTMLInputElement>(null)
   const { toast } = useToast()
+
+  useEffect(() => {
+    setPreviewUrl(currentLogoUrl)
+  }, [currentLogoUrl])
 
   const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -82,7 +86,7 @@ export function LogoUpload({ currentLogoUrl }: LogoUploadProps) {
       <CardHeader>
         <CardTitle className="text-base">Organization Logo</CardTitle>
         <CardDescription>
-          Upload your organization&apos;s logo. Accepted formats: PNG, JPEG, SVG, WebP. Max 2MB.
+          Upload your organization&apos;s logo. Accepted formats: PNG, JPEG, WebP. Max 2MB.
         </CardDescription>
       </CardHeader>
       <CardContent>

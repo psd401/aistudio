@@ -74,7 +74,6 @@ const commonSettings = [
   { key: "BRANDING_ORG_NAME", category: "branding", description: "Organization name displayed across the application", isSecret: false },
   { key: "BRANDING_APP_NAME", category: "branding", description: "Application name displayed in titles and headers", isSecret: false },
   { key: "BRANDING_PRIMARY_COLOR", category: "branding", description: "Primary brand color as hex value (e.g., #1B365D)", isSecret: false },
-  { key: "BRANDING_LOGO_URL", category: "branding", description: "Logo image URL (local path like /logo.png or S3 URL)", isSecret: false },
   { key: "BRANDING_SUPPORT_URL", category: "branding", description: "Organization website or support URL", isSecret: false },
 ]
 
