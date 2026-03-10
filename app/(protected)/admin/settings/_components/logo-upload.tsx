@@ -22,12 +22,12 @@ export function LogoUpload({ currentLogoUrl }: LogoUploadProps) {
     const file = e.target.files?.[0]
     if (!file) return
 
-    // Client-side validation
-    const allowedTypes = ["image/png", "image/jpeg", "image/svg+xml", "image/webp"]
+    // Client-side pre-validation (server re-validates with magic bytes)
+    const allowedTypes = ["image/png", "image/jpeg", "image/webp"]
     if (!allowedTypes.includes(file.type)) {
       toast({
         title: "Invalid file type",
-        description: "Accepted formats: PNG, JPEG, SVG, WebP",
+        description: "Accepted formats: PNG, JPEG, WebP",
         variant: "destructive"
       })
       return
@@ -94,7 +94,7 @@ export function LogoUpload({ currentLogoUrl }: LogoUploadProps) {
                 alt="Organization logo"
                 fill
                 className="object-contain p-1"
-                unoptimized={previewUrl.includes("s3.amazonaws.com")}
+                unoptimized={!previewUrl.startsWith("/")}
               />
             ) : (
               <ImageIcon className="h-8 w-8 text-muted-foreground" />
@@ -104,7 +104,7 @@ export function LogoUpload({ currentLogoUrl }: LogoUploadProps) {
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/png,image/jpeg,image/svg+xml,image/webp"
+              accept="image/png,image/jpeg,image/webp"
               onChange={handleFileSelect}
               className="hidden"
             />
@@ -118,7 +118,7 @@ export function LogoUpload({ currentLogoUrl }: LogoUploadProps) {
               {isUploading ? "Uploading..." : "Upload Logo"}
             </Button>
             <p className="text-xs text-muted-foreground">
-              This logo appears in the navigation bar and page headers.
+              This logo appears in the navigation bar and page headers. Accepted: PNG, JPEG, WebP (max 2MB).
             </p>
           </div>
         </div>

@@ -397,13 +397,15 @@ ON CONFLICT (key) DO NOTHING;
 -- These defaults match the original PSD branding. Other organizations
 -- should update these values in the admin settings UI.
 
+-- Defaults are intentionally generic for white-label deployments.
+-- Update these in the admin settings UI for your organization.
 INSERT INTO settings (key, value, description, category, is_secret)
 VALUES
-    ('BRANDING_ORG_NAME', 'Peninsula School District', 'Organization name displayed across the application', 'branding', false),
+    ('BRANDING_ORG_NAME', 'Your Organization', 'Organization name displayed across the application', 'branding', false),
     ('BRANDING_APP_NAME', 'AI Studio', 'Application name displayed in titles and headers', 'branding', false),
     ('BRANDING_PRIMARY_COLOR', '#1B365D', 'Primary brand color as hex value', 'branding', false),
-    ('BRANDING_LOGO_URL', '/logo.png', 'Logo image URL (local path like /logo.png or S3 URL)', 'branding', false),
-    ('BRANDING_SUPPORT_URL', 'https://www.psd401.net', 'Organization website or support URL', 'branding', false)
+    ('BRANDING_LOGO_URL', '/logo.png', 'Logo image URL (local path like /logo.png or S3 key)', 'branding', false),
+    ('BRANDING_SUPPORT_URL', 'https://example.com', 'Organization website or support URL', 'branding', false)
 ON CONFLICT (key) DO NOTHING;
 
 -- Decision capture model setting - required by decision-chat route

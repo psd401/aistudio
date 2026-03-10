@@ -235,38 +235,51 @@ export async function uploadBrandingLogoAction(formData: FormData): Promise<Acti
 
     const file = formData.get("file") as File | null
     if (!file) {
-      throw new Error("No file provided")
+      throw ErrorFactories.missingRequiredField("file")
     }
 
-    // Validate file type
-    const allowedTypes = ["image/png", "image/jpeg", "image/svg+xml", "image/webp"]
-    if (!allowedTypes.includes(file.type)) {
-      throw new Error("Invalid file type. Accepted: PNG, JPEG, SVG, WebP")
+    // Server-side MIME allowlist — SVG excluded due to stored XSS risk
+    const MIME_TO_EXT: Record<string, { ext: string; magic: number[] }> = {
+      "image/png":  { ext: "png",  magic: [0x89, 0x50, 0x4E, 0x47] },
+      "image/jpeg": { ext: "jpg",  magic: [0xFF, 0xD8, 0xFF] },
+      "image/webp": { ext: "webp", magic: [0x52, 0x49, 0x46, 0x46] },
+    }
+    const typeConfig = MIME_TO_EXT[file.type]
+    if (!typeConfig) {
+      throw ErrorFactories.invalidInput("file", file.type, "Must be PNG, JPEG, or WebP")
     }
 
     // Validate file size (max 2MB for logos)
     const maxSize = 2 * 1024 * 1024
     if (file.size > maxSize) {
-      throw new Error("File too large. Maximum logo size is 2MB")
+      throw ErrorFactories.invalidInput("file", file.size, "Maximum logo size is 2MB")
     }
+
+    const buffer = Buffer.from(await file.arrayBuffer())
+
+    // Magic-byte validation — confirms actual content matches declared type
+    const header = [...buffer.slice(0, 4)]
+    const magicValid = typeConfig.magic.every((byte, i) => header[i] === byte)
+    if (!magicValid) {
+      throw ErrorFactories.invalidInput("file", file.type, "File content does not match declared type")
+    }
+
+    // Extension derived from server-validated MIME type, never from user-supplied filename
+    const fileName = `branding-logo.${typeConfig.ext}`
 
     const { uploadDocument } = await import("@/lib/aws/s3-client")
 
-    const buffer = Buffer.from(await file.arrayBuffer())
-    const extension = file.name.split(".").pop() || "png"
-    const fileName = `branding-logo.${extension}`
-
     const { key } = await uploadDocument({
-      userId: "branding",
+      userId: "_branding",
       fileName,
       fileContent: buffer,
       contentType: file.type,
       metadata: { purpose: "branding-logo" }
     })
 
-    // Generate a long-lived signed URL (7 days — the app re-fetches via settings cache)
+    // Signed URL for immediate preview — same 1-hour expiry as getBrandingLogoUrlAction
     const { getDocumentSignedUrl } = await import("@/lib/aws/s3-client")
-    const signedUrl = await getDocumentSignedUrl({ key, expiresIn: 604800 })
+    const signedUrl = await getDocumentSignedUrl({ key, expiresIn: 3600 })
 
     // Save the S3 key as the setting value (not the signed URL, which expires)
     await upsertSetting({
@@ -300,6 +313,12 @@ export async function getBrandingLogoUrlAction(): Promise<ActionState<string>> {
   const log = createLogger({ requestId, action: "getBrandingLogoUrl" })
 
   try {
+    const session = await getServerSession()
+    if (!session) {
+      log.warn("Unauthorized branding logo URL access attempt")
+      throw ErrorFactories.authNoSession()
+    }
+
     const branding = await Settings.getBranding()
     const logoValue = branding.logoUrl
 
