@@ -1,12 +1,9 @@
 'use client'
 
 import { createContext, useContext } from 'react'
+import type { BrandingConfig } from '@/lib/branding'
 
-export interface BrandingValues {
-  orgName: string
-  appName: string
-  logoSrc: string
-}
+export type BrandingValues = Pick<BrandingConfig, 'orgName' | 'appName' | 'logoSrc'>
 
 const BrandingContext = createContext<BrandingValues>({
   orgName: 'Your Organization',

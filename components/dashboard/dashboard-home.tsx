@@ -154,13 +154,16 @@ function ToolCard(props: ToolCardProps) {
 
 interface DashboardHeaderProps {
   firstName: string;
+  orgName: string;
+  appName: string;
+  logoSrc: string;
 }
 
-function DashboardHeader({ firstName, orgName, appName, logoSrc }: DashboardHeaderProps & { orgName: string; appName: string; logoSrc: string }) {
+function DashboardHeader({ firstName, orgName, appName, logoSrc }: DashboardHeaderProps) {
   return (
     <div className="mb-6">
       <div className="flex items-center gap-2 mb-1">
-        <Image src={logoSrc} alt="" width={20} height={20} className="opacity-70" />
+        <Image src={logoSrc} alt={orgName} width={20} height={20} className="opacity-70" />
         <span className="text-xs uppercase tracking-wider text-muted-foreground font-medium">
           {orgName} - {appName}
         </span>
@@ -227,7 +230,7 @@ function ToolCardsGrid() {
           accentColor="navy"
           ctaText="Start Chatting"
           featured
-          image="/psd-ai-logo.png"
+          image="/logo.png"
         />
       </div>
 
