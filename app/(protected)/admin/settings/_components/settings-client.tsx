@@ -10,12 +10,14 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Badge } from "@/components/ui/badge"
 import { RefreshCw, Upload } from "lucide-react"
 import type { Setting, CreateSettingInput } from "@/actions/db/settings-actions"
+import { LogoUpload } from "./logo-upload"
 
 interface SettingsClientProps {
   initialSettings: Setting[]
+  currentLogoUrl?: string
 }
 
-export function SettingsClient({ initialSettings }: SettingsClientProps) {
+export function SettingsClient({ initialSettings, currentLogoUrl = "/logo.png" }: SettingsClientProps) {
   const [settings, setSettings] = useState(initialSettings)
   const [isFormOpen, setIsFormOpen] = useState(false)
   const [editingSetting, setEditingSetting] = useState<Setting | null>(null)
@@ -185,6 +187,10 @@ export function SettingsClient({ initialSettings }: SettingsClientProps) {
       title: "AI Providers",
       description: "API keys and configuration for AI model providers"
     },
+    branding: {
+      title: "Branding",
+      description: "Organization name, logo, and brand colors"
+    },
     storage: {
       title: "Storage",
       description: "Configuration for file storage services"
@@ -273,6 +279,9 @@ export function SettingsClient({ initialSettings }: SettingsClientProps) {
                     <h3 className="font-medium">{info.title}</h3>
                     <p className="text-sm text-muted-foreground">{info.description}</p>
                   </div>
+                  {key === 'branding' && (
+                    <LogoUpload currentLogoUrl={currentLogoUrl} />
+                  )}
                   <SettingsTable
                     settings={categorySettings}
                     onEdit={handleEdit}

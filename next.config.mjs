@@ -1,5 +1,20 @@
 /** @type {import('next').NextConfig} */
 
+// Scope S3 image remote patterns to the application's own bucket/region
+// so next/image optimization cannot be used to proxy arbitrary S3 content.
+// Patterns are omitted entirely when the env var is absent to avoid pointing
+// at a wrong bucket in new deployments.
+const S3_BUCKET = process.env.DOCUMENTS_BUCKET_NAME || process.env.S3_BUCKET
+const AWS_REGION = process.env.NEXT_PUBLIC_AWS_REGION || process.env.AWS_REGION || 'us-east-1'
+
+// Build S3 remote patterns only when the bucket name is explicitly configured
+const s3RemotePatterns = S3_BUCKET
+  ? [
+      { protocol: 'https', hostname: `${S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com` },
+      { protocol: 'https', hostname: `${S3_BUCKET}.s3.amazonaws.com` },
+    ]
+  : []
+
 const nextConfig = {
   reactCompiler: true,
   reactStrictMode: true,
@@ -25,7 +40,8 @@ const nextConfig = {
       {
         protocol: 'https',
         hostname: 'lh3.googleusercontent.com',
-      }
+      },
+      ...s3RemotePatterns,
     ]
   },
   devIndicators: false,
