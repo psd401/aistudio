@@ -1,16 +1,20 @@
 import { Suspense } from "react"
 import { SettingsClient } from "./_components/settings-client"
 import { requireRole } from "@/lib/auth/role-helpers"
-import { getSettingsAction } from "@/actions/db/settings-actions"
+import { getSettingsAction, getBrandingLogoUrlAction } from "@/actions/db/settings-actions"
 import { Skeleton } from "@/components/ui/skeleton"
 import { PageBranding } from "@/components/ui/page-branding"
 
 export default async function SettingsPage() {
   await requireRole("administrator")
 
-  // Fetch settings from the database
-  const settingsResult = await getSettingsAction()
+  // Fetch settings and current logo URL in parallel
+  const [settingsResult, logoResult] = await Promise.all([
+    getSettingsAction(),
+    getBrandingLogoUrlAction()
+  ])
   const settings = settingsResult.isSuccess ? settingsResult.data : []
+  const currentLogoUrl = logoResult.isSuccess ? logoResult.data : "/logo.png"
 
   return (
     <div className="p-6">
@@ -21,9 +25,9 @@ export default async function SettingsPage() {
           Manage API keys and configuration values for the application
         </p>
       </div>
-      
+
       <Suspense fallback={<SettingsSkeleton />}>
-        <SettingsClient initialSettings={settings} />
+        <SettingsClient initialSettings={settings} currentLogoUrl={currentLogoUrl} />
       </Suspense>
     </div>
   )

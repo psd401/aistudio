@@ -53,6 +53,7 @@ interface SettingsFormProps {
 const categories = [
   { value: "ai", label: "AI Configuration" },
   { value: "ai_providers", label: "AI Providers" },
+  { value: "branding", label: "Branding" },
   { value: "storage", label: "Storage" },
   { value: "external_services", label: "External Services" },
 ]
@@ -70,6 +71,11 @@ const commonSettings = [
   { key: "S3_BUCKET", category: "storage", description: "AWS S3 bucket name for document storage", isSecret: false },
   { key: "AWS_REGION", category: "storage", description: "AWS region for S3 operations", isSecret: false },
   { key: "GITHUB_ISSUE_TOKEN", category: "external_services", description: "GitHub personal access token for creating issues", isSecret: true },
+  { key: "BRANDING_ORG_NAME", category: "branding", description: "Organization name displayed across the application", isSecret: false },
+  { key: "BRANDING_APP_NAME", category: "branding", description: "Application name displayed in titles and headers", isSecret: false },
+  { key: "BRANDING_PRIMARY_COLOR", category: "branding", description: "Primary brand color as hex value (e.g., #1B365D)", isSecret: false },
+  { key: "BRANDING_LOGO_URL", category: "branding", description: "Logo image URL (local path like /logo.png or S3 URL)", isSecret: false },
+  { key: "BRANDING_SUPPORT_URL", category: "branding", description: "Organization website or support URL", isSecret: false },
 ]
 
 export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFormProps) {

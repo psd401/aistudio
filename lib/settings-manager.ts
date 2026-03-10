@@ -174,6 +174,24 @@ export const Settings = {
     }
   },
 
+  // Branding
+  async getBranding() {
+    const [orgName, appName, primaryColor, logoUrl, supportUrl] = await Promise.all([
+      getSetting('BRANDING_ORG_NAME'),
+      getSetting('BRANDING_APP_NAME'),
+      getSetting('BRANDING_PRIMARY_COLOR'),
+      getSetting('BRANDING_LOGO_URL'),
+      getSetting('BRANDING_SUPPORT_URL')
+    ])
+    return {
+      orgName: orgName || 'Your Organization',
+      appName: appName || 'AI Studio',
+      primaryColor: primaryColor || '#1B365D',
+      logoUrl: logoUrl || '/logo.png',
+      supportUrl: supportUrl || ''
+    }
+  },
+
   // K-12 Content Safety
   async getContentSafety() {
     const [

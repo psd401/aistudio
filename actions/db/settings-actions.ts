@@ -15,7 +15,7 @@ import {
   startTimer,
   sanitizeForLogging
 } from "@/lib/logger"
-import { revalidateSettingsCache } from "@/lib/settings-manager"
+import { revalidateSettingsCache, Settings } from "@/lib/settings-manager"
 
 export interface Setting {
   id: number
@@ -209,6 +209,117 @@ export async function deleteSettingAction(key: string): Promise<ActionState<void
       operation: "deleteSetting",
       metadata: { key }
     })
+  }
+}
+
+// Upload a branding logo to S3 and save the URL as a setting (admin only)
+export async function uploadBrandingLogoAction(formData: FormData): Promise<ActionState<string>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("uploadBrandingLogo")
+  const log = createLogger({ requestId, action: "uploadBrandingLogo" })
+
+  try {
+    log.info("Action started: Uploading branding logo")
+
+    const session = await getServerSession()
+    if (!session) {
+      log.warn("Unauthorized logo upload attempt")
+      throw ErrorFactories.authNoSession()
+    }
+
+    const isAdmin = await hasRole("administrator")
+    if (!isAdmin) {
+      log.warn("Logo upload denied - not admin", { userId: session.sub })
+      throw ErrorFactories.authzAdminRequired("upload branding logo")
+    }
+
+    const file = formData.get("file") as File | null
+    if (!file) {
+      throw new Error("No file provided")
+    }
+
+    // Validate file type
+    const allowedTypes = ["image/png", "image/jpeg", "image/svg+xml", "image/webp"]
+    if (!allowedTypes.includes(file.type)) {
+      throw new Error("Invalid file type. Accepted: PNG, JPEG, SVG, WebP")
+    }
+
+    // Validate file size (max 2MB for logos)
+    const maxSize = 2 * 1024 * 1024
+    if (file.size > maxSize) {
+      throw new Error("File too large. Maximum logo size is 2MB")
+    }
+
+    const { uploadDocument } = await import("@/lib/aws/s3-client")
+
+    const buffer = Buffer.from(await file.arrayBuffer())
+    const extension = file.name.split(".").pop() || "png"
+    const fileName = `branding-logo.${extension}`
+
+    const { key } = await uploadDocument({
+      userId: "branding",
+      fileName,
+      fileContent: buffer,
+      contentType: file.type,
+      metadata: { purpose: "branding-logo" }
+    })
+
+    // Generate a long-lived signed URL (7 days — the app re-fetches via settings cache)
+    const { getDocumentSignedUrl } = await import("@/lib/aws/s3-client")
+    const signedUrl = await getDocumentSignedUrl({ key, expiresIn: 604800 })
+
+    // Save the S3 key as the setting value (not the signed URL, which expires)
+    await upsertSetting({
+      key: "BRANDING_LOGO_URL",
+      value: key,
+      description: "Logo image S3 key (uploaded via admin settings)",
+      category: "branding",
+      isSecret: false
+    })
+
+    await revalidateSettingsCache()
+
+    log.info("Branding logo uploaded successfully", { key })
+    timer({ status: "success" })
+
+    return createSuccess(signedUrl, "Logo uploaded successfully")
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to upload logo. Please try again.", {
+      context: "uploadBrandingLogo",
+      requestId,
+      operation: "uploadBrandingLogo"
+    })
+  }
+}
+
+// Get a signed URL for the branding logo if it's stored in S3 (admin/internal use)
+export async function getBrandingLogoUrlAction(): Promise<ActionState<string>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("getBrandingLogoUrl")
+  const log = createLogger({ requestId, action: "getBrandingLogoUrl" })
+
+  try {
+    const branding = await Settings.getBranding()
+    const logoValue = branding.logoUrl
+
+    // If the value looks like a local path (starts with /), return as-is
+    if (logoValue.startsWith("/")) {
+      timer({ status: "success" })
+      return createSuccess(logoValue, "Logo URL retrieved")
+    }
+
+    // Otherwise it's an S3 key — generate a signed URL
+    const { getDocumentSignedUrl } = await import("@/lib/aws/s3-client")
+    const signedUrl = await getDocumentSignedUrl({ key: logoValue, expiresIn: 3600 })
+
+    timer({ status: "success" })
+    return createSuccess(signedUrl, "Logo URL retrieved")
+  } catch (error) {
+    log.error("Failed to get branding logo URL", { error })
+    timer({ status: "error" })
+    // Fall back to default logo on error
+    return createSuccess("/logo.png", "Falling back to default logo")
   }
 }
 
