@@ -10,6 +10,7 @@ import {
 } from '@tabler/icons-react';
 import { cn } from '@/lib/utils';
 import { PageBranding } from '@/components/ui/page-branding';
+import { useBranding } from '@/contexts/branding-context';
 
 // Types
 interface VideoTutorial {
@@ -264,6 +265,7 @@ function SectionHeader({ title }: { title: string }) {
 }
 
 export default function TutorialsPage() {
+  const { appName } = useBranding();
   return (
     <div className="min-h-screen bg-[#FBF7F4]">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
@@ -271,10 +273,10 @@ export default function TutorialsPage() {
         <div className="mb-6">
           <PageBranding />
           <h1 className="text-2xl sm:text-3xl font-bold text-[var(--brand-primary)]">
-            AI Studio Tutorials Library
+            {appName} Tutorials Library
           </h1>
           <p className="text-muted-foreground mt-1">
-            Video tutorials and resources to help you get the most out of AI Studio
+            Video tutorials and resources to help you get the most out of {appName}
           </p>
         </div>
 
