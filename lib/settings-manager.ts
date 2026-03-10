@@ -5,9 +5,17 @@ import logger from "@/lib/logger"
 // Uses stale-while-revalidate: serves stale value immediately while refreshing in background
 const settingsCache = new Map<string, { value: string | null; timestamp: number }>()
 const CACHE_TTL = 5 * 60 * 1000 // 5 minutes
+// On DB error, retry after this shorter window rather than waiting the full TTL
+const RETRY_AFTER_ERROR_MS = 30 * 1000 // 30 seconds
 
 // Track in-flight background refreshes to avoid duplicate fetches
 const pendingRefreshes = new Set<string>()
+
+// Mask credential/secret key names in log output to avoid leaking config surface
+const SENSITIVE_KEY_PATTERN = /KEY|SECRET|PASSWORD|TOKEN|CREDENTIAL/i
+function maskKey(key: string): string {
+  return SENSITIVE_KEY_PATTERN.test(key) ? `${key.substring(0, 4)}***` : key
+}
 
 // Background refresh: fetch fresh value without blocking the caller
 function backgroundRefresh(key: string): void {
@@ -25,11 +33,14 @@ function backgroundRefresh(key: string): void {
       }
     })
     .catch((error) => {
-      logger.error(`[SettingsManager] Background refresh failed for ${key}:`, error)
-      // On error, bump the timestamp of the stale entry so we don't retry immediately
+      logger.error(`[SettingsManager] Background refresh failed for ${maskKey(key)}:`, error)
+      // On error, retry after a short window (not full TTL) so we recover quickly when DB is back
       const stale = settingsCache.get(key)
       if (stale) {
-        settingsCache.set(key, { value: stale.value, timestamp: Date.now() })
+        settingsCache.set(key, {
+          value: stale.value,
+          timestamp: Date.now() - CACHE_TTL + RETRY_AFTER_ERROR_MS,
+        })
       }
     })
     .finally(() => {
@@ -69,7 +80,7 @@ export async function getSetting(key: string): Promise<string | null> {
       return dbValue
     }
   } catch (error) {
-    logger.error(`[SettingsManager] Error fetching setting ${key} from database:`, error)
+    logger.error(`[SettingsManager] Error fetching setting ${maskKey(key)} from database:`, error)
   }
 
   // Fall back to environment variable
@@ -78,7 +89,7 @@ export async function getSetting(key: string): Promise<string | null> {
 
   if (isAwsLambda && isBedrockCredential) {
     // In Lambda, ignore Bedrock credential env vars to use IAM role
-    logger.info(`[SettingsManager] Ignoring env var ${key} in Lambda environment`)
+    logger.info(`[SettingsManager] Ignoring env var ${maskKey(key)} in Lambda environment`)
     // Cache the null for Lambda to avoid repeated DB queries
     settingsCache.set(key, { value: null, timestamp: Date.now() })
     return null
