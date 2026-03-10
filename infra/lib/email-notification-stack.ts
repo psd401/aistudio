@@ -38,6 +38,9 @@ export class EmailNotificationStack extends cdk.Stack {
     if (!props.emailDomain) {
       throw new Error('emailDomain is required for EmailNotificationStack');
     }
+    if (!props.appBaseUrl) {
+      throw new Error('appBaseUrl is required for EmailNotificationStack');
+    }
     const emailDomain = props.emailDomain;
     const fromEmail = props.fromEmail || `noreply@${emailDomain}`;
     const appBaseUrl = props.appBaseUrl;
@@ -173,7 +176,7 @@ export class EmailNotificationStack extends cdk.Stack {
         ENVIRONMENT: props.environment,
         SES_CONFIGURATION_SET: configurationSet.configurationSetName,
         SES_FROM_EMAIL: fromEmail,
-        ...(appBaseUrl && { APP_BASE_URL: appBaseUrl }),
+        APP_BASE_URL: appBaseUrl,
         SES_REGION: 'us-east-1', // SES identities are configured in us-east-1
         MAX_SUMMARY_LENGTH: '10000', // Increased from 2000 to allow more content
         ...(props.brandingOrgName && { BRANDING_ORG_NAME: props.brandingOrgName }),
