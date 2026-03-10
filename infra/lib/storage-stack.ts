@@ -8,6 +8,8 @@ import { CostMonitor } from './constructs/storage/cost-monitor';
 
 export interface StorageStackProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
+  /** Base domain for CORS origins (e.g., 'aistudio.example.com') */
+  baseDomain?: string;
   /** Email address for cost alerts (optional) */
   alertEmail?: string;
   /** Enable CloudFront CDN (default: false) */
@@ -16,6 +18,22 @@ export interface StorageStackProps extends cdk.StackProps {
   enableReplication?: boolean;
   /** Replication regions (default: us-east-1) */
   replicationRegions?: string[];
+}
+
+/** Returns CORS allowed origins based on baseDomain, with a CDK warning if prod is missing it. */
+function getCorsOrigins(scope: Construct, environment: string, baseDomain?: string): string[] {
+  if (!baseDomain && environment === 'prod') {
+    cdk.Annotations.of(scope).addWarning(
+      'baseDomain not set — S3 CORS will only allow localhost:3000. ' +
+      'Pass --context baseDomain=<domain> for production deployments.'
+    );
+  }
+  return [
+    ...(baseDomain
+      ? [environment === 'prod' ? `https://${baseDomain}` : `https://dev.${baseDomain}`]
+      : []),
+    'http://localhost:3000', // For local development
+  ];
 }
 
 export class StorageStack extends cdk.Stack {
@@ -60,12 +78,7 @@ export class StorageStack extends cdk.Stack {
             s3.HttpMethods.POST,
             s3.HttpMethods.HEAD,
           ],
-          allowedOrigins: [
-            props.environment === 'prod'
-              ? 'https://aistudio.psd401.ai'
-              : 'https://dev.aistudio.psd401.ai',
-            'http://localhost:3000', // For local development
-          ],
+          allowedOrigins: getCorsOrigins(this, props.environment, props.baseDomain),
           allowedHeaders: ['*'],
           exposedHeaders: ['ETag'],
           maxAge: 3000,
