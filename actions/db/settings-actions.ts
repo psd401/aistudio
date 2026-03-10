@@ -244,6 +244,8 @@ export async function uploadBrandingLogoAction(formData: FormData): Promise<Acti
     const MIME_TO_EXT: Record<string, { ext: string; magic: number[] }> = {
       "image/png":  { ext: "png",  magic: [0x89, 0x50, 0x4E, 0x47] },
       "image/jpeg": { ext: "jpg",  magic: [0xFF, 0xD8, 0xFF] },
+      // WebP is a RIFF container: bytes 0-3 must be RIFF, bytes 8-11 must be WEBP
+      // Using RIFF header only (0x52 0x49 0x46 0x46) would also match WAV and AVI files
       "image/webp": { ext: "webp", magic: [0x52, 0x49, 0x46, 0x46] },
     }
     const typeConfig = MIME_TO_EXT[file.type]
@@ -259,9 +261,14 @@ export async function uploadBrandingLogoAction(formData: FormData): Promise<Acti
 
     const buffer = Buffer.from(await file.arrayBuffer())
 
-    // Magic-byte validation — confirms actual content matches declared type
-    const header = [...buffer.slice(0, 4)]
-    const magicValid = typeConfig.magic.every((byte, i) => header[i] === byte)
+    // Magic-byte validation — confirms actual content matches declared type.
+    // WebP requires both RIFF header (bytes 0-3) AND WEBP marker (bytes 8-11)
+    // because the RIFF container is shared by WAV and AVI files.
+    const WEBP_MARKER = [0x57, 0x45, 0x42, 0x50]
+    const magicValid = file.type === "image/webp"
+      ? typeConfig.magic.every((byte, i) => buffer[i] === byte) &&
+        WEBP_MARKER.every((byte, i) => buffer[8 + i] === byte)
+      : typeConfig.magic.every((byte, i) => buffer[i] === byte)
     if (!magicValid) {
       throw ErrorFactories.invalidInput("file", file.type, "File content does not match declared type")
     }
@@ -269,7 +276,20 @@ export async function uploadBrandingLogoAction(formData: FormData): Promise<Acti
     // Extension derived from server-validated MIME type, never from user-supplied filename
     const fileName = `branding-logo.${typeConfig.ext}`
 
-    const { uploadDocument, getDocumentSignedUrl } = await import("@/lib/aws/s3-client")
+    const { uploadDocument, getDocumentSignedUrl, deleteDocument } = await import("@/lib/aws/s3-client")
+
+    // Delete previous logo from S3 to prevent orphaned files accumulating
+    // when the admin uploads a new logo in a different format
+    const previousKey = await getSetting("BRANDING_LOGO_URL")
+    if (previousKey && !previousKey.startsWith("/")) {
+      try {
+        await deleteDocument(previousKey)
+        log.debug("Deleted previous branding logo", { previousKey })
+      } catch {
+        // Non-fatal: old file stays in S3 but new logo still uploads correctly
+        log.warn("Could not delete previous branding logo", { previousKey })
+      }
+    }
 
     const { key } = await uploadDocument({
       userId: "_branding",
@@ -315,6 +335,8 @@ export async function getBrandingLogoUrlAction(): Promise<ActionState<string>> {
   const log = createLogger({ requestId, action: "getBrandingLogoUrl" })
 
   try {
+    log.info("Action started: Getting branding logo URL")
+
     const session = await getServerSession()
     if (!session) {
       log.warn("Unauthorized branding logo URL access attempt")

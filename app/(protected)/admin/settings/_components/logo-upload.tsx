@@ -99,6 +99,7 @@ export function LogoUpload({ currentLogoUrl }: LogoUploadProps) {
                 fill
                 className="object-contain p-1"
                 unoptimized={!previewUrl.startsWith("/")}
+                onError={() => setPreviewUrl("")}
               />
             ) : (
               <ImageIcon className="h-8 w-8 text-muted-foreground" />

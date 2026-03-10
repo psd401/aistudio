@@ -187,6 +187,10 @@ export const Settings = {
       orgName: orgName || 'Your Organization',
       appName: appName || 'AI Studio',
       primaryColor: primaryColor || '#1B365D',
+      // NOTE: when BRANDING_LOGO_URL is an S3 key (not a "/" path), callers
+      // must resolve it to a signed URL via getBrandingLogoUrlAction() before
+      // passing to <Image> or any HTTP consumer. Use this value directly only
+      // for local paths (e.g. "/logo.png").
       logoUrl: logoUrl || '/logo.png',
       supportUrl: supportUrl || ''
     }
