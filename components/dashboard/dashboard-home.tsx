@@ -14,6 +14,7 @@ import {
   IconSearch,
 } from '@tabler/icons-react';
 import { cn } from '@/lib/utils';
+import { useBranding } from '@/contexts/branding-context';
 
 type AccentColor = 'navy' | 'coral' | 'purple' | 'green';
 
@@ -30,21 +31,21 @@ interface ToolCardProps {
 }
 
 const ACCENT_CLASSES: Record<AccentColor, string> = {
-  navy: 'from-[#1B365D]/10 to-transparent',
+  navy: 'from-[var(--brand-primary)]/10 to-transparent',
   coral: 'from-[#E8927C]/15 to-transparent',
   purple: 'from-[#7B68A6]/15 to-transparent',
   green: 'from-[#6B9E78]/15 to-transparent',
 };
 
 const ICON_BG_CLASSES: Record<AccentColor, string> = {
-  navy: 'bg-[#1B365D]/10 text-[#1B365D]',
+  navy: 'bg-[var(--brand-primary)]/10 text-[var(--brand-primary)]',
   coral: 'bg-[#E8927C]/15 text-[#E8927C]',
   purple: 'bg-[#7B68A6]/15 text-[#7B68A6]',
   green: 'bg-[#6B9E78]/15 text-[#6B9E78]',
 };
 
 const CTA_COLOR_CLASSES: Record<AccentColor, string> = {
-  navy: 'text-[#1B365D]',
+  navy: 'text-[var(--brand-primary)]',
   coral: 'text-[#E8927C]',
   purple: 'text-[#7B68A6]',
   green: 'text-[#6B9E78]',
@@ -59,7 +60,7 @@ function FeaturedToolCard({ title, description, href, icon, ctaText, accentColor
         'border border-border/40 shadow-sm',
         'transition-all duration-200 ease-out',
         'hover:shadow-lg hover:border-border/60 hover:-translate-y-0.5',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1B365D] focus-visible:ring-offset-2',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] focus-visible:ring-offset-2',
         'h-full min-h-[280px]'
       )}
     >
@@ -69,15 +70,15 @@ function FeaturedToolCard({ title, description, href, icon, ctaText, accentColor
             <div className={cn('inline-flex p-2 rounded-lg mb-3', ICON_BG_CLASSES[accentColor])}>
               {icon}
             </div>
-            <h3 className="text-lg font-bold text-[#1B365D] mb-2">{title}</h3>
+            <h3 className="text-lg font-bold text-[var(--brand-primary)] mb-2">{title}</h3>
             <p className="text-sm text-muted-foreground leading-relaxed">{description}</p>
           </div>
           <span
             className={cn(
               'mt-4 inline-flex items-center gap-2 px-5 py-2.5 rounded-full',
-              'bg-[#1B365D] text-white text-sm font-medium',
+              'bg-[var(--brand-primary)] text-white text-sm font-medium',
               'transition-all duration-200',
-              'group-hover:bg-[#1B365D]/90',
+              'group-hover:bg-[var(--brand-primary)]/90',
               'w-fit'
             )}
           >
@@ -86,7 +87,7 @@ function FeaturedToolCard({ title, description, href, icon, ctaText, accentColor
           </span>
         </div>
         {image && (
-          <div className="relative w-[180px] flex-shrink-0 bg-[#1B365D]/95 hidden sm:block">
+          <div className="relative w-[180px] flex-shrink-0 bg-[var(--brand-primary)]/95 hidden sm:block">
             <Image src={image} alt="" fill className="object-contain p-4 opacity-90" sizes="180px" />
           </div>
         )}
@@ -106,7 +107,7 @@ function StandardToolCard({ title, description, href, icon, ctaText, ctaColor, a
         'border border-border/40 shadow-sm p-5',
         'transition-all duration-200 ease-out',
         'hover:shadow-lg hover:border-border/60 hover:-translate-y-0.5',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1B365D] focus-visible:ring-offset-2',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] focus-visible:ring-offset-2',
         'h-full min-h-[140px]'
       )}
     >
@@ -153,15 +154,18 @@ function ToolCard(props: ToolCardProps) {
 
 interface DashboardHeaderProps {
   firstName: string;
+  orgName: string;
+  appName: string;
+  logoSrc: string;
 }
 
-function DashboardHeader({ firstName }: DashboardHeaderProps) {
+function DashboardHeader({ firstName, orgName, appName, logoSrc }: DashboardHeaderProps) {
   return (
     <div className="mb-6">
       <div className="flex items-center gap-2 mb-1">
-        <Image src="/logo.png" alt="" width={20} height={20} className="opacity-70" />
+        <Image src={logoSrc} alt={orgName} width={20} height={20} className="opacity-70" />
         <span className="text-xs uppercase tracking-wider text-muted-foreground font-medium">
-          Peninsula School District - AI Studio
+          {orgName} - {appName}
         </span>
       </div>
       <h1 className="text-2xl sm:text-3xl font-normal text-foreground">
@@ -182,7 +186,7 @@ function SearchBar() {
           'w-full h-12 pl-12 pr-4 rounded-xl',
           'bg-white border border-border/40 shadow-sm',
           'text-sm placeholder:text-muted-foreground',
-          'focus:outline-none focus:ring-2 focus:ring-[#1B365D]/20 focus:border-[#1B365D]/40',
+          'focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]/40',
           'transition-all duration-200'
         )}
       />
@@ -193,10 +197,10 @@ function SearchBar() {
 function FeaturedToolsHeader() {
   return (
     <div className="flex items-center justify-between mb-4">
-      <h2 className="text-lg font-bold text-[#1B365D]">Featured Tools</h2>
+      <h2 className="text-lg font-bold text-[var(--brand-primary)]">Featured Tools</h2>
       <Link
         href="/utilities/assistant-catalog"
-        className="text-sm text-[#1B365D] hover:text-[#1B365D]/80 font-medium flex items-center gap-1"
+        className="text-sm text-[var(--brand-primary)] hover:text-[var(--brand-primary)]/80 font-medium flex items-center gap-1"
       >
         View All
         <span>&rarr;</span>
@@ -214,6 +218,7 @@ const AssistantArchitectIcon = <IconTools size={20} />;
 const TutorialsIcon = <IconSchool size={20} />;
 
 function ToolCardsGrid() {
+  const { logoSrc } = useBranding();
   return (
     <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 auto-rows-auto">
       {/* Nexus Chat - spans 3 columns on large screens, 2 rows */}
@@ -226,7 +231,7 @@ function ToolCardsGrid() {
           accentColor="navy"
           ctaText="Start Chatting"
           featured
-          image="/psd-ai-logo.png"
+          image={logoSrc}
         />
       </div>
 
@@ -294,6 +299,7 @@ function ToolCardsGrid() {
 
 export function DashboardHome() {
   const { data: session } = useSession();
+  const { orgName, appName, logoSrc } = useBranding();
 
   const firstName = useMemo(() => {
     return session?.user?.givenName || session?.user?.name?.split(' ')[0] || 'there';
@@ -302,7 +308,7 @@ export function DashboardHome() {
   return (
     <div className="min-h-screen bg-[#FBF7F4]">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        <DashboardHeader firstName={firstName} />
+        <DashboardHeader firstName={firstName} orgName={orgName} appName={appName} logoSrc={logoSrc} />
         <SearchBar />
         <FeaturedToolsHeader />
         <ToolCardsGrid />

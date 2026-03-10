@@ -6,10 +6,12 @@ import Image from "next/image";
 import { useSession, signIn } from "next-auth/react";
 import { useEffect, Suspense } from "react";
 import { useRouter } from "next/navigation";
+import { useBranding } from "@/contexts/branding-context";
 
 function LandingPageContent() {
   const router = useRouter();
   const { data: session, status } = useSession();
+  const { appName } = useBranding();
 
   // Get callbackUrl from query params if present
   const searchParams = new URLSearchParams(typeof window !== 'undefined' ? window.location.search : '');
@@ -54,8 +56,8 @@ function LandingPageContent() {
       <div className="relative flex min-h-screen items-center justify-center p-4">
         <Card className="w-full max-w-md border-0 shadow-2xl bg-white/80 backdrop-blur-sm">
           <CardHeader>
-            <CardTitle className="text-center text-3xl font-bold text-sky-900">
-              Welcome to PSD AI Studio
+            <CardTitle className="text-center text-3xl font-bold text-[var(--brand-primary)]">
+              Welcome to {appName}
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -63,7 +65,7 @@ function LandingPageContent() {
               Your creative space for building, exploring, and innovating with AI in education.
             </p>
             <Button
-              className="w-full bg-sky-600 hover:bg-sky-700 text-white shadow-lg"
+              className="w-full bg-[var(--brand-primary)] hover:bg-[var(--brand-primary)]/90 text-white shadow-lg"
               size="lg"
               onClick={handleSignIn}
             >

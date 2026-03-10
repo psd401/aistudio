@@ -28,6 +28,7 @@ import { createFreshserviceTicketAction } from '@/actions/create-freshservice-ti
 import { createLogger } from '@/lib/client-logger';
 import { NotificationBell } from '@/components/notifications/notification-bell';
 import { MessageCenter } from '@/components/notifications/message-center';
+import { useBranding } from '@/contexts/branding-context';
 import { iconMap, IconName } from './icon-map';
 import { LinksGroup } from './navbar-links-group';
 import { cn } from '@/lib/utils';
@@ -688,7 +689,7 @@ function SidebarUserProfile({ isExpanded, fullName, userInitials, email, image }
     <div className={cn('flex items-center gap-3 p-2 rounded-lg bg-muted/50', !isExpanded && 'justify-center')}>
       <Avatar className="h-8 w-8 flex-shrink-0">
         <AvatarImage src={image || undefined} />
-        <AvatarFallback className="bg-[#1B365D] text-white text-xs font-medium">{userInitials}</AvatarFallback>
+        <AvatarFallback className="bg-[var(--brand-primary)] text-white text-xs font-medium">{userInitials}</AvatarFallback>
       </Avatar>
       <AnimatePresence>
         {isExpanded && (
@@ -767,6 +768,7 @@ function NavigationContent({ isExpanded }: { isExpanded: boolean }) {
   const { data: session } = useSession();
   const [navItems, setNavItems] = useState<NavigationItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const { orgName, appName, logoSrc } = useBranding();
 
   const { fullName, userInitials } = useMemo(() => {
     const givenName = session?.user?.givenName || session?.user?.name?.split(' ')[0] || 'User';
@@ -805,13 +807,13 @@ function NavigationContent({ isExpanded }: { isExpanded: boolean }) {
           )}
         >
           <Image
-            src="/logo.png"
-            alt="Peninsula School District"
+            src={logoSrc}
+            alt={orgName}
             width={isExpanded ? 28 : 24}
             height={isExpanded ? 28 : 24}
             className="object-contain"
           />
-          {isExpanded && <span className="text-[#1B365D] text-base font-bold">PSD AI Studio</span>}
+          {isExpanded && <span className="text-[var(--brand-primary)] text-base font-bold">{appName}</span>}
         </Link>
       </div>
 

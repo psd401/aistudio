@@ -75,6 +75,7 @@ const commonSettings = [
   { key: "BRANDING_APP_NAME", category: "branding", description: "Application name displayed in titles and headers", isSecret: false },
   { key: "BRANDING_PRIMARY_COLOR", category: "branding", description: "Primary brand color as hex value (e.g., #1B365D)", isSecret: false },
   { key: "BRANDING_SUPPORT_URL", category: "branding", description: "Organization website or support URL", isSecret: false },
+  { key: "BRANDING_APP_URL", category: "branding", description: "Canonical application URL (e.g., https://ai.example.com) — used in download links and SEO metadata", isSecret: false },
 ]
 
 export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFormProps) {

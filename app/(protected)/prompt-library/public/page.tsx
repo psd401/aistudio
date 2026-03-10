@@ -3,6 +3,7 @@ import { PublicGalleryClient } from "./_components/public-gallery-client"
 import { PublicGalleryHero } from "./_components/public-gallery-hero"
 import { Skeleton } from "@/components/ui/skeleton"
 import { generateGalleryStructuredData } from "./_components/seo-metadata"
+import { getBrandingConfig } from "@/lib/branding"
 import type { Metadata } from "next"
 
 export const metadata: Metadata = {
@@ -33,14 +34,15 @@ export default async function PublicPromptLibraryPage({
   const sort = (params.sort as 'created' | 'usage' | 'views') || 'usage'
   const page = Number.parseInt(params.page || "1", 10)
 
-  const structuredData = generateGalleryStructuredData()
+  const branding = await getBrandingConfig()
+  const structuredData = generateGalleryStructuredData(branding.orgName, branding.appUrl)
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-background to-muted/20">
       {/* Structured Data for SEO */}
       <script
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }}
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData).replace(/<\/script>/gi, '<\\/script>') }}
       />
 
       {/* Hero Section */}

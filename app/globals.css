@@ -43,6 +43,11 @@
   --color-ring: oklch(0.47 0.089 237.66);
 }
 
+/* Brand color fallback — overridden by inline style on <html> from settings */
+:root {
+  --brand-primary: #1B365D;
+}
+
 /* Base styles */
 * {
   border-color: var(--color-border);

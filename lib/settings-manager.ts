@@ -176,12 +176,13 @@ export const Settings = {
 
   // Branding
   async getBranding() {
-    const [orgName, appName, primaryColor, logoUrl, supportUrl] = await Promise.all([
+    const [orgName, appName, primaryColor, logoUrl, supportUrl, appUrl] = await Promise.all([
       getSetting('BRANDING_ORG_NAME'),
       getSetting('BRANDING_APP_NAME'),
       getSetting('BRANDING_PRIMARY_COLOR'),
       getSetting('BRANDING_LOGO_URL'),
-      getSetting('BRANDING_SUPPORT_URL')
+      getSetting('BRANDING_SUPPORT_URL'),
+      getSetting('BRANDING_APP_URL')
     ])
     // Validate primaryColor as a CSS hex color to prevent CSS injection
     // when embedded in style attributes (e.g. `color: ${primaryColor}`)
@@ -190,10 +191,17 @@ export const Settings = {
       ? primaryColor
       : '#1B365D'
 
-    // Validate supportUrl to prevent javascript: URI injection in <a href>
+    // Validate URLs to prevent javascript: URI injection in <a href>
     const validatedSupportUrl = supportUrl &&
       (supportUrl.startsWith('https://') || supportUrl.startsWith('http://'))
       ? supportUrl
+      : ''
+
+    // appUrl: canonical application URL, falls back to NEXT_PUBLIC_APP_URL env var
+    const rawAppUrl = appUrl || process.env.NEXT_PUBLIC_APP_URL || ''
+    const validatedAppUrl = rawAppUrl &&
+      (rawAppUrl.startsWith('https://') || rawAppUrl.startsWith('http://'))
+      ? rawAppUrl.replace(/\/+$/, '') // strip trailing slashes
       : ''
 
     const rawLogoValue = logoUrl || '/logo.png'
@@ -202,16 +210,13 @@ export const Settings = {
       appName: appName || 'AI Studio',
       primaryColor: validatedColor,
       // logoPath: the raw stored value. Either a local "/" path or an S3 key.
-      // isLogoS3Key: true when the value must be resolved to a signed URL
-      //   via getBrandingLogoUrlAction() before rendering.
-      // @example Server component usage:
-      //   const { logoPath, isLogoS3Key } = await Settings.getBranding()
-      //   const logoSrc = isLogoS3Key
-      //     ? (await getBrandingLogoUrlAction()).data ?? '/logo.png'
-      //     : logoPath
+      // isLogoS3Key: true when the value must be resolved to a signed URL.
+      // @example Server component usage — use getBrandingConfig() from lib/branding.ts
+      //   which handles S3 resolution without requiring an auth session.
       logoPath: rawLogoValue,
       isLogoS3Key: !rawLogoValue.startsWith('/'),
-      supportUrl: validatedSupportUrl
+      supportUrl: validatedSupportUrl,
+      appUrl: validatedAppUrl
     }
   },
 

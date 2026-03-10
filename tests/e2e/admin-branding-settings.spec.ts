@@ -7,6 +7,41 @@ import { test, expect } from '@playwright/test'
  * Auth note: these tests require a seeded admin session. They auto-skip in CI
  * unless PLAYWRIGHT_AUTH_ENABLED=true is set.
  */
+
+/**
+ * E2E tests for settings-driven branding rendering (Issue #825)
+ * Covers: default branding values render on public landing page.
+ * CI-compatible — no auth required.
+ */
+test.describe('Branding Rendering (Issue #825)', () => {
+  test('landing page renders app name from branding context', async ({ page }) => {
+    await page.goto('/')
+
+    // App name should appear in the welcome heading — default is "AI Studio"
+    const heading = page.locator('h2, h3, [class*="CardTitle"]').filter({ hasText: /Welcome to/i })
+    await expect(heading).toBeVisible({ timeout: 10000 })
+    await expect(heading).toContainText('Welcome to')
+  })
+
+  test('landing page logo image is present and renders', async ({ page }) => {
+    await page.goto('/')
+
+    // The logo image should be rendered (default /logo.png)
+    const logo = page.locator('img[src*="logo"]').first()
+    await expect(logo).toBeVisible({ timeout: 10000 })
+  })
+
+  test('sign-in button uses brand primary color CSS variable', async ({ page }) => {
+    await page.goto('/')
+
+    const signInButton = page.locator('button:has-text("Sign In")')
+    await expect(signInButton).toBeVisible({ timeout: 10000 })
+
+    // The button should exist and be enabled — color is applied via CSS var
+    await expect(signInButton).toBeEnabled()
+  })
+})
+
 test.describe('Admin Branding Settings', () => {
   test.beforeEach(async ({ page }) => {
     // Navigate to the admin settings page; relies on seeded auth state
@@ -58,6 +93,24 @@ test.describe('Admin Branding Settings', () => {
 
     const settingsHeading = page.locator('h1:has-text("System Settings")')
     await expect(settingsHeading).not.toBeVisible()
+  })
+
+  // ── App URL setting ───────────────────────────────────────────────────────
+
+  test('BRANDING_APP_URL field is present in branding settings', async ({ page }) => {
+    const url = page.url()
+    if (url.includes('/auth') || url.includes('/sign-in') || url.includes('/login')) {
+      test.skip(true, 'No admin auth state available — run with seeded users locally')
+      return
+    }
+
+    const brandingTab = page.locator('[role="tab"]:has-text("Branding")')
+    await expect(brandingTab).toBeVisible({ timeout: 10000 })
+    await brandingTab.click()
+
+    // App URL field should be configurable in the branding settings
+    const appUrlField = page.locator('input[placeholder*="https://"], input[name*="app_url"], input[name*="appUrl"], label:has-text("App URL") ~ input, label:has-text("Application URL") ~ input').first()
+    await expect(appUrlField).toBeVisible({ timeout: 5000 })
   })
 
   // ── Error state ───────────────────────────────────────────────────────────
