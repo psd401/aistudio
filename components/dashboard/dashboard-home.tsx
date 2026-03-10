@@ -163,7 +163,7 @@ function DashboardHeader({ firstName, orgName, appName, logoSrc }: DashboardHead
   return (
     <div className="mb-6">
       <div className="flex items-center gap-2 mb-1">
-        <Image src={logoSrc} alt={orgName} width={20} height={20} className="opacity-70" />
+        <Image src={logoSrc} alt={orgName} width={20} height={20} className="opacity-70" unoptimized={!logoSrc.startsWith('/')} />
         <span className="text-xs uppercase tracking-wider text-muted-foreground font-medium">
           {orgName} - {appName}
         </span>
@@ -218,7 +218,6 @@ const AssistantArchitectIcon = <IconTools size={20} />;
 const TutorialsIcon = <IconSchool size={20} />;
 
 function ToolCardsGrid() {
-  const { logoSrc } = useBranding();
   return (
     <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 auto-rows-auto">
       {/* Nexus Chat - spans 3 columns on large screens, 2 rows */}
@@ -231,7 +230,6 @@ function ToolCardsGrid() {
           accentColor="navy"
           ctaText="Start Chatting"
           featured
-          image={logoSrc}
         />
       </div>
 
