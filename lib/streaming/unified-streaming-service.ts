@@ -643,10 +643,15 @@ async function getOrCreateTools(
     const droppedTools = requestedTools.filter(tool => !supportedTools.includes(tool));
     log.info('Filtered unsupported tools for model', {
       modelId: request.modelId,
+      requestedCount: requestedTools.length,
+      filteredCount: filteredTools.length,
+      droppedTools,
+    });
+    log.debug('Tool filtering detail', {
+      modelId: request.modelId,
       requestedTools,
       supportedTools,
       filteredTools,
-      droppedTools,
     });
   }
 
