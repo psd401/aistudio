@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
+import { resolveUserId } from "@/lib/auth/resolve-user"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
-import { markAllNotificationsAsRead, getUserIdByCognitoSub } from "@/lib/db/drizzle"
+import { markAllNotificationsAsRead } from "@/lib/db/drizzle"
 
 export async function PUT() {
   const requestId = generateRequestId()
@@ -19,14 +20,8 @@ export async function PUT() {
       throw ErrorFactories.authNoSession()
     }
 
-    // Get user ID from database using cognito sub
-    const userIdString = await getUserIdByCognitoSub(session.sub)
-
-    if (!userIdString) {
-      throw ErrorFactories.dbRecordNotFound("users", session.sub)
-    }
-
-    const userId = Number(userIdString)
+    // Resolve user ID (auto-provisions if missing)
+    const userId = await resolveUserId(session)
     log.info("Marking all notifications as read for user", { userId: sanitizeForLogging(userId) })
 
     // Update all unread notifications for the user

@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
+import { resolveUserId } from "@/lib/auth/resolve-user"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
-import { getUserNotifications, getUserIdByCognitoSub } from "@/lib/db/drizzle"
+import { getUserNotifications } from "@/lib/db/drizzle"
 import type { UserNotification } from "@/types/notifications"
 
 export async function GET(request: NextRequest) {
@@ -20,14 +21,8 @@ export async function GET(request: NextRequest) {
       throw ErrorFactories.authNoSession()
     }
 
-    // Get user ID from database using cognito sub
-    const userIdString = await getUserIdByCognitoSub(session.sub)
-
-    if (!userIdString) {
-      throw ErrorFactories.dbRecordNotFound("users", session.sub)
-    }
-
-    const userId = Number(userIdString)
+    // Resolve user ID (auto-provisions if missing)
+    const userId = await resolveUserId(session)
     log.info("Fetching notifications for user", { userId: sanitizeForLogging(userId) })
 
     // Get query parameters

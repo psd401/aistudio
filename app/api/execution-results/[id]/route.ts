@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
+import { resolveUserId } from "@/lib/auth/resolve-user"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { ErrorFactories } from "@/lib/error-utils"
-import { getExecutionResultById, getUserIdByCognitoSub, deleteExecutionResult } from "@/lib/db/drizzle"
+import { getExecutionResultById, deleteExecutionResult } from "@/lib/db/drizzle"
 
 interface ExecutionResult {
   id: number
@@ -42,17 +43,8 @@ async function getHandler(
       throw ErrorFactories.authNoSession()
     }
 
-    // Get user ID from database using cognito sub
-    const userIdString = await getUserIdByCognitoSub(session.sub)
-
-    if (!userIdString) {
-      throw ErrorFactories.dbRecordNotFound("users", session.sub)
-    }
-
-    const userId = Number(userIdString)
-    if (!Number.isInteger(userId) || userId <= 0) {
-      throw ErrorFactories.invalidInput("userId", userIdString, "must be a positive integer")
-    }
+    // Resolve user ID (auto-provisions if missing)
+    const userId = await resolveUserId(session)
 
     // Get execution result with all related data - includes access control check
     const result = await getExecutionResultById(resultId, userId)
@@ -151,17 +143,8 @@ async function deleteHandler(
       throw ErrorFactories.authNoSession()
     }
 
-    // Get user ID from database using cognito sub
-    const userIdString = await getUserIdByCognitoSub(session.sub)
-
-    if (!userIdString) {
-      throw ErrorFactories.dbRecordNotFound("users", session.sub)
-    }
-
-    const userId = Number(userIdString)
-    if (!Number.isInteger(userId) || userId <= 0) {
-      throw ErrorFactories.invalidInput("userId", userIdString, "must be a positive integer")
-    }
+    // Resolve user ID (auto-provisions if missing)
+    const userId = await resolveUserId(session)
 
     // Delete the execution result with access control check
     const deleted = await deleteExecutionResult(resultId, userId)

@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
+import { resolveUserId } from "@/lib/auth/resolve-user"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { ErrorFactories } from "@/lib/error-utils"
-import { getExecutionResultForDownload, getUserIdByCognitoSub } from "@/lib/db/drizzle"
+import { getExecutionResultForDownload } from "@/lib/db/drizzle"
 import { getBrandingConfig } from "@/lib/branding"
 
 // Content sanitization for markdown to prevent XSS
@@ -88,14 +89,8 @@ export async function downloadHandler(
       throw ErrorFactories.authNoSession()
     }
 
-    // Get user ID from database using cognito sub
-    const userIdString = await getUserIdByCognitoSub(session.sub)
-
-    if (!userIdString) {
-      throw ErrorFactories.dbRecordNotFound("users", session.sub)
-    }
-
-    const userId = Number(userIdString)
+    // Resolve user ID (auto-provisions if missing)
+    const userId = await resolveUserId(session)
 
     // Get execution result with all related data - includes access control check
     const result = await getExecutionResultForDownload(resultId, userId)
