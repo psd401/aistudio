@@ -13,6 +13,10 @@
  * @see https://github.com/psd401/aistudio/issues/366
  */
 
+import { createLogger } from '@/lib/client-logger'
+
+const log = createLogger({ moduleName: 'sse-event-types' })
+
 /**
  * Base interface for all SSE events
  * Every event must have a type discriminator for runtime type checking
@@ -653,12 +657,10 @@ export function parseSSEEvent(data: string): SSEEvent {
 
     // Warn about unrecognized event types (but don't throw - allow extensibility)
     if (!VALID_SSE_EVENT_TYPES.has(parsed.type)) {
-      // In development, log a warning. In production, this could be sent to monitoring.
-      // eslint-disable-next-line no-console
-      if (typeof console !== 'undefined' && console.warn) {
-        // eslint-disable-next-line no-console
-        console.warn(`[SSE] Unrecognized event type: "${parsed.type}". This may indicate a new event type from the SDK or a malformed event.`);
-      }
+      log.warn('Unrecognized SSE event type', {
+        type: parsed.type,
+        hint: 'This may indicate a new event type from the SDK or a malformed event'
+      });
     }
 
     return parsed as unknown as SSEEvent;

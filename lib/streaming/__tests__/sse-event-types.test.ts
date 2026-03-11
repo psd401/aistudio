@@ -80,17 +80,14 @@ describe('SSE Event Parsing', () => {
       expect(() => parseSSEEvent(data)).toThrow('SSE event missing required "type" field');
     });
 
-    it('should warn for unrecognized event type', () => {
-      const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
+    it('should not throw for unrecognized event type (logs a warning instead)', () => {
       const data = '{"type":"unknown-type","data":"test"}';
 
-      parseSSEEvent(data);
-
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Unrecognized event type: "unknown-type"')
-      );
-
-      consoleSpy.mockRestore();
+      // parseSSEEvent should not throw — unknown types are gracefully forwarded
+      // with a structured log.warn via @/lib/client-logger (no console.warn)
+      expect(() => parseSSEEvent(data)).not.toThrow();
+      const event = parseSSEEvent(data);
+      expect(event.type).toBe('unknown-type');
     });
   });
 
@@ -318,6 +315,15 @@ describe('Tool Event Type Guards', () => {
         type: 'tool-input-delta',
         toolCallId: 'call-123',
         delta: '{"key":'
+      };
+
+      expect(isToolInputDeltaEvent(event)).toBe(true);
+    });
+
+    it('should return true for tool-input-delta without optional delta field', () => {
+      const event: SSEEvent = {
+        type: 'tool-input-delta',
+        toolCallId: 'call-123'
       };
 
       expect(isToolInputDeltaEvent(event)).toBe(true);

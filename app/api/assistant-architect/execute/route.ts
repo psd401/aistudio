@@ -504,8 +504,6 @@ export async function POST(req: Request) {
         JSON.stringify({
           error: error.message,
           code: 'CONTENT_BLOCKED',
-          categories: error.blockedCategories,
-          source: error.source,
           requestId
         }),
         {

@@ -172,6 +172,32 @@ export const ToolOutputAvailableSchema = BaseEventSchema.extend({
 })
 
 // ============================================================================
+// SOURCE SCHEMAS
+// ============================================================================
+
+/**
+ * Source URL event schema
+ * Includes URL protocol validation (http/https only) as defense-in-depth against XSS.
+ * Mirrors the runtime check in the isSourceUrlEvent type guard.
+ */
+export const SourceUrlSchema = BaseEventSchema.extend({
+  type: z.literal('source-url'),
+  sourceId: z.string(),
+  url: z.string().refine(
+    (u) => {
+      try {
+        const p = new URL(u);
+        return p.protocol === 'http:' || p.protocol === 'https:';
+      } catch {
+        return false;
+      }
+    },
+    { message: 'URL must use http or https protocol' }
+  ),
+  title: z.string().optional()
+})
+
+// ============================================================================
 // LIFECYCLE SCHEMAS
 // ============================================================================
 
@@ -288,6 +314,7 @@ export const SSEEventSchema = z.discriminatedUnion('type', [
   ToolInputErrorSchema,
   ToolOutputErrorSchema,
   ToolOutputAvailableSchema,
+  SourceUrlSchema,
   StartEventSchema,
   StartStepSchema,
   FinishStepSchema,
@@ -423,6 +450,7 @@ export function validateEventType(event: unknown, eventType: string): Validation
     'tool-input-error': ToolInputErrorSchema,
     'tool-output-error': ToolOutputErrorSchema,
     'tool-output-available': ToolOutputAvailableSchema,
+    'source-url': SourceUrlSchema,
     'start': StartEventSchema,
     'start-step': StartStepSchema,
     'finish-step': FinishStepSchema,
