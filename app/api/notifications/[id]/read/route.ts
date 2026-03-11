@@ -28,7 +28,7 @@ export async function PUT(request: NextRequest, context: { params: Promise<{ id:
     }
 
     // Resolve user ID (auto-provisions if missing)
-    const userId = await resolveUserId(session)
+    const userId = await resolveUserId(session, requestId)
 
     // Verify notification belongs to user and update status
     const result = await markNotificationAsRead(notificationId, userId)

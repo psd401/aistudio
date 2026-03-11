@@ -90,7 +90,7 @@ export async function downloadHandler(
     }
 
     // Resolve user ID (auto-provisions if missing)
-    const userId = await resolveUserId(session)
+    const userId = await resolveUserId(session, requestId)
 
     // Get execution result with all related data - includes access control check
     const result = await getExecutionResultForDownload(resultId, userId)

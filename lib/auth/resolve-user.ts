@@ -12,13 +12,15 @@
  */
 
 import {
-  getUserIdByCognitoSub,
+  getUserIdByCognitoSubAsNumber,
   getUserByEmail,
   updateUser,
   createUser,
   addUserRole,
 } from "@/lib/db/drizzle"
 import { createLogger, sanitizeForLogging } from "@/lib/logger"
+import { ErrorFactories } from "@/lib/error-utils"
+import { ErrorCode } from "@/types/error-types"
 import type { CognitoSession } from "./server-session"
 
 /**
@@ -38,10 +40,10 @@ export async function resolveUserId(
 ): Promise<number> {
   const log = createLogger({ module: "resolveUserId", requestId })
 
-  // Fast path: user exists
-  const existingId = await getUserIdByCognitoSub(session.sub)
+  // Fast path: user exists (returns null on miss, throws TypeError on malformed ID)
+  const existingId = await getUserIdByCognitoSubAsNumber(session.sub)
   if (existingId) {
-    return Number(existingId)
+    return existingId
   }
 
   // Slow path: provision the user
@@ -66,10 +68,14 @@ export async function resolveUserId(
         return byEmail.id
       }
     } catch (error) {
-      // getUserByEmail throws dbRecordNotFound when not found — only catch that.
-      // Re-throw real DB errors (connection failures, timeouts, etc.)
+      // getUserByEmail throws ErrorFactories.dbRecordNotFound when not found.
+      // Check the typed error code — string-match is too broad and risks swallowing
+      // real DB errors whose message happens to contain "not found".
       const isNotFound =
-        error instanceof Error && error.message.toLowerCase().includes("not found")
+        error !== null &&
+        typeof error === "object" &&
+        "code" in error &&
+        (error as { code: unknown }).code === ErrorCode.DB_RECORD_NOT_FOUND
       if (!isNotFound) {
         throw error
       }
@@ -86,7 +92,7 @@ export async function resolveUserId(
     log.warn("Cannot provision user: session has no email address", {
       cognitoSub: sanitizeForLogging(session.sub),
     })
-    throw new Error("Cannot provision user: session contains no email address")
+    throw ErrorFactories.missingRequiredField("email")
   }
 
   const firstName = session.givenName || username || "User"

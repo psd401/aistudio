@@ -21,7 +21,7 @@ export async function PUT() {
     }
 
     // Resolve user ID (auto-provisions if missing)
-    const userId = await resolveUserId(session)
+    const userId = await resolveUserId(session, requestId)
     log.info("Marking all notifications as read for user", { userId: sanitizeForLogging(userId) })
 
     // Update all unread notifications for the user

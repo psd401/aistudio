@@ -44,7 +44,7 @@ async function getHandler(
     }
 
     // Resolve user ID (auto-provisions if missing)
-    const userId = await resolveUserId(session)
+    const userId = await resolveUserId(session, requestId)
 
     // Get execution result with all related data - includes access control check
     const result = await getExecutionResultById(resultId, userId)
@@ -144,7 +144,7 @@ async function deleteHandler(
     }
 
     // Resolve user ID (auto-provisions if missing)
-    const userId = await resolveUserId(session)
+    const userId = await resolveUserId(session, requestId)
 
     // Delete the execution result with access control check
     const deleted = await deleteExecutionResult(resultId, userId)
