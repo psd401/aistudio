@@ -6,6 +6,9 @@ import { DualResponse } from "./dual-response"
 import { useToast } from "@/components/ui/use-toast"
 import { useModelsWithPersistence } from "@/lib/hooks/use-models"
 import { PageBranding } from "@/components/ui/page-branding"
+import { createLogger } from "@/lib/client-logger"
+
+const log = createLogger({ module: 'model-compare' })
 
 // Note: This component now uses native streaming instead of polling
 // The backend streams both model responses in parallel via Server-Sent Events
@@ -188,12 +191,9 @@ export function ModelCompare() {
                   }
                 }
               } catch (parseError) {
-                // Log parse errors in development for debugging
-                if (process.env.NODE_ENV === 'development') {
-                  // eslint-disable-next-line no-console
-                  console.warn('Failed to parse SSE event:', line, parseError)
-                }
-                // In production, silently ignore - server-side logging handles errors
+                log.warn('Failed to parse SSE event', {
+                  error: parseError instanceof Error ? parseError.message : String(parseError)
+                })
               }
             }
           }

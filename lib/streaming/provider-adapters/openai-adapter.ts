@@ -393,6 +393,19 @@ export class OpenAIAdapter extends BaseProviderAdapter {
             });
             await callbacks.onFinish(transformedData);
           }
+        },
+        onError: (event) => {
+          const error = event.error instanceof Error ? event.error : new Error(String(event.error));
+
+          logger.error('Stream error (Responses API)', {
+            error: error.message
+          });
+
+          this.handleError(error, callbacks);
+
+          if (callbacks.onError) {
+            callbacks.onError(error);
+          }
         }
       });
       

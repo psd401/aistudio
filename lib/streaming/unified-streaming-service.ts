@@ -499,8 +499,8 @@ async function convertMessages(
 ) {
   log.info('Messages structure before conversion', {
     messageCount: messages.length,
-    firstMessage: JSON.stringify(messages[0]),
-    allMessages: JSON.stringify(messages)
+    firstMessageRole: messages[0]?.role,
+    messageRoles: messages.map(m => m.role),
   });
 
   try {
@@ -510,7 +510,8 @@ async function convertMessages(
     log.error('Failed to convert messages', {
       error: error.message,
       stack: error.stack,
-      messages: JSON.stringify(messages)
+      messageCount: messages.length,
+      messageRoles: messages.map(m => m.role),
     });
     throw new Error(`Message conversion failed: ${error.message}`);
   }
