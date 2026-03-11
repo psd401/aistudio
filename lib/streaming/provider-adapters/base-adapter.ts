@@ -27,10 +27,15 @@ export function isTransientStreamError(error: Error): boolean {
     message.includes('etimedout') ||
     // OpenAI Responses API stale previous_response_id: "No item with id X was found"
     message.includes('no item with id') ||
-    // Rate limits are transient — the request can succeed after backoff
+    // Rate limits are transient — the request can succeed after backoff.
+    // Use precise patterns to avoid false positives on unrelated numeric strings.
     message.includes('rate limit') ||
     message.includes('too many requests') ||
-    message.includes('429')
+    // Match HTTP 429 status codes ("http 429", "status 429", "error 429") but not
+    // strings like "id 42991a" or port ":4299" that happen to contain "429".
+    /\bhttp\s*429\b/.test(message) ||
+    /\bstatus\s*429\b/.test(message) ||
+    /\berror\s*429\b/.test(message)
   );
 }
 

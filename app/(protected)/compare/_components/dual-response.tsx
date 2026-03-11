@@ -56,6 +56,7 @@ export function DualResponse({
                 size="sm"
                 variant="ghost"
                 className="h-7 px-2"
+                data-testid="streaming-indicator"
               >
                 <IconPlayerStop className="h-3 w-3" />
               </Button>

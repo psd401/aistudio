@@ -397,10 +397,7 @@ export class OpenAIAdapter extends BaseProviderAdapter {
         onError: (event) => {
           const error = event.error instanceof Error ? event.error : new Error(String(event.error));
 
-          logger.error('Stream error (Responses API)', {
-            error: error.message
-          });
-
+          // handleError() logs at warn (transient) or error (permanent) — no need to log here too.
           this.handleError(error, callbacks);
 
           if (callbacks.onError) {

@@ -70,8 +70,20 @@ describe('isTransientStreamError', () => {
       expect(isTransientStreamError(makeError('Too many requests'))).toBe(true);
     });
 
-    it('matches "429" status code in message', () => {
+    it('matches "HTTP 429" status code in message', () => {
       expect(isTransientStreamError(makeError('HTTP 429: rate limited'))).toBe(true);
+    });
+
+    it('matches "status 429" in message', () => {
+      expect(isTransientStreamError(makeError('Request failed with status 429'))).toBe(true);
+    });
+
+    it('does NOT match "42991a" (not a 429 status)', () => {
+      expect(isTransientStreamError(makeError('Failed to parse response id 42991a'))).toBe(false);
+    });
+
+    it('does NOT match ":4299" port number', () => {
+      expect(isTransientStreamError(makeError('Connection refused at host:4299'))).toBe(false);
     });
   });
 
