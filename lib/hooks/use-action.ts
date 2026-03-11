@@ -69,8 +69,25 @@ export function useAction<TInput, TOutput>(
       }
     } catch (e) {
       const message = e instanceof Error ? e.message : "An unexpected error occurred";
+
+      // Detect stale server action references after deployment
+      // Next.js throws this when the client has cached action IDs from a previous build
+      if (message.includes("Failed to find Server Action")) {
+        toast({
+          title: "New version available",
+          description: "The application has been updated. Reloading...",
+          variant: "default",
+        });
+        // Brief delay so the toast is visible before reload
+        setTimeout(() => window.location.reload(), 1500);
+        return {
+          isSuccess: false,
+          message: "Application updated, reloading...",
+        };
+      }
+
       setError(message);
-      
+
       if (showErrorToast) {
         toast({
           title: "Error",
