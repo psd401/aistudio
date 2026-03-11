@@ -612,7 +612,8 @@ export function isErrorEvent(event: SSEEvent): event is ErrorEvent {
 // ============================================================================
 
 // Valid SSE event types for runtime validation
-const VALID_SSE_EVENT_TYPES = new Set([
+// Exported for sync tests — must match SSEEventSchema discriminated union options
+export const VALID_SSE_EVENT_TYPES = new Set([
   'text-start',
   'text-delta',
   'text-end',

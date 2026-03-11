@@ -14,7 +14,7 @@
  * @see /lib/streaming/sse-event-types.ts
  */
 
-import { z } from 'zod'
+import { z, ZodIssueCode } from 'zod'
 import type { SSEEvent } from './sse-event-types'
 
 // ============================================================================
@@ -378,35 +378,38 @@ export function validateSSEEvent(event: unknown): ValidationResult {
     }
   }
 
-  // Generate helpful error messages
-  const issues = result.error.issues.map(issue => ({
-    path: issue.path.map(String),
-    message: issue.message,
-    expected: 'expected' in issue ? String(issue.expected) : undefined,
-    received: 'received' in issue ? String(issue.received) : undefined
-  }))
-
-  // Generate helpful hints based on error patterns
+  // Generate hints from raw Zod issues (before mapping) to access ZodIssueCode
   let hint: string | undefined
 
   // Check for field name mismatches (like textDelta vs delta)
-  // Zod v4 may say "expected string, received undefined" for missing required fields
-  const fieldNameIssues = issues.filter(i =>
-    i.message.includes('Unrecognized key') ||
-    i.message.includes('Required') ||
-    i.message.includes('received undefined') ||
-    (i.message.includes('Invalid input') && i.path.includes('delta'))
+  // In Zod v4, invalid_type issues have `input` (not `received`):
+  //   - input === undefined → required field is missing (likely wrong field name)
+  //   - input !== undefined → field is present but has wrong type
+  const fieldNameIssues = result.error.issues.filter(i =>
+    i.code === ZodIssueCode.unrecognized_keys ||
+    i.code === ZodIssueCode.invalid_union ||
+    (i.code === ZodIssueCode.invalid_type && i.input === undefined)
   )
 
   if (fieldNameIssues.length > 0) {
     hint = 'Field name mismatch detected. This may indicate an AI SDK compatibility issue or version mismatch. Check that field names match the Vercel AI SDK v6 specification.'
   }
 
-  // Check for type mismatches
-  const typeIssues = issues.filter(i => i.message.includes('Expected') || i.message.includes('invalid_type'))
+  // Check for type mismatches (wrong type provided, not a missing field)
+  const typeIssues = result.error.issues.filter(i =>
+    i.code === ZodIssueCode.invalid_type && i.input !== undefined
+  )
   if (typeIssues.length > 0 && !hint) {
     hint = 'Type mismatch detected. Verify that the event fields have the correct data types.'
   }
+
+  // Map issues for structured output
+  const issues = result.error.issues.map(issue => ({
+    path: issue.path.map(String),
+    message: issue.message,
+    expected: 'expected' in issue ? String(issue.expected) : undefined,
+    received: 'received' in issue ? String(issue.received) : undefined
+  }))
 
   return {
     success: false,
@@ -534,7 +537,7 @@ export function generateValidationErrorMessage(result: ValidationResult): string
   }
 
   if (result.error.hint) {
-    message += `\n\n💡 Hint: ${result.error.hint}`
+    message += `\n\nHint: ${result.error.hint}`
   }
 
   return message

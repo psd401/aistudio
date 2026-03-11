@@ -37,6 +37,7 @@ import {
   isTextStartEvent,
   isTextEndEvent,
   isReasoningStartEvent,
+  isReasoningDeltaEvent,
   isReasoningEndEvent,
   isStartStepEvent,
   isStartEvent,
@@ -327,6 +328,9 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
                   else if (isReasoningStartEvent(event)) {
                     log.debug('Reasoning started', { id: event.id })
                   }
+                  else if (isReasoningDeltaEvent(event)) {
+                    log.debug('Reasoning delta received', { delta: event.delta?.slice(0, 50) })
+                  }
                   else if (isReasoningEndEvent(event)) {
                     log.debug('Reasoning completed', { id: event.id })
                   }
@@ -410,32 +414,14 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
                     sources.push({ id: event.sourceId, url: event.url, title: event.title })
                     log.debug('Source URL collected', { sourceId: event.sourceId })
                   }
-                  // Handle complete assistant messages (direct format - legacy support)
-                  else if ('role' in event && event.role === 'assistant' && 'parts' in event) {
-                    log.info('Received complete assistant message (legacy format)')
-                    const parts = (event as { parts: unknown }).parts
-                    if (Array.isArray(parts)) {
-                      const text = parts.find((p: { type: string; text?: string }) => p.type === 'text')?.text
-                      if (text) {
-                        accumulatedText = text
-                        yield {
-                          content: [{
-                            type: 'text' as const,
-                            text: accumulatedText
-                          }]
-                        }
-                        log.debug('✅ YIELDED content from assistant message', {
-                          textLength: accumulatedText.length
-                        })
-                      }
-                    }
-                  }
                   // Graceful degradation for unknown event types
+                  // event is `never` here (all SSEEvent union members handled above)
                   else {
+                    const unknownEvent = event as unknown as Record<string, unknown>
                     log.warn('⚠️ UNHANDLED SSE EVENT TYPE', {
-                      type: event.type,
-                      keys: Object.keys(event),
-                      sample: JSON.stringify(event).substring(0, 200)
+                      type: unknownEvent['type'],
+                      keys: Object.keys(unknownEvent),
+                      sample: JSON.stringify(unknownEvent).substring(0, 200)
                     })
 
                     // Attempt to extract text content from unknown event
@@ -454,7 +440,7 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
                         }]
                       }
                       log.debug('✅ YIELDED content from unknown event', {
-                        type: event.type,
+                        type: unknownEvent['type'],
                         textLength: accumulatedText.length
                       })
                     }

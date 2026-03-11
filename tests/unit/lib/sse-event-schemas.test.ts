@@ -13,8 +13,10 @@ import {
   validateSSEEvent,
   validateEventType,
   extractEventFields,
-  generateValidationErrorMessage
+  generateValidationErrorMessage,
+  SSEEventSchema
 } from '@/lib/streaming/sse-event-schemas'
+import { VALID_SSE_EVENT_TYPES } from '@/lib/streaming/sse-event-types'
 
 describe('SSE Event Schemas', () => {
   describe('TextDeltaSchema', () => {
@@ -497,6 +499,28 @@ describe('SSE Event Schemas', () => {
       const event = { type: 'source-url', url: 'https://example.com' }
       const result = validateSSEEvent(event)
       expect(result.success).toBe(false)
+    })
+  })
+
+  describe('Schema Sync', () => {
+    it('SSEEventSchema and VALID_SSE_EVENT_TYPES must contain identical event types', () => {
+      // Extract type literals from discriminated union options
+      const schemaTypes = new Set(
+        SSEEventSchema.options.map((schema) => schema.shape.type.value as string)
+      )
+
+      // Every type in SSEEventSchema must be in VALID_SSE_EVENT_TYPES
+      for (const type of schemaTypes) {
+        expect(VALID_SSE_EVENT_TYPES).toContain(type)
+      }
+
+      // Every type in VALID_SSE_EVENT_TYPES must be in SSEEventSchema
+      for (const type of VALID_SSE_EVENT_TYPES) {
+        expect(schemaTypes).toContain(type)
+      }
+
+      // Sets must be the same size
+      expect(schemaTypes.size).toBe(VALID_SSE_EVENT_TYPES.size)
     })
   })
 })
