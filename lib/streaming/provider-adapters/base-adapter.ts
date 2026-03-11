@@ -26,7 +26,7 @@ export function isTransientStreamError(error: Error): boolean {
     message.includes('econnreset') ||
     message.includes('etimedout') ||
     // OpenAI Responses API stale previous_response_id: "No item with id X was found"
-    (message.includes('no item with id') || (message.includes('item') && message.includes('not found')))
+    message.includes('no item with id')
   );
 }
 

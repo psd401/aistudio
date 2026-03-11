@@ -168,20 +168,26 @@ test.describe('Compare API Integration', () => {
     await page.goto('/compare')
     await page.waitForSelector('h1:has-text("Model Comparison")', { timeout: 10000 })
 
-    // Fill prompt and submit (model selectors may not be pre-populated in test env)
     await page.locator('textarea').fill('Test prompt')
     const compareButton = page.locator('button:has-text("Compare Models")')
-    if (await compareButton.isEnabled()) {
-      await compareButton.click()
 
-      // Warning toast should appear
-      await expect(page.locator('[role="alert"]')).toContainText('unavailable', { timeout: 5000 })
-
-      // Model1 content should render
-      await expect(page.locator('text=Hello from model 1')).toBeVisible({ timeout: 5000 })
-
-      // No streaming spinner should remain visible after both models complete
-      await expect(page.locator('[data-testid="streaming-indicator"]')).not.toBeVisible({ timeout: 5000 })
+    // The compare button requires two different models to be selected, which requires
+    // live model data. Skip if the button is not enabled rather than letting the test
+    // silently pass without exercising any assertions.
+    const isEnabled = await compareButton.isEnabled()
+    if (!isEnabled) {
+      test.skip(true, 'Compare button not enabled — model selectors not pre-populated in this environment')
     }
+
+    await compareButton.click()
+
+    // Warning toast should appear
+    await expect(page.locator('[role="alert"]')).toContainText('unavailable', { timeout: 5000 })
+
+    // Model1 content should render
+    await expect(page.locator('text=Hello from model 1')).toBeVisible({ timeout: 5000 })
+
+    // No streaming spinner should remain visible after both models complete
+    await expect(page.locator('[data-testid="streaming-indicator"]')).not.toBeVisible({ timeout: 5000 })
   })
 })

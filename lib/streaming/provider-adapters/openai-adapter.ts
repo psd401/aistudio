@@ -409,9 +409,14 @@ export class OpenAIAdapter extends BaseProviderAdapter {
         }
       });
       
-      // Process reasoning content from the stream (fire-and-forget, errors handled internally)
+      // Process supplementary reasoning content (fire-and-forget).
+      // processResponsesAPIStream has its own internal try/catch for all error paths
+      // (stale reference → warn, other → error). callbacks.onError is intentionally
+      // not called here: this stream extracts reasoning tokens only; the main
+      // response content was already delivered via textStream. A failure here does
+      // not constitute a stream failure from the caller's perspective.
       this.processResponsesAPIStream(result, callbacks).catch((err: unknown) => {
-        logger.error('Unhandled error in processResponsesAPIStream', {
+        logger.error('Unexpected error escaping processResponsesAPIStream', {
           error: err instanceof Error ? err.message : String(err)
         });
       });
@@ -487,7 +492,8 @@ export class OpenAIAdapter extends BaseProviderAdapter {
       }
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      const isStaleReference = errorMessage.includes('Item') && errorMessage.includes('not found');
+      // Match the same precise pattern as isTransientStreamError — "No item with id X was found"
+      const isStaleReference = errorMessage.toLowerCase().includes('no item with id');
 
       if (isStaleReference) {
         // Stale message ID from OpenAI Responses API — a previous response ID
