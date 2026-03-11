@@ -14,7 +14,7 @@ Features:
 import boto3
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 import logging
 
@@ -147,7 +147,7 @@ def get_connection_count(minutes: int = 30) -> int:
         Maximum number of connections in the period
     """
     try:
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(minutes=minutes)
 
         response = cloudwatch.get_metric_statistics(

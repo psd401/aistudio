@@ -33,26 +33,13 @@ ENVIRONMENT = os.environ["ENVIRONMENT"]
 MAX_REASON_LENGTH = 500
 
 
-def validate_capacity(capacity: Optional[float], name: str) -> Optional[float]:
-    """Validate capacity value is within Aurora Serverless v2 bounds."""
-    if capacity is None:
-        return None
-
-    # Aurora Serverless v2 valid range: 0.5 - 128 ACU
-    if capacity < 0.5:
-        logger.warning(f"{name} capacity {capacity} too low. Minimum is 0.5 ACU.")
-        return 0.5
-    if capacity > 128:
-        logger.warning(f"{name} capacity {capacity} too high. Maximum is 128 ACU.")
-        return 128
-
-    return capacity
-
-
 def validate_event(event: Dict[str, Any]) -> tuple[Optional[float], Optional[float], str]:
     """Validate and sanitize event inputs."""
-    min_capacity = validate_capacity(event.get("minCapacity"), "Minimum")
-    max_capacity = validate_capacity(event.get("maxCapacity"), "Maximum")
+    # Validate capacity inline — event values are Optional[float]
+    raw_min = event.get("minCapacity")
+    raw_max = event.get("maxCapacity")
+    min_capacity = validate_capacity(raw_min, "Minimum") if raw_min is not None else None
+    max_capacity = validate_capacity(raw_max, "Maximum") if raw_max is not None else None
 
     # Sanitize reason string
     reason = str(event.get("reason", "Scheduled scaling"))
