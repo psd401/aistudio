@@ -12,7 +12,7 @@ jest.mock('@aws-sdk/client-dynamodb');
 
 import { DynamoDBClient, BatchGetItemCommand } from '@aws-sdk/client-dynamodb';
 
-interface BatchGetInput {
+interface MockBatchGetItemInput {
   RequestItems: {
     [tableName: string]: {
       Keys: Array<{ token: { S: string }; sessionId: { S: string } }>;
@@ -171,14 +171,18 @@ describe('PIITokenizationService', () => {
     const PLACEHOLDER = `[PII:${TOKEN_UUID}]`;
 
     // Capture BatchGetItemCommand constructor args since auto-mock doesn't preserve input
-    let capturedBatchInputs: BatchGetInput[];
+    let capturedBatchInputs: MockBatchGetItemInput[];
     let mockSend: jest.Mock;
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
 
     function setupMockDynamo(responses: Record<string, unknown[]>) {
       capturedBatchInputs = [];
       const MockedBatchGetItemCommand = BatchGetItemCommand as jest.MockedClass<typeof BatchGetItemCommand>;
       MockedBatchGetItemCommand.mockImplementation((input) => {
-        capturedBatchInputs.push(input as unknown as BatchGetInput);
+        capturedBatchInputs.push(input as unknown as MockBatchGetItemInput);
         return Object.assign(Object.create(BatchGetItemCommand.prototype), { input });
       });
 

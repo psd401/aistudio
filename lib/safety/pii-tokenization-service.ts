@@ -323,6 +323,10 @@ export class PIITokenizationService {
       const tokenMappings = await this.batchGetTokenMappings(tokenIds, sessionId);
 
       let replacementsApplied = 0;
+      // NOTE: matchAll returns every occurrence of a token placeholder as a separate entry.
+      // String.replace(string, string) replaces only the FIRST occurrence, which is correct
+      // here because each iteration handles exactly one site. If matches were deduplicated
+      // before this loop, subsequent occurrences would go unreplaced — intentionally not done.
       for (const match of matches) {
         const [placeholder, token] = match;
 
@@ -330,8 +334,14 @@ export class PIITokenizationService {
         const tokenMapping = tokenMappings.find((t) => t.token === token);
 
         if (tokenMapping) {
+          const before = detokenizedText;
           detokenizedText = detokenizedText.replace(placeholder, tokenMapping.original);
-          replacementsApplied++;
+          // Only increment when the substitution actually changed the string.
+          // In the pathological case where original itself contains a [PII:UUID] pattern,
+          // a prior iteration may have already consumed this placeholder.
+          if (detokenizedText !== before) {
+            replacementsApplied++;
+          }
         } else {
           this.log.warn('Token mapping not found', {
             requestId,
@@ -482,7 +492,10 @@ export class PIITokenizationService {
       return [];
     }
 
-    // BatchGetItem supports up to 100 items per request
+    // BatchGetItem supports up to 100 items per request.
+    // Deduplication is applied BEFORE batching so that batch boundaries always
+    // contain only unique keys. This means 101 tokens that deduplicate to 51
+    // unique IDs split into batches of 51 and 0, not 100 and 1.
     const BATCH_SIZE = 100;
     const batches: string[][] = [];
     for (let i = 0; i < uniqueTokens.length; i += BATCH_SIZE) {
