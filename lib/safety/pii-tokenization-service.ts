@@ -469,6 +469,11 @@ export class PIITokenizationService {
       return [];
     }
 
+    // Deduplicate token IDs — DynamoDB BatchGetItem rejects requests with
+    // duplicate composite keys (token + sessionId). The same PII token UUID
+    // can appear multiple times in text (e.g., same name repeated).
+    const uniqueTokens = [...new Set(tokens)];
+
     const tableName = this.config.piiTokenTableName;
     if (!tableName) {
       return [];
@@ -477,8 +482,8 @@ export class PIITokenizationService {
     // BatchGetItem supports up to 100 items per request
     const BATCH_SIZE = 100;
     const batches: string[][] = [];
-    for (let i = 0; i < tokens.length; i += BATCH_SIZE) {
-      batches.push(tokens.slice(i, i + BATCH_SIZE));
+    for (let i = 0; i < uniqueTokens.length; i += BATCH_SIZE) {
+      batches.push(uniqueTokens.slice(i, i + BATCH_SIZE));
     }
 
     // Process batches concurrently with resilience - use allSettled to avoid losing
