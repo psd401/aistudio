@@ -12,6 +12,14 @@ jest.mock('@aws-sdk/client-dynamodb');
 
 import { DynamoDBClient, BatchGetItemCommand } from '@aws-sdk/client-dynamodb';
 
+interface BatchGetInput {
+  RequestItems: {
+    [tableName: string]: {
+      Keys: Array<{ token: { S: string }; sessionId: { S: string } }>;
+    };
+  };
+}
+
 describe('PIITokenizationService', () => {
   let service: PIITokenizationService;
   const TEST_REGION = 'us-west-2';
@@ -163,14 +171,14 @@ describe('PIITokenizationService', () => {
     const PLACEHOLDER = `[PII:${TOKEN_UUID}]`;
 
     // Capture BatchGetItemCommand constructor args since auto-mock doesn't preserve input
-    let capturedBatchInputs: unknown[];
+    let capturedBatchInputs: BatchGetInput[];
     let mockSend: jest.Mock;
 
     function setupMockDynamo(responses: Record<string, unknown[]>) {
       capturedBatchInputs = [];
       const MockedBatchGetItemCommand = BatchGetItemCommand as jest.MockedClass<typeof BatchGetItemCommand>;
       MockedBatchGetItemCommand.mockImplementation((input) => {
-        capturedBatchInputs.push(input);
+        capturedBatchInputs.push(input as unknown as BatchGetInput);
         return Object.assign(Object.create(BatchGetItemCommand.prototype), { input });
       });
 
@@ -193,8 +201,7 @@ describe('PIITokenizationService', () => {
       // BatchGetItem should be called once with only 1 unique key (not 3)
       expect(mockSend).toHaveBeenCalledTimes(1);
       expect(capturedBatchInputs).toHaveLength(1);
-      const keys = (capturedBatchInputs[0] as Record<string, Record<string, { Keys: unknown[] }>>)
-        .RequestItems['test-table'].Keys;
+      const keys = capturedBatchInputs[0].RequestItems['test-table'].Keys;
       expect(keys).toHaveLength(1);
 
       // All 3 occurrences should still be replaced
@@ -212,8 +219,7 @@ describe('PIITokenizationService', () => {
 
       const result = await service.detokenize(text, 'session-123');
 
-      const keys = (capturedBatchInputs[0] as Record<string, Record<string, { Keys: unknown[] }>>)
-        .RequestItems['test-table'].Keys;
+      const keys = capturedBatchInputs[0].RequestItems['test-table'].Keys;
       expect(keys).toHaveLength(1);
       expect(result).toBe('Jane Jane');
     });
@@ -233,8 +239,7 @@ describe('PIITokenizationService', () => {
 
       const result = await service.detokenize(text, 'session-123');
 
-      const keys = (capturedBatchInputs[0] as Record<string, Record<string, { Keys: unknown[] }>>)
-        .RequestItems['test-table'].Keys;
+      const keys = capturedBatchInputs[0].RequestItems['test-table'].Keys;
       expect(keys).toHaveLength(2);
       expect(result).toBe('Alice and Bob met Alice');
     });

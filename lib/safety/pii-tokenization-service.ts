@@ -322,6 +322,7 @@ export class PIITokenizationService {
       const tokenIds = matches.map((m) => m[1]);
       const tokenMappings = await this.batchGetTokenMappings(tokenIds, sessionId);
 
+      let replacementsApplied = 0;
       for (const match of matches) {
         const [placeholder, token] = match;
 
@@ -330,6 +331,7 @@ export class PIITokenizationService {
 
         if (tokenMapping) {
           detokenizedText = detokenizedText.replace(placeholder, tokenMapping.original);
+          replacementsApplied++;
         } else {
           this.log.warn('Token mapping not found', {
             requestId,
@@ -342,7 +344,8 @@ export class PIITokenizationService {
 
       this.log.info('PII detokenization complete', {
         requestId,
-        tokensRestored: tokenMappings.length,
+        uniqueTokensFetched: tokenMappings.length,
+        textReplacementsApplied: replacementsApplied,
       });
 
       return detokenizedText;
