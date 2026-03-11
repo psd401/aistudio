@@ -61,6 +61,18 @@ describe('isTransientStreamError', () => {
     it('matches OpenAI stale ref lowercase', () => {
       expect(isTransientStreamError(makeError('no item with id resp_xyz was found'))).toBe(true);
     });
+
+    it('matches "Rate limit exceeded"', () => {
+      expect(isTransientStreamError(makeError('Rate limit exceeded. Please try again later.'))).toBe(true);
+    });
+
+    it('matches "Too many requests"', () => {
+      expect(isTransientStreamError(makeError('Too many requests'))).toBe(true);
+    });
+
+    it('matches "429" status code in message', () => {
+      expect(isTransientStreamError(makeError('HTTP 429: rate limited'))).toBe(true);
+    });
   });
 
   describe('non-transient patterns — should return false', () => {
@@ -84,8 +96,8 @@ describe('isTransientStreamError', () => {
       expect(isTransientStreamError(makeError('Model gpt-99 does not exist'))).toBe(false);
     });
 
-    it('rejects rate limit error (rate limit is not transient in this classifier)', () => {
-      expect(isTransientStreamError(makeError('Rate limit exceeded. Please try again later.'))).toBe(false);
+    it('rejects permission error', () => {
+      expect(isTransientStreamError(makeError('You do not have permission to access this model'))).toBe(false);
     });
 
     it('rejects empty string error', () => {

@@ -26,7 +26,11 @@ export function isTransientStreamError(error: Error): boolean {
     message.includes('econnreset') ||
     message.includes('etimedout') ||
     // OpenAI Responses API stale previous_response_id: "No item with id X was found"
-    message.includes('no item with id')
+    message.includes('no item with id') ||
+    // Rate limits are transient — the request can succeed after backoff
+    message.includes('rate limit') ||
+    message.includes('too many requests') ||
+    message.includes('429')
   );
 }
 
