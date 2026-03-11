@@ -107,8 +107,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         logger.error(f"Error in predictive scaling: {str(e)}", exc_info=True)
         return {
             "statusCode": 500,
-            "error": str(e),
-            "cluster": CLUSTER_ID,
+            "error": "Predictive scaling failed. See CloudWatch logs for details.",
         }
 
 

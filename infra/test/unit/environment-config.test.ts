@@ -313,6 +313,17 @@ describe("EnvironmentConfig", () => {
       expect(devConfig.monitoring.detailedMetrics).toBe(false)
     })
 
+    test("prod should have equal or greater capacity ceiling than staging", () => {
+      const stagingConfig = EnvironmentConfig.get("staging")
+      const prodConfig = EnvironmentConfig.get("prod")
+
+      // maxCapacity is the key differentiator now that minCapacity is equal (both 1)
+      expect(prodConfig.database.maxCapacity).toBeGreaterThanOrEqual(stagingConfig.database.maxCapacity)
+      // Prod must always have deletion protection even if capacity shrinks
+      expect(prodConfig.database.deletionProtection).toBe(true)
+      expect(stagingConfig.database.deletionProtection).toBe(false)
+    })
+
     test("staging should be between dev and prod", () => {
       const devConfig = EnvironmentConfig.get("dev")
       const stagingConfig = EnvironmentConfig.get("staging")

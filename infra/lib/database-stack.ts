@@ -45,15 +45,16 @@ export class DatabaseStack extends cdk.Stack {
       allowAllOutbound: true,
     });
 
-    // For development, allow PostgreSQL access from anywhere (you should restrict this to your IP)
+    // Restrict PostgreSQL access to VPC CIDR in all environments.
+    // Previously dev allowed 0.0.0.0/0, but with RDS Proxy removed (which enforced
+    // TLS termination), direct internet exposure on port 5432 is unacceptable.
+    // Local development uses DATABASE_URL in .env.local (see CLAUDE.md).
     if (props.environment === 'dev') {
       dbSg.addIngressRule(
-        ec2.Peer.anyIpv4(),
+        ec2.Peer.ipv4(vpc.vpcCidrBlock),
         ec2.Port.tcp(5432),
-        'Allow PostgreSQL access from anywhere (DEV ONLY)'
+        'Allow PostgreSQL access from VPC (DEV)'
       );
-      // Better practice: restrict to your IP
-      // dbSg.addIngressRule(ec2.Peer.ipv4('YOUR.IP.ADDRESS.HERE/32'), ec2.Port.tcp(5432), 'Allow PostgreSQL from my IP');
     } else {
       // Production: only allow from within VPC
       dbSg.addIngressRule(
@@ -370,11 +371,9 @@ export class DatabaseStack extends cdk.Stack {
         exportName: `${props.environment}-ClusterEndpoint`,
       });
 
-      new cdk.CfnOutput(this, 'ClusterReaderEndpoint', {
-        value: this.cluster.clusterReadEndpoint.hostname,
-        description: 'Aurora cluster reader endpoint',
-        exportName: `${props.environment}-ClusterReaderEndpoint`,
-      });
+      // ClusterReaderEndpoint removed — no reader instance deployed (see #832).
+      // Reader resolves to writer when no reader exists, which could mislead
+      // consumers expecting read/write separation. Re-add when reader is restored.
     }
 
     // Store values in SSM Parameter Store for cross-stack references

@@ -95,7 +95,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         "reason": "Description of why this action was triggered"
     }
     """
-    logger.info(f"Aurora cost optimizer invoked: {json.dumps(event)}")
+    logger.info(f"Aurora cost optimizer invoked: action={event.get('action', 'auto')}")
 
     action, reason = validate_event(event)
 
@@ -111,7 +111,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     except Exception as e:
         logger.error(f"Error in Aurora cost optimizer: {str(e)}", exc_info=True)
-        return {"statusCode": 500, "error": str(e)}
+        return {"statusCode": 500, "error": "Aurora cost optimizer failed. See CloudWatch logs for details."}
 
 
 def get_cluster_info() -> Dict[str, Any]:
@@ -192,11 +192,14 @@ def pause_cluster(reason: str) -> Dict[str, Any]:
     cluster_info = get_cluster_info()
     current_min = cluster_info["minCapacity"]
 
-    # Only consider it paused if both min AND max are at 0.5
+    # Only consider it paused if both min AND max are at 0.5.
+    # Use normalized comparison (round to nearest 0.5) to avoid float precision issues.
     # Bug fix: Previously only checked min, so dev cluster (min=0.5, max=2.0)
-    # was incorrectly reported as "already paused" and never truly paused
+    # was incorrectly reported as "already paused" and never truly paused.
     current_max = cluster_info["maxCapacity"]
-    if current_min == 0.5 and current_max == 0.5:
+    normalized_min = round(current_min * 2) / 2
+    normalized_max = round(current_max * 2) / 2
+    if normalized_min == 0.5 and normalized_max == 0.5:
         logger.info("Cluster already at minimum capacity (effectively paused)")
         return {"status": "already_paused", "capacity": 0.5}
 
@@ -314,7 +317,7 @@ def auto_pause_check(reason: str) -> Dict[str, Any]:
         # Don't force resume if cluster is already active
         # This prevents unnecessary API calls
         cluster_info = get_cluster_info()
-        if cluster_info["minCapacity"] == 0.5 and cluster_info["maxCapacity"] == 0.5:
+        if round(cluster_info["minCapacity"] * 2) / 2 == 0.5 and round(cluster_info["maxCapacity"] * 2) / 2 == 0.5:
             logger.info("Cluster is paused but has activity. Resuming.")
             return resume_cluster("Auto-resume: Activity detected")
         else:

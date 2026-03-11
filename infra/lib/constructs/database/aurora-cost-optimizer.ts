@@ -152,7 +152,7 @@ export class AuroraCostOptimizer extends Construct {
     const pauseResumeLogGroup = new logs.LogGroup(this, "PauseResumeFunctionLogGroup", {
       logGroupName: `/aws/lambda/aistudio-${props.environment}-aurora-pause-resume`,
       retention: logs.RetentionDays.ONE_WEEK,
-      removalPolicy: cdk.RemovalPolicy.DESTROY,
+      removalPolicy: props.environment === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
     })
 
     // Add tags for cost tracking and resource management
@@ -237,7 +237,7 @@ export class AuroraCostOptimizer extends Construct {
       const scalingLogGroup = new logs.LogGroup(this, "ScalingFunctionLogGroup", {
         logGroupName: `/aws/lambda/aistudio-${props.environment}-aurora-scaling`,
         retention: logs.RetentionDays.ONE_WEEK,
-        removalPolicy: cdk.RemovalPolicy.DESTROY,
+        removalPolicy: props.environment === "prod" ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
       })
 
       // Add tags for cost tracking and resource management
