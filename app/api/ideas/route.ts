@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from '@/lib/auth/server-session';
-import { getIdeas, getUserVotedIdeaIds, getUserIdByCognitoSub, createIdea } from '@/lib/db/drizzle';
+import { getIdeas, getUserVotedIdeaIds, createIdea, getUserIdByCognitoSubAsNumber } from '@/lib/db/drizzle';
+import { resolveUserId } from '@/lib/auth/resolve-user';
 import { hasRole } from '@/utils/roles';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
@@ -27,18 +28,17 @@ export async function GET() {
     // Get all ideas with creator names and counts
     const allIdeas = await getIdeas();
 
-    // Get the user's numeric ID for vote checking
-    const currentUserIdString = await getUserIdByCognitoSub(session.sub);
-    const currentUserId = currentUserIdString ? Number(currentUserIdString) : null;
-
-    let userVotedIdeaIds = new Set<number>();
-    if (currentUserId) {
-      userVotedIdeaIds = await getUserVotedIdeaIds(currentUserId);
-    }
+    // Look up existing user ID without provisioning — GET should not create users.
+    // If the user has no DB record yet, return ideas with hasVoted: false as a
+    // graceful fallback; provisioning happens on the next write action.
+    const currentUserId = await getUserIdByCognitoSubAsNumber(session.sub);
+    const votedIds = currentUserId !== null
+      ? await getUserVotedIdeaIds(currentUserId)
+      : new Set<number>();
 
     const ideasWithVotes = allIdeas.map((idea) => ({
       ...idea,
-      hasVoted: userVotedIdeaIds.has(idea.id)
+      hasVoted: votedIds.has(idea.id)
     }));
 
     log.info("Ideas retrieved successfully", { count: ideasWithVotes.length });
@@ -103,19 +103,8 @@ export async function POST(request: Request) {
       });
     }
 
-    // Get the user's numeric ID from their cognito_sub
-    const userIdString = await getUserIdByCognitoSub(session.sub);
-
-    if (!userIdString) {
-      log.error("User not found in database", { cognitoSub: session.sub });
-      timer({ status: "error", reason: "user_not_found" });
-      return new NextResponse('User not found', {
-        status: 404,
-        headers: { "X-Request-Id": requestId }
-      });
-    }
-
-    const userId = Number(userIdString);
+    // Get the user's numeric ID (provisions if missing)
+    const userId = await resolveUserId(session, requestId);
 
     const newIdea = await createIdea({
       title,

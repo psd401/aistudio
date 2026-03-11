@@ -1,6 +1,7 @@
 import { getServerSession } from '@/lib/auth/server-session';
 import { NextResponse } from 'next/server';
-import { getUserIdByCognitoSub, updateIdeaStatus } from '@/lib/db/drizzle';
+import { updateIdeaStatus } from '@/lib/db/drizzle';
+import { resolveUserId } from '@/lib/auth/resolve-user';
 import { hasRole } from '@/utils/roles';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
@@ -37,14 +38,8 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
 
     let completedBy: string | undefined;
     if (status === 'completed') {
-      // Get the user's numeric ID from their cognito_sub
-      const userIdString = await getUserIdByCognitoSub(session.sub);
-
-      if (!userIdString) {
-        return new NextResponse('User not found', { status: 404 });
-      }
-
-      completedBy = userIdString;
+      const userId = await resolveUserId(session, requestId);
+      completedBy = String(userId);
     }
 
     const result = await updateIdeaStatus(ideaId, status, completedBy);
