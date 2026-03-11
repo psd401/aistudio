@@ -72,13 +72,15 @@ export function useAction<TInput, TOutput>(
 
       // Detect stale server action references after deployment
       // Next.js throws this when the client has cached action IDs from a previous build
-      if (message.includes("Failed to find Server Action")) {
+      // Use instanceof + startsWith (not includes) to avoid matching ActionState message strings
+      if (e instanceof Error && e.message.startsWith("Failed to find Server Action")) {
         toast({
           title: "New version available",
           description: "The application has been updated. Reloading...",
           variant: "default",
         });
-        // Brief delay so the toast is visible before reload
+        // Brief delay so the toast is visible before reload.
+        // Intentionally fire-and-forget — the reload is expected to always happen.
         setTimeout(() => window.location.reload(), 1500);
         return {
           isSuccess: false,

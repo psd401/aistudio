@@ -54,6 +54,7 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
         // Session expired — silently stop, don't treat as error
         if (response.status === 401) {
           setResults([])
+          isLoadingRef.current = false
           setIsLoading(false)
           return
         }

@@ -55,6 +55,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
         // If unauthorized, just return empty notifications instead of throwing
         if (response.status === 401) {
           setNotifications([])
+          isLoadingRef.current = false
           setIsLoading(false)
           return
         }
