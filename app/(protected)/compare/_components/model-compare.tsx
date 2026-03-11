@@ -249,6 +249,10 @@ export function ModelCompare() {
 
     setIsStreaming(false)
     setIsLoading(false)
+    // Reset to false so the next comparison starts clean. The defensive
+    // setModel1/2Complete(true) at the end of the stream loop only runs
+    // on the natural-completion path — it won't fire here because
+    // reader.cancel() above breaks the while(true) loop.
     setModel1Complete(false)
     setModel2Complete(false)
   }, [])

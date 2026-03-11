@@ -407,14 +407,8 @@ export class OpenAIAdapter extends BaseProviderAdapter {
       });
       
       // Process supplementary reasoning content (fire-and-forget).
-      // Note: the onError handler above handles errors from the main streamText() call
-      // and DOES forward them via callbacks.onError.
-      // This .catch() is separate: processResponsesAPIStream has its own internal
-      // try/catch (stale reference → warn, other → error logged server-side).
-      // callbacks.onError is intentionally NOT called here because this stream
-      // extracts reasoning tokens only — the main response was already delivered
-      // via textStream. A failure here is not a stream failure from the caller's
-      // perspective.
+      // Supplementary reasoning tokens only — main response already delivered;
+      // intentionally does not call callbacks.onError.
       this.processResponsesAPIStream(result, callbacks).catch((err: unknown) => {
         logger.error('Unexpected error escaping processResponsesAPIStream', {
           error: err instanceof Error ? err.message : String(err)

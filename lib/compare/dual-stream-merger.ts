@@ -4,19 +4,20 @@ import { isTransientStreamError } from '@/lib/streaming/provider-adapters/base-a
 
 const log = createLogger({ module: 'dual-stream-merger' });
 
-export interface DualStreamEvent {
-  modelId: 'model1' | 'model2';
-  type: 'content' | 'finish' | 'error' | 'warning';
-  chunk?: string;
-  error?: string;
-  warning?: string;
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
-  finishReason?: string;
+/** Usage data included in finish events */
+interface StreamUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
 }
+
+/** Discriminated union — TypeScript enforces that warning/error/chunk fields
+ *  only appear on the correct event type. */
+export type DualStreamEvent =
+  | { modelId: 'model1' | 'model2'; type: 'content'; chunk: string }
+  | { modelId: 'model1' | 'model2'; type: 'finish'; finishReason: string; usage?: StreamUsage }
+  | { modelId: 'model1' | 'model2'; type: 'error'; error: string }
+  | { modelId: 'model1' | 'model2'; type: 'warning'; warning: string };
 
 /** Generic client-facing messages — raw provider errors are logged server-side only */
 const CLIENT_MESSAGES = {
@@ -105,13 +106,10 @@ export async function* mergeStreamsWithIdentifiers<T1 extends ToolSet, T2 extend
     // Send terminal events for both models since a merge-level failure affects both.
     // Use warning for transient failures, error for persistent ones.
     // Always follow with finish so the client knows both models are done.
-    const eventType = isTransient ? 'warning' : 'error';
-    const eventPayload = isTransient
-      ? { warning: CLIENT_MESSAGES.responseUnavailable }
-      : { error: CLIENT_MESSAGES.mergeFailed };
-
     for (const modelId of ['model1', 'model2'] as const) {
-      const terminalEvent: DualStreamEvent = { modelId, type: eventType, ...eventPayload };
+      const terminalEvent: DualStreamEvent = isTransient
+        ? { modelId, type: 'warning', warning: CLIENT_MESSAGES.responseUnavailable }
+        : { modelId, type: 'error', error: CLIENT_MESSAGES.mergeFailed };
       yield encoder.encode(`data: ${JSON.stringify(terminalEvent)}\n\n`);
       const finishEvent: DualStreamEvent = { modelId, type: 'finish', finishReason: 'error' };
       yield encoder.encode(`data: ${JSON.stringify(finishEvent)}\n\n`);
@@ -122,6 +120,9 @@ export async function* mergeStreamsWithIdentifiers<T1 extends ToolSet, T2 extend
 /**
  * Emit appropriate init failure event based on whether the error is transient.
  * Transient → warning (graceful fallback); persistent → error.
+ *
+ * Yields raw DualStreamEvent objects — SSE encoding happens in the caller's
+ * for-await loop via encoder.encode().
  */
 async function* emitInitFailureEvent(
   modelId: 'model1' | 'model2',
@@ -214,7 +215,7 @@ async function* processStream<T extends ToolSet>(
         completionTokens: usage.outputTokens || 0,
         totalTokens: (usage.inputTokens || 0) + (usage.outputTokens || 0)
       } : undefined,
-      finishReason: finishReason
+      finishReason: finishReason ?? 'stop'
     };
     yield finishEvent;
 

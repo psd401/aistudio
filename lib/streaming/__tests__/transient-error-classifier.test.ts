@@ -26,6 +26,14 @@ describe('isTransientStreamError', () => {
       expect(isTransientStreamError(makeError('no output generated'))).toBe(true);
     });
 
+    // Note: "no output generated" is a substring match and will classify any error
+    // containing this phrase as transient. This is intentional — the phrase is specific
+    // enough that false positives are unlikely in practice. If a false positive is
+    // discovered, tighten the pattern and add a test case here.
+    it('matches embedded "no output generated" (substring)', () => {
+      expect(isTransientStreamError(makeError('Provider returned: no output generated for request'))).toBe(true);
+    });
+
     it('matches "timeout" (lowercase)', () => {
       expect(isTransientStreamError(makeError('Request timeout after 30s'))).toBe(true);
     });
