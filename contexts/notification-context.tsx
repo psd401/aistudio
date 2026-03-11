@@ -56,6 +56,9 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
         // If unauthorized, just return empty notifications instead of throwing
         if (response.status === 401) {
           setNotifications([])
+          // Belt-and-suspenders: `finally` always runs after this return, so these
+          // assignments are redundant. They're kept here to make the early-return
+          // intent explicit for readers who may not notice the `finally` block.
           isLoadingRef.current = false
           setIsLoading(false)
           return

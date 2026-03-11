@@ -54,6 +54,9 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
         // Session expired — silently stop, don't treat as error
         if (response.status === 401) {
           setResults([])
+          // Belt-and-suspenders: `finally` always runs after this return, so these
+          // assignments are redundant. They're kept here to make the early-return
+          // intent explicit for readers who may not notice the `finally` block.
           isLoadingRef.current = false
           setIsLoading(false)
           return

@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ActionState } from "@/types/actions-types";
 import { toast } from "@/components/ui/use-toast";
+import { createLogger } from "@/lib/client-logger";
 
 type ActionFunction<TInput, TOutput> = (data: TInput) => Promise<ActionState<TOutput>>;
 
@@ -12,6 +13,8 @@ interface UseActionOptions<TOutput> {
   showErrorToast?: boolean;
   successMessage?: string;
 }
+
+const log = createLogger({ hook: "useAction" });
 
 /**
  * Hook for handling server actions with loading state and toast notifications
@@ -73,10 +76,13 @@ export function useAction<TInput, TOutput>(
       // Detect stale server action references after deployment
       // Next.js throws this when the client has cached action IDs from a previous build
       // Use instanceof + startsWith (not includes) to avoid matching ActionState message strings
+      // Error message validated against Next.js 16.x — if detection silently breaks after an
+      // upgrade, check server logs for unhandled "Failed to find Server Action" errors.
       if (e instanceof Error && e.message.startsWith("Failed to find Server Action")) {
         const staleMessage = "Application updated, reloading...";
         // Set internal error state but don't invoke onError — the page reloads in 1.5s
         // and calling onError would cause callers to briefly flash error UI before reload.
+        log.warn("Stale server action detected — triggering reload", { message: e.message });
         setError(staleMessage);
         toast({
           title: "New version available",
