@@ -14,7 +14,7 @@ Features:
 import boto3
 import os
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
 import logging
 
@@ -95,7 +95,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         "reason": "Description of why this action was triggered"
     }
     """
-    logger.info(f"Aurora cost optimizer invoked: {json.dumps(event)}")
+    logger.info(f"Aurora cost optimizer invoked: action={event.get('action', 'auto')}")
 
     action, reason = validate_event(event)
 
@@ -111,7 +111,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
     except Exception as e:
         logger.error(f"Error in Aurora cost optimizer: {str(e)}", exc_info=True)
-        return {"statusCode": 500, "error": str(e)}
+        return {"statusCode": 500, "error": "Aurora cost optimizer failed. See CloudWatch logs for details."}
 
 
 def get_cluster_info() -> Dict[str, Any]:
@@ -147,7 +147,7 @@ def get_connection_count(minutes: int = 30) -> int:
         Maximum number of connections in the period
     """
     try:
-        end_time = datetime.utcnow()
+        end_time = datetime.now(timezone.utc)
         start_time = end_time - timedelta(minutes=minutes)
 
         response = cloudwatch.get_metric_statistics(
@@ -192,8 +192,14 @@ def pause_cluster(reason: str) -> Dict[str, Any]:
     cluster_info = get_cluster_info()
     current_min = cluster_info["minCapacity"]
 
-    # If already at minimum, consider it paused
-    if current_min == 0.5:
+    # Only consider it paused if both min AND max are at 0.5.
+    # Use normalized comparison (round to nearest 0.5) to avoid float precision issues.
+    # Bug fix: Previously only checked min, so dev cluster (min=0.5, max=2.0)
+    # was incorrectly reported as "already paused" and never truly paused.
+    current_max = cluster_info["maxCapacity"]
+    normalized_min = round(current_min * 2) / 2
+    normalized_max = round(current_max * 2) / 2
+    if normalized_min == 0.5 and normalized_max == 0.5:
         logger.info("Cluster already at minimum capacity (effectively paused)")
         return {"status": "already_paused", "capacity": 0.5}
 
@@ -239,19 +245,20 @@ def resume_cluster(reason: str) -> Dict[str, Any]:
 
     cluster_info = get_cluster_info()
 
-    # Determine target capacity based on environment
+    # Determine target capacity based on environment (right-sized per #832)
+    # prod max set to 6 to cover observed 6.0 ACU peak (see environment-config.ts)
     if ENVIRONMENT == "prod":
-        target_min, target_max = 2.0, 8.0
+        target_min, target_max = 1.0, 6.0
     elif ENVIRONMENT == "staging":
         target_min, target_max = 0.5, 2.0
     else:  # dev
         target_min, target_max = 0.5, 2.0
 
-    # If already at target, no action needed
-    if (
-        cluster_info["minCapacity"] == target_min
-        and cluster_info["maxCapacity"] == target_max
-    ):
+    # If already at target, no action needed.
+    # Use normalized comparison consistent with pause_cluster() float hardening.
+    current_normalized_min = round(cluster_info["minCapacity"] * 2) / 2
+    current_normalized_max = round(cluster_info["maxCapacity"] * 2) / 2
+    if current_normalized_min == target_min and current_normalized_max == target_max:
         logger.info("Cluster already at target capacity")
         return {"status": "already_resumed", "capacity": f"{target_min}-{target_max}"}
 
@@ -311,7 +318,7 @@ def auto_pause_check(reason: str) -> Dict[str, Any]:
         # Don't force resume if cluster is already active
         # This prevents unnecessary API calls
         cluster_info = get_cluster_info()
-        if cluster_info["minCapacity"] == 0.5 and cluster_info["maxCapacity"] == 0.5:
+        if round(cluster_info["minCapacity"] * 2) / 2 == 0.5 and round(cluster_info["maxCapacity"] * 2) / 2 == 0.5:
             logger.info("Cluster is paused but has activity. Resuming.")
             return resume_cluster("Auto-resume: Activity detected")
         else:

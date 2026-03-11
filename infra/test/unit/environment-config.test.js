@@ -76,11 +76,11 @@ describe("EnvironmentConfig", () => {
         test("should return reliability-optimized configuration for prod", () => {
             const config = environment_config_1.EnvironmentConfig.get("prod");
             expect(config.costOptimization).toBe(false);
-            expect(config.database.minCapacity).toBe(2);
-            expect(config.database.maxCapacity).toBe(8);
+            expect(config.database.minCapacity).toBe(1);
+            expect(config.database.maxCapacity).toBe(6);
             expect(config.database.autoPause).toBe(false);
             expect(config.database.deletionProtection).toBe(true);
-            expect(config.database.multiAz).toBe(true);
+            expect(config.database.multiAz).toBe(false);
         });
         test("should have maximum compute configuration for prod", () => {
             const config = environment_config_1.EnvironmentConfig.get("prod");
@@ -273,7 +273,8 @@ describe("EnvironmentConfig", () => {
         test("prod should have better reliability than dev", () => {
             const devConfig = environment_config_1.EnvironmentConfig.get("dev");
             const prodConfig = environment_config_1.EnvironmentConfig.get("prod");
-            expect(prodConfig.database.multiAz).toBe(true);
+            // multiAz disabled for prod (reader instance removed per #832)
+            expect(prodConfig.database.multiAz).toBe(false);
             expect(devConfig.database.multiAz).toBe(false);
             expect(prodConfig.database.deletionProtection).toBe(true);
             expect(devConfig.database.deletionProtection).toBe(false);
@@ -285,7 +286,8 @@ describe("EnvironmentConfig", () => {
             const stagingConfig = environment_config_1.EnvironmentConfig.get("staging");
             const prodConfig = environment_config_1.EnvironmentConfig.get("prod");
             expect(stagingConfig.database.minCapacity).toBeGreaterThan(devConfig.database.minCapacity);
-            expect(stagingConfig.database.minCapacity).toBeLessThan(prodConfig.database.minCapacity);
+            // Staging and prod now share same min ACU (1) after right-sizing per #832
+            expect(stagingConfig.database.minCapacity).toBeLessThanOrEqual(prodConfig.database.minCapacity);
             expect(stagingConfig.compute.lambdaMemory).toBeGreaterThan(devConfig.compute.lambdaMemory);
             expect(stagingConfig.compute.lambdaMemory).toBeLessThan(prodConfig.compute.lambdaMemory);
         });

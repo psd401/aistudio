@@ -33,26 +33,13 @@ ENVIRONMENT = os.environ["ENVIRONMENT"]
 MAX_REASON_LENGTH = 500
 
 
-def validate_capacity(capacity: Optional[float], name: str) -> Optional[float]:
-    """Validate capacity value is within Aurora Serverless v2 bounds."""
-    if capacity is None:
-        return None
-
-    # Aurora Serverless v2 valid range: 0.5 - 128 ACU
-    if capacity < 0.5:
-        logger.warning(f"{name} capacity {capacity} too low. Minimum is 0.5 ACU.")
-        return 0.5
-    if capacity > 128:
-        logger.warning(f"{name} capacity {capacity} too high. Maximum is 128 ACU.")
-        return 128
-
-    return capacity
-
-
 def validate_event(event: Dict[str, Any]) -> tuple[Optional[float], Optional[float], str]:
     """Validate and sanitize event inputs."""
-    min_capacity = validate_capacity(event.get("minCapacity"), "Minimum")
-    max_capacity = validate_capacity(event.get("maxCapacity"), "Maximum")
+    # Validate capacity inline — event values are Optional[float]
+    raw_min = event.get("minCapacity")
+    raw_max = event.get("maxCapacity")
+    min_capacity = validate_capacity(raw_min, "Minimum") if raw_min is not None else None
+    max_capacity = validate_capacity(raw_max, "Maximum") if raw_max is not None else None
 
     # Sanitize reason string
     reason = str(event.get("reason", "Scheduled scaling"))
@@ -76,7 +63,10 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         "reason": "Business hours scale-up"
     }
     """
-    logger.info(f"Predictive scaling invoked: {json.dumps(event)}")
+    logger.info(
+        f"Predictive scaling invoked: minCapacity={event.get('minCapacity')}, "
+        f"maxCapacity={event.get('maxCapacity')}, reason={event.get('reason', 'Scheduled scaling')}"
+    )
 
     try:
         min_capacity, max_capacity, reason = validate_event(event)
@@ -120,8 +110,7 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         logger.error(f"Error in predictive scaling: {str(e)}", exc_info=True)
         return {
             "statusCode": 500,
-            "error": str(e),
-            "cluster": CLUSTER_ID,
+            "error": "Predictive scaling failed. See CloudWatch logs for details.",
         }
 
 
@@ -165,8 +154,10 @@ def determine_target_capacity(
         Tuple of (min_capacity, max_capacity)
     """
     # Default capacity by environment
+    # Right-sized per issue #832 based on CloudWatch ACU metrics
+    # prod max set to 6 to cover observed 6.0 ACU peak (see environment-config.ts)
     env_defaults = {
-        "prod": {"min": 2.0, "max": 8.0, "off_hours_min": 1.0, "off_hours_max": 4.0},
+        "prod": {"min": 1.0, "max": 6.0, "off_hours_min": 0.5, "off_hours_max": 2.0},
         "staging": {"min": 0.5, "max": 2.0, "off_hours_min": 0.5, "off_hours_max": 1.0},
         "dev": {"min": 0.5, "max": 2.0, "off_hours_min": 0.5, "off_hours_max": 1.0},
     }
