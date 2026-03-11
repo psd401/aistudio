@@ -190,9 +190,20 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     notification => notification.status !== 'read'
   ).length
 
-  // Initial fetch on mount (only when authenticated)
+  // Reset state when session becomes unauthenticated to prevent stuck loading spinner
+  useEffect(() => {
+    if (sessionStatus === 'unauthenticated') {
+      setNotifications([])
+      setIsLoading(false)
+      setError(null)
+      consecutiveFailures.current = 0
+    }
+  }, [sessionStatus])
+
+  // Initial fetch on mount (only when authenticated); reset backoff on re-authentication
   useEffect(() => {
     if (sessionStatus === 'authenticated') {
+      consecutiveFailures.current = 0
       fetchNotifications()
     }
   }, [fetchNotifications, sessionStatus])
@@ -202,6 +213,8 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     if (sessionStatus !== 'authenticated') {
       return
     }
+
+    let cancelled = false
 
     const baseInterval = 30000 // 30 seconds
 
@@ -215,9 +228,14 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     let timeoutId: NodeJS.Timeout
 
     const scheduleNext = () => {
+      if (cancelled) return
       timeoutId = setTimeout(() => {
+        if (cancelled) return
         if (!isLoadingRef.current) {
-          fetchNotifications().then(scheduleNext)
+          // Use .finally() so polling continues on both success and transient errors
+          fetchNotifications().finally(() => {
+            if (!cancelled) scheduleNext()
+          })
         } else {
           scheduleNext()
         }
@@ -226,7 +244,10 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
 
     scheduleNext()
 
-    return () => clearTimeout(timeoutId)
+    return () => {
+      cancelled = true
+      clearTimeout(timeoutId)
+    }
   }, [fetchNotifications, sessionStatus])
 
   // Set up EventSource for real-time updates with exponential backoff

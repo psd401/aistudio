@@ -74,6 +74,10 @@ export function useAction<TInput, TOutput>(
       // Next.js throws this when the client has cached action IDs from a previous build
       // Use instanceof + startsWith (not includes) to avoid matching ActionState message strings
       if (e instanceof Error && e.message.startsWith("Failed to find Server Action")) {
+        const staleMessage = "Application updated, reloading...";
+        // Notify callers tracking error state or disabling buttons via onError
+        setError(staleMessage);
+        onError?.(staleMessage);
         toast({
           title: "New version available",
           description: "The application has been updated. Reloading...",
@@ -84,7 +88,7 @@ export function useAction<TInput, TOutput>(
         setTimeout(() => window.location.reload(), 1500);
         return {
           isSuccess: false,
-          message: "Application updated, reloading...",
+          message: staleMessage,
         };
       }
 

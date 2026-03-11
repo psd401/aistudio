@@ -91,9 +91,20 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
     await fetchResults()
   }, [fetchResults])
 
-  // Initial fetch on mount (only when authenticated)
+  // Reset state when session becomes unauthenticated to prevent stuck loading spinner
+  useEffect(() => {
+    if (sessionStatus === 'unauthenticated') {
+      setResults([])
+      setIsLoading(false)
+      setError(null)
+      consecutiveFailures.current = 0
+    }
+  }, [sessionStatus])
+
+  // Initial fetch on mount (only when authenticated); reset backoff on re-authentication
   useEffect(() => {
     if (sessionStatus === 'authenticated') {
+      consecutiveFailures.current = 0
       fetchResults()
     }
   }, [fetchResults, sessionStatus])
@@ -103,6 +114,8 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
     if (refreshInterval <= 0 || sessionStatus !== 'authenticated') {
       return
     }
+
+    let cancelled = false
 
     const getInterval = () => {
       if (consecutiveFailures.current === 0) return refreshInterval
@@ -114,9 +127,14 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
     let timeoutId: NodeJS.Timeout
 
     const scheduleNext = () => {
+      if (cancelled) return
       timeoutId = setTimeout(() => {
+        if (cancelled) return
         if (!isLoadingRef.current) {
-          fetchResults().then(scheduleNext)
+          // Use .finally() so polling continues on both success and transient errors
+          fetchResults().finally(() => {
+            if (!cancelled) scheduleNext()
+          })
         } else {
           scheduleNext()
         }
@@ -125,7 +143,10 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
 
     scheduleNext()
 
-    return () => clearTimeout(timeoutId)
+    return () => {
+      cancelled = true
+      clearTimeout(timeoutId)
+    }
   }, [fetchResults, refreshInterval, sessionStatus])
 
   return {
