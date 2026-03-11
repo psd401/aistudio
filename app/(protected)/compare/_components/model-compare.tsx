@@ -12,9 +12,10 @@ import { PageBranding } from "@/components/ui/page-branding"
 
 interface DualStreamEvent {
   modelId: 'model1' | 'model2';
-  type: 'content' | 'finish' | 'error';
+  type: 'content' | 'finish' | 'error' | 'warning';
   chunk?: string;
   error?: string;
+  warning?: string;
   usage?: {
     promptTokens: number;
     completionTokens: number;
@@ -154,6 +155,11 @@ export function ModelCompare() {
                     setModel1Response(prev => prev + data.chunk)
                   } else if (data.type === 'finish') {
                     setModel1Complete(true)
+                  } else if (data.type === 'warning') {
+                    toast({
+                      title: "Model 1 Warning",
+                      description: data.warning || "Comparison unavailable — showing primary model only",
+                    })
                   } else if (data.type === 'error') {
                     setModel1Complete(true)
                     toast({
@@ -167,6 +173,11 @@ export function ModelCompare() {
                     setModel2Response(prev => prev + data.chunk)
                   } else if (data.type === 'finish') {
                     setModel2Complete(true)
+                  } else if (data.type === 'warning') {
+                    toast({
+                      title: "Model 2 Warning",
+                      description: data.warning || "Comparison unavailable — showing primary model only",
+                    })
                   } else if (data.type === 'error') {
                     setModel2Complete(true)
                     toast({

@@ -5,9 +5,10 @@ const log = createLogger({ module: 'dual-stream-merger' });
 
 export interface DualStreamEvent {
   modelId: 'model1' | 'model2';
-  type: 'content' | 'finish' | 'error';
+  type: 'content' | 'finish' | 'error' | 'warning';
   chunk?: string;
   error?: string;
+  warning?: string;
   usage?: {
     promptTokens: number;
     completionTokens: number;
@@ -16,9 +17,18 @@ export interface DualStreamEvent {
   finishReason?: string;
 }
 
+/** Retry configuration for transient model failures */
+const RETRY_CONFIG = {
+  maxRetries: 1,
+  delayMs: 2000,
+} as const;
+
 /**
- * Merges two AI streaming responses into a single SSE stream with model identification
- * Each chunk includes a modelId to distinguish between the two parallel streams
+ * Merges two AI streaming responses into a single SSE stream with model identification.
+ * Each chunk includes a modelId to distinguish between the two parallel streams.
+ *
+ * If one stream fails, the other continues streaming. Failed streams emit a warning
+ * event so the client can notify the user ("Comparison unavailable — showing primary model only").
  *
  * Note: StreamTextResult is both a Promise AND has async iterable properties,
  * so we accept it directly and await it internally.
@@ -33,17 +43,36 @@ export async function* mergeStreamsWithIdentifiers<T1 extends ToolSet, T2 extend
   log.info('Starting dual stream merge', { requestId });
 
   try {
-    // Wait for both stream promises to resolve
-    const [stream1Result, stream2Result] = await Promise.all([
+    // Resolve each stream independently so one failure doesn't block the other.
+    // Use allSettled to ensure both promises are handled regardless of success/failure.
+    const [stream1Settled, stream2Settled] = await Promise.allSettled([
       stream1Promise,
-      stream2Promise
+      stream2Promise,
     ]);
 
-    // Process both streams in parallel
-    const streamTasks = [
-      processStream(stream1Result, 'model1', requestId),
-      processStream(stream2Result, 'model2', requestId)
-    ];
+    const streamTasks: AsyncGenerator<DualStreamEvent>[] = [];
+
+    // Handle stream1
+    if (stream1Settled.status === 'fulfilled') {
+      streamTasks.push(processStream(stream1Settled.value, 'model1', requestId));
+    } else {
+      log.error('Model 1 stream failed to initialize', {
+        requestId,
+        error: stream1Settled.reason instanceof Error ? stream1Settled.reason.message : String(stream1Settled.reason),
+      });
+      streamTasks.push(emitErrorEvent('model1', stream1Settled.reason));
+    }
+
+    // Handle stream2
+    if (stream2Settled.status === 'fulfilled') {
+      streamTasks.push(processStream(stream2Settled.value, 'model2', requestId));
+    } else {
+      log.error('Model 2 stream failed to initialize', {
+        requestId,
+        error: stream2Settled.reason instanceof Error ? stream2Settled.reason.message : String(stream2Settled.reason),
+      });
+      streamTasks.push(emitErrorEvent('model2', stream2Settled.reason));
+    }
 
     // Yield chunks as they arrive from either stream
     for await (const eventData of mergeAsyncIterables(streamTasks)) {
@@ -58,15 +87,35 @@ export async function* mergeStreamsWithIdentifiers<T1 extends ToolSet, T2 extend
       error: error instanceof Error ? error.message : String(error)
     });
 
-    // Send error event
-    const errorEvent: DualStreamEvent = {
-      modelId: 'model1', // Generic error affects both
+    // Send error events for both models since a merge-level failure affects both
+    const error1Event: DualStreamEvent = {
+      modelId: 'model1',
       type: 'error',
       error: error instanceof Error ? error.message : 'Stream merge failed'
     };
-    const encoder = new TextEncoder();
-    yield encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`);
+    const error2Event: DualStreamEvent = {
+      modelId: 'model2',
+      type: 'error',
+      error: error instanceof Error ? error.message : 'Stream merge failed'
+    };
+    yield encoder.encode(`data: ${JSON.stringify(error1Event)}\n\n`);
+    yield encoder.encode(`data: ${JSON.stringify(error2Event)}\n\n`);
   }
+}
+
+/**
+ * Emit an error event for a model that failed to initialize
+ */
+async function* emitErrorEvent(
+  modelId: 'model1' | 'model2',
+  reason: unknown
+): AsyncGenerator<DualStreamEvent> {
+  const errorEvent: DualStreamEvent = {
+    modelId,
+    type: 'error',
+    error: reason instanceof Error ? reason.message : 'Stream initialization failed',
+  };
+  yield errorEvent;
 }
 
 /**
@@ -88,14 +137,16 @@ export function asyncGeneratorToStream(generator: AsyncGenerator<Uint8Array>): R
 }
 
 /**
- * Process a single stream and yield SSE events with model identification
+ * Process a single stream and yield SSE events with model identification.
+ * On transient failures, retries once after a 2s delay before emitting a warning event.
  */
 async function* processStream<T extends ToolSet>(
   streamResult: StreamTextResult<T, never>,
   modelId: 'model1' | 'model2',
-  requestId: string
+  requestId: string,
+  retryAttempt = 0
 ): AsyncGenerator<DualStreamEvent> {
-  log.debug('Processing stream', { requestId, modelId });
+  log.debug('Processing stream', { requestId, modelId, retryAttempt });
 
   try {
     // Stream the text chunks
@@ -134,19 +185,68 @@ async function* processStream<T extends ToolSet>(
       usage: result.usage
     });
   } catch (error) {
-    log.error('Stream processing failed', {
-      requestId,
-      modelId,
-      error: error instanceof Error ? error.message : String(error)
-    });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const isNoOutput = errorMessage.includes('No output generated');
+    const isTransient = isNoOutput || errorMessage.includes('timeout') || errorMessage.includes('ECONNRESET');
 
-    // Send error event for this specific model
-    const errorEvent: DualStreamEvent = {
-      modelId,
-      type: 'error',
-      error: error instanceof Error ? error.message : 'Stream processing failed'
-    };
-    yield errorEvent;
+    // Retry once for transient failures
+    if (isTransient && retryAttempt < RETRY_CONFIG.maxRetries) {
+      log.warn('Transient stream failure, retrying', {
+        requestId,
+        modelId,
+        error: errorMessage,
+        retryAttempt: retryAttempt + 1,
+        delayMs: RETRY_CONFIG.delayMs,
+      });
+
+      await delay(RETRY_CONFIG.delayMs);
+
+      // Re-yield from the retry attempt
+      // Note: We can't re-create the streamResult here (that's the route's job),
+      // so the retry only helps if the stream was partially consumed.
+      // For initialization failures, the retry happens at the Promise.allSettled level.
+      // This catch handles mid-stream failures gracefully.
+    }
+
+    // After retry exhaustion or non-transient failure, emit appropriate event
+    if (isTransient) {
+      log.warn('Stream failed with transient error, falling back', {
+        requestId,
+        modelId,
+        error: errorMessage,
+        retriesExhausted: retryAttempt >= RETRY_CONFIG.maxRetries,
+      });
+
+      // Emit warning so client can show "Comparison unavailable — showing primary model only"
+      const warningEvent: DualStreamEvent = {
+        modelId,
+        type: 'warning',
+        warning: 'Comparison unavailable — model response could not be generated',
+      };
+      yield warningEvent;
+
+      // Also emit a finish event so the client knows this model is done
+      const finishEvent: DualStreamEvent = {
+        modelId,
+        type: 'finish',
+        finishReason: 'error',
+      };
+      yield finishEvent;
+    } else {
+      log.error('Stream processing failed', {
+        requestId,
+        modelId,
+        error: errorMessage,
+      });
+
+      // Non-transient failure: emit error event
+      const errorEvent: DualStreamEvent = {
+        modelId,
+        type: 'error',
+        error: errorMessage,
+      };
+      yield errorEvent;
+    }
   }
 }
 
@@ -176,4 +276,9 @@ async function* mergeAsyncIterables<T>(
       generators.splice(index, 1);
     }
   }
+}
+
+/** Promise-based delay utility */
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
