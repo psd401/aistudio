@@ -11,6 +11,24 @@ import type {
 
 const log = createLogger({ module: 'base-provider-adapter' });
 
+/**
+ * Standalone transient error classifier used by both the streaming adapters
+ * and the dual-stream merger to ensure consistent behavior across all paths.
+ *
+ * Transient errors are recoverable conditions that don't indicate a systemic
+ * issue: network timeouts, connection resets, temporary provider outages.
+ */
+export function isTransientStreamError(error: Error): boolean {
+  const message = error.message;
+  return (
+    message.includes('No output generated') ||
+    message.includes('timeout') ||
+    message.includes('ECONNRESET') ||
+    message.includes('ETIMEDOUT') ||
+    (message.includes('Item') && message.includes('not found'))
+  );
+}
+
 /** Tool call accumulated across streaming steps */
 export type AccumulatedToolCall = {
   toolCallId: string;
@@ -364,14 +382,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
    * a systemic issue.
    */
   protected isTransientError(error: Error): boolean {
-    const message = error.message;
-    return (
-      message.includes('No output generated') ||
-      message.includes('timeout') ||
-      message.includes('ECONNRESET') ||
-      message.includes('ETIMEDOUT') ||
-      (message.includes('Item') && message.includes('not found'))
-    );
+    return isTransientStreamError(error);
   }
   
   /**

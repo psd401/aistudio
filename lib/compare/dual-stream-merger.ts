@@ -1,5 +1,6 @@
 import { createLogger, generateRequestId } from '@/lib/logger';
 import type { StreamTextResult, ToolSet } from 'ai';
+import { isTransientStreamError } from '@/lib/streaming/provider-adapters/base-adapter';
 
 const log = createLogger({ module: 'dual-stream-merger' });
 
@@ -16,6 +17,14 @@ export interface DualStreamEvent {
   };
   finishReason?: string;
 }
+
+/** Generic client-facing messages — raw provider errors are logged server-side only */
+const CLIENT_MESSAGES = {
+  initFailed: 'Stream initialization failed',
+  mergeFailed: 'Stream merge failed',
+  responseUnavailable: 'Comparison unavailable — model response could not be generated',
+  streamFailed: 'Stream processing failed',
+} as const;
 
 /**
  * Merges two AI streaming responses into a single SSE stream with model identification.
@@ -50,22 +59,30 @@ export async function* mergeStreamsWithIdentifiers<T1 extends ToolSet, T2 extend
     if (stream1Settled.status === 'fulfilled') {
       streamTasks.push(processStream(stream1Settled.value, 'model1', requestId));
     } else {
-      log.error('Model 1 stream failed to initialize', {
-        requestId,
-        error: stream1Settled.reason instanceof Error ? stream1Settled.reason.message : String(stream1Settled.reason),
-      });
-      streamTasks.push(emitErrorEvent('model1', stream1Settled.reason));
+      const reason = stream1Settled.reason;
+      const errorMessage = reason instanceof Error ? reason.message : String(reason);
+      const isTransient = reason instanceof Error && isTransientStreamError(reason);
+      if (isTransient) {
+        log.warn('Model 1 stream failed to initialize (transient)', { requestId, error: errorMessage });
+      } else {
+        log.error('Model 1 stream failed to initialize', { requestId, error: errorMessage });
+      }
+      streamTasks.push(emitInitFailureEvent('model1', isTransient));
     }
 
     // Handle stream2
     if (stream2Settled.status === 'fulfilled') {
       streamTasks.push(processStream(stream2Settled.value, 'model2', requestId));
     } else {
-      log.error('Model 2 stream failed to initialize', {
-        requestId,
-        error: stream2Settled.reason instanceof Error ? stream2Settled.reason.message : String(stream2Settled.reason),
-      });
-      streamTasks.push(emitErrorEvent('model2', stream2Settled.reason));
+      const reason = stream2Settled.reason;
+      const errorMessage = reason instanceof Error ? reason.message : String(reason);
+      const isTransient = reason instanceof Error && isTransientStreamError(reason);
+      if (isTransient) {
+        log.warn('Model 2 stream failed to initialize (transient)', { requestId, error: errorMessage });
+      } else {
+        log.error('Model 2 stream failed to initialize', { requestId, error: errorMessage });
+      }
+      streamTasks.push(emitInitFailureEvent('model2', isTransient));
     }
 
     // Yield chunks as they arrive from either stream
@@ -81,16 +98,17 @@ export async function* mergeStreamsWithIdentifiers<T1 extends ToolSet, T2 extend
       error: error instanceof Error ? error.message : String(error)
     });
 
-    // Send error events for both models since a merge-level failure affects both
+    // Send error events for both models since a merge-level failure affects both.
+    // Use generic client message — raw error is already logged above.
     const error1Event: DualStreamEvent = {
       modelId: 'model1',
       type: 'error',
-      error: error instanceof Error ? error.message : 'Stream merge failed'
+      error: CLIENT_MESSAGES.mergeFailed,
     };
     const error2Event: DualStreamEvent = {
       modelId: 'model2',
       type: 'error',
-      error: error instanceof Error ? error.message : 'Stream merge failed'
+      error: CLIENT_MESSAGES.mergeFailed,
     };
     yield encoder.encode(`data: ${JSON.stringify(error1Event)}\n\n`);
     yield encoder.encode(`data: ${JSON.stringify(error2Event)}\n\n`);
@@ -98,18 +116,30 @@ export async function* mergeStreamsWithIdentifiers<T1 extends ToolSet, T2 extend
 }
 
 /**
- * Emit an error event for a model that failed to initialize
+ * Emit appropriate init failure event based on whether the error is transient.
+ * Transient → warning (graceful fallback); persistent → error.
  */
-async function* emitErrorEvent(
+async function* emitInitFailureEvent(
   modelId: 'model1' | 'model2',
-  reason: unknown
+  isTransient: boolean
 ): AsyncGenerator<DualStreamEvent> {
-  const errorEvent: DualStreamEvent = {
-    modelId,
-    type: 'error',
-    error: reason instanceof Error ? reason.message : 'Stream initialization failed',
-  };
-  yield errorEvent;
+  if (isTransient) {
+    const warningEvent: DualStreamEvent = {
+      modelId,
+      type: 'warning',
+      warning: CLIENT_MESSAGES.responseUnavailable,
+    };
+    yield warningEvent;
+    const finishEvent: DualStreamEvent = { modelId, type: 'finish', finishReason: 'error' };
+    yield finishEvent;
+  } else {
+    const errorEvent: DualStreamEvent = {
+      modelId,
+      type: 'error',
+      error: CLIENT_MESSAGES.initFailed,
+    };
+    yield errorEvent;
+  }
 }
 
 /**
@@ -132,13 +162,16 @@ export function asyncGeneratorToStream(generator: AsyncGenerator<Uint8Array>): R
 
 /**
  * Process a single stream and yield SSE events with model identification.
- * On transient failures (no output, timeout, connection reset), emits a warning event
- * so the client can show "Comparison unavailable — showing primary model only".
+ * On transient failures (no output, timeout, connection reset, stale ID), emits a warning
+ * event so the client can show "Comparison unavailable — showing primary model only".
  * Non-transient failures emit an error event.
  *
+ * Uses the shared isTransientStreamError() classifier from base-adapter to ensure
+ * consistent behavior with the provider adapters' handleError() path.
+ *
  * Note: Retry at this level is not possible because the merger receives a pre-created
- * StreamTextResult — it cannot recreate the stream. Retries would need to happen at
- * the compare route level by re-calling streamText().
+ * StreamTextResult — it cannot recreate the stream. Retries must happen at the
+ * compare route level by re-calling streamText().
  */
 async function* processStream<T extends ToolSet>(
   streamResult: StreamTextResult<T, never>,
@@ -185,10 +218,7 @@ async function* processStream<T extends ToolSet>(
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const isTransient =
-      errorMessage.includes('No output generated') ||
-      errorMessage.includes('timeout') ||
-      errorMessage.includes('ECONNRESET');
+    const isTransient = error instanceof Error && isTransientStreamError(error);
 
     if (isTransient) {
       log.warn('Stream failed with transient error, falling back', {
@@ -197,15 +227,16 @@ async function* processStream<T extends ToolSet>(
         error: errorMessage,
       });
 
-      // Emit warning so client can show "Comparison unavailable — showing primary model only"
+      // Emit warning so client can show "Comparison unavailable — showing primary model only".
+      // Raw error message is logged above — send only a generic string to the browser.
       const warningEvent: DualStreamEvent = {
         modelId,
         type: 'warning',
-        warning: 'Comparison unavailable — model response could not be generated',
+        warning: CLIENT_MESSAGES.responseUnavailable,
       };
       yield warningEvent;
 
-      // Also emit a finish event so the client knows this model is done
+      // Emit finish so the client knows this model is done
       const finishEvent: DualStreamEvent = {
         modelId,
         type: 'finish',
@@ -219,11 +250,12 @@ async function* processStream<T extends ToolSet>(
         error: errorMessage,
       });
 
-      // Non-transient failure: emit error event
+      // Non-transient failure: emit error with generic client message.
+      // Raw error is logged above.
       const errorEvent: DualStreamEvent = {
         modelId,
         type: 'error',
-        error: errorMessage,
+        error: CLIENT_MESSAGES.streamFailed,
       };
       yield errorEvent;
     }
@@ -257,4 +289,3 @@ async function* mergeAsyncIterables<T>(
     }
   }
 }
-
