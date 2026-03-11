@@ -2,9 +2,10 @@ import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
 import { resolveUserId } from "@/lib/auth/resolve-user"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
-import { ErrorFactories, handleError } from "@/lib/error-utils"
+import { ErrorFactories } from "@/lib/error-utils"
 import { getExecutionResultById, deleteExecutionResult } from "@/lib/db/drizzle"
 import type { ExecutionResult } from "@/types/notifications"
+import { executionResultErrorResponse } from "@/lib/api/execution-result-error"
 
 async function getHandler(
   request: NextRequest,
@@ -66,14 +67,7 @@ async function getHandler(
 
   } catch (error) {
     timer({ status: "error" })
-    return NextResponse.json(
-      handleError(error, "Failed to fetch execution result", {
-        context: "GET /api/execution-results/[id]",
-        requestId,
-        operation: "getExecutionResult"
-      }),
-      { status: 500 }
-    )
+    return executionResultErrorResponse(error, "Unable to fetch execution result")
   }
 }
 
@@ -123,14 +117,7 @@ async function deleteHandler(
 
   } catch (error) {
     timer({ status: "error" })
-    return NextResponse.json(
-      handleError(error, "Failed to delete execution result", {
-        context: "DELETE /api/execution-results/[id]",
-        requestId,
-        operation: "deleteExecutionResult"
-      }),
-      { status: 500 }
-    )
+    return executionResultErrorResponse(error, "Unable to delete execution result")
   }
 }
 

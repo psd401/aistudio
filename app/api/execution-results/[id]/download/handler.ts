@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
 import { resolveUserId } from "@/lib/auth/resolve-user"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
-import { ErrorFactories, handleError } from "@/lib/error-utils"
+import { ErrorFactories } from "@/lib/error-utils"
+import { executionResultErrorResponse } from "@/lib/api/execution-result-error"
 import { getExecutionResultForDownload } from "@/lib/db/drizzle"
 import { getBrandingConfig } from "@/lib/branding"
 
@@ -152,14 +153,7 @@ export async function downloadHandler(
 
   } catch (error) {
     timer({ status: "error" })
-    return NextResponse.json(
-      handleError(error, "Failed to download execution result", {
-        context: "GET /api/execution-results/[id]/download",
-        requestId,
-        operation: "downloadExecutionResult"
-      }),
-      { status: 500 }
-    )
+    return executionResultErrorResponse(error, "Unable to download execution result")
   }
 }
 

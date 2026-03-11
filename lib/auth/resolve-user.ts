@@ -31,8 +31,13 @@ import type { CognitoSession } from "./server-session"
  * 2. If not found, look up by email and link cognito_sub (migration path)
  * 3. If still not found, create user via UPSERT and assign default role (new user path)
  *
+ * **Write side-effect**: On the first call for a new Cognito user, this function
+ * creates a users row and assigns a default role. Callers on read-only (GET) routes
+ * accept this one-time write — it is intentional for JIT provisioning.
+ *
  * @returns Numeric user ID (never null — provisions if missing)
- * @throws If database operations fail or session has no email for a new user
+ * @throws ErrorFactories.missingRequiredField if session has no email (new user only)
+ * @throws If database operations fail
  */
 export async function resolveUserId(
   session: CognitoSession,
@@ -42,7 +47,7 @@ export async function resolveUserId(
 
   // Fast path: user exists (returns null on miss, throws TypeError on malformed ID)
   const existingId = await getUserIdByCognitoSubAsNumber(session.sub)
-  if (existingId) {
+  if (existingId !== null) {
     return existingId
   }
 
@@ -119,7 +124,7 @@ export async function resolveUserId(
   // Numeric username prefix → student (K-12 district convention: student IDs
   // are all-digit numbers, e.g. 123456@psd401.net). Non-numeric → staff.
   // Defaults to least-privilege (student) when username cannot be determined.
-  const isNumeric = username.length > 0 && /^\d+$/.test(username)
+  const isNumeric = /^\d+$/.test(username) // already false for empty strings
   const defaultRole = isNumeric ? "student" : "staff"
 
   try {
@@ -131,11 +136,25 @@ export async function resolveUserId(
   } catch (error) {
     // Role assignment failure is non-fatal — user can still access the app,
     // and getCurrentUserAction will handle role assignment on next full login.
-    log.warn("Default role assignment failed — user provisioned without role", {
-      userId,
-      attemptedRole: defaultRole,
-      error: error instanceof Error ? error.message : "Unknown error",
-    })
+    // Distinguish a missing role record (expected in misconfigured envs) from
+    // infrastructure failures (DB connectivity, deadlock) which warrant error-level.
+    const isRoleNotFound =
+      error !== null &&
+      typeof error === "object" &&
+      "code" in error &&
+      (error as { code: unknown }).code === ErrorCode.DB_RECORD_NOT_FOUND
+    if (isRoleNotFound) {
+      log.warn("Default role not found in database — user provisioned without role", {
+        userId,
+        attemptedRole: defaultRole,
+      })
+    } else {
+      log.error("Role assignment failed — infrastructure error; user provisioned without role", {
+        userId,
+        attemptedRole: defaultRole,
+        error: error instanceof Error ? error.message : "Unknown error",
+      })
+    }
   }
 
   return userId
