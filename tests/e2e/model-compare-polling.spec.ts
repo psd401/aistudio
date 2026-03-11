@@ -146,6 +146,23 @@ test.describe('Compare API Integration', () => {
   test('SSE warning event shows unavailable toast and does not leave spinner running', async ({ page }) => {
     // Model2 emits warning (transient failure) — model1 completes normally.
     // Verifies: toast appears with model name, spinner stops for model2, model1 content renders.
+    //
+    // Both /api/models and /api/compare are mocked so this test runs without live infrastructure.
+
+    // Inject two distinct models so the model selectors are populated and the
+    // compare button becomes enabled without depending on live model data.
+    const mockModels = [
+      { id: 'model-alpha', modelId: 'gpt-4o', name: 'GPT-4o', provider: 'openai', categories: ['chat'], enabled: true },
+      { id: 'model-beta', modelId: 'claude-3-5-sonnet', name: 'Claude 3.5 Sonnet', provider: 'bedrock', categories: ['chat'], enabled: true },
+    ]
+    await page.route('/api/models', route => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ success: true, data: mockModels }),
+      })
+    })
+
     const sseBody = [
       'data: {"modelId":"model1","type":"content","chunk":"Hello from model 1"}\n\n',
       'data: {"modelId":"model1","type":"finish","finishReason":"stop"}\n\n',
@@ -171,14 +188,9 @@ test.describe('Compare API Integration', () => {
     await page.locator('textarea').fill('Test prompt')
     const compareButton = page.locator('button:has-text("Compare Models")')
 
-    // The compare button requires two different models to be selected, which requires
-    // live model data. Skip if the button is not enabled rather than letting the test
-    // silently pass without exercising any assertions.
-    const isEnabled = await compareButton.isEnabled()
-    if (!isEnabled) {
-      test.skip(true, 'Compare button not enabled — model selectors not pre-populated in this environment')
-    }
-
+    // With mocked model data the button should be enabled once both selectors are populated.
+    // If not enabled (e.g. auth redirected, selector UI changed), fail explicitly.
+    await expect(compareButton).toBeEnabled({ timeout: 5000 })
     await compareButton.click()
 
     // Warning toast should appear

@@ -157,7 +157,7 @@ export function ModelCompare() {
                     setModel1Complete(true)
                     toast({
                       title: `${model1State.selectedModel?.name ?? 'First model'} failed`,
-                      description: data.error || "Failed to generate response",
+                      description: data.error ?? "Failed to generate response",
                       variant: "destructive"
                     })
                   }
@@ -178,7 +178,7 @@ export function ModelCompare() {
                     setModel2Complete(true)
                     toast({
                       title: `${model2State.selectedModel?.name ?? 'Second model'} failed`,
-                      description: data.error || "Failed to generate response",
+                      description: data.error ?? "Failed to generate response",
                       variant: "destructive"
                     })
                   }

@@ -631,9 +631,15 @@ async function getOrCreateTools(
   if (supportedTools.length === 0) {
     log.info('Model does not support provider-native tools, filtering all tool requests', {
       modelId: request.modelId,
+      requestedCount: requestedTools.length,
+    });
+    log.debug('Tool filtering detail (no provider-native tools)', {
+      modelId: request.modelId,
       requestedTools,
     });
-    // Still create universal tools (show_chart, etc.) — they work with all models
+    // createTools([]) always returns universal tools (show_chart, etc.) regardless of
+    // the empty input — BaseProviderAdapter.createTools() calls createUniversalTools()
+    // unconditionally, and all concrete adapters call super or replicate this behaviour.
     return adapter.createTools([]);
   }
 
