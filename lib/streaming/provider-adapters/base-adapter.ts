@@ -19,13 +19,13 @@ const log = createLogger({ module: 'base-provider-adapter' });
  * issue: network timeouts, connection resets, temporary provider outages.
  */
 export function isTransientStreamError(error: Error): boolean {
-  const message = error.message;
+  const message = error.message.toLowerCase();
   return (
-    message.includes('No output generated') ||
+    message.includes('no output generated') ||
     message.includes('timeout') ||
-    message.includes('ECONNRESET') ||
-    message.includes('ETIMEDOUT') ||
-    (message.includes('Item') && message.includes('not found'))
+    message.includes('econnreset') ||
+    message.includes('etimedout') ||
+    (message.includes('item') && message.includes('not found'))
   );
 }
 

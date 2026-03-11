@@ -151,7 +151,7 @@ export function ModelCompare() {
                     setModel1Complete(true)
                     toast({
                       title: `${model1State.selectedModel?.name ?? 'First model'} unavailable`,
-                      description: data.warning || "Comparison unavailable — showing primary model only",
+                      description: data.warning ?? "Comparison unavailable — model response could not be generated",
                     })
                   } else if (data.type === 'error') {
                     setModel1Complete(true)
@@ -172,7 +172,7 @@ export function ModelCompare() {
                     setModel2Complete(true)
                     toast({
                       title: `${model2State.selectedModel?.name ?? 'Second model'} unavailable`,
-                      description: data.warning || "Comparison unavailable — showing primary model only",
+                      description: data.warning ?? "Comparison unavailable — model response could not be generated",
                     })
                   } else if (data.type === 'error') {
                     setModel2Complete(true)

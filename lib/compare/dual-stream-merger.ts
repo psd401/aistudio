@@ -93,25 +93,29 @@ export async function* mergeStreamsWithIdentifiers<T1 extends ToolSet, T2 extend
 
     log.info('Dual stream merge completed', { requestId });
   } catch (error) {
-    log.error('Dual stream merge failed', {
-      requestId,
-      error: error instanceof Error ? error.message : String(error)
-    });
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const isTransient = error instanceof Error && isTransientStreamError(error);
 
-    // Send error events for both models since a merge-level failure affects both.
-    // Use generic client message — raw error is already logged above.
-    const error1Event: DualStreamEvent = {
-      modelId: 'model1',
-      type: 'error',
-      error: CLIENT_MESSAGES.mergeFailed,
-    };
-    const error2Event: DualStreamEvent = {
-      modelId: 'model2',
-      type: 'error',
-      error: CLIENT_MESSAGES.mergeFailed,
-    };
-    yield encoder.encode(`data: ${JSON.stringify(error1Event)}\n\n`);
-    yield encoder.encode(`data: ${JSON.stringify(error2Event)}\n\n`);
+    if (isTransient) {
+      log.warn('Dual stream merge failed (transient)', { requestId, error: errorMessage });
+    } else {
+      log.error('Dual stream merge failed', { requestId, error: errorMessage });
+    }
+
+    // Send terminal events for both models since a merge-level failure affects both.
+    // Use warning for transient failures, error for persistent ones.
+    // Always follow with finish so the client knows both models are done.
+    const eventType = isTransient ? 'warning' : 'error';
+    const eventPayload = isTransient
+      ? { warning: CLIENT_MESSAGES.responseUnavailable }
+      : { error: CLIENT_MESSAGES.mergeFailed };
+
+    for (const modelId of ['model1', 'model2'] as const) {
+      const terminalEvent: DualStreamEvent = { modelId, type: eventType, ...eventPayload };
+      yield encoder.encode(`data: ${JSON.stringify(terminalEvent)}\n\n`);
+      const finishEvent: DualStreamEvent = { modelId, type: 'finish', finishReason: 'error' };
+      yield encoder.encode(`data: ${JSON.stringify(finishEvent)}\n\n`);
+    }
   }
 }
 
@@ -139,6 +143,9 @@ async function* emitInitFailureEvent(
       error: CLIENT_MESSAGES.initFailed,
     };
     yield errorEvent;
+    // Emit finish so client knows this model is done, consistent with the transient path.
+    const finishEvent: DualStreamEvent = { modelId, type: 'finish', finishReason: 'error' };
+    yield finishEvent;
   }
 }
 
