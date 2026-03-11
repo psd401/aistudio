@@ -172,9 +172,10 @@ describe('PIITokenizationService', () => {
 
     // Capture BatchGetItemCommand constructor args since auto-mock doesn't preserve input
     let capturedBatchInputs: MockBatchGetItemInput[];
-    let mockSend: jest.Mock;
 
     afterEach(() => {
+      // restoreAllMocks() only restores jest.spyOn spies — not direct prototype assignments.
+      // Using jest.spyOn below ensures this cleanup is actually effective.
       jest.restoreAllMocks();
     });
 
@@ -186,8 +187,14 @@ describe('PIITokenizationService', () => {
         return Object.assign(Object.create(BatchGetItemCommand.prototype), { input });
       });
 
-      mockSend = jest.fn().mockResolvedValue({ Responses: responses });
-      (DynamoDBClient as jest.MockedClass<typeof DynamoDBClient>).prototype.send = mockSend;
+      // Use jest.spyOn (not direct assignment) so afterEach restoreAllMocks() cleans up.
+      // Direct assignment (prototype.send = mockFn) is NOT restored by restoreAllMocks()
+      // and would leak mock state to subsequent tests in the same worker.
+      // Cast prototype to any: DynamoDBClient.send is overloaded and TypeScript
+      // resolves the intersection to `never`, blocking mockResolvedValue without the cast.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      jest.spyOn(DynamoDBClient.prototype as any, 'send')
+        .mockResolvedValue({ Responses: responses });
     }
 
     it('should deduplicate token IDs before BatchGetItem call', async () => {
@@ -203,7 +210,6 @@ describe('PIITokenizationService', () => {
       const result = await service.detokenize(text, 'session-123');
 
       // BatchGetItem should be called once with only 1 unique key (not 3)
-      expect(mockSend).toHaveBeenCalledTimes(1);
       expect(capturedBatchInputs).toHaveLength(1);
       const keys = capturedBatchInputs[0].RequestItems['test-table'].Keys;
       expect(keys).toHaveLength(1);

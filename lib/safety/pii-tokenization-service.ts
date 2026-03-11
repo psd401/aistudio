@@ -354,7 +354,7 @@ export class PIITokenizationService {
 
       this.log.info('PII detokenization complete', {
         requestId,
-        uniqueTokensFetched: tokenMappings.length,
+        uniqueTokensResolved: tokenMappings.length,
         textReplacementsApplied: replacementsApplied,
       });
 
@@ -495,7 +495,7 @@ export class PIITokenizationService {
     // BatchGetItem supports up to 100 items per request.
     // Deduplication is applied BEFORE batching so that batch boundaries always
     // contain only unique keys. This means 101 tokens that deduplicate to 51
-    // unique IDs split into batches of 51 and 0, not 100 and 1.
+    // unique IDs produce a single batch of [51], not two batches of [100, 1].
     const BATCH_SIZE = 100;
     const batches: string[][] = [];
     for (let i = 0; i < uniqueTokens.length; i += BATCH_SIZE) {
