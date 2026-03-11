@@ -492,19 +492,14 @@ export async function POST(req: Request) {
     }
 
   } catch (error) {
-    log.error('Assistant architect execution error', {
-      error: error instanceof Error ? {
-        message: error.message,
-        name: error.name,
-        stack: error.stack
-      } : String(error)
-    });
-
-    timer({ status: 'error' });
-
-    // Issue #657: Handle ContentSafetyBlockedError with proper 400 response
-    // This provides a user-friendly error message when guardrails block content
+    // Issue #657/#835: Handle ContentSafetyBlockedError at warn level (expected behavior)
     if (error instanceof ContentSafetyBlockedError) {
+      log.warn('Content blocked by safety guardrails', {
+        error: { message: error.message, name: error.name },
+        categories: error.blockedCategories,
+        source: error.source
+      });
+      timer({ status: 'blocked' });
       return new Response(
         JSON.stringify({
           error: error.message,
@@ -522,6 +517,16 @@ export async function POST(req: Request) {
         }
       );
     }
+
+    log.error('Assistant architect execution error', {
+      error: error instanceof Error ? {
+        message: error.message,
+        name: error.name,
+        stack: error.stack
+      } : String(error)
+    });
+
+    timer({ status: 'error' });
 
     return new Response(
       JSON.stringify({

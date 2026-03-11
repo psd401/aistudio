@@ -17,6 +17,8 @@ import {
   isToolCallEvent,
   isToolCallDeltaEvent,
   isToolInputStartEvent,
+  isToolInputDeltaEvent,
+  isToolInputAvailableEvent,
   isToolInputErrorEvent,
   isToolOutputErrorEvent,
   isToolOutputAvailableEvent,
@@ -307,6 +309,52 @@ describe('Tool Event Type Guards', () => {
       };
 
       expect(isToolInputStartEvent(event)).toBe(true);
+    });
+  });
+
+  describe('isToolInputDeltaEvent', () => {
+    it('should return true for valid tool-input-delta event', () => {
+      const event: SSEEvent = {
+        type: 'tool-input-delta',
+        toolCallId: 'call-123',
+        delta: '{"key":'
+      };
+
+      expect(isToolInputDeltaEvent(event)).toBe(true);
+    });
+
+    it('should return false for tool-input-delta with missing toolCallId', () => {
+      const event = { type: 'tool-input-delta' } as unknown as SSEEvent;
+
+      expect(isToolInputDeltaEvent(event)).toBe(false);
+    });
+  });
+
+  describe('isToolInputAvailableEvent', () => {
+    it('should return true for valid tool-input-available event', () => {
+      const event: SSEEvent = {
+        type: 'tool-input-available',
+        toolCallId: 'call-123'
+      };
+
+      expect(isToolInputAvailableEvent(event)).toBe(true);
+    });
+
+    it('should return true for tool-input-available with optional fields', () => {
+      const event: SSEEvent = {
+        type: 'tool-input-available',
+        toolCallId: 'call-123',
+        toolName: 'web_search',
+        args: { query: 'test' }
+      };
+
+      expect(isToolInputAvailableEvent(event)).toBe(true);
+    });
+
+    it('should return false for tool-input-available with missing toolCallId', () => {
+      const event = { type: 'tool-input-available' } as unknown as SSEEvent;
+
+      expect(isToolInputAvailableEvent(event)).toBe(false);
     });
   });
 

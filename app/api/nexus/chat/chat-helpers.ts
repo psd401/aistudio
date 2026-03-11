@@ -446,21 +446,25 @@ export function handleChatError(
   error: unknown,
   requestId: string,
   timer: (data: Record<string, unknown>) => void,
-  log: { error: (msg: string, data?: unknown) => void },
+  log: { warn: (msg: string, data?: unknown) => void; error: (msg: string, data?: unknown) => void },
   ContentSafetyBlockedError: new (msg: string) => Error
 ): Response {
-  log.error('Nexus chat API error', {
-    error: error instanceof Error ? { message: error.message, name: error.name } : String(error)
-  });
-
-  timer({ status: 'error' });
-
   if (error instanceof ContentSafetyBlockedError) {
+    log.warn('Content blocked by safety guardrails', {
+      error: error instanceof Error ? { message: error.message, name: error.name } : String(error)
+    });
+    timer({ status: 'blocked' });
     return new Response(
       JSON.stringify({ error: (error as Error).message, code: 'CONTENT_BLOCKED', requestId }),
       { status: 400, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
     );
   }
+
+  log.error('Nexus chat API error', {
+    error: error instanceof Error ? { message: error.message, name: error.name } : String(error)
+  });
+
+  timer({ status: 'error' });
 
   return new Response(
     JSON.stringify({ error: 'Failed to process chat request', requestId }),

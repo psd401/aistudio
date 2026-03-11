@@ -123,6 +123,27 @@ export const ToolInputStartSchema = BaseEventSchema.extend({
 })
 
 /**
+ * Tool input delta event schema
+ * Incremental tool input updates from AI SDK v6
+ */
+export const ToolInputDeltaSchema = BaseEventSchema.extend({
+  type: z.literal('tool-input-delta'),
+  toolCallId: z.string(),
+  delta: z.string().optional()
+})
+
+/**
+ * Tool input available event schema
+ * Complete tool input is available for processing
+ */
+export const ToolInputAvailableSchema = BaseEventSchema.extend({
+  type: z.literal('tool-input-available'),
+  toolCallId: z.string(),
+  toolName: z.string().optional(),
+  args: z.record(z.string(), z.unknown()).optional()
+})
+
+/**
  * Tool input error event schema
  */
 export const ToolInputErrorSchema = BaseEventSchema.extend({
@@ -262,6 +283,8 @@ export const SSEEventSchema = z.discriminatedUnion('type', [
   ToolCallSchema,
   ToolCallDeltaSchema,
   ToolInputStartSchema,
+  ToolInputDeltaSchema,
+  ToolInputAvailableSchema,
   ToolInputErrorSchema,
   ToolOutputErrorSchema,
   ToolOutputAvailableSchema,
@@ -395,6 +418,8 @@ export function validateEventType(event: unknown, eventType: string): Validation
     'tool-call': ToolCallSchema,
     'tool-call-delta': ToolCallDeltaSchema,
     'tool-input-start': ToolInputStartSchema,
+    'tool-input-delta': ToolInputDeltaSchema,
+    'tool-input-available': ToolInputAvailableSchema,
     'tool-input-error': ToolInputErrorSchema,
     'tool-output-error': ToolOutputErrorSchema,
     'tool-output-available': ToolOutputAvailableSchema,

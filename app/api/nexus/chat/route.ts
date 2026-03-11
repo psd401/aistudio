@@ -601,18 +601,22 @@ export async function POST(req: Request) {
     // for all terminal states including errors (verified against ai@6.x).
     await closeMcpClients(connectorToolResults, log, 'catch');
 
-    log.error('Nexus chat API error', {
-      error: error instanceof Error ? { message: error.message, name: error.name } : String(error)
-    });
-
-    timer({ status: 'error' });
-
     if (error instanceof ContentSafetyBlockedError) {
+      log.warn('Content blocked by safety guardrails', {
+        error: { message: error.message, name: error.name }
+      });
+      timer({ status: 'blocked' });
       return new Response(
         JSON.stringify({ error: error.message, code: 'CONTENT_BLOCKED', requestId }),
         { status: 400, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
       );
     }
+
+    log.error('Nexus chat API error', {
+      error: error instanceof Error ? { message: error.message, name: error.name } : String(error)
+    });
+
+    timer({ status: 'error' });
 
     return new Response(
       JSON.stringify({ error: 'Failed to process chat request', requestId }),

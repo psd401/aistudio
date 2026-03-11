@@ -142,6 +142,32 @@ export interface ToolInputStartEvent extends BaseSSEEvent {
 }
 
 /**
+ * Tool input delta event - incremental tool input updates
+ * Emitted by AI SDK v6 during streaming tool argument construction
+ */
+export interface ToolInputDeltaEvent extends BaseSSEEvent {
+  type: 'tool-input-delta';
+  /** Unique identifier for this tool call */
+  toolCallId: string;
+  /** Incremental input data */
+  delta?: string;
+}
+
+/**
+ * Tool input available event
+ * Indicates complete tool input is available for processing
+ */
+export interface ToolInputAvailableEvent extends BaseSSEEvent {
+  type: 'tool-input-available';
+  /** Unique identifier for this tool call */
+  toolCallId: string;
+  /** Tool name */
+  toolName?: string;
+  /** Complete tool input arguments */
+  args?: Record<string, unknown>;
+}
+
+/**
  * Tool input error event
  * Indicates validation or parsing error in tool inputs
  */
@@ -330,6 +356,8 @@ export type SSEEvent =
   | ToolCallEvent
   | ToolCallDeltaEvent
   | ToolInputStartEvent
+  | ToolInputDeltaEvent
+  | ToolInputAvailableEvent
   | ToolInputErrorEvent
   | ToolOutputErrorEvent
   | ToolOutputAvailableEvent
@@ -436,6 +464,26 @@ export function isToolInputStartEvent(event: SSEEvent): event is ToolInputStartE
          typeof event.toolCallId === 'string' &&
          'toolName' in event &&
          typeof event.toolName === 'string';
+}
+
+/**
+ * Type guard for tool-input-delta events
+ * Validates both type and required fields with strict runtime checks
+ */
+export function isToolInputDeltaEvent(event: SSEEvent): event is ToolInputDeltaEvent {
+  return event.type === 'tool-input-delta' &&
+         'toolCallId' in event &&
+         typeof event.toolCallId === 'string';
+}
+
+/**
+ * Type guard for tool-input-available events
+ * Validates both type and required fields with strict runtime checks
+ */
+export function isToolInputAvailableEvent(event: SSEEvent): event is ToolInputAvailableEvent {
+  return event.type === 'tool-input-available' &&
+         'toolCallId' in event &&
+         typeof event.toolCallId === 'string';
 }
 
 /**
@@ -564,6 +612,8 @@ const VALID_SSE_EVENT_TYPES = new Set([
   'tool-call',
   'tool-call-delta',
   'tool-input-start',
+  'tool-input-delta',
+  'tool-input-available',
   'tool-input-error',
   'tool-output-error',
   'tool-output-available',

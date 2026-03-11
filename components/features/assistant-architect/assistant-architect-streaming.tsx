@@ -56,7 +56,6 @@ import {
 import { createSSEMonitor } from '@/lib/streaming/sse-monitoring'
 import { validateSSEEvent } from '@/lib/streaming/sse-event-schemas'
 import { processUnknownEvent } from '@/lib/streaming/graceful-degradation'
-import { publishSSEMonitorMetrics } from '@/lib/streaming/cloudwatch-metrics'
 
 const log = createLogger({ moduleName: 'assistant-architect-streaming' })
 
@@ -488,16 +487,6 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
 
           // Complete monitoring and publish metrics
           const metrics = monitor.complete()
-
-          // Publish metrics to CloudWatch (non-blocking)
-          publishSSEMonitorMetrics(metrics, {
-            executionId: executionIdRef.current || undefined,
-            toolId
-          }).catch(err => {
-            log.warn('Failed to publish SSE metrics to CloudWatch', {
-              error: err instanceof Error ? err.message : String(err)
-            })
-          })
 
           log.info('Streaming completed successfully', {
             totalLength: accumulatedText.length,
