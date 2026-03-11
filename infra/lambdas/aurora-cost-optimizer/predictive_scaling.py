@@ -63,7 +63,10 @@ def handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         "reason": "Business hours scale-up"
     }
     """
-    logger.info(f"Predictive scaling invoked: {json.dumps(event)}")
+    logger.info(
+        f"Predictive scaling invoked: minCapacity={event.get('minCapacity')}, "
+        f"maxCapacity={event.get('maxCapacity')}, reason={event.get('reason', 'Scheduled scaling')}"
+    )
 
     try:
         min_capacity, max_capacity, reason = validate_event(event)
@@ -152,8 +155,9 @@ def determine_target_capacity(
     """
     # Default capacity by environment
     # Right-sized per issue #832 based on CloudWatch ACU metrics
+    # prod max set to 6 to cover observed 6.0 ACU peak (see environment-config.ts)
     env_defaults = {
-        "prod": {"min": 1.0, "max": 4.0, "off_hours_min": 0.5, "off_hours_max": 2.0},
+        "prod": {"min": 1.0, "max": 6.0, "off_hours_min": 0.5, "off_hours_max": 2.0},
         "staging": {"min": 0.5, "max": 2.0, "off_hours_min": 0.5, "off_hours_max": 1.0},
         "dev": {"min": 0.5, "max": 2.0, "off_hours_min": 0.5, "off_hours_max": 1.0},
     }

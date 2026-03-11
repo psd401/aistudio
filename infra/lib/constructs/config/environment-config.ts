@@ -77,12 +77,14 @@ export class EnvironmentConfig {
     // Production configuration - cost/reliability balanced
     // Right-sized from 2-8 ACU to 1-4 based on CloudWatch metrics (issue #832):
     // avg 1.41 ACU, peak 6.0 ACU over sustained monitoring period.
+    // maxCapacity set to 6 (not 4) to cover the observed 6.0 ACU peak — Aurora
+    // cannot scale beyond max, so 4 would throttle during peak traffic events.
     // multiAz: false — reader removed at current traffic (avg 1.1 connections, peak 24).
     // Set multiAz: true to re-enable reader when multi-district traffic warrants it.
     EnvironmentConfig.configs.set("prod", {
       database: {
         minCapacity: 1,
-        maxCapacity: 4,
+        maxCapacity: 6,
         autoPause: false,
         backupRetention: cdk.Duration.days(7),
         deletionProtection: true,
@@ -117,6 +119,9 @@ export class EnvironmentConfig {
     })
 
     // Staging configuration - balanced
+    // Note: staging has multiAz: true while prod has multiAz: false (issue #832).
+    // Staging is intentionally a canary for reader-instance behavior before re-enabling
+    // in prod. Once prod traffic warrants a reader, set prod.multiAz: true.
     EnvironmentConfig.configs.set("staging", {
       database: {
         minCapacity: 1,

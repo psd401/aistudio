@@ -166,7 +166,11 @@ export class DatabaseStack extends cdk.Stack {
         backup: {
           retention: config.database.backupRetention,
         },
-        removalPolicy: config.database.deletionProtection ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+        // removalPolicy and deletionProtection are distinct:
+        // - removalPolicy controls CDK teardown behavior (RETAIN keeps cluster if stack is deleted)
+        // - deletionProtection prevents accidental RDS deletion via API/console
+        // Both are prod-only; using environment check avoids coupling them through config.
+        removalPolicy: props.environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
         deletionProtection: config.database.deletionProtection,
         cloudwatchLogsExports: ['postgresql'],
         vpc,
@@ -209,8 +213,8 @@ export class DatabaseStack extends cdk.Stack {
             daysOfWeek: 'MON-FRI',  // Weekdays only, weekends use lower capacity
           },
           scaling: {
-            businessHoursMin: 1.0,  // M-F 7am-5pm PT: 1-4 ACU (right-sized per #832)
-            businessHoursMax: 4.0,
+            businessHoursMin: 1.0,  // M-F 7am-5pm PT: 1-6 ACU
+            businessHoursMax: 6.0,  // max=6 covers observed 6.0 ACU peak (see environment-config.ts)
             offHoursMin: 0.5,       // Nights and weekends: 0.5-2 ACU
             offHoursMax: 2.0,
           },

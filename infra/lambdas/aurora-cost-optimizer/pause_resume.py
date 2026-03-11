@@ -246,18 +246,19 @@ def resume_cluster(reason: str) -> Dict[str, Any]:
     cluster_info = get_cluster_info()
 
     # Determine target capacity based on environment (right-sized per #832)
+    # prod max set to 6 to cover observed 6.0 ACU peak (see environment-config.ts)
     if ENVIRONMENT == "prod":
-        target_min, target_max = 1.0, 4.0
+        target_min, target_max = 1.0, 6.0
     elif ENVIRONMENT == "staging":
         target_min, target_max = 0.5, 2.0
     else:  # dev
         target_min, target_max = 0.5, 2.0
 
-    # If already at target, no action needed
-    if (
-        cluster_info["minCapacity"] == target_min
-        and cluster_info["maxCapacity"] == target_max
-    ):
+    # If already at target, no action needed.
+    # Use normalized comparison consistent with pause_cluster() float hardening.
+    current_normalized_min = round(cluster_info["minCapacity"] * 2) / 2
+    current_normalized_max = round(cluster_info["maxCapacity"] * 2) / 2
+    if current_normalized_min == target_min and current_normalized_max == target_max:
         logger.info("Cluster already at target capacity")
         return {"status": "already_resumed", "capacity": f"{target_min}-{target_max}"}
 

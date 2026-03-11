@@ -54,7 +54,7 @@ describe("EnvironmentConfig", () => {
 
       expect(config.costOptimization).toBe(false)
       expect(config.database.minCapacity).toBe(1)
-      expect(config.database.maxCapacity).toBe(4)
+      expect(config.database.maxCapacity).toBe(6)
       expect(config.database.autoPause).toBe(false)
       expect(config.database.deletionProtection).toBe(true)
       expect(config.database.multiAz).toBe(false)
