@@ -17,12 +17,6 @@ export interface DualStreamEvent {
   finishReason?: string;
 }
 
-/** Retry configuration for transient model failures */
-const RETRY_CONFIG = {
-  maxRetries: 1,
-  delayMs: 2000,
-} as const;
-
 /**
  * Merges two AI streaming responses into a single SSE stream with model identification.
  * Each chunk includes a modelId to distinguish between the two parallel streams.
@@ -138,15 +132,20 @@ export function asyncGeneratorToStream(generator: AsyncGenerator<Uint8Array>): R
 
 /**
  * Process a single stream and yield SSE events with model identification.
- * On transient failures, retries once after a 2s delay before emitting a warning event.
+ * On transient failures (no output, timeout, connection reset), emits a warning event
+ * so the client can show "Comparison unavailable — showing primary model only".
+ * Non-transient failures emit an error event.
+ *
+ * Note: Retry at this level is not possible because the merger receives a pre-created
+ * StreamTextResult — it cannot recreate the stream. Retries would need to happen at
+ * the compare route level by re-calling streamText().
  */
 async function* processStream<T extends ToolSet>(
   streamResult: StreamTextResult<T, never>,
   modelId: 'model1' | 'model2',
-  requestId: string,
-  retryAttempt = 0
+  requestId: string
 ): AsyncGenerator<DualStreamEvent> {
-  log.debug('Processing stream', { requestId, modelId, retryAttempt });
+  log.debug('Processing stream', { requestId, modelId });
 
   try {
     // Stream the text chunks
@@ -186,35 +185,16 @@ async function* processStream<T extends ToolSet>(
     });
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
-    const isNoOutput = errorMessage.includes('No output generated');
-    const isTransient = isNoOutput || errorMessage.includes('timeout') || errorMessage.includes('ECONNRESET');
+    const isTransient =
+      errorMessage.includes('No output generated') ||
+      errorMessage.includes('timeout') ||
+      errorMessage.includes('ECONNRESET');
 
-    // Retry once for transient failures
-    if (isTransient && retryAttempt < RETRY_CONFIG.maxRetries) {
-      log.warn('Transient stream failure, retrying', {
-        requestId,
-        modelId,
-        error: errorMessage,
-        retryAttempt: retryAttempt + 1,
-        delayMs: RETRY_CONFIG.delayMs,
-      });
-
-      await delay(RETRY_CONFIG.delayMs);
-
-      // Re-yield from the retry attempt
-      // Note: We can't re-create the streamResult here (that's the route's job),
-      // so the retry only helps if the stream was partially consumed.
-      // For initialization failures, the retry happens at the Promise.allSettled level.
-      // This catch handles mid-stream failures gracefully.
-    }
-
-    // After retry exhaustion or non-transient failure, emit appropriate event
     if (isTransient) {
       log.warn('Stream failed with transient error, falling back', {
         requestId,
         modelId,
         error: errorMessage,
-        retriesExhausted: retryAttempt >= RETRY_CONFIG.maxRetries,
       });
 
       // Emit warning so client can show "Comparison unavailable — showing primary model only"
@@ -278,7 +258,3 @@ async function* mergeAsyncIterables<T>(
   }
 }
 
-/** Promise-based delay utility */
-function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
