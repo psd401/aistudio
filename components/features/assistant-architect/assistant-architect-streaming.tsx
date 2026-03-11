@@ -44,6 +44,8 @@ import {
   isToolCallEvent,
   isToolCallDeltaEvent,
   isToolInputStartEvent,
+  isToolInputDeltaEvent,
+  isToolInputAvailableEvent,
   isToolInputErrorEvent,
   isToolOutputErrorEvent,
   isToolOutputAvailableEvent,
@@ -346,6 +348,12 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
                   // Handle tool input events (from web_search_preview, etc.)
                   else if (isToolInputStartEvent(event)) {
                     log.debug('Tool input started', { toolCallId: event.toolCallId, toolName: event.toolName })
+                  }
+                  else if (isToolInputDeltaEvent(event)) {
+                    log.debug('Tool input delta', { toolCallId: event.toolCallId })
+                  }
+                  else if (isToolInputAvailableEvent(event)) {
+                    log.debug('Tool input available', { toolCallId: event.toolCallId })
                   }
                   else if (isToolInputErrorEvent(event)) {
                     log.debug('Tool input error', { toolCallId: event.toolCallId, toolName: event.toolName })
