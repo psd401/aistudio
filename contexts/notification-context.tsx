@@ -1,6 +1,7 @@
 "use client"
 
-import { createContext, useContext, useEffect, useState, useCallback, ReactNode } from "react"
+import { createContext, useContext, useEffect, useState, useCallback, useRef, ReactNode } from "react"
+import { useSession } from "next-auth/react"
 import { createLogger, generateRequestId } from "@/lib/client-logger"
 import type { NotificationContextValue, UserNotification } from "@/types/notifications"
 import { isConnectionTimeoutEvent, isNotificationUpdateEvent } from "@/types/notification-sse-events"
@@ -20,13 +21,20 @@ interface NotificationProviderProps {
 }
 
 export function NotificationProvider({ children }: NotificationProviderProps) {
+  const { status: sessionStatus } = useSession()
   const [notifications, setNotifications] = useState<UserNotification[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const consecutiveFailures = useRef(0)
 
   const log = createLogger({ component: 'NotificationProvider' })
 
   const fetchNotifications = useCallback(async () => {
+    // Don't fetch if session is not authenticated
+    if (sessionStatus !== 'authenticated') {
+      return
+    }
+
     const requestId = generateRequestId()
     const requestLog = createLogger({ component: 'NotificationProvider', requestId })
 
@@ -58,17 +66,23 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       }
 
       setNotifications(data.data || [])
+      consecutiveFailures.current = 0
       requestLog.info('Notifications fetched successfully', {
         count: data.data?.length || 0
       })
     } catch (err) {
+      consecutiveFailures.current++
       const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      requestLog.error('Failed to fetch notifications', { error: errorMessage })
+      // Downgrade to warn — polling failures are expected transient states
+      requestLog.warn('Failed to fetch notifications', {
+        error: errorMessage,
+        consecutiveFailures: consecutiveFailures.current
+      })
       setError(errorMessage)
     } finally {
       setIsLoading(false)
     }
-  }, [])
+  }, [sessionStatus])
 
   const markAsRead = useCallback(async (notificationId: number) => {
     const requestId = generateRequestId()
@@ -172,21 +186,44 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     notification => notification.status !== 'read'
   ).length
 
-  // Initial fetch on mount
+  // Initial fetch on mount (only when authenticated)
   useEffect(() => {
-    fetchNotifications()
-  }, [fetchNotifications])
+    if (sessionStatus === 'authenticated') {
+      fetchNotifications()
+    }
+  }, [fetchNotifications, sessionStatus])
 
-  // Set up periodic refresh (every 30 seconds)
+  // Set up periodic refresh with exponential backoff on failures
   useEffect(() => {
-    const interval = setInterval(() => {
-      if (!isLoading) {
-        fetchNotifications()
-      }
-    }, 30000)
+    if (sessionStatus !== 'authenticated') {
+      return
+    }
 
-    return () => clearInterval(interval)
-  }, [fetchNotifications, isLoading])
+    const baseInterval = 30000 // 30 seconds
+
+    const getInterval = () => {
+      if (consecutiveFailures.current === 0) return baseInterval
+      // Exponential backoff: 1x, 2x, 4x, 8x cap
+      const multiplier = Math.min(Math.pow(2, consecutiveFailures.current), 8)
+      return baseInterval * multiplier
+    }
+
+    let timeoutId: NodeJS.Timeout
+
+    const scheduleNext = () => {
+      timeoutId = setTimeout(() => {
+        if (!isLoading) {
+          fetchNotifications().then(scheduleNext)
+        } else {
+          scheduleNext()
+        }
+      }, getInterval())
+    }
+
+    scheduleNext()
+
+    return () => clearTimeout(timeoutId)
+  }, [fetchNotifications, isLoading, sessionStatus])
 
   // Set up EventSource for real-time updates with exponential backoff
   useEffect(() => {
@@ -308,15 +345,15 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       }
     }
 
-    // Only setup SSE if browser supports it
-    if (typeof EventSource !== 'undefined') {
+    // Only setup SSE if browser supports it and session is authenticated
+    if (typeof EventSource !== 'undefined' && sessionStatus === 'authenticated') {
       setupEventSource()
     }
 
     return () => {
       cleanupEventSource()
     }
-  }, [fetchNotifications, log])
+  }, [fetchNotifications, log, sessionStatus])
 
   const value: NotificationContextValue = {
     notifications,

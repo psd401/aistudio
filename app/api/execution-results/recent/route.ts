@@ -62,13 +62,17 @@ export async function GET(request: NextRequest) {
 
   } catch (error) {
     timer({ status: "error" })
+    // Extract statusCode from typed errors (e.g., AUTH_NO_SESSION → 401)
+    const statusCode = error instanceof Error && "statusCode" in error
+      ? (error as { statusCode: number }).statusCode
+      : 500
     return NextResponse.json(
       handleError(error, "Failed to fetch recent execution results", {
         context: "GET /api/execution-results/recent",
         requestId,
         operation: "fetchRecentExecutionResults"
       }),
-      { status: 500 }
+      { status: statusCode }
     )
   }
 }
