@@ -75,9 +75,9 @@ export function useAction<TInput, TOutput>(
       // Use instanceof + startsWith (not includes) to avoid matching ActionState message strings
       if (e instanceof Error && e.message.startsWith("Failed to find Server Action")) {
         const staleMessage = "Application updated, reloading...";
-        // Notify callers tracking error state or disabling buttons via onError
+        // Set internal error state but don't invoke onError — the page reloads in 1.5s
+        // and calling onError would cause callers to briefly flash error UI before reload.
         setError(staleMessage);
-        onError?.(staleMessage);
         toast({
           title: "New version available",
           description: "The application has been updated. Reloading...",

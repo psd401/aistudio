@@ -3,6 +3,7 @@ import { getServerSession } from "@/lib/auth/server-session"
 import { resolveUserId } from "@/lib/auth/resolve-user"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
+import type { TypedError } from "@/types/error-types"
 import { getRecentExecutionResults } from "@/lib/db/drizzle"
 import type { ExecutionResult } from "@/types/notifications"
 
@@ -63,9 +64,9 @@ export async function GET(request: NextRequest) {
 
   } catch (error) {
     timer({ status: "error" })
-    // Extract statusCode from typed errors (e.g., AUTH_NO_SESSION → 401)
-    const rawCode = error instanceof Error && "statusCode" in error
-      ? (error as { statusCode: number }).statusCode
+    // Use "code" in error to identify TypedErrors — consistent with error-utils.ts:414 pattern
+    const rawCode = error instanceof Error && "code" in error
+      ? (error as TypedError).statusCode ?? 500
       : 500
     const statusCode = Number.isInteger(rawCode) && rawCode >= 100 && rawCode <= 599
       ? rawCode

@@ -91,7 +91,8 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
     await fetchResults()
   }, [fetchResults])
 
-  // Reset state when session becomes unauthenticated to prevent stuck loading spinner
+  // Reset state when session becomes unauthenticated to prevent stuck loading spinner.
+  // sessionStatus === 'loading' intentionally keeps isLoading=true while NextAuth resolves auth.
   useEffect(() => {
     if (sessionStatus === 'unauthenticated') {
       setResults([])
@@ -118,10 +119,12 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
     let cancelled = false
 
     const getInterval = () => {
-      if (consecutiveFailures.current === 0) return refreshInterval
-      // Exponential backoff: 1x, 2x, 4x, 8x cap
-      const multiplier = Math.min(Math.pow(2, consecutiveFailures.current), 8)
-      return refreshInterval * multiplier
+      const base = consecutiveFailures.current === 0
+        ? refreshInterval
+        : Math.min(Math.pow(2, consecutiveFailures.current), 8) * refreshInterval
+      // ±10% jitter to prevent thundering herd from multiple tabs retrying simultaneously
+      const jitter = Math.random() * 0.2 + 0.9
+      return base * jitter
     }
 
     let timeoutId: NodeJS.Timeout

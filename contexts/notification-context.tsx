@@ -1,6 +1,6 @@
 "use client"
 
-import { createContext, useContext, useEffect, useState, useCallback, useRef, useMemo, ReactNode } from "react"
+import { createContext, useContext, useEffect, useState, useCallback, useRef, ReactNode } from "react"
 import { useSession } from "next-auth/react"
 import { createLogger, generateRequestId } from "@/lib/client-logger"
 import type { NotificationContextValue, UserNotification } from "@/types/notifications"
@@ -28,7 +28,8 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
   const consecutiveFailures = useRef(0)
   const isLoadingRef = useRef(false)
 
-  const log = useMemo(() => createLogger({ component: 'NotificationProvider' }), [])
+  // useRef is semantically correct for stable, non-derived values (useMemo is for computed values)
+  const log = useRef(createLogger({ component: 'NotificationProvider' })).current
 
   const fetchNotifications = useCallback(async () => {
     // Don't fetch if session is not authenticated
@@ -190,7 +191,8 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     notification => notification.status !== 'read'
   ).length
 
-  // Reset state when session becomes unauthenticated to prevent stuck loading spinner
+  // Reset state when session becomes unauthenticated to prevent stuck loading spinner.
+  // sessionStatus === 'loading' intentionally keeps isLoading=true while NextAuth resolves auth.
   useEffect(() => {
     if (sessionStatus === 'unauthenticated') {
       setNotifications([])
@@ -219,10 +221,12 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     const baseInterval = 30000 // 30 seconds
 
     const getInterval = () => {
-      if (consecutiveFailures.current === 0) return baseInterval
-      // Exponential backoff: 1x, 2x, 4x, 8x cap
-      const multiplier = Math.min(Math.pow(2, consecutiveFailures.current), 8)
-      return baseInterval * multiplier
+      const base = consecutiveFailures.current === 0
+        ? baseInterval
+        : Math.min(Math.pow(2, consecutiveFailures.current), 8) * baseInterval
+      // ±10% jitter to prevent thundering herd from multiple tabs retrying simultaneously
+      const jitter = Math.random() * 0.2 + 0.9
+      return base * jitter
     }
 
     let timeoutId: NodeJS.Timeout
