@@ -74,9 +74,11 @@ export class EnvironmentConfig {
       costOptimization: true,
     })
 
-    // Production configuration - optimized for reliability
+    // Production configuration - cost/reliability balanced
     // Right-sized from 2-8 ACU to 1-4 based on CloudWatch metrics (issue #832):
-    // avg 1.41 ACU, peak 6.0 ACU over sustained monitoring period
+    // avg 1.41 ACU, peak 6.0 ACU over sustained monitoring period.
+    // multiAz: false — reader removed at current traffic (avg 1.1 connections, peak 24).
+    // Set multiAz: true to re-enable reader when multi-district traffic warrants it.
     EnvironmentConfig.configs.set("prod", {
       database: {
         minCapacity: 1,

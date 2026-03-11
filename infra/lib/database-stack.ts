@@ -102,16 +102,16 @@ export class DatabaseStack extends cdk.Stack {
         engineVersion: '15.12', // Match snapshot version
         dbClusterIdentifier: `aistudio-${props.environment}-cluster`,
         serverlessV2ScalingConfiguration: {
-          minCapacity: props.environment === 'prod' ? 1 : 0.5,
-          maxCapacity: props.environment === 'prod' ? 4 : 2,
+          minCapacity: config.database.minCapacity,
+          maxCapacity: config.database.maxCapacity,
         },
         enableHttpEndpoint: true, // Enable Data API
         storageEncrypted: true,
         enableCloudwatchLogsExports: ['postgresql'],
         vpcSecurityGroupIds: [dbSg.securityGroupId],
         dbSubnetGroupName: subnetGroup.dbSubnetGroupName,
-        backupRetentionPeriod: props.environment === 'prod' ? 7 : 1,
-        deletionProtection: props.environment === 'prod',
+        backupRetentionPeriod: config.database.backupRetention.toDays(),
+        deletionProtection: config.database.deletionProtection,
         // Note: masterUsername and masterUserPassword are not needed for snapshot restoration
       });
       cfnCluster.addDependency(subnetGroup);
@@ -152,20 +152,22 @@ export class DatabaseStack extends cdk.Stack {
           // Note: publiclyAccessible requires the DB to be in public subnets
           // We'll keep it in private subnets and use Data API instead
         }),
-        // Reader instance removed — avg 1.1 connections, peak 24 does not
-        // justify a dedicated reader. Saves ~$88/month. Re-add when traffic
-        // from multi-district onboarding warrants read scaling. See issue #832.
-        readers: [],
-        // Right-sized from prod 2-8 ACU to 1-4 based on CloudWatch metrics:
-        // avg 1.41 ACU, peak 6.0 ACU. Previous config was overprovisioned.
-        serverlessV2MinCapacity: props.environment === 'prod' ? 1 : 0.5,
-        serverlessV2MaxCapacity: props.environment === 'prod' ? 4 : 2,
+        // Reader instance controlled by config.database.multiAz.
+        // Currently false for prod — avg 1.1 connections, peak 24 does not
+        // justify a dedicated reader. Re-enable multiAz in environment-config.ts
+        // when multi-district onboarding generates read-heavy traffic. See #832.
+        readers: config.database.multiAz
+          ? [rds.ClusterInstance.serverlessV2('Reader', { scaleWithWriter: true })]
+          : [],
+        // Capacity sourced from environment-config.ts — single source of truth.
+        serverlessV2MinCapacity: config.database.minCapacity,
+        serverlessV2MaxCapacity: config.database.maxCapacity,
         storageEncrypted: true,
         backup: {
-          retention: cdk.Duration.days(props.environment === 'prod' ? 7 : 1),
+          retention: config.database.backupRetention,
         },
-        removalPolicy: props.environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
-        deletionProtection: props.environment === 'prod',
+        removalPolicy: config.database.deletionProtection ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+        deletionProtection: config.database.deletionProtection,
         cloudwatchLogsExports: ['postgresql'],
         vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
