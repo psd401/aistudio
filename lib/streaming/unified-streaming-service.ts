@@ -600,7 +600,9 @@ function shouldCheckOutputSafety(
 }
 
 /**
- * Get or create tools for streaming
+ * Get or create tools for streaming.
+ * Filters requested tools against the model's supported tools to prevent
+ * errors like "This model doesn't support tool use in streaming mode."
  */
 async function getOrCreateTools(
   request: StreamRequest,
@@ -612,7 +614,42 @@ async function getOrCreateTools(
   if (request.tools) {
     return request.tools;
   }
-  return adapter.createTools(request.enabledTools || []);
+
+  const requestedTools = request.enabledTools || [];
+  if (requestedTools.length === 0) {
+    return adapter.createTools([]);
+  }
+
+  // Filter requested tools against model's supported capabilities
+  const supportedTools = adapter.getSupportedTools(request.modelId);
+
+  // If the adapter reports no supported tools, pass nothing to avoid
+  // "tool use in streaming mode" errors (e.g., Bedrock Claude models)
+  if (supportedTools.length === 0) {
+    const log = createLogger({ module: 'unified-streaming-service' });
+    log.info('Model does not support provider-native tools, filtering all tool requests', {
+      modelId: request.modelId,
+      requestedTools,
+    });
+    // Still create universal tools (show_chart, etc.) — they work with all models
+    return adapter.createTools([]);
+  }
+
+  // Only pass through tools the model actually supports
+  const filteredTools = requestedTools.filter(tool => supportedTools.includes(tool));
+  if (filteredTools.length < requestedTools.length) {
+    const log = createLogger({ module: 'unified-streaming-service' });
+    const droppedTools = requestedTools.filter(tool => !supportedTools.includes(tool));
+    log.info('Filtered unsupported tools for model', {
+      modelId: request.modelId,
+      requestedTools,
+      supportedTools,
+      filteredTools,
+      droppedTools,
+    });
+  }
+
+  return adapter.createTools(filteredTools);
 }
 
 /**
