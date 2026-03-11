@@ -334,6 +334,12 @@ describe('Tool Event Type Guards', () => {
 
       expect(isToolInputDeltaEvent(event)).toBe(false);
     });
+
+    it('should return false for tool-input-delta with non-string delta', () => {
+      const event = { type: 'tool-input-delta', toolCallId: 'call-123', delta: 123 } as unknown as SSEEvent;
+
+      expect(isToolInputDeltaEvent(event)).toBe(false);
+    });
   });
 
   describe('isToolInputAvailableEvent', () => {
@@ -359,6 +365,24 @@ describe('Tool Event Type Guards', () => {
 
     it('should return false for tool-input-available with missing toolCallId', () => {
       const event = { type: 'tool-input-available' } as unknown as SSEEvent;
+
+      expect(isToolInputAvailableEvent(event)).toBe(false);
+    });
+
+    it('should return false for tool-input-available with non-string toolName', () => {
+      const event = { type: 'tool-input-available', toolCallId: 'call-123', toolName: 42 } as unknown as SSEEvent;
+
+      expect(isToolInputAvailableEvent(event)).toBe(false);
+    });
+
+    it('should return false for tool-input-available with null args', () => {
+      const event = { type: 'tool-input-available', toolCallId: 'call-123', args: null } as unknown as SSEEvent;
+
+      expect(isToolInputAvailableEvent(event)).toBe(false);
+    });
+
+    it('should return false for tool-input-available with array args', () => {
+      const event = { type: 'tool-input-available', toolCallId: 'call-123', args: [] } as unknown as SSEEvent;
 
       expect(isToolInputAvailableEvent(event)).toBe(false);
     });

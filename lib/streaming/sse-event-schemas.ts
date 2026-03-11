@@ -399,7 +399,7 @@ export function validateSSEEvent(event: unknown): ValidationResult {
   )
 
   if (fieldNameIssues.length > 0) {
-    hint = 'Field name mismatch detected. This may indicate an AI SDK compatibility issue or version mismatch. Check that field names match the Vercel AI SDK v5 specification.'
+    hint = 'Field name mismatch detected. This may indicate an AI SDK compatibility issue or version mismatch. Check that field names match the Vercel AI SDK v6 specification.'
   }
 
   // Check for type mismatches

@@ -469,7 +469,9 @@ export async function POST(req: Request) {
   } catch (error) {
     if (error instanceof ContentSafetyBlockedError) {
       log.warn('Content blocked by safety guardrails', {
-        error: { message: error.message, name: error.name }
+        error: { message: error.message, name: error.name },
+        categories: error.blockedCategories,
+        source: error.source
       });
       timer({ status: 'blocked' });
       return new Response(

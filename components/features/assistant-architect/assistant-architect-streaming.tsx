@@ -493,7 +493,7 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
             }
           }
 
-          // Complete monitoring and publish metrics
+          // Complete monitoring and log metrics locally
           const metrics = monitor.complete()
 
           log.info('Streaming completed successfully', {

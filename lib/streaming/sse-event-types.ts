@@ -477,7 +477,8 @@ export function isToolInputStartEvent(event: SSEEvent): event is ToolInputStartE
 export function isToolInputDeltaEvent(event: SSEEvent): event is ToolInputDeltaEvent {
   return event.type === 'tool-input-delta' &&
          'toolCallId' in event &&
-         typeof event.toolCallId === 'string';
+         typeof event.toolCallId === 'string' &&
+         (!('delta' in event) || typeof event.delta === 'string');
 }
 
 /**
@@ -487,7 +488,12 @@ export function isToolInputDeltaEvent(event: SSEEvent): event is ToolInputDeltaE
 export function isToolInputAvailableEvent(event: SSEEvent): event is ToolInputAvailableEvent {
   return event.type === 'tool-input-available' &&
          'toolCallId' in event &&
-         typeof event.toolCallId === 'string';
+         typeof event.toolCallId === 'string' &&
+         (!('toolName' in event) || typeof event.toolName === 'string') &&
+         (!('args' in event) ||
+           (event.args !== null &&
+            typeof event.args === 'object' &&
+            !Array.isArray(event.args)));
 }
 
 /**
