@@ -229,6 +229,7 @@ describe('PIITokenizationService', () => {
 
       const result = await service.detokenize(text, 'session-123');
 
+      expect(capturedBatchInputs).toHaveLength(1);
       const keys = capturedBatchInputs[0].RequestItems['test-table'].Keys;
       expect(keys).toHaveLength(1);
       expect(result).toBe('Jane Jane');
@@ -249,6 +250,7 @@ describe('PIITokenizationService', () => {
 
       const result = await service.detokenize(text, 'session-123');
 
+      expect(capturedBatchInputs).toHaveLength(1);
       const keys = capturedBatchInputs[0].RequestItems['test-table'].Keys;
       expect(keys).toHaveLength(2);
       expect(result).toBe('Alice and Bob met Alice');
