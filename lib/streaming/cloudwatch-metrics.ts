@@ -261,6 +261,7 @@ export function convertSSEMetricsToCloudWatch(
  *
  * @param sseMetrics - Metrics from SSEMonitor.complete()
  * @param context - Additional context
+ * @deprecated No active callers. Tracked for removal in issue #842.
  */
 export async function publishSSEMonitorMetrics(
   sseMetrics: SSEMetrics,
