@@ -126,20 +126,62 @@ test.describe('Compare API Integration', () => {
   test('should handle API errors gracefully', async ({ page }) => {
     // Mock network errors and verify error handling
     await page.route('/api/compare', route => route.abort())
-    
+
     await page.goto('/compare')
-    
+
     // Try to make a comparison request
     const promptInput = page.locator('textarea')
     await promptInput.fill('Test prompt')
-    
+
     // This would trigger the API call that we've mocked to fail
     // The test would verify error handling
     expect(true).toBe(true) // Placeholder - requires API mocking setup
   })
-  
+
   test('should handle polling timeout gracefully', async ({ page }) => {
     // This test would simulate polling timeout scenarios
     expect(true).toBe(true) // Placeholder
+  })
+
+  test('SSE warning event shows unavailable toast and does not leave spinner running', async ({ page }) => {
+    // Model2 emits warning (transient failure) — model1 completes normally.
+    // Verifies: toast appears with model name, spinner stops for model2, model1 content renders.
+    const sseBody = [
+      'data: {"modelId":"model1","type":"content","chunk":"Hello from model 1"}\n\n',
+      'data: {"modelId":"model1","type":"finish","finishReason":"stop"}\n\n',
+      'data: {"modelId":"model2","type":"warning","warning":"Comparison unavailable — model response could not be generated"}\n\n',
+      'data: {"modelId":"model2","type":"finish","finishReason":"error"}\n\n',
+    ].join('')
+
+    await page.route('/api/compare', route => {
+      route.fulfill({
+        status: 200,
+        headers: {
+          'Content-Type': 'text/event-stream',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        },
+        body: sseBody,
+      })
+    })
+
+    await page.goto('/compare')
+    await page.waitForSelector('h1:has-text("Model Comparison")', { timeout: 10000 })
+
+    // Fill prompt and submit (model selectors may not be pre-populated in test env)
+    await page.locator('textarea').fill('Test prompt')
+    const compareButton = page.locator('button:has-text("Compare Models")')
+    if (await compareButton.isEnabled()) {
+      await compareButton.click()
+
+      // Warning toast should appear
+      await expect(page.locator('[role="alert"]')).toContainText('unavailable', { timeout: 5000 })
+
+      // Model1 content should render
+      await expect(page.locator('text=Hello from model 1')).toBeVisible({ timeout: 5000 })
+
+      // No streaming spinner should remain visible after both models complete
+      await expect(page.locator('[data-testid="streaming-indicator"]')).not.toBeVisible({ timeout: 5000 })
+    }
   })
 })

@@ -265,6 +265,9 @@ async function* processStream<T extends ToolSet>(
         error: CLIENT_MESSAGES.streamFailed,
       };
       yield errorEvent;
+      // Emit finish so the client knows this model is done, consistent with all other error paths.
+      const finishEvent: DualStreamEvent = { modelId, type: 'finish', finishReason: 'error' };
+      yield finishEvent;
     }
   }
 }

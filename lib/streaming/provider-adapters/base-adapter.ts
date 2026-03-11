@@ -25,7 +25,8 @@ export function isTransientStreamError(error: Error): boolean {
     message.includes('timeout') ||
     message.includes('econnreset') ||
     message.includes('etimedout') ||
-    (message.includes('item') && message.includes('not found'))
+    // OpenAI Responses API stale previous_response_id: "No item with id X was found"
+    (message.includes('no item with id') || (message.includes('item') && message.includes('not found')))
   );
 }
 
@@ -97,14 +98,12 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
   }
 
   /**
-   * Get list of tools supported by a specific model
-   * Override in subclasses to report model-specific tool capabilities
+   * Get list of tools supported by a specific model.
+   * Return [] to indicate the model supports no provider-native tools (all tool requests
+   * will be filtered out). Abstract to enforce a deliberate implementation in every adapter —
+   * a missing override would silently drop all tools, which is hard to debug.
    */
-   
-  getSupportedTools(_modelId: string): string[] {
-    // Base implementation returns empty - providers override this
-    return [];
-  }
+  abstract getSupportedTools(modelId: string): string[];
 
   /**
    * Get stored provider client instance (for debugging/testing)
