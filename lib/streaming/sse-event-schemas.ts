@@ -388,7 +388,10 @@ export function validateSSEEvent(event: unknown): ValidationResult {
   const fieldNameIssues = result.error.issues.filter(i =>
     i.code === ZodIssueCode.unrecognized_keys ||
     i.code === ZodIssueCode.invalid_union ||
-    (i.code === ZodIssueCode.invalid_type && i.input === undefined)
+    // Zod v4 $ZodIssueInvalidType has optional `input` — omitted entirely (not just undefined)
+    // when the field is missing from the object, so `'input' in i` would be false.
+    // Cast to access the optional property safely.
+    (i.code === ZodIssueCode.invalid_type && (i as { input?: unknown }).input === undefined)
   )
 
   if (fieldNameIssues.length > 0) {
@@ -397,7 +400,7 @@ export function validateSSEEvent(event: unknown): ValidationResult {
 
   // Check for type mismatches (wrong type provided, not a missing field)
   const typeIssues = result.error.issues.filter(i =>
-    i.code === ZodIssueCode.invalid_type && i.input !== undefined
+    i.code === ZodIssueCode.invalid_type && (i as { input?: unknown }).input !== undefined
   )
   if (typeIssues.length > 0 && !hint) {
     hint = 'Type mismatch detected. Verify that the event fields have the correct data types.'
