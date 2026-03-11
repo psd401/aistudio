@@ -9,8 +9,9 @@ import { cn } from "@/lib/utils"
 import { getBrandingConfig } from "@/lib/branding"
 import type { Metadata } from "next"
 
-// Environment validation is handled server-side only
-// Client-side validation would expose sensitive environment variable names
+// Force dynamic rendering so branding values are fetched from the database
+// at request time, not baked in at build time (when DB is unavailable).
+export const dynamic = 'force-dynamic'
 
 export async function generateMetadata(): Promise<Metadata> {
   const branding = await getBrandingConfig()
