@@ -165,8 +165,9 @@ def determine_target_capacity(
         Tuple of (min_capacity, max_capacity)
     """
     # Default capacity by environment
+    # Right-sized per issue #832 based on CloudWatch ACU metrics
     env_defaults = {
-        "prod": {"min": 2.0, "max": 8.0, "off_hours_min": 1.0, "off_hours_max": 4.0},
+        "prod": {"min": 1.0, "max": 4.0, "off_hours_min": 0.5, "off_hours_max": 2.0},
         "staging": {"min": 0.5, "max": 2.0, "off_hours_min": 0.5, "off_hours_max": 1.0},
         "dev": {"min": 0.5, "max": 2.0, "off_hours_min": 0.5, "off_hours_max": 1.0},
     }

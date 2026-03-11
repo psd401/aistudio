@@ -75,14 +75,16 @@ export class EnvironmentConfig {
     })
 
     // Production configuration - optimized for reliability
+    // Right-sized from 2-8 ACU to 1-4 based on CloudWatch metrics (issue #832):
+    // avg 1.41 ACU, peak 6.0 ACU over sustained monitoring period
     EnvironmentConfig.configs.set("prod", {
       database: {
-        minCapacity: 2,
-        maxCapacity: 8,
+        minCapacity: 1,
+        maxCapacity: 4,
         autoPause: false,
         backupRetention: cdk.Duration.days(7),
         deletionProtection: true,
-        multiAz: true,
+        multiAz: false,
       },
       compute: {
         lambdaMemory: 3008,

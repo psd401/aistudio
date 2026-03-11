@@ -192,8 +192,11 @@ def pause_cluster(reason: str) -> Dict[str, Any]:
     cluster_info = get_cluster_info()
     current_min = cluster_info["minCapacity"]
 
-    # If already at minimum, consider it paused
-    if current_min == 0.5:
+    # Only consider it paused if both min AND max are at 0.5
+    # Bug fix: Previously only checked min, so dev cluster (min=0.5, max=2.0)
+    # was incorrectly reported as "already paused" and never truly paused
+    current_max = cluster_info["maxCapacity"]
+    if current_min == 0.5 and current_max == 0.5:
         logger.info("Cluster already at minimum capacity (effectively paused)")
         return {"status": "already_paused", "capacity": 0.5}
 
@@ -239,9 +242,9 @@ def resume_cluster(reason: str) -> Dict[str, Any]:
 
     cluster_info = get_cluster_info()
 
-    # Determine target capacity based on environment
+    # Determine target capacity based on environment (right-sized per #832)
     if ENVIRONMENT == "prod":
-        target_min, target_max = 2.0, 8.0
+        target_min, target_max = 1.0, 4.0
     elif ENVIRONMENT == "staging":
         target_min, target_max = 0.5, 2.0
     else:  # dev

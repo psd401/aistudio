@@ -101,8 +101,8 @@ export class DatabaseStack extends cdk.Stack {
         engineVersion: '15.12', // Match snapshot version
         dbClusterIdentifier: `aistudio-${props.environment}-cluster`,
         serverlessV2ScalingConfiguration: {
-          minCapacity: props.environment === 'prod' ? 2 : 0.5,
-          maxCapacity: props.environment === 'prod' ? 8 : 2,
+          minCapacity: props.environment === 'prod' ? 1 : 0.5,
+          maxCapacity: props.environment === 'prod' ? 4 : 2,
         },
         enableHttpEndpoint: true, // Enable Data API
         storageEncrypted: true,
@@ -151,13 +151,14 @@ export class DatabaseStack extends cdk.Stack {
           // Note: publiclyAccessible requires the DB to be in public subnets
           // We'll keep it in private subnets and use Data API instead
         }),
-        readers: props.environment === 'prod'
-          ? [rds.ClusterInstance.serverlessV2('Reader', {
-              scaleWithWriter: true,
-            })]
-          : [],
-        serverlessV2MinCapacity: props.environment === 'prod' ? 2 : 0.5,
-        serverlessV2MaxCapacity: props.environment === 'prod' ? 8 : 2,
+        // Reader instance removed — avg 1.1 connections, peak 24 does not
+        // justify a dedicated reader. Saves ~$88/month. Re-add when traffic
+        // from multi-district onboarding warrants read scaling. See issue #832.
+        readers: [],
+        // Right-sized from prod 2-8 ACU to 1-4 based on CloudWatch metrics:
+        // avg 1.41 ACU, peak 6.0 ACU. Previous config was overprovisioned.
+        serverlessV2MinCapacity: props.environment === 'prod' ? 1 : 0.5,
+        serverlessV2MaxCapacity: props.environment === 'prod' ? 4 : 2,
         storageEncrypted: true,
         backup: {
           retention: cdk.Duration.days(props.environment === 'prod' ? 7 : 1),
@@ -175,18 +176,9 @@ export class DatabaseStack extends cdk.Stack {
       this.databaseSecretArn = dbSecret.secretArn;
     }
 
-    // RDS Proxy (skip for snapshot restoration as imported cluster doesn't support addProxy)
-    let proxy: rds.IDatabaseProxy | undefined;
-    if (!restoreFromSnapshot && this.cluster instanceof rds.DatabaseCluster) {
-      proxy = this.cluster.addProxy('RdsProxy', {
-        secrets: [dbSecret],
-        vpc,
-        vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
-        securityGroups: [dbSg],
-        requireTLS: true,
-        debugLogging: props.environment !== 'prod',
-      });
-    }
+    // RDS Proxy removed — the application uses postgres.js with built-in
+    // connection pooling (max 20 connections, idle timeout 20s), making
+    // RDS Proxy redundant. Saves ~$81/month. See issue #832.
 
     // Add cost optimization features (skip for snapshot restoration as AuroraCostOptimizer requires DatabaseCluster)
     if (!restoreFromSnapshot && this.cluster instanceof rds.DatabaseCluster) {
@@ -214,10 +206,10 @@ export class DatabaseStack extends cdk.Stack {
             daysOfWeek: 'MON-FRI',  // Weekdays only, weekends use lower capacity
           },
           scaling: {
-            businessHoursMin: 2.0,  // M-F 7am-5pm PT: 2-8 ACU
-            businessHoursMax: 8.0,
-            offHoursMin: 1.0,       // Nights and weekends: 1-4 ACU
-            offHoursMax: 4.0,
+            businessHoursMin: 1.0,  // M-F 7am-5pm PT: 1-4 ACU (right-sized per #832)
+            businessHoursMax: 4.0,
+            offHoursMin: 0.5,       // Nights and weekends: 0.5-2 ACU
+            offHoursMax: 2.0,
           },
         }),
       });
@@ -371,14 +363,6 @@ export class DatabaseStack extends cdk.Stack {
     }
 
     // Outputs
-    if (proxy) {
-      new cdk.CfnOutput(this, 'RdsProxyEndpoint', {
-        value: proxy.endpoint,
-        description: 'RDS Proxy endpoint',
-        exportName: `${props.environment}-RdsProxyEndpoint`,
-      });
-    }
-
     if (!restoreFromSnapshot) {
       new cdk.CfnOutput(this, 'ClusterEndpoint', {
         value: this.cluster.clusterEndpoint.hostname,
