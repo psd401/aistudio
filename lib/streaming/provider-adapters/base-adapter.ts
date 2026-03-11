@@ -340,15 +340,38 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
    * Can be overridden by specific providers
    */
   protected handleError(
-    error: Error, 
+    error: Error,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     callbacks: StreamingCallbacks
   ): void {
-    // Base error handling - log the error
-    log.error(`${this.providerName} adapter error`, {
-      error: error.message,
-      provider: this.providerName
-    });
+    const isTransient = this.isTransientError(error);
+    if (isTransient) {
+      log.warn(`${this.providerName} adapter transient error`, {
+        error: error.message,
+        provider: this.providerName,
+      });
+    } else {
+      log.error(`${this.providerName} adapter error`, {
+        error: error.message,
+        provider: this.providerName,
+      });
+    }
+  }
+
+  /**
+   * Check if an error is transient (recoverable) vs permanent.
+   * Transient errors are logged at warn level since they don't indicate
+   * a systemic issue.
+   */
+  protected isTransientError(error: Error): boolean {
+    const message = error.message;
+    return (
+      message.includes('No output generated') ||
+      message.includes('timeout') ||
+      message.includes('ECONNRESET') ||
+      message.includes('ETIMEDOUT') ||
+      (message.includes('Item') && message.includes('not found'))
+    );
   }
   
   /**
