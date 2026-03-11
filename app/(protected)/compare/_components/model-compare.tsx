@@ -7,25 +7,12 @@ import { useToast } from "@/components/ui/use-toast"
 import { useModelsWithPersistence } from "@/lib/hooks/use-models"
 import { PageBranding } from "@/components/ui/page-branding"
 import { createLogger } from "@/lib/client-logger"
+import type { DualStreamEvent } from "@/lib/compare/dual-stream-merger"
 
 const log = createLogger({ module: 'model-compare' })
 
 // Note: This component now uses native streaming instead of polling
 // The backend streams both model responses in parallel via Server-Sent Events
-
-interface DualStreamEvent {
-  modelId: 'model1' | 'model2';
-  type: 'content' | 'finish' | 'error' | 'warning';
-  chunk?: string;
-  error?: string;
-  warning?: string;
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
-  finishReason?: string;
-}
 
 export function ModelCompare() {
   // Use shared model management hooks
@@ -159,15 +146,18 @@ export function ModelCompare() {
                   } else if (data.type === 'finish') {
                     setModel1Complete(true)
                   } else if (data.type === 'warning') {
+                    // Mark complete defensively — warning is always followed by finish,
+                    // but don't rely on that sequence in case the finish is dropped.
+                    setModel1Complete(true)
                     toast({
-                      title: "Model 1 Warning",
+                      title: `${model1State.selectedModel?.name ?? 'First model'} unavailable`,
                       description: data.warning || "Comparison unavailable — showing primary model only",
                     })
                   } else if (data.type === 'error') {
                     setModel1Complete(true)
                     toast({
-                      title: "Model 1 Error",
-                      description: data.error || "Model 1 failed to generate response",
+                      title: `${model1State.selectedModel?.name ?? 'First model'} failed`,
+                      description: data.error || "Failed to generate response",
                       variant: "destructive"
                     })
                   }
@@ -177,15 +167,18 @@ export function ModelCompare() {
                   } else if (data.type === 'finish') {
                     setModel2Complete(true)
                   } else if (data.type === 'warning') {
+                    // Mark complete defensively — warning is always followed by finish,
+                    // but don't rely on that sequence in case the finish is dropped.
+                    setModel2Complete(true)
                     toast({
-                      title: "Model 2 Warning",
+                      title: `${model2State.selectedModel?.name ?? 'Second model'} unavailable`,
                       description: data.warning || "Comparison unavailable — showing primary model only",
                     })
                   } else if (data.type === 'error') {
                     setModel2Complete(true)
                     toast({
-                      title: "Model 2 Error",
-                      description: data.error || "Model 2 failed to generate response",
+                      title: `${model2State.selectedModel?.name ?? 'Second model'} failed`,
+                      description: data.error || "Failed to generate response",
                       variant: "destructive"
                     })
                   }
@@ -199,7 +192,10 @@ export function ModelCompare() {
           }
         }
 
-        // Stream complete
+        // Stream complete — force completion flags to true as a defensive
+        // guard against any missed finish/warning/error events.
+        setModel1Complete(true)
+        setModel2Complete(true)
         setIsStreaming(false)
       } finally {
         // Always cleanup the reader

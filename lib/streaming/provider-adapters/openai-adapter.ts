@@ -409,8 +409,12 @@ export class OpenAIAdapter extends BaseProviderAdapter {
         }
       });
       
-      // Process reasoning content from the stream
-      this.processResponsesAPIStream(result, callbacks);
+      // Process reasoning content from the stream (fire-and-forget, errors handled internally)
+      this.processResponsesAPIStream(result, callbacks).catch((err: unknown) => {
+        logger.error('Unhandled error in processResponsesAPIStream', {
+          error: err instanceof Error ? err.message : String(err)
+        });
+      });
       
       return {
         toDataStreamResponse: (options?: { headers?: Record<string, string> }) =>

@@ -10,6 +10,8 @@ import { ContentSafetyBlockedError } from './types';
 
 // Logger for PII transform debugging
 const piiTransformLog = createLogger({ module: 'pii-transform' });
+// Module-level logger for free functions (class methods use per-request loggers)
+const log = createLogger({ module: 'unified-streaming-service' });
 
 // PII token format: [PII:uuid] where uuid is 36 chars = 42 total chars
 const PII_TOKEN_REGEX = /\[PII:[\da-f-]{36}]/g;
@@ -627,7 +629,6 @@ async function getOrCreateTools(
   // If the adapter reports no supported tools, pass nothing to avoid
   // "tool use in streaming mode" errors (e.g., Bedrock Claude models)
   if (supportedTools.length === 0) {
-    const log = createLogger({ module: 'unified-streaming-service' });
     log.info('Model does not support provider-native tools, filtering all tool requests', {
       modelId: request.modelId,
       requestedTools,
@@ -639,7 +640,6 @@ async function getOrCreateTools(
   // Only pass through tools the model actually supports
   const filteredTools = requestedTools.filter(tool => supportedTools.includes(tool));
   if (filteredTools.length < requestedTools.length) {
-    const log = createLogger({ module: 'unified-streaming-service' });
     const droppedTools = requestedTools.filter(tool => !supportedTools.includes(tool));
     log.info('Filtered unsupported tools for model', {
       modelId: request.modelId,
