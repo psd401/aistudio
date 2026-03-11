@@ -6,7 +6,7 @@ import {
   createUser,
   updateUser,
   getRoleByName,
-  assignRoleToUser,
+  addUserRole,
   getUserRolesByCognitoSub
 } from "@/lib/db/drizzle"
 import { getServerSession } from "@/lib/auth/server-session"
@@ -152,29 +152,20 @@ export async function getCurrentUserAction(): Promise<
         assignedRole: defaultRole
       })
 
-      const role = await getRoleByName(defaultRole)
-
-      if (role) {
-        const roleId = role.id
-        // UPSERT: If role already assigned by concurrent request, DO NOTHING
-        const assignmentResult = await assignRoleToUser(user!.id, roleId)
-
-        if (assignmentResult && assignmentResult.length > 0) {
-          log.info(`${defaultRole} role assigned to user`, {
-            userId: user.id,
-            roleId,
-            roleName: defaultRole
-          })
-        } else {
-          log.info(`${defaultRole} role already assigned (concurrent request)`, {
-            userId: user.id,
-            roleId,
-            roleName: defaultRole
-          })
-        }
-      } else {
-        log.warn("Default role not found in database - user has no default role", {
-          attemptedRole: defaultRole
+      // addUserRole runs in a transaction, handles role lookup, and increments
+      // role_version for session cache invalidation — consistent with resolveUserId
+      try {
+        await addUserRole(user!.id, defaultRole)
+        log.info(`${defaultRole} role assigned to user`, {
+          userId: user.id,
+          roleName: defaultRole
+        })
+      } catch (roleError) {
+        // Non-fatal: user is provisioned but may lack a role until next login
+        log.warn("Default role assignment failed", {
+          userId: user.id,
+          attemptedRole: defaultRole,
+          error: roleError instanceof Error ? roleError.message : "Unknown error"
         })
       }
     }

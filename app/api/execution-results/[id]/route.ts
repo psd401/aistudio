@@ -2,21 +2,9 @@ import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
 import { resolveUserId } from "@/lib/auth/resolve-user"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
-import { ErrorFactories } from "@/lib/error-utils"
+import { ErrorFactories, handleError } from "@/lib/error-utils"
 import { getExecutionResultById, deleteExecutionResult } from "@/lib/db/drizzle"
-
-interface ExecutionResult {
-  id: number
-  scheduledExecutionId: number
-  resultData: Record<string, unknown>
-  status: 'success' | 'failed' | 'running'
-  executedAt: string
-  executionDurationMs: number
-  errorMessage: string | null
-  scheduleName: string
-  userId: number
-  assistantArchitectName: string
-}
+import type { ExecutionResult } from "@/types/notifications"
 
 async function getHandler(
   request: NextRequest,
@@ -78,41 +66,12 @@ async function getHandler(
 
   } catch (error) {
     timer({ status: "error" })
-
-    log.error("Failed to fetch execution result", {
-      error: error instanceof Error ? error.message : 'Unknown error',
-      resultId: sanitizeForLogging((await params).id),
-      stack: error instanceof Error ? error.stack : undefined
-    })
-
-    // Determine appropriate error status and message based on error type
-    if (error && typeof error === 'object' && 'name' in error) {
-      switch (error.name) {
-        case 'InvalidInputError':
-          return NextResponse.json(
-            { error: "Invalid execution result ID" },
-            { status: 400 }
-          )
-        case 'AuthNoSessionError':
-          return NextResponse.json(
-            { error: "Authentication required" },
-            { status: 401 }
-          )
-        case 'DbRecordNotFoundError':
-          return NextResponse.json(
-            { error: "Execution result not found" },
-            { status: 404 }
-          )
-        default:
-          return NextResponse.json(
-            { error: "Unable to fetch execution result" },
-            { status: 500 }
-          )
-      }
-    }
-
     return NextResponse.json(
-      { error: "Unable to fetch execution result" },
+      handleError(error, "Failed to fetch execution result", {
+        context: "GET /api/execution-results/[id]",
+        requestId,
+        operation: "getExecutionResult"
+      }),
       { status: 500 }
     )
   }
@@ -164,41 +123,12 @@ async function deleteHandler(
 
   } catch (error) {
     timer({ status: "error" })
-
-    log.error("Failed to delete execution result", {
-      error: error instanceof Error ? error.message : 'Unknown error',
-      resultId: sanitizeForLogging((await params).id),
-      stack: error instanceof Error ? error.stack : undefined
-    })
-
-    // Determine appropriate error status and message based on error type
-    if (error && typeof error === 'object' && 'name' in error) {
-      switch (error.name) {
-        case 'InvalidInputError':
-          return NextResponse.json(
-            { error: "Invalid execution result ID" },
-            { status: 400 }
-          )
-        case 'AuthNoSessionError':
-          return NextResponse.json(
-            { error: "Authentication required" },
-            { status: 401 }
-          )
-        case 'DbRecordNotFoundError':
-          return NextResponse.json(
-            { error: "Execution result not found" },
-            { status: 404 }
-          )
-        default:
-          return NextResponse.json(
-            { error: "Unable to delete execution result" },
-            { status: 500 }
-          )
-      }
-    }
-
     return NextResponse.json(
-      { error: "Unable to delete execution result" },
+      handleError(error, "Failed to delete execution result", {
+        context: "DELETE /api/execution-results/[id]",
+        requestId,
+        operation: "deleteExecutionResult"
+      }),
       { status: 500 }
     )
   }

@@ -83,9 +83,6 @@ export async function resolveUserId(
     }
   }
 
-  // New user: create via UPSERT (safe for concurrent requests)
-  const username = session.email?.split("@")[0] ?? ""
-
   // Require a real email for new users — synthetic addresses create permanent
   // bad data in the users table and break downstream notification delivery.
   if (!session.email) {
@@ -95,6 +92,9 @@ export async function resolveUserId(
     throw ErrorFactories.missingRequiredField("email")
   }
 
+  // New user: create via UPSERT (safe for concurrent requests)
+  // session.email is guaranteed non-null after the guard above
+  const username = session.email.split("@")[0]
   const firstName = session.givenName || username || "User"
   const lastName = session.familyName || undefined
 
@@ -108,8 +108,9 @@ export async function resolveUserId(
   // Guard against UPSERT returning no rows (DB trigger, RLS, permission error)
   const userId = newUser?.id
   if (!userId || typeof userId !== "number" || userId <= 0) {
-    throw new Error(
-      `createUser UPSERT returned no valid ID for cognitoSub: ${sanitizeForLogging(session.sub)}`
+    throw ErrorFactories.dbQueryFailed(
+      "createUser UPSERT",
+      new Error(`Returned no valid ID for cognitoSub: ${sanitizeForLogging(session.sub)}`)
     )
   }
 

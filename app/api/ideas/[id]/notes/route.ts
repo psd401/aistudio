@@ -1,6 +1,7 @@
 import { getServerSession } from '@/lib/auth/server-session';
 import { NextResponse } from 'next/server';
-import { getIdeaNotes, addNote, getUserIdByCognitoSub } from '@/lib/db/drizzle';
+import { getIdeaNotes, addNote } from '@/lib/db/drizzle';
+import { resolveUserId } from '@/lib/auth/resolve-user';
 import { hasRole } from '@/utils/roles';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -81,14 +82,8 @@ export async function POST(request: Request, context: { params: Promise<{ id: st
       return new NextResponse('Missing content', { status: 400 });
     }
 
-    // Get the user's numeric ID from their cognito_sub
-    const userIdString = await getUserIdByCognitoSub(session.sub);
-
-    if (!userIdString) {
-      return new NextResponse('User not found', { status: 404 });
-    }
-
-    const userId = Number(userIdString);
+    // Get the user's numeric ID (provisions if missing)
+    const userId = await resolveUserId(session, requestId);
 
     // Add the note
     const newNote = await addNote(ideaId, userId, content);

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
 import { resolveUserId } from "@/lib/auth/resolve-user"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
-import { ErrorFactories } from "@/lib/error-utils"
+import { ErrorFactories, handleError } from "@/lib/error-utils"
 import { getExecutionResultForDownload } from "@/lib/db/drizzle"
 import { getBrandingConfig } from "@/lib/branding"
 
@@ -13,12 +13,9 @@ function sanitizeMarkdownContent(content: string): string {
   }
 
   return content
-    // Remove null bytes first
+    // Remove null bytes (\u0000 and \0 are the same character in JS)
     // eslint-disable-next-line no-control-regex
     .replace(/\u0000/g, '')
-    // eslint-disable-next-line no-control-regex
-    .replace(/\u0000/g, '')
-    .replace(/\0/g, '')
     // Remove dangerous HTML/XML elements
     .replace(/[<>]/g, '') // Remove angle brackets that could contain HTML/XML
     .replace(/javascript:/gi, '') // Remove javascript: URLs
@@ -155,44 +152,12 @@ export async function downloadHandler(
 
   } catch (error) {
     timer({ status: "error" })
-
-    // Log detailed error internally but return generic message to client
-    log.error("Failed to download execution result", {
-      error: error instanceof Error ? error.message : 'Unknown error',
-      resultId: sanitizeForLogging((await params).id),
-      stack: error instanceof Error ? error.stack : undefined
-    })
-
-    // Determine appropriate error status and message based on error type
-    if (error && typeof error === 'object' && 'name' in error) {
-      switch (error.name) {
-        case 'InvalidInputError':
-          return NextResponse.json(
-            { error: "Invalid execution result ID" },
-            { status: 400 }
-          )
-        case 'AuthNoSessionError':
-          return NextResponse.json(
-            { error: "Authentication required" },
-            { status: 401 }
-          )
-        case 'DbRecordNotFoundError':
-          return NextResponse.json(
-            { error: "Execution result not found" },
-            { status: 404 }
-          )
-        default:
-          // Return generic error message to client for server errors
-          return NextResponse.json(
-            { error: "Unable to download execution result" },
-            { status: 500 }
-          )
-      }
-    }
-
-    // Fallback for unknown error types
     return NextResponse.json(
-      { error: "Unable to download execution result" },
+      handleError(error, "Failed to download execution result", {
+        context: "GET /api/execution-results/[id]/download",
+        requestId,
+        operation: "downloadExecutionResult"
+      }),
       { status: 500 }
     )
   }
@@ -276,12 +241,9 @@ function generateSafeFilename(scheduleName: string): string {
 
   return scheduleName
     .toLowerCase()
-    // Remove null bytes (multiple representations)
+    // Remove null bytes (\u0000 and \0 are the same character in JS)
     // eslint-disable-next-line no-control-regex
-    .replace(/\u0000/g, '') // Actual null byte
-    // eslint-disable-next-line no-control-regex
-    .replace(/\u0000/g, '') // Unicode null
-    .replace(/\0/g, '') // Null character
+    .replace(/\u0000/g, '')
     // Remove path traversal patterns
     .replace(/\.\./g, '') // Remove dot-dot
     .replace(/\//g, '') // Remove forward slash

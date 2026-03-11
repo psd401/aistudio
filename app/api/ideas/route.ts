@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from '@/lib/auth/server-session';
-import { getIdeas, getUserVotedIdeaIds, getUserIdByCognitoSub, createIdea } from '@/lib/db/drizzle';
+import { getIdeas, getUserVotedIdeaIds, createIdea } from '@/lib/db/drizzle';
+import { resolveUserId } from '@/lib/auth/resolve-user';
 import { hasRole } from '@/utils/roles';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
@@ -28,13 +29,8 @@ export async function GET() {
     const allIdeas = await getIdeas();
 
     // Get the user's numeric ID for vote checking
-    const currentUserIdString = await getUserIdByCognitoSub(session.sub);
-    const currentUserId = currentUserIdString ? Number(currentUserIdString) : null;
-
-    let userVotedIdeaIds = new Set<number>();
-    if (currentUserId) {
-      userVotedIdeaIds = await getUserVotedIdeaIds(currentUserId);
-    }
+    const currentUserId = await resolveUserId(session, requestId);
+    const userVotedIdeaIds = await getUserVotedIdeaIds(currentUserId);
 
     const ideasWithVotes = allIdeas.map((idea) => ({
       ...idea,
@@ -103,19 +99,8 @@ export async function POST(request: Request) {
       });
     }
 
-    // Get the user's numeric ID from their cognito_sub
-    const userIdString = await getUserIdByCognitoSub(session.sub);
-
-    if (!userIdString) {
-      log.error("User not found in database", { cognitoSub: session.sub });
-      timer({ status: "error", reason: "user_not_found" });
-      return new NextResponse('User not found', {
-        status: 404,
-        headers: { "X-Request-Id": requestId }
-      });
-    }
-
-    const userId = Number(userIdString);
+    // Get the user's numeric ID (provisions if missing)
+    const userId = await resolveUserId(session, requestId);
 
     const newIdea = await createIdea({
       title,

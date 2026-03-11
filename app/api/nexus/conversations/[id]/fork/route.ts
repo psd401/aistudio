@@ -4,8 +4,8 @@ import {
   getConversationById,
   recordConversationEvent,
   updateConversation,
-  getUserIdByCognitoSubAsNumber,
 } from '@/lib/db/drizzle';
+import { resolveUserId } from '@/lib/auth/resolve-user';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { nexusConversations } from '@/lib/db/schema';
 
@@ -43,15 +43,8 @@ export async function POST(
       return new Response('Unauthorized', { status: 401 });
     }
     
-    const userCognitoSub = session.sub;
-
-    // Get numeric user ID
-    const userId = await getUserIdByCognitoSubAsNumber(userCognitoSub);
-    if (!userId) {
-      log.warn('User not found', { cognitoSub: userCognitoSub });
-      timer({ status: 'error', reason: 'user_not_found' });
-      return new Response('User not found', { status: 404 });
-    }
+    // Get numeric user ID (provisions if missing)
+    const userId = await resolveUserId(session, requestId);
 
     // Parse request body
     const body: ForkRequest = await req.json();
