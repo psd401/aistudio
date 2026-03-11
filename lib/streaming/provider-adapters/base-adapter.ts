@@ -379,6 +379,11 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
    * Check if an error is transient (recoverable) vs permanent.
    * Transient errors are logged at warn level since they don't indicate
    * a systemic issue.
+   *
+   * Subclasses may override this to add provider-specific transient patterns.
+   * Call `super.isTransientError(error)` to include the base patterns.
+   * Do not call the module-level `isTransientStreamError()` directly from
+   * subclass overrides — always go through `super` so the chain is extensible.
    */
   protected isTransientError(error: Error): boolean {
     return isTransientStreamError(error);

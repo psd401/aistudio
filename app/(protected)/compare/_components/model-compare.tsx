@@ -249,6 +249,8 @@ export function ModelCompare() {
 
     setIsStreaming(false)
     setIsLoading(false)
+    setModel1Complete(false)
+    setModel2Complete(false)
   }, [])
 
   // Cleanup on unmount

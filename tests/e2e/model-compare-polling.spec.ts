@@ -63,43 +63,24 @@ test.describe('Model Compare Polling Migration', () => {
     await expect(page.locator('[role="alert"]')).toContainText('Enter a prompt')
   })
 
-  test('should prevent comparing same model', async ({ page }) => {
-    // This test checks that user cannot select the same model twice
-    // Implementation would depend on the specific UI behavior
-    expect(true).toBe(true) // Placeholder
+  test.skip('should prevent comparing same model', async ({ page }) => {
+    // TODO: Verify that selecting the same model in both dropdowns is prevented
   })
 
-  test('should start comparison with valid inputs', async ({ page }) => {
-    // This test would verify the full comparison flow:
-    // 1. Select two different models
-    // 2. Enter a prompt
-    // 3. Submit comparison
-    // 4. Verify polling starts
-    // 5. Verify results appear
-    
-    // Note: This test would need actual models configured in test environment
-    expect(true).toBe(true) // Placeholder - requires test data setup
+  test.skip('should start comparison with valid inputs', async ({ page }) => {
+    // TODO: Full comparison flow with mocked SSE responses
   })
 
-  test('should handle polling updates correctly', async ({ page }) => {
-    // This test would:
-    // 1. Mock the API responses for job creation and polling
-    // 2. Verify that partial content updates appear
-    // 3. Verify that final results are displayed
-    // 4. Verify that loading states are handled correctly
-    
-    expect(true).toBe(true) // Placeholder - requires API mocking
+  test.skip('should handle polling updates correctly', async ({ page }) => {
+    // TODO: Mock API responses, verify partial content updates and final results
   })
 
-  test('should handle job failures gracefully', async ({ page }) => {
-    // This test would verify error handling when one or both jobs fail
-    expect(true).toBe(true) // Placeholder - requires failure simulation
+  test.skip('should handle job failures gracefully', async ({ page }) => {
+    // TODO: Simulate job failures and verify error handling
   })
 
-  test('should save results to comparison history', async ({ page }) => {
-    // This test would verify that completed comparisons are saved 
-    // and can be viewed in comparison history
-    expect(true).toBe(true) // Placeholder - requires database integration
+  test.skip('should save results to comparison history', async ({ page }) => {
+    // TODO: Verify completed comparisons persist to comparison history
   })
 
   test('should allow starting new comparison', async ({ page }) => {
@@ -123,24 +104,12 @@ test.describe('Model Compare Polling Migration', () => {
 })
 
 test.describe('Compare API Integration', () => {
-  test('should handle API errors gracefully', async ({ page }) => {
-    // Mock network errors and verify error handling
-    await page.route('/api/compare', route => route.abort())
-
-    await page.goto('/compare')
-
-    // Try to make a comparison request
-    const promptInput = page.locator('textarea')
-    await promptInput.fill('Test prompt')
-
-    // This would trigger the API call that we've mocked to fail
-    // The test would verify error handling
-    expect(true).toBe(true) // Placeholder - requires API mocking setup
+  test.skip('should handle API errors gracefully', async ({ page }) => {
+    // TODO: Mock network errors, trigger comparison, verify error toast
   })
 
-  test('should handle polling timeout gracefully', async ({ page }) => {
-    // This test would simulate polling timeout scenarios
-    expect(true).toBe(true) // Placeholder
+  test.skip('should handle polling timeout gracefully', async ({ page }) => {
+    // TODO: Simulate polling timeout and verify graceful degradation
   })
 
   test('SSE warning event shows unavailable toast and does not leave spinner running', async ({ page }) => {
@@ -151,9 +120,11 @@ test.describe('Compare API Integration', () => {
 
     // Inject two distinct models so the model selectors are populated and the
     // compare button becomes enabled without depending on live model data.
+    // capabilities must include 'chat' because useModelsWithPersistence('compareModel1', ['chat'])
+    // uses meetsRequiredCapabilities() to filter models for auto-selection.
     const mockModels = [
-      { id: 'model-alpha', modelId: 'gpt-4o', name: 'GPT-4o', provider: 'openai', categories: ['chat'], enabled: true },
-      { id: 'model-beta', modelId: 'claude-3-5-sonnet', name: 'Claude 3.5 Sonnet', provider: 'bedrock', categories: ['chat'], enabled: true },
+      { id: 1, modelId: 'gpt-4o', name: 'GPT-4o', provider: 'openai', active: true, nexusEnabled: false, capabilities: '["chat"]' },
+      { id: 2, modelId: 'claude-3-5-sonnet', name: 'Claude 3.5 Sonnet', provider: 'bedrock', active: true, nexusEnabled: false, capabilities: '["chat"]' },
     ]
     await page.route('/api/models', route => {
       route.fulfill({

@@ -80,7 +80,6 @@ export class ClaudeAdapter extends BaseProviderAdapter {
   /**
    * Get list of tools supported by Claude models on Bedrock
    */
-   
   getSupportedTools(_modelId: string): string[] {
     // Claude models on Bedrock will support tools in future
     // For now, return empty

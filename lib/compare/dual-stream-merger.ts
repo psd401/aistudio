@@ -201,7 +201,7 @@ async function* processStream<T extends ToolSet>(
     // Wait for final result
     const result = await streamResult;
 
-    // Wait for usage data (it's a promise in AI SDK v5)
+    // Wait for usage data (it's a promise in AI SDK v6)
     const usage = await result.usage;
     const finishReason = await result.finishReason;
 
@@ -275,6 +275,12 @@ async function* processStream<T extends ToolSet>(
 /**
  * Merge multiple async iterables into a single async iterable
  * Yields items as they become available from any source
+ */
+/**
+ * Interleave events from N async generators, yielding each event as soon as
+ * it resolves. Each iteration creates N wrapper promises via Promise.race —
+ * acceptable for the current N=2 (dual-stream) use case but would need a
+ * more efficient approach (e.g. a shared queue) if N grows significantly.
  */
 async function* mergeAsyncIterables<T>(
   iterables: AsyncGenerator<T>[]
