@@ -1,6 +1,7 @@
 "use client"
 
-import { createContext, useContext, useEffect, useState, useCallback, ReactNode } from "react"
+import { createContext, useContext, useEffect, useState, useCallback, useRef, ReactNode } from "react"
+import { useSession } from "next-auth/react"
 import { createLogger, generateRequestId } from "@/lib/client-logger"
 import type { NotificationContextValue, UserNotification } from "@/types/notifications"
 import { isConnectionTimeoutEvent, isNotificationUpdateEvent } from "@/types/notification-sse-events"
@@ -20,16 +21,26 @@ interface NotificationProviderProps {
 }
 
 export function NotificationProvider({ children }: NotificationProviderProps) {
+  const { status: sessionStatus } = useSession()
   const [notifications, setNotifications] = useState<UserNotification[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const consecutiveFailures = useRef(0)
+  const isLoadingRef = useRef(false)
 
-  const log = createLogger({ component: 'NotificationProvider' })
+  // useRef is semantically correct for stable, non-derived values (useMemo is for computed values)
+  const log = useRef(createLogger({ component: 'NotificationProvider' })).current
 
   const fetchNotifications = useCallback(async () => {
+    // Don't fetch if session is not authenticated
+    if (sessionStatus !== 'authenticated') {
+      return
+    }
+
     const requestId = generateRequestId()
     const requestLog = createLogger({ component: 'NotificationProvider', requestId })
 
+    isLoadingRef.current = true
     try {
       requestLog.info('Fetching notifications')
       setError(null)
@@ -45,6 +56,10 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
         // If unauthorized, just return empty notifications instead of throwing
         if (response.status === 401) {
           setNotifications([])
+          // Belt-and-suspenders: `finally` always runs after this return, so these
+          // assignments are redundant. They're kept here to make the early-return
+          // intent explicit for readers who may not notice the `finally` block.
+          isLoadingRef.current = false
           setIsLoading(false)
           return
         }
@@ -58,17 +73,24 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       }
 
       setNotifications(data.data || [])
+      consecutiveFailures.current = 0
       requestLog.info('Notifications fetched successfully', {
         count: data.data?.length || 0
       })
     } catch (err) {
+      consecutiveFailures.current++
       const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      requestLog.error('Failed to fetch notifications', { error: errorMessage })
+      // Downgrade to warn — polling failures are expected transient states
+      requestLog.warn('Failed to fetch notifications', {
+        error: errorMessage,
+        consecutiveFailures: consecutiveFailures.current
+      })
       setError(errorMessage)
     } finally {
+      isLoadingRef.current = false
       setIsLoading(false)
     }
-  }, [])
+  }, [sessionStatus])
 
   const markAsRead = useCallback(async (notificationId: number) => {
     const requestId = generateRequestId()
@@ -172,21 +194,70 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     notification => notification.status !== 'read'
   ).length
 
-  // Initial fetch on mount
+  // Reset state when session becomes unauthenticated to prevent stuck loading spinner.
+  // sessionStatus === 'loading' intentionally keeps isLoading=true while NextAuth resolves auth.
   useEffect(() => {
-    fetchNotifications()
-  }, [fetchNotifications])
+    if (sessionStatus === 'unauthenticated') {
+      setNotifications([])
+      setIsLoading(false)
+      setError(null)
+      consecutiveFailures.current = 0
+    }
+  }, [sessionStatus])
 
-  // Set up periodic refresh (every 30 seconds)
+  // Initial fetch on mount (only when authenticated); reset backoff on re-authentication
   useEffect(() => {
-    const interval = setInterval(() => {
-      if (!isLoading) {
-        fetchNotifications()
-      }
-    }, 30000)
+    if (sessionStatus === 'authenticated') {
+      consecutiveFailures.current = 0
+      fetchNotifications()
+    }
+  }, [fetchNotifications, sessionStatus])
 
-    return () => clearInterval(interval)
-  }, [fetchNotifications, isLoading])
+  // Set up periodic refresh with exponential backoff on failures
+  useEffect(() => {
+    if (sessionStatus !== 'authenticated') {
+      return
+    }
+
+    let cancelled = false
+
+    const baseInterval = 30000 // 30 seconds
+
+    const getInterval = () => {
+      const base = consecutiveFailures.current === 0
+        ? baseInterval
+        : Math.min(Math.pow(2, consecutiveFailures.current), 8) * baseInterval
+      // ±10% jitter to prevent thundering herd from multiple tabs retrying simultaneously
+      const jitter = Math.random() * 0.2 + 0.9
+      return base * jitter
+    }
+
+    let timeoutId: NodeJS.Timeout
+
+    const scheduleNext = () => {
+      if (cancelled) return
+      timeoutId = setTimeout(() => {
+        if (cancelled) return
+        if (!isLoadingRef.current) {
+          // Use .finally() so polling continues on both success and transient errors
+          fetchNotifications().finally(() => {
+            if (!cancelled) scheduleNext()
+          })
+        } else {
+          // Fetch still in flight — wait another full interval before rechecking.
+          // This means polling skips at most one cycle when a request runs long.
+          scheduleNext()
+        }
+      }, getInterval())
+    }
+
+    scheduleNext()
+
+    return () => {
+      cancelled = true
+      clearTimeout(timeoutId)
+    }
+  }, [fetchNotifications, sessionStatus])
 
   // Set up EventSource for real-time updates with exponential backoff
   useEffect(() => {
@@ -308,15 +379,15 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       }
     }
 
-    // Only setup SSE if browser supports it
-    if (typeof EventSource !== 'undefined') {
+    // Only setup SSE if browser supports it and session is authenticated
+    if (typeof EventSource !== 'undefined' && sessionStatus === 'authenticated') {
       setupEventSource()
     }
 
     return () => {
       cleanupEventSource()
     }
-  }, [fetchNotifications, log])
+  }, [fetchNotifications, log, sessionStatus])
 
   const value: NotificationContextValue = {
     notifications,
