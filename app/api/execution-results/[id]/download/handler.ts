@@ -153,6 +153,10 @@ export async function downloadHandler(
 
   } catch (error) {
     timer({ status: "error" })
+    log.error("Failed to download execution result", {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    })
     return executionResultErrorResponse(error, "Unable to download execution result")
   }
 }

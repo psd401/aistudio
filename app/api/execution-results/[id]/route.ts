@@ -67,6 +67,10 @@ async function getHandler(
 
   } catch (error) {
     timer({ status: "error" })
+    log.error("Failed to fetch execution result", {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    })
     return executionResultErrorResponse(error, "Unable to fetch execution result")
   }
 }
@@ -117,6 +121,10 @@ async function deleteHandler(
 
   } catch (error) {
     timer({ status: "error" })
+    log.error("Failed to delete execution result", {
+      error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+    })
     return executionResultErrorResponse(error, "Unable to delete execution result")
   }
 }

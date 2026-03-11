@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getServerSession } from '@/lib/auth/server-session';
-import { getIdeas, getUserVotedIdeaIds, createIdea } from '@/lib/db/drizzle';
+import { getIdeas, getUserVotedIdeaIds, createIdea, getUserIdByCognitoSubAsNumber } from '@/lib/db/drizzle';
 import { resolveUserId } from '@/lib/auth/resolve-user';
 import { hasRole } from '@/utils/roles';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
@@ -28,13 +28,17 @@ export async function GET() {
     // Get all ideas with creator names and counts
     const allIdeas = await getIdeas();
 
-    // Get the user's numeric ID for vote checking
-    const currentUserId = await resolveUserId(session, requestId);
-    const userVotedIdeaIds = await getUserVotedIdeaIds(currentUserId);
+    // Look up existing user ID without provisioning — GET should not create users.
+    // If the user has no DB record yet, return ideas with hasVoted: false as a
+    // graceful fallback; provisioning happens on the next write action.
+    const currentUserId = await getUserIdByCognitoSubAsNumber(session.sub);
+    const votedIds = currentUserId !== null
+      ? await getUserVotedIdeaIds(currentUserId)
+      : new Set<number>();
 
     const ideasWithVotes = allIdeas.map((idea) => ({
       ...idea,
-      hasVoted: userVotedIdeaIds.has(idea.id)
+      hasVoted: votedIds.has(idea.id)
     }));
 
     log.info("Ideas retrieved successfully", { count: ideasWithVotes.length });
