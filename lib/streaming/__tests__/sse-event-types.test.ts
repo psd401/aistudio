@@ -17,6 +17,8 @@ import {
   isToolCallEvent,
   isToolCallDeltaEvent,
   isToolInputStartEvent,
+  isToolInputDeltaEvent,
+  isToolInputAvailableEvent,
   isToolInputErrorEvent,
   isToolOutputErrorEvent,
   isToolOutputAvailableEvent,
@@ -78,17 +80,14 @@ describe('SSE Event Parsing', () => {
       expect(() => parseSSEEvent(data)).toThrow('SSE event missing required "type" field');
     });
 
-    it('should warn for unrecognized event type', () => {
-      const consoleSpy = jest.spyOn(console, 'warn').mockImplementation();
+    it('should not throw for unrecognized event type (logs a warning instead)', () => {
       const data = '{"type":"unknown-type","data":"test"}';
 
-      parseSSEEvent(data);
-
-      expect(consoleSpy).toHaveBeenCalledWith(
-        expect.stringContaining('Unrecognized event type: "unknown-type"')
-      );
-
-      consoleSpy.mockRestore();
+      // parseSSEEvent should not throw — unknown types are gracefully forwarded
+      // with a structured log.warn via @/lib/client-logger (no console.warn)
+      expect(() => parseSSEEvent(data)).not.toThrow();
+      const event = parseSSEEvent(data);
+      expect(event.type).toBe('unknown-type');
     });
   });
 
@@ -307,6 +306,85 @@ describe('Tool Event Type Guards', () => {
       };
 
       expect(isToolInputStartEvent(event)).toBe(true);
+    });
+  });
+
+  describe('isToolInputDeltaEvent', () => {
+    it('should return true for valid tool-input-delta event', () => {
+      const event: SSEEvent = {
+        type: 'tool-input-delta',
+        toolCallId: 'call-123',
+        delta: '{"key":'
+      };
+
+      expect(isToolInputDeltaEvent(event)).toBe(true);
+    });
+
+    it('should return true for tool-input-delta without optional delta field', () => {
+      const event: SSEEvent = {
+        type: 'tool-input-delta',
+        toolCallId: 'call-123'
+      };
+
+      expect(isToolInputDeltaEvent(event)).toBe(true);
+    });
+
+    it('should return false for tool-input-delta with missing toolCallId', () => {
+      const event = { type: 'tool-input-delta' } as unknown as SSEEvent;
+
+      expect(isToolInputDeltaEvent(event)).toBe(false);
+    });
+
+    it('should return false for tool-input-delta with non-string delta', () => {
+      const event = { type: 'tool-input-delta', toolCallId: 'call-123', delta: 123 } as unknown as SSEEvent;
+
+      expect(isToolInputDeltaEvent(event)).toBe(false);
+    });
+  });
+
+  describe('isToolInputAvailableEvent', () => {
+    it('should return true for valid tool-input-available event', () => {
+      const event: SSEEvent = {
+        type: 'tool-input-available',
+        toolCallId: 'call-123'
+      };
+
+      expect(isToolInputAvailableEvent(event)).toBe(true);
+    });
+
+    it('should return true for tool-input-available with optional fields', () => {
+      const event: SSEEvent = {
+        type: 'tool-input-available',
+        toolCallId: 'call-123',
+        toolName: 'web_search',
+        args: { query: 'test' }
+      };
+
+      expect(isToolInputAvailableEvent(event)).toBe(true);
+    });
+
+    it('should return false for tool-input-available with missing toolCallId', () => {
+      const event = { type: 'tool-input-available' } as unknown as SSEEvent;
+
+      expect(isToolInputAvailableEvent(event)).toBe(false);
+    });
+
+    it('should return false for tool-input-available with non-string toolName', () => {
+      const event = { type: 'tool-input-available', toolCallId: 'call-123', toolName: 42 } as unknown as SSEEvent;
+
+      expect(isToolInputAvailableEvent(event)).toBe(false);
+    });
+
+    it('should return false for tool-input-available with null args', () => {
+      const event = { type: 'tool-input-available', toolCallId: 'call-123', args: null } as unknown as SSEEvent;
+
+      expect(isToolInputAvailableEvent(event)).toBe(false);
+    });
+
+    it('should return false for tool-input-available with array args', () => {
+      const event = { type: 'tool-input-available', toolCallId: 'call-123', args: [] } as unknown as SSEEvent;
+
+      expect(isToolInputAvailableEvent(event)).toBe(false);
     });
   });
 

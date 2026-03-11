@@ -14,7 +14,7 @@
  * @see /lib/streaming/sse-event-types.ts
  */
 
-import { z } from 'zod'
+import { z, ZodIssueCode } from 'zod'
 import type { SSEEvent } from './sse-event-types'
 
 // ============================================================================
@@ -123,6 +123,27 @@ export const ToolInputStartSchema = BaseEventSchema.extend({
 })
 
 /**
+ * Tool input delta event schema
+ * Incremental tool input updates from AI SDK v6
+ */
+export const ToolInputDeltaSchema = BaseEventSchema.extend({
+  type: z.literal('tool-input-delta'),
+  toolCallId: z.string(),
+  delta: z.string().optional()
+})
+
+/**
+ * Tool input available event schema
+ * Complete tool input is available for processing
+ */
+export const ToolInputAvailableSchema = BaseEventSchema.extend({
+  type: z.literal('tool-input-available'),
+  toolCallId: z.string(),
+  toolName: z.string().optional(),
+  args: z.record(z.string(), z.unknown()).optional()
+})
+
+/**
  * Tool input error event schema
  */
 export const ToolInputErrorSchema = BaseEventSchema.extend({
@@ -148,6 +169,32 @@ export const ToolOutputAvailableSchema = BaseEventSchema.extend({
   type: z.literal('tool-output-available'),
   toolCallId: z.string(),
   output: z.unknown().optional()
+})
+
+// ============================================================================
+// SOURCE SCHEMAS
+// ============================================================================
+
+/**
+ * Source URL event schema
+ * Includes URL protocol validation (http/https only) as defense-in-depth against XSS.
+ * Mirrors the runtime check in the isSourceUrlEvent type guard.
+ */
+export const SourceUrlSchema = BaseEventSchema.extend({
+  type: z.literal('source-url'),
+  sourceId: z.string(),
+  url: z.string().refine(
+    (u) => {
+      try {
+        const p = new URL(u);
+        return p.protocol === 'http:' || p.protocol === 'https:';
+      } catch {
+        return false;
+      }
+    },
+    { message: 'URL must use http or https protocol' }
+  ),
+  title: z.string().optional()
 })
 
 // ============================================================================
@@ -262,9 +309,12 @@ export const SSEEventSchema = z.discriminatedUnion('type', [
   ToolCallSchema,
   ToolCallDeltaSchema,
   ToolInputStartSchema,
+  ToolInputDeltaSchema,
+  ToolInputAvailableSchema,
   ToolInputErrorSchema,
   ToolOutputErrorSchema,
   ToolOutputAvailableSchema,
+  SourceUrlSchema,
   StartEventSchema,
   StartStepSchema,
   FinishStepSchema,
@@ -328,35 +378,41 @@ export function validateSSEEvent(event: unknown): ValidationResult {
     }
   }
 
-  // Generate helpful error messages
+  // Generate hints from raw Zod issues (before mapping) to access ZodIssueCode
+  let hint: string | undefined
+
+  // Check for field name mismatches (like textDelta vs delta)
+  // In Zod v4, invalid_type issues have `input` (not `received`):
+  //   - input === undefined → required field is missing (likely wrong field name)
+  //   - input !== undefined → field is present but has wrong type
+  const fieldNameIssues = result.error.issues.filter(i =>
+    i.code === ZodIssueCode.unrecognized_keys ||
+    i.code === ZodIssueCode.invalid_union ||
+    // Zod v4 $ZodIssueInvalidType has optional `input` — omitted entirely (not just undefined)
+    // when the field is missing from the object, so `'input' in i` would be false.
+    // Cast to access the optional property safely.
+    (i.code === ZodIssueCode.invalid_type && (i as { input?: unknown }).input === undefined)
+  )
+
+  if (fieldNameIssues.length > 0) {
+    hint = 'Field name mismatch detected. This may indicate an AI SDK compatibility issue or version mismatch. Check that field names match the Vercel AI SDK v6 specification.'
+  }
+
+  // Check for type mismatches (wrong type provided, not a missing field)
+  const typeIssues = result.error.issues.filter(i =>
+    i.code === ZodIssueCode.invalid_type && (i as { input?: unknown }).input !== undefined
+  )
+  if (typeIssues.length > 0 && !hint) {
+    hint = 'Type mismatch detected. Verify that the event fields have the correct data types.'
+  }
+
+  // Map issues for structured output
   const issues = result.error.issues.map(issue => ({
     path: issue.path.map(String),
     message: issue.message,
     expected: 'expected' in issue ? String(issue.expected) : undefined,
     received: 'received' in issue ? String(issue.received) : undefined
   }))
-
-  // Generate helpful hints based on error patterns
-  let hint: string | undefined
-
-  // Check for field name mismatches (like textDelta vs delta)
-  // Zod v4 may say "expected string, received undefined" for missing required fields
-  const fieldNameIssues = issues.filter(i =>
-    i.message.includes('Unrecognized key') ||
-    i.message.includes('Required') ||
-    i.message.includes('received undefined') ||
-    (i.message.includes('Invalid input') && i.path.includes('delta'))
-  )
-
-  if (fieldNameIssues.length > 0) {
-    hint = 'Field name mismatch detected. This may indicate an AI SDK compatibility issue or version mismatch. Check that field names match the Vercel AI SDK v5 specification.'
-  }
-
-  // Check for type mismatches
-  const typeIssues = issues.filter(i => i.message.includes('Expected') || i.message.includes('invalid_type'))
-  if (typeIssues.length > 0 && !hint) {
-    hint = 'Type mismatch detected. Verify that the event fields have the correct data types.'
-  }
 
   return {
     success: false,
@@ -395,9 +451,12 @@ export function validateEventType(event: unknown, eventType: string): Validation
     'tool-call': ToolCallSchema,
     'tool-call-delta': ToolCallDeltaSchema,
     'tool-input-start': ToolInputStartSchema,
+    'tool-input-delta': ToolInputDeltaSchema,
+    'tool-input-available': ToolInputAvailableSchema,
     'tool-input-error': ToolInputErrorSchema,
     'tool-output-error': ToolOutputErrorSchema,
     'tool-output-available': ToolOutputAvailableSchema,
+    'source-url': SourceUrlSchema,
     'start': StartEventSchema,
     'start-step': StartStepSchema,
     'finish-step': FinishStepSchema,
@@ -481,7 +540,7 @@ export function generateValidationErrorMessage(result: ValidationResult): string
   }
 
   if (result.error.hint) {
-    message += `\n\n💡 Hint: ${result.error.hint}`
+    message += `\n\nHint: ${result.error.hint}`
   }
 
   return message
