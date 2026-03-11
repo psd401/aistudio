@@ -27,7 +27,8 @@ export async function GET(request: NextRequest) {
 
     // Get query parameters
     const url = new URL(request.url)
-    const limit = Math.min(Number.parseInt(url.searchParams.get('limit') || '20'), 50)
+    const parsed = Number.parseInt(url.searchParams.get('limit') ?? '20', 10)
+    const limit = Math.min(isNaN(parsed) || parsed <= 0 ? 20 : parsed, 50)
     const statusParam = url.searchParams.get('status')
     const status = statusParam && ['success', 'failed', 'running'].includes(statusParam)
       ? (statusParam as 'success' | 'failed' | 'running')

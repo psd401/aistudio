@@ -1,6 +1,6 @@
 "use client"
 
-import { createContext, useContext, useEffect, useState, useCallback, useRef, ReactNode } from "react"
+import { createContext, useContext, useEffect, useState, useCallback, useRef, useMemo, ReactNode } from "react"
 import { useSession } from "next-auth/react"
 import { createLogger, generateRequestId } from "@/lib/client-logger"
 import type { NotificationContextValue, UserNotification } from "@/types/notifications"
@@ -26,8 +26,9 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const consecutiveFailures = useRef(0)
+  const isLoadingRef = useRef(false)
 
-  const log = createLogger({ component: 'NotificationProvider' })
+  const log = useMemo(() => createLogger({ component: 'NotificationProvider' }), [])
 
   const fetchNotifications = useCallback(async () => {
     // Don't fetch if session is not authenticated
@@ -38,6 +39,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     const requestId = generateRequestId()
     const requestLog = createLogger({ component: 'NotificationProvider', requestId })
 
+    isLoadingRef.current = true
     try {
       requestLog.info('Fetching notifications')
       setError(null)
@@ -80,6 +82,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       })
       setError(errorMessage)
     } finally {
+      isLoadingRef.current = false
       setIsLoading(false)
     }
   }, [sessionStatus])
@@ -212,7 +215,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
 
     const scheduleNext = () => {
       timeoutId = setTimeout(() => {
-        if (!isLoading) {
+        if (!isLoadingRef.current) {
           fetchNotifications().then(scheduleNext)
         } else {
           scheduleNext()
@@ -223,7 +226,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     scheduleNext()
 
     return () => clearTimeout(timeoutId)
-  }, [fetchNotifications, isLoading, sessionStatus])
+  }, [fetchNotifications, sessionStatus])
 
   // Set up EventSource for real-time updates with exponential backoff
   useEffect(() => {

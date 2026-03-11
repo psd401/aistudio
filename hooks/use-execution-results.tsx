@@ -23,6 +23,7 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const consecutiveFailures = useRef(0)
+  const isLoadingRef = useRef(false)
 
   const fetchResults = useCallback(async () => {
     // Don't fetch if session is not authenticated
@@ -33,6 +34,7 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
     const requestId = generateRequestId()
     const requestLog = createLogger({ hook: 'useExecutionResults', requestId })
 
+    isLoadingRef.current = true
     try {
       setError(null)
 
@@ -79,6 +81,7 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
       })
       setError(errorMessage)
     } finally {
+      isLoadingRef.current = false
       setIsLoading(false)
     }
   }, [limit, status, sessionStatus])
@@ -111,7 +114,7 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
 
     const scheduleNext = () => {
       timeoutId = setTimeout(() => {
-        if (!isLoading) {
+        if (!isLoadingRef.current) {
           fetchResults().then(scheduleNext)
         } else {
           scheduleNext()
@@ -122,7 +125,7 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
     scheduleNext()
 
     return () => clearTimeout(timeoutId)
-  }, [fetchResults, isLoading, refreshInterval, sessionStatus])
+  }, [fetchResults, refreshInterval, sessionStatus])
 
   return {
     results,
