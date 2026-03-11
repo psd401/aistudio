@@ -85,7 +85,8 @@ export function useAction<TInput, TOutput>(
         });
         // Brief delay so the toast is visible before reload.
         // Intentionally fire-and-forget — the reload is expected to always happen.
-        setTimeout(() => window.location.reload(), 1500);
+        // typeof guard is idiomatic in Next.js hooks (SSR safety, avoids build warnings).
+        setTimeout(() => typeof window !== 'undefined' && window.location.reload(), 1500);
         return {
           isSuccess: false,
           message: staleMessage,

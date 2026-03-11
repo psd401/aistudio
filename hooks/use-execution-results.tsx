@@ -136,6 +136,8 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
             if (!cancelled) scheduleNext()
           })
         } else {
+          // Fetch still in flight — wait another full interval before rechecking.
+          // This means polling skips at most one cycle when a request runs long.
           scheduleNext()
         }
       }, getInterval())
