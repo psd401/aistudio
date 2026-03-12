@@ -3,6 +3,7 @@
 import { createContext, useContext, useEffect, useState, useCallback, useRef, ReactNode } from "react"
 import { useSession } from "next-auth/react"
 import { createLogger, generateRequestId } from "@/lib/client-logger"
+import { usePollingWithBackoff } from "@/lib/hooks/use-polling-with-backoff"
 import type { NotificationContextValue, UserNotification } from "@/types/notifications"
 import { isConnectionTimeoutEvent, isNotificationUpdateEvent } from "@/types/notification-sse-events"
 
@@ -25,8 +26,6 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
   const [notifications, setNotifications] = useState<UserNotification[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const consecutiveFailures = useRef(0)
-  const isLoadingRef = useRef(false)
 
   // useRef is semantically correct for stable, non-derived values (useMemo is for computed values)
   const log = useRef(createLogger({ component: 'NotificationProvider' })).current
@@ -40,7 +39,6 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     const requestId = generateRequestId()
     const requestLog = createLogger({ component: 'NotificationProvider', requestId })
 
-    isLoadingRef.current = true
     try {
       requestLog.info('Fetching notifications')
       setError(null)
@@ -56,10 +54,6 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
         // If unauthorized, just return empty notifications instead of throwing
         if (response.status === 401) {
           setNotifications([])
-          // Belt-and-suspenders: `finally` always runs after this return, so these
-          // assignments are redundant. They're kept here to make the early-return
-          // intent explicit for readers who may not notice the `finally` block.
-          isLoadingRef.current = false
           setIsLoading(false)
           return
         }
@@ -73,21 +67,16 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       }
 
       setNotifications(data.data || [])
-      consecutiveFailures.current = 0
       requestLog.info('Notifications fetched successfully', {
         count: data.data?.length || 0
       })
     } catch (err) {
-      consecutiveFailures.current++
       const errorMessage = err instanceof Error ? err.message : 'Unknown error'
       // Downgrade to warn — polling failures are expected transient states
-      requestLog.warn('Failed to fetch notifications', {
-        error: errorMessage,
-        consecutiveFailures: consecutiveFailures.current
-      })
+      requestLog.warn('Failed to fetch notifications', { error: errorMessage })
       setError(errorMessage)
+      throw err // Re-throw so the polling hook tracks the failure for backoff
     } finally {
-      isLoadingRef.current = false
       setIsLoading(false)
     }
   }, [sessionStatus])
@@ -138,7 +127,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       setError(errorMessage)
 
       // Refresh notifications to get correct state
-      await fetchNotifications()
+      await fetchNotifications().catch(() => {}) // Error already logged inside fetchNotifications
     }
   }, [fetchNotifications])
 
@@ -181,18 +170,23 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       setError(errorMessage)
 
       // Refresh notifications to get correct state
-      await fetchNotifications()
+      await fetchNotifications().catch(() => {}) // Error already logged inside fetchNotifications
     }
   }, [fetchNotifications])
 
   const refreshNotifications = useCallback(async () => {
-    await fetchNotifications()
+    await fetchNotifications().catch(() => {}) // Error already logged inside fetchNotifications
   }, [fetchNotifications])
 
   // Calculate unread count
   const unreadCount = notifications.filter(
     notification => notification.status !== 'read'
   ).length
+
+  const { resetFailures } = usePollingWithBackoff(fetchNotifications, {
+    baseInterval: 30000, // 30 seconds
+    enabled: sessionStatus === 'authenticated',
+  })
 
   // Reset state when session becomes unauthenticated to prevent stuck loading spinner.
   // sessionStatus === 'loading' intentionally keeps isLoading=true while NextAuth resolves auth.
@@ -201,61 +195,14 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       setNotifications([])
       setIsLoading(false)
       setError(null)
-      consecutiveFailures.current = 0
+      resetFailures()
     }
-  }, [sessionStatus])
+  }, [sessionStatus, resetFailures])
 
-  // Initial fetch on mount (only when authenticated); reset backoff on re-authentication
+  // Initial fetch on mount (only when authenticated)
   useEffect(() => {
     if (sessionStatus === 'authenticated') {
-      consecutiveFailures.current = 0
-      fetchNotifications()
-    }
-  }, [fetchNotifications, sessionStatus])
-
-  // Set up periodic refresh with exponential backoff on failures
-  useEffect(() => {
-    if (sessionStatus !== 'authenticated') {
-      return
-    }
-
-    let cancelled = false
-
-    const baseInterval = 30000 // 30 seconds
-
-    const getInterval = () => {
-      const base = consecutiveFailures.current === 0
-        ? baseInterval
-        : Math.min(Math.pow(2, consecutiveFailures.current), 8) * baseInterval
-      // ±10% jitter to prevent thundering herd from multiple tabs retrying simultaneously
-      const jitter = Math.random() * 0.2 + 0.9
-      return base * jitter
-    }
-
-    let timeoutId: NodeJS.Timeout
-
-    const scheduleNext = () => {
-      if (cancelled) return
-      timeoutId = setTimeout(() => {
-        if (cancelled) return
-        if (!isLoadingRef.current) {
-          // Use .finally() so polling continues on both success and transient errors
-          fetchNotifications().finally(() => {
-            if (!cancelled) scheduleNext()
-          })
-        } else {
-          // Fetch still in flight — wait another full interval before rechecking.
-          // This means polling skips at most one cycle when a request runs long.
-          scheduleNext()
-        }
-      }, getInterval())
-    }
-
-    scheduleNext()
-
-    return () => {
-      cancelled = true
-      clearTimeout(timeoutId)
+      fetchNotifications().catch(() => {}) // Error already logged inside fetchNotifications
     }
   }, [fetchNotifications, sessionStatus])
 
@@ -331,7 +278,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
                 type: data.type,
                 serverTimestamp: data.timestamp
               })
-              fetchNotifications()
+              fetchNotifications().catch(() => {}) // Error already logged inside fetchNotifications
             }
           } catch (err) {
             log.error('Failed to parse SSE message', {

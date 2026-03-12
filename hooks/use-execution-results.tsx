@@ -1,8 +1,9 @@
 "use client"
 
-import { useState, useEffect, useCallback, useRef } from "react"
+import { useState, useEffect, useCallback } from "react"
 import { useSession } from "next-auth/react"
 import { createLogger, generateRequestId } from "@/lib/client-logger"
+import { usePollingWithBackoff } from "@/lib/hooks/use-polling-with-backoff"
 import type { ExecutionResult } from "@/types/notifications"
 
 interface UseExecutionResultsOptions {
@@ -22,8 +23,6 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
   const [results, setResults] = useState<ExecutionResult[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
-  const consecutiveFailures = useRef(0)
-  const isLoadingRef = useRef(false)
 
   const fetchResults = useCallback(async () => {
     // Don't fetch if session is not authenticated
@@ -34,7 +33,6 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
     const requestId = generateRequestId()
     const requestLog = createLogger({ hook: 'useExecutionResults', requestId })
 
-    isLoadingRef.current = true
     try {
       setError(null)
 
@@ -45,19 +43,13 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
 
       const response = await fetch(`/api/execution-results/recent?${params}`, {
         method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
       })
 
       if (!response.ok) {
         // Session expired — silently stop, don't treat as error
         if (response.status === 401) {
           setResults([])
-          // Belt-and-suspenders: `finally` always runs after this return, so these
-          // assignments are redundant. They're kept here to make the early-return
-          // intent explicit for readers who may not notice the `finally` block.
-          isLoadingRef.current = false
           setIsLoading(false)
           return
         }
@@ -71,28 +63,24 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
       }
 
       setResults(data.data || [])
-      consecutiveFailures.current = 0
       requestLog.info('Execution results fetched successfully', {
         count: data.data?.length || 0
       })
     } catch (err) {
-      consecutiveFailures.current++
       const errorMessage = err instanceof Error ? err.message : 'Unknown error'
       // Downgrade to warn — polling failures are expected transient states
-      requestLog.warn('Failed to fetch execution results', {
-        error: errorMessage,
-        consecutiveFailures: consecutiveFailures.current
-      })
+      requestLog.warn('Failed to fetch execution results', { error: errorMessage })
       setError(errorMessage)
+      throw err // Re-throw so the polling hook tracks the failure for backoff
     } finally {
-      isLoadingRef.current = false
       setIsLoading(false)
     }
   }, [limit, status, sessionStatus])
 
-  const refreshResults = useCallback(async () => {
-    await fetchResults()
-  }, [fetchResults])
+  const { resetFailures } = usePollingWithBackoff(fetchResults, {
+    baseInterval: refreshInterval,
+    enabled: sessionStatus === 'authenticated',
+  })
 
   // Reset state when session becomes unauthenticated to prevent stuck loading spinner.
   // sessionStatus === 'loading' intentionally keeps isLoading=true while NextAuth resolves auth.
@@ -101,66 +89,23 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
       setResults([])
       setIsLoading(false)
       setError(null)
-      consecutiveFailures.current = 0
+      resetFailures()
     }
-  }, [sessionStatus])
+  }, [sessionStatus, resetFailures])
 
-  // Initial fetch on mount (only when authenticated); reset backoff on re-authentication
+  // Initial fetch on mount (only when authenticated)
   useEffect(() => {
     if (sessionStatus === 'authenticated') {
-      consecutiveFailures.current = 0
-      fetchResults()
+      fetchResults().catch(() => {}) // Error already logged inside fetchResults
     }
   }, [fetchResults, sessionStatus])
-
-  // Set up periodic refresh with exponential backoff on failures
-  useEffect(() => {
-    if (refreshInterval <= 0 || sessionStatus !== 'authenticated') {
-      return
-    }
-
-    let cancelled = false
-
-    const getInterval = () => {
-      const base = consecutiveFailures.current === 0
-        ? refreshInterval
-        : Math.min(Math.pow(2, consecutiveFailures.current), 8) * refreshInterval
-      // ±10% jitter to prevent thundering herd from multiple tabs retrying simultaneously
-      const jitter = Math.random() * 0.2 + 0.9
-      return base * jitter
-    }
-
-    let timeoutId: NodeJS.Timeout
-
-    const scheduleNext = () => {
-      if (cancelled) return
-      timeoutId = setTimeout(() => {
-        if (cancelled) return
-        if (!isLoadingRef.current) {
-          // Use .finally() so polling continues on both success and transient errors
-          fetchResults().finally(() => {
-            if (!cancelled) scheduleNext()
-          })
-        } else {
-          // Fetch still in flight — wait another full interval before rechecking.
-          // This means polling skips at most one cycle when a request runs long.
-          scheduleNext()
-        }
-      }, getInterval())
-    }
-
-    scheduleNext()
-
-    return () => {
-      cancelled = true
-      clearTimeout(timeoutId)
-    }
-  }, [fetchResults, refreshInterval, sessionStatus])
 
   return {
     results,
     isLoading,
     error,
-    refreshResults,
+    refreshResults: useCallback(async () => {
+      await fetchResults().catch(() => {}) // Error already logged inside fetchResults
+    }, [fetchResults]),
   }
 }
