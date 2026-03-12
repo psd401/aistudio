@@ -70,7 +70,10 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error'
       // Downgrade to warn — polling failures are expected transient states
-      requestLog.warn('Failed to fetch execution results', { error: errorMessage })
+      requestLog.warn('Failed to fetch execution results', {
+        error: errorMessage,
+        consecutiveFailures: consecutiveFailures.current
+      })
       setError(errorMessage)
       throw err // Re-throw so the polling hook tracks the failure for backoff
     } finally {
@@ -78,7 +81,7 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
     }
   }, [limit, status, sessionStatus])
 
-  const { resetFailures } = usePollingWithBackoff(fetchResults, {
+  const { resetFailures, consecutiveFailures } = usePollingWithBackoff(fetchResults, {
     baseInterval: refreshInterval,
     enabled: sessionStatus === 'authenticated',
   })

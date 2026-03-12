@@ -105,5 +105,5 @@ export function usePollingWithBackoff(
     }
   }, [fn, baseInterval, maxMultiplier, enabled])
 
-  return { resetFailures }
+  return { resetFailures, consecutiveFailures }
 }

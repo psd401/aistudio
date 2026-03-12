@@ -74,7 +74,10 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error'
       // Downgrade to warn — polling failures are expected transient states
-      requestLog.warn('Failed to fetch notifications', { error: errorMessage })
+      requestLog.warn('Failed to fetch notifications', {
+        error: errorMessage,
+        consecutiveFailures: consecutiveFailures.current
+      })
       setError(errorMessage)
       throw err // Re-throw so the polling hook tracks the failure for backoff
     } finally {
@@ -184,7 +187,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     notification => notification.status !== 'read'
   ).length
 
-  const { resetFailures } = usePollingWithBackoff(fetchNotifications, {
+  const { resetFailures, consecutiveFailures } = usePollingWithBackoff(fetchNotifications, {
     baseInterval: 30000, // 30 seconds
     enabled: sessionStatus === 'authenticated',
   })
