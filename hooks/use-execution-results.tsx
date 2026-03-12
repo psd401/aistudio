@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
 import { useSession } from "next-auth/react"
 import { createLogger, generateRequestId } from "@/lib/client-logger"
 import { usePollingWithBackoff } from "@/lib/hooks/use-polling-with-backoff"
@@ -23,6 +23,9 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
   const [results, setResults] = useState<ExecutionResult[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+
+  // Stable logger for onFailure — created once, never changes
+  const log = useRef(createLogger({ hook: 'useExecutionResults' })).current
 
   const fetchResults = useCallback(async () => {
     // Don't fetch if session is not authenticated
@@ -69,26 +72,22 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
       })
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      // Downgrade to warn — polling failures are expected transient states.
-      // Log +1 because the hook's .catch() increments consecutiveFailures after re-throw.
-      requestLog.warn('Failed to fetch execution results', {
-        error: errorMessage,
-        consecutiveFailures: getConsecutiveFailures() + 1
-      })
+      // Downgrade to warn — polling failures are expected transient states
+      requestLog.warn('Failed to fetch execution results', { error: errorMessage })
       setError(errorMessage)
       throw err // Re-throw so the polling hook tracks the failure for backoff
     } finally {
       setIsLoading(false)
     }
-  }, [limit, status, sessionStatus]) // eslint-disable-line react-hooks/exhaustive-deps
-  // getConsecutiveFailures is intentionally excluded: it is a stable getter
-  // that reads a ref at call time. Including it would require placing the
-  // usePollingWithBackoff call above this callback (circular dep), and refs
-  // are safe to close over without listing in deps.
+  }, [limit, status, sessionStatus])
 
-  const { resetFailures, getConsecutiveFailures } = usePollingWithBackoff(fetchResults, {
+  const { resetFailures } = usePollingWithBackoff(fetchResults, {
     baseInterval: refreshInterval,
     enabled: sessionStatus === 'authenticated',
+    // onFailure receives the post-increment count from the hook — no +1 arithmetic needed
+    onFailure: useCallback((consecutiveFailures: number) => {
+      log.warn('Execution results polling backoff increasing', { consecutiveFailures })
+    }, [log]),
   })
 
   // Reset state when session becomes unauthenticated to prevent stuck loading spinner.

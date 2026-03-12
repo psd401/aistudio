@@ -30,6 +30,8 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
   // useRef is semantically correct for stable, non-derived values (useMemo is for computed values)
   const log = useRef(createLogger({ component: 'NotificationProvider' })).current
 
+  // fetchNotifications re-throws errors so the polling hook can track backoff.
+  // All direct call sites (non-polling) must use .catch(() => {}) — errors are logged inside.
   const fetchNotifications = useCallback(async () => {
     // Don't fetch if session is not authenticated
     if (sessionStatus !== 'authenticated') {
@@ -74,11 +76,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error'
       // Downgrade to warn — polling failures are expected transient states
-      // Log +1 because the hook's .catch() increments consecutiveFailures after re-throw.
-      requestLog.warn('Failed to fetch notifications', {
-        error: errorMessage,
-        consecutiveFailures: getConsecutiveFailures() + 1
-      })
+      requestLog.warn('Failed to fetch notifications', { error: errorMessage })
       setError(errorMessage)
       throw err // Re-throw so the polling hook tracks the failure for backoff
     } finally {
@@ -132,7 +130,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       setError(errorMessage)
 
       // Refresh notifications to get correct state
-      await fetchNotifications().catch(() => {}) // Error already logged inside fetchNotifications
+      await fetchNotifications().catch(() => {})
     }
   }, [fetchNotifications])
 
@@ -175,12 +173,12 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       setError(errorMessage)
 
       // Refresh notifications to get correct state
-      await fetchNotifications().catch(() => {}) // Error already logged inside fetchNotifications
+      await fetchNotifications().catch(() => {})
     }
   }, [fetchNotifications])
 
   const refreshNotifications = useCallback(async () => {
-    await fetchNotifications().catch(() => {}) // Error already logged inside fetchNotifications
+    await fetchNotifications().catch(() => {})
   }, [fetchNotifications])
 
   // Calculate unread count
@@ -188,12 +186,13 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     notification => notification.status !== 'read'
   ).length
 
-  // getConsecutiveFailures is used inside fetchNotifications (defined above).
-  // The closure captures it by reference — it's safe because closures execute after
-  // this line runs (the function body completes before any callback is invoked).
-  const { resetFailures, getConsecutiveFailures } = usePollingWithBackoff(fetchNotifications, {
+  const { resetFailures } = usePollingWithBackoff(fetchNotifications, {
     baseInterval: 30000, // 30 seconds
     enabled: sessionStatus === 'authenticated',
+    // onFailure receives the post-increment count from the hook — no +1 arithmetic needed
+    onFailure: useCallback((consecutiveFailures: number) => {
+      log.warn('Notification polling backoff increasing', { consecutiveFailures })
+    }, [log]),
   })
 
   // Reset state when session becomes unauthenticated to prevent stuck loading spinner.
@@ -210,7 +209,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
   // Initial fetch on mount (only when authenticated)
   useEffect(() => {
     if (sessionStatus === 'authenticated') {
-      fetchNotifications().catch(() => {}) // Error already logged inside fetchNotifications
+      fetchNotifications().catch(() => {})
     }
   }, [fetchNotifications, sessionStatus])
 
@@ -286,7 +285,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
                 type: data.type,
                 serverTimestamp: data.timestamp
               })
-              fetchNotifications().catch(() => {}) // Error already logged inside fetchNotifications
+              fetchNotifications().catch(() => {})
             }
           } catch (err) {
             log.error('Failed to parse SSE message', {

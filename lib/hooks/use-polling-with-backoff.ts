@@ -17,6 +17,12 @@ interface UsePollingWithBackoffOptions {
    * `fn` must be stable (wrapped in `useCallback`) to avoid unintentional backoff resets.
    */
   enabled?: boolean
+  /**
+   * Called after each polling failure with the post-increment consecutive failure count.
+   * Use this for logging backoff depth — the count is accurate at call time.
+   * Must be stable (wrapped in `useCallback` with empty deps, or defined outside the component).
+   */
+  onFailure?: (consecutiveFailures: number) => void
 }
 
 /**
@@ -36,7 +42,7 @@ export function usePollingWithBackoff(
   fn: () => Promise<unknown>,
   options: UsePollingWithBackoffOptions
 ) {
-  const { baseInterval, enabled = true } = options
+  const { baseInterval, enabled = true, onFailure } = options
   // Clamp maxMultiplier to ≥1 — a value of 0 or negative would produce 0ms intervals
   // and spin the event loop continuously.
   const maxMultiplier = Math.max(1, options.maxMultiplier ?? 8)
@@ -48,9 +54,6 @@ export function usePollingWithBackoff(
   const resetFailures = useCallback(() => {
     consecutiveFailures.current = 0
   }, [])
-
-  // Getter prevents callers from accidentally writing to the ref and breaking invariants
-  const getConsecutiveFailures = useCallback(() => consecutiveFailures.current, [])
 
   useEffect(() => {
     if (!enabled || baseInterval <= 0) {
@@ -90,6 +93,9 @@ export function usePollingWithBackoff(
             })
             .catch(() => {
               consecutiveFailures.current++
+              // Notify caller with post-increment count so logging reflects the actual
+              // depth the client is now at, with no +1 arithmetic needed by the caller.
+              onFailure?.(consecutiveFailures.current)
             })
             .finally(() => {
               isLoadingRef.current = false
@@ -112,7 +118,7 @@ export function usePollingWithBackoff(
       // without skipping the first cycle due to a stale in-flight flag.
       isLoadingRef.current = false
     }
-  }, [fn, baseInterval, maxMultiplier, enabled])
+  }, [fn, baseInterval, maxMultiplier, enabled, onFailure])
 
-  return { resetFailures, getConsecutiveFailures }
+  return { resetFailures }
 }
