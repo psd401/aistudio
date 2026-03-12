@@ -501,7 +501,7 @@ export class MonitoringStack extends cdk.Stack {
         view: cloudwatch.LogQueryVisualizationType.TABLE,
         queryLines: [
           'fields @timestamp, message, error.name, action, requestId',
-          'filter status = "blocked" or error.name = "ContentSafetyBlockedError"',
+          'filter error.name = "ContentSafetyBlockedError"',
           'sort @timestamp desc',
           'limit 20',
         ],
@@ -516,8 +516,8 @@ export class MonitoringStack extends cdk.Stack {
         logGroupNames: [logGroupName],
         view: cloudwatch.LogQueryVisualizationType.PIE,
         queryLines: [
-          'fields status',
-          'filter ispresent(status)',
+          'fields status, duration',
+          'filter ispresent(status) and ispresent(duration)',
           'stats count() by status',
         ],
         width: 12,
@@ -660,15 +660,15 @@ fields @timestamp, message, error.code, userId
 ### Content safety blocks
 \`\`\`
 fields @timestamp, message, error.name, action, requestId
-| filter status = "blocked" or error.name = "ContentSafetyBlockedError"
+| filter error.name = "ContentSafetyBlockedError"
 | sort @timestamp desc
 | limit 50
 \`\`\`
 
-### Operation status breakdown (all routes)
+### Operation status breakdown (timer/performance logs only)
 \`\`\`
-fields status
-| filter ispresent(status)
+fields status, duration
+| filter ispresent(status) and ispresent(duration)
 | stats count() as requests by status
 | sort requests desc
 \`\`\`
