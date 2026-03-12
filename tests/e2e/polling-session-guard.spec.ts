@@ -63,6 +63,9 @@ test.describe('Polling Session Guards — useExecutionResults', () => {
     // Install fake clock BEFORE navigation so timers are controlled from mount
     await page.clock.install()
 
+    // requestTimestamps uses wall-clock Date.now() (Node.js process, not browser).
+    // Only .length is checked — do not add timing-gap assertions without
+    // switching to page.evaluate(() => Date.now()) for fake-clock time.
     const requestTimestamps: number[] = []
     await page.route('/api/execution-results/recent*', (route) => {
       requestTimestamps.push(Date.now())
@@ -86,9 +89,9 @@ test.describe('Polling Session Guards — useExecutionResults', () => {
     ])
     expect(requestTimestamps.length).toBe(1)
 
-    // Advance 50s — below the 60s base interval (minus jitter minimum of ~54s).
+    // Advance 45s — well below the jitter floor of 54s (60s × 0.9).
     // No second request should have fired yet.
-    await page.clock.fastForward(50000)
+    await page.clock.fastForward(45000)
     expect(requestTimestamps.length).toBe(1)
   })
 })
@@ -131,6 +134,9 @@ test.describe('Polling Backoff Behavior', () => {
     // Install fake clock BEFORE navigation to control timer scheduling
     await page.clock.install()
 
+    // requestTimestamps uses wall-clock Date.now() (Node.js process, not browser).
+    // Only .length is checked — do not add timing-gap assertions without
+    // switching to page.evaluate(() => Date.now()) for fake-clock time.
     const requestTimestamps: number[] = []
     await page.route('/api/execution-results/recent*', (route) => {
       requestTimestamps.push(Date.now())
