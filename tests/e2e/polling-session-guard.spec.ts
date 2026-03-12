@@ -3,53 +3,40 @@ import { test, expect, type Page } from '@playwright/test'
 /**
  * E2E tests for session-expiry polling guards (#837 / #845).
  *
- * Tests verify that useExecutionResults and NotificationProvider:
- *   - Stop polling when session expires (401 response)
- *   - Reset isLoading on unauthenticated (no stuck spinner)
- *   - Silently clear results on 401 without setting error
- *   - Apply exponential backoff on consecutive failures
+ * Verified behaviors:
+ *   - 401 response silently clears results without setting error state
+ *   - 401 response does not trigger rapid retry (respects 60s interval)
+ *   - NotificationProvider 401 does not surface error toasts
+ *   - Consecutive 500 failures increase polling interval (exponential backoff)
  *
- * All tests mock API responses via page.route() — no live backend needed.
+ * All tests mock API responses via page.route(). Timing-sensitive tests use
+ * page.clock to advance fake timers rather than waiting real time.
  *
- * Auth: These tests navigate to /nexus. If the test environment lacks an
- * authenticated session, the app redirects to /login and the API route mocks
- * are never triggered. The assertions are designed to be vacuously safe in
- * that case (no false positives), but ideally run against an authenticated
- * Playwright context. See docs/guides/TESTING.md for auth setup.
+ * Tests navigate to /nexus and fail fast if redirected to login — they require
+ * an authenticated Playwright context to exercise any polling hooks.
  */
 
-/** Navigates to /nexus and waits for auth resolution (redirect to login or page load). */
+/** Navigates to /nexus and fails immediately if the app redirects to login. */
 async function gotoNexus(page: Page) {
   await page.goto('/nexus')
-  // Wait for either the authenticated shell or the login redirect
-  await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
-    // networkidle may not settle on all environments — continue anyway
-  })
+  // If unauthenticated the app redirects to /login — fail fast rather than
+  // silently passing with route mocks that were never invoked.
+  await page.waitForURL((url) => !url.pathname.startsWith('/login'), { timeout: 10000 })
 }
 
 test.describe('Polling Session Guards — useExecutionResults', () => {
   test('401 response silently clears results without setting error state', async ({ page }) => {
-    // First request succeeds, second returns 401
-    let requestCount = 0
+    // All execution-results requests return 401 to exercise the silent-error path
     await page.route('/api/execution-results/recent*', (route) => {
-      requestCount++
-      if (requestCount === 1) {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({
-            isSuccess: true,
-            data: [
-              { id: 1, assistantName: 'Test', status: 'success', startedAt: new Date().toISOString() }
-            ]
-          })
-        })
-      } else {
-        route.fulfill({ status: 401, body: 'Unauthorized' })
-      }
+      route.fulfill({ status: 401, body: 'Unauthorized' })
     })
 
-    // Mock notifications API to prevent interference
+    // Register SSE stream abort BEFORE the wildcard polling mock.
+    // Playwright matches routes in reverse registration order, so stream abort
+    // takes priority over the catch-all JSON mock below.
+    await page.route('/api/notifications/stream', (route) => {
+      route.abort()
+    })
     await page.route('/api/notifications*', (route) => {
       route.fulfill({
         status: 200,
@@ -58,29 +45,32 @@ test.describe('Polling Session Guards — useExecutionResults', () => {
       })
     })
 
-    await gotoNexus(page)
+    // Wait for the initial fetch response before asserting
+    await Promise.all([
+      page.waitForResponse('/api/execution-results/recent*'),
+      gotoNexus(page),
+    ])
 
-    // Wait for at least the initial fetch to fire (or page redirect)
-    await page.waitForTimeout(2000)
-
-    // Verify no error toast/banner appeared from the silent 401 handling
-    const errorElements = page.locator('[role="alert"]')
-    const errorCount = await errorElements.count()
-    for (let i = 0; i < errorCount; i++) {
-      const text = await errorElements.nth(i).textContent()
+    // No error toast/banner should appear — 401 is handled silently
+    const alertTexts = await page.locator('[role="alert"]').allTextContents()
+    for (const text of alertTexts) {
       expect(text).not.toContain('execution results')
-      expect(text).not.toContain('401')
+      expect((text ?? '').toLowerCase()).not.toContain('401')
     }
   })
 
-  test('polling stops when API returns 401 — no subsequent requests', async ({ page }) => {
-    // All requests return 401
+  test('401 response does not trigger rapid retry — next poll respects 60s interval', async ({ page }) => {
+    // Install fake clock BEFORE navigation so timers are controlled from mount
+    await page.clock.install()
+
     const requestTimestamps: number[] = []
     await page.route('/api/execution-results/recent*', (route) => {
       requestTimestamps.push(Date.now())
       route.fulfill({ status: 401, body: 'Unauthorized' })
     })
 
+    // SSE stream abort must be registered before the wildcard notifications mock
+    await page.route('/api/notifications/stream', (route) => { route.abort() })
     await page.route('/api/notifications*', (route) => {
       route.fulfill({
         status: 200,
@@ -89,31 +79,29 @@ test.describe('Polling Session Guards — useExecutionResults', () => {
       })
     })
 
-    await gotoNexus(page)
+    // Wait for the initial fetch (fires on mount regardless of interval)
+    await Promise.all([
+      page.waitForResponse('/api/execution-results/recent*'),
+      gotoNexus(page),
+    ])
+    expect(requestTimestamps.length).toBe(1)
 
-    // Wait for initial request
-    await page.waitForTimeout(1000)
-    const initialCount = requestTimestamps.length
-
-    // Wait a further window — should NOT see additional requests
-    // since 401 returns early (no throw) and session guard prevents polling
-    await page.waitForTimeout(5000)
-    const afterCount = requestTimestamps.length
-
-    // Only the initial fetch should have fired — allow at most 1 additional for race conditions
-    expect(afterCount - initialCount).toBeLessThanOrEqual(1)
+    // Advance 50s — below the 60s base interval (minus jitter minimum of ~54s).
+    // No second request should have fired yet.
+    await page.clock.fastForward(50000)
+    expect(requestTimestamps.length).toBe(1)
   })
 })
 
 test.describe('Polling Session Guards — NotificationProvider', () => {
-  test('401 from notifications API does not produce error state', async ({ page }) => {
-    await page.route('/api/notifications*', (route) => {
-      route.fulfill({ status: 401, body: 'Unauthorized' })
-    })
-
-    // Abort the SSE stream to avoid hanging
+  test('401 from notifications polling endpoint does not produce error state', async ({ page }) => {
+    // SSE stream abort registered first (higher priority when using wildcard below)
     await page.route('/api/notifications/stream', (route) => {
       route.abort()
+    })
+    // Exact-path mock for the polling endpoint only — does not intercept SSE
+    await page.route('/api/notifications', (route) => {
+      route.fulfill({ status: 401, body: 'Unauthorized' })
     })
 
     await page.route('/api/execution-results/recent*', (route) => {
@@ -124,20 +112,25 @@ test.describe('Polling Session Guards — NotificationProvider', () => {
       })
     })
 
-    await gotoNexus(page)
-    await page.waitForTimeout(2000)
+    // Wait for the notifications fetch to complete before asserting
+    await Promise.all([
+      page.waitForResponse('/api/notifications'),
+      gotoNexus(page),
+    ])
 
-    // No error toasts should appear from the silent 401 handling
+    // Silent 401 handling — no error toasts for notifications
     const alertTexts = await page.locator('[role="alert"]').allTextContents()
     for (const text of alertTexts) {
-      expect(text.toLowerCase()).not.toContain('failed to fetch notifications')
+      expect((text ?? '').toLowerCase()).not.toContain('failed to fetch notifications')
     }
   })
 })
 
 test.describe('Polling Backoff Behavior', () => {
-  test('consecutive 500 failures do not trigger rapid-fire requests', async ({ page }) => {
-    // All execution-results requests fail with 500
+  test('consecutive 500 failures delay next poll by 2× base interval', async ({ page }) => {
+    // Install fake clock BEFORE navigation to control timer scheduling
+    await page.clock.install()
+
     const requestTimestamps: number[] = []
     await page.route('/api/execution-results/recent*', (route) => {
       requestTimestamps.push(Date.now())
@@ -148,6 +141,8 @@ test.describe('Polling Backoff Behavior', () => {
       })
     })
 
+    // SSE stream abort before wildcard notifications mock
+    await page.route('/api/notifications/stream', (route) => { route.abort() })
     await page.route('/api/notifications*', (route) => {
       route.fulfill({
         status: 200,
@@ -156,17 +151,30 @@ test.describe('Polling Backoff Behavior', () => {
       })
     })
 
-    await gotoNexus(page)
+    // Wait for initial fetch (1 failure → consecutiveFailures = 1)
+    await Promise.all([
+      page.waitForResponse('/api/execution-results/recent*'),
+      gotoNexus(page),
+    ])
+    expect(requestTimestamps.length).toBe(1)
 
-    // Wait 3 seconds — enough for the initial fetch to fire
-    await page.waitForTimeout(3000)
+    // After 1 failure, backoff = 2^1 × 60s = 120s (±10% jitter: 108s–132s).
+    // At 60s into the backoff window — no second request yet.
+    await page.clock.fastForward(60000)
+    expect(requestTimestamps.length).toBe(1)
 
-    // Verify at least the initial fetch happened
-    expect(requestTimestamps.length).toBeGreaterThanOrEqual(1)
+    // At 140s total — past the maximum backoff window (132s).
+    // Second request should now fire.
+    await page.clock.fastForward(80000)
+    await page.waitForResponse('/api/execution-results/recent*', { timeout: 5000 }).catch(() => {
+      // Response may have already been captured; catch timeout if so
+    })
+    expect(requestTimestamps.length).toBeGreaterThanOrEqual(2)
 
-    // Verify no rapid-fire burst (more than 3 requests in 3s would indicate no backoff)
-    // Default refreshInterval is 60s, so even with 500 errors the next poll is
-    // 60s * 2^1 = 120s minimum — should see at most 1-2 requests in 3 seconds
-    expect(requestTimestamps.length).toBeLessThanOrEqual(3)
+    // Verify the actual delay between requests reflects backoff (>= base 60s)
+    if (requestTimestamps.length >= 2) {
+      const gapMs = requestTimestamps[1] - requestTimestamps[0]
+      expect(gapMs).toBeGreaterThanOrEqual(60000) // at least 1× base interval
+    }
   })
 })
