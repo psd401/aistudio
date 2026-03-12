@@ -12,6 +12,13 @@ import { test, expect, type Page } from '@playwright/test'
  * All tests mock API responses via page.route(). Timing-sensitive tests use
  * page.clock to advance fake timers rather than waiting real time.
  *
+ * Auth requirement: these tests navigate to /nexus and invoke real polling
+ * hooks. They require an authenticated Playwright context — useExecutionResults
+ * and NotificationProvider both gate their initial fetches on
+ * sessionStatus === 'authenticated'. Without a live authenticated session the
+ * hooks skip the fetch entirely and waitForResponse() would time out.
+ * Run locally with a seeded session or set PLAYWRIGHT_AUTH_ENABLED=true in CI.
+ *
  * Tests navigate to /nexus and fail fast if redirected to login — they require
  * an authenticated Playwright context to exercise any polling hooks.
  */
@@ -25,6 +32,8 @@ async function gotoNexus(page: Page) {
 }
 
 test.describe('Polling Session Guards — useExecutionResults', () => {
+  test.skip(!process.env.PLAYWRIGHT_AUTH_ENABLED, 'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run')
+
   test('401 response silently clears results without setting error state', async ({ page }) => {
     // All execution-results requests return 401 to exercise the silent-error path
     await page.route('/api/execution-results/recent*', (route) => {
@@ -57,6 +66,13 @@ test.describe('Polling Session Guards — useExecutionResults', () => {
       expect(text).not.toContain('execution results')
       expect(text.toLowerCase()).not.toContain('401')
     }
+
+    // Positive assertion: open the MessageCenter and confirm results were
+    // cleared (setResults([]) is the observable side-effect of the 401 path).
+    // This also verifies the assertion above is not vacuously true — the
+    // component must be rendered and interactable for empty state to appear.
+    await page.getByRole('button', { name: 'Messages & Results' }).click()
+    await expect(page.getByText('No execution results yet')).toBeVisible({ timeout: 3000 })
   })
 
   test('401 response does not trigger rapid retry — next poll respects 60s interval', async ({ page }) => {
@@ -66,6 +82,10 @@ test.describe('Polling Session Guards — useExecutionResults', () => {
     // requestTimestamps uses wall-clock Date.now() (Node.js process, not browser).
     // Only .length is checked — do not add timing-gap assertions without
     // switching to page.evaluate(() => Date.now()) for fake-clock time.
+    //
+    // Note: 401 takes the early-return path before the catch block, so
+    // consecutiveFailures is NOT incremented — next poll uses the base 60s
+    // interval with no backoff applied.
     const requestTimestamps: number[] = []
     await page.route('/api/execution-results/recent*', (route) => {
       requestTimestamps.push(Date.now())
@@ -97,6 +117,8 @@ test.describe('Polling Session Guards — useExecutionResults', () => {
 })
 
 test.describe('Polling Session Guards — NotificationProvider', () => {
+  test.skip(!process.env.PLAYWRIGHT_AUTH_ENABLED, 'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run')
+
   test('401 from notifications polling endpoint does not produce error state', async ({ page }) => {
     // SSE stream abort registered first (higher priority when using wildcard below)
     await page.route('/api/notifications/stream', (route) => {
@@ -130,6 +152,8 @@ test.describe('Polling Session Guards — NotificationProvider', () => {
 })
 
 test.describe('Polling Backoff Behavior', () => {
+  test.skip(!process.env.PLAYWRIGHT_AUTH_ENABLED, 'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run')
+
   test('consecutive 500 failures delay next poll by 2× base interval', async ({ page }) => {
     // Install fake clock BEFORE navigation to control timer scheduling
     await page.clock.install()
