@@ -55,7 +55,7 @@ test.describe('Polling Session Guards — useExecutionResults', () => {
     const alertTexts = await page.locator('[role="alert"]').allTextContents()
     for (const text of alertTexts) {
       expect(text).not.toContain('execution results')
-      expect((text ?? '').toLowerCase()).not.toContain('401')
+      expect(text.toLowerCase()).not.toContain('401')
     }
   })
 
@@ -121,7 +121,7 @@ test.describe('Polling Session Guards — NotificationProvider', () => {
     // Silent 401 handling — no error toasts for notifications
     const alertTexts = await page.locator('[role="alert"]').allTextContents()
     for (const text of alertTexts) {
-      expect((text ?? '').toLowerCase()).not.toContain('failed to fetch notifications')
+      expect(text.toLowerCase()).not.toContain('failed to fetch notifications')
     }
   })
 })
@@ -159,6 +159,8 @@ test.describe('Polling Backoff Behavior', () => {
     expect(requestTimestamps.length).toBe(1)
 
     // After 1 failure, backoff = 2^1 × 60s = 120s (±10% jitter: 108s–132s).
+    // Timings here are for useExecutionResults (refreshInterval = 60 000 ms);
+    // NotificationProvider uses a 30 s base interval and is a separate concern.
     // At 60s into the backoff window — no second request yet.
     await page.clock.fastForward(60000)
     expect(requestTimestamps.length).toBe(1)
@@ -166,15 +168,9 @@ test.describe('Polling Backoff Behavior', () => {
     // At 140s total — past the maximum backoff window (132s).
     // Second request should now fire.
     await page.clock.fastForward(80000)
-    await page.waitForResponse('/api/execution-results/recent*', { timeout: 5000 }).catch(() => {
-      // Response may have already been captured; catch timeout if so
-    })
-    expect(requestTimestamps.length).toBeGreaterThanOrEqual(2)
-
-    // Verify the actual delay between requests reflects backoff (>= base 60s)
-    if (requestTimestamps.length >= 2) {
-      const gapMs = requestTimestamps[1] - requestTimestamps[0]
-      expect(gapMs).toBeGreaterThanOrEqual(60000) // at least 1× base interval
-    }
+    // Route handler updates requestTimestamps when the request is fulfilled.
+    // poll() gives a clear failure message if the second request never arrives,
+    // rather than a silent timeout via .catch(() => {}).
+    await expect.poll(() => requestTimestamps.length, { timeout: 5000 }).toBeGreaterThanOrEqual(2)
   })
 })
