@@ -391,6 +391,11 @@ export class MonitoringStack extends cdk.Stack {
     });
 
     // ============================================================================
+    // Enhanced Log Monitoring (Issue #843)
+    // ============================================================================
+    this.addEnhancedMonitoring(environment, `/ecs/aistudio-${environment}`);
+
+    // ============================================================================
     // Additional Alarms
     // ============================================================================
     this.createCriticalAlarms(environment);
@@ -491,11 +496,11 @@ export class MonitoringStack extends cdk.Stack {
     // Content Safety & Operation Status
     this.dashboard.addWidgets(
       new cloudwatch.LogQueryWidget({
-        title: 'Content Safety Blocks (Last 24h)',
+        title: 'Content Safety Blocks',
         logGroupNames: [logGroupName],
         view: cloudwatch.LogQueryVisualizationType.TABLE,
         queryLines: [
-          'fields @timestamp, message, error.name, error.message, requestId',
+          'fields @timestamp, message, error.name, action, requestId',
           'filter status = "blocked" or error.name = "ContentSafetyBlockedError"',
           'sort @timestamp desc',
           'limit 20',
@@ -654,7 +659,7 @@ fields @timestamp, message, error.code, userId
 
 ### Content safety blocks
 \`\`\`
-fields @timestamp, message, error.name, error.message, requestId, action
+fields @timestamp, message, error.name, action, requestId
 | filter status = "blocked" or error.name = "ContentSafetyBlockedError"
 | sort @timestamp desc
 | limit 50
