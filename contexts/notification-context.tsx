@@ -178,6 +178,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
   }, [fetchNotifications])
 
   const refreshNotifications = useCallback(async () => {
+    // Manual refresh: errors suppressed here (not counted toward polling backoff)
     await fetchNotifications().catch(() => {})
   }, [fetchNotifications])
 

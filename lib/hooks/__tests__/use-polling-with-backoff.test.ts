@@ -340,4 +340,87 @@ describe('usePollingWithBackoff', () => {
     await act(async () => { jest.advanceTimersByTime(1001) })
     expect(callCount).toBe(3)
   })
+
+  // ---------------------------------------------------------------------------
+  // onFailure callback
+  // ---------------------------------------------------------------------------
+
+  it('calls onFailure with post-increment count after each failure', async () => {
+    const onFailure = jest.fn()
+    let callCount = 0
+    const fn = makeFn(async () => {
+      callCount++
+      throw new Error('fail')
+    })
+
+    renderHook(() =>
+      usePollingWithBackoff(fn, { baseInterval: 1000, enabled: true, onFailure })
+    )
+
+    // Failure 1 at 1000ms — onFailure called with 1
+    await act(async () => { jest.advanceTimersByTime(1001) })
+    expect(callCount).toBe(1)
+    expect(onFailure).toHaveBeenCalledTimes(1)
+    expect(onFailure).toHaveBeenLastCalledWith(1)
+
+    // Failure 2 at 2000ms — onFailure called with 2
+    await act(async () => { jest.advanceTimersByTime(2001) })
+    expect(callCount).toBe(2)
+    expect(onFailure).toHaveBeenCalledTimes(2)
+    expect(onFailure).toHaveBeenLastCalledWith(2)
+  })
+
+  it('does not call onFailure on success', async () => {
+    const onFailure = jest.fn()
+    const fn = makeFn(() => Promise.resolve())
+
+    renderHook(() =>
+      usePollingWithBackoff(fn, { baseInterval: 1000, enabled: true, onFailure })
+    )
+
+    await act(async () => { jest.advanceTimersByTime(1001) })
+    expect(fn).toHaveBeenCalledTimes(1)
+
+    await act(async () => { jest.advanceTimersByTime(1001) })
+    expect(fn).toHaveBeenCalledTimes(2)
+
+    expect(onFailure).not.toHaveBeenCalled()
+  })
+
+  it('does not restart polling when onFailure reference changes', async () => {
+    // With the internal ref pattern, changing the onFailure callback should NOT
+    // restart the polling chain (unlike if it were in the dep array directly).
+    let callCount = 0
+    const fn = makeFn(async () => {
+      callCount++
+      throw new Error('fail')
+    })
+
+    const onFailure1 = jest.fn()
+    const onFailure2 = jest.fn()
+
+    const { rerender } = renderHook(
+      ({ onFailure }: { onFailure: (n: number) => void }) =>
+        usePollingWithBackoff(fn, { baseInterval: 1000, enabled: true, onFailure }),
+      { initialProps: { onFailure: onFailure1 } }
+    )
+
+    // Failure 1 at 1000ms — onFailure1 called
+    await act(async () => { jest.advanceTimersByTime(1001) })
+    expect(callCount).toBe(1)
+    expect(onFailure1).toHaveBeenCalledTimes(1)
+
+    // Change onFailure reference — backoff is now 2000ms
+    rerender({ onFailure: onFailure2 })
+
+    // If onFailure were in the dep array, the effect would restart and reset backoff.
+    // With the ref pattern, the 2000ms backoff must be preserved.
+    await act(async () => { jest.advanceTimersByTime(1001) })
+    expect(callCount).toBe(1) // No call yet — still in 2000ms backoff window
+
+    await act(async () => { jest.advanceTimersByTime(1001) })
+    expect(callCount).toBe(2) // Fires at 2000ms
+    expect(onFailure2).toHaveBeenCalledTimes(1) // New reference received the callback
+    expect(onFailure2).toHaveBeenLastCalledWith(2)
+  })
 })

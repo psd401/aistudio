@@ -20,7 +20,9 @@ interface UsePollingWithBackoffOptions {
   /**
    * Called after each polling failure with the post-increment consecutive failure count.
    * Use this for logging backoff depth — the count is accurate at call time.
-   * Must be stable (wrapped in `useCallback` with empty deps, or defined outside the component).
+   *
+   * Does NOT need to be memoized — the hook wraps it in a ref internally so passing
+   * an inline arrow function does not restart the polling chain on each render.
    */
   onFailure?: (consecutiveFailures: number) => void
 }
@@ -50,6 +52,10 @@ export function usePollingWithBackoff(
   const isLoadingRef = useRef(false)
   // Track whether polling was previously enabled to detect genuine false→true transitions
   const wasEnabledRef = useRef(false)
+  // Wrap onFailure in a ref so callers don't need to memoize it — an inline arrow
+  // function in the caller would otherwise restart the polling chain on every render.
+  const onFailureRef = useRef(onFailure)
+  useEffect(() => { onFailureRef.current = onFailure })
 
   const resetFailures = useCallback(() => {
     consecutiveFailures.current = 0
@@ -73,7 +79,7 @@ export function usePollingWithBackoff(
     const getInterval = () => {
       const base = consecutiveFailures.current === 0
         ? baseInterval
-        : Math.min(Math.pow(2, consecutiveFailures.current), maxMultiplier) * baseInterval
+        : Math.min(2 ** consecutiveFailures.current, maxMultiplier) * baseInterval
       // ±10% jitter to prevent thundering herd from multiple tabs retrying simultaneously
       const jitter = Math.random() * 0.2 + 0.9
       return base * jitter
@@ -95,7 +101,7 @@ export function usePollingWithBackoff(
               consecutiveFailures.current++
               // Notify caller with post-increment count so logging reflects the actual
               // depth the client is now at, with no +1 arithmetic needed by the caller.
-              onFailure?.(consecutiveFailures.current)
+              onFailureRef.current?.(consecutiveFailures.current)
             })
             .finally(() => {
               isLoadingRef.current = false
@@ -118,7 +124,7 @@ export function usePollingWithBackoff(
       // without skipping the first cycle due to a stale in-flight flag.
       isLoadingRef.current = false
     }
-  }, [fn, baseInterval, maxMultiplier, enabled, onFailure])
+  }, [fn, baseInterval, maxMultiplier, enabled])
 
   return { resetFailures }
 }

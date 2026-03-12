@@ -109,7 +109,8 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
   }, [fetchResults, sessionStatus])
 
   const refreshResults = useCallback(async () => {
-    await fetchResults().catch(() => {}) // Error already logged inside fetchResults
+    // Manual refresh: errors suppressed here (not counted toward polling backoff)
+    await fetchResults().catch(() => {})
   }, [fetchResults])
 
   return {
