@@ -5,7 +5,10 @@ import { useEffect, useRef, useCallback } from "react"
 interface UsePollingWithBackoffOptions {
   /** Base polling interval in milliseconds */
   baseInterval: number
-  /** Maximum backoff multiplier (default: 8) */
+  /**
+   * Maximum backoff multiplier (default: 8, minimum clamped to 1).
+   * A value ≤ 0 would produce 0ms delays and tight-loop the event loop.
+   */
   maxMultiplier?: number
   /**
    * Whether polling is enabled (default: true).
@@ -33,7 +36,10 @@ export function usePollingWithBackoff(
   fn: () => Promise<unknown>,
   options: UsePollingWithBackoffOptions
 ) {
-  const { baseInterval, maxMultiplier = 8, enabled = true } = options
+  const { baseInterval, enabled = true } = options
+  // Clamp maxMultiplier to ≥1 — a value of 0 or negative would produce 0ms intervals
+  // and spin the event loop continuously.
+  const maxMultiplier = Math.max(1, options.maxMultiplier ?? 8)
   const consecutiveFailures = useRef(0)
   const isLoadingRef = useRef(false)
   // Track whether polling was previously enabled to detect genuine false→true transitions
@@ -42,6 +48,9 @@ export function usePollingWithBackoff(
   const resetFailures = useCallback(() => {
     consecutiveFailures.current = 0
   }, [])
+
+  // Getter prevents callers from accidentally writing to the ref and breaking invariants
+  const getConsecutiveFailures = useCallback(() => consecutiveFailures.current, [])
 
   useEffect(() => {
     if (!enabled || baseInterval <= 0) {
@@ -105,5 +114,5 @@ export function usePollingWithBackoff(
     }
   }, [fn, baseInterval, maxMultiplier, enabled])
 
-  return { resetFailures, consecutiveFailures }
+  return { resetFailures, getConsecutiveFailures }
 }

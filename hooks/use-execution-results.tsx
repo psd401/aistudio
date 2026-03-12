@@ -69,19 +69,24 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
       })
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      // Downgrade to warn — polling failures are expected transient states
+      // Downgrade to warn — polling failures are expected transient states.
+      // Log +1 because the hook's .catch() increments consecutiveFailures after re-throw.
       requestLog.warn('Failed to fetch execution results', {
         error: errorMessage,
-        consecutiveFailures: consecutiveFailures.current
+        consecutiveFailures: getConsecutiveFailures() + 1
       })
       setError(errorMessage)
       throw err // Re-throw so the polling hook tracks the failure for backoff
     } finally {
       setIsLoading(false)
     }
-  }, [limit, status, sessionStatus])
+  }, [limit, status, sessionStatus]) // eslint-disable-line react-hooks/exhaustive-deps
+  // getConsecutiveFailures is intentionally excluded: it is a stable getter
+  // that reads a ref at call time. Including it would require placing the
+  // usePollingWithBackoff call above this callback (circular dep), and refs
+  // are safe to close over without listing in deps.
 
-  const { resetFailures, consecutiveFailures } = usePollingWithBackoff(fetchResults, {
+  const { resetFailures, getConsecutiveFailures } = usePollingWithBackoff(fetchResults, {
     baseInterval: refreshInterval,
     enabled: sessionStatus === 'authenticated',
   })
@@ -104,12 +109,14 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
     }
   }, [fetchResults, sessionStatus])
 
+  const refreshResults = useCallback(async () => {
+    await fetchResults().catch(() => {}) // Error already logged inside fetchResults
+  }, [fetchResults])
+
   return {
     results,
     isLoading,
     error,
-    refreshResults: useCallback(async () => {
-      await fetchResults().catch(() => {}) // Error already logged inside fetchResults
-    }, [fetchResults]),
+    refreshResults,
   }
 }
