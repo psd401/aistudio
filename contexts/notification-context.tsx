@@ -51,7 +51,8 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       })
 
       if (!response.ok) {
-        // If unauthorized, just return empty notifications instead of throwing
+        // 401 returns without throwing — polling hook treats this as success (no backoff increment).
+        // Session expiry should not trigger exponential backoff.
         if (response.status === 401) {
           setNotifications([])
           setIsLoading(false)

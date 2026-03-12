@@ -47,7 +47,8 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
       })
 
       if (!response.ok) {
-        // Session expired — silently stop, don't treat as error
+        // 401 returns without throwing — polling hook treats this as success (no backoff increment).
+        // Session expiry should not trigger exponential backoff.
         if (response.status === 401) {
           setResults([])
           setIsLoading(false)

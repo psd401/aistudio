@@ -7,7 +7,12 @@ interface UsePollingWithBackoffOptions {
   baseInterval: number
   /** Maximum backoff multiplier (default: 8) */
   maxMultiplier?: number
-  /** Whether polling is enabled (default: true). Failures reset when this transitions to true. */
+  /**
+   * Whether polling is enabled (default: true).
+   *
+   * Failures reset only on genuine false→true transition, not on fn/interval changes.
+   * `fn` must be stable (wrapped in `useCallback`) to avoid unintentional backoff resets.
+   */
   enabled?: boolean
 }
 
@@ -31,6 +36,8 @@ export function usePollingWithBackoff(
   const { baseInterval, maxMultiplier = 8, enabled = true } = options
   const consecutiveFailures = useRef(0)
   const isLoadingRef = useRef(false)
+  // Track whether polling was previously enabled to detect genuine false→true transitions
+  const wasEnabledRef = useRef(false)
 
   const resetFailures = useCallback(() => {
     consecutiveFailures.current = 0
@@ -38,11 +45,16 @@ export function usePollingWithBackoff(
 
   useEffect(() => {
     if (!enabled || baseInterval <= 0) {
+      wasEnabledRef.current = false
       return
     }
 
-    // Reset failures when polling becomes enabled (e.g., re-authentication)
-    consecutiveFailures.current = 0
+    // Only reset failures on genuine false→true transition, not fn/interval changes.
+    // This prevents a non-memoized fn from silently defeating backoff mid-session.
+    if (!wasEnabledRef.current) {
+      consecutiveFailures.current = 0
+    }
+    wasEnabledRef.current = true
 
     let cancelled = false
 
@@ -87,6 +99,9 @@ export function usePollingWithBackoff(
     return () => {
       cancelled = true
       clearTimeout(timeoutId)
+      // Reset the loading guard so the next effect run can poll immediately
+      // without skipping the first cycle due to a stale in-flight flag.
+      isLoadingRef.current = false
     }
   }, [fn, baseInterval, maxMultiplier, enabled])
 
