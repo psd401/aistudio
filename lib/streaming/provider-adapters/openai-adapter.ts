@@ -305,16 +305,6 @@ export class OpenAIAdapter extends BaseProviderAdapter {
             stream_reasoning_summaries: true,
             preserve_reasoning_items: true,
 
-            // Response configuration
-            response_format: {
-              type: 'json_object' as const,
-              schema: {
-                reasoning_steps: 'array',
-                thinking_content: 'string',
-                final_answer: 'string'
-              }
-            },
-
             // Tool configuration for reasoning models
             parallel_tool_calls: true
           }
