@@ -10,6 +10,8 @@ import { ContentSafetyBlockedError } from './types';
 
 // Logger for PII transform debugging
 const piiTransformLog = createLogger({ module: 'pii-transform' });
+// Module-level logger for free functions (class methods use per-request loggers)
+const log = createLogger({ module: 'unified-streaming-service' });
 
 // PII token format: [PII:uuid] where uuid is 36 chars = 42 total chars
 const PII_TOKEN_REGEX = /\[PII:[\da-f-]{36}]/g;
@@ -499,8 +501,8 @@ async function convertMessages(
 ) {
   log.info('Messages structure before conversion', {
     messageCount: messages.length,
-    firstMessage: JSON.stringify(messages[0]),
-    allMessages: JSON.stringify(messages)
+    firstMessageRole: messages[0]?.role,
+    messageRoles: messages.map(m => m.role),
   });
 
   try {
@@ -510,7 +512,8 @@ async function convertMessages(
     log.error('Failed to convert messages', {
       error: error.message,
       stack: error.stack,
-      messages: JSON.stringify(messages)
+      messageCount: messages.length,
+      messageRoles: messages.map(m => m.role),
     });
     throw new Error(`Message conversion failed: ${error.message}`);
   }
@@ -600,7 +603,9 @@ function shouldCheckOutputSafety(
 }
 
 /**
- * Get or create tools for streaming
+ * Get or create tools for streaming.
+ * Filters requested tools against the model's supported tools to prevent
+ * errors like "This model doesn't support tool use in streaming mode."
  */
 async function getOrCreateTools(
   request: StreamRequest,
@@ -612,7 +617,51 @@ async function getOrCreateTools(
   if (request.tools) {
     return request.tools;
   }
-  return adapter.createTools(request.enabledTools || []);
+
+  const requestedTools = request.enabledTools || [];
+  if (requestedTools.length === 0) {
+    return adapter.createTools([]);
+  }
+
+  // Filter requested tools against model's supported capabilities
+  const supportedTools = adapter.getSupportedTools(request.modelId);
+
+  // If the adapter reports no supported tools, pass nothing to avoid
+  // "tool use in streaming mode" errors (e.g., Bedrock Claude models)
+  if (supportedTools.length === 0) {
+    log.info('Model does not support provider-native tools, filtering all tool requests', {
+      modelId: request.modelId,
+      requestedCount: requestedTools.length,
+    });
+    log.debug('Tool filtering detail (no provider-native tools)', {
+      modelId: request.modelId,
+      requestedTools,
+    });
+    // createTools([]) always returns universal tools (show_chart, etc.) regardless of
+    // the empty input — BaseProviderAdapter.createTools() calls createUniversalTools()
+    // unconditionally, and all concrete adapters call super or replicate this behaviour.
+    return adapter.createTools([]);
+  }
+
+  // Only pass through tools the model actually supports
+  const filteredTools = requestedTools.filter(tool => supportedTools.includes(tool));
+  if (filteredTools.length < requestedTools.length) {
+    const droppedTools = requestedTools.filter(tool => !supportedTools.includes(tool));
+    log.info('Filtered unsupported tools for model', {
+      modelId: request.modelId,
+      requestedCount: requestedTools.length,
+      filteredCount: filteredTools.length,
+      droppedTools,
+    });
+    log.debug('Tool filtering detail', {
+      modelId: request.modelId,
+      requestedTools,
+      supportedTools,
+      filteredTools,
+    });
+  }
+
+  return adapter.createTools(filteredTools);
 }
 
 /**

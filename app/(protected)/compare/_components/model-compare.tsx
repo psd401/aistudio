@@ -6,22 +6,13 @@ import { DualResponse } from "./dual-response"
 import { useToast } from "@/components/ui/use-toast"
 import { useModelsWithPersistence } from "@/lib/hooks/use-models"
 import { PageBranding } from "@/components/ui/page-branding"
+import { createLogger } from "@/lib/client-logger"
+import type { DualStreamEvent } from "@/lib/compare/dual-stream-merger"
+
+const log = createLogger({ module: 'model-compare' })
 
 // Note: This component now uses native streaming instead of polling
 // The backend streams both model responses in parallel via Server-Sent Events
-
-interface DualStreamEvent {
-  modelId: 'model1' | 'model2';
-  type: 'content' | 'finish' | 'error';
-  chunk?: string;
-  error?: string;
-  usage?: {
-    promptTokens: number;
-    completionTokens: number;
-    totalTokens: number;
-  };
-  finishReason?: string;
-}
 
 export function ModelCompare() {
   // Use shared model management hooks
@@ -154,11 +145,19 @@ export function ModelCompare() {
                     setModel1Response(prev => prev + data.chunk)
                   } else if (data.type === 'finish') {
                     setModel1Complete(true)
+                  } else if (data.type === 'warning') {
+                    // Mark complete defensively — warning is always followed by finish,
+                    // but don't rely on that sequence in case the finish is dropped.
+                    setModel1Complete(true)
+                    toast({
+                      title: `${model1State.selectedModel?.name ?? 'First model'} unavailable`,
+                      description: data.warning ?? "Comparison unavailable — model response could not be generated",
+                    })
                   } else if (data.type === 'error') {
                     setModel1Complete(true)
                     toast({
-                      title: "Model 1 Error",
-                      description: data.error || "Model 1 failed to generate response",
+                      title: `${model1State.selectedModel?.name ?? 'First model'} failed`,
+                      description: data.error ?? "Failed to generate response",
                       variant: "destructive"
                     })
                   }
@@ -167,28 +166,36 @@ export function ModelCompare() {
                     setModel2Response(prev => prev + data.chunk)
                   } else if (data.type === 'finish') {
                     setModel2Complete(true)
+                  } else if (data.type === 'warning') {
+                    // Mark complete defensively — warning is always followed by finish,
+                    // but don't rely on that sequence in case the finish is dropped.
+                    setModel2Complete(true)
+                    toast({
+                      title: `${model2State.selectedModel?.name ?? 'Second model'} unavailable`,
+                      description: data.warning ?? "Comparison unavailable — model response could not be generated",
+                    })
                   } else if (data.type === 'error') {
                     setModel2Complete(true)
                     toast({
-                      title: "Model 2 Error",
-                      description: data.error || "Model 2 failed to generate response",
+                      title: `${model2State.selectedModel?.name ?? 'Second model'} failed`,
+                      description: data.error ?? "Failed to generate response",
                       variant: "destructive"
                     })
                   }
                 }
               } catch (parseError) {
-                // Log parse errors in development for debugging
-                if (process.env.NODE_ENV === 'development') {
-                  // eslint-disable-next-line no-console
-                  console.warn('Failed to parse SSE event:', line, parseError)
-                }
-                // In production, silently ignore - server-side logging handles errors
+                log.warn('Failed to parse SSE event', {
+                  error: parseError instanceof Error ? parseError.message : String(parseError)
+                })
               }
             }
           }
         }
 
-        // Stream complete
+        // Stream complete — force completion flags to true as a defensive
+        // guard against any missed finish/warning/error events.
+        setModel1Complete(true)
+        setModel2Complete(true)
         setIsStreaming(false)
       } finally {
         // Always cleanup the reader
@@ -242,6 +249,12 @@ export function ModelCompare() {
 
     setIsStreaming(false)
     setIsLoading(false)
+    // Reset to false so the next comparison starts clean. The defensive
+    // setModel1/2Complete(true) at the end of the stream loop only runs
+    // on the natural-completion path — it won't fire here because
+    // reader.cancel() above breaks the while(true) loop.
+    setModel1Complete(false)
+    setModel2Complete(false)
   }, [])
 
   // Cleanup on unmount
