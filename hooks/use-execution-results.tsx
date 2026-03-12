@@ -84,10 +84,11 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
   const { resetFailures } = usePollingWithBackoff(fetchResults, {
     baseInterval: refreshInterval,
     enabled: sessionStatus === 'authenticated',
-    // onFailure receives the post-increment count from the hook — no +1 arithmetic needed
-    onFailure: useCallback((consecutiveFailures: number) => {
+    // onFailure receives the post-increment count from the hook — no +1 arithmetic needed.
+    // No useCallback needed — the hook wraps this in a ref internally.
+    onFailure: (consecutiveFailures: number) => {
       log.warn('Execution results polling backoff increasing', { consecutiveFailures })
-    }, [log]),
+    },
   })
 
   // Reset state when session becomes unauthenticated to prevent stuck loading spinner.

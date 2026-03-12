@@ -190,10 +190,11 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
   const { resetFailures } = usePollingWithBackoff(fetchNotifications, {
     baseInterval: 30000, // 30 seconds
     enabled: sessionStatus === 'authenticated',
-    // onFailure receives the post-increment count from the hook — no +1 arithmetic needed
-    onFailure: useCallback((consecutiveFailures: number) => {
+    // onFailure receives the post-increment count from the hook — no +1 arithmetic needed.
+    // No useCallback needed — the hook wraps this in a ref internally.
+    onFailure: (consecutiveFailures: number) => {
       log.warn('Notification polling backoff increasing', { consecutiveFailures })
-    }, [log]),
+    },
   })
 
   // Reset state when session becomes unauthenticated to prevent stuck loading spinner.

@@ -14,6 +14,8 @@ const mockRandom = jest.spyOn(Math, 'random').mockReturnValue(0.5)
 describe('usePollingWithBackoff', () => {
   beforeEach(() => {
     jest.useFakeTimers()
+    // mockReturnValue(0.5) is set at module scope; repeated here as defensive reset
+    // in case a future test temporarily overrides it mid-suite.
     mockRandom.mockReturnValue(0.5)
   })
 

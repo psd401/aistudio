@@ -54,8 +54,10 @@ export function usePollingWithBackoff(
   const wasEnabledRef = useRef(false)
   // Wrap onFailure in a ref so callers don't need to memoize it — an inline arrow
   // function in the caller would otherwise restart the polling chain on every render.
+  // Synchronous assignment during render (not useEffect) ensures onFailureRef is always
+  // current by the time any effect or timer callback fires, closing the stale-ref window.
   const onFailureRef = useRef(onFailure)
-  useEffect(() => { onFailureRef.current = onFailure })
+  onFailureRef.current = onFailure
 
   const resetFailures = useCallback(() => {
     consecutiveFailures.current = 0
