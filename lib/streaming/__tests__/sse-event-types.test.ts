@@ -84,7 +84,7 @@ describe('SSE Event Parsing', () => {
       const data = '{"type":"unknown-type","data":"test"}';
 
       // parseSSEEvent should not throw — unknown types are gracefully forwarded
-      // with a structured log.warn via @/lib/client-logger (no console.warn)
+      // with a console.warn (can't use client-logger or server logger in this shared module)
       expect(() => parseSSEEvent(data)).not.toThrow();
       const event = parseSSEEvent(data);
       expect(event.type).toBe('unknown-type');
