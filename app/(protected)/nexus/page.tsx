@@ -134,12 +134,16 @@ function ConversationRuntimeProvider({
             categories: errorData.categories,
             source: errorData.source,
           })
-          // Throw to stop the AI SDK runtime from processing this non-streaming response
-          throw new Error(errorData.error || 'Content blocked by safety guardrails')
+          // Throw to stop the AI SDK runtime from processing this non-streaming response.
+          // Use a sentinel property so the outer catch can reliably re-throw regardless
+          // of what Bedrock puts in the error message.
+          const err = new Error(errorData.error || 'Content blocked by safety guardrails')
+          ;(err as Error & { isContentBlocked: boolean }).isContentBlocked = true
+          throw err
         }
       } catch (e) {
         // Re-throw CONTENT_BLOCKED errors — only swallow JSON parse failures
-        if (e instanceof Error && e.message.includes('Content blocked')) {
+        if (e instanceof Error && (e as Error & { isContentBlocked?: boolean }).isContentBlocked) {
           throw e
         }
         log.debug('Could not parse error response as JSON')
