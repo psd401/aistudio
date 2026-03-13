@@ -158,6 +158,7 @@ export type ContentFilterType =
   | 'VIOLENCE'
   | 'SELF_HARM'
   | 'SEXUAL'
+  | 'INSULTS'
   | 'MISCONDUCT'
   | 'PROMPT_ATTACK';
 

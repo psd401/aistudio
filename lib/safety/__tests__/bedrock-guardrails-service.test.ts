@@ -5,6 +5,7 @@
  */
 
 import { BedrockGuardrailsService } from '../bedrock-guardrails-service';
+import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 
 // Mock AWS SDK clients
 jest.mock('@aws-sdk/client-bedrock-runtime');
@@ -491,6 +492,46 @@ describe('BedrockGuardrailsService', () => {
       const result = await service.evaluateOutput(aiResponse, 'claude-haiku-4.5', 'amazon-bedrock');
       expect(result.allowed).toBe(true);
       expect(result.processedContent).toBe(aiResponse);
+    });
+  });
+
+  /**
+   * Issue #763: managedWordLists BLOCKED path
+   *
+   * Regression test for the bug where PROFANITY blocks were invisible in logs/notifications
+   * because extractBlockedCategories() only checked wordPolicy.customWords, not managedWordLists.
+   */
+  describe('managedWordLists blocking (Issue #763)', () => {
+    it('should return allowed=false and blockedCategories with Profanity filter when managedWordLists is BLOCKED', async () => {
+      const mockSend = jest.fn().mockResolvedValue({
+        action: 'GUARDRAIL_INTERVENED',
+        outputs: [{ text: 'Your request was blocked.' }],
+        assessments: [
+          {
+            wordPolicy: {
+              managedWordLists: [
+                { match: 'redacted', type: 'PROFANITY', action: 'BLOCKED' },
+              ],
+            },
+          },
+        ],
+      });
+
+      (BedrockRuntimeClient as jest.Mock).mockImplementation(() => ({
+        send: mockSend,
+      }));
+
+      const blockedService = new BedrockGuardrailsService({
+        region: TEST_REGION,
+        guardrailId: 'test-guardrail-id',
+        guardrailVersion: 'DRAFT',
+      });
+
+      const result = await blockedService.evaluateInput('test content with profanity');
+
+      expect(result.allowed).toBe(false);
+      expect(result.blockedCategories).toBeDefined();
+      expect(result.blockedCategories?.some(c => c.includes('Profanity filter'))).toBe(true);
     });
   });
 });

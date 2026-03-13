@@ -395,10 +395,13 @@ export class BedrockGuardrailsService {
 
       // Issue #763: Log detailed assessment data for blocked content to support
       // analysis of false positive patterns and tuning strategy development.
-      // Includes word policy matches, filter confidence levels, and topic triggers.
+      // Includes word policy matches (count/type only — never raw words), filter
+      // confidence levels, and topic triggers.
+      // Note: raw matched words are NOT logged — they come from user/AI content
+      // and could contain profane or offensive terms. Log type and count instead.
       const wordMatches = [
-        ...(assessment?.wordPolicy?.customWords?.filter(w => w.action === 'BLOCKED').map(w => w.match) || []),
-        ...(assessment?.wordPolicy?.managedWordLists?.filter(w => w.action === 'BLOCKED').map(w => ({ word: w.match, type: w.type })) || []),
+        ...(assessment?.wordPolicy?.customWords?.filter(w => w.action === 'BLOCKED').map(w => ({ type: 'custom', matchLength: w.match?.length })) || []),
+        ...(assessment?.wordPolicy?.managedWordLists?.filter(w => w.action === 'BLOCKED').map(w => ({ type: w.type, matchLength: w.match?.length })) || []),
       ];
       const filterDetails = assessment?.contentPolicy?.filters
         ?.filter(f => f.action === 'BLOCKED')
@@ -465,10 +468,13 @@ export class BedrockGuardrailsService {
     // Issue #763: Word policy - managed word lists (PROFANITY filter)
     // Previously missing — PROFANITY blocks were not categorized in logs/notifications,
     // making it impossible to identify them as the source of increased blocking.
+    // Note: word.match (the raw blocked word) is intentionally NOT included in the
+    // category string — it flows into SNS email subjects which appear in plaintext
+    // on lock screens and email previews.
     if (assessment?.wordPolicy?.managedWordLists) {
       for (const word of assessment.wordPolicy.managedWordLists) {
         if (word.action === 'BLOCKED') {
-          categories.push(`Profanity filter: "${word.match}"`);
+          categories.push(`Profanity filter (${word.type ?? 'managed word list'})`);
         }
       }
     }
@@ -593,6 +599,7 @@ export class BedrockGuardrailsService {
       VIOLENCE: 'Violence',
       SELF_HARM: 'Self-harm',
       SEXUAL: 'Sexual content',
+      INSULTS: 'Insults',
       MISCONDUCT: 'Misconduct',
       PROMPT_ATTACK: 'Prompt attack',
     };
