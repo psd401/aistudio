@@ -16,6 +16,7 @@ import { ChartVisualizationUI } from '../_components/tools/chart-visualization-u
 import { createEnhancedNexusAttachmentAdapter } from '@/lib/nexus/enhanced-attachment-adapters'
 import { validateConversationId, navigateToDecisionCaptureConversation, navigateToNewDecisionCapture } from '@/lib/nexus/conversation-navigation'
 import { createLogger } from '@/lib/client-logger'
+import { handleContentBlockedResponse } from '@/lib/nexus/content-blocked-handler'
 
 /**
  * Decision Capture Page
@@ -97,9 +98,13 @@ function DecisionRuntimeProvider({
     })
   }, [])
 
-  // Custom fetch to intercept conversation ID header
+  // Custom fetch to intercept conversation ID header and handle content safety blocks
   const customFetch = useCallback(async (input: RequestInfo | URL, init?: RequestInit) => {
     const response = await fetch(input, init)
+
+    // Issue #860: Handle CONTENT_BLOCKED 400 responses — shows toast and throws
+    // to prevent AI SDK runtime from parsing non-streaming JSON as a stream
+    await handleContentBlockedResponse(response, log)
 
     const newConversationId = response.headers.get('X-Conversation-Id')
     if (newConversationId && newConversationId !== conversationId) {

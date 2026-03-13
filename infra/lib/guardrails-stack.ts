@@ -79,13 +79,20 @@ export class GuardrailsStack extends cdk.Stack {
       // - Issue #727: PROMPT_ATTACK disabled (75% false positive rate)
       // - Issue #761: All filters to NONE except HATE at LOW (Bedrock minimum requirement)
       // - Issue #763: PROFANITY word policy disabled (97% of all blocks, 24x rate spike)
+      // - Issue #860: HATE asymmetric (input LOW, output NONE) — 100% FP rate on output
       contentPolicyConfig: {
         filtersConfig: [
           {
-            // Kept at LOW — Bedrock requires at least one non-NONE filter
+            // Issue #860: Asymmetric — input at LOW (Bedrock minimum), output at NONE.
+            // 30-day analysis (#763) found HATE at LOW had 100% false positive rate
+            // (2/2 blocks were on large educational documents: 28KB, 52KB).
+            // Asymmetric config eliminates output false positives (the most disruptive —
+            // blocks AI responses users already waited for) while satisfying Bedrock's
+            // requirement of at least one non-NONE content filter.
+            // inputStrength: 'LOW' still catches genuinely hateful user input.
             type: 'HATE',
             inputStrength: 'LOW',
-            outputStrength: 'LOW',
+            outputStrength: 'NONE',
           },
           {
             type: 'VIOLENCE',

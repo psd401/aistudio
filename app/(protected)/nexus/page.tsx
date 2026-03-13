@@ -23,6 +23,7 @@ import { validateConversationId } from '@/lib/nexus/conversation-navigation'
 import type { SelectAiModel } from '@/types'
 import { createLogger } from '@/lib/client-logger'
 import { toast } from 'sonner'
+import { handleContentBlockedResponse } from '@/lib/nexus/content-blocked-handler'
 import { getPromptSettings } from '@/actions/prompt-library.actions'
 import { ModelFallbackBanner } from './_components/model-fallback-banner'
 
@@ -113,25 +114,9 @@ function ConversationRuntimeProvider({
       }
     }
 
-    // Handle content safety blocked errors (400 with CONTENT_BLOCKED code)
-    if (response.status === 400) {
-      try {
-        // Clone response to read body without consuming it
-        const clonedResponse = response.clone()
-        const errorData = await clonedResponse.json()
-        if (errorData.code === 'CONTENT_BLOCKED') {
-          // Show user-friendly toast notification
-          toast.error('Content Blocked', {
-            description: errorData.error || 'This content is not appropriate for educational use.',
-            duration: 6000
-          })
-          log.warn('Content blocked by safety guardrails', { error: errorData.error })
-        }
-      } catch {
-        // If we can't parse the error, let the default error handling occur
-        log.debug('Could not parse error response as JSON')
-      }
-    }
+    // Issue #860: Handle CONTENT_BLOCKED 400 responses — shows toast and throws
+    // to prevent AI SDK runtime from parsing non-streaming JSON as a stream
+    await handleContentBlockedResponse(response, log)
 
     // Extract conversation ID from response header (new conversations only)
     const newConversationId = response.headers.get('X-Conversation-Id')
