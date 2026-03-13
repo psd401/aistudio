@@ -195,6 +195,11 @@ export interface GuardrailAssessment {
       match: string;
       action: 'BLOCKED' | 'ALLOWED';
     }>;
+    managedWordLists?: Array<{
+      match: string;
+      type: string;
+      action: 'BLOCKED' | 'ALLOWED';
+    }>;
   };
   sensitiveInformationPolicy?: {
     piiEntities?: Array<{

@@ -40,6 +40,10 @@ export class GuardrailsStack extends cdk.Stack {
     // 1. Amazon Bedrock Guardrail for K-12 Content Safety
     // =====================================================================
 
+    // Issue #763: Currently using CLASSIC tier (default). STANDARD tier available
+    // with benefits: 1000-char topic definitions (vs 200), better contextual
+    // classification, 60+ languages. Requires cross-region inference config.
+    // See docs/operations/guardrail-tuning-analysis.md for migration checklist.
     this.guardrail = new bedrock.CfnGuardrail(this, 'K12ContentGuardrail', {
       name: `aistudio-${props.environment}-k12-safety`,
       description: 'K-12 content safety guardrail for AI Studio - filters harmful content including hate speech, violence, self-harm, and inappropriate material for educational environments.',
@@ -205,6 +209,12 @@ export class GuardrailsStack extends cdk.Stack {
       },
 
       // Word policy - block specific terms inappropriate for K-12
+      //
+      // Issue #763: PROFANITY managed word list is a binary on/off — no strength
+      // setting, no customization. AWS controls the word list and does not document
+      // changes. This is one of only two active blocking policies (along with HATE
+      // at LOW). If unexpected blocking increases, this is the prime suspect.
+      // See docs/operations/guardrail-tuning-analysis.md for analysis queries.
       wordPolicyConfig: {
         managedWordListsConfig: [
           {

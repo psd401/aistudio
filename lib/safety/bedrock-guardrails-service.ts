@@ -346,6 +346,10 @@ export class BedrockGuardrailsService {
       guardrailIdentifier: this.config.guardrailId,
       guardrailVersion: this.config.guardrailVersion,
       source,
+      // Issue #763: Use FULL outputScope for detailed assessment data including
+      // non-triggered filters. This improves diagnostic capability when analyzing
+      // false positive patterns and tuning guardrail configuration.
+      outputScope: 'FULL',
       content: [
         {
           text: {
@@ -389,10 +393,24 @@ export class BedrockGuardrailsService {
       const blockedCategories = this.extractBlockedCategories(assessment);
       const blockedMessage = response.outputs?.[0]?.text;
 
+      // Issue #763: Log detailed assessment data for blocked content to support
+      // analysis of false positive patterns and tuning strategy development.
+      // Includes word policy matches, filter confidence levels, and topic triggers.
+      const wordMatches = [
+        ...(assessment?.wordPolicy?.customWords?.filter(w => w.action === 'BLOCKED').map(w => w.match) || []),
+        ...(assessment?.wordPolicy?.managedWordLists?.filter(w => w.action === 'BLOCKED').map(w => ({ word: w.match, type: w.type })) || []),
+      ];
+      const filterDetails = assessment?.contentPolicy?.filters
+        ?.filter(f => f.action === 'BLOCKED')
+        .map(f => ({ type: f.type, confidence: f.confidence })) || [];
+
       this.log.warn('Guardrail intervened', {
         source,
         blockedCategories,
         hasBlockedMessage: !!blockedMessage,
+        wordPolicyMatches: wordMatches.length > 0 ? wordMatches : undefined,
+        contentFilterDetails: filterDetails.length > 0 ? filterDetails : undefined,
+        contentLength: content.length,
       });
 
       return {
@@ -434,12 +452,23 @@ export class BedrockGuardrailsService {
       }
     }
 
-    // Word policy
+    // Word policy - custom words
     if (assessment?.wordPolicy?.customWords) {
       for (const word of assessment.wordPolicy.customWords) {
         if (word.action === 'BLOCKED') {
           categories.push('Blocked word detected');
           break; // Only add once
+        }
+      }
+    }
+
+    // Issue #763: Word policy - managed word lists (PROFANITY filter)
+    // Previously missing — PROFANITY blocks were not categorized in logs/notifications,
+    // making it impossible to identify them as the source of increased blocking.
+    if (assessment?.wordPolicy?.managedWordLists) {
+      for (const word of assessment.wordPolicy.managedWordLists) {
+        if (word.action === 'BLOCKED') {
+          categories.push(`Profanity filter: "${word.match}"`);
         }
       }
     }

@@ -37,12 +37,14 @@ The content filtering system evaluates all messages against configurable safety 
 
 | Category | Type | Description | Action |
 |----------|------|-------------|--------|
-| **Hate Speech** | Content Filter | Content targeting protected groups | Blocked (MEDIUM) |
-| **Violence** | Content Filter | Graphic violence or threats | Blocked (MEDIUM) |
+| **Hate Speech** | Content Filter | Content targeting protected groups | **Blocked (LOW)** — Bedrock minimum requirement |
+| **Violence** | Content Filter | Graphic violence or threats | **Detect only (Issue #761)** |
 | **Self-Harm** | Topic Policy | Content encouraging self-injury | **Detect only (Issue #742)** |
-| **Sexual Content** | Content Filter | Inappropriate sexual material | Blocked (HIGH) |
-| **Misconduct** | Content Filter | Illegal activities, dangerous instructions | Blocked (LOW) |
+| **Sexual Content** | Content Filter | Inappropriate sexual material | **Detect only (Issue #761)** |
+| **Insults** | Content Filter | Personal attacks, insults | **Detect only (Issue #761)** |
+| **Misconduct** | Content Filter | Illegal activities, dangerous instructions | **Detect only (Issue #761)** |
 | **Prompt Attacks** | Content Filter | Attempts to bypass safety measures | **Disabled (Issue #727)** |
+| **Profanity** | Managed Word List | Profane language | **Blocked** (binary on/off, no strength setting) |
 | **Weapons** | Topic Policy | Weapons, firearms, explosives | **Detect only (Issue #742)** |
 | **Drugs** | Topic Policy | Illegal drug use/substance abuse | **Detect only (Issue #742)** |
 | **Bullying** | Topic Policy | Bullying, harassment, intimidation | **Detect only (Issue #742)** |
@@ -416,14 +418,15 @@ aws cloudwatch put-metric-alarm \
 
 Content filters use strength levels (`NONE`, `LOW`, `MEDIUM`, `HIGH`) to balance safety with educational flexibility. The default configuration uses MEDIUM for most filters to allow legitimate educational discussions:
 
-| Filter | Default | Purpose | Educational Considerations |
-|--------|---------|---------|---------------------------|
-| **HATE** | MEDIUM | Blocks discrimination/prejudice | Allows civil rights, Holocaust education |
-| **VIOLENCE** | MEDIUM | Blocks graphic violence | Allows history (wars), literature, biology |
-| **SEXUAL** | HIGH | Blocks sexual content | Keep HIGH for K-12 environments |
-| **INSULTS** | MEDIUM | Blocks personal attacks | Allows character analysis in literature |
-| **MISCONDUCT** | LOW | Blocks illegal activities | Allows legal system, drug education, PBIS behavior management |
-| **PROMPT_ATTACK** | **NONE** | ~~Blocks jailbreak attempts~~ | **Disabled due to 75% false positive rate (Issue #727).** See [Security Trade-offs](#security-trade-offs) for monitoring approach.
+| Filter | Current Setting | Purpose | Educational Considerations |
+|--------|----------------|---------|---------------------------|
+| **HATE** | **LOW** (blocking) | Blocks discrimination/prejudice | LOW is Bedrock minimum — required to maintain guardrail. Allows civil rights, Holocaust education at this threshold. |
+| **VIOLENCE** | NONE (detect only) | Graphic violence | Issue #761 — FPs on history (wars, civil rights), literature, biology |
+| **SEXUAL** | NONE (detect only) | Sexual content | Issue #761 — FPs on health education discussions |
+| **INSULTS** | NONE (detect only) | Personal attacks | Issue #761 — FPs on teacher observations, behavior discussions |
+| **MISCONDUCT** | NONE (detect only) | Illegal activities | Issue #761 — FPs on PBIS behavior management content |
+| **PROMPT_ATTACK** | NONE (disabled) | Jailbreak attempts | Issue #727 — 75% FP rate. See [Security Trade-offs](#security-trade-offs). |
+| **PROFANITY** | ON (blocking) | Profane language | Managed word list — binary on/off, no strength setting. Cannot be tuned. |
 
 To customize filter strengths, edit `infra/lib/guardrails-stack.ts`:
 
@@ -606,6 +609,7 @@ However, we strongly recommend keeping both enabled for K-12 deployments.
 
 ## Related Documentation
 
+- [Guardrail Tuning Analysis Guide](../operations/guardrail-tuning-analysis.md) - Detection data analysis and tuning strategy (Issue #763)
 - [Deployment Guide](../DEPLOYMENT.md) - Full deployment instructions
 - [IAM Security](../security/IAM_LEAST_PRIVILEGE.md) - IAM role configuration
 - [Architecture Overview](../ARCHITECTURE.md) - System architecture
