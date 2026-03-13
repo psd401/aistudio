@@ -10,8 +10,8 @@ Only two policies actively block content:
 
 | Policy | Type | Status | Notes |
 |--------|------|--------|-------|
-| **HATE** | Content Filter | `LOW` (blocking) | Bedrock requires at least one non-NONE filter |
-| **PROFANITY** | Managed Word List | ON (blocking) | Binary on/off — no strength tuning available |
+| **HATE** | Content Filter | Input: `LOW`, Output: `NONE` | Issue #860 — asymmetric. Bedrock requires at least one non-NONE filter; input LOW satisfies this. Output NONE eliminates AI response FPs. |
+| **PROFANITY** | Managed Word List | OFF (disabled) | Issue #763 — 97% of blocks, 24x rate spike. Binary on/off. |
 
 ### Detect-Only Policies (logging, not blocking)
 

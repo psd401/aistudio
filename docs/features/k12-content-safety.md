@@ -37,7 +37,7 @@ The content filtering system evaluates all messages against configurable safety 
 
 | Category | Type | Description | Action |
 |----------|------|-------------|--------|
-| **Hate Speech** | Content Filter | Content targeting protected groups | **Blocked (LOW)** — Bedrock minimum requirement |
+| **Hate Speech** | Content Filter | Content targeting protected groups | **Input: Blocked (LOW), Output: Detect only** — Bedrock minimum req. Asymmetric since Issue #860 |
 | **Violence** | Content Filter | Graphic violence or threats | **Detect only (Issue #761)** |
 | **Self-Harm** | Topic Policy | Content encouraging self-injury | **Detect only (Issue #742)** |
 | **Sexual Content** | Content Filter | Inappropriate sexual material | **Detect only (Issue #761)** |
@@ -420,7 +420,7 @@ Content filters use strength levels (`NONE`, `LOW`, `MEDIUM`, `HIGH`) to balance
 
 | Filter | Current Setting | Purpose | Educational Considerations |
 |--------|----------------|---------|---------------------------|
-| **HATE** | **LOW** (blocking) | Blocks discrimination/prejudice | LOW is Bedrock minimum — required to maintain guardrail. Allows civil rights, Holocaust education at this threshold. |
+| **HATE** | **Input: LOW, Output: NONE** | Blocks discrimination/prejudice | Issue #860 — asymmetric config. Input at LOW (Bedrock minimum), output at NONE. 30-day analysis showed 100% FP rate on output (educational docs). |
 | **VIOLENCE** | NONE (detect only) | Graphic violence | Issue #761 — FPs on history (wars, civil rights), literature, biology |
 | **SEXUAL** | NONE (detect only) | Sexual content | Issue #761 — FPs on health education discussions |
 | **INSULTS** | NONE (detect only) | Personal attacks | Issue #761 — FPs on teacher observations, behavior discussions |

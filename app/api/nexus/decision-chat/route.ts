@@ -475,7 +475,13 @@ export async function POST(req: Request) {
       });
       timer({ status: 'blocked' });
       return new Response(
-        JSON.stringify({ error: error.message, code: 'CONTENT_BLOCKED', requestId }),
+        JSON.stringify({
+          error: error.message,
+          code: 'CONTENT_BLOCKED',
+          categories: error.blockedCategories,
+          source: error.source,
+          requestId,
+        }),
         { status: 400, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
       );
     }

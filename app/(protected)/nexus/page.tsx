@@ -114,21 +114,34 @@ function ConversationRuntimeProvider({
     }
 
     // Handle content safety blocked errors (400 with CONTENT_BLOCKED code)
+    // Issue #860: Throw after showing the toast to prevent the AI SDK runtime
+    // from parsing the non-streaming 400 JSON response as a stream, which causes
+    // TypeError: Cannot read properties of undefined (reading 'id')
     if (response.status === 400) {
       try {
-        // Clone response to read body without consuming it
         const clonedResponse = response.clone()
         const errorData = await clonedResponse.json()
         if (errorData.code === 'CONTENT_BLOCKED') {
-          // Show user-friendly toast notification
+          const categories = errorData.categories?.length
+            ? ` (${errorData.categories.join(', ')})`
+            : ''
           toast.error('Content Blocked', {
-            description: errorData.error || 'This content is not appropriate for educational use.',
+            description: `Your message was flagged by the content safety filter${categories}. Try rephrasing your request.`,
             duration: 6000
           })
-          log.warn('Content blocked by safety guardrails', { error: errorData.error })
+          log.warn('Content blocked by safety guardrails', {
+            error: errorData.error,
+            categories: errorData.categories,
+            source: errorData.source,
+          })
+          // Throw to stop the AI SDK runtime from processing this non-streaming response
+          throw new Error(errorData.error || 'Content blocked by safety guardrails')
         }
-      } catch {
-        // If we can't parse the error, let the default error handling occur
+      } catch (e) {
+        // Re-throw CONTENT_BLOCKED errors — only swallow JSON parse failures
+        if (e instanceof Error && e.message.includes('Content blocked')) {
+          throw e
+        }
         log.debug('Could not parse error response as JSON')
       }
     }
