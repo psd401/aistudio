@@ -346,6 +346,10 @@ export class BedrockGuardrailsService {
       guardrailIdentifier: this.config.guardrailId,
       guardrailVersion: this.config.guardrailVersion,
       source,
+      // Issue #763: Use FULL outputScope for detailed assessment data including
+      // non-triggered filters. This improves diagnostic capability when analyzing
+      // false positive patterns and tuning guardrail configuration.
+      outputScope: 'FULL',
       content: [
         {
           text: {
@@ -389,10 +393,27 @@ export class BedrockGuardrailsService {
       const blockedCategories = this.extractBlockedCategories(assessment);
       const blockedMessage = response.outputs?.[0]?.text;
 
+      // Issue #763: Log detailed assessment data for blocked content to support
+      // analysis of false positive patterns and tuning strategy development.
+      // Includes word policy matches (count/type only — never raw words), filter
+      // confidence levels, and topic triggers.
+      // Note: raw matched words are NOT logged — they come from user/AI content
+      // and could contain profane or offensive terms. Log type and count instead.
+      const wordMatches = [
+        ...(assessment?.wordPolicy?.customWords?.filter(w => w.action === 'BLOCKED').map(w => ({ type: 'custom', matchLength: w.match?.length })) || []),
+        ...(assessment?.wordPolicy?.managedWordLists?.filter(w => w.action === 'BLOCKED').map(w => ({ type: w.type, matchLength: w.match?.length })) || []),
+      ];
+      const filterDetails = assessment?.contentPolicy?.filters
+        ?.filter(f => f.action === 'BLOCKED')
+        .map(f => ({ type: f.type, confidence: f.confidence })) || [];
+
       this.log.warn('Guardrail intervened', {
         source,
         blockedCategories,
         hasBlockedMessage: !!blockedMessage,
+        wordPolicyMatches: wordMatches.length > 0 ? wordMatches : undefined,
+        contentFilterDetails: filterDetails.length > 0 ? filterDetails : undefined,
+        contentLength: content.length,
       });
 
       return {
@@ -434,12 +455,26 @@ export class BedrockGuardrailsService {
       }
     }
 
-    // Word policy
+    // Word policy - custom words
     if (assessment?.wordPolicy?.customWords) {
       for (const word of assessment.wordPolicy.customWords) {
         if (word.action === 'BLOCKED') {
           categories.push('Blocked word detected');
           break; // Only add once
+        }
+      }
+    }
+
+    // Issue #763: Word policy - managed word lists (PROFANITY filter)
+    // Previously missing — PROFANITY blocks were not categorized in logs/notifications,
+    // making it impossible to identify them as the source of increased blocking.
+    // Note: word.match (the raw blocked word) is intentionally NOT included in the
+    // category string — it flows into SNS email subjects which appear in plaintext
+    // on lock screens and email previews.
+    if (assessment?.wordPolicy?.managedWordLists) {
+      for (const word of assessment.wordPolicy.managedWordLists) {
+        if (word.action === 'BLOCKED') {
+          categories.push(`Profanity filter (${word.type ?? 'managed word list'})`);
         }
       }
     }
@@ -564,6 +599,7 @@ export class BedrockGuardrailsService {
       VIOLENCE: 'Violence',
       SELF_HARM: 'Self-harm',
       SEXUAL: 'Sexual content',
+      INSULTS: 'Insults',
       MISCONDUCT: 'Misconduct',
       PROMPT_ATTACK: 'Prompt attack',
     };
@@ -596,7 +632,12 @@ export class BedrockGuardrailsService {
 
       const command = new PublishCommand({
         TopicArn: this.config.violationTopicArn,
-        Subject: `K-12 Content Safety Alert: ${violation.categories.join(', ')}`,
+        // SNS Subject max is 100 chars. Truncate category list to fit.
+        Subject: (() => {
+          const base = 'K-12 Content Safety Alert: ';
+          const full = base + violation.categories.join(', ');
+          return full.length <= 100 ? full : full.slice(0, 97) + '...';
+        })(),
         Message: JSON.stringify(message, null, 2),
         MessageAttributes: {
           violationType: {
