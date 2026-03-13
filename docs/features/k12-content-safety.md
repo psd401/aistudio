@@ -44,7 +44,7 @@ The content filtering system evaluates all messages against configurable safety 
 | **Insults** | Content Filter | Personal attacks, insults | **Detect only (Issue #761)** |
 | **Misconduct** | Content Filter | Illegal activities, dangerous instructions | **Detect only (Issue #761)** |
 | **Prompt Attacks** | Content Filter | Attempts to bypass safety measures | **Disabled (Issue #727)** |
-| **Profanity** | Managed Word List | Profane language | **Blocked** (binary on/off, no strength setting) |
+| **Profanity** | Managed Word List | Profane language | **Disabled (Issue #763)** — caused 97% of blocks, mostly on AI educational responses |
 | **Weapons** | Topic Policy | Weapons, firearms, explosives | **Detect only (Issue #742)** |
 | **Drugs** | Topic Policy | Illegal drug use/substance abuse | **Detect only (Issue #742)** |
 | **Bullying** | Topic Policy | Bullying, harassment, intimidation | **Detect only (Issue #742)** |
@@ -426,7 +426,7 @@ Content filters use strength levels (`NONE`, `LOW`, `MEDIUM`, `HIGH`) to balance
 | **INSULTS** | NONE (detect only) | Personal attacks | Issue #761 — FPs on teacher observations, behavior discussions |
 | **MISCONDUCT** | NONE (detect only) | Illegal activities | Issue #761 — FPs on PBIS behavior management content |
 | **PROMPT_ATTACK** | NONE (disabled) | Jailbreak attempts | Issue #727 — 75% FP rate. See [Security Trade-offs](#security-trade-offs). |
-| **PROFANITY** | ON (blocking) | Profane language | Managed word list — binary on/off, no strength setting. Cannot be tuned. |
+| **PROFANITY** | **OFF** (disabled) | Profane language | Issue #763 — 97% of blocks, 24x block rate increase. AWS-controlled list, no tuning. Disabled 2026-03-12. |
 
 To customize filter strengths, edit `infra/lib/guardrails-stack.ts`:
 

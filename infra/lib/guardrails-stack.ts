@@ -66,6 +66,11 @@ export class GuardrailsStack extends cdk.Stack {
       // HATE at LOW is kept as the minimum required filter — LOW threshold has
       // the fewest false positives for K-12 educational content.
       //
+      // Issue #763 analysis (2026-03-12): HATE at LOW produced only 2 blocks in
+      // 30 days, both false positives on large educational documents (28KB, 52KB
+      // inputs that simultaneously triggered Bullying/Weapons topic detections).
+      // Keeping at LOW as Bedrock minimum requirement; FP rate is tolerable.
+      //
       // Safety net: LLM providers (OpenAI, Anthropic, Google) have built-in safety
       // training that provides baseline content filtering even without Bedrock.
       //
@@ -73,6 +78,7 @@ export class GuardrailsStack extends cdk.Stack {
       // - Issue #639: INSULTS/MISCONDUCT lowered from MEDIUM to LOW
       // - Issue #727: PROMPT_ATTACK disabled (75% false positive rate)
       // - Issue #761: All filters to NONE except HATE at LOW (Bedrock minimum requirement)
+      // - Issue #763: PROFANITY word policy disabled (97% of all blocks, 24x rate spike)
       contentPolicyConfig: {
         filtersConfig: [
           {
@@ -208,20 +214,31 @@ export class GuardrailsStack extends cdk.Stack {
         ],
       },
 
-      // Word policy - block specific terms inappropriate for K-12
+      // Word policy - PROFANITY managed word list
       //
-      // Issue #763: PROFANITY managed word list is a binary on/off — no strength
-      // setting, no customization. AWS controls the word list and does not document
-      // changes. This is one of only two active blocking policies (along with HATE
-      // at LOW). If unexpected blocking increases, this is the prime suspect.
-      // See docs/operations/guardrail-tuning-analysis.md for analysis queries.
-      wordPolicyConfig: {
-        managedWordListsConfig: [
-          {
-            type: 'PROFANITY',
-          },
-        ],
-      },
+      // Issue #763: DISABLED after 30-day analysis (2026-03-12). Data showed:
+      // - 66 of 68 blocks (97%) were from PROFANITY — the remaining 2 were HATE FPs
+      // - 48 of 66 PROFANITY blocks were on OUTPUT (AI-generated educational responses)
+      // - Block rate increased 24x starting March 6 (AWS likely updated the word list)
+      // - The extraction bug (missing managedWordLists) made these blocks invisible
+      //
+      // PROFANITY is binary on/off with no strength tuning. AWS controls the list
+      // and does not publish changes. With 97% of blocks being PROFANITY and the
+      // majority blocking AI educational OUTPUT, the cost exceeds the benefit.
+      //
+      // Compensating controls:
+      // - LLM safety training prevents actual profanity generation
+      // - HATE at LOW still catches hate speech (Bedrock minimum)
+      // - Content filters in detect-only mode provide visibility
+      //
+      // To re-enable: uncomment the wordPolicyConfig below.
+      // wordPolicyConfig: {
+      //   managedWordListsConfig: [
+      //     {
+      //       type: 'PROFANITY',
+      //     },
+      //   ],
+      // },
 
       // Resource tags
       tags: [
