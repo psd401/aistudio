@@ -23,6 +23,7 @@ import { validateConversationId } from '@/lib/nexus/conversation-navigation'
 import type { SelectAiModel } from '@/types'
 import { createLogger } from '@/lib/client-logger'
 import { toast } from 'sonner'
+import { handleContentBlockedResponse } from '@/lib/nexus/content-blocked-handler'
 import { getPromptSettings } from '@/actions/prompt-library.actions'
 import { ModelFallbackBanner } from './_components/model-fallback-banner'
 
@@ -113,42 +114,9 @@ function ConversationRuntimeProvider({
       }
     }
 
-    // Handle content safety blocked errors (400 with CONTENT_BLOCKED code)
-    // Issue #860: Throw after showing the toast to prevent the AI SDK runtime
-    // from parsing the non-streaming 400 JSON response as a stream, which causes
-    // TypeError: Cannot read properties of undefined (reading 'id')
-    if (response.status === 400) {
-      try {
-        const clonedResponse = response.clone()
-        const errorData = await clonedResponse.json()
-        if (errorData.code === 'CONTENT_BLOCKED') {
-          const categories = errorData.categories?.length
-            ? ` (${errorData.categories.join(', ')})`
-            : ''
-          toast.error('Content Blocked', {
-            description: `Your message was flagged by the content safety filter${categories}. Try rephrasing your request.`,
-            duration: 6000
-          })
-          log.warn('Content blocked by safety guardrails', {
-            error: errorData.error,
-            categories: errorData.categories,
-            source: errorData.source,
-          })
-          // Throw to stop the AI SDK runtime from processing this non-streaming response.
-          // Use a sentinel property so the outer catch can reliably re-throw regardless
-          // of what Bedrock puts in the error message.
-          const err = new Error(errorData.error || 'Content blocked by safety guardrails')
-          ;(err as Error & { isContentBlocked: boolean }).isContentBlocked = true
-          throw err
-        }
-      } catch (e) {
-        // Re-throw CONTENT_BLOCKED errors — only swallow JSON parse failures
-        if (e instanceof Error && (e as Error & { isContentBlocked?: boolean }).isContentBlocked) {
-          throw e
-        }
-        log.debug('Could not parse error response as JSON')
-      }
-    }
+    // Issue #860: Handle CONTENT_BLOCKED 400 responses — shows toast and throws
+    // to prevent AI SDK runtime from parsing non-streaming JSON as a stream
+    await handleContentBlockedResponse(response, log)
 
     // Extract conversation ID from response header (new conversations only)
     const newConversationId = response.headers.get('X-Conversation-Id')

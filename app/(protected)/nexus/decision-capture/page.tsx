@@ -16,7 +16,7 @@ import { ChartVisualizationUI } from '../_components/tools/chart-visualization-u
 import { createEnhancedNexusAttachmentAdapter } from '@/lib/nexus/enhanced-attachment-adapters'
 import { validateConversationId, navigateToDecisionCaptureConversation, navigateToNewDecisionCapture } from '@/lib/nexus/conversation-navigation'
 import { createLogger } from '@/lib/client-logger'
-import { toast } from 'sonner'
+import { handleContentBlockedResponse } from '@/lib/nexus/content-blocked-handler'
 
 /**
  * Decision Capture Page
@@ -102,38 +102,9 @@ function DecisionRuntimeProvider({
   const customFetch = useCallback(async (input: RequestInfo | URL, init?: RequestInit) => {
     const response = await fetch(input, init)
 
-    // Handle content safety blocked errors (400 with CONTENT_BLOCKED code)
-    // Issue #860: Throw after showing the toast to prevent the AI SDK runtime
-    // from parsing the non-streaming 400 JSON response as a stream, which causes
-    // TypeError: Cannot read properties of undefined (reading 'id')
-    if (response.status === 400) {
-      try {
-        const clonedResponse = response.clone()
-        const errorData = await clonedResponse.json()
-        if (errorData.code === 'CONTENT_BLOCKED') {
-          const categories = errorData.categories?.length
-            ? ` (${errorData.categories.join(', ')})`
-            : ''
-          toast.error('Content Blocked', {
-            description: `Your message was flagged by the content safety filter${categories}. Try rephrasing your request.`,
-            duration: 6000
-          })
-          log.warn('Content blocked by safety guardrails', {
-            error: errorData.error,
-            categories: errorData.categories,
-            source: errorData.source,
-          })
-          const err = new Error(errorData.error || 'Content blocked by safety guardrails')
-          ;(err as Error & { isContentBlocked: boolean }).isContentBlocked = true
-          throw err
-        }
-      } catch (e) {
-        if (e instanceof Error && (e as Error & { isContentBlocked?: boolean }).isContentBlocked) {
-          throw e
-        }
-        log.debug('Could not parse error response as JSON')
-      }
-    }
+    // Issue #860: Handle CONTENT_BLOCKED 400 responses — shows toast and throws
+    // to prevent AI SDK runtime from parsing non-streaming JSON as a stream
+    await handleContentBlockedResponse(response, log)
 
     const newConversationId = response.headers.get('X-Conversation-Id')
     if (newConversationId && newConversationId !== conversationId) {
