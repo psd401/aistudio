@@ -198,8 +198,10 @@ export interface GuardrailAssessment {
     }>;
     managedWordLists?: Array<{
       match: string;
-      type: string;
-      action: 'BLOCKED' | 'ALLOWED';
+      /** AWS currently only supports 'PROFANITY' as a managed word list type */
+      type: 'PROFANITY';
+      /** 'NONE' may appear when outputScope: 'FULL' returns non-triggered assessments */
+      action: 'BLOCKED' | 'ALLOWED' | 'NONE' | string;
     }>;
   };
   sensitiveInformationPolicy?: {

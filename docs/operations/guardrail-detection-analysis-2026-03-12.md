@@ -9,7 +9,7 @@
 
 - **97% of blocks (66/68) have empty `blockedCategories`** — these are PROFANITY managed word list blocks that were **invisible** in monitoring due to a bug in `extractBlockedCategories()` (missing `managedWordLists` handling). Fixed in this PR.
 - **3% of blocks (2/68) are "Hate speech"** — both are false positives on large educational documents (28KB and 52KB inputs that also triggered educational topic detections).
-- **Block rate increased 16x starting March 6** — from ~1 block/week to ~10+/day. Usage also increased, but the block RATE (blocks/evaluations) also climbed from <1% to 2-7%, confirming something became more sensitive.
+- **Block rate increased 24x starting March 6** — from 0.13% (pre-spike) to 3.07% (post-spike) per evaluation. Raw daily block count also increased from ~1/week to ~10+/day, but the rate increase is the more meaningful signal since usage also increased.
 - **Since no config changed, the PROFANITY managed word list is the confirmed source** — AWS likely updated the word list silently.
 
 ## Block Trend (Production)

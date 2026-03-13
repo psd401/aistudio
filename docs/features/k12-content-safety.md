@@ -416,7 +416,7 @@ aws cloudwatch put-metric-alarm \
 
 ### Customizing Content Filter Strength
 
-Content filters use strength levels (`NONE`, `LOW`, `MEDIUM`, `HIGH`) to balance safety with educational flexibility. The default configuration uses MEDIUM for most filters to allow legitimate educational discussions:
+Content filters use strength levels (`NONE`, `LOW`, `MEDIUM`, `HIGH`) to balance safety with educational flexibility. The current configuration uses detect-only (`NONE`) for most filters due to high false positive rates on educational content (Issues #639, #727, #742, #761). Only `HATE` is active at `LOW` — the Bedrock minimum required to maintain a valid guardrail:
 
 | Filter | Current Setting | Purpose | Educational Considerations |
 |--------|----------------|---------|---------------------------|
@@ -426,7 +426,9 @@ Content filters use strength levels (`NONE`, `LOW`, `MEDIUM`, `HIGH`) to balance
 | **INSULTS** | NONE (detect only) | Personal attacks | Issue #761 — FPs on teacher observations, behavior discussions |
 | **MISCONDUCT** | NONE (detect only) | Illegal activities | Issue #761 — FPs on PBIS behavior management content |
 | **PROMPT_ATTACK** | NONE (disabled) | Jailbreak attempts | Issue #727 — 75% FP rate. See [Security Trade-offs](#security-trade-offs). |
-| **PROFANITY** | **OFF** (disabled) | Profane language | Issue #763 — 97% of blocks, 24x block rate increase. AWS-controlled list, no tuning. Disabled 2026-03-12. |
+| **PROFANITY** | **OFF** (disabled) | Profane language | Issue #763 — 97% of blocks, 24x block rate increase. AWS-controlled list, no tuning. Disabled 2026-03-12. See trade-off note below. |
+
+> **Trade-off (PROFANITY disabled):** Disabling the PROFANITY word list removes filtering for both AI-generated responses (OUTPUT) and user-submitted prompts (INPUT). In the 30-day analysis, 18 of 66 PROFANITY blocks were on user INPUT. LLM safety training prevents the AI from generating profanity, but user-submitted profane text is no longer caught at the guardrail layer. This is considered an acceptable trade-off given the 24x increase in false-positive blocks on legitimate AI educational responses, but should be revisited if inappropriate user input becomes an operational concern.
 
 To customize filter strengths, edit `infra/lib/guardrails-stack.ts`:
 

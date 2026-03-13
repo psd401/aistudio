@@ -632,7 +632,12 @@ export class BedrockGuardrailsService {
 
       const command = new PublishCommand({
         TopicArn: this.config.violationTopicArn,
-        Subject: `K-12 Content Safety Alert: ${violation.categories.join(', ')}`,
+        // SNS Subject max is 100 chars. Truncate category list to fit.
+        Subject: (() => {
+          const base = 'K-12 Content Safety Alert: ';
+          const full = base + violation.categories.join(', ');
+          return full.length <= 100 ? full : full.slice(0, 97) + '...';
+        })(),
         Message: JSON.stringify(message, null, 2),
         MessageAttributes: {
           violationType: {
