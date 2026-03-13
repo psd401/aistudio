@@ -665,7 +665,7 @@ export function parseSSEEvent(data: string): SSEEvent {
     // Warn about unrecognized event types (but don't throw - allow extensibility)
     if (!VALID_SSE_EVENT_TYPES.has(parsed.type)) {
       // eslint-disable-next-line no-console -- shared client/server file, can't use either logger
-      console.warn('[sse-event-types] Unrecognized SSE event type:', parsed.type);
+      console.warn('[sse-event-types] Unrecognized SSE event type', { type: parsed.type, hint: 'This may indicate a new event type from the SDK or a malformed event' });
     }
 
     return parsed as unknown as SSEEvent;
