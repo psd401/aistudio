@@ -13,9 +13,9 @@
  * @see https://github.com/psd401/aistudio/issues/366
  */
 
-import { createLogger } from '@/lib/client-logger'
-
-const log = createLogger({ moduleName: 'sse-event-types' })
+// Note: This file is imported by both server routes (API) and client components.
+// Do NOT import from @/lib/client-logger (has 'use client') or @/lib/logger (uses winston).
+// Either would poison the opposite bundle. Use console.warn for the single diagnostic call.
 
 /**
  * Base interface for all SSE events
@@ -664,10 +664,8 @@ export function parseSSEEvent(data: string): SSEEvent {
 
     // Warn about unrecognized event types (but don't throw - allow extensibility)
     if (!VALID_SSE_EVENT_TYPES.has(parsed.type)) {
-      log.warn('Unrecognized SSE event type', {
-        type: parsed.type,
-        hint: 'This may indicate a new event type from the SDK or a malformed event'
-      });
+      // eslint-disable-next-line no-console -- shared client/server file, can't use either logger
+      console.warn('[sse-event-types] Unrecognized SSE event type', { type: parsed.type, hint: 'This may indicate a new event type from the SDK or a malformed event' });
     }
 
     return parsed as unknown as SSEEvent;
