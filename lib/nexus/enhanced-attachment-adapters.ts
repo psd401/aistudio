@@ -42,6 +42,32 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
     'text/yaml'
   ] as const;
 
+  // Allowlist of known error substrings → safe canned messages for AI context.
+  // Only these controlled strings are embedded in LLM prompts. Any error that
+  // does not match falls through to a generic message, preventing prompt injection.
+  private static readonly SAFE_ERROR_MAP: Array<{ pattern: string; message: string }> = [
+    { pattern: 'storage service temporarily unavailable', message: 'Storage service temporarily unavailable.' },
+    { pattern: 'upload service temporarily unavailable', message: 'Upload service temporarily unavailable.' },
+    { pattern: 'processing service temporarily unavailable', message: 'Processing service temporarily unavailable.' },
+    { pattern: 'document processing service temporarily unavailable', message: 'Document processing service temporarily unavailable.' },
+    { pattern: 'document processing queue temporarily unavailable', message: 'Processing queue temporarily unavailable.' },
+    { pattern: 'upload timed out', message: 'Upload timed out.' },
+    { pattern: 'processing timeout', message: 'Processing timed out.' },
+    { pattern: 'invalid file format', message: 'Invalid file format.' },
+    { pattern: 'file size exceeds', message: 'File size exceeds the allowed limit.' },
+    { pattern: 'network error during upload', message: 'Network error during upload.' },
+    { pattern: 'failed to check processing status', message: 'Could not check processing status.' },
+    { pattern: 'server processing failed', message: 'Server processing failed.' },
+  ];
+
+  private static toSafeErrorMessage(rawMessage: string): string {
+    const lower = rawMessage.toLowerCase();
+    for (const { pattern, message } of HybridDocumentAdapter.SAFE_ERROR_MAP) {
+      if (lower.includes(pattern)) return message;
+    }
+    return 'An unexpected error occurred during processing.';
+  }
+
   private processedCache = new Map<string, CompleteAttachment>();
   private processingPromises = new Map<string, Promise<CompleteAttachment>>();
   private callbacks?: AttachmentProcessingCallbacks;
@@ -164,9 +190,10 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
         errorName: error instanceof Error ? error.name : undefined,
       });
 
-      // Sanitize error message before embedding in AI model context to prevent
-      // indirect prompt injection via poisoned error strings (OWASP LLM Top 10)
-      const safeMessage = rawMessage.replace(/[<>`[\]()]/g, '').substring(0, 200);
+      // Map known error messages to safe canned text for AI model context.
+      // Only controlled strings reach the LLM — unknown errors get a generic
+      // message to prevent indirect prompt injection (OWASP LLM Top 10).
+      const safeMessage = HybridDocumentAdapter.toSafeErrorMessage(rawMessage);
 
       return {
         id: attachment.id,
@@ -182,7 +209,7 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
 
 **Size:** ${Math.round(attachment.file.size / 1024)}KB
 
-Please try re-uploading. If the issue persists, contact support with the error message above.`
+Please try re-uploading. If the issue persists, contact support.`
         }],
         status: {
           type: "complete"
@@ -436,6 +463,7 @@ Please try re-uploading. If the issue persists, contact support with the error m
 
       log.debug('Validating binary file format', {
         fileName: file.name,
+        header: header.substring(0, 16),
       });
 
       // Check magic bytes for supported binary formats

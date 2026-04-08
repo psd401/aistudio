@@ -257,16 +257,16 @@ async function uploadHandler(req: NextRequest) {
     const errorName = error instanceof Error ? error.name : 'Unknown';
     const errorStack = error instanceof Error ? error.stack : undefined;
 
-    log.error('Server-side upload failed', sanitizeForLogging({
+    log.error('Server-side upload failed', {
       error: errorMessage,
       name: errorName,
       stack: process.env.NODE_ENV !== 'production' ? errorStack : undefined,
-      fileName,
+      fileName: sanitizeForLogging(fileName),
       fileSize,
       userId,
       jobId,
       requestId
-    }));
+    });
 
     timer({ status: 'error' });
 
