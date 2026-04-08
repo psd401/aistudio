@@ -93,6 +93,18 @@ const ERROR_PATTERNS: Array<{ patterns: string[]; code: string; message: string;
     code: 'STORAGE_UNAVAILABLE',
     message: 'Storage service temporarily unavailable - please try again',
     status: 503
+  },
+  {
+    patterns: ['dynamodb', 'document_jobs_table', 'resourcenotfoundexception'],
+    code: 'JOB_SERVICE_UNAVAILABLE',
+    message: 'Document processing service temporarily unavailable - please try again',
+    status: 503
+  },
+  {
+    patterns: ['processing_queue_url', 'sqs'],
+    code: 'QUEUE_UNAVAILABLE',
+    message: 'Document processing queue temporarily unavailable - please try again',
+    status: 503
   }
 ];
 
