@@ -218,7 +218,8 @@ Please try re-uploading. If the issue persists, contact support with the error m
     if (!response.ok) {
       // Try to parse JSON error from our API. If it fails (e.g. ALB 502/503
       // returning HTML), include the HTTP status for diagnostics.
-      const errorData = await response.json().catch(() => null);
+      const errorData: { error?: string; code?: string; requestId?: string } | null =
+        await response.json().catch(() => null);
 
       if (errorData?.error) {
         const requestId = errorData.requestId ? ` (ref: ${errorData.requestId})` : '';
@@ -344,16 +345,6 @@ Please try re-uploading. If the issue persists, contact support with the error m
     throw new Error('Processing timeout - document processing took too long')
   }
 
-  private formatProcessingTime(startTime: string, endTime: string): string {
-    const start = new Date(startTime).getTime();
-    const end = new Date(endTime).getTime();
-    const duration = end - start;
-    
-    if (duration < 1000) return `${duration}ms`;
-    if (duration < 60000) return `${Math.round(duration / 1000)}s`;
-    return `${Math.round(duration / 60000)}m ${Math.round((duration % 60000) / 1000)}s`;
-  }
-
   /**
    * Type guard to check if extension is a supported text-based format
    */
@@ -467,21 +458,6 @@ Please try re-uploading. If the issue persists, contact support with the error m
         error: error instanceof Error ? error.message : 'Unknown error'
       });
       return false;
-    }
-  }
-
-  private getFileTypeFromName(fileName: string): string {
-    const extension = fileName.split('.').pop()?.toLowerCase() || '';
-    
-    switch (extension) {
-      case 'pdf': return 'pdf';
-      case 'docx':
-      case 'doc': return 'docx';
-      case 'xlsx':
-      case 'xls': return 'xlsx';
-      case 'pptx':
-      case 'ppt': return 'pptx';
-      default: return extension;
     }
   }
 
