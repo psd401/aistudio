@@ -57,7 +57,10 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
     { pattern: 'file size exceeds', message: 'File size exceeds the allowed limit.' },
     { pattern: 'network error during upload', message: 'Network error during upload.' },
     { pattern: 'failed to check processing status', message: 'Could not check processing status.' },
+    // Intentionally broad catch-all for server-side failures. New error categories
+    // that deserve their own message should be added as specific entries above this one.
     { pattern: 'server processing failed', message: 'Server processing failed.' },
+    { pattern: 'is misconfigured', message: 'Service configuration error.' },
   ];
 
   private static toSafeErrorMessage(rawMessage: string): string {

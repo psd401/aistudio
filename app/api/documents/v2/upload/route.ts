@@ -68,7 +68,9 @@ function parseProcessingOptions(processingOptionsRaw: string | null, log: Return
   }
 }
 
-/** Error classification patterns with user-friendly messages */
+import { UploadClassifiedError } from '@/lib/errors/upload-errors';
+
+/** Error classification patterns with user-friendly messages (fallback for untyped errors) */
 const ERROR_PATTERNS: Array<{ patterns: string[]; code: string; message: string; status: number }> = [
   {
     patterns: ['file size', 'exceeds'],
@@ -95,7 +97,8 @@ const ERROR_PATTERNS: Array<{ patterns: string[]; code: string; message: string;
     status: 503
   },
   {
-    patterns: ['dynamodb', 'document_jobs_table', 'resourcenotfoundexception'],
+    // Fallback pattern matching for DynamoDB errors not thrown as UploadClassifiedError
+    patterns: ['dynamodb', 'resourcenotfoundexception'],
     code: 'JOB_SERVICE_UNAVAILABLE',
     message: 'Document processing service temporarily unavailable - please try again',
     status: 503
@@ -110,9 +113,16 @@ const ERROR_PATTERNS: Array<{ patterns: string[]; code: string; message: string;
 
 /**
  * Classify error and return user-friendly message with status code.
- * Uses specific patterns to avoid misclassifying unrelated errors.
+ * Prefers typed UploadClassifiedError for explicit classification,
+ * falls back to string pattern matching for untyped AWS SDK errors.
  */
-function classifyUploadError(errorMessage: string): { code: string; message: string; status: number } {
+function classifyUploadError(error: unknown): { code: string; message: string; status: number } {
+  // Prefer typed errors — no string coupling needed
+  if (error instanceof UploadClassifiedError) {
+    return { code: error.code, message: error.userMessage, status: error.statusCode };
+  }
+
+  const errorMessage = error instanceof Error ? error.message : String(error);
   const lowerMessage = errorMessage.toLowerCase();
 
   for (const { patterns, code, message, status } of ERROR_PATTERNS) {
@@ -270,7 +280,7 @@ async function uploadHandler(req: NextRequest) {
 
     timer({ status: 'error' });
 
-    const { code, message, status } = classifyUploadError(errorMessage);
+    const { code, message, status } = classifyUploadError(error);
     return NextResponse.json({ error: message, code, requestId }, { status });
   }
 }
