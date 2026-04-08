@@ -122,7 +122,12 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
           if (this.callbacks?.onProcessingComplete) {
             this.callbacks.onProcessingComplete(attachment.id);
           }
-          log.error('Background processing failed', { attachmentId: attachment.id, fileName: attachment.name, error });
+          log.error('Background processing failed', {
+            attachmentId: attachment.id,
+            fileName: attachment.name,
+            error: error instanceof Error ? error.message : String(error),
+            errorName: error instanceof Error ? error.name : undefined,
+          });
           throw error;
         });
 
@@ -485,6 +490,7 @@ Please try re-uploading. If the issue persists, contact support.`
         fileName: file.name,
         extension: ext,
         mimeType: file.type,
+        headerPreview: header.substring(0, 16),
       });
 
       return false;

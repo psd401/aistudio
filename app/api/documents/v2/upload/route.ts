@@ -89,7 +89,7 @@ const ERROR_PATTERNS: Array<{ patterns: string[]; code: string; message: string;
     status: 408
   },
   {
-    patterns: ['s3', 'storage service', 'bucket'],
+    patterns: ['upload to s3', 'storage service', 'bucket', 'nosuchbucket', 'accessdenied'],
     code: 'STORAGE_UNAVAILABLE',
     message: 'Storage service temporarily unavailable - please try again',
     status: 503
