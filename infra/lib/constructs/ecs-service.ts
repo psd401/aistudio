@@ -656,7 +656,6 @@ export class EcsServiceConstruct extends Construct {
         healthyHttpCodes: '200',
       },
       deregistrationDelay: cdk.Duration.seconds(30),
-      stickinessCookieDuration: cdk.Duration.hours(1),
       targets: [this.service],
     });
 
