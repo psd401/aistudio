@@ -6,6 +6,7 @@ import { sendToProcessingQueue } from '@/lib/aws/lambda-trigger';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
 import { UploadRequestSchema } from '@/lib/validation/document-upload.validation';
 import { apiRateLimit } from '@/lib/rate-limit';
+import { UploadClassifiedError } from '@/lib/errors/upload-errors';
 
 /**
  * Server-side upload endpoint that proxies file uploads through the application server to S3.
@@ -68,8 +69,6 @@ function parseProcessingOptions(processingOptionsRaw: string | null, log: Return
   }
 }
 
-import { UploadClassifiedError } from '@/lib/errors/upload-errors';
-
 /** Error classification patterns with user-friendly messages (fallback for untyped errors) */
 const ERROR_PATTERNS: Array<{ patterns: string[]; code: string; message: string; status: number }> = [
   {
@@ -91,7 +90,7 @@ const ERROR_PATTERNS: Array<{ patterns: string[]; code: string; message: string;
     status: 408
   },
   {
-    patterns: ['upload to s3', 'storage service', 'bucket', 'nosuchbucket', 'accessdenied'],
+    patterns: ['upload to s3', 'storage service', 'bucket', 'nosuchbucket', 'accessdenied', 'slowdown', 's3 service'],
     code: 'STORAGE_UNAVAILABLE',
     message: 'Storage service temporarily unavailable - please try again',
     status: 503
