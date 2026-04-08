@@ -140,7 +140,7 @@ async function uploadHandler(req: NextRequest) {
     const session = await getServerSession();
     if (!session?.sub) {
       log.warn('Unauthorized request');
-      return NextResponse.json({ error: 'Unauthorized', requestId }, { status: 401 });
+      return NextResponse.json({ error: 'Unauthorized', code: 'UNAUTHORIZED', requestId }, { status: 401 });
     }
     userId = session.sub;
 
@@ -152,7 +152,7 @@ async function uploadHandler(req: NextRequest) {
 
     if (!file) {
       log.warn('No file provided');
-      return NextResponse.json({ error: 'No file provided', requestId }, { status: 400 });
+      return NextResponse.json({ error: 'No file provided', code: 'NO_FILE', requestId }, { status: 400 });
     }
 
     // Parse processing options
@@ -176,6 +176,7 @@ async function uploadHandler(req: NextRequest) {
       return NextResponse.json(
         {
           error: 'Invalid request data',
+          code: 'VALIDATION_ERROR',
           details: validationResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`),
           requestId
         },
@@ -227,7 +228,7 @@ async function uploadHandler(req: NextRequest) {
     // Step 4: Send to processing queue (matching confirm-upload flow)
     if (process.env.NODE_ENV !== 'test' && !process.env.DOCUMENTS_BUCKET_NAME) {
       log.error('DOCUMENTS_BUCKET_NAME environment variable not configured');
-      return NextResponse.json({ error: 'Service configuration error', requestId }, { status: 500 });
+      return NextResponse.json({ error: 'Service configuration error', code: 'CONFIG_ERROR', requestId }, { status: 500 });
     }
 
     await sendToProcessingQueue({

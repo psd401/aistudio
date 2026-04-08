@@ -156,8 +156,13 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
         status: { type: "complete" },
       };
     } catch (error) {
-      const rawMessage = error instanceof Error ? error.message : 'Unknown server error';
-      log.error('Server-side processing failed', { error: rawMessage, fileName: attachment.name });
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      log.error('Server-side processing failed', {
+        attachmentId: attachment.id,
+        fileName: attachment.name,
+        error: rawMessage,
+        errorName: error instanceof Error ? error.name : undefined,
+      });
 
       // Sanitize error message before embedding in AI model context to prevent
       // indirect prompt injection via poisoned error strings (OWASP LLM Top 10)
@@ -173,7 +178,7 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
           type: "text" as const,
           text: `## Document: ${attachment.name}
 
-*Upload failed: ${safeMessage}*
+*Processing failed: ${safeMessage}*
 
 **Size:** ${Math.round(attachment.file.size / 1024)}KB
 
@@ -214,7 +219,7 @@ Please try re-uploading. If the issue persists, contact support with the error m
       log.error('Upload network error', {
         attachmentId: attachment.id,
         fileName: attachment.name,
-        error: networkError instanceof Error ? networkError.message : 'Unknown network error',
+        error: networkError instanceof Error ? networkError.message : String(networkError),
       });
       throw new Error('Network error during upload - check your connection and try again');
     }
