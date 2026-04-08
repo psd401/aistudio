@@ -8,6 +8,7 @@ import {
 } from "@assistant-ui/react";
 import { createLogger } from "@/lib/client-logger";
 import { generateUUID } from "@/lib/utils/uuid";
+import { UploadClassifiedError, toValidErrorCode, type UploadErrorCode } from "@/lib/errors/upload-errors";
 
 const log = createLogger({ moduleName: 'enhanced-attachment-adapters' });
 
@@ -41,6 +42,49 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
     'application/x-yaml',
     'text/yaml'
   ] as const;
+
+  // Code-based lookup: preferred when server error `code` is available.
+  // Only these controlled strings are embedded in LLM prompts (prompt injection defense).
+  private static readonly CODE_TO_SAFE_MESSAGE: Partial<Record<UploadErrorCode, string>> = {
+    STORAGE_UNAVAILABLE: 'Storage service temporarily unavailable.',
+    UPLOAD_TIMEOUT: 'Upload timed out.',
+    INVALID_FORMAT: 'Invalid file format.',
+    FILE_TOO_LARGE: 'File size exceeds the allowed limit.',
+    JOB_SERVICE_UNAVAILABLE: 'Document processing service temporarily unavailable.',
+    QUEUE_UNAVAILABLE: 'Processing queue temporarily unavailable.',
+    CONFIG_ERROR: 'Service configuration error.',
+    UPLOAD_FAILED: 'Upload failed.',
+    UNAUTHORIZED: 'Authentication required.',
+    NO_FILE: 'No file provided.',
+    VALIDATION_ERROR: 'Invalid request data.',
+  };
+
+  // Fallback string matching for errors without a code (network errors, polling
+  // failures, ALB gateway errors). Only used when CODE_TO_SAFE_MESSAGE has no match.
+  private static readonly SAFE_ERROR_MAP: Array<{ pattern: string; message: string }> = [
+    { pattern: 'upload service temporarily unavailable', message: 'Upload service temporarily unavailable.' },
+    { pattern: 'processing service temporarily unavailable', message: 'Processing service temporarily unavailable.' },
+    { pattern: 'processing timeout', message: 'Processing timed out.' },
+    { pattern: 'network error during upload', message: 'Network error during upload.' },
+    { pattern: 'failed to check processing status', message: 'Could not check processing status.' },
+    // Intentionally broad catch-all for server-side failures. New error categories
+    // that deserve their own message should be added as specific entries above this one.
+    { pattern: 'server processing failed', message: 'Server processing failed.' },
+  ];
+
+  static toSafeErrorMessage(rawMessage: string, code?: UploadErrorCode): string {
+    // Prefer code-based lookup — no string coupling with server messages
+    if (code && code in HybridDocumentAdapter.CODE_TO_SAFE_MESSAGE) {
+      return HybridDocumentAdapter.CODE_TO_SAFE_MESSAGE[code]!;
+    }
+
+    // Fallback to pattern matching for non-code errors (network, polling, ALB)
+    const lower = rawMessage.toLowerCase();
+    for (const { pattern, message } of HybridDocumentAdapter.SAFE_ERROR_MAP) {
+      if (lower.includes(pattern)) return message;
+    }
+    return 'An unexpected error occurred during processing.';
+  }
 
   private processedCache = new Map<string, CompleteAttachment>();
   private processingPromises = new Map<string, Promise<CompleteAttachment>>();
@@ -96,7 +140,12 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
           if (this.callbacks?.onProcessingComplete) {
             this.callbacks.onProcessingComplete(attachment.id);
           }
-          log.error('Background processing failed', { attachmentId: attachment.id, fileName: attachment.name, error });
+          log.error('Background processing failed', {
+            attachmentId: attachment.id,
+            fileName: attachment.name,
+            error: error instanceof Error ? error.message : String(error),
+            errorName: error instanceof Error ? error.name : undefined,
+          });
           throw error;
         });
 
@@ -156,8 +205,21 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
         status: { type: "complete" },
       };
     } catch (error) {
-      log.error('Server-side processing failed', { error, fileName: attachment.name });
-      
+      const rawMessage = error instanceof Error ? error.message : String(error);
+      const errorCode: UploadErrorCode | undefined = error instanceof UploadClassifiedError ? error.code : undefined;
+      log.error('Server-side processing failed', {
+        attachmentId: attachment.id,
+        fileName: attachment.name,
+        error: rawMessage,
+        code: errorCode,
+        errorName: error instanceof Error ? error.name : undefined,
+      });
+
+      // Map known error codes/messages to safe canned text for AI model context.
+      // Only controlled strings reach the LLM — unknown errors get a generic
+      // message to prevent indirect prompt injection (OWASP LLM Top 10).
+      const safeMessage = HybridDocumentAdapter.toSafeErrorMessage(rawMessage, errorCode);
+
       return {
         id: attachment.id,
         type: "document",
@@ -168,20 +230,13 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
           type: "text" as const,
           text: `## Document: ${attachment.name}
 
-*Server processing failed. The document could not be processed.*
+*Processing failed: ${safeMessage}*
 
-**Error:** ${error instanceof Error ? error.message : 'Unknown server error'}
 **Size:** ${Math.round(attachment.file.size / 1024)}KB
 
-*This may be due to:*
-- Unsupported document format
-- Corrupted file
-- Server processing limits
-- Network connectivity issues
-
-Please try re-uploading or contact support if the issue persists.`
+Please try re-uploading. If the issue persists, contact support.`
         }],
-        status: { 
+        status: {
           type: "complete"
         },
       };
@@ -206,14 +261,55 @@ Please try re-uploading or contact support if the issue persists.`
       ocrEnabled: true
     }));
 
-    const response = await fetch('/api/documents/v2/upload', {
-      method: 'POST',
-      body: formData, // No Content-Type header - browser sets it with boundary
-    });
+    let response: Response;
+    try {
+      response = await fetch('/api/documents/v2/upload', {
+        method: 'POST',
+        body: formData, // No Content-Type header - browser sets it with boundary
+      });
+    } catch (networkError) {
+      log.error('Upload network error', {
+        attachmentId: attachment.id,
+        fileName: attachment.name,
+        error: networkError instanceof Error ? networkError.message : String(networkError),
+      });
+      throw new Error('Network error during upload - check your connection and try again');
+    }
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ error: 'Upload failed' }));
-      throw new Error(errorData.error || `Upload failed: ${response.status}`);
+      // Try to parse JSON error from our API. If it fails (e.g. ALB 502/503
+      // returning HTML), include the HTTP status for diagnostics.
+      const errorData: { error?: string; code?: string; requestId?: string } | null =
+        await response.json().catch(() => null);
+
+      if (errorData?.error) {
+        log.error('Upload server error', {
+          attachmentId: attachment.id,
+          fileName: attachment.name,
+          status: response.status,
+          code: errorData.code,
+          error: errorData.error,
+          requestId: errorData.requestId,
+        });
+        throw new UploadClassifiedError(
+          toValidErrorCode(errorData.code),
+          errorData.error,
+          response.status
+        );
+      }
+
+      // Non-JSON response — likely ALB 502/503 or infrastructure error
+      log.error('Upload failed with non-JSON response', {
+        attachmentId: attachment.id,
+        fileName: attachment.name,
+        status: response.status,
+        statusText: response.statusText,
+      });
+      throw new Error(
+        response.status === 502 || response.status === 503
+          ? 'Upload service temporarily unavailable - please try again in a moment'
+          : `Upload failed (HTTP ${response.status}) - please try again`
+      );
     }
 
     const result = await response.json();
@@ -265,7 +361,10 @@ Please try re-uploading or contact support if the issue persists.`
     const response = await fetch(`/api/documents/v2/jobs/${jobId}`)
 
     if (!response.ok) {
-      throw new Error(`Failed to check job status: ${response.status}`)
+      if (response.status === 502 || response.status === 503) {
+        throw new Error('Processing service temporarily unavailable')
+      }
+      throw new Error('Failed to check processing status - please try again')
     }
 
     return response.json()
@@ -311,16 +410,6 @@ Please try re-uploading or contact support if the issue persists.`
     }
 
     throw new Error('Processing timeout - document processing took too long')
-  }
-
-  private formatProcessingTime(startTime: string, endTime: string): string {
-    const start = new Date(startTime).getTime();
-    const end = new Date(endTime).getTime();
-    const duration = end - start;
-    
-    if (duration < 1000) return `${duration}ms`;
-    if (duration < 60000) return `${Math.round(duration / 1000)}s`;
-    return `${Math.round(duration / 60000)}m ${Math.round((duration % 60000) / 1000)}s`;
   }
 
   /**
@@ -401,9 +490,9 @@ Please try re-uploading or contact support if the issue persists.`
         .map(byte => byte.toString(16).padStart(2, '0'))
         .join('');
 
-      log.debug('Checking magic bytes for binary file', {
+      log.debug('Validating binary file format', {
         fileName: file.name,
-        header: header.substring(0, 16)
+        header: header.substring(0, 16),
       });
 
       // Check magic bytes for supported binary formats
@@ -425,7 +514,7 @@ Please try re-uploading or contact support if the issue persists.`
         fileName: file.name,
         extension: ext,
         mimeType: file.type,
-        headerPreview: header.substring(0, 16)
+        headerPreview: header.substring(0, 16),
       });
 
       return false;
@@ -436,21 +525,6 @@ Please try re-uploading or contact support if the issue persists.`
         error: error instanceof Error ? error.message : 'Unknown error'
       });
       return false;
-    }
-  }
-
-  private getFileTypeFromName(fileName: string): string {
-    const extension = fileName.split('.').pop()?.toLowerCase() || '';
-    
-    switch (extension) {
-      case 'pdf': return 'pdf';
-      case 'docx':
-      case 'doc': return 'docx';
-      case 'xlsx':
-      case 'xls': return 'xlsx';
-      case 'pptx':
-      case 'ppt': return 'pptx';
-      default: return extension;
     }
   }
 

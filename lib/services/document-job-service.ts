@@ -2,6 +2,7 @@ import { DynamoDBClient, PutItemCommand, QueryCommand, AttributeValue } from '@a
 import { marshall, unmarshall } from '@aws-sdk/util-dynamodb';
 import { createLogger, generateRequestId } from '@/lib/logger';
 import { generateUUID } from '@/lib/utils/uuid';
+import { UploadClassifiedError } from '@/lib/errors/upload-errors';
 
 const dynamoClient = new DynamoDBClient({
   region: process.env.AWS_REGION || process.env.NEXT_PUBLIC_AWS_REGION || 'us-east-1',
@@ -18,7 +19,12 @@ function getDocumentJobsTable(): string {
   const tableName = process.env.DOCUMENT_JOBS_TABLE;
   if (!tableName) {
     const availableVars = Object.keys(process.env).filter(k => k.includes('TABLE')).join(', ');
-    throw new Error(`DOCUMENT_JOBS_TABLE environment variable is required but not configured. Available TABLE vars: ${availableVars}`);
+    log.error('DOCUMENT_JOBS_TABLE not configured', { availableVars });
+    throw new UploadClassifiedError(
+      'CONFIG_ERROR',
+      'Document processing service is misconfigured',
+      500
+    );
   }
   
   return tableName;
