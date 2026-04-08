@@ -8,7 +8,7 @@ import {
 } from "@assistant-ui/react";
 import { createLogger } from "@/lib/client-logger";
 import { generateUUID } from "@/lib/utils/uuid";
-import { UploadClassifiedError, type UploadErrorCode } from "@/lib/errors/upload-errors";
+import { UploadClassifiedError, toValidErrorCode, type UploadErrorCode } from "@/lib/errors/upload-errors";
 
 const log = createLogger({ moduleName: 'enhanced-attachment-adapters' });
 
@@ -292,7 +292,7 @@ Please try re-uploading. If the issue persists, contact support.`
           requestId: errorData.requestId,
         });
         throw new UploadClassifiedError(
-          (errorData.code ?? 'UPLOAD_FAILED') as UploadErrorCode,
+          toValidErrorCode(errorData.code),
           errorData.error,
           response.status
         );

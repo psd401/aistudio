@@ -2,18 +2,29 @@
  * Known upload error codes. Used by UploadClassifiedError, ERROR_PATTERNS
  * in the upload route, and CODE_TO_SAFE_MESSAGE in the attachment adapter.
  */
-export type UploadErrorCode =
-  | 'STORAGE_UNAVAILABLE'
-  | 'UPLOAD_TIMEOUT'
-  | 'INVALID_FORMAT'
-  | 'FILE_TOO_LARGE'
-  | 'JOB_SERVICE_UNAVAILABLE'
-  | 'QUEUE_UNAVAILABLE'
-  | 'CONFIG_ERROR'
-  | 'UPLOAD_FAILED'
-  | 'NO_FILE'
-  | 'VALIDATION_ERROR'
-  | 'UNAUTHORIZED';
+export const UPLOAD_ERROR_CODES = [
+  'STORAGE_UNAVAILABLE',
+  'UPLOAD_TIMEOUT',
+  'INVALID_FORMAT',
+  'FILE_TOO_LARGE',
+  'JOB_SERVICE_UNAVAILABLE',
+  'QUEUE_UNAVAILABLE',
+  'CONFIG_ERROR',
+  'UPLOAD_FAILED',
+  'NO_FILE',
+  'VALIDATION_ERROR',
+  'UNAUTHORIZED',
+] as const;
+
+export type UploadErrorCode = typeof UPLOAD_ERROR_CODES[number];
+
+/** Runtime check: returns the code if valid, or 'UPLOAD_FAILED' as fallback */
+export function toValidErrorCode(code: string | undefined): UploadErrorCode {
+  if (code && (UPLOAD_ERROR_CODES as readonly string[]).includes(code)) {
+    return code as UploadErrorCode;
+  }
+  return 'UPLOAD_FAILED';
+}
 
 /**
  * Typed error for upload pipeline failures. Throw this instead of plain Error
