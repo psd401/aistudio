@@ -54,6 +54,9 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
     QUEUE_UNAVAILABLE: 'Processing queue temporarily unavailable.',
     CONFIG_ERROR: 'Service configuration error.',
     UPLOAD_FAILED: 'Upload failed.',
+    UNAUTHORIZED: 'Authentication required.',
+    NO_FILE: 'No file provided.',
+    VALIDATION_ERROR: 'Invalid request data.',
   };
 
   // Fallback string matching for errors without a code (network errors, polling
@@ -69,11 +72,10 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
     { pattern: 'server processing failed', message: 'Server processing failed.' },
   ];
 
-  private static toSafeErrorMessage(rawMessage: string, code?: string): string {
+  static toSafeErrorMessage(rawMessage: string, code?: UploadErrorCode): string {
     // Prefer code-based lookup — no string coupling with server messages
-    const safeCode = code as UploadErrorCode | undefined;
-    if (safeCode && safeCode in HybridDocumentAdapter.CODE_TO_SAFE_MESSAGE) {
-      return HybridDocumentAdapter.CODE_TO_SAFE_MESSAGE[safeCode]!;
+    if (code && code in HybridDocumentAdapter.CODE_TO_SAFE_MESSAGE) {
+      return HybridDocumentAdapter.CODE_TO_SAFE_MESSAGE[code]!;
     }
 
     // Fallback to pattern matching for non-code errors (network, polling, ALB)
@@ -204,7 +206,7 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
       };
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : String(error);
-      const errorCode = error instanceof UploadClassifiedError ? error.code : undefined;
+      const errorCode: UploadErrorCode | undefined = error instanceof UploadClassifiedError ? error.code : undefined;
       log.error('Server-side processing failed', {
         attachmentId: attachment.id,
         fileName: attachment.name,
