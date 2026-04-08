@@ -18,7 +18,8 @@ function getDocumentJobsTable(): string {
   const tableName = process.env.DOCUMENT_JOBS_TABLE;
   if (!tableName) {
     const availableVars = Object.keys(process.env).filter(k => k.includes('TABLE')).join(', ');
-    throw new Error(`DOCUMENT_JOBS_TABLE environment variable is required but not configured. Available TABLE vars: ${availableVars}`);
+    log.error('DOCUMENT_JOBS_TABLE not configured', { availableVars });
+    throw new Error('document_jobs_table not configured');
   }
   
   return tableName;

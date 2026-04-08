@@ -3,7 +3,7 @@ import { getServerSession } from '@/lib/auth/server-session';
 import { createDocumentJob, confirmDocumentUpload } from '@/lib/services/document-job-service';
 import { uploadToS3 } from '@/lib/aws/document-upload';
 import { sendToProcessingQueue } from '@/lib/aws/lambda-trigger';
-import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
 import { UploadRequestSchema } from '@/lib/validation/document-upload.validation';
 import { apiRateLimit } from '@/lib/rate-limit';
 
@@ -256,16 +256,16 @@ async function uploadHandler(req: NextRequest) {
     const errorName = error instanceof Error ? error.name : 'Unknown';
     const errorStack = error instanceof Error ? error.stack : undefined;
 
-    log.error('Server-side upload failed', {
+    log.error('Server-side upload failed', sanitizeForLogging({
       error: errorMessage,
       name: errorName,
-      stack: errorStack,
+      stack: process.env.NODE_ENV !== 'production' ? errorStack : undefined,
       fileName,
       fileSize,
       userId,
       jobId,
       requestId
-    });
+    }));
 
     timer({ status: 'error' });
 

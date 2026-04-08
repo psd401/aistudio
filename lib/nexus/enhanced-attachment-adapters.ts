@@ -156,8 +156,12 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
         status: { type: "complete" },
       };
     } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Unknown server error';
-      log.error('Server-side processing failed', { error: errorMessage, fileName: attachment.name });
+      const rawMessage = error instanceof Error ? error.message : 'Unknown server error';
+      log.error('Server-side processing failed', { error: rawMessage, fileName: attachment.name });
+
+      // Sanitize error message before embedding in AI model context to prevent
+      // indirect prompt injection via poisoned error strings (OWASP LLM Top 10)
+      const safeMessage = rawMessage.replace(/[<>`[\]()]/g, '').substring(0, 200);
 
       return {
         id: attachment.id,
@@ -169,7 +173,7 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
           type: "text" as const,
           text: `## Document: ${attachment.name}
 
-*Upload failed: ${errorMessage}*
+*Upload failed: ${safeMessage}*
 
 **Size:** ${Math.round(attachment.file.size / 1024)}KB
 
@@ -222,7 +226,6 @@ Please try re-uploading. If the issue persists, contact support with the error m
         await response.json().catch(() => null);
 
       if (errorData?.error) {
-        const requestId = errorData.requestId ? ` (ref: ${errorData.requestId})` : '';
         log.error('Upload server error', {
           attachmentId: attachment.id,
           fileName: attachment.name,
@@ -231,7 +234,7 @@ Please try re-uploading. If the issue persists, contact support with the error m
           error: errorData.error,
           requestId: errorData.requestId,
         });
-        throw new Error(`${errorData.error}${requestId}`);
+        throw new Error(errorData.error);
       }
 
       // Non-JSON response — likely ALB 502/503 or infrastructure error
@@ -297,7 +300,10 @@ Please try re-uploading. If the issue persists, contact support with the error m
     const response = await fetch(`/api/documents/v2/jobs/${jobId}`)
 
     if (!response.ok) {
-      throw new Error(`Failed to check job status: ${response.status}`)
+      if (response.status === 502 || response.status === 503) {
+        throw new Error('Processing service temporarily unavailable')
+      }
+      throw new Error('Failed to check processing status - please try again')
     }
 
     return response.json()
@@ -423,9 +429,8 @@ Please try re-uploading. If the issue persists, contact support with the error m
         .map(byte => byte.toString(16).padStart(2, '0'))
         .join('');
 
-      log.debug('Checking magic bytes for binary file', {
+      log.debug('Validating binary file format', {
         fileName: file.name,
-        header: header.substring(0, 16)
       });
 
       // Check magic bytes for supported binary formats
@@ -447,7 +452,6 @@ Please try re-uploading. If the issue persists, contact support with the error m
         fileName: file.name,
         extension: ext,
         mimeType: file.type,
-        headerPreview: header.substring(0, 16)
       });
 
       return false;
