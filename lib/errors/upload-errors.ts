@@ -29,7 +29,7 @@ export class UploadClassifiedError extends Error {
     public readonly statusCode: number,
     cause?: unknown
   ) {
-    super(cause instanceof Error ? cause.message : String(cause ?? userMessage), { cause: cause instanceof Error ? cause : undefined });
+    super(cause instanceof Error ? cause.message : String(cause ?? userMessage), cause != null ? { cause } : undefined);
     this.name = 'UploadClassifiedError';
   }
 }

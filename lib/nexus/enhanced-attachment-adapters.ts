@@ -8,6 +8,7 @@ import {
 } from "@assistant-ui/react";
 import { createLogger } from "@/lib/client-logger";
 import { generateUUID } from "@/lib/utils/uuid";
+import { UploadClassifiedError, type UploadErrorCode } from "@/lib/errors/upload-errors";
 
 const log = createLogger({ moduleName: 'enhanced-attachment-adapters' });
 
@@ -44,7 +45,7 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
 
   // Code-based lookup: preferred when server error `code` is available.
   // Only these controlled strings are embedded in LLM prompts (prompt injection defense).
-  private static readonly CODE_TO_SAFE_MESSAGE: Record<string, string> = {
+  private static readonly CODE_TO_SAFE_MESSAGE: Partial<Record<UploadErrorCode, string>> = {
     STORAGE_UNAVAILABLE: 'Storage service temporarily unavailable.',
     UPLOAD_TIMEOUT: 'Upload timed out.',
     INVALID_FORMAT: 'Invalid file format.',
@@ -70,8 +71,9 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
 
   private static toSafeErrorMessage(rawMessage: string, code?: string): string {
     // Prefer code-based lookup — no string coupling with server messages
-    if (code && code in HybridDocumentAdapter.CODE_TO_SAFE_MESSAGE) {
-      return HybridDocumentAdapter.CODE_TO_SAFE_MESSAGE[code];
+    const safeCode = code as UploadErrorCode | undefined;
+    if (safeCode && safeCode in HybridDocumentAdapter.CODE_TO_SAFE_MESSAGE) {
+      return HybridDocumentAdapter.CODE_TO_SAFE_MESSAGE[safeCode]!;
     }
 
     // Fallback to pattern matching for non-code errors (network, polling, ALB)
@@ -202,7 +204,7 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
       };
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : String(error);
-      const errorCode = (error as Error & { code?: string })?.code;
+      const errorCode = error instanceof UploadClassifiedError ? error.code : undefined;
       log.error('Server-side processing failed', {
         attachmentId: attachment.id,
         fileName: attachment.name,
@@ -287,9 +289,11 @@ Please try re-uploading. If the issue persists, contact support.`
           error: errorData.error,
           requestId: errorData.requestId,
         });
-        const err = new Error(errorData.error);
-        (err as Error & { code?: string }).code = errorData.code;
-        throw err;
+        throw new UploadClassifiedError(
+          (errorData.code ?? 'UPLOAD_FAILED') as UploadErrorCode,
+          errorData.error,
+          response.status
+        );
       }
 
       // Non-JSON response — likely ALB 502/503 or infrastructure error
