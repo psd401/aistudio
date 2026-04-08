@@ -69,25 +69,29 @@ function parseProcessingOptions(processingOptionsRaw: string | null, log: Return
 }
 
 /** Error classification patterns with user-friendly messages */
-const ERROR_PATTERNS: Array<{ patterns: string[]; message: string; status: number }> = [
+const ERROR_PATTERNS: Array<{ patterns: string[]; code: string; message: string; status: number }> = [
   {
     patterns: ['file size', 'exceeds'],
+    code: 'FILE_TOO_LARGE',
     message: 'File size exceeds maximum allowed',
     status: 413
   },
   {
     patterns: ['file format', 'file type', 'unsupported format', 'invalid mime'],
+    code: 'INVALID_FORMAT',
     message: 'Invalid file format',
     status: 415
   },
   {
     patterns: ['request timeout', 'upload timeout', 'timed out', 'etimedout'],
+    code: 'UPLOAD_TIMEOUT',
     message: 'Upload timed out - please try again',
     status: 408
   },
   {
     patterns: ['s3', 'storage service', 'bucket'],
-    message: 'Storage service temporarily unavailable',
+    code: 'STORAGE_UNAVAILABLE',
+    message: 'Storage service temporarily unavailable - please try again',
     status: 503
   }
 ];
@@ -96,16 +100,16 @@ const ERROR_PATTERNS: Array<{ patterns: string[]; message: string; status: numbe
  * Classify error and return user-friendly message with status code.
  * Uses specific patterns to avoid misclassifying unrelated errors.
  */
-function classifyUploadError(errorMessage: string): { message: string; status: number } {
+function classifyUploadError(errorMessage: string): { code: string; message: string; status: number } {
   const lowerMessage = errorMessage.toLowerCase();
 
-  for (const { patterns, message, status } of ERROR_PATTERNS) {
+  for (const { patterns, code, message, status } of ERROR_PATTERNS) {
     if (patterns.some(pattern => lowerMessage.includes(pattern))) {
-      return { message, status };
+      return { code, message, status };
     }
   }
 
-  return { message: 'Failed to upload file', status: 500 };
+  return { code: 'UPLOAD_FAILED', message: 'Failed to upload file', status: 500 };
 }
 
 async function uploadHandler(req: NextRequest) {
@@ -253,8 +257,8 @@ async function uploadHandler(req: NextRequest) {
 
     timer({ status: 'error' });
 
-    const { message, status } = classifyUploadError(errorMessage);
-    return NextResponse.json({ error: message, requestId }, { status });
+    const { code, message, status } = classifyUploadError(errorMessage);
+    return NextResponse.json({ error: message, code, requestId }, { status });
   }
 }
 

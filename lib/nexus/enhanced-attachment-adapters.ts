@@ -156,8 +156,9 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
         status: { type: "complete" },
       };
     } catch (error) {
-      log.error('Server-side processing failed', { error, fileName: attachment.name });
-      
+      const errorMessage = error instanceof Error ? error.message : 'Unknown server error';
+      log.error('Server-side processing failed', { error: errorMessage, fileName: attachment.name });
+
       return {
         id: attachment.id,
         type: "document",
@@ -168,20 +169,13 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
           type: "text" as const,
           text: `## Document: ${attachment.name}
 
-*Server processing failed. The document could not be processed.*
+*Upload failed: ${errorMessage}*
 
-**Error:** ${error instanceof Error ? error.message : 'Unknown server error'}
 **Size:** ${Math.round(attachment.file.size / 1024)}KB
 
-*This may be due to:*
-- Unsupported document format
-- Corrupted file
-- Server processing limits
-- Network connectivity issues
-
-Please try re-uploading or contact support if the issue persists.`
+Please try re-uploading. If the issue persists, contact support with the error message above.`
         }],
-        status: { 
+        status: {
           type: "complete"
         },
       };
@@ -206,14 +200,51 @@ Please try re-uploading or contact support if the issue persists.`
       ocrEnabled: true
     }));
 
-    const response = await fetch('/api/documents/v2/upload', {
-      method: 'POST',
-      body: formData, // No Content-Type header - browser sets it with boundary
-    });
+    let response: Response;
+    try {
+      response = await fetch('/api/documents/v2/upload', {
+        method: 'POST',
+        body: formData, // No Content-Type header - browser sets it with boundary
+      });
+    } catch (networkError) {
+      log.error('Upload network error', {
+        attachmentId: attachment.id,
+        fileName: attachment.name,
+        error: networkError instanceof Error ? networkError.message : 'Unknown network error',
+      });
+      throw new Error('Network error during upload - check your connection and try again');
+    }
 
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({ error: 'Upload failed' }));
-      throw new Error(errorData.error || `Upload failed: ${response.status}`);
+      // Try to parse JSON error from our API. If it fails (e.g. ALB 502/503
+      // returning HTML), include the HTTP status for diagnostics.
+      const errorData = await response.json().catch(() => null);
+
+      if (errorData?.error) {
+        const requestId = errorData.requestId ? ` (ref: ${errorData.requestId})` : '';
+        log.error('Upload server error', {
+          attachmentId: attachment.id,
+          fileName: attachment.name,
+          status: response.status,
+          code: errorData.code,
+          error: errorData.error,
+          requestId: errorData.requestId,
+        });
+        throw new Error(`${errorData.error}${requestId}`);
+      }
+
+      // Non-JSON response — likely ALB 502/503 or infrastructure error
+      log.error('Upload failed with non-JSON response', {
+        attachmentId: attachment.id,
+        fileName: attachment.name,
+        status: response.status,
+        statusText: response.statusText,
+      });
+      throw new Error(
+        response.status === 502 || response.status === 503
+          ? 'Upload service temporarily unavailable - please try again in a moment'
+          : `Upload failed (HTTP ${response.status}) - please try again`
+      );
     }
 
     const result = await response.json();
