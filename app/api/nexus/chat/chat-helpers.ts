@@ -172,7 +172,9 @@ export function extractUserContent(message: MessageWithContent): {
 }
 
 /**
- * Save user message to database
+ * Save user message to database.
+ * Skips saving if the message has no text content and no parts,
+ * matching the hasMessageContent() guard in saveAssistantMessage().
  */
 export async function saveUserMessage(params: {
   conversationId: string;
@@ -181,6 +183,11 @@ export async function saveUserMessage(params: {
   dbModelId: number;
 }): Promise<void> {
   const { conversationId, content, parts, dbModelId } = params;
+
+  if (!content && parts.length === 0) {
+    log.warn('Skipping empty user message save', { conversationId });
+    return;
+  }
 
   await executeQuery(
     (db) => db.insert(nexusMessages)

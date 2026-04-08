@@ -82,9 +82,19 @@ function ConversationRuntimeProvider({
   onConnectorReconnect,
   onConnectorToolsReceived
 }: ConversationRuntimeProviderProps) {
+  // Use a ref so the adapter instance stays stable when conversationId transitions
+  // from null → UUID during a new conversation. Without this, the runtime re-calls
+  // load() on the recreated adapter and fetches already-displayed messages,
+  // causing duplicate message rendering. (Issue #868)
+  const conversationIdRef = useRef(conversationId)
+  useEffect(() => {
+    conversationIdRef.current = conversationId
+  }, [conversationId])
+
   const historyAdapter = useMemo(
-    () => createNexusHistoryAdapter(conversationId),
-    [conversationId]
+    () => createNexusHistoryAdapter(() => conversationIdRef.current),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally stable; conversationId accessed via ref
+    []
   )
 
   // Custom fetch to intercept X-Conversation-Id header for conversation continuity

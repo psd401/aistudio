@@ -171,11 +171,18 @@ export function useConversationContext() {
 }
 
 /**
- * Creates a ThreadHistoryAdapter that loads and saves conversation messages
+ * Creates a ThreadHistoryAdapter that loads and saves conversation messages.
+ *
+ * Accepts a getter function for conversationId so the adapter instance can
+ * remain stable (not recreated) when the ID transitions from null → UUID
+ * during a new conversation. This prevents the runtime from re-calling
+ * load() mid-stream, which would fetch already-displayed messages from
+ * the database and cause duplicate message rendering. (Issue #868)
  */
-export function createNexusHistoryAdapter(conversationId: string | null): ThreadHistoryAdapter {
+export function createNexusHistoryAdapter(getConversationId: () => string | null): ThreadHistoryAdapter {
   const adapter: ThreadHistoryAdapter = {
     async load(): Promise<ExportedMessageRepository & { unstable_resume?: boolean }> {
+      const conversationId = getConversationId()
       if (!conversationId) {
         log.debug('No conversation ID, returning empty repository')
         return { messages: [] }
@@ -218,10 +225,11 @@ export function createNexusHistoryAdapter(conversationId: string | null): Thread
     },
 
     async append(item: ExportedMessageRepositoryItem): Promise<void> {
-      // Messages are already saved by the polling adapter in /api/nexus/chat
-      // No need to save again - this prevents duplicates and API errors
-      log.debug('Skipping message save - handled by polling adapter', {
-        conversationId,
+      // Messages are persisted server-side in the /api/nexus/chat route handler:
+      // user messages by setupConversation() and assistant messages by onFinish().
+      // This no-op prevents the runtime from double-saving through the history adapter.
+      log.debug('Skipping message save - handled by chat route handler', {
+        conversationId: getConversationId(),
         messageRole: item.message.role,
         messageId: item.message.id
       })
@@ -237,7 +245,7 @@ export function createNexusHistoryAdapter(conversationId: string | null): Thread
           const exportedRepo = await adapter.load();
 
           log.debug('withFormat.load called', {
-            conversationId,
+            conversationId: getConversationId(),
             messageCount: exportedRepo.messages.length
           });
 
@@ -268,7 +276,7 @@ export function createNexusHistoryAdapter(conversationId: string | null): Thread
         },
 
         async append(item: MessageFormatItem<TMessage>): Promise<void> {
-          log.debug('withFormat.append called', { conversationId });
+          log.debug('withFormat.append called', { conversationId: getConversationId() });
 
           // Encode the message to storage format
           const encoded = formatAdapter.encode(item);
