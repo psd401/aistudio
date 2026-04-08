@@ -6,7 +6,7 @@ import { sendToProcessingQueue } from '@/lib/aws/lambda-trigger';
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
 import { UploadRequestSchema } from '@/lib/validation/document-upload.validation';
 import { apiRateLimit } from '@/lib/rate-limit';
-import { UploadClassifiedError } from '@/lib/errors/upload-errors';
+import { UploadClassifiedError, type UploadErrorCode } from '@/lib/errors/upload-errors';
 
 /**
  * Server-side upload endpoint that proxies file uploads through the application server to S3.
@@ -70,7 +70,7 @@ function parseProcessingOptions(processingOptionsRaw: string | null, log: Return
 }
 
 /** Error classification patterns with user-friendly messages (fallback for untyped errors) */
-const ERROR_PATTERNS: Array<{ patterns: string[]; code: string; message: string; status: number }> = [
+const ERROR_PATTERNS: Array<{ patterns: string[]; code: UploadErrorCode; message: string; status: number }> = [
   {
     patterns: ['file size', 'exceeds'],
     code: 'FILE_TOO_LARGE',
@@ -115,7 +115,7 @@ const ERROR_PATTERNS: Array<{ patterns: string[]; code: string; message: string;
  * Prefers typed UploadClassifiedError for explicit classification,
  * falls back to string pattern matching for untyped AWS SDK errors.
  */
-function classifyUploadError(error: unknown): { code: string; message: string; status: number } {
+function classifyUploadError(error: unknown): { code: UploadErrorCode; message: string; status: number } {
   // Prefer typed errors — no string coupling needed
   if (error instanceof UploadClassifiedError) {
     return { code: error.code, message: error.userMessage, status: error.statusCode };

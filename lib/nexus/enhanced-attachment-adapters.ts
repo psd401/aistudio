@@ -42,28 +42,39 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
     'text/yaml'
   ] as const;
 
-  // Allowlist of known error substrings → safe canned messages for AI context.
-  // Only these controlled strings are embedded in LLM prompts. Any error that
-  // does not match falls through to a generic message, preventing prompt injection.
+  // Code-based lookup: preferred when server error `code` is available.
+  // Only these controlled strings are embedded in LLM prompts (prompt injection defense).
+  private static readonly CODE_TO_SAFE_MESSAGE: Record<string, string> = {
+    STORAGE_UNAVAILABLE: 'Storage service temporarily unavailable.',
+    UPLOAD_TIMEOUT: 'Upload timed out.',
+    INVALID_FORMAT: 'Invalid file format.',
+    FILE_TOO_LARGE: 'File size exceeds the allowed limit.',
+    JOB_SERVICE_UNAVAILABLE: 'Document processing service temporarily unavailable.',
+    QUEUE_UNAVAILABLE: 'Processing queue temporarily unavailable.',
+    CONFIG_ERROR: 'Service configuration error.',
+    UPLOAD_FAILED: 'Upload failed.',
+  };
+
+  // Fallback string matching for errors without a code (network errors, polling
+  // failures, ALB gateway errors). Only used when CODE_TO_SAFE_MESSAGE has no match.
   private static readonly SAFE_ERROR_MAP: Array<{ pattern: string; message: string }> = [
-    { pattern: 'storage service temporarily unavailable', message: 'Storage service temporarily unavailable.' },
     { pattern: 'upload service temporarily unavailable', message: 'Upload service temporarily unavailable.' },
     { pattern: 'processing service temporarily unavailable', message: 'Processing service temporarily unavailable.' },
-    { pattern: 'document processing service temporarily unavailable', message: 'Document processing service temporarily unavailable.' },
-    { pattern: 'document processing queue temporarily unavailable', message: 'Processing queue temporarily unavailable.' },
-    { pattern: 'upload timed out', message: 'Upload timed out.' },
     { pattern: 'processing timeout', message: 'Processing timed out.' },
-    { pattern: 'invalid file format', message: 'Invalid file format.' },
-    { pattern: 'file size exceeds', message: 'File size exceeds the allowed limit.' },
     { pattern: 'network error during upload', message: 'Network error during upload.' },
     { pattern: 'failed to check processing status', message: 'Could not check processing status.' },
     // Intentionally broad catch-all for server-side failures. New error categories
     // that deserve their own message should be added as specific entries above this one.
     { pattern: 'server processing failed', message: 'Server processing failed.' },
-    { pattern: 'is misconfigured', message: 'Service configuration error.' },
   ];
 
-  private static toSafeErrorMessage(rawMessage: string): string {
+  private static toSafeErrorMessage(rawMessage: string, code?: string): string {
+    // Prefer code-based lookup — no string coupling with server messages
+    if (code && code in HybridDocumentAdapter.CODE_TO_SAFE_MESSAGE) {
+      return HybridDocumentAdapter.CODE_TO_SAFE_MESSAGE[code];
+    }
+
+    // Fallback to pattern matching for non-code errors (network, polling, ALB)
     const lower = rawMessage.toLowerCase();
     for (const { pattern, message } of HybridDocumentAdapter.SAFE_ERROR_MAP) {
       if (lower.includes(pattern)) return message;
@@ -191,17 +202,19 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
       };
     } catch (error) {
       const rawMessage = error instanceof Error ? error.message : String(error);
+      const errorCode = (error as Error & { code?: string })?.code;
       log.error('Server-side processing failed', {
         attachmentId: attachment.id,
         fileName: attachment.name,
         error: rawMessage,
+        code: errorCode,
         errorName: error instanceof Error ? error.name : undefined,
       });
 
-      // Map known error messages to safe canned text for AI model context.
+      // Map known error codes/messages to safe canned text for AI model context.
       // Only controlled strings reach the LLM — unknown errors get a generic
       // message to prevent indirect prompt injection (OWASP LLM Top 10).
-      const safeMessage = HybridDocumentAdapter.toSafeErrorMessage(rawMessage);
+      const safeMessage = HybridDocumentAdapter.toSafeErrorMessage(rawMessage, errorCode);
 
       return {
         id: attachment.id,
@@ -274,7 +287,9 @@ Please try re-uploading. If the issue persists, contact support.`
           error: errorData.error,
           requestId: errorData.requestId,
         });
-        throw new Error(errorData.error);
+        const err = new Error(errorData.error);
+        (err as Error & { code?: string }).code = errorData.code;
+        throw err;
       }
 
       // Non-JSON response — likely ALB 502/503 or infrastructure error
