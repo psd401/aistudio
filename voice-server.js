@@ -11,7 +11,7 @@
  * Issue #872
  */
 
-/* eslint-disable @typescript-eslint/no-require-imports */
+/* eslint-disable no-undef, no-console, @typescript-eslint/no-require-imports, unicorn/prefer-node-protocol */
 const http = require('http')
 const { WebSocketServer } = require('ws')
 const { parse } = require('url')

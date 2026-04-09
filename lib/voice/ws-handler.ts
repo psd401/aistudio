@@ -12,7 +12,7 @@
  * Issue #872
  */
 
-import type { IncomingMessage } from "http"
+import type { IncomingMessage } from "node:http"
 import type WebSocket from "ws"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { Settings } from "@/lib/settings-manager"

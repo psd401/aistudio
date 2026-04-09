@@ -213,30 +213,40 @@ export class GeminiLiveProvider implements VoiceProvider {
     const content = message.serverContent
 
     if (!content) {
-      // setupComplete or other non-content messages
       if (message.setupComplete) {
         this.log.debug("Gemini Live setup complete")
       }
       return
     }
 
-    // Handle audio response from model
-    if (content.modelTurn?.parts) {
-      for (const part of content.modelTurn.parts) {
-        if (part.inlineData?.data) {
-          // Model is speaking — emit audio
-          if (this.state.speaking !== "assistant") {
-            this.updateState({ speaking: "assistant" })
-            this.onEvent?.({ type: "state_change", state: this.state })
-          }
+    this.handleAudioContent(content)
+    this.handleTranscriptions(content)
+    this.handleTurnState(content)
+  }
 
-          const audioBuffer = Buffer.from(part.inlineData.data, "base64")
-          this.onEvent?.({ type: "audio", data: audioBuffer })
+  /**
+   * Process audio data from model turns.
+   */
+  private handleAudioContent(content: NonNullable<LiveServerMessage["serverContent"]>): void {
+    if (!content.modelTurn?.parts) return
+
+    for (const part of content.modelTurn.parts) {
+      if (part.inlineData?.data) {
+        if (this.state.speaking !== "assistant") {
+          this.updateState({ speaking: "assistant" })
+          this.onEvent?.({ type: "state_change", state: this.state })
         }
+
+        const audioBuffer = Buffer.from(part.inlineData.data, "base64")
+        this.onEvent?.({ type: "audio", data: audioBuffer })
       }
     }
+  }
 
-    // Handle input transcription (user speech → text)
+  /**
+   * Process input and output transcriptions.
+   */
+  private handleTranscriptions(content: NonNullable<LiveServerMessage["serverContent"]>): void {
     if (content.inputTranscription?.text) {
       const entry: TranscriptEntry = {
         role: "user",
@@ -248,7 +258,6 @@ export class GeminiLiveProvider implements VoiceProvider {
       this.onEvent?.({ type: "transcript", entry })
     }
 
-    // Handle output transcription (model speech → text)
     if (content.outputTranscription?.text) {
       const entry: TranscriptEntry = {
         role: "assistant",
@@ -259,14 +268,17 @@ export class GeminiLiveProvider implements VoiceProvider {
       this.state.transcript.push(entry)
       this.onEvent?.({ type: "transcript", entry })
     }
+  }
 
-    // Turn complete — model finished speaking
+  /**
+   * Handle turn completion and interruption signals.
+   */
+  private handleTurnState(content: NonNullable<LiveServerMessage["serverContent"]>): void {
     if (content.turnComplete) {
       this.updateState({ speaking: "none" })
       this.onEvent?.({ type: "state_change", state: this.state })
     }
 
-    // Interrupted — user started speaking while model was speaking
     if (content.interrupted) {
       this.updateState({ speaking: "user" })
       this.onEvent?.({ type: "state_change", state: this.state })

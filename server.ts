@@ -12,17 +12,17 @@
  * Issue #872
  */
 
-import { createServer, type IncomingMessage } from "http"
-import type { Duplex } from "stream"
+import { createServer, type IncomingMessage } from "node:http"
+import type { Duplex } from "node:stream"
 import { WebSocketServer } from "ws"
 import next from "next"
-import { parse } from "url"
+import { parse } from "node:url"
 
 const VOICE_WS_PATH = "/api/nexus/voice"
 
 const dev = process.env.NODE_ENV !== "production"
 const hostname = process.env.HOSTNAME || "0.0.0.0"
-const port = parseInt(process.env.PORT || "3000", 10)
+const port = Number.parseInt(process.env.PORT || "3000", 10)
 
 async function main() {
   const app = next({ dev, hostname, port })
@@ -60,13 +60,11 @@ async function main() {
     handleVoiceConnection(ws, req)
   })
 
-  server.listen(port, hostname, () => {
-    console.log(`> Ready on http://${hostname}:${port}`)
-    console.log(`> Voice WebSocket available at ws://${hostname}:${port}${VOICE_WS_PATH}`)
-  })
+  server.listen(port, hostname)
 }
 
 main().catch((err) => {
+  // eslint-disable-next-line no-console -- Server startup errors must go to stderr
   console.error("Failed to start server:", err)
   process.exit(1)
 })
