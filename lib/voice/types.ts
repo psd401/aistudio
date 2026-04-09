@@ -35,7 +35,7 @@ export interface VoiceProviderConfig {
   language?: string
   /** Provider-specific voice name/ID */
   voiceName?: string
-  /** System instruction for the voice conversation */
+  /** System instruction for the voice conversation (populated from conversation context, not admin settings) */
   systemInstruction?: string
   /** Optional API key override (normally read from Settings) */
   apiKey?: string

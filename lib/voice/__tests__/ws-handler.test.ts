@@ -75,6 +75,8 @@ function createMockWs() {
     send: jest.fn(),
     close: jest.fn(),
     on: jest.fn(),
+    ping: jest.fn(),
+    removeAllListeners: jest.fn(),
   }
   return ws as unknown as Parameters<typeof handleVoiceConnection>[0]
 }
@@ -278,6 +280,92 @@ describe("handleVoiceConnection", () => {
         expect.stringContaining("Voice provider not configured")
       )
       expect(ws.close).toHaveBeenCalledWith(4500, "Provider not configured")
+    })
+
+    it("should close with 4500 when provider.connect() times out", async () => {
+      mockDecode.mockResolvedValue({ sub: "user-123" })
+      mockHasToolAccess.mockResolvedValue(true)
+
+      // Make provider.connect() hang forever
+      const { createVoiceProvider } = require("../provider-factory")
+      createVoiceProvider.mockReturnValueOnce({
+        providerId: "gemini-live",
+        connect: jest.fn().mockReturnValue(new Promise(() => { /* never resolves */ })),
+        disconnect: jest.fn().mockResolvedValue(undefined),
+        sendAudio: jest.fn(),
+        getSessionState: jest.fn(),
+        isConnected: jest.fn().mockReturnValue(false),
+      })
+
+      const ws = createMockWs()
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+
+      await handleVoiceConnection(ws, req)
+
+      expect(ws.close).toHaveBeenCalledWith(4500, "Internal error")
+    }, 35_000)
+
+    it("should remove listeners on connect failure", async () => {
+      mockDecode.mockResolvedValue({ sub: "user-123" })
+      mockHasToolAccess.mockResolvedValue(true)
+
+      const { createVoiceProvider } = require("../provider-factory")
+      createVoiceProvider.mockReturnValueOnce({
+        providerId: "gemini-live",
+        connect: jest.fn().mockRejectedValue(new Error("SDK error")),
+        disconnect: jest.fn().mockResolvedValue(undefined),
+        sendAudio: jest.fn(),
+        getSessionState: jest.fn(),
+        isConnected: jest.fn(),
+      })
+
+      const ws = createMockWs()
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+
+      await handleVoiceConnection(ws, req)
+
+      expect(ws.removeAllListeners).toHaveBeenCalledWith("message")
+      expect(ws.removeAllListeners).toHaveBeenCalledWith("close")
+      expect(ws.removeAllListeners).toHaveBeenCalledWith("error")
+    })
+  })
+
+  describe("chunked cookie edge cases", () => {
+    it("should handle cookies with = in value", async () => {
+      mockDecode.mockResolvedValue({ sub: "user-123" })
+      mockHasToolAccess.mockResolvedValue(true)
+
+      const ws = createMockWs()
+      // Session tokens often contain = padding
+      const req = createMockReq({
+        "authjs.session-token": "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2Q0JDLUhTNTEyIn0..abc==",
+      })
+
+      await handleVoiceConnection(ws, req)
+
+      expect(mockDecode).toHaveBeenCalledWith(
+        expect.objectContaining({
+          token: "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2Q0JDLUhTNTEyIn0..abc==",
+        })
+      )
+    })
+
+    it("should stop chunk assembly at first missing index", async () => {
+      mockDecode.mockResolvedValue({ sub: "user-123" })
+      mockHasToolAccess.mockResolvedValue(true)
+
+      const ws = createMockWs()
+      // Gap at index 1 — should only get chunk 0
+      const req = createMockReq({
+        "authjs.session-token.0": "chunk0",
+        "authjs.session-token.2": "chunk2",
+      })
+
+      await handleVoiceConnection(ws, req)
+
+      expect(mockDecode).toHaveBeenCalledWith(
+        expect.objectContaining({ token: "chunk0" })
+      )
     })
   })
 })

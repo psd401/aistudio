@@ -15,7 +15,7 @@
 
 import { GoogleGenAI, Modality } from "@google/genai"
 import type { Session as GeminiSession, LiveServerMessage, LiveConnectConfig } from "@google/genai"
-import { createLogger, generateRequestId } from "@/lib/logger"
+import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 import type {
   VoiceProvider,
   VoiceProviderConfig,
@@ -128,8 +128,10 @@ export class GeminiLiveProvider implements VoiceProvider {
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      this.log.error("Failed to connect to Gemini Live", { error: message })
-      throw new Error(`Failed to connect to Gemini Live: ${message}`)
+      // Log full error internally but throw a generic message to prevent
+      // leaking SDK internals (API keys, URLs) to the client
+      this.log.error("Failed to connect to Gemini Live", { error: sanitizeForLogging(message) })
+      throw new Error("Failed to connect to Gemini Live API")
     }
   }
 

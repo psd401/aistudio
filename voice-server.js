@@ -51,11 +51,23 @@ http.createServer = function (...args) {
           return
         }
 
+        // Build allowed origins list from env (ALLOWED_ORIGINS, NEXTAUTH_URL, APP_URL)
+        // If none configured, fall back to same-origin check using Host header
         const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean)
         const appUrl = process.env.NEXTAUTH_URL || process.env.APP_URL
         if (appUrl) allowedOrigins.push(appUrl.replace(/\/+$/, ''))
 
-        if (allowedOrigins.length > 0 && !allowedOrigins.includes(origin)) {
+        let originAllowed = false
+        if (allowedOrigins.length > 0) {
+          originAllowed = allowedOrigins.includes(origin)
+        } else {
+          // No explicit origins configured — fall back to same-origin check
+          const host = request.headers.host
+          const proto = request.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http'
+          originAllowed = !!host && origin === `${proto}://${host}`
+        }
+
+        if (!originAllowed) {
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
           socket.destroy()
           return
