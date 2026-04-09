@@ -273,9 +273,7 @@ async function handleImagePart(
     // Before this guard, s3:// images without s3Key would fall through to the
     // imageUrl branch (if present) — silently using a URL that can't resolve.
     // Logging explicitly is safer than a silent fallback to an unusable URL.
-    log.warn('Image part has s3:// URL but no s3Key — cannot retrieve', {
-      requestId: 'image-part'
-    });
+    log.warn('Image part has s3:// URL but no s3Key — cannot retrieve');
   } else if (part.imageUrl) {
     // s3Key is intentionally omitted — it is provably undefined here because
     // the first branch (if part.s3Key) already handles parts that carry an s3Key.
@@ -532,10 +530,10 @@ export function handleImageGenerationError(
   conversationId: string,
   requestId: string
 ): Response {
-  // Safely extract typed error properties without unsafe `as` assertion on unknown
+  // Extract typed error properties with instanceof + in narrowing
   const errorMessage = error instanceof Error ? error.message : String(error);
-  const errorType = error instanceof Error ? (error as Error & { type?: string }).type : undefined;
-  const retryAfter = error instanceof Error ? (error as Error & { retryAfter?: number }).retryAfter : undefined;
+  const errorType = error instanceof Error && 'type' in error ? (error as { type: string }).type : undefined;
+  const retryAfter = error instanceof Error && 'retryAfter' in error ? (error as { retryAfter: number }).retryAfter : undefined;
 
   if (errorType === 'CONTENT_POLICY') {
     // Cap logged message to avoid persisting full user prompt content that providers may echo back

@@ -105,6 +105,16 @@ describe('extractReferenceImages', () => {
     expect(result).toEqual([]);
   });
 
+  it('includes file parts with allowed MIME type', async () => {
+    const result = await extractReferenceImages({
+      id: '1',
+      role: 'user',
+      parts: [{ type: 'file', mediaType: 'image/jpeg', data: '/9j/4AAQ' }]
+    });
+    expect(result.length).toBe(1);
+    expect(result[0].mimeType).toBe('image/jpeg');
+  });
+
   it('skips image parts with s3:// URL but no s3Key', async () => {
     const result = await extractReferenceImages({
       id: '1',
