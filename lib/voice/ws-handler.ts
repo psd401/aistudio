@@ -150,6 +150,37 @@ function isValidClientMessage(msg: unknown): msg is VoiceClientMessage {
 }
 
 /**
+ * Forward a provider event to the client WebSocket as a typed message.
+ */
+function forwardProviderEvent(ws: WebSocket, event: import("./types").VoiceProviderEvent): void {
+  switch (event.type) {
+    case "audio":
+      sendToClient(ws, { type: "audio", data: event.data.toString("base64") })
+      break
+    case "transcript":
+      sendToClient(ws, {
+        type: "transcript",
+        entry: {
+          role: event.entry.role,
+          text: event.entry.text,
+          isFinal: event.entry.isFinal,
+          timestamp: event.entry.timestamp.toISOString(),
+        },
+      })
+      break
+    case "state_change":
+      sendToClient(ws, { type: "state", speaking: event.state.speaking })
+      break
+    case "error":
+      sendToClient(ws, { type: "error", message: event.error.message })
+      break
+    case "session_ended":
+      sendToClient(ws, { type: "session_ended", reason: event.reason })
+      break
+  }
+}
+
+/**
  * Handle a new WebSocket connection for voice sessions.
  *
  * Flow:
@@ -265,54 +296,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       apiKey: googleApiKey,
     }
 
-    await provider.connect(providerConfig, (event) => {
-      switch (event.type) {
-        case "audio": {
-          sendToClient(ws, {
-            type: "audio",
-            data: event.data.toString("base64"),
-          })
-          break
-        }
-
-        case "transcript": {
-          sendToClient(ws, {
-            type: "transcript",
-            entry: {
-              role: event.entry.role,
-              text: event.entry.text,
-              isFinal: event.entry.isFinal,
-              timestamp: event.entry.timestamp.toISOString(),
-            },
-          })
-          break
-        }
-
-        case "state_change": {
-          sendToClient(ws, {
-            type: "state",
-            speaking: event.state.speaking,
-          })
-          break
-        }
-
-        case "error": {
-          sendToClient(ws, {
-            type: "error",
-            message: event.error.message,
-          })
-          break
-        }
-
-        case "session_ended": {
-          sendToClient(ws, {
-            type: "session_ended",
-            reason: event.reason,
-          })
-          break
-        }
-      }
-    })
+    await provider.connect(providerConfig, (event) => forwardProviderEvent(ws, event))
 
     // Signal ready to client
     sendToClient(ws, { type: "ready" })
