@@ -95,6 +95,15 @@ describe('extractReferenceImages', () => {
     });
     expect(result).toEqual([]);
   });
+
+  it('skips file parts with non-allowlisted MIME type (e.g. SVG)', async () => {
+    const result = await extractReferenceImages({
+      id: '1',
+      role: 'user',
+      parts: [{ type: 'file', mediaType: 'image/svg+xml', data: 'PHN2Zz4=' }]
+    });
+    expect(result).toEqual([]);
+  });
 });
 
 describe('handleImageGenerationError', () => {

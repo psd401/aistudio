@@ -533,9 +533,10 @@ export function handleImageGenerationError(
   const retryAfter = error instanceof Error ? (error as Error & { retryAfter?: number }).retryAfter : undefined;
 
   if (errorType === 'CONTENT_POLICY') {
+    // Cap logged message to avoid persisting full user prompt content that providers may echo back
     log.warn('Image generation content policy violation', {
       conversationId,
-      errorMessage,
+      errorMessage: errorMessage.slice(0, 200),
       requestId
     });
     return new Response(
@@ -548,7 +549,7 @@ export function handleImageGenerationError(
     log.warn('Image generation rate limited', {
       conversationId,
       errorMessage,
-      retryAfter: retryAfter || 60,
+      retryAfter,
       requestId
     });
     return new Response(
