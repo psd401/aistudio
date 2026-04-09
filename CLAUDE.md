@@ -29,7 +29,7 @@ cd infra && bunx cdk deploy AIStudio-FrontendStack-Dev     # Deploy single stack
 
 1. **Type Safety**: NO `any` types. Full TypeScript. Run `bun run lint` and `bun run typecheck` on ENTIRE codebase before commits.
 2. **Database Migrations**: Files 001-005 are IMMUTABLE. Only add migrations 010+. Add filename to `migrationFiles` array in `/infra/database/migrations.json`.
-3. **Logging**: NEVER use `console.log/error`. Always use `@/lib/logger`. See patterns below.
+3. **Logging**: NEVER use `console.log/error`. Always use `@/lib/logger`. See patterns below. **Exception**: `voice-server.js` and other CJS standalone scripts that run outside the Next.js runtime cannot import `@/lib/logger` — use `console.*` with `// eslint-disable-line no-console` comments.
 4. **Git Flow**: PRs target `dev` branch, never `main`. Write detailed commit messages.
 5. **Testing**: Add E2E tests for new features (see `docs/guides/TESTING.md` — E2E Expectations section). Run locally via `bunx playwright test tests/e2e/`.
 6. **Nexus Conversations**: MUST read `/docs/features/nexus-conversation-architecture.md` before modifying conversation code. This system has broken multiple times - follow documented patterns exactly.

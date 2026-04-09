@@ -9,6 +9,15 @@ jest.mock("@auth/core/jwt", () => ({
   decode: (...args: unknown[]) => mockDecode(...args),
 }))
 
+// Mock constants with short timeout for tests
+jest.mock("../constants", () => ({
+  MAX_AUDIO_DATA_LENGTH: 131_072,
+  PROVIDER_CONNECT_TIMEOUT_MS: 200, // 200ms instead of 30s for test speed
+  MIN_AUDIO_INTERVAL_MS: 20,
+  PING_INTERVAL_MS: 240_000,
+  WS_OPEN: 1,
+}))
+
 // Mock logger
 jest.mock("@/lib/logger", () => ({
   createLogger: () => ({
@@ -286,11 +295,18 @@ describe("handleVoiceConnection", () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
       mockHasToolAccess.mockResolvedValue(true)
 
-      // Make provider.connect() hang forever
+      // Mock connect that hangs but rejects when aborted (via AbortSignal)
       const { createVoiceProvider } = require("../provider-factory")
       createVoiceProvider.mockReturnValueOnce({
         providerId: "gemini-live",
-        connect: jest.fn().mockReturnValue(new Promise(() => { /* never resolves */ })),
+        connect: jest.fn().mockImplementation(
+          (_config: unknown, _onEvent: unknown, signal?: AbortSignal) =>
+            new Promise((_, reject) => {
+              if (signal) {
+                signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true })
+              }
+            })
+        ),
         disconnect: jest.fn().mockResolvedValue(undefined),
         sendAudio: jest.fn(),
         getSessionState: jest.fn(),
@@ -303,7 +319,7 @@ describe("handleVoiceConnection", () => {
       await handleVoiceConnection(ws, req)
 
       expect(ws.close).toHaveBeenCalledWith(4500, "Internal error")
-    }, 35_000)
+    }, 5_000)
 
     it("should remove listeners on connect failure", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })

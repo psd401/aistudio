@@ -70,13 +70,18 @@ export class GeminiLiveProvider implements VoiceProvider {
     })
   }
 
-  async connect(config: VoiceProviderConfig, onEvent: VoiceProviderEventHandler): Promise<void> {
+  async connect(config: VoiceProviderConfig, onEvent: VoiceProviderEventHandler, signal?: AbortSignal): Promise<void> {
     if (this.session) {
       throw new Error("Session already connected. Disconnect first.")
     }
 
     if (!config.apiKey) {
       throw new Error("Google API key is required for Gemini Live")
+    }
+
+    // Check if already aborted before starting
+    if (signal?.aborted) {
+      throw new Error("Connection aborted")
     }
 
     this.onEvent = onEvent
@@ -127,6 +132,21 @@ export class GeminiLiveProvider implements VoiceProvider {
           },
         },
       })
+
+      // If the signal was aborted during connect, disconnect immediately
+      // so the Gemini session doesn't leak in the background
+      if (signal?.aborted) {
+        this.log.info("Connection aborted after session established")
+        await this.disconnect()
+        throw new Error("Connection aborted")
+      }
+
+      // Listen for future abort (e.g., timeout fires after connect resolves but
+      // before the caller processes the result)
+      signal?.addEventListener("abort", () => {
+        this.log.info("Connection aborted via signal")
+        this.disconnect().catch(() => { /* best-effort */ })
+      }, { once: true })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       // Log full error internally but throw a generic message to prevent

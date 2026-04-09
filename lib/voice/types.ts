@@ -93,8 +93,9 @@ export interface VoiceProvider {
    * Establish a connection to the AI service.
    * @param config - Voice session configuration
    * @param onEvent - Callback for provider events (audio, transcripts, state changes)
+   * @param signal - Optional AbortSignal to cancel the connection attempt
    */
-  connect(config: VoiceProviderConfig, onEvent: VoiceProviderEventHandler): Promise<void>
+  connect(config: VoiceProviderConfig, onEvent: VoiceProviderEventHandler, signal?: AbortSignal): Promise<void>
 
   /**
    * Disconnect and clean up the session.

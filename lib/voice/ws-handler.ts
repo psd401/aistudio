@@ -146,7 +146,8 @@ function forwardProviderEvent(ws: WebSocket, event: VoiceProviderEvent): void {
       sendToClient(ws, { type: "state", speaking: event.state.speaking })
       break
     case "error":
-      sendToClient(ws, { type: "error", message: event.error.message })
+      // Send generic message to client — provider errors may contain URLs, API keys, or request IDs
+      sendToClient(ws, { type: "error", message: "Voice provider error" })
       break
     case "session_ended":
       sendToClient(ws, { type: "session_ended", reason: event.reason })
@@ -257,7 +258,9 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       cleanup("error")
     })
 
-    // Step 5: Connect to AI service with timeout
+    // Step 5: Connect to AI service with timeout + abort signal
+    // AbortSignal cancels the in-flight connect if timeout fires, preventing
+    // a leaked Gemini session from running in the background with no client.
     const providerConfig: VoiceProviderConfig = {
       model: voiceSettings.model,
       language: voiceSettings.language,
@@ -265,12 +268,18 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       apiKey: googleApiKey,
     }
 
-    await Promise.race([
-      provider.connect(providerConfig, (event) => forwardProviderEvent(ws, event)),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Provider connection timeout")), PROVIDER_CONNECT_TIMEOUT_MS)
-      ),
-    ])
+    const connectAbort = new AbortController()
+    const connectTimer = setTimeout(() => connectAbort.abort(), PROVIDER_CONNECT_TIMEOUT_MS)
+
+    try {
+      await provider.connect(
+        providerConfig,
+        (event) => forwardProviderEvent(ws, event),
+        connectAbort.signal,
+      )
+    } finally {
+      clearTimeout(connectTimer)
+    }
 
     // Signal ready to client
     sendToClient(ws, { type: "ready" })
@@ -315,10 +324,9 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       }
     })
 
-    // Step 7: Keepalive ping — AFTER all handlers registered to prevent interval leak
+    // Step 7: Keepalive ping — cleanup() handles clearInterval on close/error
     pingInterval = setInterval(() => {
       if (ws.readyState === WS_OPEN) ws.ping()
-      else if (pingInterval) { clearInterval(pingInterval); pingInterval = null }
     }, PING_INTERVAL_MS)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
