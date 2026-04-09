@@ -107,7 +107,12 @@ export function validateImagePrompt(prompt: string): { valid: boolean; error?: R
     'hate', 'racist', 'discriminatory', 'offensive'
   ];
 
-  if (forbiddenPatterns.some(pattern => lowercasePrompt.includes(pattern))) {
+  const matchedPattern = forbiddenPatterns.find(pattern => lowercasePrompt.includes(pattern));
+  if (matchedPattern) {
+    log.warn('Image prompt blocked by local content policy filter', {
+      matchedPattern,
+      promptLength: prompt.length
+    });
     return {
       valid: false,
       error: new Response(
@@ -307,12 +312,16 @@ async function handleS3FileImage(
   }
 }
 
+const ALLOWED_IMAGE_MIMES = new Set([
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp', 'image/tiff'
+]);
+
 async function handleFilePart(
   part: { mediaType?: string; mimeType?: string; s3Key?: string; url?: string; data?: string },
   referenceImages: ReferenceImage[]
 ): Promise<void> {
   const mimeType = part.mediaType || part.mimeType || '';
-  if (!mimeType.startsWith('image/')) {
+  if (!ALLOWED_IMAGE_MIMES.has(mimeType)) {
     return;
   }
 
@@ -545,10 +554,15 @@ export function handleImageGenerationError(
     );
   }
 
+  log.error('Image generation error details', {
+    conversationId,
+    errorMessage: typedError.message,
+    requestId
+  });
+
   return new Response(
     JSON.stringify({
       error: 'Image generation failed. Please try again.',
-      details: typedError.message,
       requestId
     }),
     { status: 500, headers: { 'Content-Type': 'application/json' } }
