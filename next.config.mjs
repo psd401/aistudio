@@ -70,6 +70,9 @@ const nextConfig = {
           },
           {
             key: 'Permissions-Policy',
+            // microphone=(self) required for voice mode (Issue #872).
+            // Applies globally — voice pages need mic access, other pages
+            // won't trigger the permission prompt unless they call getUserMedia.
             value: 'camera=(), microphone=(self), geolocation=()'
           },
           {

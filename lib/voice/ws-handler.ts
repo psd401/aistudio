@@ -45,6 +45,9 @@ const PING_INTERVAL_MS = 240_000
  *
  * Handles chunked cookies (authjs.session-token.0, .1, etc.) for
  * large session tokens that exceed cookie size limits.
+ *
+ * Note: Cookie values are not URL-decoded. Auth.js does not URL-encode
+ * session cookie values, so this is correct for the current implementation.
  */
 async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: string; sub: string } | null> {
   const log = createLogger({ context: "voice-ws-auth" })

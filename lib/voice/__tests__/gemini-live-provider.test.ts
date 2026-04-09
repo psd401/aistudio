@@ -3,12 +3,13 @@ import type { VoiceProviderConfig, VoiceProviderEvent } from "../types"
 
 // Shared mock references so we can inspect calls from inside the provider
 const mockSendRealtimeInput = jest.fn()
-const mockConnClose = jest.fn()
+const mockClose = jest.fn()
 const mockLiveConnect = jest.fn()
 
 const mockSession = {
   sendRealtimeInput: mockSendRealtimeInput,
-  conn: { close: mockConnClose },
+  close: mockClose,
+  conn: { close: mockClose },
 }
 
 jest.mock("@google/genai", () => ({
@@ -197,7 +198,7 @@ describe("GeminiLiveProvider", () => {
       await provider.connect(baseConfig, jest.fn())
       await provider.disconnect()
 
-      expect(mockConnClose).toHaveBeenCalled()
+      expect(mockClose).toHaveBeenCalled()
     })
 
     it("should update state to disconnected", async () => {

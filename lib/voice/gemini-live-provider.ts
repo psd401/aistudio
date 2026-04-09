@@ -144,7 +144,7 @@ export class GeminiLiveProvider implements VoiceProvider {
     this.log.info("Disconnecting from Gemini Live")
     this.intentionalDisconnect = true
     try {
-      this.session.conn.close()
+      this.session.close()
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       this.log.warn("Error during disconnect", { error: message })
