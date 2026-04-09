@@ -13,7 +13,7 @@ import { NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 import { Settings } from "@/lib/settings-manager"
-import { hasToolAccess } from "@/utils/roles"
+import { hasToolAccess } from "@/lib/db/drizzle/users"
 
 /**
  * GET handler — returns voice configuration for authenticated users.
@@ -32,8 +32,9 @@ export async function GET() {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    // Tool access check
-    const hasAccess = await hasToolAccess("voice-mode")
+    // Tool access check — uses same DB-level function as ws-handler.ts
+    // with explicit user context (session.sub) instead of implicit session lookup
+    const hasAccess = await hasToolAccess(session.sub, "voice-mode")
     if (!hasAccess) {
       timer({ status: "forbidden" })
       return NextResponse.json({ error: "Voice mode not enabled" }, { status: 403 })

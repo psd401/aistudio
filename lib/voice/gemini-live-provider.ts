@@ -27,6 +27,14 @@ import type {
 const DEFAULT_MODEL = "gemini-2.0-flash-live-001"
 /** Max transcript entries to keep in memory — rolling window to bound memory usage */
 const MAX_TRANSCRIPT_ENTRIES = 200
+/** Max audio buffer size: 64KB PCM ≈ 2 seconds at 16kHz 16-bit mono */
+const MAX_AUDIO_BUFFER_SIZE = 64 * 1024
+/** Max system instruction length to prevent prompt injection via settings */
+const MAX_SYSTEM_INSTRUCTION_LENGTH = 10_000
+/** Max voice name length */
+const MAX_VOICE_NAME_LENGTH = 100
+/** BCP47 language code pattern (e.g. en-US, fr-FR, zh-Hans-CN) */
+const BCP47_PATTERN = /^[a-z]{2,3}(-[A-Za-z]{2,8})*$/
 
 export class GeminiLiveProvider implements VoiceProvider {
   readonly providerId = "gemini-live"
@@ -135,9 +143,21 @@ export class GeminiLiveProvider implements VoiceProvider {
     }
   }
 
+  /**
+   * Send audio data to the AI service.
+   * Expects PCM16 16kHz mono audio. Max 64KB per call.
+   */
   sendAudio(audioData: Buffer): void {
     if (!this.session) {
       this.log.warn("Cannot send audio: session not connected")
+      return
+    }
+
+    if (audioData.length > MAX_AUDIO_BUFFER_SIZE) {
+      this.log.warn("Audio buffer too large, dropping frame", {
+        size: audioData.length,
+        max: MAX_AUDIO_BUFFER_SIZE,
+      })
       return
     }
 
@@ -169,6 +189,7 @@ export class GeminiLiveProvider implements VoiceProvider {
 
   /**
    * Build the LiveConnectConfig from our VoiceProviderConfig.
+   * Validates and sanitizes all external inputs before forwarding to the API.
    */
   private buildLiveConfig(config: VoiceProviderConfig): LiveConnectConfig {
     const liveConfig: LiveConnectConfig = {
@@ -177,29 +198,33 @@ export class GeminiLiveProvider implements VoiceProvider {
       outputAudioTranscription: {},
     }
 
-    // Voice selection
+    // Voice selection — validate name length to prevent injection via settings
     if (config.voiceName) {
+      const sanitizedVoiceName = config.voiceName.slice(0, MAX_VOICE_NAME_LENGTH)
       liveConfig.speechConfig = {
         voiceConfig: {
           prebuiltVoiceConfig: {
-            voiceName: config.voiceName,
+            voiceName: sanitizedVoiceName,
           },
         },
       }
     }
 
-    // Language
-    if (config.language && liveConfig.speechConfig) {
-      liveConfig.speechConfig.languageCode = config.language
-    } else if (config.language) {
-      liveConfig.speechConfig = {
-        languageCode: config.language,
+    // Language — validate BCP47 format
+    const language = config.language
+    if (language && BCP47_PATTERN.test(language)) {
+      if (liveConfig.speechConfig) {
+        liveConfig.speechConfig.languageCode = language
+      } else {
+        liveConfig.speechConfig = { languageCode: language }
       }
+    } else if (language) {
+      this.log.warn("Invalid language code, skipping", { language })
     }
 
-    // System instruction
+    // System instruction — truncate to prevent prompt injection via settings
     if (config.systemInstruction) {
-      liveConfig.systemInstruction = config.systemInstruction
+      liveConfig.systemInstruction = config.systemInstruction.slice(0, MAX_SYSTEM_INSTRUCTION_LENGTH)
     }
 
     // Enable context window compression for long conversations
