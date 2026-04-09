@@ -104,6 +104,15 @@ describe('extractReferenceImages', () => {
     });
     expect(result).toEqual([]);
   });
+
+  it('skips image parts with s3:// URL but no s3Key', async () => {
+    const result = await extractReferenceImages({
+      id: '1',
+      role: 'user',
+      parts: [{ type: 'image', image: 's3://bucket/key.png' }]
+    });
+    expect(result).toEqual([]);
+  });
 });
 
 describe('handleImageGenerationError', () => {

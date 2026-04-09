@@ -270,8 +270,11 @@ async function handleImagePart(
   } else if (part.image && !part.image.startsWith('s3://')) {
     referenceImages.push({ base64: part.image, role: 'reference' });
   } else if (part.image && part.image.startsWith('s3://')) {
+    // Before this guard, s3:// images without s3Key would fall through to the
+    // imageUrl branch (if present) — silently using a URL that can't resolve.
+    // Logging explicitly is safer than a silent fallback to an unusable URL.
     log.warn('Image part has s3:// URL but no s3Key — cannot retrieve', {
-      imagePrefix: part.image.slice(0, 30)
+      requestId: 'image-part'
     });
   } else if (part.imageUrl) {
     // s3Key is intentionally omitted — it is provably undefined here because
