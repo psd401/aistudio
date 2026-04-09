@@ -302,8 +302,19 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     sendToClient(ws, { type: "ready" })
     log.info("Voice session ready")
 
-    // Step 7: Clean up on close
+    // Step 7: WebSocket keepalive ping — ALB closes idle connections after
+    // idleTimeout (300s). Send ping every 240s to reset the timer.
+    const pingInterval = setInterval(() => {
+      if (ws.readyState === 1) {
+        ws.ping()
+      } else {
+        clearInterval(pingInterval)
+      }
+    }, 240_000)
+
+    // Step 8: Clean up on close
     ws.on("close", (code, reason) => {
+      clearInterval(pingInterval)
       log.info("Voice WebSocket closed", { code, reason: reason.toString() })
       void provider?.disconnect().catch((e: Error) =>
         log.warn("Error during close cleanup", { error: e.message })
@@ -312,6 +323,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     })
 
     ws.on("error", (error) => {
+      clearInterval(pingInterval)
       log.error("Voice WebSocket error", { error: error.message })
       void provider?.disconnect().catch((e: Error) =>
         log.warn("Error during error cleanup", { error: e.message })
