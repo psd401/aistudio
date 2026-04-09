@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 
 /**
  * Regression test for Issue #868: Message duplication and empty user bubble.
@@ -8,15 +8,26 @@ import { test, expect } from '@playwright/test'
  * 2. No empty user bubbles appear after sending a message
  * 3. The AI response appears exactly once (no duplicates during streaming)
  *
- * Requires: dev server running with seeded test users (bun run db:seed)
+ * Auth requirement: these tests navigate to /nexus (a protected route) and
+ * send real messages. They require an authenticated Playwright context.
+ * Run locally with a seeded session or set PLAYWRIGHT_AUTH_ENABLED=true in CI.
  */
+
+/** Navigates to /nexus and fails immediately if the app redirects to login. */
+async function gotoNexus(page: Page) {
+  await page.goto('/nexus')
+  // If unauthenticated the app redirects to /api/auth/signin — fail fast
+  // rather than silently timing out on waitForSelector.
+  await page.waitForURL((url) => !url.pathname.includes('/auth/signin'), { timeout: 10000 })
+  await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 10000 })
+}
+
 test.describe('Nexus Message Deduplication (#868)', () => {
-  test.beforeEach(async ({ page }) => {
-    await page.goto('/nexus')
-    await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 10000 })
-  })
+  test.skip(!process.env.PLAYWRIGHT_AUTH_ENABLED, 'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run')
 
   test('first message should not create empty or duplicate user bubbles', async ({ page }) => {
+    await gotoNexus(page)
+
     // Wait for the composer input to be ready
     const composerInput = page.locator('[aria-label="Message input"]')
     await expect(composerInput).toBeVisible({ timeout: 10000 })
@@ -47,6 +58,8 @@ test.describe('Nexus Message Deduplication (#868)', () => {
   })
 
   test('AI response should appear exactly once during streaming', async ({ page }) => {
+    await gotoNexus(page)
+
     // Wait for the composer input
     const composerInput = page.locator('[aria-label="Message input"]')
     await expect(composerInput).toBeVisible({ timeout: 10000 })
