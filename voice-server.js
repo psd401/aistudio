@@ -107,6 +107,7 @@ http.createServer = function (...args) {
         }
 
         if (!isOriginAllowed(request)) {
+          console.warn(`[voice-server] Origin rejected: ${request.headers.origin || '(none)'}`) // eslint-disable-line no-console
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
           socket.destroy()
           return

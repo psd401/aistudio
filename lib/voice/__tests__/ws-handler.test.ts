@@ -330,6 +330,34 @@ describe("handleVoiceConnection", () => {
     })
   })
 
+  describe("message handling (happy path)", () => {
+    beforeEach(() => {
+      mockDecode.mockResolvedValue({ sub: "user-123" })
+      mockHasToolAccess.mockResolvedValue(true)
+    })
+
+    it("should register close/error handlers before connect and message handler after", async () => {
+      const ws = createMockWs()
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+
+      // Track registration order
+      const registrationOrder: string[] = []
+      ;(ws.on as jest.Mock).mockImplementation((event: string) => {
+        registrationOrder.push(event)
+        return ws
+      })
+
+      await handleVoiceConnection(ws, req)
+
+      // close and error should be registered BEFORE message
+      const closeIdx = registrationOrder.indexOf("close")
+      const errorIdx = registrationOrder.indexOf("error")
+      const messageIdx = registrationOrder.indexOf("message")
+      expect(closeIdx).toBeLessThan(messageIdx)
+      expect(errorIdx).toBeLessThan(messageIdx)
+    })
+  })
+
   describe("chunked cookie edge cases", () => {
     it("should handle cookies with = in value", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })

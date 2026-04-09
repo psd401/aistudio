@@ -35,6 +35,8 @@ const PROVIDER_CONNECT_TIMEOUT_MS = 30_000
 const MIN_AUDIO_INTERVAL_MS = 20
 /** ALB keepalive ping interval (must be < ALB idleTimeout of 300s) */
 const PING_INTERVAL_MS = 240_000
+/** WebSocket readyState OPEN constant (ws library value) */
+const WS_OPEN = 1
 
 /**
  * Authenticate an incoming WebSocket connection.
@@ -57,11 +59,11 @@ async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: st
     const cookies = Object.fromEntries(
       cookieHeader.split(";").map((c) => {
         const [key, ...vals] = c.trim().split("=")
-        return [key, vals.join("=")]
+        // Trim key and value to handle proxy/ALB whitespace injection
+        return [key.trim(), vals.join("=").trim()]
       })
     )
 
-    // Determine cookie name and extract token (handles __Secure- prefix and chunked cookies)
     const cookieNames = ["__Secure-authjs.session-token", "authjs.session-token", "next-auth.session-token"]
     let sessionToken: string | undefined
     let cookieSalt: string | undefined
@@ -72,7 +74,7 @@ async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: st
         cookieSalt = name
         break
       }
-      // Chunked cookies: name.0, name.1, ... (Auth.js splits large tokens)
+      // Chunked cookies: name.0, name.1, ... (Auth.js splits large tokens, typically 2-3 chunks)
       const chunks: string[] = []
       for (let i = 0; i < 20; i++) {
         const chunk = cookies[`${name}.${i}`]
@@ -116,7 +118,7 @@ async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: st
  * Send a typed message to the client WebSocket.
  */
 function sendToClient(ws: WebSocket, message: VoiceServerMessage): void {
-  if (ws.readyState === 1) {
+  if (ws.readyState === WS_OPEN) {
     ws.send(JSON.stringify(message))
   }
 }
@@ -170,7 +172,8 @@ function forwardProviderEvent(ws: WebSocket, event: VoiceProviderEvent): void {
  * 1. Authenticate via Auth.js session cookie
  * 2. Check voice-mode tool access
  * 3. Get voice settings and create provider
- * 4. Connect to AI service (with timeout) and proxy audio bidirectionally
+ * 4. Register close/error handlers (BEFORE connect, to catch early disconnects)
+ * 5. Connect to AI service (with timeout) and proxy audio bidirectionally
  */
 export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage): Promise<void> {
   const requestId = generateRequestId()
@@ -179,6 +182,18 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
 
   let provider: VoiceProvider | null = null
   let pingInterval: ReturnType<typeof setInterval> | null = null
+  let sessionEnded = false
+
+  /** Clean up provider and timer — idempotent */
+  function cleanup(status: string) {
+    if (sessionEnded) return
+    sessionEnded = true
+    if (pingInterval) clearInterval(pingInterval)
+    provider?.disconnect().catch((e: Error) =>
+      log.warn("Provider disconnect failed during cleanup", { error: e.message })
+    )
+    timer({ status })
+  }
 
   try {
     // Step 1: Authenticate
@@ -223,7 +238,6 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       return
     }
 
-    // Step 4: Validate and create provider
     if (!isSupportedVoiceProvider(voiceSettings.provider)) {
       log.error("Invalid voice provider configured", { provider: voiceSettings.provider })
       sendToClient(ws, { type: "error", message: "Voice provider not configured" })
@@ -232,6 +246,18 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       return
     }
     provider = createVoiceProvider(voiceSettings.provider)
+
+    // Step 4: Register close/error handlers BEFORE provider.connect() so cleanup
+    // is guaranteed even if the WebSocket drops during the connect await.
+    ws.on("close", (code, reason) => {
+      log.info("Voice WebSocket closed", { code, reason: reason.toString() })
+      cleanup("success")
+    })
+
+    ws.on("error", (error) => {
+      log.error("Voice WebSocket error", { error: error.message })
+      cleanup("error")
+    })
 
     // Step 5: Connect to AI service with timeout
     const providerConfig: VoiceProviderConfig = {
@@ -252,9 +278,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     sendToClient(ws, { type: "ready" })
     log.info("Voice session ready")
 
-    // Step 6: Handle incoming messages — registered AFTER provider.connect()
-    // so audio frames aren't processed before the provider is connected.
-    // Clients must wait for { type: "ready" } before sending audio.
+    // Step 6: Register message handler AFTER connect (clients must wait for "ready")
     let lastAudioTime = 0
     ws.on("message", (data) => {
       try {
@@ -281,7 +305,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
 
           case "disconnect": {
             log.info("Client requested disconnect")
-            void provider?.disconnect().catch((e: Error) =>
+            provider?.disconnect().catch((e: Error) =>
               log.warn("Error during client-requested disconnect", { error: e.message })
             )
             break
@@ -295,39 +319,17 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
 
     // Step 7: Keepalive ping for ALB idle timeout (300s)
     pingInterval = setInterval(() => {
-      if (ws.readyState === 1) ws.ping()
+      if (ws.readyState === WS_OPEN) ws.ping()
       else if (pingInterval) clearInterval(pingInterval)
     }, PING_INTERVAL_MS)
-
-    // Step 8: Clean up on close
-    ws.on("close", (code, reason) => {
-      if (pingInterval) clearInterval(pingInterval)
-      log.info("Voice WebSocket closed", { code, reason: reason.toString() })
-      void provider?.disconnect().catch((e: Error) =>
-        log.warn("Error during close cleanup", { error: e.message })
-      )
-      timer({ status: "success" })
-    })
-
-    ws.on("error", (error) => {
-      if (pingInterval) clearInterval(pingInterval)
-      log.error("Voice WebSocket error", { error: error.message })
-      void provider?.disconnect().catch((e: Error) =>
-        log.warn("Error during error cleanup", { error: e.message })
-      )
-      timer({ status: "error" })
-    })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     log.error("Voice session setup failed", { error: message })
     sendToClient(ws, { type: "error", message: "Failed to establish voice session" })
-    void provider?.disconnect().catch(() => { /* cleanup best-effort */ })
-    // Remove dangling listeners from the try block on connect failure
+    cleanup("error")
     ws.removeAllListeners("message")
     ws.removeAllListeners("close")
     ws.removeAllListeners("error")
-    if (pingInterval) clearInterval(pingInterval)
     ws.close(4500, "Internal error")
-    timer({ status: "error" })
   }
 }

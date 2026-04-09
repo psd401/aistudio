@@ -231,4 +231,71 @@ describe("GeminiLiveProvider", () => {
       expect(state1.transcript).not.toBe(state2.transcript)
     })
   })
+
+  describe("sendAudio size validation", () => {
+    it("should reject buffers larger than MAX_AUDIO_BUFFER_SIZE", async () => {
+      await provider.connect(baseConfig, jest.fn())
+      // 65KB > 64KB limit
+      const oversizedBuffer = Buffer.alloc(65 * 1024)
+      provider.sendAudio(oversizedBuffer)
+      // Should NOT have called the SDK
+      expect(mockSendRealtimeInput).not.toHaveBeenCalled()
+    })
+
+    it("should accept buffers within size limit", async () => {
+      await provider.connect(baseConfig, jest.fn())
+      const validBuffer = Buffer.alloc(32 * 1024)
+      provider.sendAudio(validBuffer)
+      expect(mockSendRealtimeInput).toHaveBeenCalled()
+    })
+  })
+
+  describe("buildLiveConfig validation", () => {
+    it("should truncate long voice names", async () => {
+      const longNameConfig = {
+        ...baseConfig,
+        voiceName: "A".repeat(200),
+      }
+      await provider.connect(longNameConfig, jest.fn())
+
+      const connectArgs = mockLiveConnect.mock.calls[0][0]
+      expect(connectArgs.config.speechConfig.voiceConfig.prebuiltVoiceConfig.voiceName).toHaveLength(100)
+    })
+
+    it("should truncate long system instructions", async () => {
+      const longInstructionConfig = {
+        ...baseConfig,
+        systemInstruction: "X".repeat(20_000),
+      }
+      await provider.connect(longInstructionConfig, jest.fn())
+
+      const connectArgs = mockLiveConnect.mock.calls[0][0]
+      expect(connectArgs.config.systemInstruction).toHaveLength(10_000)
+    })
+
+    it("should accept valid BCP47 language codes", async () => {
+      await provider.connect({ ...baseConfig, language: "en-US" }, jest.fn())
+      const args = mockLiveConnect.mock.calls[0][0]
+      expect(args.config.speechConfig?.languageCode).toBe("en-US")
+    })
+
+    it("should accept numeric subtags like es-419", async () => {
+      await provider.connect({ ...baseConfig, language: "es-419" }, jest.fn())
+      const args = mockLiveConnect.mock.calls[0][0]
+      expect(args.config.speechConfig?.languageCode).toBe("es-419")
+    })
+
+    it("should reject invalid language codes", async () => {
+      await provider.connect({ ...baseConfig, language: "not-a-language-code-at-all" }, jest.fn())
+      const args = mockLiveConnect.mock.calls[0][0]
+      // Invalid language should be skipped — no languageCode set
+      expect(args.config.speechConfig?.languageCode).toBeUndefined()
+    })
+
+    it("should reject empty language code", async () => {
+      await provider.connect({ ...baseConfig, language: "" }, jest.fn())
+      const args = mockLiveConnect.mock.calls[0][0]
+      expect(args.config.speechConfig?.languageCode).toBeUndefined()
+    })
+  })
 })
