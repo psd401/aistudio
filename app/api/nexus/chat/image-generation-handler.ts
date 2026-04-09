@@ -207,9 +207,13 @@ export async function saveImageUserMessage(params: {
  * Extract reference images from message parts
  */
 export async function extractReferenceImages(
-  lastMessage: ImageGenerationParams['messages'][0]
+  lastMessage: ImageGenerationParams['messages'][0] | undefined
 ): Promise<ReferenceImage[]> {
   const referenceImages: ReferenceImage[] = [];
+
+  if (!lastMessage) {
+    return referenceImages;
+  }
 
   const partsArray = lastMessage.parts as unknown as Array<{
     type: string;
