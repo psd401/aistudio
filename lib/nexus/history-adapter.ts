@@ -158,10 +158,6 @@ export function useConversationContext() {
         currentConversationIdRef.current = id
       }
     },
-
-    getCurrentConversationId(): string | null {
-      return currentConversationIdRef.current
-    }
   }), [])
 }
 
