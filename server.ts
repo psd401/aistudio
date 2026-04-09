@@ -19,8 +19,8 @@ import next from "next"
 import { parse } from "node:url"
 
 const VOICE_WS_PATH = "/api/nexus/voice"
-// maxPayload: 64KB — PCM 16kHz 16-bit mono = 32KB/sec; generous 1-sec cap
-const WS_MAX_PAYLOAD = 64 * 1024
+// Must match WS_MAX_PAYLOAD in lib/voice/constants.ts and voice-server.js
+const WS_MAX_PAYLOAD = 65536 // 64KB
 
 const dev = process.env.NODE_ENV !== "production"
 const hostname = process.env.HOSTNAME || "0.0.0.0"

@@ -19,6 +19,13 @@ import { Settings } from "@/lib/settings-manager"
 import { createVoiceProvider, isSupportedVoiceProvider } from "./provider-factory"
 import { decode } from "@auth/core/jwt"
 import { hasToolAccess } from "@/lib/db/drizzle/users"
+import {
+  MAX_AUDIO_DATA_LENGTH,
+  PROVIDER_CONNECT_TIMEOUT_MS,
+  MIN_AUDIO_INTERVAL_MS,
+  PING_INTERVAL_MS,
+  WS_OPEN,
+} from "./constants"
 import type {
   VoiceProvider,
   VoiceProviderConfig,
@@ -26,17 +33,6 @@ import type {
   VoiceServerMessage,
   VoiceProviderEvent,
 } from "./types"
-
-/** Max base64 audio data size per message: 128KB base64 ≈ 96KB PCM */
-const MAX_AUDIO_DATA_LENGTH = 131_072
-/** Connection timeout for provider.connect() — prevent indefinite hangs */
-const PROVIDER_CONNECT_TIMEOUT_MS = 30_000
-/** Min interval between audio messages per connection (ms) — rate limit */
-const MIN_AUDIO_INTERVAL_MS = 20
-/** ALB keepalive ping interval (must be < ALB idleTimeout of 300s) */
-const PING_INTERVAL_MS = 240_000
-/** WebSocket readyState OPEN constant (ws library value) */
-const WS_OPEN = 1
 
 /**
  * Authenticate an incoming WebSocket connection.
@@ -59,7 +55,6 @@ async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: st
     const cookies = Object.fromEntries(
       cookieHeader.split(";").map((c) => {
         const [key, ...vals] = c.trim().split("=")
-        // Trim key and value to handle proxy/ALB whitespace injection
         return [key.trim(), vals.join("=").trim()]
       })
     )
@@ -114,18 +109,14 @@ async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: st
   }
 }
 
-/**
- * Send a typed message to the client WebSocket.
- */
+/** Send a typed message to the client WebSocket. */
 function sendToClient(ws: WebSocket, message: VoiceServerMessage): void {
   if (ws.readyState === WS_OPEN) {
     ws.send(JSON.stringify(message))
   }
 }
 
-/**
- * Validate that a parsed message has the expected shape for VoiceClientMessage.
- */
+/** Validate that a parsed message has the expected shape. */
 function isValidClientMessage(msg: unknown): msg is VoiceClientMessage {
   if (typeof msg !== "object" || msg === null) return false
   const obj = msg as Record<string, unknown>
@@ -134,9 +125,7 @@ function isValidClientMessage(msg: unknown): msg is VoiceClientMessage {
   return true
 }
 
-/**
- * Forward a provider event to the client WebSocket as a typed message.
- */
+/** Forward a provider event to the client WebSocket. */
 function forwardProviderEvent(ws: WebSocket, event: VoiceProviderEvent): void {
   switch (event.type) {
     case "audio":
@@ -172,8 +161,10 @@ function forwardProviderEvent(ws: WebSocket, event: VoiceProviderEvent): void {
  * 1. Authenticate via Auth.js session cookie
  * 2. Check voice-mode tool access
  * 3. Get voice settings and create provider
- * 4. Register close/error handlers (BEFORE connect, to catch early disconnects)
- * 5. Connect to AI service (with timeout) and proxy audio bidirectionally
+ * 4. Register close/error handlers (BEFORE connect)
+ * 5. Connect to AI service with timeout
+ * 6. Register message handler (AFTER connect — clients must wait for "ready")
+ * 7. Start keepalive ping
  */
 export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage): Promise<void> {
   const requestId = generateRequestId()
@@ -184,14 +175,17 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
   let pingInterval: ReturnType<typeof setInterval> | null = null
   let sessionEnded = false
 
-  /** Clean up provider and timer — idempotent */
+  /** Idempotent cleanup — synchronous to avoid swallowed errors in event handlers */
   function cleanup(status: string) {
     if (sessionEnded) return
     sessionEnded = true
-    if (pingInterval) clearInterval(pingInterval)
-    provider?.disconnect().catch((e: Error) =>
-      log.warn("Provider disconnect failed during cleanup", { error: e.message })
-    )
+    if (pingInterval) { clearInterval(pingInterval); pingInterval = null }
+    if (provider) {
+      provider.disconnect().catch((e: Error) =>
+        log.warn("Provider disconnect failed during cleanup", { error: e.message })
+      )
+      provider = null
+    }
     timer({ status })
   }
 
@@ -210,6 +204,8 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     log.info("Voice connection authenticated", { userId: sanitizeForLogging(auth.userId) })
 
     // Step 2: Check voice access (fail-closed on error)
+    // Tool access check ensures only users with the "voice-mode" permission
+    // can access voice features and see configuration details.
     let hasAccess = false
     try {
       hasAccess = await hasToolAccess(auth.sub, "voice-mode")
@@ -225,6 +221,8 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     }
 
     // Step 3: Get voice settings and API key
+    // Settings are cached with 5-min TTL in settings-manager. Active WS sessions
+    // use the config from connection time; config changes take effect on new sessions.
     const [voiceSettings, googleApiKey] = await Promise.all([
       Settings.getVoice(),
       Settings.getGoogleAI(),
@@ -291,6 +289,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
         switch (parsed.type) {
           case "audio": {
             if (!provider?.isConnected()) break
+            // Validate base64 string length (aligned with WS_MAX_PAYLOAD via 4:3 ratio)
             if (parsed.data.length > MAX_AUDIO_DATA_LENGTH) {
               log.warn("Audio data too large", { length: parsed.data.length })
               break
@@ -298,7 +297,6 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
             const now = Date.now()
             if (now - lastAudioTime < MIN_AUDIO_INTERVAL_MS) break
             lastAudioTime = now
-            // Buffer.from silently ignores invalid base64 chars — acceptable for audio
             provider.sendAudio(Buffer.from(parsed.data, "base64"))
             break
           }
@@ -317,10 +315,10 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       }
     })
 
-    // Step 7: Keepalive ping for ALB idle timeout (300s)
+    // Step 7: Keepalive ping — AFTER all handlers registered to prevent interval leak
     pingInterval = setInterval(() => {
       if (ws.readyState === WS_OPEN) ws.ping()
-      else if (pingInterval) clearInterval(pingInterval)
+      else if (pingInterval) { clearInterval(pingInterval); pingInterval = null }
     }, PING_INTERVAL_MS)
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

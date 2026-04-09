@@ -63,6 +63,10 @@ const handleVoiceConnection = loadWsHandler()
  * Validate origin to prevent cross-site WebSocket hijacking (CSWSH).
  * Logic mirrors server.ts:isAllowedOrigin() — duplicated because this
  * file is CJS (standalone) and cannot import from the ESM server.ts.
+ *
+ * INTENTIONAL DIFFERENCE: server.ts (dev) bypasses origin checks for
+ * local testing. This file (production only) does NOT bypass.
+ * Both use the same same-origin fallback when no origins are configured.
  */
 function isOriginAllowed(request) {
   const origin = request.headers.origin
@@ -94,7 +98,8 @@ http.createServer = function (...args) {
   const server = originalCreateServer(...args)
 
   if (!wss) {
-    wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
+    // maxPayload must match WS_MAX_PAYLOAD in lib/voice/constants.ts (64KB)
+    wss = new WebSocketServer({ noServer: true, maxPayload: 65536 })
 
     server.on('upgrade', (request, socket, head) => {
       const { pathname } = parse(request.url || '/')
