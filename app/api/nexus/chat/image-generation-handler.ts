@@ -269,10 +269,13 @@ async function handleImagePart(
     }
   } else if (part.image && !part.image.startsWith('s3://')) {
     referenceImages.push({ base64: part.image, role: 'reference' });
+  } else if (part.image && part.image.startsWith('s3://')) {
+    log.warn('Image part has s3:// URL but no s3Key — cannot retrieve', {
+      imagePrefix: part.image.slice(0, 30)
+    });
   } else if (part.imageUrl) {
     referenceImages.push({
       url: part.imageUrl,
-      s3Key: part.s3Key,
       role: 'reference'
     });
   }
@@ -527,12 +530,15 @@ export function handleImageGenerationError(
     conversationId
   });
 
-  const typedError = error as Error & { type?: string; retryAfter?: number };
+  // Safely extract typed error properties without unsafe `as` assertion on unknown
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const errorType = error instanceof Error ? (error as Error & { type?: string }).type : undefined;
+  const retryAfter = error instanceof Error ? (error as Error & { retryAfter?: number }).retryAfter : undefined;
 
-  if (typedError.type === 'CONTENT_POLICY') {
+  if (errorType === 'CONTENT_POLICY') {
     log.warn('Image generation content policy violation', {
       conversationId,
-      errorMessage: typedError.message,
+      errorMessage,
       requestId
     });
     return new Response(
@@ -541,25 +547,25 @@ export function handleImageGenerationError(
     );
   }
 
-  if (typedError.type === 'RATE_LIMIT') {
+  if (errorType === 'RATE_LIMIT') {
     log.warn('Image generation rate limited', {
       conversationId,
-      errorMessage: typedError.message,
-      retryAfter: typedError.retryAfter || 60,
+      errorMessage,
+      retryAfter: retryAfter || 60,
       requestId
     });
     return new Response(
       JSON.stringify({
         error: 'Image generation rate limit reached. Please wait and try again.',
         code: 'RATE_LIMIT',
-        retryAfter: typedError.retryAfter || 60,
+        retryAfter: retryAfter || 60,
         requestId
       }),
       { status: 429, headers: { 'Content-Type': 'application/json' } }
     );
   }
 
-  if (typedError.type === 'AUTHENTICATION') {
+  if (errorType === 'AUTHENTICATION') {
     return new Response(
       JSON.stringify({ error: 'Image generation service authentication failed', code: 'AUTH_ERROR' }),
       { status: 401, headers: { 'Content-Type': 'application/json' } }
@@ -568,7 +574,7 @@ export function handleImageGenerationError(
 
   log.error('Image generation error details', {
     conversationId,
-    errorMessage: typedError.message,
+    errorMessage,
     requestId
   });
 
