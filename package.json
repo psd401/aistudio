@@ -41,7 +41,8 @@
     "db:studio": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run drizzle:studio",
     "db:psql": "docker exec -it aistudio-postgres psql -U postgres -d aistudio",
     "dev:docker": "docker compose -f docker-compose.dev.yml up",
-    "dev:local": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run dev"
+    "dev:local": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run dev",
+    "dev:voice": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run server.ts"
   },
   "dependencies": {
     "@ai-sdk/amazon-bedrock": "~4.0.61",
@@ -50,7 +51,7 @@
     "@ai-sdk/mcp": "1.0.21",
     "@ai-sdk/openai": "~3.0.30",
     "@ai-sdk/react": "~3.0.93",
-    "@assistant-ui/react": "^0.12.15",
+    "@assistant-ui/react": "^0.12.22",
     "@assistant-ui/react-ai-sdk": "^1.3.11",
     "@assistant-ui/react-markdown": "^0.12.5",
     "@aws-sdk/client-bedrock-runtime": "^3.982.0",
@@ -73,6 +74,7 @@
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",
+    "@google/genai": "^1.49.0",
     "@heroicons/react": "^2.2.0",
     "@hookform/resolvers": "^5.2.2",
     "@mdxeditor/editor": "^3.52.3",
@@ -156,6 +158,7 @@
     "uuid": "^13.0.0",
     "vaul": "^1.1.2",
     "winston": "^3.18.3",
+    "ws": "^8.20.0",
     "zod": "^4.1.11",
     "zustand": "^5.0.8"
   },
@@ -176,6 +179,7 @@
     "@types/react": "^19.2.10",
     "@types/react-dom": "^19.2.2",
     "@types/react-syntax-highlighter": "^15.5.13",
+    "@types/ws": "^8.18.1",
     "@types/xml2js": "^0.4.14",
     "autoprefixer": "^10.4.24",
     "babel-loader": "^10.0.0",
