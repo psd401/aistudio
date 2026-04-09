@@ -274,6 +274,8 @@ async function handleImagePart(
       imagePrefix: part.image.slice(0, 30)
     });
   } else if (part.imageUrl) {
+    // s3Key is intentionally omitted — it is provably undefined here because
+    // the first branch (if part.s3Key) already handles parts that carry an s3Key.
     referenceImages.push({
       url: part.imageUrl,
       role: 'reference'
