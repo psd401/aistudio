@@ -173,8 +173,12 @@ export function extractUserContent(message: MessageWithContent): {
 
 /**
  * Save user message to database.
- * Skips saving if the message has no text content and no parts,
- * matching the hasMessageContent() guard in saveAssistantMessage().
+ *
+ * Note: Unlike saveAssistantMessage(), this function does NOT guard against
+ * empty content because extractUserContent() only serializes text/image parts.
+ * Attachment-only messages (PDF, DOCX, etc.) arrive with content='' and parts=[]
+ * since processMessagePart() doesn't handle file types — but the user DID send
+ * something. The caller (setupConversation) validates the original message.
  */
 export async function saveUserMessage(params: {
   conversationId: string;
@@ -183,11 +187,6 @@ export async function saveUserMessage(params: {
   dbModelId: number;
 }): Promise<void> {
   const { conversationId, content, parts, dbModelId } = params;
-
-  if (!content.trim() && parts.length === 0) {
-    log.warn('Skipping empty user message save', { conversationId });
-    return;
-  }
 
   await executeQuery(
     (db) => db.insert(nexusMessages)

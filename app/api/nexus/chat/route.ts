@@ -471,11 +471,19 @@ async function setupConversation(params: {
     conversationId = convResult.conversationId;
   }
 
-  // Save user message
+  // Save user message — guard against truly empty messages (no parts, no content)
+  // while preserving attachment-only turns where extractUserContent() returns empty
+  // text but the original message had file/attachment parts.
   const lastMessage = messages[messages.length - 1];
   if (lastMessage && lastMessage.role === 'user') {
-    const { content, parts } = extractUserContent(lastMessage as UIMessage);
-    await saveUserMessage({ conversationId, content, parts, dbModelId });
+    const hasOriginalContent = (lastMessage.parts && lastMessage.parts.length > 0) ||
+      (typeof lastMessage.content === 'string' && lastMessage.content.trim().length > 0) ||
+      (Array.isArray(lastMessage.content) && lastMessage.content.length > 0);
+
+    if (hasOriginalContent) {
+      const { content, parts } = extractUserContent(lastMessage as UIMessage);
+      await saveUserMessage({ conversationId, content, parts, dbModelId });
+    }
   }
 
   return { conversationId, conversationTitle };
