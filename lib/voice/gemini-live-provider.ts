@@ -33,8 +33,18 @@ const MAX_AUDIO_BUFFER_SIZE = 64 * 1024
 const MAX_SYSTEM_INSTRUCTION_LENGTH = 10_000
 /** Max voice name length */
 const MAX_VOICE_NAME_LENGTH = 100
-/** BCP47 language code pattern (e.g. en-US, fr-FR, zh-Hans-CN) */
-const BCP47_PATTERN = /^[a-z]{2,3}(-[A-Za-z]{2,8})*$/
+/**
+ * Validate a BCP47-like language code.
+ * Uses simple string checks instead of regex to avoid ReDoS concerns
+ * flagged by eslint security/detect-unsafe-regex.
+ */
+function isValidLanguageCode(code: string): boolean {
+  if (code.length < 2 || code.length > 35) return false
+  // Split on hyphens, validate each subtag is alpha 2-8 chars
+  const parts = code.split("-")
+  if (parts.length === 0 || parts.length > 4) return false
+  return parts.every((p) => p.length >= 2 && p.length <= 8 && /^[A-Za-z]+$/.test(p))
+}
 
 export class GeminiLiveProvider implements VoiceProvider {
   readonly providerId = "gemini-live"
@@ -212,7 +222,7 @@ export class GeminiLiveProvider implements VoiceProvider {
 
     // Language — validate BCP47 format
     const language = config.language
-    if (language && BCP47_PATTERN.test(language)) {
+    if (language && isValidLanguageCode(language)) {
       if (liveConfig.speechConfig) {
         liveConfig.speechConfig.languageCode = language
       } else {
