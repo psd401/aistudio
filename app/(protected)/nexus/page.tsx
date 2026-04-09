@@ -13,7 +13,7 @@ import { ErrorBoundary } from './_components/error-boundary'
 import { PromptAutoLoader } from './_components/prompt-auto-loader'
 import { ConversationInitializer } from './_components/conversation-initializer'
 import { z } from 'zod'
-import { useConversationContext, createNexusHistoryAdapter } from '@/lib/nexus/history-adapter'
+import { createNexusHistoryAdapter } from '@/lib/nexus/history-adapter'
 import { MultiProviderToolUIs } from './_components/tools/multi-provider-tools'
 import { ConnectorToolProvider, useConnectorTools } from './_components/tools/connector-tool-context'
 import { ConnectorReconnectPrompt, ConnectorToolFallback } from './_components/tools/connector-tool-ui'
@@ -441,9 +441,6 @@ function NexusPageContent() {
   // This prevents remounting when ID is assigned during runtime
   const [stableConversationId] = useState<string | null>(validatedConversationId)
 
-  // Conversation context for history adapter
-  const conversationContext = useConversationContext()
-  
   // Debug logging for enabled tools
   useEffect(() => {
     log.debug('Enabled tools changed', { enabledTools })
@@ -499,18 +496,13 @@ function NexusPageContent() {
     setConversationId(newConversationId)
     // Clear fallback state — it's only relevant to the previously loaded conversation
     setConversationModelId(null)
-    conversationContext.setConversationId(newConversationId)
 
     // Update URL to reflect the current conversation
     const newUrl = `/nexus?id=${newConversationId}`
     router.push(newUrl, { scroll: false })
 
-    log.debug('Conversation ID updated', {
-      previousId: conversationId,
-      newId: newConversationId,
-      newUrl
-    })
-  }, [conversationId, conversationContext, router])
+    log.debug('Conversation ID updated', { newId: newConversationId })
+  }, [router])
   
   // Handle invalid conversation ID in URL - redirect to clean state
   useEffect(() => {

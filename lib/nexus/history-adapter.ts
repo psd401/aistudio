@@ -1,6 +1,5 @@
 'use client'
 
-import { useRef, useMemo } from 'react'
 import { createLogger } from '@/lib/client-logger'
 import type {
   ThreadHistoryAdapter,
@@ -139,27 +138,6 @@ type ExportedMessageRepositoryItem = {
 }
 
 const log = createLogger({ moduleName: 'nexus-history-adapter' })
-
-/**
- * Manages conversation context with stable state across renders.
- * Returns a memoized object with a ref-backed conversation ID,
- * so callers can read/write the ID without triggering re-renders.
- */
-export function useConversationContext() {
-  const currentConversationIdRef = useRef<string | null>(null)
-
-  return useMemo(() => ({
-    setConversationId(id: string | null) {
-      if (currentConversationIdRef.current !== id) {
-        log.debug('Conversation context changed', {
-          from: currentConversationIdRef.current,
-          to: id
-        })
-        currentConversationIdRef.current = id
-      }
-    },
-  }), [])
-}
 
 /**
  * Creates a ThreadHistoryAdapter that loads and saves conversation messages.
