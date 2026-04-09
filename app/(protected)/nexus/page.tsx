@@ -13,7 +13,7 @@ import { ErrorBoundary } from './_components/error-boundary'
 import { PromptAutoLoader } from './_components/prompt-auto-loader'
 import { ConversationInitializer } from './_components/conversation-initializer'
 import { z } from 'zod'
-import { useConversationContext, createNexusHistoryAdapter } from '@/lib/nexus/history-adapter'
+import { createNexusHistoryAdapter } from '@/lib/nexus/history-adapter'
 import { MultiProviderToolUIs } from './_components/tools/multi-provider-tools'
 import { ConnectorToolProvider, useConnectorTools } from './_components/tools/connector-tool-context'
 import { ConnectorReconnectPrompt, ConnectorToolFallback } from './_components/tools/connector-tool-ui'
@@ -82,9 +82,17 @@ function ConversationRuntimeProvider({
   onConnectorReconnect,
   onConnectorToolsReceived
 }: ConversationRuntimeProviderProps) {
+  // Use a ref so the adapter instance stays stable when conversationId transitions
+  // from null → UUID during a new conversation. Without this, the runtime re-calls
+  // load() on the recreated adapter and fetches already-displayed messages,
+  // causing duplicate message rendering. (Issue #868)
+  const conversationIdRef = useRef(conversationId)
+  conversationIdRef.current = conversationId
+
   const historyAdapter = useMemo(
-    () => createNexusHistoryAdapter(conversationId),
-    [conversationId]
+    () => createNexusHistoryAdapter(() => conversationIdRef.current),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally stable; conversationId accessed via ref
+    []
   )
 
   // Custom fetch to intercept X-Conversation-Id header for conversation continuity
@@ -121,13 +129,17 @@ function ConversationRuntimeProvider({
     // Extract conversation ID from response header (new conversations only)
     const newConversationId = response.headers.get('X-Conversation-Id')
     if (newConversationId && newConversationId !== conversationId) {
-      log.debug('Received new conversation ID from server', {
-        newConversationId,
-        currentConversationId: conversationId
-      })
-      // Update parent state for URL and component updates
-      if (onConversationIdChange) {
-        onConversationIdChange(newConversationId)
+      if (!uuidSchema.safeParse(newConversationId).success) {
+        log.warn('Received malformed X-Conversation-Id header, ignoring', { newConversationId })
+      } else {
+        log.debug('Received new conversation ID from server', {
+          newConversationId,
+          currentConversationId: conversationId
+        })
+        // Update parent state for URL and component updates
+        if (onConversationIdChange) {
+          onConversationIdChange(newConversationId)
+        }
       }
     }
 
@@ -429,9 +441,6 @@ function NexusPageContent() {
   // This prevents remounting when ID is assigned during runtime
   const [stableConversationId] = useState<string | null>(validatedConversationId)
 
-  // Conversation context for history adapter
-  const conversationContext = useConversationContext()
-  
   // Debug logging for enabled tools
   useEffect(() => {
     log.debug('Enabled tools changed', { enabledTools })
@@ -487,18 +496,13 @@ function NexusPageContent() {
     setConversationId(newConversationId)
     // Clear fallback state — it's only relevant to the previously loaded conversation
     setConversationModelId(null)
-    conversationContext.setConversationId(newConversationId)
 
     // Update URL to reflect the current conversation
     const newUrl = `/nexus?id=${newConversationId}`
     router.push(newUrl, { scroll: false })
 
-    log.debug('Conversation ID updated', {
-      previousId: conversationId,
-      newId: newConversationId,
-      newUrl
-    })
-  }, [conversationId, conversationContext, router])
+    log.debug('Conversation ID updated', { newId: newConversationId })
+  }, [router])
   
   // Handle invalid conversation ID in URL - redirect to clean state
   useEffect(() => {

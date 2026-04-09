@@ -8,7 +8,7 @@ import { executeQuery } from '@/lib/db/drizzle-client';
 import { nexusConversations, nexusMessages } from '@/lib/db/schema';
 import { sanitizeTextForDatabase, decodeHtmlEntitiesDeep } from '@/lib/utils/text-sanitizer';
 import { safeJsonbStringify } from '@/lib/db/json-utils';
-import { createLogger } from '@/lib/logger';
+import { createLogger, sanitizeForLogging } from '@/lib/logger';
 
 const log = createLogger({ route: 'api.nexus.chat.helpers' });
 
@@ -113,7 +113,7 @@ export async function createConversation(params: {
   }
 
   const conversationId = createResult[0].id as string;
-  log.info('Created new Nexus conversation', { conversationId, userId, title });
+  log.info('Created new Nexus conversation', sanitizeForLogging({ conversationId, userId, title }));
 
   return { conversationId };
 }
@@ -172,7 +172,13 @@ export function extractUserContent(message: MessageWithContent): {
 }
 
 /**
- * Save user message to database
+ * Save user message to database.
+ *
+ * Note: Unlike saveAssistantMessage(), this function does NOT guard against
+ * empty content because extractUserContent() only serializes text/image parts.
+ * Attachment-only messages (PDF, DOCX, etc.) arrive with content='' and parts=[]
+ * since processMessagePart() doesn't handle file types — but the user DID send
+ * something. The caller (setupConversation) validates the original message.
  */
 export async function saveUserMessage(params: {
   conversationId: string;
