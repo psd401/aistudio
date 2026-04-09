@@ -33,6 +33,8 @@ export class GeminiLiveProvider implements VoiceProvider {
 
   private session: GeminiSession | null = null
   private onEvent: VoiceProviderEventHandler | null = null
+  /** Tracks intentional disconnect to prevent duplicate session_ended events */
+  private intentionalDisconnect = false
   private state: VoiceSessionState = {
     connected: false,
     speaking: "none",
@@ -97,7 +99,11 @@ export class GeminiLiveProvider implements VoiceProvider {
               reason: event.reason,
             })
             this.updateState({ connected: false, speaking: "none" })
-            this.onEvent?.({ type: "session_ended", reason: "finished" })
+            // Only emit 'finished' if not an intentional disconnect
+            // (disconnect() emits 'cancelled' separately)
+            if (!this.intentionalDisconnect) {
+              this.onEvent?.({ type: "session_ended", reason: "finished" })
+            }
             this.session = null
           },
         },
@@ -115,6 +121,7 @@ export class GeminiLiveProvider implements VoiceProvider {
     }
 
     this.log.info("Disconnecting from Gemini Live")
+    this.intentionalDisconnect = true
     try {
       this.session.conn.close()
     } catch (error) {

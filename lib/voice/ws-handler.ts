@@ -24,21 +24,23 @@ import type {
   VoiceServerMessage,
 } from "./types"
 
+/** Max base64 audio data size per message: 128KB base64 ≈ 96KB PCM */
+const MAX_AUDIO_DATA_LENGTH = 131_072
+
 /**
  * Authenticate an incoming WebSocket connection.
  *
- * Extracts the session token from the cookie header and validates it.
- * Returns the user ID if valid, null otherwise.
+ * Extracts the Auth.js session cookie and decrypts it using @auth/core/jwt.
+ * Auth.js JWTs are encrypted (JWE with A256CBC-HS512), not signed,
+ * so standard jwtVerify won't work — must use Auth.js decode.
  *
- * Note: We can't use getServerSession() directly because WebSocket upgrade
- * requests don't go through the Next.js request pipeline. Instead we
- * verify the NextAuth session token from the cookie.
+ * Handles chunked cookies (authjs.session-token.0, .1, etc.) for
+ * large session tokens that exceed cookie size limits.
  */
 async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: string; sub: string } | null> {
   const log = createLogger({ context: "voice-ws-auth" })
 
   try {
-    // Extract session token from cookies
     const cookieHeader = req.headers.cookie || ""
     const cookies = Object.fromEntries(
       cookieHeader.split(";").map((c) => {
@@ -47,38 +49,58 @@ async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: st
       })
     )
 
-    // NextAuth v5 session token cookie names
-    const sessionToken =
-      cookies["__Secure-authjs.session-token"] ||
-      cookies["authjs.session-token"] ||
-      cookies["next-auth.session-token"]
+    // Determine cookie name and extract token (handles __Secure- prefix and chunked cookies)
+    const cookieNames = ["__Secure-authjs.session-token", "authjs.session-token", "next-auth.session-token"]
+    let sessionToken: string | undefined
+    let cookieSalt: string | undefined
 
-    if (!sessionToken) {
+    for (const name of cookieNames) {
+      // Check for single cookie
+      if (cookies[name]) {
+        sessionToken = cookies[name]
+        cookieSalt = name
+        break
+      }
+      // Check for chunked cookies (name.0, name.1, ...)
+      const chunks: string[] = []
+      for (let i = 0; ; i++) {
+        const chunk = cookies[`${name}.${i}`]
+        if (!chunk) break
+        chunks.push(chunk)
+      }
+      if (chunks.length > 0) {
+        sessionToken = chunks.join("")
+        cookieSalt = name
+        break
+      }
+    }
+
+    if (!sessionToken || !cookieSalt) {
       log.warn("No session token found in WebSocket cookies")
       return null
     }
 
-    // Verify the JWT session token
-    // We use jose to verify the token, matching NextAuth's approach
-    const { jwtVerify } = await import("jose")
+    // Decrypt the Auth.js JWT session token
+    // Auth.js encrypts session cookies with A256CBC-HS512 using AUTH_SECRET
+    const { decode } = await import("@auth/core/jwt")
     const secret = process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET
     if (!secret) {
       log.error("AUTH_SECRET not configured")
       return null
     }
 
-    const secretKey = new TextEncoder().encode(secret)
-    const { payload } = await jwtVerify(sessionToken, secretKey, {
-      algorithms: ["HS256"], // Pin to NextAuth v5 default algorithm
-      clockTolerance: 30,    // 30-second clock skew tolerance
+    const payload = await decode({
+      token: sessionToken,
+      salt: cookieSalt,
+      secret,
     })
 
-    if (!payload.sub) {
+    if (!payload?.sub) {
       log.warn("Session token missing sub claim")
       return null
     }
 
-    return { userId: payload.sub as string, sub: payload.sub as string }
+    return { userId: payload.sub, sub: payload.sub }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     log.warn("WebSocket authentication failed", { error: message })
@@ -90,8 +112,7 @@ async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: st
  * Check if the user has access to voice mode.
  *
  * Uses the same hasToolAccess pattern as the rest of the application.
- * The DB-level hasToolAccess takes cognitoSub directly, so we can
- * bypass the session-based wrapper.
+ * The DB-level hasToolAccess takes cognitoSub directly.
  */
 async function checkVoiceAccess(sub: string): Promise<boolean> {
   const log = createLogger({ context: "voice-ws-access" })
@@ -108,22 +129,34 @@ async function checkVoiceAccess(sub: string): Promise<boolean> {
 
 /**
  * Send a typed message to the client WebSocket.
+ * Uses numeric readyState comparison for reliability.
  */
 function sendToClient(ws: WebSocket, message: VoiceServerMessage): void {
-  if (ws.readyState === ws.OPEN) {
+  // WebSocket.OPEN === 1; compare numerically to avoid prototype lookup issues
+  if (ws.readyState === 1) {
     ws.send(JSON.stringify(message))
   }
+}
+
+/**
+ * Validate that a parsed message has the expected shape for VoiceClientMessage.
+ */
+function isValidClientMessage(msg: unknown): msg is VoiceClientMessage {
+  if (typeof msg !== "object" || msg === null) return false
+  const obj = msg as Record<string, unknown>
+  if (typeof obj.type !== "string") return false
+  if (obj.type === "audio" && typeof obj.data !== "string") return false
+  return true
 }
 
 /**
  * Handle a new WebSocket connection for voice sessions.
  *
  * Flow:
- * 1. Authenticate the connection via session cookie
+ * 1. Authenticate via Auth.js session cookie
  * 2. Check voice-mode tool access
- * 3. Wait for config message from client
- * 4. Create voice provider and connect to AI service
- * 5. Proxy audio bidirectionally
+ * 3. Get voice settings and create provider
+ * 4. Connect to AI service and proxy audio bidirectionally
  */
 export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage): Promise<void> {
   const requestId = generateRequestId()
@@ -180,14 +213,18 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     // Step 5: Handle incoming messages from client
     ws.on("message", (data) => {
       try {
-        const message = JSON.parse(data.toString()) as VoiceClientMessage
+        const parsed: unknown = JSON.parse(data.toString())
+        if (!isValidClientMessage(parsed)) {
+          log.warn("Invalid client message format")
+          return
+        }
+        const message = parsed
 
         switch (message.type) {
           case "audio": {
             if (provider?.isConnected()) {
-              // Validate audio data: must be string, max 128KB base64 (≈96KB PCM)
-              if (typeof message.data !== "string" || message.data.length > 131_072) {
-                log.warn("Invalid audio data", { type: typeof message.data, length: typeof message.data === "string" ? message.data.length : 0 })
+              if (message.data.length > MAX_AUDIO_DATA_LENGTH) {
+                log.warn("Audio data too large", { length: message.data.length })
                 break
               }
               const audioBuffer = Buffer.from(message.data, "base64")
@@ -198,7 +235,9 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
 
           case "disconnect": {
             log.info("Client requested disconnect")
-            provider?.disconnect()
+            void provider?.disconnect().catch((e: Error) =>
+              log.warn("Error during client-requested disconnect", { error: e.message })
+            )
             break
           }
 
@@ -277,26 +316,25 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
 
     // Step 7: Clean up on close
     ws.on("close", (code, reason) => {
-      log.info("Voice WebSocket closed", {
-        code,
-        reason: reason.toString(),
-      })
-      provider?.disconnect()
+      log.info("Voice WebSocket closed", { code, reason: reason.toString() })
+      void provider?.disconnect().catch((e: Error) =>
+        log.warn("Error during close cleanup", { error: e.message })
+      )
       timer({ status: "success" })
     })
 
     ws.on("error", (error) => {
-      log.error("Voice WebSocket error", {
-        error: error.message,
-      })
-      provider?.disconnect()
+      log.error("Voice WebSocket error", { error: error.message })
+      void provider?.disconnect().catch((e: Error) =>
+        log.warn("Error during error cleanup", { error: e.message })
+      )
       timer({ status: "error" })
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     log.error("Voice session setup failed", { error: message })
     sendToClient(ws, { type: "error", message: "Failed to establish voice session" })
-    provider?.disconnect()
+    void provider?.disconnect().catch(() => { /* cleanup best-effort */ })
     ws.close(4500, "Internal error")
     timer({ status: "error" })
   }

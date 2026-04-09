@@ -1,12 +1,12 @@
 /**
  * Tests for voice WebSocket handler authentication and authorization.
- * Covers the critical security paths: JWT verification, tool access, error handling.
+ * Covers the critical security paths: Auth.js JWT decryption, tool access, error handling.
  */
 
-// Mock jose
-const mockJwtVerify = jest.fn()
-jest.mock("jose", () => ({
-  jwtVerify: (...args: unknown[]) => mockJwtVerify(...args),
+// Mock @auth/core/jwt (Auth.js uses encrypted JWTs, not signed)
+const mockDecode = jest.fn()
+jest.mock("@auth/core/jwt", () => ({
+  decode: (...args: unknown[]) => mockDecode(...args),
 }))
 
 // Mock logger
@@ -53,13 +53,13 @@ jest.mock("../provider-factory", () => ({
   isSupportedVoiceProvider: jest.fn().mockReturnValue(true),
 }))
 
-// Mock @google/genai (required by gemini-live-provider which is transitively imported)
+// Mock @google/genai (required by gemini-live-provider transitively)
 jest.mock("@google/genai", () => ({
   GoogleGenAI: jest.fn(),
   Modality: { AUDIO: "AUDIO" },
 }))
 
-// Mock S3 (needed if settings-manager is loaded)
+// Mock S3
 jest.mock("@/lib/aws/s3-client", () => ({
   clearS3Cache: jest.fn(),
 }))
@@ -70,8 +70,7 @@ import type { IncomingMessage } from "node:http"
 // Helper to create a mock WebSocket
 function createMockWs() {
   const ws = {
-    OPEN: 1,
-    readyState: 1,
+    readyState: 1, // OPEN
     send: jest.fn(),
     close: jest.fn(),
     on: jest.fn(),
@@ -112,8 +111,8 @@ describe("handleVoiceConnection", () => {
       expect(ws.close).toHaveBeenCalledWith(4001, "Unauthorized")
     })
 
-    it("should close with 4001 when JWT verification fails", async () => {
-      mockJwtVerify.mockRejectedValue(new Error("Invalid token"))
+    it("should close with 4001 when Auth.js decode fails", async () => {
+      mockDecode.mockRejectedValue(new Error("Decryption failed"))
 
       const ws = createMockWs()
       const req = createMockReq({ "authjs.session-token": "invalid-token" })
@@ -126,8 +125,8 @@ describe("handleVoiceConnection", () => {
       expect(ws.close).toHaveBeenCalledWith(4001, "Unauthorized")
     })
 
-    it("should close with 4001 when JWT has no sub claim", async () => {
-      mockJwtVerify.mockResolvedValue({ payload: {} })
+    it("should close with 4001 when decoded token has no sub claim", async () => {
+      mockDecode.mockResolvedValue({ email: "test@example.com" })
 
       const ws = createMockWs()
       const req = createMockReq({ "authjs.session-token": "token-no-sub" })
@@ -137,27 +136,35 @@ describe("handleVoiceConnection", () => {
       expect(ws.close).toHaveBeenCalledWith(4001, "Unauthorized")
     })
 
-    it("should verify JWT with HS256 algorithm pinning", async () => {
-      mockJwtVerify.mockResolvedValue({ payload: { sub: "user-123" } })
-      mockHasToolAccess.mockResolvedValue(true)
+    it("should close with 4001 when decode returns null", async () => {
+      mockDecode.mockResolvedValue(null)
 
       const ws = createMockWs()
-      const req = createMockReq({ "authjs.session-token": "valid-token" })
+      const req = createMockReq({ "authjs.session-token": "expired-token" })
 
       await handleVoiceConnection(ws, req)
 
-      expect(mockJwtVerify).toHaveBeenCalledWith(
-        "valid-token",
-        expect.anything(), // TextEncoder-encoded secret key
-        expect.objectContaining({
-          algorithms: ["HS256"],
-          clockTolerance: 30,
-        })
-      )
+      expect(ws.close).toHaveBeenCalledWith(4001, "Unauthorized")
     })
 
-    it("should accept __Secure-authjs.session-token cookie", async () => {
-      mockJwtVerify.mockResolvedValue({ payload: { sub: "user-123" } })
+    it("should use @auth/core/jwt decode with correct salt and secret", async () => {
+      mockDecode.mockResolvedValue({ sub: "user-123" })
+      mockHasToolAccess.mockResolvedValue(true)
+
+      const ws = createMockWs()
+      const req = createMockReq({ "authjs.session-token": "encrypted-token" })
+
+      await handleVoiceConnection(ws, req)
+
+      expect(mockDecode).toHaveBeenCalledWith({
+        token: "encrypted-token",
+        salt: "authjs.session-token",
+        secret: "test-secret-key-for-testing-only-32chars!",
+      })
+    })
+
+    it("should handle __Secure- prefixed cookies", async () => {
+      mockDecode.mockResolvedValue({ sub: "user-123" })
       mockHasToolAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
@@ -165,17 +172,37 @@ describe("handleVoiceConnection", () => {
 
       await handleVoiceConnection(ws, req)
 
-      expect(mockJwtVerify).toHaveBeenCalledWith(
-        "secure-token",
-        expect.anything(),
-        expect.anything()
-      )
+      expect(mockDecode).toHaveBeenCalledWith({
+        token: "secure-token",
+        salt: "__Secure-authjs.session-token",
+        secret: expect.any(String),
+      })
+    })
+
+    it("should reassemble chunked session cookies", async () => {
+      mockDecode.mockResolvedValue({ sub: "user-123" })
+      mockHasToolAccess.mockResolvedValue(true)
+
+      const ws = createMockWs()
+      const req = createMockReq({
+        "authjs.session-token.0": "chunk1",
+        "authjs.session-token.1": "chunk2",
+        "authjs.session-token.2": "chunk3",
+      })
+
+      await handleVoiceConnection(ws, req)
+
+      expect(mockDecode).toHaveBeenCalledWith({
+        token: "chunk1chunk2chunk3",
+        salt: "authjs.session-token",
+        secret: expect.any(String),
+      })
     })
   })
 
   describe("authorization", () => {
     beforeEach(() => {
-      mockJwtVerify.mockResolvedValue({ payload: { sub: "user-123" } })
+      mockDecode.mockResolvedValue({ sub: "user-123" })
     })
 
     it("should close with 4003 when user lacks voice-mode access", async () => {
@@ -193,7 +220,7 @@ describe("handleVoiceConnection", () => {
       expect(ws.close).toHaveBeenCalledWith(4003, "Forbidden")
     })
 
-    it("should close with 4003 when tool access check throws", async () => {
+    it("should close with 4003 when tool access check throws (fail-closed)", async () => {
       mockHasToolAccess.mockRejectedValue(new Error("DB error"))
 
       const ws = createMockWs()
@@ -212,7 +239,7 @@ describe("handleVoiceConnection", () => {
 
       await handleVoiceConnection(ws, req)
 
-      // Should not close with 4003 — connection continues
+      // Should not close with 4003
       const closeCalls = (ws.close as jest.Mock).mock.calls
       const forbiddenClose = closeCalls.find(
         (call: unknown[]) => call[0] === 4003
@@ -222,7 +249,7 @@ describe("handleVoiceConnection", () => {
   })
 
   describe("error handling", () => {
-    it("should close with 4500 when AUTH_SECRET is not configured", async () => {
+    it("should close with 4001 when AUTH_SECRET is not configured", async () => {
       delete process.env.AUTH_SECRET
       delete process.env.NEXTAUTH_SECRET
 
@@ -235,10 +262,9 @@ describe("handleVoiceConnection", () => {
     })
 
     it("should close with 4500 when Google API key is missing", async () => {
-      mockJwtVerify.mockResolvedValue({ payload: { sub: "user-123" } })
+      mockDecode.mockResolvedValue({ sub: "user-123" })
       mockHasToolAccess.mockResolvedValue(true)
 
-      // Override getGoogleAI to return null
       const { Settings } = require("@/lib/settings-manager")
       Settings.getGoogleAI.mockResolvedValueOnce(null)
 
