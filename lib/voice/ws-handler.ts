@@ -230,49 +230,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     }
     provider = createVoiceProvider(voiceSettings.provider)
 
-    // Step 5: Handle incoming messages from client (with rate limiting)
-    let lastAudioTime = 0
-    ws.on("message", (data) => {
-      try {
-        const parsed: unknown = JSON.parse(data.toString())
-        if (!isValidClientMessage(parsed)) {
-          log.warn("Invalid client message format")
-          return
-        }
-
-        switch (parsed.type) {
-          case "audio": {
-            if (!provider?.isConnected()) break
-            // Size check
-            if (parsed.data.length > MAX_AUDIO_DATA_LENGTH) {
-              log.warn("Audio data too large", { length: parsed.data.length })
-              break
-            }
-            // Rate limit
-            const now = Date.now()
-            if (now - lastAudioTime < MIN_AUDIO_INTERVAL_MS) break
-            lastAudioTime = now
-            // Decode base64 — Buffer.from silently handles invalid base64 by
-            // ignoring non-base64 chars, which is acceptable for audio streams
-            provider.sendAudio(Buffer.from(parsed.data, "base64"))
-            break
-          }
-
-          case "disconnect": {
-            log.info("Client requested disconnect")
-            void provider?.disconnect().catch((e: Error) =>
-              log.warn("Error during client-requested disconnect", { error: e.message })
-            )
-            break
-          }
-        }
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error)
-        log.error("Error processing client message", { error: errorMessage })
-      }
-    })
-
-    // Step 6: Connect to AI service with timeout
+    // Step 5: Connect to AI service with timeout
     const providerConfig: VoiceProviderConfig = {
       model: voiceSettings.model,
       language: voiceSettings.language,
@@ -290,6 +248,47 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     // Signal ready to client
     sendToClient(ws, { type: "ready" })
     log.info("Voice session ready")
+
+    // Step 6: Handle incoming messages — registered AFTER provider.connect()
+    // so audio frames aren't processed before the provider is connected.
+    // Clients must wait for { type: "ready" } before sending audio.
+    let lastAudioTime = 0
+    ws.on("message", (data) => {
+      try {
+        const parsed: unknown = JSON.parse(data.toString())
+        if (!isValidClientMessage(parsed)) {
+          log.warn("Invalid client message format")
+          return
+        }
+
+        switch (parsed.type) {
+          case "audio": {
+            if (!provider?.isConnected()) break
+            if (parsed.data.length > MAX_AUDIO_DATA_LENGTH) {
+              log.warn("Audio data too large", { length: parsed.data.length })
+              break
+            }
+            const now = Date.now()
+            if (now - lastAudioTime < MIN_AUDIO_INTERVAL_MS) break
+            lastAudioTime = now
+            // Buffer.from silently ignores invalid base64 chars — acceptable for audio
+            provider.sendAudio(Buffer.from(parsed.data, "base64"))
+            break
+          }
+
+          case "disconnect": {
+            log.info("Client requested disconnect")
+            void provider?.disconnect().catch((e: Error) =>
+              log.warn("Error during client-requested disconnect", { error: e.message })
+            )
+            break
+          }
+        }
+      } catch (error) {
+        const errorMessage = error instanceof Error ? error.message : String(error)
+        log.error("Error processing client message", { error: errorMessage })
+      }
+    })
 
     // Step 7: Keepalive ping for ALB idle timeout (300s)
     pingInterval = setInterval(() => {

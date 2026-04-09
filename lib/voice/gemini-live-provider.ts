@@ -40,10 +40,11 @@ const MAX_VOICE_NAME_LENGTH = 100
  */
 function isValidLanguageCode(code: string): boolean {
   if (code.length < 2 || code.length > 35) return false
-  // Split on hyphens, validate each subtag is alpha 2-8 chars
+  // Split on hyphens, validate each subtag is alphanumeric 2-8 chars
+  // Numeric subtags are valid in BCP47 (e.g. es-419 for Latin American Spanish)
   const parts = code.split("-")
   if (parts.length === 0 || parts.length > 4) return false
-  return parts.every((p) => p.length >= 2 && p.length <= 8 && /^[A-Za-z]+$/.test(p))
+  return parts.every((p) => p.length >= 2 && p.length <= 8 && /^[\dA-Za-z]+$/.test(p))
 }
 
 export class GeminiLiveProvider implements VoiceProvider {
@@ -242,7 +243,7 @@ export class GeminiLiveProvider implements VoiceProvider {
     // Enable context window compression for long conversations
     liveConfig.contextWindowCompression = {
       slidingWindow: {
-        targetTokens: "10000",
+        targetTokens: "10000", // SDK type is string, not number — intentional
       },
     }
 

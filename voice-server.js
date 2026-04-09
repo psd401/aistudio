@@ -83,8 +83,10 @@ http.createServer = function (...args) {
     wss.on('connection', async (ws, req) => {
       try {
         // Import the voice handler from the Next.js server bundle.
-        // If the module is unavailable, hard-fail — do NOT fall back to an
-        // inline handler, as that would bypass hasToolAccess authorization.
+        // Path is the standalone output location for /lib/voice/ws-handler.ts.
+        // If Next.js changes the standalone structure, this path must be updated.
+        // Hard-fail if unavailable — do NOT fall back to inline handler
+        // as that would bypass hasToolAccess authorization.
         const { handleVoiceConnection } = require('./.next/server/lib/voice/ws-handler')
         await handleVoiceConnection(ws, req).catch((err) => {
           console.error('[voice-server] Voice connection error:', err.message) // eslint-disable-line no-console
