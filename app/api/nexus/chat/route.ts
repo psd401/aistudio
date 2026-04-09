@@ -472,8 +472,11 @@ async function setupConversation(params: {
   }
 
   // Save user message — guard against truly empty messages (no parts, no content)
-  // while preserving attachment-only turns where extractUserContent() returns empty
-  // text but the original message had file/attachment parts.
+  // while preserving attachment-only turns. The guard checks the ORIGINAL message
+  // from the client (which includes file/attachment parts), not the extracted content.
+  // extractUserContent() only serializes text/image parts, so attachment-only messages
+  // arrive at saveUserMessage with content='' and parts=[] — but they ARE still saved
+  // because hasOriginalContent is true (the original message had file parts).
   const lastMessage = messages[messages.length - 1];
   if (lastMessage && lastMessage.role === 'user') {
     const hasOriginalContent = (lastMessage.parts && lastMessage.parts.length > 0) ||
