@@ -8,7 +8,7 @@ import { executeQuery } from '@/lib/db/drizzle-client';
 import { nexusConversations, nexusMessages } from '@/lib/db/schema';
 import { sanitizeTextForDatabase, decodeHtmlEntitiesDeep } from '@/lib/utils/text-sanitizer';
 import { safeJsonbStringify } from '@/lib/db/json-utils';
-import { createLogger } from '@/lib/logger';
+import { createLogger, sanitizeForLogging } from '@/lib/logger';
 
 const log = createLogger({ route: 'api.nexus.chat.helpers' });
 
@@ -113,7 +113,7 @@ export async function createConversation(params: {
   }
 
   const conversationId = createResult[0].id as string;
-  log.info('Created new Nexus conversation', { conversationId, userId, title });
+  log.info('Created new Nexus conversation', sanitizeForLogging({ conversationId, userId, title }));
 
   return { conversationId };
 }
@@ -184,7 +184,7 @@ export async function saveUserMessage(params: {
 }): Promise<void> {
   const { conversationId, content, parts, dbModelId } = params;
 
-  if (!content && parts.length === 0) {
+  if (!content.trim() && parts.length === 0) {
     log.warn('Skipping empty user message save', { conversationId });
     return;
   }

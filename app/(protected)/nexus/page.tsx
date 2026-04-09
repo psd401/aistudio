@@ -87,9 +87,7 @@ function ConversationRuntimeProvider({
   // load() on the recreated adapter and fetches already-displayed messages,
   // causing duplicate message rendering. (Issue #868)
   const conversationIdRef = useRef(conversationId)
-  useEffect(() => {
-    conversationIdRef.current = conversationId
-  }, [conversationId])
+  conversationIdRef.current = conversationId
 
   const historyAdapter = useMemo(
     () => createNexusHistoryAdapter(() => conversationIdRef.current),
@@ -131,13 +129,17 @@ function ConversationRuntimeProvider({
     // Extract conversation ID from response header (new conversations only)
     const newConversationId = response.headers.get('X-Conversation-Id')
     if (newConversationId && newConversationId !== conversationId) {
-      log.debug('Received new conversation ID from server', {
-        newConversationId,
-        currentConversationId: conversationId
-      })
-      // Update parent state for URL and component updates
-      if (onConversationIdChange) {
-        onConversationIdChange(newConversationId)
+      if (!uuidSchema.safeParse(newConversationId).success) {
+        log.warn('Received malformed X-Conversation-Id header, ignoring', { newConversationId })
+      } else {
+        log.debug('Received new conversation ID from server', {
+          newConversationId,
+          currentConversationId: conversationId
+        })
+        // Update parent state for URL and component updates
+        if (onConversationIdChange) {
+          onConversationIdChange(newConversationId)
+        }
       }
     }
 
