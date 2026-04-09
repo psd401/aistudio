@@ -14,7 +14,7 @@
 
 import type { IncomingMessage } from "node:http"
 import type WebSocket from "ws"
-import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
+import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { Settings } from "@/lib/settings-manager"
 import { createVoiceProvider } from "./provider-factory"
 import type {
@@ -173,17 +173,19 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       log.warn("Unauthorized voice connection attempt")
       sendToClient(ws, { type: "error", message: "Unauthorized" })
       ws.close(4001, "Unauthorized")
+      timer({ status: "unauthorized" })
       return
     }
 
-    log.info("Voice connection authenticated", { userId: auth.userId })
+    log.info("Voice connection authenticated", { userId: sanitizeForLogging(auth.userId) })
 
     // Step 2: Check voice access
     const hasAccess = await checkVoiceAccess(auth.sub)
     if (!hasAccess) {
-      log.warn("User lacks voice-mode access", { userId: auth.userId })
+      log.warn("User lacks voice-mode access", { userId: sanitizeForLogging(auth.userId) })
       sendToClient(ws, { type: "error", message: "Voice mode not enabled for this user" })
       ws.close(4003, "Forbidden")
+      timer({ status: "forbidden" })
       return
     }
 
@@ -197,6 +199,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       log.error("Google API key not configured")
       sendToClient(ws, { type: "error", message: "Voice provider not configured" })
       ws.close(4500, "Provider not configured")
+      timer({ status: "error", reason: "missing_api_key" })
       return
     }
 
@@ -206,6 +209,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       log.error("Invalid voice provider configured", { provider: voiceSettings.provider })
       sendToClient(ws, { type: "error", message: "Voice provider not configured" })
       ws.close(4500, "Provider not configured")
+      timer({ status: "error", reason: "invalid_provider" })
       return
     }
     provider = createVoiceProvider(voiceSettings.provider)

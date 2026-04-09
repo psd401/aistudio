@@ -19,6 +19,7 @@ jest.mock("@/lib/logger", () => ({
   }),
   generateRequestId: () => "test-request-id",
   startTimer: () => jest.fn(),
+  sanitizeForLogging: (v: unknown) => v,
 }))
 
 // Mock settings

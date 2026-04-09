@@ -43,17 +43,22 @@ http.createServer = function (...args) {
 
       if (pathname === VOICE_WS_PATH) {
         // Validate origin to prevent cross-site WebSocket hijacking (CSWSH)
+        // Reject requests with no Origin header — browser WS requests always include it
         const origin = request.headers.origin
-        if (origin) {
-          const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean)
-          const appUrl = process.env.NEXTAUTH_URL || process.env.APP_URL
-          if (appUrl) allowedOrigins.push(appUrl.replace(/\/+$/, ''))
+        if (!origin) {
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
+          socket.destroy()
+          return
+        }
 
-          if (allowedOrigins.length > 0 && !allowedOrigins.includes(origin)) {
-            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
-            socket.destroy()
-            return
-          }
+        const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean)
+        const appUrl = process.env.NEXTAUTH_URL || process.env.APP_URL
+        if (appUrl) allowedOrigins.push(appUrl.replace(/\/+$/, ''))
+
+        if (allowedOrigins.length > 0 && !allowedOrigins.includes(origin)) {
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
+          socket.destroy()
+          return
         }
 
         wss.handleUpgrade(request, socket, head, (ws) => {
