@@ -152,4 +152,15 @@ describe('handleImageGenerationError', () => {
     expect(String(body.error)).not.toContain('org-abc123');
     expect(body.retryAfter).toBe(30);
   });
+
+  it('returns generic message for AUTHENTICATION errors with requestId', () => {
+    const error = Object.assign(new Error('API key sk-proj-abc123 is invalid'), { type: 'AUTHENTICATION' });
+    const response = handleImageGenerationError(error, 'conv-123', 'req-456');
+
+    expect(response.status).toBe(401);
+    const body = getLastBody();
+    expect(body.code).toBe('AUTH_ERROR');
+    expect(String(body.error)).not.toContain('sk-proj-abc123');
+    expect(body.requestId).toBe('req-456');
+  });
 });

@@ -315,8 +315,10 @@ async function handleS3FileImage(
   }
 }
 
+// SVG intentionally excluded — can embed <script> tags and JS event handlers (XSS vector)
 const ALLOWED_IMAGE_MIMES = new Set([
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff'
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff',
+  'image/avif', 'image/heic', 'image/heif'
 ]);
 
 async function handleFilePart(
@@ -525,11 +527,6 @@ export function handleImageGenerationError(
   conversationId: string,
   requestId: string
 ): Response {
-  log.error('Image generation failed', {
-    error: error instanceof Error ? error.message : String(error),
-    conversationId
-  });
-
   // Safely extract typed error properties without unsafe `as` assertion on unknown
   const errorMessage = error instanceof Error ? error.message : String(error);
   const errorType = error instanceof Error ? (error as Error & { type?: string }).type : undefined;
@@ -566,13 +563,19 @@ export function handleImageGenerationError(
   }
 
   if (errorType === 'AUTHENTICATION') {
+    log.warn('Image generation authentication failure', {
+      conversationId,
+      errorMessage,
+      requestId
+    });
     return new Response(
-      JSON.stringify({ error: 'Image generation service authentication failed', code: 'AUTH_ERROR' }),
+      JSON.stringify({ error: 'Image generation service authentication failed', code: 'AUTH_ERROR', requestId }),
       { status: 401, headers: { 'Content-Type': 'application/json' } }
     );
   }
 
-  log.error('Image generation error details', {
+  // Only log at error level for unexpected/untyped errors — not for expected error types above
+  log.error('Image generation failed', {
     conversationId,
     errorMessage,
     requestId
