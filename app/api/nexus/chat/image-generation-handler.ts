@@ -107,7 +107,12 @@ export function validateImagePrompt(prompt: string): { valid: boolean; error?: R
     'hate', 'racist', 'discriminatory', 'offensive'
   ];
 
-  if (forbiddenPatterns.some(pattern => lowercasePrompt.includes(pattern))) {
+  const matchedPattern = forbiddenPatterns.find(pattern => lowercasePrompt.includes(pattern));
+  if (matchedPattern) {
+    log.warn('Image prompt blocked by local content policy filter', {
+      matchedPattern,
+      promptLength: prompt.length
+    });
     return {
       valid: false,
       error: new Response(
@@ -207,9 +212,13 @@ export async function saveImageUserMessage(params: {
  * Extract reference images from message parts
  */
 export async function extractReferenceImages(
-  lastMessage: ImageGenerationParams['messages'][0]
+  lastMessage: ImageGenerationParams['messages'][0] | undefined
 ): Promise<ReferenceImage[]> {
   const referenceImages: ReferenceImage[] = [];
+
+  if (!lastMessage) {
+    return referenceImages;
+  }
 
   const partsArray = lastMessage.parts as unknown as Array<{
     type: string;
@@ -260,10 +269,16 @@ async function handleImagePart(
     }
   } else if (part.image && !part.image.startsWith('s3://')) {
     referenceImages.push({ base64: part.image, role: 'reference' });
+  } else if (part.image && part.image.startsWith('s3://')) {
+    // Before this guard, s3:// images without s3Key would fall through to the
+    // imageUrl branch (if present) — silently using a URL that can't resolve.
+    // Logging explicitly is safer than a silent fallback to an unusable URL.
+    log.warn('Image part has s3:// URL but no s3Key — cannot retrieve');
   } else if (part.imageUrl) {
+    // s3Key is intentionally omitted — it is provably undefined here because
+    // the first branch (if part.s3Key) already handles parts that carry an s3Key.
     referenceImages.push({
       url: part.imageUrl,
-      s3Key: part.s3Key,
       role: 'reference'
     });
   }
@@ -303,12 +318,18 @@ async function handleS3FileImage(
   }
 }
 
+// SVG intentionally excluded — can embed <script> tags and JS event handlers (XSS vector)
+const ALLOWED_IMAGE_MIMES = new Set([
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff',
+  'image/avif', 'image/heic', 'image/heif'
+]);
+
 async function handleFilePart(
   part: { mediaType?: string; mimeType?: string; s3Key?: string; url?: string; data?: string },
   referenceImages: ReferenceImage[]
 ): Promise<void> {
   const mimeType = part.mediaType || part.mimeType || '';
-  if (!mimeType.startsWith('image/')) {
+  if (!ALLOWED_IMAGE_MIMES.has(mimeType)) {
     return;
   }
 
@@ -509,42 +530,64 @@ export function handleImageGenerationError(
   conversationId: string,
   requestId: string
 ): Response {
-  log.error('Image generation failed', {
-    error: error instanceof Error ? error.message : String(error),
-    conversationId
-  });
+  // Extract typed error properties with instanceof + in narrowing
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const errorType = error instanceof Error && 'type' in error ? (error as { type: string }).type : undefined;
+  const retryAfter = error instanceof Error && 'retryAfter' in error ? (error as { retryAfter: number }).retryAfter : undefined;
 
-  const typedError = error as Error & { type?: string; retryAfter?: number };
-
-  if (typedError.type === 'CONTENT_POLICY') {
+  if (errorType === 'CONTENT_POLICY') {
+    // Cap logged message to avoid persisting full user prompt content that providers may echo back
+    log.warn('Image generation content policy violation', {
+      conversationId,
+      errorMessage: errorMessage.slice(0, 200),
+      requestId
+    });
     return new Response(
-      JSON.stringify({ error: typedError.message, code: 'CONTENT_POLICY' }),
+      JSON.stringify({ error: 'Your image prompt was flagged by the content policy. Please revise your request.', code: 'CONTENT_POLICY', requestId }),
       { status: 400, headers: { 'Content-Type': 'application/json' } }
     );
   }
 
-  if (typedError.type === 'RATE_LIMIT') {
+  if (errorType === 'RATE_LIMIT') {
+    log.warn('Image generation rate limited', {
+      conversationId,
+      errorMessage,
+      retryAfter,
+      requestId
+    });
     return new Response(
       JSON.stringify({
-        error: typedError.message,
+        error: 'Image generation rate limit reached. Please wait and try again.',
         code: 'RATE_LIMIT',
-        retryAfter: typedError.retryAfter || 60
+        retryAfter: retryAfter || 60,
+        requestId
       }),
       { status: 429, headers: { 'Content-Type': 'application/json' } }
     );
   }
 
-  if (typedError.type === 'AUTHENTICATION') {
+  if (errorType === 'AUTHENTICATION') {
+    log.warn('Image generation authentication failure', {
+      conversationId,
+      errorMessage,
+      requestId
+    });
     return new Response(
-      JSON.stringify({ error: 'Image generation service authentication failed', code: 'AUTH_ERROR' }),
+      JSON.stringify({ error: 'Image generation service authentication failed', code: 'AUTH_ERROR', requestId }),
       { status: 401, headers: { 'Content-Type': 'application/json' } }
     );
   }
 
+  // Only log at error level for unexpected/untyped errors — not for expected error types above
+  log.error('Image generation failed', {
+    conversationId,
+    errorMessage,
+    requestId
+  });
+
   return new Response(
     JSON.stringify({
       error: 'Image generation failed. Please try again.',
-      details: typedError.message,
       requestId
     }),
     { status: 500, headers: { 'Content-Type': 'application/json' } }
