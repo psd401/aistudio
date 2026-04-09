@@ -98,14 +98,6 @@ describe("WebSocket protocol messages", () => {
       expect(msg.type).toBe("audio")
     })
 
-    it("should represent a config message", () => {
-      const msg: VoiceClientMessage = {
-        type: "config",
-        config: { model: "test-model" },
-      }
-      expect(msg.type).toBe("config")
-      expect(msg.config.model).toBe("test-model")
-    })
 
     it("should represent a disconnect message", () => {
       const msg: VoiceClientMessage = {

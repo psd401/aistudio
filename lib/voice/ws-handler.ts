@@ -181,15 +181,6 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
             break
           }
 
-          case "config": {
-            // Client can send updated config (e.g. system instruction)
-            // This is handled during initial connection setup
-            log.debug("Received config update from client", {
-              model: message.config.model,
-            })
-            break
-          }
-
           case "disconnect": {
             log.info("Client requested disconnect")
             provider?.disconnect()

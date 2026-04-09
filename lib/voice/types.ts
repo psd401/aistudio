@@ -109,7 +109,6 @@ export interface VoiceProvider {
  */
 export type VoiceClientMessage =
   | { type: "audio"; data: string } // base64-encoded audio
-  | { type: "config"; config: VoiceProviderConfig }
   | { type: "disconnect" }
 
 export type VoiceServerMessage =

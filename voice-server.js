@@ -195,9 +195,8 @@ async function handleVoiceConnectionInline(ws, req) {
       try {
         const msg = JSON.parse(data.toString())
         if (msg.type === 'audio' && msg.data) {
-          const audioBuffer = Buffer.from(msg.data, 'base64')
-          const audioBlob = new Blob([audioBuffer], { type: 'audio/pcm;rate=16000' })
-          session.sendRealtimeInput({ audio: audioBlob })
+          // SDK Blob is { data: string, mimeType: string } — NOT the web API Blob
+          session.sendRealtimeInput({ audio: { data: msg.data, mimeType: 'audio/pcm;rate=16000' } })
         } else if (msg.type === 'disconnect') {
           session.conn.close()
         }
