@@ -25,6 +25,8 @@ import type {
 } from "./types"
 
 const DEFAULT_MODEL = "gemini-2.0-flash-live-001"
+/** Max transcript entries to keep in memory — rolling window to bound memory usage */
+const MAX_TRANSCRIPT_ENTRIES = 200
 
 export class GeminiLiveProvider implements VoiceProvider {
   readonly providerId = "gemini-live"
@@ -254,7 +256,7 @@ export class GeminiLiveProvider implements VoiceProvider {
         timestamp: new Date(),
         isFinal: true,
       }
-      this.state.transcript.push(entry)
+      this.addTranscript(entry)
       this.onEvent?.({ type: "transcript", entry })
     }
 
@@ -265,7 +267,7 @@ export class GeminiLiveProvider implements VoiceProvider {
         timestamp: new Date(),
         isFinal: true,
       }
-      this.state.transcript.push(entry)
+      this.addTranscript(entry)
       this.onEvent?.({ type: "transcript", entry })
     }
   }
@@ -290,5 +292,15 @@ export class GeminiLiveProvider implements VoiceProvider {
    */
   private updateState(partial: Partial<VoiceSessionState>): void {
     this.state = { ...this.state, ...partial }
+  }
+
+  /**
+   * Add a transcript entry with rolling window to bound memory.
+   */
+  private addTranscript(entry: TranscriptEntry): void {
+    this.state.transcript.push(entry)
+    if (this.state.transcript.length > MAX_TRANSCRIPT_ENTRIES) {
+      this.state.transcript = this.state.transcript.slice(-MAX_TRANSCRIPT_ENTRIES)
+    }
   }
 }

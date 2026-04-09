@@ -11,11 +11,10 @@
  * Issue #872
  */
 
-/* eslint-disable no-undef, no-console, @typescript-eslint/no-require-imports, unicorn/prefer-node-protocol */
+/* eslint-disable no-undef, @typescript-eslint/no-require-imports, unicorn/prefer-node-protocol -- CJS script running outside Next.js runtime */
 const http = require('http')
 const { WebSocketServer } = require('ws')
 const { parse } = require('url')
-const crypto = require('crypto')
 
 const VOICE_WS_PATH = '/api/nexus/voice'
 
@@ -36,12 +35,27 @@ http.createServer = function (...args) {
 
   // Only set up WebSocket once (startServer may create multiple servers)
   if (!wss) {
-    wss = new WebSocketServer({ noServer: true })
+    // maxPayload: 64KB — PCM 16kHz 16-bit mono = 32KB/sec; generous 1-sec cap
+    wss = new WebSocketServer({ noServer: true, maxPayload: 64 * 1024 })
 
     server.on('upgrade', (request, socket, head) => {
       const { pathname } = parse(request.url || '/')
 
       if (pathname === VOICE_WS_PATH) {
+        // Validate origin to prevent cross-site WebSocket hijacking (CSWSH)
+        const origin = request.headers.origin
+        if (origin) {
+          const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean)
+          const appUrl = process.env.NEXTAUTH_URL || process.env.APP_URL
+          if (appUrl) allowedOrigins.push(appUrl.replace(/\/+$/, ''))
+
+          if (allowedOrigins.length > 0 && !allowedOrigins.includes(origin)) {
+            socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
+            socket.destroy()
+            return
+          }
+        }
+
         wss.handleUpgrade(request, socket, head, (ws) => {
           wss.emit('connection', ws, request)
         })
@@ -51,174 +65,25 @@ http.createServer = function (...args) {
 
     wss.on('connection', async (ws, req) => {
       try {
-        // Dynamic import of the voice handler from Next.js server bundle
-        // The handler is compiled into the .next/server/ directory during build
+        // Import the voice handler from the Next.js server bundle.
+        // If the module is unavailable, hard-fail — do NOT fall back to an
+        // inline handler, as that would bypass hasToolAccess authorization.
         const { handleVoiceConnection } = require('./.next/server/lib/voice/ws-handler')
-        handleVoiceConnection(ws, req)
+        await handleVoiceConnection(ws, req).catch((err) => {
+          console.error('[voice-server] Voice connection error:', err.message) // eslint-disable-line no-console
+          try { ws.close(4500, 'Internal error') } catch { /* already closed */ }
+        })
       } catch (importError) {
-        // If the handler isn't available in the bundle, use inline auth + proxy
-        console.error('[voice-server] Failed to load ws-handler from bundle, using inline handler:', importError.message)
-        handleVoiceConnectionInline(ws, req)
+        console.error('[voice-server] FATAL: ws-handler module not found in bundle:', importError.message) // eslint-disable-line no-console
+        ws.send(JSON.stringify({ type: 'error', message: 'Voice service unavailable' }))
+        ws.close(4500, 'Service unavailable')
       }
     })
 
-    console.log(`[voice-server] WebSocket handler registered for ${VOICE_WS_PATH}`)
+    console.log(`[voice-server] WebSocket handler registered for ${VOICE_WS_PATH}`) // eslint-disable-line no-console
   }
 
   return server
-}
-
-/**
- * Inline fallback handler for when the bundled ws-handler is not available.
- * Performs basic auth check and sets up a minimal voice proxy.
- */
-async function handleVoiceConnectionInline(ws, req) {
-  const requestId = crypto.randomUUID()
-  console.log(`[voice-server] [${requestId}] New voice connection (inline handler)`)
-
-  try {
-    // Extract session token from cookies
-    const cookieHeader = req.headers.cookie || ''
-    const cookies = Object.fromEntries(
-      cookieHeader.split(';').map((c) => {
-        const [key, ...vals] = c.trim().split('=')
-        return [key, vals.join('=')]
-      })
-    )
-
-    const sessionToken =
-      cookies['__Secure-authjs.session-token'] ||
-      cookies['authjs.session-token'] ||
-      cookies['next-auth.session-token']
-
-    if (!sessionToken) {
-      console.warn(`[voice-server] [${requestId}] No session token found`)
-      ws.send(JSON.stringify({ type: 'error', message: 'Unauthorized' }))
-      ws.close(4001, 'Unauthorized')
-      return
-    }
-
-    // Verify JWT using jose (available in Node.js 22)
-    const { jwtVerify } = await import('jose')
-    const secret = process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET
-    if (!secret) {
-      console.error(`[voice-server] [${requestId}] AUTH_SECRET not configured`)
-      ws.send(JSON.stringify({ type: 'error', message: 'Server misconfigured' }))
-      ws.close(4500, 'Server error')
-      return
-    }
-
-    const secretKey = new TextEncoder().encode(secret)
-    const { payload } = await jwtVerify(sessionToken, secretKey)
-
-    if (!payload.sub) {
-      ws.send(JSON.stringify({ type: 'error', message: 'Invalid session' }))
-      ws.close(4001, 'Unauthorized')
-      return
-    }
-
-    console.log(`[voice-server] [${requestId}] Authenticated user: ${payload.sub}`)
-
-    // For the inline handler, we set up a basic Gemini Live proxy
-    // The full handler with tool access checks runs when the bundled version is available
-    const { GoogleGenAI, Modality } = await import('@google/genai')
-
-    const apiKey = process.env.GOOGLE_API_KEY
-    if (!apiKey) {
-      ws.send(JSON.stringify({ type: 'error', message: 'Voice provider not configured' }))
-      ws.close(4500, 'Provider not configured')
-      return
-    }
-
-    const ai = new GoogleGenAI({ apiKey })
-    const model = process.env.VOICE_MODEL || 'gemini-2.0-flash-live-001'
-
-    const session = await ai.live.connect({
-      model,
-      config: {
-        responseModalities: [Modality.AUDIO],
-        inputAudioTranscription: {},
-        outputAudioTranscription: {},
-      },
-      callbacks: {
-        onopen: () => {
-          ws.send(JSON.stringify({ type: 'ready' }))
-        },
-        onmessage: (message) => {
-          const content = message.serverContent
-          if (!content) return
-
-          // Forward audio
-          if (content.modelTurn?.parts) {
-            for (const part of content.modelTurn.parts) {
-              if (part.inlineData?.data) {
-                ws.send(JSON.stringify({ type: 'audio', data: part.inlineData.data }))
-              }
-            }
-          }
-
-          // Forward transcripts
-          if (content.inputTranscription?.text) {
-            ws.send(JSON.stringify({
-              type: 'transcript',
-              entry: { role: 'user', text: content.inputTranscription.text, isFinal: true, timestamp: new Date().toISOString() }
-            }))
-          }
-          if (content.outputTranscription?.text) {
-            ws.send(JSON.stringify({
-              type: 'transcript',
-              entry: { role: 'assistant', text: content.outputTranscription.text, isFinal: true, timestamp: new Date().toISOString() }
-            }))
-          }
-
-          // Forward state
-          if (content.turnComplete) {
-            ws.send(JSON.stringify({ type: 'state', speaking: 'none' }))
-          }
-          if (content.interrupted) {
-            ws.send(JSON.stringify({ type: 'state', speaking: 'user' }))
-          }
-        },
-        onerror: (error) => {
-          console.error(`[voice-server] [${requestId}] Gemini error:`, error.message)
-          ws.send(JSON.stringify({ type: 'error', message: 'Voice service error' }))
-        },
-        onclose: () => {
-          ws.send(JSON.stringify({ type: 'session_ended', reason: 'finished' }))
-          ws.close()
-        },
-      },
-    })
-
-    // Forward audio from client to Gemini
-    ws.on('message', (data) => {
-      try {
-        const msg = JSON.parse(data.toString())
-        if (msg.type === 'audio' && msg.data) {
-          // SDK Blob is { data: string, mimeType: string } — NOT the web API Blob
-          session.sendRealtimeInput({ audio: { data: msg.data, mimeType: 'audio/pcm;rate=16000' } })
-        } else if (msg.type === 'disconnect') {
-          session.conn.close()
-        }
-      } catch (err) {
-        console.error(`[voice-server] [${requestId}] Message error:`, err.message)
-      }
-    })
-
-    ws.on('close', () => {
-      console.log(`[voice-server] [${requestId}] Connection closed`)
-      try { session.conn.close() } catch { /* ignore */ }
-    })
-
-    ws.on('error', (err) => {
-      console.error(`[voice-server] [${requestId}] WebSocket error:`, err.message)
-      try { session.conn.close() } catch { /* ignore */ }
-    })
-  } catch (error) {
-    console.error(`[voice-server] [${requestId}] Setup error:`, error.message || error)
-    ws.send(JSON.stringify({ type: 'error', message: 'Failed to establish voice session' }))
-    ws.close(4500, 'Internal error')
-  }
 }
 
 // Now load and run the original Next.js standalone server

@@ -68,7 +68,10 @@ async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: st
     }
 
     const secretKey = new TextEncoder().encode(secret)
-    const { payload } = await jwtVerify(sessionToken, secretKey)
+    const { payload } = await jwtVerify(sessionToken, secretKey, {
+      algorithms: ["HS256"], // Pin to NextAuth v5 default algorithm
+      clockTolerance: 30,    // 30-second clock skew tolerance
+    })
 
     if (!payload.sub) {
       log.warn("Session token missing sub claim")
@@ -164,7 +167,14 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       return
     }
 
-    // Step 4: Create and connect provider
+    // Step 4: Validate and create provider
+    const { isSupportedVoiceProvider } = await import("./provider-factory")
+    if (!isSupportedVoiceProvider(voiceSettings.provider)) {
+      log.error("Invalid voice provider configured", { provider: voiceSettings.provider })
+      sendToClient(ws, { type: "error", message: "Voice provider not configured" })
+      ws.close(4500, "Provider not configured")
+      return
+    }
     provider = createVoiceProvider(voiceSettings.provider)
 
     // Step 5: Handle incoming messages from client
@@ -175,6 +185,11 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
         switch (message.type) {
           case "audio": {
             if (provider?.isConnected()) {
+              // Validate audio data: must be string, max 128KB base64 (≈96KB PCM)
+              if (typeof message.data !== "string" || message.data.length > 131_072) {
+                log.warn("Invalid audio data", { type: typeof message.data, length: typeof message.data === "string" ? message.data.length : 0 })
+                break
+              }
               const audioBuffer = Buffer.from(message.data, "base64")
               provider.sendAudio(audioBuffer)
             }
