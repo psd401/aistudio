@@ -313,7 +313,7 @@ async function handleS3FileImage(
 }
 
 const ALLOWED_IMAGE_MIMES = new Set([
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp', 'image/tiff'
+  'image/jpeg', 'image/png', 'image/gif', 'image/webp', 'image/bmp', 'image/tiff'
 ]);
 
 async function handleFilePart(
@@ -530,18 +530,30 @@ export function handleImageGenerationError(
   const typedError = error as Error & { type?: string; retryAfter?: number };
 
   if (typedError.type === 'CONTENT_POLICY') {
+    log.warn('Image generation content policy violation', {
+      conversationId,
+      errorMessage: typedError.message,
+      requestId
+    });
     return new Response(
-      JSON.stringify({ error: typedError.message, code: 'CONTENT_POLICY' }),
+      JSON.stringify({ error: 'Your image prompt was flagged by the content policy. Please revise your request.', code: 'CONTENT_POLICY', requestId }),
       { status: 400, headers: { 'Content-Type': 'application/json' } }
     );
   }
 
   if (typedError.type === 'RATE_LIMIT') {
+    log.warn('Image generation rate limited', {
+      conversationId,
+      errorMessage: typedError.message,
+      retryAfter: typedError.retryAfter || 60,
+      requestId
+    });
     return new Response(
       JSON.stringify({
-        error: typedError.message,
+        error: 'Image generation rate limit reached. Please wait and try again.',
         code: 'RATE_LIMIT',
-        retryAfter: typedError.retryAfter || 60
+        retryAfter: typedError.retryAfter || 60,
+        requestId
       }),
       { status: 429, headers: { 'Content-Type': 'application/json' } }
     );

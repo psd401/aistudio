@@ -1,15 +1,13 @@
-import { describe, it, expect } from '@jest/globals';
-
 /**
- * Tests for image-generation-handler.ts
- *
- * These test the pure/synchronous functions that can be imported without
- * side effects. extractReferenceImages is async and accesses S3, so we
- * test it via a focused import that avoids triggering DB/S3 module resolution.
+ * @jest-environment node
  */
-
-// extractImagePrompt and validateImagePrompt are pure functions — safe to import directly
-import { extractImagePrompt, validateImagePrompt } from '@/app/api/nexus/chat/image-generation-handler';
+import { describe, it, expect } from '@jest/globals';
+import {
+  extractImagePrompt,
+  validateImagePrompt,
+  extractReferenceImages,
+  handleImageGenerationError
+} from '@/app/api/nexus/chat/image-generation-handler';
 
 describe('extractImagePrompt', () => {
   it('returns empty string when messages array is empty', () => {
@@ -70,26 +68,17 @@ describe('validateImagePrompt', () => {
 });
 
 describe('extractReferenceImages', () => {
-  // Dynamic import to avoid top-level DB/S3 module resolution
-  async function getExtractReferenceImages() {
-    const mod = await import('@/app/api/nexus/chat/image-generation-handler');
-    return mod.extractReferenceImages;
-  }
-
   it('returns empty array when lastMessage is undefined', async () => {
-    const extractReferenceImages = await getExtractReferenceImages();
     const result = await extractReferenceImages(undefined);
     expect(result).toEqual([]);
   });
 
   it('returns empty array when message has no parts', async () => {
-    const extractReferenceImages = await getExtractReferenceImages();
     const result = await extractReferenceImages({ id: '1', role: 'user' });
     expect(result).toEqual([]);
   });
 
   it('returns empty array when parts is not an array', async () => {
-    const extractReferenceImages = await getExtractReferenceImages();
     const result = await extractReferenceImages({
       id: '1',
       role: 'user',
@@ -99,12 +88,68 @@ describe('extractReferenceImages', () => {
   });
 
   it('returns empty array when parts has only text', async () => {
-    const extractReferenceImages = await getExtractReferenceImages();
     const result = await extractReferenceImages({
       id: '1',
       role: 'user',
       parts: [{ type: 'text', text: 'draw something' }]
     });
     expect(result).toEqual([]);
+  });
+});
+
+describe('handleImageGenerationError', () => {
+  // jest-environment-jsdom's Response polyfill lacks body-reading methods (.text(), .json()).
+  // Spy on Response constructor to capture the body string argument directly.
+  let responseBodies: string[];
+  const OriginalResponse = globalThis.Response;
+
+  beforeEach(() => {
+    responseBodies = [];
+    globalThis.Response = class extends OriginalResponse {
+      constructor(body?: BodyInit | null, init?: ResponseInit) {
+        super(body, init);
+        if (typeof body === 'string') responseBodies.push(body);
+      }
+    } as typeof Response;
+  });
+
+  afterEach(() => {
+    globalThis.Response = OriginalResponse;
+  });
+
+  function getLastBody(): Record<string, unknown> {
+    return JSON.parse(responseBodies[responseBodies.length - 1]) as Record<string, unknown>;
+  }
+
+  it('does not expose error details in 500 response body', () => {
+    const error = new Error('Internal provider SDK trace: connection to api.openai.com failed');
+    const response = handleImageGenerationError(error, 'conv-123', 'req-456');
+
+    expect(response.status).toBe(500);
+    const body = getLastBody();
+    expect(body.error).toBe('Image generation failed. Please try again.');
+    expect(body).not.toHaveProperty('details');
+    expect(body.requestId).toBe('req-456');
+  });
+
+  it('returns generic message for CONTENT_POLICY errors', () => {
+    const error = Object.assign(new Error('prompt contains nude content: "user prompt text here"'), { type: 'CONTENT_POLICY' });
+    const response = handleImageGenerationError(error, 'conv-123', 'req-456');
+
+    expect(response.status).toBe(400);
+    const body = getLastBody();
+    expect(body.code).toBe('CONTENT_POLICY');
+    expect(String(body.error)).not.toContain('user prompt text here');
+  });
+
+  it('returns generic message for RATE_LIMIT errors', () => {
+    const error = Object.assign(new Error('Rate limit exceeded for org-abc123'), { type: 'RATE_LIMIT', retryAfter: 30 });
+    const response = handleImageGenerationError(error, 'conv-123', 'req-456');
+
+    expect(response.status).toBe(429);
+    const body = getLastBody();
+    expect(body.code).toBe('RATE_LIMIT');
+    expect(String(body.error)).not.toContain('org-abc123');
+    expect(body.retryAfter).toBe(30);
   });
 });
