@@ -199,6 +199,10 @@ export function SettingsClient({ initialSettings, currentLogoUrl = "/logo.png" }
       title: "External Services",
       description: "API keys and configuration for external integrations"
     },
+    voice: {
+      title: "Voice Mode",
+      description: "Real-time voice conversation provider, model, and language settings"
+    },
     embeddings: {
       title: "Embeddings",
       description: "Configuration for embedding generation and vector search"
