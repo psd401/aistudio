@@ -31,6 +31,7 @@ class PCMCaptureProcessor extends AudioWorkletProcessor {
         this._stopped = true
       }
     })
+    this.port.start()
   }
 
   process(inputs) {

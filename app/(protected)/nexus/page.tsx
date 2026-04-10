@@ -300,18 +300,6 @@ function NexusRuntimeWrapper({
     setVoiceOverlayOpen(false)
   }, [])
 
-  // Close voice overlay on Escape key
-  useEffect(() => {
-    if (!voiceOverlayOpen) return
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        setVoiceOverlayOpen(false)
-      }
-    }
-    window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [voiceOverlayOpen])
-
   // Voice button rendered in composer extra actions slot
   const composerExtraActions = voiceAvailable ? (
     <VoiceButton onVoiceStart={handleVoiceStart} />

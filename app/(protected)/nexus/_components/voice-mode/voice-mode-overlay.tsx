@@ -14,7 +14,7 @@
 
 'use client'
 
-import { useCallback, type FC } from 'react'
+import { useCallback, useEffect, type FC } from 'react'
 import { useVoiceState, useVoiceVolume, useVoiceControls } from '@assistant-ui/react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Mic, MicOff, PhoneOff, AlertCircle, RotateCcw } from 'lucide-react'
@@ -128,6 +128,19 @@ export function VoiceModeOverlay({ open, onClose }: VoiceModeOverlayProps) {
     controls.disconnect()
     onClose()
   }, [controls, onClose])
+
+  // Escape key disconnects and closes (not just closes)
+  useEffect(() => {
+    if (!open) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        controls.disconnect()
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [open, controls, onClose])
 
   const handleReconnect = useCallback(() => {
     controls.connect()

@@ -200,8 +200,15 @@ class VoiceSession {
     }
   }
 
+  /** Safely close an AudioContext if it's not already closed. */
+  private static closeAudioContext(ctx: AudioContext | null): void {
+    if (ctx?.state !== 'closed') ctx?.close().catch(() => undefined)
+  }
+
   /** Clean up all audio, WebSocket, and system resources. */
   private cleanup(): void {
+    this.wakeLock?.release().catch(() => undefined)
+    this.wakeLock = null
     if (this.volumeTimer) {
       clearInterval(this.volumeTimer)
       this.volumeTimer = null
@@ -217,13 +224,9 @@ class VoiceSession {
     }
     this.playbackQueue?.clear()
     this.playbackQueue = null
-    if (this.captureContext?.state !== 'closed') {
-      this.captureContext?.close().catch(() => undefined)
-    }
+    VoiceSession.closeAudioContext(this.captureContext)
     this.captureContext = null
-    if (this.playbackContext?.state !== 'closed') {
-      this.playbackContext?.close().catch(() => undefined)
-    }
+    VoiceSession.closeAudioContext(this.playbackContext)
     this.playbackContext = null
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       this.ws.close()
@@ -298,6 +301,8 @@ class VoiceSession {
       if (this.isMuted || !this.ws || this.ws.readyState !== WebSocket.OPEN) return
       this.ws.send(JSON.stringify({ type: 'audio', data: pcmToBase64(event.data) }))
     })
+    // Required when using addEventListener (vs onmessage) — starts message dispatch
+    this.workletNode.port.start()
   }
 
   /** Set up audio playback context and queue. */
@@ -410,10 +415,8 @@ class VoiceSession {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ type: 'disconnect' }))
     }
-    this.wakeLock?.release().catch(() => undefined)
-    this.wakeLock = null
     this.helpers.end('finished')
-    this.cleanup()
+    this.cleanup() // cleanup() releases wake lock
   }
 
   /** Mute microphone (stop sending audio). */
