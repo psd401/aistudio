@@ -16,7 +16,7 @@
  * serving HTTP normally — voice just won't work. This ensures a build
  * output path change in Next.js doesn't take down the entire app.
  *
- * Usage: CMD ["node", "voice-server.js"] in Dockerfile
+ * Usage: CMD ["bun", "run", "voice-server.js"] in Dockerfile
  *
  * Issue #872
  */
@@ -24,7 +24,6 @@
 /* eslint-disable no-undef, @typescript-eslint/no-require-imports, unicorn/prefer-node-protocol -- CJS script outside Next.js runtime */
 const http = require('http')
 const { WebSocketServer } = require('ws')
-const { parse } = require('url')
 
 const VOICE_WS_PATH = '/api/nexus/voice'
 
@@ -98,30 +97,18 @@ http.createServer = function (...args) {
   const server = originalCreateServer(...args)
 
   if (!wss) {
+    // Server-attached mode instead of noServer + handleUpgrade.
+    // The noServer pattern is incompatible with bun's node:http shim —
+    // the socket gets dropped during handleUpgrade (close code 1006).
     // maxPayload must match WS_MAX_PAYLOAD in lib/voice/constants.ts (64KB)
-    wss = new WebSocketServer({ noServer: true, maxPayload: 65536 })
-
-    server.on('upgrade', (request, socket, head) => {
-      const { pathname } = parse(request.url || '/')
-
-      if (pathname === VOICE_WS_PATH) {
-        if (!wsHandlerAvailable) {
-          socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
-          socket.destroy()
-          return
-        }
-
-        if (!isOriginAllowed(request)) {
-          console.warn(`[voice-server] Origin rejected: ${request.headers.origin || '(none)'}`) // eslint-disable-line no-console
-          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
-          socket.destroy()
-          return
-        }
-
-        wss.handleUpgrade(request, socket, head, (ws) => {
-          wss.emit('connection', ws, request)
-        })
-      }
+    wss = new WebSocketServer({
+      server,
+      path: VOICE_WS_PATH,
+      maxPayload: 65536,
+      verifyClient: ({ req }) => {
+        if (!wsHandlerAvailable) return false
+        return isOriginAllowed(req)
+      },
     })
 
     wss.on('connection', async (ws, req) => {
