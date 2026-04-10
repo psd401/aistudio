@@ -26,6 +26,9 @@ export function VoiceButton({ onVoiceStart }: VoiceButtonProps) {
   // Guard against double-clicks: disable while connecting or running
   const isActive = voiceState?.status?.type === 'starting' || voiceState?.status?.type === 'running'
 
+  // connect() is fire-and-forget: the overlay opens immediately showing "Connecting..."
+  // state. If connect rejects, useVoiceState transitions to 'ended' with error, and the
+  // overlay displays the error state. No need to await — the session lifecycle is event-driven.
   const handleClick = useCallback(() => {
     controls.connect()
     onVoiceStart()

@@ -470,6 +470,10 @@ class VoiceSession {
       return
     }
 
+    // Known limitation: reconnect re-establishes the WebSocket but reuses the existing
+    // captureContext and mediaStream. If the mic was physically disconnected or OS-revoked
+    // during the session, reconnect will send silence. Full mic re-acquisition would require
+    // re-running setupMicrophoneCapture(), which risks a second permission prompt.
     if (this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
       this.reconnectAttempts++
       // Linear backoff starting at RECONNECT_DELAY_MS (not 0)
