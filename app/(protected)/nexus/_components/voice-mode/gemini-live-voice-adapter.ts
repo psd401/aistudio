@@ -25,6 +25,9 @@ import {
   type VoiceSessionControls,
 } from '@assistant-ui/react'
 import type { VoiceServerMessage } from '@/lib/voice/types'
+import { createLogger } from '@/lib/client-logger'
+
+const log = createLogger({ moduleName: 'voice-adapter' })
 
 /** Audio playback sample rate — Gemini Live outputs at 24kHz (input is 16kHz) */
 const PLAYBACK_SAMPLE_RATE = 24000
@@ -255,6 +258,7 @@ class VoiceSession {
     }
     if (this.workletNode) {
       this.workletNode.port.postMessage('stop')
+      this.workletNode.port.close()
       this.workletNode.disconnect()
       this.workletNode = null
     }
@@ -309,7 +313,7 @@ class VoiceSession {
             signal?.removeEventListener('abort', onAbort)
             resolve(socket)
           }
-        } catch { /* Ignore parse errors during handshake */ }
+        } catch { log.debug('Parse error during WebSocket handshake') }
       })
 
       socket.addEventListener('error', () => {
@@ -452,7 +456,7 @@ class VoiceSession {
           this.cleanup()
           break
       }
-    } catch { /* Ignore malformed messages */ }
+    } catch { log.debug('Malformed WebSocket message received') }
   }
 
   /** Handle WebSocket close during active session (potential reconnect). */
