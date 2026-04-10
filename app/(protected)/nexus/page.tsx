@@ -566,8 +566,10 @@ function NexusPageContent() {
   // Voice mode — check availability and create stable adapter
   const voiceAvailability = useVoiceAvailability()
   const voiceAdapter = useMemo(
-    () => voiceAvailability.available ? createGeminiLiveVoiceAdapter() : undefined,
-    [voiceAvailability.available]
+    () => (voiceAvailability.available && voiceAvailability.wsPort && voiceAvailability.wsPath)
+      ? createGeminiLiveVoiceAdapter(voiceAvailability.wsPort, voiceAvailability.wsPath)
+      : undefined,
+    [voiceAvailability.available, voiceAvailability.wsPort, voiceAvailability.wsPath]
   )
 
 

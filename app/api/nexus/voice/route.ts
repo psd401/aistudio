@@ -59,8 +59,9 @@ export async function GET() {
       provider: voiceSettings.provider,
       model: voiceSettings.model,
       language: voiceSettings.language,
-      // WebSocket endpoint for clients to connect to
-      wsEndpoint: "/api/nexus/voice",
+      // WebSocket port for voice connections (separate from HTTP port)
+      wsPort: Number.parseInt(process.env.VOICE_WS_PORT || "3001", 10),
+      wsPath: "/api/nexus/voice",
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

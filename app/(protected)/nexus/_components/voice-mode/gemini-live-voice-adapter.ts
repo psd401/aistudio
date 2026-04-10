@@ -25,9 +25,6 @@ import {
   type VoiceSessionControls,
 } from '@assistant-ui/react'
 import type { VoiceServerMessage } from '@/lib/voice/types'
-import { createLogger } from '@/lib/client-logger'
-
-const log = createLogger({ moduleName: 'voice-adapter' })
 
 /** Audio playback sample rate — matches server-side Gemini Live config */
 const PLAYBACK_SAMPLE_RATE = 16000
@@ -49,10 +46,12 @@ const MAX_BUFFERED_AMOUNT = 65_536
 
 /**
  * Constructs the WebSocket URL for the voice endpoint.
+ * Uses a separate port for the WS server (Bun.serve native WebSocket).
  */
-function getWebSocketUrl(): string {
+function getWebSocketUrl(wsPort: number, wsPath: string): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${protocol}//${window.location.host}/api/nexus/voice`
+  const host = window.location.hostname
+  return `${protocol}//${host}:${wsPort}${wsPath}`
 }
 
 /**
@@ -171,25 +170,12 @@ class AudioPlaybackQueue {
  * Creates a RealtimeVoiceAdapter that connects to the Gemini Live
  * WebSocket proxy and manages audio capture/playback.
  */
-export function createGeminiLiveVoiceAdapter(): RealtimeVoiceAdapter {
+export function createGeminiLiveVoiceAdapter(wsPort: number, wsPath: string): RealtimeVoiceAdapter {
   return {
     connect(options) {
-      // eslint-disable-next-line no-console -- temporary debug
-      console.log('[voice-adapter] connect() called, creating session')
       return createVoiceSession(options, async (helpers) => {
-        // eslint-disable-next-line no-console -- temporary debug
-        console.log('[voice-adapter] setup function entered')
-        try {
-          const session = new VoiceSession(helpers, options.abortSignal)
-          const controls = await session.start()
-          // eslint-disable-next-line no-console -- temporary debug
-          console.log('[voice-adapter] session started successfully')
-          return controls
-        } catch (err) {
-          // eslint-disable-next-line no-console -- temporary debug
-          console.error('[voice-adapter] session.start() threw:', err)
-          throw err
-        }
+        const session = new VoiceSession(helpers, options.abortSignal, wsPort, wsPath)
+        return session.start()
       })
     },
   }
@@ -214,19 +200,22 @@ class VoiceSession {
   private isMuted = false
   private reconnectAttempts = 0
   private wakeLock: WakeLockSentinel | null = null
+  private wsPort: number
+  private wsPath: string
 
-  constructor(helpers: VoiceSessionHelpers, abortSignal?: AbortSignal) {
+  constructor(helpers: VoiceSessionHelpers, abortSignal: AbortSignal | undefined, wsPort: number, wsPath: string) {
     this.helpers = helpers
     this.abortSignal = abortSignal
+    this.wsPort = wsPort
+    this.wsPath = wsPath
   }
 
   /** Main entry point — connects and returns session controls. */
   async start(): Promise<VoiceSessionControls> {
-    log.info('Voice session starting')
-    this.helpers.setStatus({ type: 'starting' })
+this.helpers.setStatus({ type: 'starting' })
 
     this.ws = await this.connectWebSocket()
-    log.info('WebSocket connected, waiting for mic permission')
+
 
     if (this.helpers.isDisposed()) {
       this.cleanup()
@@ -238,9 +227,8 @@ class VoiceSession {
     this.ws.addEventListener('message', (e) => this.handleMessage(e))
     this.ws.addEventListener('close', (e) => this.handleClose(e))
 
-    log.info('Setting up microphone capture')
-    await this.setupMicrophoneCapture()
-    log.info('Microphone capture ready')
+await this.setupMicrophoneCapture()
+
 
     // Check disposal again after async mic setup
     if (this.helpers.isDisposed()) {
@@ -254,8 +242,7 @@ class VoiceSession {
     this.startVolumePolling()
     await this.acquireWakeLock()
 
-    log.info('Voice session running — listening for audio')
-    this.helpers.setStatus({ type: 'running' })
+this.helpers.setStatus({ type: 'running' })
     this.helpers.emitMode('listening')
 
     return {
@@ -310,7 +297,7 @@ class VoiceSession {
         return
       }
 
-      const socket = new WebSocket(getWebSocketUrl())
+      const socket = new WebSocket(getWebSocketUrl(this.wsPort, this.wsPath))
 
       const onAbort = () => {
         socket.close()
@@ -350,8 +337,7 @@ class VoiceSession {
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       })
     } catch (error) {
-      log.error('Microphone setup failed', { error: error instanceof Error ? error.message : String(error) })
-      this.cleanup()
+this.cleanup()
       // Use DOMException.name for cross-browser permission detection
       const isPermissionDenied = error instanceof DOMException
         && (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError')

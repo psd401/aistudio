@@ -23,16 +23,7 @@ export function VoiceButton({ onVoiceStart }: VoiceButtonProps) {
   const controls = useVoiceControls()
 
   const handleClick = useCallback(() => {
-    // eslint-disable-next-line no-console -- temporary debug for voice session startup
-    console.log('[VoiceButton] clicked, calling controls.connect()', controls)
-    try {
-      controls.connect()
-      // eslint-disable-next-line no-console -- temporary debug
-      console.log('[VoiceButton] connect() called successfully')
-    } catch (err) {
-      // eslint-disable-next-line no-console -- temporary debug
-      console.error('[VoiceButton] connect() threw:', err)
-    }
+    controls.connect()
     onVoiceStart()
   }, [controls, onVoiceStart])
 
