@@ -117,8 +117,10 @@ export function VoiceModeOverlay({ open, onClose }: VoiceModeOverlayProps) {
   const isMuted = voiceState?.isMuted ?? false
   const voiceMode = voiceState?.mode
   const isEnded = statusType === 'ended'
-  const endedError = isEnded
-    ? (voiceState?.status as { type: 'ended'; error?: unknown }).error
+  // Extract error from ended status via runtime check (not unsafe cast)
+  const endedStatus = voiceState?.status
+  const endedError = (isEnded && endedStatus && 'error' in endedStatus)
+    ? (endedStatus as { error: unknown }).error
     : null
 
   const vizMode = getVisualizerMode(statusType, voiceMode, endedError != null)
