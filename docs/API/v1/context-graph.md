@@ -558,3 +558,42 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 **Response `401`** — Missing or invalid API key.
 **Response `403`** — API key lacks `graph:write` scope.
 **Response `500`** — Internal error.
+
+---
+
+## Voice API (Issue #872)
+
+### GET `/api/nexus/voice`
+
+Returns voice provider configuration and availability. Clients call this before attempting a WebSocket connection to verify access and provider status.
+
+**Auth:** Session cookie (not API key). Requires `voice-mode` tool access.
+
+**Response `200`:**
+
+```json
+{
+  "available": true,
+  "provider": "gemini-live",
+  "model": "gemini-2.0-flash-live-001",
+  "language": "en-US",
+  "wsEndpoint": "/api/nexus/voice"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `available` | boolean | Whether the voice provider is configured (API key exists) |
+| `provider` | string | Voice provider ID (e.g. `gemini-live`) |
+| `model` | string | Gemini Live model ID |
+| `language` | string | BCP47 language code |
+| `wsEndpoint` | string | WebSocket endpoint path for voice sessions |
+
+**Response `401`** — No authenticated session.
+**Response `403`** — User lacks `voice-mode` tool access.
+**Response `500`** — Internal error.
+
+### WebSocket `/api/nexus/voice`
+
+Bidirectional audio streaming for real-time voice conversations. See [`docs/features/voice-api.md`](../features/voice-api.md) for the full WebSocket protocol specification including message types, close codes, and connection flow.
+

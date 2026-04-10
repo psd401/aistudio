@@ -304,5 +304,21 @@ export const Settings = {
       enabled: enabled !== 'false', // Default to true if not explicitly disabled
       piiTokenizationEnabled: piiTokenizationEnabled !== 'false' // Default to true
     }
+  },
+
+  // Voice (Issue #872)
+  async getVoice() {
+    const [provider, model, language, voiceName] = await Promise.all([
+      getSetting('VOICE_PROVIDER'),
+      getSetting('VOICE_MODEL'),
+      getSetting('VOICE_LANGUAGE'),
+      getSetting('VOICE_NAME'),
+    ])
+    return {
+      provider: provider || 'gemini-live',
+      model: model || 'gemini-2.0-flash-live-001',
+      language: language || 'en-US',
+      voiceName: voiceName || null,
+    }
   }
 }

@@ -20,12 +20,14 @@ const nextConfig = {
   reactStrictMode: true,
   output: 'standalone',
   transpilePackages: ['recharts'],
-  serverExternalPackages: ['winston', 'logform', '@colors/colors', 'argon2', 'postgres', 'mammoth', 'pdf-parse', 'oidc-provider'],
+  serverExternalPackages: ['winston', 'logform', '@colors/colors', 'argon2', 'postgres', 'mammoth', 'pdf-parse', 'oidc-provider', 'ws'],
   outputFileTracingIncludes: {
     '/**': [
       './node_modules/argon2/**/*',
       './node_modules/@phc/format/**/*',
       './node_modules/node-gyp-build/**/*',
+      './node_modules/ws/**/*',
+      './node_modules/@google/genai/**/*',
     ],
   },
   typescript: {
@@ -68,7 +70,10 @@ const nextConfig = {
           },
           {
             key: 'Permissions-Policy',
-            value: 'camera=(), microphone=(), geolocation=()'
+            // microphone=(self) required for voice mode (Issue #872).
+            // Applies globally — voice pages need mic access, other pages
+            // won't trigger the permission prompt unless they call getUserMedia.
+            value: 'camera=(), microphone=(self), geolocation=()'
           },
           {
             key: 'Content-Security-Policy',

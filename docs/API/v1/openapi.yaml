@@ -65,6 +65,66 @@ tags:
 # ============================================
 
 paths:
+  /api/nexus/voice:
+    get:
+      operationId: getVoiceConfig
+      tags: [Voice]
+      summary: Voice configuration and availability
+      description: |
+        Returns voice provider configuration and availability status.
+        Clients should call this before attempting a WebSocket connection
+        to verify the user has access and the provider is configured.
+
+        Requires authenticated session and `voice-mode` tool access.
+      security:
+        - sessionAuth: []
+      responses:
+        "200":
+          description: Voice configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  available:
+                    type: boolean
+                    description: Whether the voice provider is configured and ready
+                  provider:
+                    type: string
+                    example: gemini-live
+                  model:
+                    type: string
+                    example: gemini-2.0-flash-live-001
+                  language:
+                    type: string
+                    example: en-US
+                  wsEndpoint:
+                    type: string
+                    description: WebSocket endpoint path for voice sessions
+                    example: /api/nexus/voice
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Unauthorized
+        "403":
+          description: User lacks voice-mode tool access
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Voice mode not enabled
+        "500":
+          description: Internal server error
+
   /health:
     get:
       operationId: getHealth
