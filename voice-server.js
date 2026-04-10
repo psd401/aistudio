@@ -136,7 +136,10 @@ http.createServer = function (...args) {
     if (wsHandlerAvailable) {
       console.log(`[voice-server] WebSocket handler registered for ${VOICE_WS_PATH}`) // eslint-disable-line no-console
     } else {
-      console.warn(`[voice-server] WebSocket handler NOT available — voice disabled, HTTP serving normally`) // eslint-disable-line no-console
+      // ERROR level so this surfaces in CloudWatch alarms — operators should know
+      // voice is broken before users hit 503
+      console.error(`[voice-server] ERROR: Voice WebSocket handler NOT available — voice disabled, HTTP serving normally`) // eslint-disable-line no-console
+      console.error(`[voice-server] Expected handler at: ${WS_HANDLER_PATH} — verify Next.js standalone output structure`) // eslint-disable-line no-console
     }
   }
 

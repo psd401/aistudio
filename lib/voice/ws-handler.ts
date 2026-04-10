@@ -332,6 +332,9 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     const message = error instanceof Error ? error.message : String(error)
     log.error("Voice session setup failed", { error: message })
     sendToClient(ws, { type: "error", message: "Failed to establish voice session" })
+    // cleanup() first: sets sessionEnded=true, clears interval, disconnects provider.
+    // Then remove listeners so ws.close()'s "close" event doesn't re-enter cleanup.
+    // This is safe because cleanup is idempotent via the sessionEnded guard.
     cleanup("error")
     ws.removeAllListeners("message")
     ws.removeAllListeners("close")

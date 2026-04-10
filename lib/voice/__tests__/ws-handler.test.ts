@@ -346,31 +346,103 @@ describe("handleVoiceConnection", () => {
     })
   })
 
-  describe("message handling (happy path)", () => {
+  describe("message handling", () => {
+    let messageHandler: (data: Buffer) => void
+
     beforeEach(() => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
       mockHasToolAccess.mockResolvedValue(true)
     })
 
-    it("should register close/error handlers before connect and message handler after", async () => {
+    /** Connect and extract the registered message handler from ws.on("message", ...) */
+    async function connectAndGetMessageHandler() {
       const ws = createMockWs()
-      const req = createMockReq({ "authjs.session-token": "valid-token" })
+      const handlers: Record<string, (...args: unknown[]) => void> = {}
+      ;(ws.on as jest.Mock).mockImplementation((event: string, handler: (...args: unknown[]) => void) => {
+        handlers[event] = handler
+        return ws
+      })
 
-      // Track registration order
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+      await handleVoiceConnection(ws, req)
+
+      messageHandler = handlers["message"] as (data: Buffer) => void
+      return { ws, handlers }
+    }
+
+    it("should register close/error handlers before message handler", async () => {
+      const ws = createMockWs()
       const registrationOrder: string[] = []
       ;(ws.on as jest.Mock).mockImplementation((event: string) => {
         registrationOrder.push(event)
         return ws
       })
 
-      await handleVoiceConnection(ws, req)
+      await handleVoiceConnection(ws, createMockReq({ "authjs.session-token": "valid-token" }))
 
-      // close and error should be registered BEFORE message
       const closeIdx = registrationOrder.indexOf("close")
       const errorIdx = registrationOrder.indexOf("error")
       const messageIdx = registrationOrder.indexOf("message")
       expect(closeIdx).toBeLessThan(messageIdx)
       expect(errorIdx).toBeLessThan(messageIdx)
+    })
+
+    it("should call provider.sendAudio for valid audio messages", async () => {
+      await connectAndGetMessageHandler()
+
+      const audioData = Buffer.from("AQID", "base64") // 3 bytes
+      messageHandler(Buffer.from(JSON.stringify({ type: "audio", data: "AQID" })))
+
+      const { createVoiceProvider } = require("../provider-factory")
+      const mockProvider = createVoiceProvider()
+      expect(mockProvider.sendAudio).toHaveBeenCalledWith(audioData)
+    })
+
+    it("should reject oversized audio messages", async () => {
+      await connectAndGetMessageHandler()
+
+      // Create a base64 string larger than MAX_AUDIO_DATA_LENGTH (mocked to 131072)
+      const oversizedData = "A".repeat(200_000)
+      messageHandler(Buffer.from(JSON.stringify({ type: "audio", data: oversizedData })))
+
+      const { createVoiceProvider } = require("../provider-factory")
+      const mockProvider = createVoiceProvider()
+      expect(mockProvider.sendAudio).not.toHaveBeenCalled()
+    })
+
+    it("should rate-limit audio messages", async () => {
+      await connectAndGetMessageHandler()
+
+      // Send two audio messages with no delay — second should be dropped
+      const msg = Buffer.from(JSON.stringify({ type: "audio", data: "AQID" }))
+      messageHandler(msg)
+      messageHandler(msg) // immediate — within MIN_AUDIO_INTERVAL_MS
+
+      const { createVoiceProvider } = require("../provider-factory")
+      const mockProvider = createVoiceProvider()
+      // Only the first call should go through
+      expect(mockProvider.sendAudio).toHaveBeenCalledTimes(1)
+    })
+
+    it("should call provider.disconnect for disconnect messages", async () => {
+      await connectAndGetMessageHandler()
+
+      messageHandler(Buffer.from(JSON.stringify({ type: "disconnect" })))
+
+      const { createVoiceProvider } = require("../provider-factory")
+      const mockProvider = createVoiceProvider()
+      expect(mockProvider.disconnect).toHaveBeenCalled()
+    })
+
+    it("should ignore messages with invalid format", async () => {
+      await connectAndGetMessageHandler()
+
+      messageHandler(Buffer.from(JSON.stringify({ foo: "bar" })))
+
+      const { createVoiceProvider } = require("../provider-factory")
+      const mockProvider = createVoiceProvider()
+      expect(mockProvider.sendAudio).not.toHaveBeenCalled()
+      expect(mockProvider.disconnect).not.toHaveBeenCalled()
     })
   })
 

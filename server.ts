@@ -44,7 +44,10 @@ function isAllowedOrigin(request: IncomingMessage): boolean {
   const appUrl = process.env.NEXTAUTH_URL || process.env.APP_URL
   if (appUrl) allowedOrigins.push(appUrl.replace(/\/+$/, ""))
 
-  // If no allowed origins configured, fall back to same-origin check
+  // If no allowed origins configured, fall back to same-origin check.
+  // Protocol may be "http" for local dev without HTTPS — this is intentional
+  // to allow dev:voice to work without TLS. In production, ALB always sets
+  // x-forwarded-proto: https so the check enforces HTTPS origins.
   if (allowedOrigins.length === 0) {
     const host = request.headers.host
     if (!host) return false

@@ -267,7 +267,11 @@ export class GeminiLiveProvider implements VoiceProvider {
       },
     }
 
-    // Enable session resumption
+    // Enable session resumption — server-side only for this issue.
+    // The Gemini SDK handles resumption internally via session tokens.
+    // Client-facing resumption (passing previousSessionId through
+    // VoiceProviderConfig) is deferred to a later issue in the voice epic
+    // when the client UI supports reconnection flows.
     liveConfig.sessionResumption = {}
 
     return liveConfig
