@@ -487,6 +487,9 @@ class VoiceSession {
             this.ws.close()
             return
           }
+          // Clear stale audio from the dropped session before re-attaching
+          this.playbackQueue?.clear()
+          this.helpers.emitMode('listening')
           this.ws.addEventListener('message', (e) => this.handleMessage(e))
           this.ws.addEventListener('close', (e) => this.handleClose(e))
           this.reconnectAttempts = 0

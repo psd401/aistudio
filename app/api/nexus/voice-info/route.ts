@@ -57,7 +57,10 @@ export async function GET() {
     timer({ status: "success" })
     // Only return availability — internal config (provider, model, wsEndpoint)
     // is not needed by the client and would expose infrastructure details
-    return NextResponse.json({ available: isConfigured })
+    return NextResponse.json(
+      { available: isConfigured },
+      { headers: { 'Cache-Control': 'max-age=30, private' } }
+    )
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     log.error("Error getting voice info", { error: message })

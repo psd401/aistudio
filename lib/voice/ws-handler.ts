@@ -52,12 +52,12 @@ async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: st
 
   try {
     const cookieHeader = req.headers.cookie || ""
-    const cookies = Object.fromEntries(
-      cookieHeader.split(";").map((c) => {
-        const [key, ...vals] = c.trim().split("=")
-        return [key.trim(), vals.join("=").trim()]
-      })
-    )
+    // Use Object.create(null) — cookie names are user-controlled input
+    const cookies: Record<string, string> = Object.create(null)
+    for (const c of cookieHeader.split(";")) {
+      const [key, ...vals] = c.trim().split("=")
+      cookies[key.trim()] = vals.join("=").trim()
+    }
 
     const cookieNames = ["__Secure-authjs.session-token", "authjs.session-token", "next-auth.session-token"]
     let sessionToken: string | undefined

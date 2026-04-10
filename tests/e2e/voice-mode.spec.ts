@@ -27,7 +27,7 @@ test.describe('Voice Mode', () => {
 
       // Voice button should not be present
       const voiceButton = page.getByTestId('voice-mode-button')
-      await expect(voiceButton).toBeHidden()
+      await expect(voiceButton).not.toBeAttached()
     })
 
     test('voice button is hidden when voice provider is not configured', async ({ page }) => {
@@ -43,7 +43,7 @@ test.describe('Voice Mode', () => {
       await page.waitForSelector('[data-role="user"], [placeholder="How can I help you today?"]', { timeout: 10000 })
 
       const voiceButton = page.getByTestId('voice-mode-button')
-      await expect(voiceButton).toBeHidden()
+      await expect(voiceButton).not.toBeAttached()
     })
 
     test('voice button is visible when voice mode is available', async ({ page }) => {

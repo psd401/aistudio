@@ -1,10 +1,12 @@
 /**
  * Hook to check voice mode availability for the current user.
  *
- * Fetches GET /api/nexus/voice to verify:
+ * Fetches GET /api/nexus/voice-info to verify:
  * - User has hasToolAccess("voice-mode") permission
- * - Voice provider is configured (API key exists)
- * - Returns WebSocket connection info (port, path)
+ * - Voice provider and model are configured
+ * - Google API key exists
+ *
+ * Returns { available: boolean } — no infrastructure details exposed.
  *
  * Issue #873
  */
