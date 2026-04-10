@@ -41,7 +41,7 @@
     "db:studio": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run drizzle:studio",
     "db:psql": "docker exec -it aistudio-postgres psql -U postgres -d aistudio",
     "dev:docker": "docker compose -f docker-compose.dev.yml up",
-    "dev:local": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run dev",
+    "dev:local": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run server.ts",
     "dev:voice": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run server.ts"
   },
   "dependencies": {
