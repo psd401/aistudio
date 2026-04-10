@@ -43,12 +43,13 @@ export async function GET() {
     // Get voice settings
     const voiceSettings = await Settings.getVoice()
 
-    // Check if the provider is configured (Google API key exists)
+    // Voice is available only when provider, model, and API key are all configured
     const googleApiKey = await Settings.getGoogleAI()
-    const isConfigured = !!googleApiKey
+    const isConfigured = !!googleApiKey && !!voiceSettings.provider && !!voiceSettings.model
 
     log.info("Voice info requested", {
       provider: voiceSettings.provider,
+      model: voiceSettings.model,
       isConfigured,
     })
 
