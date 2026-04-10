@@ -396,8 +396,13 @@ class VoiceSession {
 
   /** Resume AudioContexts (required after user gesture on iOS Safari). */
   private async resumeAudioContexts(): Promise<void> {
-    if (this.captureContext?.state === 'suspended') await this.captureContext.resume()
-    if (this.playbackContext?.state === 'suspended') await this.playbackContext.resume()
+    try {
+      if (this.captureContext?.state === 'suspended') await this.captureContext.resume()
+      if (this.playbackContext?.state === 'suspended') await this.playbackContext.resume()
+    } catch {
+      this.cleanup()
+      throw new Error('Audio playback blocked by browser. Please interact with the page and try again.')
+    }
   }
 
   /** Start polling volume levels from analysers. */
