@@ -66,11 +66,7 @@ function pcmToBase64(buffer: ArrayBuffer): string {
  */
 function base64ToPcm(base64: string): ArrayBuffer {
   const binary = atob(base64)
-  const bytes = new Uint8Array(binary.length)
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i)
-  }
-  return bytes.buffer
+  return Uint8Array.from(binary, (c) => c.charCodeAt(0)).buffer
 }
 
 /** Compute average volume from AnalyserNode frequency data */
@@ -472,10 +468,17 @@ class VoiceSession {
 
     if (this.reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
       this.reconnectAttempts++
+      // Linear backoff starting at RECONNECT_DELAY_MS (not 0)
       setTimeout(async () => {
         if (this.helpers.isDisposed()) return
         try {
           this.ws = await this.connectWebSocket()
+          // Re-check disposal after async connect — prevents socket leak
+          // if disconnect() was called during the connection handshake
+          if (this.helpers.isDisposed()) {
+            this.ws.close()
+            return
+          }
           this.ws.addEventListener('message', (e) => this.handleMessage(e))
           this.ws.addEventListener('close', (e) => this.handleClose(e))
           this.reconnectAttempts = 0

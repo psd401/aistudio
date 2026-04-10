@@ -14,7 +14,7 @@
 
 'use client'
 
-import { useCallback, useEffect, type FC } from 'react'
+import { useCallback, useEffect, useRef, type FC } from 'react'
 import { useVoiceState, useVoiceVolume, useVoiceControls } from '@assistant-ui/react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Mic, MicOff, PhoneOff, AlertCircle, RotateCcw } from 'lucide-react'
@@ -142,6 +142,33 @@ export function VoiceModeOverlay({ open, onClose }: VoiceModeOverlayProps) {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [open, controls, onClose, statusType])
 
+  // Focus trap — contain Tab navigation within the overlay
+  const overlayRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!open || !overlayRef.current) return
+    const overlay = overlayRef.current
+    // Move focus into the overlay on open
+    const firstButton = overlay.querySelector<HTMLElement>('button')
+    firstButton?.focus()
+
+    const handleTab = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab') return
+      const focusable = overlay.querySelectorAll<HTMLElement>('button, [tabindex]:not([tabindex="-1"])')
+      if (focusable.length === 0) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (e.shiftKey && document.activeElement === first) {
+        e.preventDefault()
+        last.focus()
+      } else if (!e.shiftKey && document.activeElement === last) {
+        e.preventDefault()
+        first.focus()
+      }
+    }
+    overlay.addEventListener('keydown', handleTab)
+    return () => overlay.removeEventListener('keydown', handleTab)
+  }, [open])
+
   const handleReconnect = useCallback(() => {
     controls.connect()
   }, [controls])
@@ -158,6 +185,7 @@ export function VoiceModeOverlay({ open, onClose }: VoiceModeOverlayProps) {
     <AnimatePresence>
       {open && (
         <motion.div
+          ref={overlayRef}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
