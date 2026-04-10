@@ -19,7 +19,7 @@ import { useVoiceState, useVoiceVolume, useVoiceControls } from '@assistant-ui/r
 import { motion, AnimatePresence } from 'framer-motion'
 import { Mic, MicOff, PhoneOff, AlertCircle, RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
-import { AudioVisualizer } from './audio-visualizer'
+import { AudioVisualizer, type VisualizerMode } from './audio-visualizer'
 
 interface VoiceModeOverlayProps {
   /** Whether the overlay is visible */
@@ -27,8 +27,6 @@ interface VoiceModeOverlayProps {
   /** Called when the overlay should close */
   onClose: () => void
 }
-
-type VisualizerMode = 'connecting' | 'listening' | 'speaking' | 'error' | 'idle'
 
 /** Maps voice session state to visualizer mode */
 function getVisualizerMode(
@@ -189,12 +187,14 @@ export function VoiceModeOverlay({ open, onClose }: VoiceModeOverlayProps) {
             <AudioVisualizer mode={vizMode} volume={volume} />
           </motion.div>
 
-          {/* State label */}
+          {/* State label — aria-live for screen reader announcements */}
           <motion.p
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ delay: 0.3 }}
             className="mt-8 text-lg font-medium text-gray-200"
+            aria-live="polite"
+            aria-atomic="true"
           >
             {statusLabel}
           </motion.p>
@@ -207,11 +207,7 @@ export function VoiceModeOverlay({ open, onClose }: VoiceModeOverlayProps) {
               className="mt-4 flex items-center gap-2 rounded-lg bg-red-950/50 px-4 py-2 text-sm text-red-300"
             >
               <AlertCircle size={16} />
-              <span>
-                {endedError instanceof Error
-                  ? endedError.message
-                  : 'Connection lost'}
-              </span>
+              <span>Something went wrong. Please try again.</span>
             </motion.div>
           )}
 
@@ -230,7 +226,7 @@ export function VoiceModeOverlay({ open, onClose }: VoiceModeOverlayProps) {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={{ delay: 0.6 }}
-            className="absolute bottom-6 text-xs text-gray-600"
+            className="absolute bottom-6 text-xs text-gray-400"
           >
             Press Escape to end conversation
           </motion.p>

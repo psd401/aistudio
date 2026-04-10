@@ -223,7 +223,6 @@ interface NexusRuntimeWrapperProps {
   enabledConnectors: string[]
   attachmentAdapter: AttachmentAdapter
   voiceAdapter?: RealtimeVoiceAdapter
-  voiceAvailable: boolean
   initialMessages: UIMessage[]
   onConversationIdChange: (id: string) => void
   processingAttachments: Set<string>
@@ -241,7 +240,6 @@ function NexusRuntimeWrapper({
   enabledConnectors,
   attachmentAdapter,
   voiceAdapter,
-  voiceAvailable,
   initialMessages,
   onConversationIdChange,
   processingAttachments,
@@ -301,7 +299,7 @@ function NexusRuntimeWrapper({
   }, [])
 
   // Voice button rendered in composer extra actions slot
-  const composerExtraActions = voiceAvailable ? (
+  const composerExtraActions = voiceAdapter ? (
     <VoiceButton onVoiceStart={handleVoiceStart} />
   ) : null
 
@@ -620,7 +618,6 @@ function NexusPageContent() {
                         enabledConnectors={enabledConnectors}
                         attachmentAdapter={attachmentAdapter}
                         voiceAdapter={voiceAdapter}
-                        voiceAvailable={voiceAvailability.available}
                         initialMessages={initialMessages}
                         onConversationIdChange={handleConversationIdChange}
                         processingAttachments={processingAttachments}

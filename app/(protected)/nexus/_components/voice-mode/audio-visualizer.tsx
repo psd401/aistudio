@@ -3,6 +3,7 @@
  *
  * Displays a pulsing orb that reacts to real-time audio volume.
  * Uses CSS transforms for smooth 60fps animation without layout thrashing.
+ * Respects prefers-reduced-motion for vestibular accessibility.
  *
  * States:
  * - Connecting: spinning animation
@@ -15,12 +16,14 @@
 
 'use client'
 
-import { memo, useMemo } from 'react'
+import { memo } from 'react'
 import { cn } from '@/lib/utils'
+
+export type VisualizerMode = 'connecting' | 'listening' | 'speaking' | 'error' | 'idle'
 
 interface AudioVisualizerProps {
   /** Current voice session mode */
-  mode: 'connecting' | 'listening' | 'speaking' | 'error' | 'idle'
+  mode: VisualizerMode
   /** Audio volume level 0–1 */
   volume: number
 }
@@ -34,7 +37,14 @@ const MAX_SCALE = 1.4
 /** Number of concentric rings around the orb */
 const RING_COUNT = 3
 
-const modeColors: Record<AudioVisualizerProps['mode'], { orb: string; ring: string; glow: string }> = {
+/** Pre-computed ring configuration (static — no need for useMemo) */
+const RINGS = Array.from({ length: RING_COUNT }, (_, i) => ({
+  offset: (i + 1) * 20,
+  opacity: 0.15 - i * 0.04,
+  delay: i * 0.1,
+}))
+
+const modeColors: Record<VisualizerMode, { orb: string; ring: string; glow: string }> = {
   idle: {
     orb: 'bg-gray-400',
     ring: 'border-gray-300/30',
@@ -72,17 +82,6 @@ export const AudioVisualizer = memo(function AudioVisualizer({
   // Scale based on volume (smoother transition with easing)
   const scale = 1 + volume * (MAX_SCALE - 1)
 
-  // Ring offsets — each ring is larger and more transparent
-  const rings = useMemo(
-    () =>
-      Array.from({ length: RING_COUNT }, (_, i) => ({
-        offset: (i + 1) * 20,
-        opacity: 0.15 - i * 0.04,
-        delay: i * 0.1,
-      })),
-    []
-  )
-
   return (
     <div
       className="relative flex items-center justify-center"
@@ -90,14 +89,14 @@ export const AudioVisualizer = memo(function AudioVisualizer({
       role="img"
       aria-label={`Voice visualizer: ${mode}`}
     >
-      {/* Concentric rings */}
-      {rings.map((ring, i) => (
+      {/* Concentric rings — animations disabled for prefers-reduced-motion */}
+      {RINGS.map((ring, i) => (
         <div
           key={i}
           className={cn(
-            'absolute rounded-full border-2 transition-transform duration-150',
+            'absolute rounded-full border-2 transition-transform duration-150 motion-reduce:transition-none',
             colors.ring,
-            isConnecting && 'animate-ping'
+            isConnecting && 'animate-ping motion-reduce:animate-none'
           )}
           style={{
             width: ORB_BASE_SIZE + ring.offset * 2,
@@ -110,14 +109,14 @@ export const AudioVisualizer = memo(function AudioVisualizer({
         />
       ))}
 
-      {/* Main orb */}
+      {/* Main orb — reduced-motion users get static orb */}
       <div
         className={cn(
-          'relative rounded-full transition-transform duration-100',
+          'relative rounded-full transition-transform duration-100 motion-reduce:transition-none',
           colors.orb,
           colors.glow,
           'shadow-2xl',
-          isConnecting && 'animate-pulse'
+          isConnecting && 'animate-pulse motion-reduce:animate-none'
         )}
         style={{
           width: ORB_BASE_SIZE,
