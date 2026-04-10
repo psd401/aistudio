@@ -1,14 +1,12 @@
 /**
  * Custom Next.js Server with WebSocket Support
  *
- * Wraps the standard Next.js server to handle WebSocket upgrade requests
- * for the voice API (/api/nexus/voice). All other requests pass through
- * to Next.js unchanged.
- *
  * Uses Bun.serve() with native WebSocket upgrade — the `ws` npm package's
  * handleUpgrade is incompatible with bun's node:http shim (close code 1006).
  * A lightweight shim (BunWebSocketShim) adapts bun's ServerWebSocket to
  * the event-based ws.WebSocket interface expected by ws-handler.ts.
+ *
+ * HTTP bridge uses ReadableStream for SSR streaming compatibility.
  *
  * Usage:
  *   Development: bun run dev:voice / bun run dev:local
@@ -57,13 +55,8 @@ function isAllowedOrigin(origin: string | null | undefined, host: string | null 
 
 // ─── Bun WebSocket Shim ───────────────────────────────────────────────────────
 // Adapts bun's ServerWebSocket to the event-based ws.WebSocket interface
-// used by ws-handler.ts. Only implements the subset ws-handler actually uses.
-
-type WsEventMap = {
-  message: [(data: Buffer) => void]
-  close: [(code: number, reason: Buffer) => void]
-  error: [(error: Error) => void]
-}
+// used by ws-handler.ts. Buffers messages arriving before listeners register
+// (race condition: ws-handler registers ws.on('message') after async auth).
 
 interface BunWsData {
   headers: Record<string, string>
@@ -71,15 +64,9 @@ interface BunWsData {
   shim: BunWebSocketShim | null
 }
 
-/**
- * Minimal EventEmitter-compatible wrapper around bun's ServerWebSocket.
- * Implements only the ws.WebSocket methods used by ws-handler.ts:
- * - on(event, handler) / removeAllListeners(event)
- * - send(data) / close(code, reason) / ping()
- * - readyState
- */
 class BunWebSocketShim {
-  private _listeners: { [K in keyof WsEventMap]?: Array<(...args: unknown[]) => void> } = {}
+  private _listeners: Record<string, Array<(...args: unknown[]) => void>> = {}
+  private _pendingMessages: Buffer[] = []
   private _bunWs: ServerWebSocket<BunWsData>
 
   constructor(bunWs: ServerWebSocket<BunWsData>) {
@@ -91,14 +78,18 @@ class BunWebSocketShim {
   }
 
   on(event: string, handler: (...args: unknown[]) => void): this {
-    const key = event as keyof WsEventMap
-    if (!this._listeners[key]) this._listeners[key] = []
-    this._listeners[key]!.push(handler)
+    if (!this._listeners[event]) this._listeners[event] = []
+    this._listeners[event].push(handler)
+    // Drain buffered messages when message listener is first registered
+    if (event === "message" && this._pendingMessages.length > 0) {
+      const queued = this._pendingMessages.splice(0)
+      for (const msg of queued) handler(msg)
+    }
     return this
   }
 
   removeAllListeners(event: string): this {
-    delete this._listeners[event as keyof WsEventMap]
+    delete this._listeners[event]
     return this
   }
 
@@ -120,13 +111,114 @@ class BunWebSocketShim {
   }
 
   /** Called by websocket handlers to dispatch events to listeners */
-  _emit(event: keyof WsEventMap, ...args: unknown[]): void {
+  _emit(event: string, ...args: unknown[]): void {
     const handlers = this._listeners[event]
-    if (!handlers) return
+    if (!handlers || handlers.length === 0) {
+      // Buffer messages arriving before listener registration
+      if (event === "message" && args[0]) {
+        this._pendingMessages.push(args[0] as Buffer)
+      }
+      return
+    }
     for (const handler of handlers) {
       handler(...args)
     }
   }
+}
+
+// ─── Streaming HTTP Bridge ────────────────────────────────────────────────────
+// Bridges Bun.serve() Request/Response to Next.js IncomingMessage/ServerResponse.
+// Uses ReadableStream for SSR streaming compatibility (React Server Components).
+
+function handleNextRequest(
+  req: Request,
+  remoteAddress: string,
+  nextHandler: ReturnType<ReturnType<typeof next>["getRequestHandler"]>
+): Promise<Response> {
+  return new Promise<Response>((resolve) => {
+    const url = new URL(req.url)
+    const fakeSocket = new PassThrough()
+    Object.assign(fakeSocket, { remoteAddress, encrypted: url.protocol === "https:" })
+
+    const nodeReq = new http.IncomingMessage(fakeSocket as unknown as Socket)
+    nodeReq.url = url.pathname + url.search
+    nodeReq.method = req.method
+    nodeReq.headers = Object.fromEntries(req.headers.entries())
+
+    const nodeRes = new http.ServerResponse(nodeReq)
+
+    // Stream response body via ReadableStream (supports SSR streaming)
+    let streamController: ReadableStreamDefaultController<Uint8Array>
+    let headersSent = false
+    let resolved = false
+
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        streamController = controller
+      },
+    })
+
+    const sendHeaders = () => {
+      if (headersSent) return
+      headersSent = true
+      const headers = new Headers()
+      const rawHeaders = nodeRes.getHeaders()
+      for (const [key, value] of Object.entries(rawHeaders)) {
+        if (value === undefined) continue
+        if (Array.isArray(value)) {
+          for (const v of value) headers.append(key, v)
+        } else {
+          headers.set(key, String(value))
+        }
+      }
+      resolved = true
+      resolve(new Response(body, { status: nodeRes.statusCode, headers }))
+    }
+
+    const origWriteHead = nodeRes.writeHead.bind(nodeRes)
+    nodeRes.writeHead = ((...args: unknown[]) => {
+      const result = (origWriteHead as (...a: unknown[]) => http.ServerResponse)(...args)
+      sendHeaders()
+      return result
+    }) as typeof nodeRes.writeHead
+
+    const origWrite = nodeRes.write.bind(nodeRes)
+    nodeRes.write = ((chunk: unknown, ...args: unknown[]) => {
+      sendHeaders()
+      if (chunk) {
+        streamController.enqueue(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string))
+      }
+      return (origWrite as (...a: unknown[]) => boolean)(chunk, ...args)
+    }) as typeof nodeRes.write
+
+    const origEnd = nodeRes.end.bind(nodeRes)
+    nodeRes.end = ((chunk?: unknown, ...args: unknown[]) => {
+      if (chunk) {
+        sendHeaders()
+        streamController.enqueue(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string))
+      }
+      streamController.close()
+      if (!resolved) sendHeaders()
+      return (origEnd as (...a: unknown[]) => unknown)(chunk, ...args)
+    }) as typeof nodeRes.end
+
+    // Stream request body to nodeReq
+    if (req.body) {
+      const reader = req.body.getReader()
+      const pump = (): void => {
+        reader.read().then((result) => {
+          if (result.done) { nodeReq.push(null); return }
+          nodeReq.push(Buffer.from(result.value))
+          pump()
+        })
+      }
+      pump()
+    } else {
+      nodeReq.push(null)
+    }
+
+    nextHandler(nodeReq, nodeRes, parse(nodeReq.url || "/", true))
+  })
 }
 
 // ─── Server ───────────────────────────────────────────────────────────────────
@@ -151,91 +243,26 @@ async function main() {
       if (url.pathname === VOICE_WS_PATH) {
         const upgradeHeader = req.headers.get("upgrade")
         if (upgradeHeader?.toLowerCase() === "websocket") {
-          const origin = req.headers.get("origin")
-          const host = req.headers.get("host")
-
-          if (!isAllowedOrigin(origin, host)) {
+          if (!isAllowedOrigin(req.headers.get("origin"), req.headers.get("host"))) {
             return new Response("Forbidden", { status: 403 })
           }
 
-          // Pass request headers as data for auth extraction in ws-handler
           const data: BunWsData = {
             headers: Object.fromEntries(req.headers.entries()),
             url: req.url,
             shim: null,
           }
 
-          const upgraded = server.upgrade(req, { data })
-          if (!upgraded) {
-            return new Response("WebSocket upgrade failed", { status: 500 })
+          if (server.upgrade(req, { data })) {
+            return undefined as unknown as Response
           }
-          // Bun handles the 101 response
-          return undefined as unknown as Response
+          return new Response("WebSocket upgrade failed", { status: 500 })
         }
       }
 
-      // All other requests → Next.js
-      // Bun.serve's fetch receives a standard Request object.
-      // Next.js's getRequestHandler expects (IncomingMessage, ServerResponse).
-      // Use node:http createServer as a bridge.
-      return new Promise<Response>((resolve) => {
-        const fakeSocket = new PassThrough()
-        Object.assign(fakeSocket, {
-          remoteAddress: server.requestIP(req)?.address ?? "127.0.0.1",
-          encrypted: url.protocol === "https:",
-        })
-
-        const nodeReq = new http.IncomingMessage(fakeSocket as unknown as Socket)
-        nodeReq.url = url.pathname + url.search
-        nodeReq.method = req.method
-        nodeReq.headers = Object.fromEntries(req.headers.entries())
-
-        const nodeRes = new http.ServerResponse(nodeReq)
-        const chunks: Buffer[] = []
-
-        const origWrite = nodeRes.write.bind(nodeRes)
-        nodeRes.write = ((chunk: unknown, ...args: unknown[]) => {
-          if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string))
-          return (origWrite as (...a: unknown[]) => boolean)(chunk, ...args)
-        }) as typeof nodeRes.write
-
-        const origEnd = nodeRes.end.bind(nodeRes)
-        nodeRes.end = ((chunk?: unknown, ...args: unknown[]) => {
-          if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string))
-          const headers = new Headers()
-          const rawHeaders = nodeRes.getHeaders()
-          for (const [key, value] of Object.entries(rawHeaders)) {
-            if (value === undefined) continue
-            if (Array.isArray(value)) {
-              for (const v of value) headers.append(key, v)
-            } else {
-              headers.set(key, String(value))
-            }
-          }
-          resolve(new Response(Buffer.concat(chunks), {
-            status: nodeRes.statusCode,
-            headers,
-          }))
-          return (origEnd as (...a: unknown[]) => unknown)(chunk, ...args)
-        }) as typeof nodeRes.end
-
-        // Stream request body for POST/PUT etc
-        if (req.body) {
-          const reader = req.body.getReader()
-          const pump = () => {
-            reader.read().then(({ done, value }) => {
-              if (done) { nodeReq.push(null); return }
-              nodeReq.push(Buffer.from(value))
-              pump()
-            })
-          }
-          pump()
-        } else {
-          nodeReq.push(null)
-        }
-
-        nextHandler(nodeReq, nodeRes, parse(nodeReq.url || "/", true))
-      })
+      // All other requests → Next.js via streaming bridge
+      const remoteAddress = server.requestIP(req)?.address ?? "127.0.0.1"
+      return handleNextRequest(req, remoteAddress, nextHandler)
     },
 
     websocket: {
@@ -246,13 +273,11 @@ async function main() {
         const shim = new BunWebSocketShim(bunWs)
         wsData.shim = shim
 
-        // Create a minimal IncomingMessage for auth cookie extraction
         const fakeSocket = new PassThrough()
         const req = new http.IncomingMessage(fakeSocket as unknown as Socket)
         req.url = wsData.url
         req.headers = wsData.headers
 
-        // Handle voice connection using the existing ws-handler
         import("@/lib/voice/ws-handler").then(({ handleVoiceConnection }) => {
           handleVoiceConnection(shim as unknown as WebSocket, req).catch((error) => {
             const message = error instanceof Error ? error.message : String(error)
@@ -264,19 +289,16 @@ async function main() {
       },
 
       message(bunWs, message) {
-        const wsData = bunWs.data
         const buf = typeof message === "string" ? Buffer.from(message) : Buffer.from(message)
-        wsData.shim?._emit("message", buf)
+        bunWs.data.shim?._emit("message", buf)
       },
 
       close(bunWs, code, reason) {
-        const wsData = bunWs.data
-        wsData.shim?._emit("close", code, Buffer.from(reason || ""))
+        bunWs.data.shim?._emit("close", code, Buffer.from(reason || ""))
       },
     },
   })
 
-  // Suppress unused variable — server is the running instance
   void server
 }
 
