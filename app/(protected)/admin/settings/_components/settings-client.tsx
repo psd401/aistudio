@@ -12,11 +12,23 @@ import { RefreshCw, Upload } from "lucide-react"
 import type { Setting, CreateSettingInput } from "@/actions/db/settings-actions"
 import { LogoUpload } from "./logo-upload"
 
+const CATEGORY_INFO: Record<string, { title: string; description: string }> = {
+  ai: { title: "AI Configuration", description: "AI prompts, embeddings, and model configuration" },
+  ai_providers: { title: "AI Providers", description: "API keys and configuration for AI model providers" },
+  branding: { title: "Branding", description: "Organization name, logo, and brand colors" },
+  storage: { title: "Storage", description: "Configuration for file storage services" },
+  external_services: { title: "External Services", description: "API keys and configuration for external integrations" },
+  voice: { title: "Voice Mode", description: "Real-time voice conversation provider, model, and language settings" },
+  embeddings: { title: "Embeddings", description: "Configuration for embedding generation and vector search" },
+  uncategorized: { title: "Other", description: "Uncategorized settings" },
+}
+
 interface SettingsClientProps {
   initialSettings: Setting[]
   currentLogoUrl?: string
 }
 
+// eslint-disable-next-line max-lines-per-function -- Settings dashboard with CRUD handlers and tab rendering
 export function SettingsClient({ initialSettings, currentLogoUrl = "/logo.png" }: SettingsClientProps) {
   const [settings, setSettings] = useState(initialSettings)
   const [isFormOpen, setIsFormOpen] = useState(false)
@@ -178,40 +190,7 @@ export function SettingsClient({ initialSettings, currentLogoUrl = "/logo.png" }
     }
   }, [handleRefresh, toast])
 
-  const categoryInfo: Record<string, { title: string; description: string }> = {
-    ai: {
-      title: "AI Configuration",
-      description: "AI prompts, embeddings, and model configuration"
-    },
-    ai_providers: {
-      title: "AI Providers",
-      description: "API keys and configuration for AI model providers"
-    },
-    branding: {
-      title: "Branding",
-      description: "Organization name, logo, and brand colors"
-    },
-    storage: {
-      title: "Storage",
-      description: "Configuration for file storage services"
-    },
-    external_services: {
-      title: "External Services",
-      description: "API keys and configuration for external integrations"
-    },
-    voice: {
-      title: "Voice Mode",
-      description: "Real-time voice conversation provider, model, and language settings"
-    },
-    embeddings: {
-      title: "Embeddings",
-      description: "Configuration for embedding generation and vector search"
-    },
-    uncategorized: {
-      title: "Other",
-      description: "Uncategorized settings"
-    }
-  }
+  // CATEGORY_INFO moved to module-level CATEGORY_INFO constant
 
   return (
     <div className="space-y-6">
@@ -258,7 +237,7 @@ export function SettingsClient({ initialSettings, currentLogoUrl = "/logo.png" }
         <CardContent>
           <Tabs defaultValue="ai_providers" className="space-y-4">
             <TabsList>
-              {Object.entries(categoryInfo).map(([key, info]) => {
+              {Object.entries(CATEGORY_INFO).map(([key, info]) => {
                 const count = settingsByCategory[key]?.length || 0
                 if (count === 0 && key !== 'uncategorized') return null
                 
@@ -273,7 +252,7 @@ export function SettingsClient({ initialSettings, currentLogoUrl = "/logo.png" }
               })}
             </TabsList>
 
-            {Object.entries(categoryInfo).map(([key, info]) => {
+            {Object.entries(CATEGORY_INFO).map(([key, info]) => {
               const categorySettings = settingsByCategory[key] || []
               if (categorySettings.length === 0 && key !== 'uncategorized') return null
 

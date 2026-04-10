@@ -26,8 +26,8 @@ import {
 } from '@assistant-ui/react'
 import type { VoiceServerMessage } from '@/lib/voice/types'
 
-/** Audio playback sample rate — matches server-side Gemini Live config */
-const PLAYBACK_SAMPLE_RATE = 16000
+/** Audio playback sample rate — Gemini Live outputs at 24kHz (input is 16kHz) */
+const PLAYBACK_SAMPLE_RATE = 24000
 
 /** AnalyserNode FFT size for volume measurement */
 const ANALYSER_FFT_SIZE = 256

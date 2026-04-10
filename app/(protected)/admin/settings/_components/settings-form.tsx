@@ -83,6 +83,7 @@ const commonSettings = [
   { key: "VOICE_NAME", category: "voice", description: "Provider-specific voice name/ID (leave empty for model default)", isSecret: false },
 ]
 
+// eslint-disable-next-line max-lines-per-function -- Form component with extensive JSX for multiple field types
 export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const form = useForm<FormValues>({
