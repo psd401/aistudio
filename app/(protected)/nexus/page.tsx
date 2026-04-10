@@ -299,10 +299,12 @@ function NexusRuntimeWrapper({
     setVoiceOverlayOpen(false)
   }, [])
 
-  // Voice button rendered in composer extra actions slot
-  const composerExtraActions = voiceAdapter ? (
-    <VoiceButton onVoiceStart={handleVoiceStart} />
-  ) : null
+  // Voice button rendered in composer extra actions slot — memoized to avoid
+  // re-creating JSX on every render (prevents unnecessary Thread re-renders)
+  const composerExtraActions = useMemo(
+    () => voiceAdapter ? <VoiceButton onVoiceStart={handleVoiceStart} /> : null,
+    [voiceAdapter, handleVoiceStart]
+  )
 
   return (
     <ConversationRuntimeProvider

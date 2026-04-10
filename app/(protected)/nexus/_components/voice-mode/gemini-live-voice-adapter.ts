@@ -305,31 +305,40 @@ class VoiceSession {
       }
       signal?.addEventListener('abort', onAbort, { once: true })
 
-      socket.addEventListener('message', (event) => {
+      // Handshake listeners are removed after resolve/reject to avoid
+      // stale message/error/close handlers running during the active session
+      const onHandshakeMessage = (event: MessageEvent) => {
         try {
           const parsed: unknown = JSON.parse(event.data as string)
           if (isValidServerMessage(parsed) && parsed.type === 'ready') {
             clearTimeout(connectTimeout)
             signal?.removeEventListener('abort', onAbort)
+            socket.removeEventListener('message', onHandshakeMessage)
+            socket.removeEventListener('error', onHandshakeError)
+            socket.removeEventListener('close', onHandshakeClose)
             resolve(socket)
           }
         } catch { log.debug('Parse error during WebSocket handshake') }
-      })
+      }
 
-      socket.addEventListener('error', () => {
+      const onHandshakeError = () => {
         clearTimeout(connectTimeout)
         signal?.removeEventListener('abort', onAbort)
         reject(new Error('WebSocket connection failed'))
-      })
+      }
 
       // Use allowlisted error strings — do not expose raw event.reason to UI
-      socket.addEventListener('close', (event) => {
+      const onHandshakeClose = (event: CloseEvent) => {
         clearTimeout(connectTimeout)
         signal?.removeEventListener('abort', onAbort)
         if (event.code === 4001) reject(new Error('Unauthorized — please sign in again'))
         else if (event.code === 4003) reject(new Error('Voice mode is not enabled for your account'))
         else reject(new Error('Connection lost'))
-      })
+      }
+
+      socket.addEventListener('message', onHandshakeMessage)
+      socket.addEventListener('error', onHandshakeError)
+      socket.addEventListener('close', onHandshakeClose)
     })
   }
 
