@@ -13,7 +13,6 @@
  */
 
 import { createServer, type IncomingMessage } from "node:http"
-import type { Duplex } from "node:stream"
 import { WebSocketServer } from "ws"
 import next from "next"
 import { parse } from "node:url"
@@ -69,29 +68,17 @@ async function main() {
     handle(req, res, parsedUrl)
   })
 
-  // WebSocket server with noServer mode and payload size limit
-  const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD })
-
-  server.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) => {
-    const { pathname } = parse(request.url || "/")
-
-    if (pathname === VOICE_WS_PATH) {
+  // WebSocket server attached to HTTP server with path filter.
+  // Using { server } mode instead of noServer + handleUpgrade for bun compatibility —
+  // bun's node:http shim drops the socket during ws.handleUpgrade (close code 1006).
+  const wss = new WebSocketServer({
+    server,
+    path: VOICE_WS_PATH,
+    maxPayload: WS_MAX_PAYLOAD,
+    verifyClient: ({ req }: { req: IncomingMessage }) => {
       // H3: Validate origin to prevent cross-site WebSocket hijacking
-      if (!isAllowedOrigin(request)) {
-        socket.write("HTTP/1.1 403 Forbidden\r\n\r\n")
-        socket.destroy()
-        return
-      }
-
-      wss.handleUpgrade(request, socket, head, (ws) => {
-        wss.emit("connection", ws, request)
-      })
-    } else {
-      // Let Next.js handle non-voice WebSocket upgrades (e.g. HMR in dev)
-      if (!dev) {
-        socket.destroy()
-      }
-    }
+      return isAllowedOrigin(req)
+    },
   })
 
   wss.on("connection", async (ws, req) => {
