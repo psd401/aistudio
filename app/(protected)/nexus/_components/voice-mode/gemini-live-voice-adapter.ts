@@ -331,14 +331,20 @@ this.helpers.setStatus({ type: 'running' })
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       })
     } catch (error) {
-this.cleanup()
-      // Use DOMException.name for cross-browser permission detection
+      this.cleanup()
+      // Allowlist all user-visible error strings — never expose raw error.message
       const isPermissionDenied = error instanceof DOMException
         && (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError')
+      const isDeviceBusy = error instanceof DOMException && error.name === 'NotReadableError'
+      const isNotFound = error instanceof DOMException && error.name === 'NotFoundError'
       throw new Error(
         isPermissionDenied
           ? 'Microphone permission denied. Please allow microphone access and try again.'
-          : `Microphone setup failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+          : isDeviceBusy
+          ? 'Microphone is in use by another application. Please close it and try again.'
+          : isNotFound
+          ? 'No microphone found. Please connect a microphone and try again.'
+          : 'Microphone setup failed. Please check your device and try again.'
       )
     }
 

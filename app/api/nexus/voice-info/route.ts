@@ -55,13 +55,9 @@ export async function GET() {
     })
 
     timer({ status: "success" })
-    return NextResponse.json({
-      available: isConfigured,
-      provider: voiceSettings.provider,
-      model: voiceSettings.model,
-      language: voiceSettings.language,
-      wsEndpoint: "/api/nexus/voice",
-    })
+    // Only return availability — internal config (provider, model, wsEndpoint)
+    // is not needed by the client and would expose infrastructure details
+    return NextResponse.json({ available: isConfigured })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     log.error("Error getting voice info", { error: message })
