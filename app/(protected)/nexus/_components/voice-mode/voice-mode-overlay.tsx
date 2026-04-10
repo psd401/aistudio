@@ -129,18 +129,18 @@ export function VoiceModeOverlay({ open, onClose }: VoiceModeOverlayProps) {
     onClose()
   }, [controls, onClose])
 
-  // Escape key disconnects and closes (not just closes)
+  // Escape key disconnects and closes — guarded to avoid disconnecting an already-ended session
   useEffect(() => {
     if (!open) return
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        controls.disconnect()
+        if (statusType !== 'ended') controls.disconnect()
         onClose()
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [open, controls, onClose])
+  }, [open, controls, onClose, statusType])
 
   const handleReconnect = useCallback(() => {
     controls.connect()

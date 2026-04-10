@@ -11,6 +11,10 @@
  * - Volume measurement via AnalyserNode
  * - Event emission (transcript, mode, volume, status)
  *
+ * Security: AudioWorklet processor loaded from /audio-worklet-processor.js (same-origin).
+ * The S3 bucket serving static assets must not allow public PutObject.
+ * CSP should include worker-src 'self' for defense in depth.
+ *
  * Issue #873
  */
 
@@ -36,6 +40,9 @@ const MAX_RECONNECT_ATTEMPTS = 3
 
 /** Delay between reconnect attempts (ms) */
 const RECONNECT_DELAY_MS = 1000
+
+/** Max WebSocket bufferedAmount before dropping audio (back-pressure) */
+const MAX_BUFFERED_AMOUNT = 65_536
 
 /**
  * Constructs the WebSocket URL for the voice endpoint.
@@ -77,6 +84,34 @@ function measureVolume(analyser: AnalyserNode, dataArray: Uint8Array<ArrayBuffer
     sum += value
   }
   return sum / (dataArray.length * 255)
+}
+
+/**
+ * Runtime validation guard for incoming WebSocket messages.
+ * Mirrors the server-side isValidClientMessage() pattern from ws-handler.ts.
+ */
+function isValidServerMessage(msg: unknown): msg is VoiceServerMessage {
+  if (typeof msg !== 'object' || msg === null) return false
+  const obj = msg as Record<string, unknown>
+  if (typeof obj.type !== 'string') return false
+  switch (obj.type) {
+    case 'ready':
+      return true
+    case 'audio':
+      return typeof obj.data === 'string'
+    case 'transcript':
+      return typeof obj.entry === 'object' && obj.entry !== null
+        && typeof (obj.entry as Record<string, unknown>).role === 'string'
+        && typeof (obj.entry as Record<string, unknown>).text === 'string'
+    case 'state':
+      return typeof obj.speaking === 'string'
+    case 'error':
+      return typeof obj.message === 'string'
+    case 'session_ended':
+      return typeof obj.reason === 'string'
+    default:
+      return false
+  }
 }
 
 /**
@@ -248,8 +283,8 @@ class VoiceSession {
 
       socket.addEventListener('message', (event) => {
         try {
-          const msg: VoiceServerMessage = JSON.parse(event.data as string)
-          if (msg.type === 'ready') {
+          const parsed: unknown = JSON.parse(event.data as string)
+          if (isValidServerMessage(parsed) && parsed.type === 'ready') {
             signal?.removeEventListener('abort', onAbort)
             resolve(socket)
           }
@@ -261,11 +296,12 @@ class VoiceSession {
         reject(new Error('WebSocket connection failed'))
       })
 
+      // Use allowlisted error strings — do not expose raw event.reason to UI
       socket.addEventListener('close', (event) => {
         signal?.removeEventListener('abort', onAbort)
         if (event.code === 4001) reject(new Error('Unauthorized — please sign in again'))
         else if (event.code === 4003) reject(new Error('Voice mode is not enabled for your account'))
-        else reject(new Error(`Connection closed: ${event.reason || 'unknown reason'}`))
+        else reject(new Error('Connection lost'))
       })
     })
   }
@@ -278,11 +314,13 @@ class VoiceSession {
       })
     } catch (error) {
       this.cleanup()
-      const message = error instanceof Error ? error.message : 'Microphone access failed'
+      // Use DOMException.name for cross-browser permission detection (not message string matching)
+      const isPermissionDenied = error instanceof DOMException
+        && (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError')
       throw new Error(
-        message.includes('Permission')
+        isPermissionDenied
           ? 'Microphone permission denied. Please allow microphone access and try again.'
-          : `Microphone setup failed: ${message}`
+          : `Microphone setup failed: ${error instanceof Error ? error.message : 'Unknown error'}`
       )
     }
 
@@ -299,6 +337,8 @@ class VoiceSession {
 
     this.workletNode.port.addEventListener('message', (event: MessageEvent<ArrayBuffer>) => {
       if (this.isMuted || !this.ws || this.ws.readyState !== WebSocket.OPEN) return
+      // Back-pressure: skip frame if WebSocket send buffer is congested
+      if (this.ws.bufferedAmount > MAX_BUFFERED_AMOUNT) return
       this.ws.send(JSON.stringify({ type: 'audio', data: pcmToBase64(event.data) }))
     })
     // Required when using addEventListener (vs onmessage) — starts message dispatch
@@ -350,28 +390,29 @@ class VoiceSession {
     } catch { /* Wake Lock not available — graceful degradation */ }
   }
 
-  /** Handle incoming WebSocket messages. */
+  /** Handle incoming WebSocket messages with runtime validation. */
   private handleMessage(event: MessageEvent): void {
     if (this.helpers.isDisposed()) return
     try {
-      const msg: VoiceServerMessage = JSON.parse(event.data as string)
-      switch (msg.type) {
+      const parsed: unknown = JSON.parse(event.data as string)
+      if (!isValidServerMessage(parsed)) return
+      switch (parsed.type) {
         case 'audio':
-          if (this.playbackQueue) this.playbackQueue.enqueue(base64ToPcm(msg.data))
+          if (this.playbackQueue) this.playbackQueue.enqueue(base64ToPcm(parsed.data))
           break
         case 'transcript':
-          this.helpers.emitTranscript({ role: msg.entry.role, text: msg.entry.text, isFinal: msg.entry.isFinal })
+          this.helpers.emitTranscript({ role: parsed.entry.role, text: parsed.entry.text, isFinal: parsed.entry.isFinal })
           break
         case 'state':
-          if (msg.speaking === 'user') this.helpers.emitMode('listening')
-          else if (msg.speaking === 'assistant') this.helpers.emitMode('speaking')
+          if (parsed.speaking === 'user') this.helpers.emitMode('listening')
+          else if (parsed.speaking === 'assistant') this.helpers.emitMode('speaking')
           break
         case 'error':
-          this.helpers.end('error', new Error(msg.message))
+          this.helpers.end('error', new Error(parsed.message))
           this.cleanup()
           break
         case 'session_ended':
-          this.helpers.end(msg.reason === 'finished' ? 'finished' : 'cancelled')
+          this.helpers.end(parsed.reason === 'finished' ? 'finished' : 'cancelled')
           this.cleanup()
           break
       }
@@ -382,8 +423,9 @@ class VoiceSession {
   private handleClose(event: CloseEvent): void {
     if (this.helpers.isDisposed()) return
 
+    // Auth errors — use allowlisted message, don't expose event.reason
     if (event.code === 4001 || event.code === 4003) {
-      this.helpers.end('error', new Error(event.reason || 'Access denied'))
+      this.helpers.end('error', new Error('Access denied'))
       this.cleanup()
       return
     }
