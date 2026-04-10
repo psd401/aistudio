@@ -489,7 +489,7 @@ class VoiceSession {
           // Re-check disposal after async connect — prevents socket leak
           // if disconnect() was called during the connection handshake
           if (this.helpers.isDisposed()) {
-            this.ws.close()
+            this.cleanup() // closes socket AND releases all audio/system resources
             return
           }
           // Clear stale audio from the dropped session before re-attaching

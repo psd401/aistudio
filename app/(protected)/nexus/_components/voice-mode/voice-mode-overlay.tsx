@@ -238,7 +238,11 @@ export function VoiceModeOverlay({ open, onClose }: VoiceModeOverlayProps) {
               className="mt-4 flex items-center gap-2 rounded-lg bg-red-950/50 px-4 py-2 text-sm text-red-300"
             >
               <AlertCircle size={16} />
-              <span>Something went wrong. Please try again.</span>
+              <span>
+                {endedError instanceof Error
+                  ? endedError.message
+                  : 'Something went wrong. Please try again.'}
+              </span>
             </motion.div>
           )}
 

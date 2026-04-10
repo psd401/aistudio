@@ -42,7 +42,7 @@ export function useVoiceAvailability(): VoiceAvailability {
         return res.json()
       })
       .then((data) => {
-        if (data) {
+        if (data && !controller.signal.aborted) {
           setState({ available: !!data.available, loading: false })
         }
       })
