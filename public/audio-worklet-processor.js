@@ -7,6 +7,10 @@
  * Input: Native sample rate Float32 audio from getUserMedia
  * Output: 16kHz PCM16 Int16Array via MessagePort
  *
+ * Downsampling uses a box filter (averaging) to avoid aliasing artifacts
+ * from nearest-neighbor decimation. Leftover samples after each chunk are
+ * preserved to prevent audio drift.
+ *
  * Issue #873
  */
 
@@ -51,19 +55,32 @@ class PCMCaptureProcessor extends AudioWorkletProcessor {
 
     // Check if we have enough for a chunk
     if (this._writePos >= this._targetInputSamples) {
+      // Calculate how many input samples we'll consume (exact multiple of ratio)
       const outputLength = Math.floor(this._writePos / this._ratio)
+      const consumed = Math.floor(outputLength * this._ratio)
       const int16 = new Int16Array(outputLength)
 
-      // Downsample and convert Float32 → Int16
+      // Downsample with box filter (average samples in window) to avoid aliasing
       for (let i = 0; i < outputLength; i++) {
-        const srcIdx = Math.min(Math.floor(i * this._ratio), this._writePos - 1)
-        const s = Math.max(-1, Math.min(1, this._buffer[srcIdx]))
+        const startIdx = Math.floor(i * this._ratio)
+        const endIdx = Math.min(Math.floor((i + 1) * this._ratio), this._writePos)
+        let sum = 0
+        for (let j = startIdx; j < endIdx; j++) {
+          sum += this._buffer[j]
+        }
+        const s = Math.max(-1, Math.min(1, sum / (endIdx - startIdx)))
         int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF
       }
 
       // Transfer ownership of the buffer for zero-copy
       this.port.postMessage(int16.buffer, [int16.buffer])
-      this._writePos = 0
+
+      // Preserve leftover samples to prevent audio drift
+      const leftover = this._writePos - consumed
+      if (leftover > 0) {
+        this._buffer.copyWithin(0, consumed, this._writePos)
+      }
+      this._writePos = leftover
     }
 
     return true

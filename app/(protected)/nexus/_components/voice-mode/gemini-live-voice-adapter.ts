@@ -54,14 +54,11 @@ function getWebSocketUrl(): string {
 
 /**
  * Converts an ArrayBuffer of PCM16 Int16 samples to a base64 string.
+ * Uses Array.from + join to avoid O(n²) string concatenation.
  */
 function pcmToBase64(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer)
-  let binary = ''
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte)
-  }
-  return btoa(binary)
+  return btoa(Array.from(bytes, (b) => String.fromCharCode(b)).join(''))
 }
 
 /**
@@ -99,10 +96,13 @@ function isValidServerMessage(msg: unknown): msg is VoiceServerMessage {
       return true
     case 'audio':
       return typeof obj.data === 'string'
-    case 'transcript':
-      return typeof obj.entry === 'object' && obj.entry !== null
-        && typeof (obj.entry as Record<string, unknown>).role === 'string'
-        && typeof (obj.entry as Record<string, unknown>).text === 'string'
+    case 'transcript': {
+      if (typeof obj.entry !== 'object' || obj.entry === null) return false
+      const entry = obj.entry as Record<string, unknown>
+      return typeof entry.role === 'string'
+        && typeof entry.text === 'string'
+        && (typeof entry.isFinal === 'boolean' || entry.isFinal === undefined)
+    }
     case 'state':
       return typeof obj.speaking === 'string'
     case 'error':
@@ -215,12 +215,21 @@ class VoiceSession {
       return { disconnect: () => this.cleanup(), mute: () => undefined, unmute: () => undefined }
     }
 
-    await this.setupMicrophoneCapture()
-    this.setupPlayback()
-    await this.resumeAudioContexts()
-
+    // Attach WS handlers immediately after connect (before async mic setup)
+    // so close events during permission prompt are observed
     this.ws.addEventListener('message', (e) => this.handleMessage(e))
     this.ws.addEventListener('close', (e) => this.handleClose(e))
+
+    await this.setupMicrophoneCapture()
+
+    // Check disposal again after async mic setup
+    if (this.helpers.isDisposed()) {
+      this.cleanup()
+      return { disconnect: () => this.cleanup(), mute: () => undefined, unmute: () => undefined }
+    }
+
+    this.setupPlayback()
+    await this.resumeAudioContexts()
 
     this.startVolumePolling()
     await this.acquireWakeLock()
@@ -272,8 +281,15 @@ class VoiceSession {
   /** Connect WebSocket and wait for "ready" signal. */
   private connectWebSocket(): Promise<WebSocket> {
     return new Promise((resolve, reject) => {
-      const socket = new WebSocket(getWebSocketUrl())
       const signal = this.abortSignal
+
+      // Pre-check abort signal before initiating connection
+      if (signal?.aborted) {
+        reject(new Error('Connection aborted'))
+        return
+      }
+
+      const socket = new WebSocket(getWebSocketUrl())
 
       const onAbort = () => {
         socket.close()
@@ -314,7 +330,7 @@ class VoiceSession {
       })
     } catch (error) {
       this.cleanup()
-      // Use DOMException.name for cross-browser permission detection (not message string matching)
+      // Use DOMException.name for cross-browser permission detection
       const isPermissionDenied = error instanceof DOMException
         && (error.name === 'NotAllowedError' || error.name === 'PermissionDeniedError')
       throw new Error(
@@ -334,6 +350,13 @@ class VoiceSession {
 
     source.connect(this.inputAnalyser)
     this.inputAnalyser.connect(this.workletNode)
+
+    // Connect worklet to a silent sink so the audio graph stays active
+    // (Web Audio pull-based model requires connection to destination)
+    const silentGain = this.captureContext.createGain()
+    silentGain.gain.value = 0
+    this.workletNode.connect(silentGain)
+    silentGain.connect(this.captureContext.destination)
 
     this.workletNode.port.addEventListener('message', (event: MessageEvent<ArrayBuffer>) => {
       if (this.isMuted || !this.ws || this.ws.readyState !== WebSocket.OPEN) return

@@ -34,6 +34,7 @@ export function VoiceButton({ onVoiceStart }: VoiceButtonProps) {
       className="text-muted-foreground hover:text-foreground"
       onClick={handleClick}
       aria-label="Start voice conversation"
+      data-testid="voice-mode-button"
     >
       <Mic className="size-5" />
     </TooltipIconButton>

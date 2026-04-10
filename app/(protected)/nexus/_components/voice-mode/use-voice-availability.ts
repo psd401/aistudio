@@ -10,7 +10,7 @@
 
 'use client'
 
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect } from 'react'
 
 interface VoiceAvailability {
   /** Whether voice mode is available for this user */
@@ -21,17 +21,16 @@ interface VoiceAvailability {
 
 /**
  * Checks voice mode availability. Only fetches once per mount.
+ * Aborts fetch on unmount to prevent stale setState calls.
  * Returns { available: false, loading: false } on any error (fail-closed).
  */
 export function useVoiceAvailability(): VoiceAvailability {
   const [state, setState] = useState<VoiceAvailability>({ available: false, loading: true })
-  const fetchedRef = useRef(false)
 
   useEffect(() => {
-    if (fetchedRef.current) return
-    fetchedRef.current = true
+    const controller = new AbortController()
 
-    fetch('/api/nexus/voice')
+    fetch('/api/nexus/voice', { signal: controller.signal })
       .then((res) => {
         if (!res.ok) {
           setState({ available: false, loading: false })
@@ -45,8 +44,13 @@ export function useVoiceAvailability(): VoiceAvailability {
         }
       })
       .catch(() => {
-        setState({ available: false, loading: false })
+        // AbortError from unmount or network error — fail closed
+        if (!controller.signal.aborted) {
+          setState({ available: false, loading: false })
+        }
       })
+
+    return () => { controller.abort() }
   }, [])
 
   return state

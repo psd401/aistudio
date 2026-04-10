@@ -33,11 +33,12 @@ type VisualizerMode = 'connecting' | 'listening' | 'speaking' | 'error' | 'idle'
 /** Maps voice session state to visualizer mode */
 function getVisualizerMode(
   statusType: string | undefined,
-  voiceMode: string | undefined
+  voiceMode: string | undefined,
+  hasError: boolean
 ): VisualizerMode {
   if (!statusType) return 'idle'
   if (statusType === 'starting') return 'connecting'
-  if (statusType === 'ended') return 'error'
+  if (statusType === 'ended') return hasError ? 'error' : 'idle'
   if (voiceMode === 'speaking') return 'speaking'
   return 'listening'
 }
@@ -121,7 +122,7 @@ export function VoiceModeOverlay({ open, onClose }: VoiceModeOverlayProps) {
     ? (voiceState?.status as { type: 'ended'; error?: unknown }).error
     : null
 
-  const vizMode = getVisualizerMode(statusType, voiceMode)
+  const vizMode = getVisualizerMode(statusType, voiceMode, endedError != null)
   const statusLabel = getStatusLabel(statusType, voiceMode, isMuted)
 
   const handleDisconnect = useCallback(() => {
