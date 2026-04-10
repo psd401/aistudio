@@ -72,7 +72,8 @@ interface ConversationRuntimeProviderProps {
 }
 
 /** UUID format for validating X-Connector-Reconnect header values */
-const UUID_RE = /^[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}$/i
+// eslint-disable-next-line unicorn/better-regex -- expanded form avoids security/detect-unsafe-regex on grouped quantifier
+const UUID_RE = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i
 const MAX_RECONNECT_IDS = 10
 
 function ConversationRuntimeProvider({
