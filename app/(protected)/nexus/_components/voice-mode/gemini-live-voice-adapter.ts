@@ -174,9 +174,22 @@ class AudioPlaybackQueue {
 export function createGeminiLiveVoiceAdapter(): RealtimeVoiceAdapter {
   return {
     connect(options) {
-      return createVoiceSession(options, (helpers) => {
-        const session = new VoiceSession(helpers, options.abortSignal)
-        return session.start()
+      // eslint-disable-next-line no-console -- temporary debug
+      console.log('[voice-adapter] connect() called, creating session')
+      return createVoiceSession(options, async (helpers) => {
+        // eslint-disable-next-line no-console -- temporary debug
+        console.log('[voice-adapter] setup function entered')
+        try {
+          const session = new VoiceSession(helpers, options.abortSignal)
+          const controls = await session.start()
+          // eslint-disable-next-line no-console -- temporary debug
+          console.log('[voice-adapter] session started successfully')
+          return controls
+        } catch (err) {
+          // eslint-disable-next-line no-console -- temporary debug
+          console.error('[voice-adapter] session.start() threw:', err)
+          throw err
+        }
       })
     },
   }
