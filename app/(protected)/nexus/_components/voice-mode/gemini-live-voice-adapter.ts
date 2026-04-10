@@ -206,10 +206,9 @@ class VoiceSession {
 
   /** Main entry point — connects and returns session controls. */
   async start(): Promise<VoiceSessionControls> {
-this.helpers.setStatus({ type: 'starting' })
+    this.helpers.setStatus({ type: 'starting' })
 
     this.ws = await this.connectWebSocket()
-
 
     if (this.helpers.isDisposed()) {
       this.cleanup()
@@ -221,8 +220,7 @@ this.helpers.setStatus({ type: 'starting' })
     this.ws.addEventListener('message', (e) => this.handleMessage(e))
     this.ws.addEventListener('close', (e) => this.handleClose(e))
 
-await this.setupMicrophoneCapture()
-
+    await this.setupMicrophoneCapture()
 
     // Check disposal again after async mic setup
     if (this.helpers.isDisposed()) {
@@ -236,7 +234,7 @@ await this.setupMicrophoneCapture()
     this.startVolumePolling()
     await this.acquireWakeLock()
 
-this.helpers.setStatus({ type: 'running' })
+    this.helpers.setStatus({ type: 'running' })
     this.helpers.emitMode('listening')
 
     return {
@@ -293,7 +291,15 @@ this.helpers.setStatus({ type: 'running' })
 
       const socket = new WebSocket(getWebSocketUrl())
 
+      // Timeout: reject if server never sends "ready" (e.g., hung proxy)
+      const connectTimeout = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort)
+        socket.close()
+        reject(new Error('Connection timed out'))
+      }, 10_000)
+
       const onAbort = () => {
+        clearTimeout(connectTimeout)
         socket.close()
         reject(new Error('Connection aborted'))
       }
@@ -303,6 +309,7 @@ this.helpers.setStatus({ type: 'running' })
         try {
           const parsed: unknown = JSON.parse(event.data as string)
           if (isValidServerMessage(parsed) && parsed.type === 'ready') {
+            clearTimeout(connectTimeout)
             signal?.removeEventListener('abort', onAbort)
             resolve(socket)
           }
@@ -310,12 +317,14 @@ this.helpers.setStatus({ type: 'running' })
       })
 
       socket.addEventListener('error', () => {
+        clearTimeout(connectTimeout)
         signal?.removeEventListener('abort', onAbort)
         reject(new Error('WebSocket connection failed'))
       })
 
       // Use allowlisted error strings — do not expose raw event.reason to UI
       socket.addEventListener('close', (event) => {
+        clearTimeout(connectTimeout)
         signal?.removeEventListener('abort', onAbort)
         if (event.code === 4001) reject(new Error('Unauthorized — please sign in again'))
         else if (event.code === 4003) reject(new Error('Voice mode is not enabled for your account'))

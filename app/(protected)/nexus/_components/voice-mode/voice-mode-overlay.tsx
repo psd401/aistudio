@@ -45,11 +45,12 @@ function getVisualizerMode(
 function getStatusLabel(
   statusType: string | undefined,
   voiceMode: string | undefined,
-  isMuted: boolean
+  isMuted: boolean,
+  hasError: boolean
 ): string {
   if (!statusType) return 'Ready'
   if (statusType === 'starting') return 'Connecting...'
-  if (statusType === 'ended') return 'Disconnected'
+  if (statusType === 'ended') return hasError ? 'Connection error' : 'Disconnected'
   if (isMuted) return 'Muted'
   if (voiceMode === 'speaking') return 'AI is speaking...'
   return 'Listening...'
@@ -121,7 +122,7 @@ export function VoiceModeOverlay({ open, onClose }: VoiceModeOverlayProps) {
     : null
 
   const vizMode = getVisualizerMode(statusType, voiceMode, endedError != null)
-  const statusLabel = getStatusLabel(statusType, voiceMode, isMuted)
+  const statusLabel = getStatusLabel(statusType, voiceMode, isMuted, endedError != null)
 
   const handleDisconnect = useCallback(() => {
     controls.disconnect()

@@ -238,7 +238,10 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     }
 
     if (!voiceSettings.provider || !voiceSettings.model || !isSupportedVoiceProvider(voiceSettings.provider)) {
-      log.error("Invalid voice provider configured", { provider: voiceSettings.provider })
+      log.error("Voice settings not configured — set VOICE_PROVIDER and VOICE_MODEL in Admin > System Settings > Voice Mode", {
+        provider: voiceSettings.provider,
+        model: voiceSettings.model,
+      })
       sendToClient(ws, { type: "error", message: "Voice provider not configured" })
       ws.close(4500, "Provider not configured")
       timer({ status: "error", reason: "invalid_provider" })

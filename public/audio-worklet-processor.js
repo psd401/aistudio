@@ -48,7 +48,11 @@ class PCMCaptureProcessor extends AudioWorkletProcessor {
 
     const samples = input[0]
 
-    // Copy to accumulation buffer
+    // Copy to accumulation buffer.
+    // Buffer is pre-allocated for ~200ms at native rate. process() is called every
+    // 128 samples (~2.67ms at 48kHz), and chunks drain every ~100ms, so overflow
+    // should never occur under normal conditions. The guard prevents corruption
+    // under extreme CPU pressure — samples beyond buffer capacity are dropped.
     for (let i = 0; i < samples.length && this._writePos < this._bufferSize; i++) {
       this._buffer[this._writePos++] = samples[i]
     }
