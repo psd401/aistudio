@@ -5,21 +5,29 @@
  * for the voice API (/api/nexus/voice). All other requests pass through
  * to Next.js unchanged.
  *
- * Usage:
- *   Development: bun run dev:voice (uses next dev + ws upgrade)
- *   Production:  node voice-server.js (standalone build wrapper)
+ * Uses Bun.serve() with native WebSocket upgrade — the `ws` npm package's
+ * handleUpgrade is incompatible with bun's node:http shim (close code 1006).
+ * A lightweight shim (BunWebSocketShim) adapts bun's ServerWebSocket to
+ * the event-based ws.WebSocket interface expected by ws-handler.ts.
  *
- * Issue #872
+ * Usage:
+ *   Development: bun run dev:voice / bun run dev:local
+ *   Production:  bun run voice-server.js
+ *   Docker:      CMD ["bun", "run", "server.ts"]
+ *
+ * Issue #872, #873
  */
 
-import { createServer, type IncomingMessage } from "node:http"
-import { WebSocketServer } from "ws"
-import next from "next"
+import http from "node:http"
+import { PassThrough } from "node:stream"
+import type { Socket } from "node:net"
 import { parse } from "node:url"
+import type WebSocket from "ws"
+import type { ServerWebSocket } from "bun"
+import next from "next"
 
 const VOICE_WS_PATH = "/api/nexus/voice"
-// Must match WS_MAX_PAYLOAD in lib/voice/constants.ts and voice-server.js
-const WS_MAX_PAYLOAD = 65536 // 64KB
+const WS_MAX_PAYLOAD = 65536 // 64KB — must match lib/voice/constants.ts
 
 const dev = process.env.NODE_ENV !== "production"
 const hostname = process.env.HOSTNAME || "0.0.0.0"
@@ -27,13 +35,9 @@ const port = Number.parseInt(process.env.PORT || "3000", 10)
 
 /**
  * Validate the Origin header on WebSocket upgrade to prevent CSWSH.
- * Returns true if the origin is allowed, false otherwise.
  */
-function isAllowedOrigin(request: IncomingMessage): boolean {
-  const origin = request.headers.origin
-  // In development, allow all origins for local testing
+function isAllowedOrigin(origin: string | null | undefined, host: string | null | undefined): boolean {
   if (dev) return true
-  // No origin header (e.g. server-to-server) — reject for browser safety
   if (!origin) return false
 
   const allowedOrigins: string[] = []
@@ -43,59 +47,237 @@ function isAllowedOrigin(request: IncomingMessage): boolean {
   const appUrl = process.env.NEXTAUTH_URL || process.env.APP_URL
   if (appUrl) allowedOrigins.push(appUrl.replace(/\/+$/, ""))
 
-  // If no allowed origins configured, fall back to same-origin check.
-  // Protocol may be "http" for local dev without HTTPS — this is intentional
-  // to allow dev:voice to work without TLS. In production, ALB always sets
-  // x-forwarded-proto: https so the check enforces HTTPS origins.
   if (allowedOrigins.length === 0) {
-    const host = request.headers.host
     if (!host) return false
-    const protocol = request.headers["x-forwarded-proto"] === "https" ? "https" : "http"
-    return origin === `${protocol}://${host}`
+    return origin === `http://${host}` || origin === `https://${host}`
   }
 
   return allowedOrigins.includes(origin)
 }
 
+// ─── Bun WebSocket Shim ───────────────────────────────────────────────────────
+// Adapts bun's ServerWebSocket to the event-based ws.WebSocket interface
+// used by ws-handler.ts. Only implements the subset ws-handler actually uses.
+
+type WsEventMap = {
+  message: [(data: Buffer) => void]
+  close: [(code: number, reason: Buffer) => void]
+  error: [(error: Error) => void]
+}
+
+interface BunWsData {
+  headers: Record<string, string>
+  url: string
+  shim: BunWebSocketShim | null
+}
+
+/**
+ * Minimal EventEmitter-compatible wrapper around bun's ServerWebSocket.
+ * Implements only the ws.WebSocket methods used by ws-handler.ts:
+ * - on(event, handler) / removeAllListeners(event)
+ * - send(data) / close(code, reason) / ping()
+ * - readyState
+ */
+class BunWebSocketShim {
+  private _listeners: { [K in keyof WsEventMap]?: Array<(...args: unknown[]) => void> } = {}
+  private _bunWs: ServerWebSocket<BunWsData>
+
+  constructor(bunWs: ServerWebSocket<BunWsData>) {
+    this._bunWs = bunWs
+  }
+
+  get readyState(): number {
+    return this._bunWs.readyState
+  }
+
+  on(event: string, handler: (...args: unknown[]) => void): this {
+    const key = event as keyof WsEventMap
+    if (!this._listeners[key]) this._listeners[key] = []
+    this._listeners[key]!.push(handler)
+    return this
+  }
+
+  removeAllListeners(event: string): this {
+    delete this._listeners[event as keyof WsEventMap]
+    return this
+  }
+
+  send(data: string | Buffer, cb?: (err?: Error) => void): void {
+    try {
+      this._bunWs.send(data)
+      cb?.()
+    } catch (err) {
+      cb?.(err as Error)
+    }
+  }
+
+  close(code?: number, reason?: string): void {
+    try { this._bunWs.close(code, reason) } catch { /* already closed */ }
+  }
+
+  ping(): void {
+    try { this._bunWs.ping() } catch { /* ignore */ }
+  }
+
+  /** Called by websocket handlers to dispatch events to listeners */
+  _emit(event: keyof WsEventMap, ...args: unknown[]): void {
+    const handlers = this._listeners[event]
+    if (!handlers) return
+    for (const handler of handlers) {
+      handler(...args)
+    }
+  }
+}
+
+// ─── Server ───────────────────────────────────────────────────────────────────
+
 async function main() {
   const app = next({ dev, hostname, port })
-  const handle = app.getRequestHandler()
+  const nextHandler = app.getRequestHandler()
 
   await app.prepare()
 
-  const server = createServer((req, res) => {
-    const parsedUrl = parse(req.url || "/", true)
-    handle(req, res, parsedUrl)
-  })
+  // eslint-disable-next-line no-console -- Server startup message
+  console.log(`[voice-server] Starting on ${hostname}:${port} (bun)`)
 
-  // WebSocket server attached to HTTP server with path filter.
-  // Using { server } mode instead of noServer + handleUpgrade for bun compatibility —
-  // bun's node:http shim drops the socket during ws.handleUpgrade (close code 1006).
-  const wss = new WebSocketServer({
-    server,
-    path: VOICE_WS_PATH,
-    maxPayload: WS_MAX_PAYLOAD,
-    verifyClient: ({ req }: { req: IncomingMessage }) => {
-      // H3: Validate origin to prevent cross-site WebSocket hijacking
-      return isAllowedOrigin(req)
+  const server = Bun.serve<BunWsData>({
+    port,
+    hostname,
+
+    async fetch(req, server) {
+      const url = new URL(req.url)
+
+      // Voice WebSocket upgrade
+      if (url.pathname === VOICE_WS_PATH) {
+        const upgradeHeader = req.headers.get("upgrade")
+        if (upgradeHeader?.toLowerCase() === "websocket") {
+          const origin = req.headers.get("origin")
+          const host = req.headers.get("host")
+
+          if (!isAllowedOrigin(origin, host)) {
+            return new Response("Forbidden", { status: 403 })
+          }
+
+          // Pass request headers as data for auth extraction in ws-handler
+          const data: BunWsData = {
+            headers: Object.fromEntries(req.headers.entries()),
+            url: req.url,
+            shim: null,
+          }
+
+          const upgraded = server.upgrade(req, { data })
+          if (!upgraded) {
+            return new Response("WebSocket upgrade failed", { status: 500 })
+          }
+          // Bun handles the 101 response
+          return undefined as unknown as Response
+        }
+      }
+
+      // All other requests → Next.js
+      // Bun.serve's fetch receives a standard Request object.
+      // Next.js's getRequestHandler expects (IncomingMessage, ServerResponse).
+      // Use node:http createServer as a bridge.
+      return new Promise<Response>((resolve) => {
+        const fakeSocket = new PassThrough()
+        Object.assign(fakeSocket, {
+          remoteAddress: server.requestIP(req)?.address ?? "127.0.0.1",
+          encrypted: url.protocol === "https:",
+        })
+
+        const nodeReq = new http.IncomingMessage(fakeSocket as unknown as Socket)
+        nodeReq.url = url.pathname + url.search
+        nodeReq.method = req.method
+        nodeReq.headers = Object.fromEntries(req.headers.entries())
+
+        const nodeRes = new http.ServerResponse(nodeReq)
+        const chunks: Buffer[] = []
+
+        const origWrite = nodeRes.write.bind(nodeRes)
+        nodeRes.write = ((chunk: unknown, ...args: unknown[]) => {
+          if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string))
+          return (origWrite as (...a: unknown[]) => boolean)(chunk, ...args)
+        }) as typeof nodeRes.write
+
+        const origEnd = nodeRes.end.bind(nodeRes)
+        nodeRes.end = ((chunk?: unknown, ...args: unknown[]) => {
+          if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string))
+          const headers = new Headers()
+          const rawHeaders = nodeRes.getHeaders()
+          for (const [key, value] of Object.entries(rawHeaders)) {
+            if (value === undefined) continue
+            if (Array.isArray(value)) {
+              for (const v of value) headers.append(key, v)
+            } else {
+              headers.set(key, String(value))
+            }
+          }
+          resolve(new Response(Buffer.concat(chunks), {
+            status: nodeRes.statusCode,
+            headers,
+          }))
+          return (origEnd as (...a: unknown[]) => unknown)(chunk, ...args)
+        }) as typeof nodeRes.end
+
+        // Stream request body for POST/PUT etc
+        if (req.body) {
+          const reader = req.body.getReader()
+          const pump = () => {
+            reader.read().then(({ done, value }) => {
+              if (done) { nodeReq.push(null); return }
+              nodeReq.push(Buffer.from(value))
+              pump()
+            })
+          }
+          pump()
+        } else {
+          nodeReq.push(null)
+        }
+
+        nextHandler(nodeReq, nodeRes, parse(nodeReq.url || "/", true))
+      })
+    },
+
+    websocket: {
+      maxPayloadLength: WS_MAX_PAYLOAD,
+
+      open(bunWs) {
+        const wsData = bunWs.data
+        const shim = new BunWebSocketShim(bunWs)
+        wsData.shim = shim
+
+        // Create a minimal IncomingMessage for auth cookie extraction
+        const fakeSocket = new PassThrough()
+        const req = new http.IncomingMessage(fakeSocket as unknown as Socket)
+        req.url = wsData.url
+        req.headers = wsData.headers
+
+        // Handle voice connection using the existing ws-handler
+        import("@/lib/voice/ws-handler").then(({ handleVoiceConnection }) => {
+          handleVoiceConnection(shim as unknown as WebSocket, req).catch((error) => {
+            const message = error instanceof Error ? error.message : String(error)
+            // eslint-disable-next-line no-console -- Outside Next.js runtime
+            console.error("[voice-server] Connection error:", message)
+            try { shim.close(4500, "Internal error") } catch { /* already closed */ }
+          })
+        })
+      },
+
+      message(bunWs, message) {
+        const wsData = bunWs.data
+        const buf = typeof message === "string" ? Buffer.from(message) : Buffer.from(message)
+        wsData.shim?._emit("message", buf)
+      },
+
+      close(bunWs, code, reason) {
+        const wsData = bunWs.data
+        wsData.shim?._emit("close", code, Buffer.from(reason || ""))
+      },
     },
   })
 
-  wss.on("connection", async (ws, req) => {
-    try {
-      // Dynamic import to avoid loading voice module during build
-      const { handleVoiceConnection } = await import("@/lib/voice/ws-handler")
-      // H1: Await the promise so unhandled errors propagate
-      await handleVoiceConnection(ws, req)
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      // eslint-disable-next-line no-console -- Outside Next.js runtime
-      console.error("[voice-server] Connection error:", message)
-      try { ws.close(4500, "Internal error") } catch { /* already closed */ }
-    }
-  })
-
-  server.listen(port, hostname)
+  // Suppress unused variable — server is the running instance
+  void server
 }
 
 main().catch((err) => {

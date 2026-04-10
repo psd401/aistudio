@@ -187,7 +187,7 @@ function ConversationRuntimeProvider({
   const runtime = useChatRuntime({
     transport: new AssistantChatTransport({
       api: '/api/nexus/chat',
-      fetch: customFetch,
+      fetch: customFetch as typeof fetch,
       body: () => selectedModel ? {
         modelId: selectedModel.modelId,
         provider: selectedModel.provider,

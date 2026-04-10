@@ -1,75 +1,50 @@
 /**
  * Production Voice Server Wrapper
  *
- * Wraps the Next.js standalone server to add WebSocket support for voice.
- * This script intercepts the HTTP server creation to attach a WebSocket
- * upgrade handler for /api/nexus/voice, then delegates to the standard
- * Next.js standalone server.
+ * Uses Bun.serve() with native WebSocket support to serve the Next.js
+ * standalone build AND handle voice WebSocket upgrades on the same port.
  *
- * Architecture note: This monkey-patch approach is the de-facto standard for
- * adding WebSocket to Next.js App Router with `output: standalone` on ECS.
- * Alternatives (custom server, instrumentation.ts, next-ws) are either
- * incompatible with standalone output or broken in production. See research
- * in PR #884 for details.
+ * The `ws` npm package is incompatible with bun's HTTP upgrade handling
+ * (handleUpgrade causes close code 1006). This wrapper uses bun's native
+ * WebSocket support with a lightweight shim (BunWebSocketShim) that
+ * adapts bun's ServerWebSocket to the event-based ws.WebSocket interface
+ * expected by ws-handler.
  *
  * IMPORTANT: If the WS handler module fails to load, the app continues
- * serving HTTP normally — voice just won't work. This ensures a build
- * output path change in Next.js doesn't take down the entire app.
+ * serving HTTP normally — voice just won't work.
  *
  * Usage: CMD ["bun", "run", "voice-server.js"] in Dockerfile
  *
- * Issue #872
+ * Issue #872, #873
  */
 
 /* eslint-disable no-undef, @typescript-eslint/no-require-imports, unicorn/prefer-node-protocol -- CJS script outside Next.js runtime */
 const http = require('http')
-const { WebSocketServer } = require('ws')
 
 const VOICE_WS_PATH = '/api/nexus/voice'
+const WS_MAX_PAYLOAD = 65536 // 64KB — must match lib/voice/constants.ts
 
 // WS handler module path in Next.js standalone output.
-// This is a build output path, not a public API — if Next.js changes the
-// standalone structure, update this path. The app will log a clear error
-// and continue serving HTTP if this path becomes stale.
 const WS_HANDLER_PATH = './.next/server/lib/voice/ws-handler'
 
-let wss = null
-let wsHandlerAvailable = false
+let handleVoiceConnection = null
 
-/**
- * Try to load the voice WS handler module at startup.
- * If it fails, voice is disabled but the app continues running.
- */
-function loadWsHandler() {
-  try {
-    const mod = require(WS_HANDLER_PATH)
-    if (typeof mod.handleVoiceConnection === 'function') {
-      wsHandlerAvailable = true
-      return mod.handleVoiceConnection
-    }
+try {
+  const mod = require(WS_HANDLER_PATH)
+  if (typeof mod.handleVoiceConnection === 'function') {
+    handleVoiceConnection = mod.handleVoiceConnection
+    console.log(`[voice-server] Voice WebSocket handler loaded from ${WS_HANDLER_PATH}`) // eslint-disable-line no-console
+  } else {
     console.error(`[voice-server] ws-handler loaded but handleVoiceConnection is not a function`) // eslint-disable-line no-console
-    return null
-  } catch (err) {
-    console.error(`[voice-server] Voice WebSocket disabled: ws-handler not found at ${WS_HANDLER_PATH}`) // eslint-disable-line no-console
-    console.error(`[voice-server] Expected path may have changed with Next.js upgrade. Error: ${err.message}`) // eslint-disable-line no-console
-    return null
   }
+} catch (err) {
+  console.error(`[voice-server] Voice WebSocket disabled: ${err.message}`) // eslint-disable-line no-console
 }
 
-const handleVoiceConnection = loadWsHandler()
-
 /**
- * Validate origin to prevent cross-site WebSocket hijacking (CSWSH).
- * Logic mirrors server.ts:isAllowedOrigin() — duplicated because this
- * file is CJS (standalone) and cannot import from the ESM server.ts.
- *
- * INTENTIONAL DIFFERENCE: server.ts (dev) bypasses origin checks for
- * local testing. This file (production only) does NOT bypass.
- * Both use the same same-origin fallback when no origins are configured.
+ * Validate origin to prevent CSWSH. Production only — no dev bypass.
  */
-function isOriginAllowed(request) {
-  const origin = request.headers.origin
-  // Browser WS requests always include Origin — missing = non-browser
+function isOriginAllowed(origin, host) {
   if (!origin) return false
 
   const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean)
@@ -80,58 +55,207 @@ function isOriginAllowed(request) {
     return allowedOrigins.includes(origin)
   }
 
-  // No explicit origins — fall back to same-origin check
-  const host = request.headers.host
-  // In production behind ALB, x-forwarded-proto is always https
-  const proto = request.headers['x-forwarded-proto'] === 'https' ? 'https' : 'http'
+  const proto = 'https' // Production is always behind ALB with HTTPS
   return !!host && origin === `${proto}://${host}`
 }
 
 /**
- * Intercept http.createServer to attach WebSocket upgrade handling.
- * Next.js standalone server.js calls http.createServer internally.
+ * Lightweight shim: adapts bun's ServerWebSocket to the event-based
+ * ws.WebSocket interface used by ws-handler.ts.
  */
-const originalCreateServer = http.createServer.bind(http)
-
-http.createServer = function (...args) {
-  const server = originalCreateServer(...args)
-
-  if (!wss) {
-    // Server-attached mode instead of noServer + handleUpgrade.
-    // The noServer pattern is incompatible with bun's node:http shim —
-    // the socket gets dropped during handleUpgrade (close code 1006).
-    // maxPayload must match WS_MAX_PAYLOAD in lib/voice/constants.ts (64KB)
-    wss = new WebSocketServer({
-      server,
-      path: VOICE_WS_PATH,
-      maxPayload: 65536,
-      verifyClient: ({ req }) => {
-        if (!wsHandlerAvailable) return false
-        return isOriginAllowed(req)
-      },
-    })
-
-    wss.on('connection', async (ws, req) => {
-      try {
-        await handleVoiceConnection(ws, req)
-      } catch (err) {
-        console.error('[voice-server] Voice connection error:', err.message) // eslint-disable-line no-console
-        try { ws.close(4500, 'Internal error') } catch { /* already closed */ }
-      }
-    })
-
-    if (wsHandlerAvailable) {
-      console.log(`[voice-server] WebSocket handler registered for ${VOICE_WS_PATH}`) // eslint-disable-line no-console
-    } else {
-      // ERROR level so this surfaces in CloudWatch alarms — operators should know
-      // voice is broken before users hit 503
-      console.error(`[voice-server] ERROR: Voice WebSocket handler NOT available — voice disabled, HTTP serving normally`) // eslint-disable-line no-console
-      console.error(`[voice-server] Expected handler at: ${WS_HANDLER_PATH} — verify Next.js standalone output structure`) // eslint-disable-line no-console
-    }
+class BunWebSocketShim {
+  constructor(bunWs) {
+    this._bunWs = bunWs
+    this._listeners = {}
   }
 
-  return server
+  get readyState() { return this._bunWs.readyState }
+
+  on(event, handler) {
+    if (!this._listeners[event]) this._listeners[event] = []
+    this._listeners[event].push(handler)
+    return this
+  }
+
+  removeAllListeners(event) {
+    delete this._listeners[event]
+    return this
+  }
+
+  send(data, cb) {
+    try { this._bunWs.send(data); cb?.() }
+    catch (err) { cb?.(err) }
+  }
+
+  close(code, reason) {
+    try { this._bunWs.close(code, reason) } catch { /* already closed */ }
+  }
+
+  ping() {
+    try { this._bunWs.ping() } catch { /* ignore */ }
+  }
+
+  _emit(event, ...args) {
+    const handlers = this._listeners[event]
+    if (!handlers) return
+    for (const handler of handlers) handler(...args)
+  }
 }
 
-// Load and run the Next.js standalone server
+// ─── Start Server ─────────────────────────────────────────────────────────────
+
+const hostname = process.env.HOSTNAME || '0.0.0.0'
+const port = Number.parseInt(process.env.PORT || '3000', 10)
+
+// Next.js standalone server.js creates its own http server.
+// We need to intercept that and route requests through Bun.serve instead.
+// Load the Next.js request handler by requiring the standalone server module's handler.
+// The standalone server.js sets up the handler and calls listen() — we need to
+// prevent it from listening and capture the handler instead.
+
+let nextHandler = null
+
+// Monkey-patch createServer to capture the Next.js request handler
+http.createServer = function (handler) {
+  nextHandler = handler
+  // Return a fake server that captures listen() to prevent Next.js from binding
+  return {
+    listen: () => {
+      console.log('[voice-server] Captured Next.js handler, starting Bun.serve()') // eslint-disable-line no-console
+      startBunServer()
+    },
+    on: () => {},
+    once: () => {},
+    address: () => ({ port, address: hostname }),
+  }
+}
+
+function startBunServer() {
+  Bun.serve({
+    port,
+    hostname,
+
+    async fetch(req, server) {
+      const url = new URL(req.url)
+
+      // Voice WebSocket upgrade
+      if (url.pathname === VOICE_WS_PATH && handleVoiceConnection) {
+        const upgradeHeader = req.headers.get('upgrade')
+        if (upgradeHeader?.toLowerCase() === 'websocket') {
+          const origin = req.headers.get('origin')
+          const host = req.headers.get('host')
+
+          if (!isOriginAllowed(origin, host)) {
+            return new Response('Forbidden', { status: 403 })
+          }
+
+          const data = {
+            headers: Object.fromEntries(req.headers.entries()),
+            url: req.url,
+            shim: null,
+          }
+
+          if (server.upgrade(req, { data })) {
+            return undefined
+          }
+          return new Response('WebSocket upgrade failed', { status: 500 })
+        }
+      }
+
+      // All other requests → Next.js standalone handler
+      return new Promise((resolve) => {
+        const fakeSocket = new (require('stream').PassThrough)()
+        Object.assign(fakeSocket, {
+          remoteAddress: server.requestIP(req)?.address ?? '127.0.0.1',
+          encrypted: false,
+        })
+
+        const nodeReq = new http.IncomingMessage(fakeSocket)
+        const url = new URL(req.url)
+        nodeReq.url = url.pathname + url.search
+        nodeReq.method = req.method
+        nodeReq.headers = Object.fromEntries(req.headers.entries())
+
+        const nodeRes = new http.ServerResponse(nodeReq)
+        const chunks = []
+
+        const origWrite = nodeRes.write.bind(nodeRes)
+        nodeRes.write = (chunk, ...args) => {
+          if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+          return origWrite(chunk, ...args)
+        }
+
+        const origEnd = nodeRes.end.bind(nodeRes)
+        nodeRes.end = (chunk, ...args) => {
+          if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+          const headers = new Headers()
+          const rawHeaders = nodeRes.getHeaders()
+          for (const [key, value] of Object.entries(rawHeaders)) {
+            if (value === undefined) continue
+            if (Array.isArray(value)) {
+              for (const v of value) headers.append(key, v)
+            } else {
+              headers.set(key, String(value))
+            }
+          }
+          resolve(new Response(Buffer.concat(chunks), {
+            status: nodeRes.statusCode,
+            headers,
+          }))
+          return origEnd(chunk, ...args)
+        }
+
+        // Stream request body
+        if (req.body) {
+          const reader = req.body.getReader()
+          const pump = () => {
+            reader.read().then(({ done, value }) => {
+              if (done) { nodeReq.push(null); return }
+              nodeReq.push(Buffer.from(value))
+              pump()
+            })
+          }
+          pump()
+        } else {
+          nodeReq.push(null)
+        }
+
+        nextHandler(nodeReq, nodeRes)
+      })
+    },
+
+    websocket: {
+      maxPayloadLength: WS_MAX_PAYLOAD,
+
+      open(bunWs) {
+        const wsData = bunWs.data
+        const shim = new BunWebSocketShim(bunWs)
+        wsData.shim = shim
+
+        const fakeSocket = new (require('stream').PassThrough)()
+        const req = new http.IncomingMessage(fakeSocket)
+        req.url = wsData.url
+        req.headers = wsData.headers
+
+        handleVoiceConnection(shim, req).catch((error) => {
+          console.error('[voice-server] Connection error:', error.message) // eslint-disable-line no-console
+          try { shim.close(4500, 'Internal error') } catch { /* already closed */ }
+        })
+      },
+
+      message(bunWs, message) {
+        const buf = typeof message === 'string' ? Buffer.from(message) : Buffer.from(message)
+        bunWs.data.shim?._emit('message', buf)
+      },
+
+      close(bunWs, code, reason) {
+        bunWs.data.shim?._emit('close', code, Buffer.from(reason || ''))
+      },
+    },
+  })
+
+  console.log(`[voice-server] Listening on ${hostname}:${port}`) // eslint-disable-line no-console
+}
+
+// Load Next.js standalone server — triggers the monkey-patched createServer
 require('./server.js')

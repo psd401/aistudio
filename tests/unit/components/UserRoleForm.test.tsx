@@ -21,7 +21,7 @@ describe('UserRoleForm', () => {
       ok: true,
       json: () => Promise.resolve({ message: 'Role updated successfully' })
     });
-    global.fetch = mockFetch;
+    global.fetch = mockFetch as unknown as typeof fetch;
 
     await act(async () => {
       render(<UserRoleForm userId="test-user" initialRole="staff" />, { wrapper: TestWrapper });
@@ -48,7 +48,7 @@ describe('UserRoleForm', () => {
       ok: true,
       json: () => Promise.resolve({ message: 'Role updated successfully' })
     });
-    global.fetch = mockFetch;
+    global.fetch = mockFetch as unknown as typeof fetch;
 
     await act(async () => {
       render(<UserRoleForm userId="test-user" initialRole="staff" />, { wrapper: TestWrapper });
@@ -80,7 +80,7 @@ describe('UserRoleForm', () => {
       status: 400,
       text: () => Promise.resolve('Invalid role')
     });
-    global.fetch = mockFetch;
+    global.fetch = mockFetch as unknown as typeof fetch;
 
     await act(async () => {
       render(<UserRoleForm userId="test-user" initialRole="staff" />, { wrapper: TestWrapper });
@@ -101,7 +101,7 @@ describe('UserRoleForm', () => {
     global.alert = mockAlert;
     
     const mockFetch = jest.fn().mockRejectedValue(new Error('Network error'));
-    global.fetch = mockFetch;
+    global.fetch = mockFetch as unknown as typeof fetch;
 
     await act(async () => {
       render(<UserRoleForm userId="test-user" initialRole="staff" />, { wrapper: TestWrapper });
@@ -118,7 +118,7 @@ describe('UserRoleForm', () => {
 
   it('disables select while loading', async () => {
     const mockFetch = jest.fn().mockImplementation(() => new Promise(resolve => setTimeout(resolve, 100)));
-    global.fetch = mockFetch;
+    global.fetch = mockFetch as unknown as typeof fetch;
 
     await act(async () => {
       render(<UserRoleForm userId="test-user" initialRole="staff" />, { wrapper: TestWrapper });
