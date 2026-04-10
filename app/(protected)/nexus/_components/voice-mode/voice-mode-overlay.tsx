@@ -15,7 +15,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, type FC } from 'react'
-import { useVoiceState, useVoiceVolume, useVoiceControls } from '@assistant-ui/react'
+import { useVoiceState, useVoiceControls } from '@assistant-ui/react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Mic, MicOff, PhoneOff, AlertCircle, RotateCcw } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -110,7 +110,6 @@ const VoiceControls: FC<{
 
 export function VoiceModeOverlay({ open, onClose }: VoiceModeOverlayProps) {
   const voiceState = useVoiceState()
-  const volume = useVoiceVolume()
   const controls = useVoiceControls()
 
   const statusType = voiceState?.status?.type
@@ -215,7 +214,7 @@ export function VoiceModeOverlay({ open, onClose }: VoiceModeOverlayProps) {
             animate={{ scale: 1, opacity: 1 }}
             transition={{ type: 'spring', stiffness: 200, damping: 20 }}
           >
-            <AudioVisualizer mode={vizMode} volume={volume} />
+            <AudioVisualizer mode={vizMode} />
           </motion.div>
 
           {/* State label — aria-live for screen reader announcements */}

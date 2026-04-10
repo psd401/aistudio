@@ -17,6 +17,7 @@
 'use client'
 
 import { memo } from 'react'
+import { useVoiceVolume } from '@assistant-ui/react'
 import { cn } from '@/lib/utils'
 
 export type VisualizerMode = 'connecting' | 'listening' | 'speaking' | 'error' | 'idle'
@@ -24,8 +25,6 @@ export type VisualizerMode = 'connecting' | 'listening' | 'speaking' | 'error' |
 interface AudioVisualizerProps {
   /** Current voice session mode */
   mode: VisualizerMode
-  /** Audio volume level 0–1 */
-  volume: number
 }
 
 /** Base size of the orb in pixels */
@@ -74,8 +73,9 @@ const modeColors: Record<VisualizerMode, { orb: string; ring: string; glow: stri
 
 export const AudioVisualizer = memo(function AudioVisualizer({
   mode,
-  volume,
 }: AudioVisualizerProps) {
+  // Subscribe to volume internally to avoid re-rendering the parent overlay 20×/sec
+  const volume = useVoiceVolume()
   const colors = modeColors[mode]
   const isConnecting = mode === 'connecting'
 
