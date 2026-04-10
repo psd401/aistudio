@@ -1,12 +1,14 @@
 /**
- * Voice API Route
+ * Voice Info API Route
  *
  * HTTP endpoint for voice session information and health checks.
- * The actual voice streaming happens over WebSocket (handled by server.ts).
+ * The actual voice streaming happens over WebSocket at /api/nexus/voice
+ * (handled by server.ts). This route is at /api/nexus/voice-info to avoid
+ * Next.js claiming the WebSocket upgrade path.
  *
- * GET /api/nexus/voice — Returns voice configuration and connection info
+ * GET /api/nexus/voice-info — Returns voice configuration and availability
  *
- * Issue #872
+ * Issue #872, #873
  */
 
 import { NextResponse } from "next/server"
@@ -21,8 +23,8 @@ import { hasToolAccess } from "@/lib/db/drizzle/users"
  */
 export async function GET() {
   const requestId = generateRequestId()
-  const log = createLogger({ requestId, route: "nexus.voice" })
-  const timer = startTimer("nexus.voice.info")
+  const log = createLogger({ requestId, route: "nexus.voice-info" })
+  const timer = startTimer("nexus.voice-info")
 
   try {
     // Auth check
@@ -32,8 +34,7 @@ export async function GET() {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    // Tool access check — uses same DB-level function as ws-handler.ts
-    // with explicit user context (session.sub) instead of implicit session lookup
+    // Tool access check
     const hasAccess = await hasToolAccess(session.sub, "voice-mode")
     if (!hasAccess) {
       timer({ status: "forbidden" })
@@ -59,9 +60,7 @@ export async function GET() {
       provider: voiceSettings.provider,
       model: voiceSettings.model,
       language: voiceSettings.language,
-      // WebSocket port for voice connections (separate from HTTP port)
-      wsPort: Number.parseInt(process.env.VOICE_WS_PORT || "3001", 10),
-      wsPath: "/api/nexus/voice",
+      wsEndpoint: "/api/nexus/voice",
     })
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)

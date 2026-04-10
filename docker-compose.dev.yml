@@ -52,7 +52,6 @@ services:
     container_name: aistudio-app
     ports:
       - "3000:3000"
-      - "3001:3001"  # Voice WebSocket port
     env_file:
       - .env.local
     environment:

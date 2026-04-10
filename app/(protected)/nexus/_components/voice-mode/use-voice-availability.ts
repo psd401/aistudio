@@ -18,10 +18,6 @@ export interface VoiceAvailability {
   available: boolean
   /** Whether the check is still loading */
   loading: boolean
-  /** WebSocket port for voice connections */
-  wsPort: number | null
-  /** WebSocket path */
-  wsPath: string | null
 }
 
 /**
@@ -30,37 +26,27 @@ export interface VoiceAvailability {
  * Returns { available: false } on any error (fail-closed).
  */
 export function useVoiceAvailability(): VoiceAvailability {
-  const [state, setState] = useState<VoiceAvailability>({
-    available: false,
-    loading: true,
-    wsPort: null,
-    wsPath: null,
-  })
+  const [state, setState] = useState<VoiceAvailability>({ available: false, loading: true })
 
   useEffect(() => {
     const controller = new AbortController()
 
-    fetch('/api/nexus/voice', { signal: controller.signal })
+    fetch('/api/nexus/voice-info', { signal: controller.signal })
       .then((res) => {
         if (!res.ok) {
-          setState({ available: false, loading: false, wsPort: null, wsPath: null })
+          setState({ available: false, loading: false })
           return
         }
         return res.json()
       })
       .then((data) => {
         if (data) {
-          setState({
-            available: !!data.available,
-            loading: false,
-            wsPort: data.wsPort ?? null,
-            wsPath: data.wsPath ?? null,
-          })
+          setState({ available: !!data.available, loading: false })
         }
       })
       .catch(() => {
         if (!controller.signal.aborted) {
-          setState({ available: false, loading: false, wsPort: null, wsPath: null })
+          setState({ available: false, loading: false })
         }
       })
 

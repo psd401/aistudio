@@ -46,12 +46,10 @@ const MAX_BUFFERED_AMOUNT = 65_536
 
 /**
  * Constructs the WebSocket URL for the voice endpoint.
- * Uses a separate port for the WS server (Bun.serve native WebSocket).
  */
-function getWebSocketUrl(wsPort: number, wsPath: string): string {
+function getWebSocketUrl(): string {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const host = window.location.hostname
-  return `${protocol}//${host}:${wsPort}${wsPath}`
+  return `${protocol}//${window.location.host}/api/nexus/voice`
 }
 
 /**
@@ -170,11 +168,11 @@ class AudioPlaybackQueue {
  * Creates a RealtimeVoiceAdapter that connects to the Gemini Live
  * WebSocket proxy and manages audio capture/playback.
  */
-export function createGeminiLiveVoiceAdapter(wsPort: number, wsPath: string): RealtimeVoiceAdapter {
+export function createGeminiLiveVoiceAdapter(): RealtimeVoiceAdapter {
   return {
     connect(options) {
       return createVoiceSession(options, async (helpers) => {
-        const session = new VoiceSession(helpers, options.abortSignal, wsPort, wsPath)
+        const session = new VoiceSession(helpers, options.abortSignal)
         return session.start()
       })
     },
@@ -200,14 +198,10 @@ class VoiceSession {
   private isMuted = false
   private reconnectAttempts = 0
   private wakeLock: WakeLockSentinel | null = null
-  private wsPort: number
-  private wsPath: string
 
-  constructor(helpers: VoiceSessionHelpers, abortSignal: AbortSignal | undefined, wsPort: number, wsPath: string) {
+  constructor(helpers: VoiceSessionHelpers, abortSignal?: AbortSignal) {
     this.helpers = helpers
     this.abortSignal = abortSignal
-    this.wsPort = wsPort
-    this.wsPath = wsPath
   }
 
   /** Main entry point — connects and returns session controls. */
@@ -297,7 +291,7 @@ this.helpers.setStatus({ type: 'running' })
         return
       }
 
-      const socket = new WebSocket(getWebSocketUrl(this.wsPort, this.wsPath))
+      const socket = new WebSocket(getWebSocketUrl())
 
       const onAbort = () => {
         socket.close()
