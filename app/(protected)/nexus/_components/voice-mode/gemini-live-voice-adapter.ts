@@ -25,6 +25,9 @@ import {
   type VoiceSessionControls,
 } from '@assistant-ui/react'
 import type { VoiceServerMessage } from '@/lib/voice/types'
+import { createLogger } from '@/lib/client-logger'
+
+const log = createLogger({ moduleName: 'voice-adapter' })
 
 /** Audio playback sample rate — matches server-side Gemini Live config */
 const PLAYBACK_SAMPLE_RATE = 16000
@@ -206,9 +209,11 @@ class VoiceSession {
 
   /** Main entry point — connects and returns session controls. */
   async start(): Promise<VoiceSessionControls> {
+    log.info('Voice session starting')
     this.helpers.setStatus({ type: 'starting' })
 
     this.ws = await this.connectWebSocket()
+    log.info('WebSocket connected, waiting for mic permission')
 
     if (this.helpers.isDisposed()) {
       this.cleanup()
@@ -220,7 +225,9 @@ class VoiceSession {
     this.ws.addEventListener('message', (e) => this.handleMessage(e))
     this.ws.addEventListener('close', (e) => this.handleClose(e))
 
+    log.info('Setting up microphone capture')
     await this.setupMicrophoneCapture()
+    log.info('Microphone capture ready')
 
     // Check disposal again after async mic setup
     if (this.helpers.isDisposed()) {
@@ -234,6 +241,7 @@ class VoiceSession {
     this.startVolumePolling()
     await this.acquireWakeLock()
 
+    log.info('Voice session running — listening for audio')
     this.helpers.setStatus({ type: 'running' })
     this.helpers.emitMode('listening')
 
@@ -329,6 +337,7 @@ class VoiceSession {
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       })
     } catch (error) {
+      log.error('Microphone setup failed', { error: error instanceof Error ? error.message : String(error) })
       this.cleanup()
       // Use DOMException.name for cross-browser permission detection
       const isPermissionDenied = error instanceof DOMException
