@@ -178,7 +178,17 @@ function forwardProviderEvent(ws: WebSocket, event: VoiceProviderEvent): void {
   }
 }
 
-/** Timeout for waiting for session_config message from client (ms) */
+/**
+ * Timeout for waiting for session_config message from client (ms).
+ *
+ * 5s is a deliberate trade-off: after the server sends the first "ready" (auth OK),
+ * the client must respond with session_config within this window. Under mobile or
+ * degraded networks (200-400ms RTT) this is generous. The consequence of timeout
+ * is graceful — the session proceeds with default settings (no conversation context),
+ * not a failure. Do NOT tighten this value without testing on high-latency links;
+ * the round-trip includes: WS frame delivery, client-side JS execution of
+ * socket.send(), and return delivery.
+ */
 const SESSION_CONFIG_TIMEOUT_MS = 5_000
 
 /**
@@ -235,6 +245,16 @@ function waitForSessionConfig(
           if (rawConversationId && !conversationId) {
             logFn.warn("Invalid conversationId format in session_config, discarding")
           }
+          // THREAT MODEL: systemInstruction is client-supplied and passed verbatim to
+          // the Gemini Live session. A user whose conversation history contains adversarially
+          // crafted text (e.g., "Ignore all previous instructions…") will have that text
+          // injected into the voice model's system prompt. This is an inherent architectural
+          // risk when embedding user-controlled content in system instructions. Mitigations:
+          // (1) length cap prevents unlimited injection, (2) Bedrock guardrails apply to
+          // the model output, (3) the same content is already visible to the text model.
+          // Full mitigation would require server-side instruction building from conversationId
+          // (fetching messages from DB and verifying ownership), which is deferred as a
+          // follow-on to this PR.
           const systemInstruction = typeof parsed.systemInstruction === "string"
             ? parsed.systemInstruction.slice(0, MAX_SESSION_INSTRUCTION_LENGTH)
             : undefined

@@ -490,6 +490,56 @@ describe("handleVoiceConnection", () => {
     })
   })
 
+  describe("session_config handling", () => {
+    beforeEach(() => {
+      mockDecode.mockResolvedValue({ sub: "user-123" })
+      mockHasToolAccess.mockResolvedValue(true)
+    })
+
+    it("should pass systemInstruction to provider when provided in session_config", async () => {
+      const ws = createMockWs()
+      const testInstruction = "You are a helpful assistant. Prior context: User asked about photosynthesis."
+      const testConversationId = "550e8400-e29b-41d4-a716-446655440000"
+      scheduleSessionConfig(ws, {
+        conversationId: testConversationId,
+        systemInstruction: testInstruction,
+      })
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+
+      await handleVoiceConnection(ws, req)
+
+      const { createVoiceProvider } = require("../provider-factory")
+      // createVoiceProvider is called during handleVoiceConnection; the returned mock's
+      // connect method receives the config. Verify it was called with systemInstruction.
+      const mockProvider = createVoiceProvider.mock.results[0]?.value
+      expect(mockProvider.connect).toHaveBeenCalledWith(
+        expect.objectContaining({
+          systemInstruction: testInstruction,
+        }),
+        expect.any(Function),
+        expect.anything(),
+      )
+    })
+
+    it("should pass undefined systemInstruction when session_config omits it", async () => {
+      const ws = createMockWs()
+      scheduleSessionConfig(ws)
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+
+      await handleVoiceConnection(ws, req)
+
+      const { createVoiceProvider } = require("../provider-factory")
+      const mockProvider = createVoiceProvider.mock.results[0]?.value
+      expect(mockProvider.connect).toHaveBeenCalledWith(
+        expect.objectContaining({
+          systemInstruction: undefined,
+        }),
+        expect.any(Function),
+        expect.anything(),
+      )
+    })
+  })
+
   describe("chunked cookie edge cases", () => {
     it("should handle cookies with = in value", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })

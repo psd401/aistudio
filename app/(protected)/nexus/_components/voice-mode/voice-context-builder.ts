@@ -44,32 +44,19 @@ export async function fetchConversationContext(
   const clampedLimit = Math.min(Math.max(maxMessages, 1), 100)
   const baseUrl = `/api/nexus/conversations/${encodeURIComponent(conversationId)}/messages`
 
-  // The messages endpoint returns rows ordered by createdAt ASC (oldest first).
-  // To get the MOST RECENT messages, we need the correct offset. Fetch with
-  // limit=1 first to discover total count, then compute offset for the tail.
-  const countResponse = await fetch(`${baseUrl}?limit=1&offset=0`)
-  if (!countResponse.ok) {
-    log.warn('Failed to fetch conversation message count for voice context', {
-      status: countResponse.status,
-      conversationId,
-    })
-    return []
-  }
-
-  let totalCount: number
-  try {
-    const countData = await countResponse.json()
-    totalCount = countData?.pagination?.total ?? 0
-  } catch {
-    log.warn('Failed to parse message count response', { conversationId })
-    return []
-  }
-
-  if (totalCount === 0) return []
-
-  // Compute offset to fetch the most recent messages
-  const offset = Math.max(0, totalCount - clampedLimit)
-  const response = await fetch(`${baseUrl}?limit=${clampedLimit}&offset=${offset}`)
+  // Fetch a larger window than needed to avoid a two-request count→fetch race (TOCTOU).
+  // The messages endpoint returns rows ordered by createdAt ASC (oldest first) and
+  // does not support DESC ordering. Previously we fetched count first, computed offset,
+  // then fetched — but messages arriving between the two requests would skew the window.
+  //
+  // Instead: request a generous window (3× the desired limit) starting from offset 0.
+  // We then take only the LAST clampedLimit messages from the result. For typical
+  // conversations (< 300 messages) this returns all messages in one call. For very
+  // large conversations we may miss the absolute newest messages if there are more
+  // than fetchLimit total — this is an accepted trade-off vs. adding DESC support
+  // to the endpoint (which would be a larger change).
+  const fetchLimit = Math.min(clampedLimit * 3, 1000)
+  const response = await fetch(`${baseUrl}?limit=${fetchLimit}&offset=0`)
 
   if (!response.ok) {
     log.warn('Failed to fetch conversation messages for voice context', {
@@ -111,7 +98,8 @@ export async function fetchConversationContext(
     }
   }
 
-  return messages
+  // Return only the most recent messages (endpoint returns ASC order so tail = newest)
+  return messages.length > clampedLimit ? messages.slice(-clampedLimit) : messages
 }
 
 /**

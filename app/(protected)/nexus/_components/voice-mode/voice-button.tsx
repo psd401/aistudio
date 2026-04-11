@@ -9,7 +9,7 @@
 
 'use client'
 
-import { useCallback } from 'react'
+import { useCallback, useRef } from 'react'
 import { useVoiceControls, useVoiceState } from '@assistant-ui/react'
 import { Mic } from 'lucide-react'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
@@ -27,16 +27,27 @@ export function VoiceButton({ onVoiceStart }: VoiceButtonProps) {
   const controls = useVoiceControls()
   const voiceState = useVoiceState()
 
-  // Guard against double-clicks: disable while connecting or running
-  const isActive = voiceState?.status?.type === 'starting' || voiceState?.status?.type === 'running'
+  // Guard against double-clicks during the async context-fetch window.
+  // voiceState.status only transitions to 'starting' after controls.connect(),
+  // so there's a gap while onVoiceStart() awaits the network fetch where a second
+  // click would create a duplicate adapter and race two connect() calls.
+  const isStartingRef = useRef(false)
+
+  const isVoiceActive = voiceState?.status?.type === 'starting' || voiceState?.status?.type === 'running'
 
   // Await onVoiceStart (which fetches context and swaps the adapter) BEFORE calling
   // controls.connect(). This ensures the connect() call uses the context-aware adapter,
   // not the initial no-context adapter. The overlay opens immediately showing "Connecting..."
   // state. If connect rejects, useVoiceState transitions to 'ended' with error.
   const handleClick = useCallback(async () => {
-    await onVoiceStart()
-    controls.connect()
+    if (isStartingRef.current) return
+    isStartingRef.current = true
+    try {
+      await onVoiceStart()
+      controls.connect()
+    } finally {
+      isStartingRef.current = false
+    }
   }, [controls, onVoiceStart])
 
   return (
@@ -45,7 +56,7 @@ export function VoiceButton({ onVoiceStart }: VoiceButtonProps) {
       variant="ghost"
       className="text-muted-foreground hover:text-foreground"
       onClick={handleClick}
-      disabled={isActive}
+      disabled={isVoiceActive}
       aria-label="Start voice conversation"
       data-testid="voice-mode-button"
     >
