@@ -26,10 +26,10 @@ import { toast } from 'sonner'
 import { handleContentBlockedResponse } from '@/lib/nexus/content-blocked-handler'
 import { getPromptSettings } from '@/actions/prompt-library.actions'
 import { ModelFallbackBanner } from './_components/model-fallback-banner'
-import { createGeminiLiveVoiceAdapter } from './_components/voice-mode/gemini-live-voice-adapter'
 import { VoiceModeOverlay } from './_components/voice-mode/voice-mode-overlay'
 import { VoiceButton } from './_components/voice-mode/voice-button'
 import { useVoiceAvailability } from './_components/voice-mode/use-voice-availability'
+import { useVoiceSession } from './_components/voice-mode/use-voice-session'
 
 const log = createLogger({ moduleName: 'nexus-page' })
 const uuidSchema = z.string().uuid()
@@ -223,7 +223,7 @@ interface NexusRuntimeWrapperProps {
   enabledTools: string[]
   enabledConnectors: string[]
   attachmentAdapter: AttachmentAdapter
-  voiceAdapter?: RealtimeVoiceAdapter
+  voiceAvailable: boolean
   initialMessages: UIMessage[]
   onConversationIdChange: (id: string) => void
   processingAttachments: Set<string>
@@ -240,7 +240,7 @@ function NexusRuntimeWrapper({
   enabledTools,
   enabledConnectors,
   attachmentAdapter,
-  voiceAdapter,
+  voiceAvailable,
   initialMessages,
   onConversationIdChange,
   processingAttachments,
@@ -288,22 +288,21 @@ function NexusRuntimeWrapper({
     }
   }, [registerConnectorTools])
 
-  // Voice overlay state — open when user clicks voice button, close on End/Escape
-  const [voiceOverlayOpen, setVoiceOverlayOpen] = useState(false)
-
-  const handleVoiceStart = useCallback(() => {
-    setVoiceOverlayOpen(true)
-  }, [])
-
-  const handleVoiceClose = useCallback(() => {
-    setVoiceOverlayOpen(false)
-  }, [])
+  // Voice session lifecycle — manages adapter creation with conversation context,
+  // overlay state, and browser navigation cleanup. The adapter is recreated each
+  // time the user starts a voice session to include the latest conversation context.
+  const {
+    voiceAdapter,
+    voiceOverlayOpen,
+    handleVoiceStart,
+    handleVoiceClose,
+  } = useVoiceSession({ voiceAvailable, conversationId })
 
   // Voice button rendered in composer extra actions slot — memoized to avoid
   // re-creating JSX on every render (prevents unnecessary Thread re-renders)
   const composerExtraActions = useMemo(
-    () => voiceAdapter ? <VoiceButton onVoiceStart={handleVoiceStart} /> : null,
-    [voiceAdapter, handleVoiceStart]
+    () => voiceAvailable ? <VoiceButton onVoiceStart={handleVoiceStart} /> : null,
+    [voiceAvailable, handleVoiceStart]
   )
 
   return (
@@ -566,12 +565,8 @@ function NexusPageContent() {
     })
   }, [handleAttachmentProcessingStart, handleAttachmentProcessingComplete])
 
-  // Voice mode — check availability and create stable adapter
+  // Voice mode — check availability (adapter created inside NexusRuntimeWrapper via useVoiceSession)
   const voiceAvailability = useVoiceAvailability()
-  const voiceAdapter = useMemo(
-    () => voiceAvailability.available ? createGeminiLiveVoiceAdapter() : undefined,
-    [voiceAvailability.available]
-  )
 
 
   
@@ -620,7 +615,7 @@ function NexusPageContent() {
                         enabledTools={enabledTools}
                         enabledConnectors={enabledConnectors}
                         attachmentAdapter={attachmentAdapter}
-                        voiceAdapter={voiceAdapter}
+                        voiceAvailable={voiceAvailability.available}
                         initialMessages={initialMessages}
                         onConversationIdChange={handleConversationIdChange}
                         processingAttachments={processingAttachments}

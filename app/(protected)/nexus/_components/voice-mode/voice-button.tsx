@@ -15,7 +15,7 @@ import { Mic } from 'lucide-react'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
 
 interface VoiceButtonProps {
-  /** Called after connect() to open the voice overlay */
+  /** Called BEFORE connect() — sets up the adapter with conversationId */
   onVoiceStart: () => void
 }
 
@@ -23,15 +23,13 @@ export function VoiceButton({ onVoiceStart }: VoiceButtonProps) {
   const controls = useVoiceControls()
   const voiceState = useVoiceState()
 
-  // Guard against double-clicks: disable while connecting or running
-  const isActive = voiceState?.status?.type === 'starting' || voiceState?.status?.type === 'running'
+  const isVoiceActive = voiceState?.status?.type === 'starting' || voiceState?.status?.type === 'running'
 
-  // connect() is fire-and-forget: the overlay opens immediately showing "Connecting..."
-  // state. If connect rejects, useVoiceState transitions to 'ended' with error, and the
-  // overlay displays the error state. No need to await — the session lifecycle is event-driven.
+  // onVoiceStart is synchronous (swaps adapter via flushSync), so connect()
+  // immediately uses the correct adapter. No async window = no race condition.
   const handleClick = useCallback(() => {
-    controls.connect()
     onVoiceStart()
+    controls.connect()
   }, [controls, onVoiceStart])
 
   return (
@@ -40,7 +38,7 @@ export function VoiceButton({ onVoiceStart }: VoiceButtonProps) {
       variant="ghost"
       className="text-muted-foreground hover:text-foreground"
       onClick={handleClick}
-      disabled={isActive}
+      disabled={isVoiceActive}
       aria-label="Start voice conversation"
       data-testid="voice-mode-button"
     >

@@ -31,3 +31,18 @@ export const PING_INTERVAL_MS = 240_000
 
 /** WebSocket readyState OPEN constant (ws library value) */
 export const WS_OPEN = 1
+
+/**
+ * Voice context budget constants — these two govern how much conversation
+ * history the voice model receives as system instruction.
+ *
+ * MAX_VOICE_CONTEXT_MESSAGES: How many recent messages to fetch from the DB.
+ * MAX_SESSION_INSTRUCTION_LENGTH: Character cap on the formatted instruction.
+ *
+ * Used by voice-instruction-builder.ts (server-side instruction building).
+ */
+export const MAX_VOICE_CONTEXT_MESSAGES = 20
+export const MAX_SESSION_INSTRUCTION_LENGTH = 10_000
+
+/** Max length for conversationId in session_config (UUID = 36 chars) */
+export const MAX_CONVERSATION_ID_LENGTH = 36

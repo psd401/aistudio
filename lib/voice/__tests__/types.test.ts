@@ -99,6 +99,23 @@ describe("WebSocket protocol messages", () => {
     })
 
 
+    it("should represent a session_config message with conversationId", () => {
+      const msg: VoiceClientMessage = {
+        type: "session_config",
+        conversationId: "550e8400-e29b-41d4-a716-446655440000",
+      }
+      expect(msg.type).toBe("session_config")
+      expect(msg.conversationId).toBe("550e8400-e29b-41d4-a716-446655440000")
+    })
+
+    it("should represent a session_config message with no conversationId (new conversation)", () => {
+      const msg: VoiceClientMessage = {
+        type: "session_config",
+      }
+      expect(msg.type).toBe("session_config")
+      expect(msg.conversationId).toBeUndefined()
+    })
+
     it("should represent a disconnect message", () => {
       const msg: VoiceClientMessage = {
         type: "disconnect",

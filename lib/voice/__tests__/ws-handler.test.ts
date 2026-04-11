@@ -12,10 +12,19 @@ jest.mock("@auth/core/jwt", () => ({
 // Mock constants with short timeout for tests
 jest.mock("../constants", () => ({
   MAX_AUDIO_DATA_LENGTH: 131_072,
-  PROVIDER_CONNECT_TIMEOUT_MS: 200, // 200ms instead of 30s for test speed
+  PROVIDER_CONNECT_TIMEOUT_MS: 200,
   MIN_AUDIO_INTERVAL_MS: 20,
   PING_INTERVAL_MS: 240_000,
   WS_OPEN: 1,
+  MAX_CONVERSATION_ID_LENGTH: 36,
+  MAX_VOICE_CONTEXT_MESSAGES: 20,
+  MAX_SESSION_INSTRUCTION_LENGTH: 10_000,
+}))
+
+// Mock voice instruction builder (server-side instruction building from DB)
+const mockBuildInstructionFromConversation = jest.fn()
+jest.mock("../voice-instruction-builder", () => ({
+  buildInstructionFromConversation: (...args: unknown[]) => mockBuildInstructionFromConversation(...args),
 }))
 
 // Mock logger
@@ -77,17 +86,49 @@ jest.mock("@/lib/aws/s3-client", () => ({
 import { handleVoiceConnection } from "../ws-handler"
 import type { IncomingMessage } from "node:http"
 
-// Helper to create a mock WebSocket
-function createMockWs() {
-  const ws = {
+/**
+ * Helper to create a mock WebSocket that properly tracks event listeners.
+ * Supports the two-phase handshake: waitForSessionConfig registers and
+ * removes "message" listeners, then the main handler registers another.
+ */
+type MockWs = Parameters<typeof handleVoiceConnection>[0] & {
+  _emit: (event: string, ...args: unknown[]) => void
+  _listeners: Map<string, Set<(...args: unknown[]) => void>>
+}
+
+function createMockWs(): MockWs {
+  const listeners = new Map<string, Set<(...args: unknown[]) => void>>()
+
+  const ws: Record<string, unknown> = {
     readyState: 1, // OPEN
     send: jest.fn(),
     close: jest.fn(),
-    on: jest.fn(),
+    on: jest.fn((event: string, handler: (...args: unknown[]) => void) => {
+      if (!listeners.has(event)) listeners.set(event, new Set())
+      listeners.get(event)!.add(handler)
+      return ws
+    }),
+    removeListener: jest.fn((event: string, handler: (...args: unknown[]) => void) => {
+      listeners.get(event)?.delete(handler)
+      return ws
+    }),
     ping: jest.fn(),
-    removeAllListeners: jest.fn(),
+    removeAllListeners: jest.fn((event?: string) => {
+      if (event) {
+        listeners.delete(event)
+      } else {
+        listeners.clear()
+      }
+    }),
+    _emit: (event: string, ...args: unknown[]) => {
+      const handlers = listeners.get(event)
+      if (handlers) {
+        for (const handler of handlers) handler(...args)
+      }
+    },
+    _listeners: listeners,
   }
-  return ws as unknown as Parameters<typeof handleVoiceConnection>[0]
+  return ws as unknown as MockWs
 }
 
 // Helper to create a mock request with cookies
@@ -98,6 +139,17 @@ function createMockReq(cookies: Record<string, string> = {}): IncomingMessage {
   return {
     headers: { cookie: cookieStr },
   } as unknown as IncomingMessage
+}
+
+/**
+ * Schedule a session_config message to be sent shortly after handleVoiceConnection
+ * registers its listener. Needed because the two-phase handshake waits up to 5s
+ * for session_config, causing tests that pass auth to hang without this.
+ */
+function scheduleSessionConfig(ws: MockWs, config?: { conversationId?: string }) {
+  setTimeout(() => {
+    ws._emit("message", Buffer.from(JSON.stringify({ type: "session_config", ...config })))
+  }, 10)
 }
 
 describe("handleVoiceConnection", () => {
@@ -164,6 +216,7 @@ describe("handleVoiceConnection", () => {
       mockHasToolAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
+      scheduleSessionConfig(ws)
       const req = createMockReq({ "authjs.session-token": "encrypted-token" })
 
       await handleVoiceConnection(ws, req)
@@ -180,6 +233,7 @@ describe("handleVoiceConnection", () => {
       mockHasToolAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
+      scheduleSessionConfig(ws)
       const req = createMockReq({ "__Secure-authjs.session-token": "secure-token" })
 
       await handleVoiceConnection(ws, req)
@@ -196,6 +250,7 @@ describe("handleVoiceConnection", () => {
       mockHasToolAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
+      scheduleSessionConfig(ws)
       const req = createMockReq({
         "authjs.session-token.0": "chunk1",
         "authjs.session-token.1": "chunk2",
@@ -247,6 +302,7 @@ describe("handleVoiceConnection", () => {
       mockHasToolAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
+      scheduleSessionConfig(ws)
       const req = createMockReq({ "authjs.session-token": "valid-token" })
 
       await handleVoiceConnection(ws, req)
@@ -314,6 +370,7 @@ describe("handleVoiceConnection", () => {
       })
 
       const ws = createMockWs()
+      scheduleSessionConfig(ws)
       const req = createMockReq({ "authjs.session-token": "valid-token" })
 
       await handleVoiceConnection(ws, req)
@@ -336,6 +393,7 @@ describe("handleVoiceConnection", () => {
       })
 
       const ws = createMockWs()
+      scheduleSessionConfig(ws)
       const req = createMockReq({ "authjs.session-token": "valid-token" })
 
       await handleVoiceConnection(ws, req)
@@ -347,34 +405,30 @@ describe("handleVoiceConnection", () => {
   })
 
   describe("message handling", () => {
-    let messageHandler: (data: Buffer) => void
-
     beforeEach(() => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
       mockHasToolAccess.mockResolvedValue(true)
     })
 
-    /** Connect and extract the registered message handler from ws.on("message", ...) */
-    async function connectAndGetMessageHandler() {
+    /** Connect and return the ws mock. Messages can be sent via ws._emit("message", ...) */
+    async function connectWs() {
       const ws = createMockWs()
-      const handlers: Record<string, (...args: unknown[]) => void> = {}
-      ;(ws.on as jest.Mock).mockImplementation((event: string, handler: (...args: unknown[]) => void) => {
-        handlers[event] = handler
-        return ws
-      })
-
+      scheduleSessionConfig(ws)
       const req = createMockReq({ "authjs.session-token": "valid-token" })
       await handleVoiceConnection(ws, req)
-
-      messageHandler = handlers["message"] as (data: Buffer) => void
-      return { ws, handlers }
+      return ws
     }
 
     it("should register close/error handlers before message handler", async () => {
       const ws = createMockWs()
+      scheduleSessionConfig(ws)
       const registrationOrder: string[] = []
-      ;(ws.on as jest.Mock).mockImplementation((event: string) => {
+      const origOn = ws.on as jest.Mock
+      origOn.mockImplementation((event: string, handler: (...args: unknown[]) => void) => {
         registrationOrder.push(event)
+        // Still track listeners so handshake works
+        if (!ws._listeners.has(event)) ws._listeners.set(event, new Set())
+        ws._listeners.get(event)!.add(handler)
         return ws
       })
 
@@ -382,28 +436,29 @@ describe("handleVoiceConnection", () => {
 
       const closeIdx = registrationOrder.indexOf("close")
       const errorIdx = registrationOrder.indexOf("error")
-      const messageIdx = registrationOrder.indexOf("message")
+      // "message" appears twice: once for waitForSessionConfig, once for the main handler.
+      // The main handler registration is the LAST "message" entry.
+      const messageIdx = registrationOrder.lastIndexOf("message")
       expect(closeIdx).toBeLessThan(messageIdx)
       expect(errorIdx).toBeLessThan(messageIdx)
     })
 
     it("should call provider.sendAudio for valid audio messages", async () => {
-      await connectAndGetMessageHandler()
+      const ws = await connectWs()
 
-      const audioData = Buffer.from("AQID", "base64") // 3 bytes
-      messageHandler(Buffer.from(JSON.stringify({ type: "audio", data: "AQID" })))
+      ws._emit("message", Buffer.from(JSON.stringify({ type: "audio", data: "AQID" })))
 
       const { createVoiceProvider } = require("../provider-factory")
       const mockProvider = createVoiceProvider()
+      const audioData = Buffer.from("AQID", "base64")
       expect(mockProvider.sendAudio).toHaveBeenCalledWith(audioData)
     })
 
     it("should reject oversized audio messages", async () => {
-      await connectAndGetMessageHandler()
+      const ws = await connectWs()
 
-      // Create a base64 string larger than MAX_AUDIO_DATA_LENGTH (mocked to 131072)
       const oversizedData = "A".repeat(200_000)
-      messageHandler(Buffer.from(JSON.stringify({ type: "audio", data: oversizedData })))
+      ws._emit("message", Buffer.from(JSON.stringify({ type: "audio", data: oversizedData })))
 
       const { createVoiceProvider } = require("../provider-factory")
       const mockProvider = createVoiceProvider()
@@ -411,23 +466,21 @@ describe("handleVoiceConnection", () => {
     })
 
     it("should rate-limit audio messages", async () => {
-      await connectAndGetMessageHandler()
+      const ws = await connectWs()
 
-      // Send two audio messages with no delay — second should be dropped
       const msg = Buffer.from(JSON.stringify({ type: "audio", data: "AQID" }))
-      messageHandler(msg)
-      messageHandler(msg) // immediate — within MIN_AUDIO_INTERVAL_MS
+      ws._emit("message", msg)
+      ws._emit("message", msg) // immediate — within MIN_AUDIO_INTERVAL_MS
 
       const { createVoiceProvider } = require("../provider-factory")
       const mockProvider = createVoiceProvider()
-      // Only the first call should go through
       expect(mockProvider.sendAudio).toHaveBeenCalledTimes(1)
     })
 
     it("should call provider.disconnect for disconnect messages", async () => {
-      await connectAndGetMessageHandler()
+      const ws = await connectWs()
 
-      messageHandler(Buffer.from(JSON.stringify({ type: "disconnect" })))
+      ws._emit("message", Buffer.from(JSON.stringify({ type: "disconnect" })))
 
       const { createVoiceProvider } = require("../provider-factory")
       const mockProvider = createVoiceProvider()
@@ -435,14 +488,130 @@ describe("handleVoiceConnection", () => {
     })
 
     it("should ignore messages with invalid format", async () => {
-      await connectAndGetMessageHandler()
+      const ws = await connectWs()
 
-      messageHandler(Buffer.from(JSON.stringify({ foo: "bar" })))
+      ws._emit("message", Buffer.from(JSON.stringify({ foo: "bar" })))
 
       const { createVoiceProvider } = require("../provider-factory")
       const mockProvider = createVoiceProvider()
       expect(mockProvider.sendAudio).not.toHaveBeenCalled()
       expect(mockProvider.disconnect).not.toHaveBeenCalled()
+    })
+  })
+
+  describe("session_config handling", () => {
+    beforeEach(() => {
+      mockDecode.mockResolvedValue({ sub: "user-123" })
+      mockHasToolAccess.mockResolvedValue(true)
+    })
+
+    it("should build systemInstruction server-side from conversationId", async () => {
+      const testConversationId = "550e8400-e29b-41d4-a716-446655440000"
+      const serverBuiltInstruction = "You are a helpful AI assistant. Prior conversation:\nUser: Hello"
+      mockBuildInstructionFromConversation.mockResolvedValue(serverBuiltInstruction)
+
+      const ws = createMockWs()
+      scheduleSessionConfig(ws, { conversationId: testConversationId })
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+
+      await handleVoiceConnection(ws, req)
+
+      // Verify server-side instruction builder was called with conversationId and user sub
+      expect(mockBuildInstructionFromConversation).toHaveBeenCalledWith(
+        testConversationId,
+        "user-123",
+      )
+
+      // Verify the server-built instruction was passed to the provider
+      const { createVoiceProvider } = require("../provider-factory")
+      const mockProvider = createVoiceProvider.mock.results[0]?.value
+      expect(mockProvider.connect).toHaveBeenCalledWith(
+        expect.objectContaining({
+          systemInstruction: serverBuiltInstruction,
+        }),
+        expect.any(Function),
+        expect.anything(),
+      )
+    })
+
+    it("should pass undefined systemInstruction when no conversationId provided", async () => {
+      const ws = createMockWs()
+      scheduleSessionConfig(ws)
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+
+      await handleVoiceConnection(ws, req)
+
+      // Should NOT call the instruction builder
+      expect(mockBuildInstructionFromConversation).not.toHaveBeenCalled()
+
+      const { createVoiceProvider } = require("../provider-factory")
+      const mockProvider = createVoiceProvider.mock.results[0]?.value
+      expect(mockProvider.connect).toHaveBeenCalledWith(
+        expect.objectContaining({
+          systemInstruction: undefined,
+        }),
+        expect.any(Function),
+        expect.anything(),
+      )
+    })
+
+    it("should proceed without instruction when builder fails", async () => {
+      mockBuildInstructionFromConversation.mockRejectedValue(new Error("DB connection error"))
+
+      const ws = createMockWs()
+      scheduleSessionConfig(ws, { conversationId: "550e8400-e29b-41d4-a716-446655440000" })
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+
+      await handleVoiceConnection(ws, req)
+
+      // Should still connect, just without systemInstruction
+      const { createVoiceProvider } = require("../provider-factory")
+      const mockProvider = createVoiceProvider.mock.results[0]?.value
+      expect(mockProvider.connect).toHaveBeenCalledWith(
+        expect.objectContaining({
+          systemInstruction: undefined,
+        }),
+        expect.any(Function),
+        expect.anything(),
+      )
+    })
+  })
+
+  describe("session_config timeout", () => {
+    beforeEach(() => {
+      mockDecode.mockResolvedValue({ sub: "user-123" })
+      mockHasToolAccess.mockResolvedValue(true)
+      jest.useFakeTimers()
+    })
+
+    afterEach(() => {
+      jest.useRealTimers()
+    })
+
+    it("should proceed with default config when client sends nothing within timeout", async () => {
+      const ws = createMockWs()
+      // Do NOT call scheduleSessionConfig — simulate client sending nothing
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+
+      const connectionPromise = handleVoiceConnection(ws, req)
+
+      // Flush microtasks so the handler reaches waitForSessionConfig, then advance
+      // past the 5-second SESSION_CONFIG_TIMEOUT_MS and the 200ms provider connect timeout
+      await jest.advanceTimersByTimeAsync(6_000)
+
+      await connectionPromise
+
+      // Should NOT call instruction builder (no conversationId)
+      expect(mockBuildInstructionFromConversation).not.toHaveBeenCalled()
+
+      // Should still connect to provider with no systemInstruction
+      const { createVoiceProvider } = require("../provider-factory")
+      const mockProvider = createVoiceProvider.mock.results[0]?.value
+      expect(mockProvider.connect).toHaveBeenCalledWith(
+        expect.objectContaining({ systemInstruction: undefined }),
+        expect.any(Function),
+        expect.anything(),
+      )
     })
   })
 
@@ -452,6 +621,7 @@ describe("handleVoiceConnection", () => {
       mockHasToolAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
+      scheduleSessionConfig(ws)
       // Session tokens often contain = padding
       const req = createMockReq({
         "authjs.session-token": "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2Q0JDLUhTNTEyIn0..abc==",
@@ -471,6 +641,7 @@ describe("handleVoiceConnection", () => {
       mockHasToolAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
+      scheduleSessionConfig(ws)
       // Gap at index 1 — should only get chunk 0
       const req = createMockReq({
         "authjs.session-token.0": "chunk0",

@@ -25,7 +25,9 @@ import {
   MIN_AUDIO_INTERVAL_MS,
   PING_INTERVAL_MS,
   WS_OPEN,
+  MAX_CONVERSATION_ID_LENGTH,
 } from "./constants"
+import { buildInstructionFromConversation } from "./voice-instruction-builder"
 import type {
   VoiceProvider,
   VoiceProviderConfig,
@@ -47,43 +49,41 @@ import type {
  * Note: Cookie values are not URL-decoded. Auth.js does not URL-encode
  * session cookie values, so this is correct for the current implementation.
  */
+/** Parse raw cookie header into a key-value map. Uses Object.create(null) since cookie names are user-controlled. */
+function parseCookies(cookieHeader: string): Record<string, string> {
+  const cookies: Record<string, string> = Object.create(null)
+  for (const c of cookieHeader.split(";")) {
+    const [key, ...vals] = c.trim().split("=")
+    cookies[key.trim()] = vals.join("=").trim()
+  }
+  return cookies
+}
+
+/** Find Auth.js session token from cookies, handling chunked cookies. */
+function findSessionToken(cookies: Record<string, string>): { token: string; salt: string } | null {
+  const cookieNames = ["__Secure-authjs.session-token", "authjs.session-token", "next-auth.session-token"]
+  for (const name of cookieNames) {
+    if (cookies[name]) return { token: cookies[name], salt: name }
+    // Chunked cookies: name.0, name.1, ... (Auth.js splits large tokens, typically 2-3 chunks)
+    const chunks: string[] = []
+    for (let i = 0; i < 20; i++) {
+      const chunk = cookies[`${name}.${i}`]
+      if (!chunk) break
+      chunks.push(chunk)
+    }
+    if (chunks.length > 0) return { token: chunks.join(""), salt: name }
+  }
+  return null
+}
+
 async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: string; sub: string } | null> {
   const log = createLogger({ context: "voice-ws-auth" })
 
   try {
-    const cookieHeader = req.headers.cookie || ""
-    // Use Object.create(null) — cookie names are user-controlled input
-    const cookies: Record<string, string> = Object.create(null)
-    for (const c of cookieHeader.split(";")) {
-      const [key, ...vals] = c.trim().split("=")
-      cookies[key.trim()] = vals.join("=").trim()
-    }
+    const cookies = parseCookies(req.headers.cookie || "")
+    const session = findSessionToken(cookies)
 
-    const cookieNames = ["__Secure-authjs.session-token", "authjs.session-token", "next-auth.session-token"]
-    let sessionToken: string | undefined
-    let cookieSalt: string | undefined
-
-    for (const name of cookieNames) {
-      if (cookies[name]) {
-        sessionToken = cookies[name]
-        cookieSalt = name
-        break
-      }
-      // Chunked cookies: name.0, name.1, ... (Auth.js splits large tokens, typically 2-3 chunks)
-      const chunks: string[] = []
-      for (let i = 0; i < 20; i++) {
-        const chunk = cookies[`${name}.${i}`]
-        if (!chunk) break
-        chunks.push(chunk)
-      }
-      if (chunks.length > 0) {
-        sessionToken = chunks.join("")
-        cookieSalt = name
-        break
-      }
-    }
-
-    if (!sessionToken || !cookieSalt) {
+    if (!session) {
       log.warn("No session token found in WebSocket cookies")
       return null
     }
@@ -94,7 +94,7 @@ async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: st
       return null
     }
 
-    const payload = await decode({ token: sessionToken, salt: cookieSalt, secret })
+    const payload = await decode({ token: session.token, salt: session.salt, secret })
 
     if (!payload?.sub) {
       log.warn("Session token missing sub claim")
@@ -116,12 +116,29 @@ function sendToClient(ws: WebSocket, message: VoiceServerMessage): void {
   }
 }
 
-/** Validate that a parsed message has the expected shape. */
+/** Simple UUID format check — validates 8-4-4-4-12 hex pattern using a non-backtracking character class regex */
+function isUuidFormat(value: string): boolean {
+  if (value.length !== 36) return false
+  const hyphenPositions = [8, 13, 18, 23]
+  for (const pos of hyphenPositions) {
+    if (value[pos] !== "-") return false
+  }
+  // Check all non-hyphen chars are hex digits
+  const hexOnly = value.replace(/-/g, "")
+  return hexOnly.length === 32 && /^[\da-f]+$/i.test(hexOnly)
+}
+
+const VALID_CLIENT_MESSAGE_TYPES = new Set(["audio", "session_config", "disconnect"])
+
+/** Validate that a parsed message has the expected shape and a known type. */
 function isValidClientMessage(msg: unknown): msg is VoiceClientMessage {
   if (typeof msg !== "object" || msg === null) return false
   const obj = msg as Record<string, unknown>
-  if (typeof obj.type !== "string") return false
+  if (typeof obj.type !== "string" || !VALID_CLIENT_MESSAGE_TYPES.has(obj.type)) return false
   if (obj.type === "audio" && typeof obj.data !== "string") return false
+  if (obj.type === "session_config") {
+    if (obj.conversationId !== undefined && typeof obj.conversationId !== "string") return false
+  }
   return true
 }
 
@@ -156,6 +173,115 @@ function forwardProviderEvent(ws: WebSocket, event: VoiceProviderEvent): void {
 }
 
 /**
+ * Timeout for waiting for session_config message from client (ms).
+ *
+ * 5s is a deliberate trade-off: after the server sends the first "ready" (auth OK),
+ * the client must respond with session_config within this window. Under mobile or
+ * degraded networks (200-400ms RTT) this is generous. The consequence of timeout
+ * is graceful — the session proceeds with default settings (no conversation context),
+ * not a failure. Do NOT tighten this value without testing on high-latency links;
+ * the round-trip includes: WS frame delivery, client-side JS execution of
+ * socket.send(), and return delivery.
+ */
+const SESSION_CONFIG_TIMEOUT_MS = 5_000
+
+/**
+ * Wait for the client to send a session_config message.
+ * The client MUST send session_config as its first message after WebSocket open.
+ * Returns the config or null if the client sends nothing within the timeout
+ * (in which case the session proceeds with default settings).
+ */
+function waitForSessionConfig(
+  ws: WebSocket,
+  logFn: ReturnType<typeof createLogger>,
+): Promise<{ conversationId?: string } | null> {
+  return new Promise((resolve) => {
+    function cleanupListeners() {
+      clearTimeout(timeout)
+      ws.removeListener("message", onMessage)
+      ws.removeListener("close", onClose)
+      ws.removeListener("error", onError)
+    }
+
+    const timeout = setTimeout(() => {
+      cleanupListeners()
+      logFn.debug("No session_config received within timeout, proceeding with defaults")
+      resolve(null)
+    }, SESSION_CONFIG_TIMEOUT_MS)
+
+    function onClose() {
+      cleanupListeners()
+      logFn.debug("WebSocket closed while waiting for session_config")
+      resolve(null)
+    }
+
+    function onError() {
+      cleanupListeners()
+      logFn.debug("WebSocket error while waiting for session_config")
+      resolve(null)
+    }
+
+    function onMessage(data: WebSocket.RawData) {
+      try {
+        const parsed: unknown = JSON.parse(data.toString())
+        if (!isValidClientMessage(parsed)) return
+        if (parsed.type === "session_config") {
+          cleanupListeners()
+
+          const rawConversationId = typeof parsed.conversationId === "string"
+            ? parsed.conversationId.slice(0, MAX_CONVERSATION_ID_LENGTH)
+            : undefined
+          const conversationId = rawConversationId && isUuidFormat(rawConversationId)
+            ? rawConversationId
+            : undefined
+          if (rawConversationId && !conversationId) {
+            logFn.warn("Invalid conversationId format in session_config, discarding")
+          }
+
+          logFn.info("Session config received", { hasConversationId: !!conversationId })
+          resolve({ conversationId })
+        }
+      } catch {
+        logFn.debug("Non-JSON message received while waiting for session_config")
+      }
+    }
+
+    ws.on("message", onMessage)
+    ws.on("close", onClose)
+    ws.on("error", onError)
+  })
+}
+
+/** Returns a reason string if voice config is invalid, or null if OK. */
+function validateVoiceConfig(
+  settings: { provider: string | null; model: string | null },
+  googleApiKey: string | null,
+): string | null {
+  if (!googleApiKey) return "missing_api_key"
+  if (!settings.provider || !settings.model || !isSupportedVoiceProvider(settings.provider)) return "invalid_provider"
+  return null
+}
+
+/**
+ * Build system instruction from conversation messages (server-side).
+ * Non-fatal: returns undefined if conversation doesn't exist, isn't owned, or DB fails.
+ */
+async function buildSystemInstruction(
+  conversationId: string | undefined,
+  cognitoSub: string,
+  logFn: ReturnType<typeof createLogger>,
+): Promise<string | undefined> {
+  if (!conversationId) return undefined
+  try {
+    return await buildInstructionFromConversation(conversationId, cognitoSub)
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    logFn.warn("Failed to build voice instruction from conversation", { error: msg })
+    return undefined
+  }
+}
+
+/**
  * Handle a new WebSocket connection for voice sessions.
  *
  * Flow:
@@ -163,9 +289,11 @@ function forwardProviderEvent(ws: WebSocket, event: VoiceProviderEvent): void {
  * 2. Check voice-mode tool access
  * 3. Get voice settings and create provider
  * 4. Register close/error handlers (BEFORE connect)
- * 5. Connect to AI service with timeout
- * 6. Register message handler (AFTER connect — clients must wait for "ready")
- * 7. Start keepalive ping
+ * 5a. Signal auth OK and wait for session_config from client
+ * 5b. Build system instruction server-side from conversation messages
+ * 6. Connect to AI service with timeout
+ * 7. Register message handler (AFTER connect — clients must wait for "ready")
+ * 8. Start keepalive ping
  */
 export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage): Promise<void> {
   const requestId = generateRequestId()
@@ -205,8 +333,6 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     log.info("Voice connection authenticated", { userId: sanitizeForLogging(auth.userId) })
 
     // Step 2: Check voice access (fail-closed on error)
-    // Tool access check ensures only users with the "voice-mode" permission
-    // can access voice features and see configuration details.
     let hasAccess = false
     try {
       hasAccess = await hasToolAccess(auth.sub, "voice-mode")
@@ -221,55 +347,52 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       return
     }
 
-    // Step 3: Get voice settings and API key
-    // Settings are cached with 5-min TTL in settings-manager. Active WS sessions
-    // use the config from connection time; config changes take effect on new sessions.
+    // Step 3: Get voice settings and API key (cached 5-min TTL; changes take effect on new sessions)
     const [voiceSettings, googleApiKey] = await Promise.all([
       Settings.getVoice(),
       Settings.getGoogleAI(),
     ])
 
-    if (!googleApiKey) {
-      log.error("Google API key not configured")
+    const configError = validateVoiceConfig(voiceSettings, googleApiKey)
+    if (configError) {
+      log.error("Voice not configured", { reason: configError,
+        action: "Set VOICE_PROVIDER, VOICE_MODEL, and GOOGLE_API_KEY in Admin > System Settings" })
       sendToClient(ws, { type: "error", message: "Voice provider not configured" })
       ws.close(4500, "Provider not configured")
-      timer({ status: "error", reason: "missing_api_key" })
+      timer({ status: "error", reason: configError })
+      return
+    }
+    // Non-null safe: validateVoiceConfig returned null, so provider is valid
+    provider = createVoiceProvider(voiceSettings.provider!)
+
+    // Step 4: Register close/error handlers BEFORE provider.connect()
+    ws.on("close", (code, reason) => { log.info("Voice WS closed", { code, reason: reason.toString() }); cleanup("success") })
+    ws.on("error", (error) => { log.error("Voice WS error", { error: error.message }); cleanup("error") })
+
+    // Step 5a: Signal auth OK and wait for client session_config (conversationId only)
+    sendToClient(ws, { type: "ready" })
+    log.info("Auth complete, waiting for session config")
+    const sessionConfig = await waitForSessionConfig(ws, log)
+
+    // Abort if socket closed during wait — prevents leaking a provider connection with no client
+    if (sessionEnded || ws.readyState !== WS_OPEN) {
+      log.info("Socket closed during config wait")
       return
     }
 
-    if (!voiceSettings.provider || !voiceSettings.model || !isSupportedVoiceProvider(voiceSettings.provider)) {
-      log.error("Voice settings not configured — set VOICE_PROVIDER and VOICE_MODEL in Admin > System Settings > Voice Mode", {
-        provider: voiceSettings.provider,
-        model: voiceSettings.model,
-      })
-      sendToClient(ws, { type: "error", message: "Voice provider not configured" })
-      ws.close(4500, "Provider not configured")
-      timer({ status: "error", reason: "invalid_provider" })
-      return
-    }
-    provider = createVoiceProvider(voiceSettings.provider)
-
-    // Step 4: Register close/error handlers BEFORE provider.connect() so cleanup
-    // is guaranteed even if the WebSocket drops during the connect await.
-    ws.on("close", (code, reason) => {
-      log.info("Voice WebSocket closed", { code, reason: reason.toString() })
-      cleanup("success")
-    })
-
-    ws.on("error", (error) => {
-      log.error("Voice WebSocket error", { error: error.message })
-      cleanup("error")
-    })
-
-    // Step 5: Connect to AI service with timeout + abort signal
-    // AbortSignal cancels the in-flight connect if timeout fires, preventing
-    // a leaked Gemini session from running in the background with no client.
+    // Step 5b: Build system instruction server-side and create provider config
+    const systemInstruction = await buildSystemInstruction(sessionConfig?.conversationId, auth.sub, log)
     const providerConfig: VoiceProviderConfig = {
-      model: voiceSettings.model,
+      model: voiceSettings.model!,
       language: voiceSettings.language,
       voiceName: voiceSettings.voiceName ?? undefined,
-      apiKey: googleApiKey,
+      apiKey: googleApiKey!,
+      systemInstruction,
     }
+    log.info("Connecting to voice provider", {
+      hasConversationContext: !!sessionConfig?.conversationId,
+      hasSystemInstruction: !!systemInstruction,
+    })
 
     const connectAbort = new AbortController()
     const connectTimer = setTimeout(() => connectAbort.abort(), PROVIDER_CONNECT_TIMEOUT_MS)
@@ -284,11 +407,11 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       clearTimeout(connectTimer)
     }
 
-    // Signal ready to client
+    // Signal session is fully ready for audio
     sendToClient(ws, { type: "ready" })
     log.info("Voice session ready")
 
-    // Step 6: Register message handler AFTER connect (clients must wait for "ready")
+    // Step 7: Register message handler AFTER connect (clients must wait for second "ready")
     let lastAudioTime = 0
     ws.on("message", (data) => {
       try {
@@ -313,6 +436,10 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
             break
           }
 
+          case "session_config":
+            log.debug("Ignoring late session_config (provider already connected)")
+            break
+
           case "disconnect": {
             log.info("Client requested disconnect")
             provider?.disconnect().catch((e: Error) =>
@@ -327,7 +454,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       }
     })
 
-    // Step 7: Keepalive ping — cleanup() handles clearInterval on close/error
+    // Step 8: Keepalive ping — cleanup() handles clearInterval on close/error
     pingInterval = setInterval(() => {
       if (ws.readyState === WS_OPEN) ws.ping()
     }, PING_INTERVAL_MS)
@@ -335,10 +462,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     const message = error instanceof Error ? error.message : String(error)
     log.error("Voice session setup failed", { error: message })
     sendToClient(ws, { type: "error", message: "Failed to establish voice session" })
-    // cleanup() first: sets sessionEnded=true, clears interval, disconnects provider.
-    // Then remove listeners so ws.close()'s "close" event doesn't re-enter cleanup.
-    // This is safe because cleanup is idempotent via the sessionEnded guard.
-    cleanup("error")
+    cleanup("error") // idempotent — sets sessionEnded, clears interval, disconnects provider
     ws.removeAllListeners("message")
     ws.removeAllListeners("close")
     ws.removeAllListeners("error")
