@@ -25,6 +25,8 @@ import {
   MIN_AUDIO_INTERVAL_MS,
   PING_INTERVAL_MS,
   WS_OPEN,
+  MAX_SESSION_INSTRUCTION_LENGTH,
+  MAX_CONVERSATION_ID_LENGTH,
 } from "./constants"
 import type {
   VoiceProvider,
@@ -113,12 +115,6 @@ function sendToClient(ws: WebSocket, message: VoiceServerMessage): void {
     ws.send(JSON.stringify(message))
   }
 }
-
-/** Max length for systemInstruction passed via session_config (10K chars) */
-const MAX_SESSION_INSTRUCTION_LENGTH = 10_000
-
-/** Max length for conversationId in session_config (UUID = 36 chars) */
-const MAX_CONVERSATION_ID_LENGTH = 36
 
 /** Simple UUID format check — validates 8-4-4-4-12 hex pattern using a non-backtracking character class regex */
 function isUuidFormat(value: string): boolean {
@@ -366,7 +362,8 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     }
     provider = createVoiceProvider(voiceSettings.provider)
 
-    // Step 4: Register close/error handlers BEFORE provider.connect()
+    // Step 4: Register close/error handlers BEFORE provider.connect() so cleanup
+    // is guaranteed even if the WebSocket drops during the connect await.
     ws.on("close", (code, reason) => {
       log.info("Voice WebSocket closed", { code, reason: reason.toString() })
       cleanup("success")

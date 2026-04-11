@@ -31,3 +31,14 @@ export const PING_INTERVAL_MS = 240_000
 
 /** WebSocket readyState OPEN constant (ws library value) */
 export const WS_OPEN = 1
+
+/**
+ * Max length for systemInstruction passed via session_config (characters).
+ * Shared between:
+ *   - Client: voice-context-builder.ts (caps instruction before sending)
+ *   - Server: ws-handler.ts (truncates on receipt as defense-in-depth)
+ */
+export const MAX_SESSION_INSTRUCTION_LENGTH = 10_000
+
+/** Max length for conversationId in session_config (UUID = 36 chars) */
+export const MAX_CONVERSATION_ID_LENGTH = 36

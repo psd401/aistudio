@@ -9,9 +9,9 @@
 
 'use client'
 
-import { useCallback, useRef } from 'react'
+import { useCallback, useRef, useState } from 'react'
 import { useVoiceControls, useVoiceState } from '@assistant-ui/react'
-import { Mic } from 'lucide-react'
+import { Loader2, Mic } from 'lucide-react'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
 
 interface VoiceButtonProps {
@@ -26,6 +26,11 @@ interface VoiceButtonProps {
 export function VoiceButton({ onVoiceStart }: VoiceButtonProps) {
   const controls = useVoiceControls()
   const voiceState = useVoiceState()
+
+  // Loading state tracks the async context-fetch window between button click and
+  // controls.connect(). This disables the button and shows a spinner so users know
+  // something is happening during the fetch (which can take 500ms+ on slow networks).
+  const [isLoading, setIsLoading] = useState(false)
 
   // Guard against double-clicks during the async context-fetch window.
   // voiceState.status only transitions to 'starting' after controls.connect(),
@@ -42,25 +47,27 @@ export function VoiceButton({ onVoiceStart }: VoiceButtonProps) {
   const handleClick = useCallback(async () => {
     if (isStartingRef.current) return
     isStartingRef.current = true
+    setIsLoading(true)
     try {
       await onVoiceStart()
       controls.connect()
     } finally {
       isStartingRef.current = false
+      setIsLoading(false)
     }
   }, [controls, onVoiceStart])
 
   return (
     <TooltipIconButton
-      tooltip="Voice mode"
+      tooltip={isLoading ? 'Preparing voice...' : 'Voice mode'}
       variant="ghost"
       className="text-muted-foreground hover:text-foreground"
       onClick={handleClick}
-      disabled={isVoiceActive}
-      aria-label="Start voice conversation"
+      disabled={isVoiceActive || isLoading}
+      aria-label={isLoading ? 'Preparing voice session' : 'Start voice conversation'}
       data-testid="voice-mode-button"
     >
-      <Mic className="size-5" />
+      {isLoading ? <Loader2 className="size-5 animate-spin" /> : <Mic className="size-5" />}
     </TooltipIconButton>
   )
 }

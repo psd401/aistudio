@@ -6,17 +6,16 @@
  * previously discussed in text, enabling seamless text-to-voice transitions.
  *
  * The system instruction is truncated to stay within Gemini Live's context
- * limits (10K characters max, matching the server-side MAX_SESSION_INSTRUCTION_LENGTH).
+ * limits (10K characters max, matching the server-side MAX_SESSION_INSTRUCTION_LENGTH
+ * in lib/voice/constants.ts).
  *
  * Issue #874
  */
 
 import { createLogger } from '@/lib/client-logger'
+import { MAX_SESSION_INSTRUCTION_LENGTH } from '@/lib/voice/constants'
 
 const log = createLogger({ moduleName: 'voice-context-builder' })
-
-/** Max characters for the system instruction (must match ws-handler MAX_SESSION_INSTRUCTION_LENGTH) */
-const MAX_INSTRUCTION_LENGTH = 10_000
 
 /** Simple message representation for context building */
 export interface ContextMessage {
@@ -44,22 +43,43 @@ export async function fetchConversationContext(
   const clampedLimit = Math.min(Math.max(maxMessages, 1), 100)
   const baseUrl = `/api/nexus/conversations/${encodeURIComponent(conversationId)}/messages`
 
-  // Fetch a larger window than needed to avoid a two-request count→fetch race (TOCTOU).
   // The messages endpoint returns rows ordered by createdAt ASC (oldest first) and
-  // does not support DESC ordering. Previously we fetched count first, computed offset,
-  // then fetched — but messages arriving between the two requests would skew the window.
+  // does not support DESC ordering. Strategy: make an initial request to discover the
+  // total count via the pagination response, then compute the correct offset to fetch
+  // only the most recent messages. This avoids the previous approach of fetching a
+  // "generous window" from offset 0 which missed recent messages in large conversations.
   //
-  // Instead: request a generous window (3× the desired limit) starting from offset 0.
-  // We then take only the LAST clampedLimit messages from the result. For typical
-  // conversations (< 300 messages) this returns all messages in one call. For very
-  // large conversations we may miss the absolute newest messages if there are more
-  // than fetchLimit total — this is an accepted trade-off vs. adding DESC support
-  // to the endpoint (which would be a larger change).
-  const fetchLimit = Math.min(clampedLimit * 3, 1000)
-  const response = await fetch(`${baseUrl}?limit=${fetchLimit}&offset=0`)
+  // Step 1: Probe with limit=1 to get total count without transferring full message data.
+  const probeResponse = await fetch(`${baseUrl}?limit=1&offset=0`)
+  if (!probeResponse.ok) {
+    log.warn('Failed to fetch conversation messages for voice context', {
+      status: probeResponse.status,
+      conversationId,
+    })
+    return []
+  }
+
+  let probeData: Record<string, unknown>
+  try {
+    probeData = await probeResponse.json()
+  } catch {
+    log.warn('Failed to parse conversation messages response', { conversationId })
+    return []
+  }
+
+  const pagination = probeData.pagination as { total?: number } | undefined
+  const total = typeof pagination?.total === 'number' ? pagination.total : 0
+
+  if (total === 0) {
+    return []
+  }
+
+  // Step 2: Compute offset to fetch the tail (most recent messages).
+  const offset = Math.max(total - clampedLimit, 0)
+  const response = await fetch(`${baseUrl}?limit=${clampedLimit}&offset=${offset}`)
 
   if (!response.ok) {
-    log.warn('Failed to fetch conversation messages for voice context', {
+    log.warn('Failed to fetch recent conversation messages for voice context', {
       status: response.status,
       conversationId,
     })
@@ -74,13 +94,21 @@ export async function fetchConversationContext(
     return []
   }
 
-  const messages: ContextMessage[] = []
-
   if (!Array.isArray(data.messages)) {
     return []
   }
 
-  for (const msg of data.messages) {
+  return extractTextMessages(data.messages)
+}
+
+/**
+ * Extract text-only messages from raw API response messages.
+ * Skips non-text content (images, tool calls, etc.) and system messages.
+ */
+function extractTextMessages(rawMessages: Record<string, unknown>[]): ContextMessage[] {
+  const messages: ContextMessage[] = []
+
+  for (const msg of rawMessages) {
     const role = msg.role as string
     if (role !== 'user' && role !== 'assistant') continue
 
@@ -98,8 +126,7 @@ export async function fetchConversationContext(
     }
   }
 
-  // Return only the most recent messages (endpoint returns ASC order so tail = newest)
-  return messages.length > clampedLimit ? messages.slice(-clampedLimit) : messages
+  return messages
 }
 
 /**
@@ -132,7 +159,7 @@ export function buildVoiceSystemInstruction(opts: {
   const suffix = '\n\nContinue the conversation naturally in voice. Be concise since this is spoken.'
 
   // Compute available context budget from actual prefix/suffix lengths (+2 for joining newlines)
-  const maxContextLength = MAX_INSTRUCTION_LENGTH - prefix.length - suffix.length - 2
+  const maxContextLength = MAX_SESSION_INSTRUCTION_LENGTH - prefix.length - suffix.length - 2
 
   // Build context from most recent messages, trimming oldest if needed
   const contextLines: string[] = []
@@ -164,5 +191,5 @@ export function buildVoiceSystemInstruction(opts: {
     instructionLength: instruction.length,
   })
 
-  return instruction.slice(0, MAX_INSTRUCTION_LENGTH)
+  return instruction.slice(0, MAX_SESSION_INSTRUCTION_LENGTH)
 }
