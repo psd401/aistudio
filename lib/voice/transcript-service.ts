@@ -23,13 +23,8 @@ import { nexusMessages, nexusConversations } from "@/lib/db/schema"
 import { safeJsonbStringify } from "@/lib/db/json-utils"
 import { getContentSafetyService } from "@/lib/safety"
 import { getConversationById } from "@/lib/db/drizzle/nexus-conversations"
+import { DEFAULT_CONVERSATION_TITLE } from "@/lib/constants/conversation"
 import type { TranscriptEntry } from "./types"
-
-/**
- * Default conversation title — shared sentinel used by conversation creation
- * (nexus-conversations.ts, chat-helpers.ts, route.ts) to detect untitled conversations.
- */
-const DEFAULT_CONVERSATION_TITLE = "New Conversation"
 
 // ============================================
 // Types
@@ -113,6 +108,7 @@ export async function saveVoiceTranscript(
     userId,
     rawEntryCount: transcript.length,
     voiceModel,
+    voiceProvider,
   })
 
   try {
@@ -327,7 +323,10 @@ async function applyGuardrails(
             }
           }
 
-          return { ...entry, wasFiltered: false }
+          // Use processedContent if the safety service transformed the text (e.g., PII redaction).
+          // Currently the quick check methods don't modify content, but this is defensive
+          // against future safety service changes that may introduce content transformations.
+          return { ...entry, text: result.processedContent ?? entry.text, wasFiltered: false }
         } catch (error) {
           // Graceful degradation — allow entry through on error
           const message = error instanceof Error ? error.message : String(error)

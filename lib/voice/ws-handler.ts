@@ -547,6 +547,11 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     // Set up transcript persistence context in the background (non-blocking).
     // The message handler is already registered above, so no audio frames are lost
     // during this async DB lookup.
+    //
+    // Known limitation: if the client disconnects before this await completes,
+    // transcriptContext remains null and the transcript is not persisted. This
+    // affects very short sessions or poor-connectivity scenarios. Acceptable
+    // because the persistence is a best-effort fire-and-forget operation.
     if (sessionConfig?.conversationId && voiceSettings.model && voiceSettings.provider) {
       transcriptContext = await resolveTranscriptContext(
         sessionConfig.conversationId, auth.sub, voiceSettings.model, voiceSettings.provider, log,

@@ -8,6 +8,7 @@
  */
 
 import { saveVoiceTranscript, prepareTranscriptEntries } from "../transcript-service"
+import { DEFAULT_CONVERSATION_TITLE } from "@/lib/constants/conversation"
 import type { TranscriptEntry } from "../types"
 
 // ============================================
@@ -55,16 +56,27 @@ jest.mock("@/lib/safety", () => ({
   }),
 }))
 
-jest.mock("@/lib/logger", () => ({
-  createLogger: () => ({
+// Logger mock — the factory creates a singleton logger object with jest.fn() methods.
+// We retrieve it after jest.mock via the mocked module's createLogger().
+jest.mock("@/lib/logger", () => {
+  const logger = {
     info: jest.fn(),
     warn: jest.fn(),
     error: jest.fn(),
     debug: jest.fn(),
-  }),
-  generateRequestId: () => "test-request-id",
-  startTimer: () => jest.fn().mockReturnValue(42),
-}))
+  }
+  return {
+    __mockLogger: logger,
+    createLogger: () => logger,
+    generateRequestId: () => "test-request-id",
+    startTimer: () => jest.fn().mockReturnValue(42),
+  }
+})
+
+// eslint-disable-next-line @typescript-eslint/no-require-imports, @typescript-eslint/no-var-requires
+const { __mockLogger: mockLogger } = require("@/lib/logger") as { __mockLogger: {
+  info: jest.Mock; warn: jest.Mock; error: jest.Mock; debug: jest.Mock
+}}
 
 // ============================================
 // Test Helpers
@@ -170,6 +182,25 @@ describe("prepareTranscriptEntries", () => {
     expect(result.length).toBeLessThanOrEqual(500)
   })
 
+  it("should warn when transcript is truncated beyond MAX_TRANSCRIPT_ENTRIES", () => {
+    mockLogger.warn.mockClear()
+    const entries: TranscriptEntry[] = []
+    for (let i = 0; i < 600; i++) {
+      entries.push(
+        makeEntry(i % 2 === 0 ? "user" : "assistant", `message ${i}`),
+      )
+    }
+
+    prepareTranscriptEntries(entries)
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Transcript truncated to maximum entry limit",
+      expect.objectContaining({
+        maxEntries: 500,
+        droppedCount: expect.any(Number),
+      }),
+    )
+  })
+
   it("should trim whitespace from entry text", () => {
     const entries = [
       makeEntry("user", "  hello world  "),
@@ -249,7 +280,7 @@ describe("saveVoiceTranscript", () => {
   })
 
   it("should generate title for new conversations", async () => {
-    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "New Conversation" })
+    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: DEFAULT_CONVERSATION_TITLE })
     mockIsGuardrailsEnabled.mockReturnValue(false)
 
     let capturedTx: Record<string, jest.Mock> | null = null
@@ -386,6 +417,38 @@ describe("saveVoiceTranscript", () => {
     )
   })
 
+  it("should use processedContent from guardrails when content is transformed", async () => {
+    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Test" })
+    mockIsGuardrailsEnabled.mockReturnValue(true)
+    // Simulate safety service returning transformed content (e.g., PII redaction)
+    mockCheckInputSafety.mockResolvedValue({ allowed: true, processedContent: "hello [REDACTED]" })
+    mockCheckOutputSafety.mockResolvedValue({ allowed: true, processedContent: "transformed response" })
+
+    let capturedValues: unknown[] = []
+    mockExecuteTransaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
+      await fn({
+        insert: jest.fn().mockImplementation((_table: unknown) => ({
+          values: jest.fn().mockImplementation((vals: unknown[]) => {
+            capturedValues = vals
+          }),
+        })),
+        update: jest.fn().mockReturnValue({ set: jest.fn().mockReturnValue({ where: jest.fn() }) }),
+      })
+    })
+
+    const entries = [
+      makeEntry("user", "hello original"),
+      makeEntry("assistant", "original response"),
+    ]
+
+    await saveVoiceTranscript("conv-123", 1, entries)
+
+    // Verify the persisted content uses processedContent, not original text
+    expect(capturedValues).toHaveLength(2)
+    expect((capturedValues[0] as { content: string }).content).toBe("hello [REDACTED]")
+    expect((capturedValues[1] as { content: string }).content).toBe("transformed response")
+  })
+
   it("should gracefully handle guardrail API errors", async () => {
     mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Test" })
     mockIsGuardrailsEnabled.mockReturnValue(true)
@@ -434,7 +497,7 @@ describe("voice title generation", () => {
 
   it("should truncate long titles with ellipsis", async () => {
     const longMessage = "This is a very long message that should be truncated because it exceeds the maximum title length"
-    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "New Conversation" })
+    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: DEFAULT_CONVERSATION_TITLE })
 
     let updateArgs: Record<string, unknown> = {}
     mockExecuteTransaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
@@ -460,7 +523,7 @@ describe("voice title generation", () => {
   })
 
   it("should skip title generation if first user message was filtered", async () => {
-    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "New Conversation" })
+    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: DEFAULT_CONVERSATION_TITLE })
     mockIsGuardrailsEnabled.mockReturnValue(true)
     // Block the only user message
     mockCheckInputSafety.mockResolvedValue({
