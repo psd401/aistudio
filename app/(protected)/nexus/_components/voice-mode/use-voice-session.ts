@@ -15,7 +15,8 @@
 
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { flushSync } from 'react-dom'
 import type { RealtimeVoiceAdapter } from '@assistant-ui/react'
 import { createGeminiLiveVoiceAdapter } from './gemini-live-voice-adapter'
 import { buildVoiceSystemInstruction, fetchConversationContext } from './voice-context-builder'
@@ -38,8 +39,8 @@ export interface UseVoiceSessionResult {
   voiceAdapter: RealtimeVoiceAdapter | undefined
   /** Whether the voice overlay should be shown */
   voiceOverlayOpen: boolean
-  /** Called when user clicks voice button — fetches context and opens overlay */
-  handleVoiceStart: () => void
+  /** Called when user clicks voice button — fetches context and opens overlay. Resolves when adapter is ready. */
+  handleVoiceStart: () => Promise<void>
   /** Called when voice overlay closes */
   handleVoiceClose: () => void
 }
@@ -71,7 +72,10 @@ export function useVoiceSession({
   const conversationIdRef = useRef(conversationId)
   conversationIdRef.current = conversationId
 
-  // Create initial adapter (no context) when voice becomes available
+  // Create initial adapter (no context) when voice becomes available.
+  // This no-context adapter is required by useChatRuntime for registration purposes
+  // but is never used for an actual voice session — handleVoiceStart always creates
+  // a fresh context-aware adapter before controls.connect() is called.
   useEffect(() => {
     if (voiceAvailable) {
       setVoiceAdapter(createGeminiLiveVoiceAdapter())
@@ -113,20 +117,25 @@ export function useVoiceSession({
       }
     }
 
-    // Create adapter with conversation context
-    setVoiceAdapter(createGeminiLiveVoiceAdapter({
-      conversationId: currentConversationId ?? undefined,
-      systemInstruction,
-    }))
-
-    setVoiceOverlayOpen(true)
+    // Create adapter with conversation context. flushSync forces the state update to
+    // commit synchronously so the voice runtime has the new adapter when VoiceButton
+    // calls controls.connect() immediately after this promise resolves.
+    flushSync(() => {
+      setVoiceAdapter(createGeminiLiveVoiceAdapter({
+        conversationId: currentConversationId ?? undefined,
+        systemInstruction,
+      }))
+      setVoiceOverlayOpen(true)
+    })
   }, [voiceAvailable])
 
   const handleVoiceClose = useCallback(() => {
     setVoiceOverlayOpen(false)
   }, [])
 
-  // Browser navigation cleanup — log warning for debugging
+  // Browser navigation: intentionally passive — the WebSocket will close naturally
+  // when the page unloads. This handler only logs for debugging purposes so we can
+  // distinguish intentional disconnects from unexpected ones in production logs.
   useEffect(() => {
     const handleBeforeUnload = () => {
       if (voiceOverlayOpen) {
@@ -138,13 +147,13 @@ export function useVoiceSession({
     return () => window.removeEventListener('beforeunload', handleBeforeUnload)
   }, [voiceOverlayOpen])
 
-  return useMemo(
-    () => ({
-      voiceAdapter,
-      voiceOverlayOpen,
-      handleVoiceStart,
-      handleVoiceClose,
-    }),
-    [voiceAdapter, voiceOverlayOpen, handleVoiceStart, handleVoiceClose],
-  )
+  // No useMemo needed — consumers destructure, so object identity doesn't matter.
+  // The individual values (voiceAdapter, handleVoiceStart, etc.) are already stable
+  // via useState/useCallback.
+  return {
+    voiceAdapter,
+    voiceOverlayOpen,
+    handleVoiceStart,
+    handleVoiceClose,
+  }
 }

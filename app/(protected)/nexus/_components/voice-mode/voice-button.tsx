@@ -15,8 +15,12 @@ import { Mic } from 'lucide-react'
 import { TooltipIconButton } from '@/components/assistant-ui/tooltip-icon-button'
 
 interface VoiceButtonProps {
-  /** Called after connect() to open the voice overlay */
-  onVoiceStart: () => void
+  /**
+   * Called BEFORE connect() — must complete adapter setup (context fetch + adapter swap)
+   * before the voice runtime initiates the WebSocket connection.
+   * Returns a promise that resolves when the adapter is ready.
+   */
+  onVoiceStart: () => Promise<void>
 }
 
 export function VoiceButton({ onVoiceStart }: VoiceButtonProps) {
@@ -26,12 +30,13 @@ export function VoiceButton({ onVoiceStart }: VoiceButtonProps) {
   // Guard against double-clicks: disable while connecting or running
   const isActive = voiceState?.status?.type === 'starting' || voiceState?.status?.type === 'running'
 
-  // connect() is fire-and-forget: the overlay opens immediately showing "Connecting..."
-  // state. If connect rejects, useVoiceState transitions to 'ended' with error, and the
-  // overlay displays the error state. No need to await — the session lifecycle is event-driven.
-  const handleClick = useCallback(() => {
+  // Await onVoiceStart (which fetches context and swaps the adapter) BEFORE calling
+  // controls.connect(). This ensures the connect() call uses the context-aware adapter,
+  // not the initial no-context adapter. The overlay opens immediately showing "Connecting..."
+  // state. If connect rejects, useVoiceState transitions to 'ended' with error.
+  const handleClick = useCallback(async () => {
+    await onVoiceStart()
     controls.connect()
-    onVoiceStart()
   }, [controls, onVoiceStart])
 
   return (

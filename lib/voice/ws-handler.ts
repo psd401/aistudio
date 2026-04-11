@@ -120,7 +120,7 @@ const MAX_SESSION_INSTRUCTION_LENGTH = 10_000
 /** Max length for conversationId in session_config (UUID = 36 chars) */
 const MAX_CONVERSATION_ID_LENGTH = 36
 
-/** Simple UUID format check — validates 8-4-4-4-12 hex pattern without regex backtracking */
+/** Simple UUID format check — validates 8-4-4-4-12 hex pattern using a non-backtracking character class regex */
 function isUuidFormat(value: string): boolean {
   if (value.length !== 36) return false
   const hyphenPositions = [8, 13, 18, 23]
@@ -192,19 +192,38 @@ function waitForSessionConfig(
   logFn: ReturnType<typeof createLogger>,
 ): Promise<{ conversationId?: string; systemInstruction?: string } | null> {
   return new Promise((resolve) => {
-    const timeout = setTimeout(() => {
+    /** Remove all listeners registered by this function */
+    function cleanupListeners() {
+      clearTimeout(timeout)
       ws.removeListener("message", onMessage)
+      ws.removeListener("close", onClose)
+      ws.removeListener("error", onError)
+    }
+
+    const timeout = setTimeout(() => {
+      cleanupListeners()
       logFn.debug("No session_config received within timeout, proceeding with defaults")
       resolve(null)
     }, SESSION_CONFIG_TIMEOUT_MS)
+
+    function onClose() {
+      cleanupListeners()
+      logFn.debug("WebSocket closed while waiting for session_config")
+      resolve(null)
+    }
+
+    function onError() {
+      cleanupListeners()
+      logFn.debug("WebSocket error while waiting for session_config")
+      resolve(null)
+    }
 
     function onMessage(data: WebSocket.RawData) {
       try {
         const parsed: unknown = JSON.parse(data.toString())
         if (!isValidClientMessage(parsed)) return
         if (parsed.type === "session_config") {
-          clearTimeout(timeout)
-          ws.removeListener("message", onMessage)
+          cleanupListeners()
 
           // Sanitize and validate inputs
           const rawConversationId = typeof parsed.conversationId === "string"
@@ -234,6 +253,8 @@ function waitForSessionConfig(
     }
 
     ws.on("message", onMessage)
+    ws.on("close", onClose)
+    ws.on("error", onError)
   })
 }
 
@@ -340,6 +361,9 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     sendToClient(ws, { type: "ready" })
     log.info("Auth complete, waiting for session config")
     const sessionConfig = await waitForSessionConfig(ws, log)
+
+    // Abort if socket closed during wait — prevents leaking a provider connection with no client
+    if (sessionEnded || ws.readyState !== WS_OPEN) { log.info("Socket closed during config wait"); return }
 
     // Step 6: Connect to AI service with timeout + abort signal
     const providerConfig: VoiceProviderConfig = {

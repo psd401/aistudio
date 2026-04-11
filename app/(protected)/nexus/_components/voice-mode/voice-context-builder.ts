@@ -6,7 +6,7 @@
  * previously discussed in text, enabling seamless text-to-voice transitions.
  *
  * The system instruction is truncated to stay within Gemini Live's context
- * limits (10K characters max, matching the server-side MAX_SYSTEM_INSTRUCTION_LENGTH).
+ * limits (10K characters max, matching the server-side MAX_SESSION_INSTRUCTION_LENGTH).
  *
  * Issue #874
  */
@@ -18,12 +18,9 @@ const log = createLogger({ moduleName: 'voice-context-builder' })
 /** Max characters for the system instruction (must match ws-handler MAX_SESSION_INSTRUCTION_LENGTH) */
 const MAX_INSTRUCTION_LENGTH = 10_000
 
-/** Reserved characters for the instruction prefix/suffix around the message context */
-const INSTRUCTION_OVERHEAD = 500
-
 /** Simple message representation for context building */
 export interface ContextMessage {
-  role: 'user' | 'assistant' | 'system'
+  role: 'user' | 'assistant'
   text: string
 }
 
@@ -45,9 +42,34 @@ export async function fetchConversationContext(
 ): Promise<ContextMessage[]> {
   // Clamp to a safe range — server validates too, but defensive at call site
   const clampedLimit = Math.min(Math.max(maxMessages, 1), 100)
-  const response = await fetch(
-    `/api/nexus/conversations/${encodeURIComponent(conversationId)}/messages?limit=${clampedLimit}`,
-  )
+  const baseUrl = `/api/nexus/conversations/${encodeURIComponent(conversationId)}/messages`
+
+  // The messages endpoint returns rows ordered by createdAt ASC (oldest first).
+  // To get the MOST RECENT messages, we need the correct offset. Fetch with
+  // limit=1 first to discover total count, then compute offset for the tail.
+  const countResponse = await fetch(`${baseUrl}?limit=1&offset=0`)
+  if (!countResponse.ok) {
+    log.warn('Failed to fetch conversation message count for voice context', {
+      status: countResponse.status,
+      conversationId,
+    })
+    return []
+  }
+
+  let totalCount: number
+  try {
+    const countData = await countResponse.json()
+    totalCount = countData?.pagination?.total ?? 0
+  } catch {
+    log.warn('Failed to parse message count response', { conversationId })
+    return []
+  }
+
+  if (totalCount === 0) return []
+
+  // Compute offset to fetch the most recent messages
+  const offset = Math.max(0, totalCount - clampedLimit)
+  const response = await fetch(`${baseUrl}?limit=${clampedLimit}&offset=${offset}`)
 
   if (!response.ok) {
     log.warn('Failed to fetch conversation messages for voice context', {
@@ -57,7 +79,14 @@ export async function fetchConversationContext(
     return []
   }
 
-  const data = await response.json()
+  let data: Record<string, unknown>
+  try {
+    data = await response.json()
+  } catch {
+    log.warn('Failed to parse conversation messages response', { conversationId })
+    return []
+  }
+
   const messages: ContextMessage[] = []
 
   if (!Array.isArray(data.messages)) {
@@ -114,7 +143,8 @@ export function buildVoiceSystemInstruction(opts: {
 
   const suffix = '\n\nContinue the conversation naturally in voice. Be concise since this is spoken.'
 
-  const maxContextLength = MAX_INSTRUCTION_LENGTH - INSTRUCTION_OVERHEAD
+  // Compute available context budget from actual prefix/suffix lengths (+2 for joining newlines)
+  const maxContextLength = MAX_INSTRUCTION_LENGTH - prefix.length - suffix.length - 2
 
   // Build context from most recent messages, trimming oldest if needed
   const contextLines: string[] = []

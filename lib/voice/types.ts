@@ -7,18 +7,21 @@
  * Architecture:
  *   Client ↔ WebSocket ↔ Next.js Server ↔ Provider SDK ↔ AI Service
  *
- * WebSocket Protocol (ws://.../api/nexus/voice):
+ * WebSocket Protocol (ws://.../api/nexus/voice) — Two-Phase Handshake:
  *   1. Client connects with session cookie for authentication
  *   2. Server validates JWT, checks hasToolAccess("voice-mode")
- *   3. Server sends { type: "ready" } when Gemini Live session is established
- *   4. Client sends { type: "audio", data: "<base64 PCM16 16kHz mono>" }
- *   5. Server forwards audio to Gemini, relays responses back:
+ *   3. Server sends { type: "ready" } (Phase 1: auth complete)
+ *   4. Client sends { type: "session_config", conversationId?, systemInstruction? }
+ *   5. Server connects to Gemini Live with systemInstruction (if provided)
+ *   6. Server sends { type: "ready" } (Phase 2: provider connected, audio can flow)
+ *   7. Client sends { type: "audio", data: "<base64 PCM16 16kHz mono>" }
+ *   8. Server forwards audio to Gemini, relays responses back:
  *      - { type: "audio", data: "<base64>" } — model speech audio
  *      - { type: "transcript", entry: { role, text, isFinal, timestamp } }
  *      - { type: "state", speaking: "user"|"assistant"|"none" }
  *      - { type: "error", message: string }
  *      - { type: "session_ended", reason: string }
- *   6. Client sends { type: "disconnect" } to end session
+ *   9. Client sends { type: "disconnect" } to end session
  *
  * Close codes: 4001=Unauthorized, 4003=Forbidden, 4500=Server Error
  *

@@ -337,10 +337,28 @@ class VoiceSession {
 
       // Handshake listeners are removed after resolve/reject to avoid
       // stale message/error/close handlers running during the active session
+      /** Clean up all handshake listeners and timers */
+      const cleanupHandshake = () => {
+        clearTimeout(connectTimeout)
+        signal?.removeEventListener('abort', onAbort)
+        socket.removeEventListener('message', onHandshakeMessage)
+        socket.removeEventListener('error', onHandshakeError)
+        socket.removeEventListener('close', onHandshakeClose)
+      }
+
       const onHandshakeMessage = (event: MessageEvent) => {
         try {
           const parsed: unknown = JSON.parse(event.data as string)
           if (!isValidServerMessage(parsed)) return
+
+          // Handle server errors during handshake (e.g., auth failure, provider not configured)
+          if (parsed.type === 'error') {
+            cleanupHandshake()
+            socket.close()
+            reject(new Error(parsed.message || 'Server error during handshake'))
+            return
+          }
+
           if (parsed.type !== 'ready') return
 
           if (!authReady) {
@@ -357,26 +375,20 @@ class VoiceSession {
             log.debug('Session config sent, waiting for provider connect')
           } else {
             // Phase 2 complete: provider connected, ready for audio.
-            clearTimeout(connectTimeout)
-            signal?.removeEventListener('abort', onAbort)
-            socket.removeEventListener('message', onHandshakeMessage)
-            socket.removeEventListener('error', onHandshakeError)
-            socket.removeEventListener('close', onHandshakeClose)
+            cleanupHandshake()
             resolve(socket)
           }
         } catch { log.debug('Parse error during WebSocket handshake') }
       }
 
       const onHandshakeError = () => {
-        clearTimeout(connectTimeout)
-        signal?.removeEventListener('abort', onAbort)
+        cleanupHandshake()
         reject(new Error('WebSocket connection failed'))
       }
 
       // Use allowlisted error strings — do not expose raw event.reason to UI
       const onHandshakeClose = (event: CloseEvent) => {
-        clearTimeout(connectTimeout)
-        signal?.removeEventListener('abort', onAbort)
+        cleanupHandshake()
         if (event.code === 4001) reject(new Error('Unauthorized — please sign in again'))
         else if (event.code === 4003) reject(new Error('Voice mode is not enabled for your account'))
         else reject(new Error('Connection lost'))
