@@ -226,6 +226,88 @@ function registerMessageHandler(
   })
 }
 
+/** Mutable session state shared between handleVoiceConnection and its helpers. */
+interface VoiceSessionState {
+  providerRef: { current: VoiceProvider | null }
+  pingInterval: ReturnType<typeof setInterval> | null
+  sessionEnded: boolean
+  capturedTranscript: TranscriptEntry[]
+  transcriptContext: { conversationId: string; userId: number; voiceModel: string; voiceProvider: string } | null
+}
+
+/** Create a fresh session state object. */
+function createSessionState(): VoiceSessionState {
+  return {
+    providerRef: { current: null },
+    pingInterval: null,
+    sessionEnded: false,
+    capturedTranscript: [],
+    transcriptContext: null,
+  }
+}
+
+/**
+ * Idempotent session cleanup. Captures transcript, disconnects provider,
+ * fires async persistence, and records timing.
+ */
+function cleanupSession(
+  state: VoiceSessionState,
+  status: string,
+  logFn: ReturnType<typeof createLogger>,
+  timer: ReturnType<typeof startTimer>,
+): void {
+  if (state.sessionEnded) return
+  state.sessionEnded = true
+  if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null }
+
+  // Capture transcript BEFORE disconnect clears it from provider memory.
+  // Shallow copy the array — disconnect() may mutate/clear the original.
+  if (state.providerRef.current) {
+    try {
+      const providerState = state.providerRef.current.getSessionState()
+      if (providerState.transcript.length > 0) {
+        state.capturedTranscript = [...providerState.transcript]
+      }
+    } catch {
+      logFn.warn("Failed to capture transcript before disconnect")
+    }
+
+    state.providerRef.current.disconnect().catch((e: Error) =>
+      logFn.warn("Provider disconnect failed during cleanup", { error: e.message })
+    )
+    state.providerRef.current = null
+  }
+
+  // Fire-and-forget transcript persistence — non-blocking, non-fatal
+  if (state.transcriptContext && state.capturedTranscript.length > 0) {
+    const { conversationId, userId, voiceModel, voiceProvider } = state.transcriptContext
+    logFn.info("Persisting voice transcript", {
+      conversationId,
+      entryCount: state.capturedTranscript.length,
+    })
+    saveVoiceTranscript(conversationId, userId, state.capturedTranscript, voiceModel, voiceProvider)
+      .then((result) => {
+        const logMethod = result.processingTimeMs > 5000 ? "warn" : "info"
+        logFn[logMethod]("Voice transcript persisted", {
+          conversationId,
+          messageCount: result.messageCount,
+          filteredCount: result.filteredCount,
+          titleGenerated: result.titleGenerated,
+          processingTimeMs: result.processingTimeMs,
+          ...(result.processingTimeMs > 5000 ? { slow: true } : {}),
+        })
+      })
+      .catch((error: Error) => {
+        logFn.error("Failed to persist voice transcript", {
+          conversationId,
+          error: error.message,
+        })
+      })
+  }
+
+  timer({ status })
+}
+
 /** Forward a provider event to the client WebSocket. */
 function forwardProviderEvent(ws: WebSocket, event: VoiceProviderEvent): void {
   switch (event.type) {
@@ -336,6 +418,44 @@ function waitForSessionConfig(
   })
 }
 
+/**
+ * Authenticate and authorize a WebSocket connection for voice.
+ * Returns auth info on success, or sends the appropriate error/close and returns null.
+ */
+async function authenticateAndAuthorize(
+  ws: WebSocket,
+  req: IncomingMessage,
+  logFn: ReturnType<typeof createLogger>,
+  timer: ReturnType<typeof startTimer>,
+): Promise<{ userId: string; sub: string } | null> {
+  const auth = await authenticateWebSocket(req)
+  if (!auth) {
+    logFn.warn("Unauthorized voice connection attempt")
+    sendToClient(ws, { type: "error", message: "Unauthorized" })
+    ws.close(4001, "Unauthorized")
+    timer({ status: "unauthorized" })
+    return null
+  }
+
+  logFn.info("Voice connection authenticated", { userId: sanitizeForLogging(auth.userId) })
+
+  let hasAccess = false
+  try {
+    hasAccess = await hasToolAccess(auth.sub, "voice-mode")
+  } catch {
+    hasAccess = false
+  }
+  if (!hasAccess) {
+    logFn.warn("User lacks voice-mode access", { userId: sanitizeForLogging(auth.userId) })
+    sendToClient(ws, { type: "error", message: "Voice mode not enabled for this user" })
+    ws.close(4003, "Forbidden")
+    timer({ status: "forbidden" })
+    return null
+  }
+
+  return auth
+}
+
 /** Returns a reason string if voice config is invalid, or null if OK. */
 function validateVoiceConfig(
   settings: { provider: string | null; model: string | null },
@@ -384,97 +504,14 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
   const log = createLogger({ requestId, context: "voice-ws" })
   const timer = startTimer("voice-session")
 
-  /** Mutable ref so both cleanup() and registerMessageHandler() share the same provider pointer */
-  const providerRef: { current: VoiceProvider | null } = { current: null }
-  let pingInterval: ReturnType<typeof setInterval> | null = null
-  let sessionEnded = false
-  /** Captured transcript for persistence — snapshot taken before provider.disconnect() clears it */
-  let capturedTranscript: TranscriptEntry[] = []
-  /** Session context for transcript persistence — set after auth + config */
-  let transcriptContext: { conversationId: string; userId: number; voiceModel: string; voiceProvider: string } | null = null
-
-  /** Idempotent cleanup — synchronous to avoid swallowed errors in event handlers */
-  function cleanup(status: string) {
-    if (sessionEnded) return
-    sessionEnded = true
-    if (pingInterval) { clearInterval(pingInterval); pingInterval = null }
-
-    // Capture transcript BEFORE disconnect clears it from provider memory.
-    // Shallow copy the array — disconnect() may mutate/clear the original.
-    if (providerRef.current) {
-      try {
-        const state = providerRef.current.getSessionState()
-        if (state.transcript.length > 0) {
-          capturedTranscript = [...state.transcript]
-        }
-      } catch {
-        log.warn("Failed to capture transcript before disconnect")
-      }
-
-      providerRef.current.disconnect().catch((e: Error) =>
-        log.warn("Provider disconnect failed during cleanup", { error: e.message })
-      )
-      providerRef.current = null
-    }
-
-    // Fire-and-forget transcript persistence — non-blocking, non-fatal
-    if (transcriptContext && capturedTranscript.length > 0) {
-      const { conversationId, userId, voiceModel, voiceProvider } = transcriptContext
-      log.info("Persisting voice transcript", {
-        conversationId,
-        entryCount: capturedTranscript.length,
-      })
-      saveVoiceTranscript(conversationId, userId, capturedTranscript, voiceModel, voiceProvider)
-        .then((result) => {
-          const logMethod = result.processingTimeMs > 5000 ? "warn" : "info"
-          log[logMethod]("Voice transcript persisted", {
-            conversationId,
-            messageCount: result.messageCount,
-            filteredCount: result.filteredCount,
-            titleGenerated: result.titleGenerated,
-            processingTimeMs: result.processingTimeMs,
-            ...(result.processingTimeMs > 5000 ? { slow: true } : {}),
-          })
-        })
-        .catch((error: Error) => {
-          log.error("Failed to persist voice transcript", {
-            conversationId,
-            error: error.message,
-          })
-        })
-    }
-
-    timer({ status })
-  }
+  const session = createSessionState()
+  const cleanup = (status: string) => cleanupSession(session, status, log, timer)
 
   try {
-    // Step 1: Authenticate
+    // Steps 1-2: Authenticate and check voice-mode access
     log.info("New voice WebSocket connection")
-    const auth = await authenticateWebSocket(req)
-    if (!auth) {
-      log.warn("Unauthorized voice connection attempt")
-      sendToClient(ws, { type: "error", message: "Unauthorized" })
-      ws.close(4001, "Unauthorized")
-      timer({ status: "unauthorized" })
-      return
-    }
-
-    log.info("Voice connection authenticated", { userId: sanitizeForLogging(auth.userId) })
-
-    // Step 2: Check voice access (fail-closed on error)
-    let hasAccess = false
-    try {
-      hasAccess = await hasToolAccess(auth.sub, "voice-mode")
-    } catch {
-      hasAccess = false
-    }
-    if (!hasAccess) {
-      log.warn("User lacks voice-mode access", { userId: sanitizeForLogging(auth.userId) })
-      sendToClient(ws, { type: "error", message: "Voice mode not enabled for this user" })
-      ws.close(4003, "Forbidden")
-      timer({ status: "forbidden" })
-      return
-    }
+    const auth = await authenticateAndAuthorize(ws, req, log, timer)
+    if (!auth) return
 
     // Step 3: Get voice settings and API key (cached 5-min TTL; changes take effect on new sessions)
     const [voiceSettings, googleApiKey] = await Promise.all([
@@ -492,7 +529,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       return
     }
     // Non-null safe: validateVoiceConfig returned null, so provider is valid
-    providerRef.current = createVoiceProvider(voiceSettings.provider!)
+    session.providerRef.current = createVoiceProvider(voiceSettings.provider!)
 
     // Step 4: Register close/error handlers BEFORE provider.connect()
     ws.on("close", (code, reason) => { log.info("Voice WS closed", { code, reason: reason.toString() }); cleanup("success") })
@@ -504,7 +541,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     const sessionConfig = await waitForSessionConfig(ws, log)
 
     // Abort if socket closed during wait — prevents leaking a provider connection with no client
-    if (sessionEnded || ws.readyState !== WS_OPEN) {
+    if (session.sessionEnded || ws.readyState !== WS_OPEN) {
       log.info("Socket closed during config wait")
       return
     }
@@ -527,7 +564,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     const connectTimer = setTimeout(() => connectAbort.abort(), PROVIDER_CONNECT_TIMEOUT_MS)
 
     try {
-      await providerRef.current.connect(
+      await session.providerRef.current.connect(
         providerConfig,
         (event) => forwardProviderEvent(ws, event),
         connectAbort.signal,
@@ -538,7 +575,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
 
     // Step 7: Register message handler BEFORE signaling ready — prevents
     // dropping early audio frames if the client sends immediately after "ready".
-    registerMessageHandler(ws, providerRef, log)
+    registerMessageHandler(ws, session.providerRef, log)
 
     // Signal session is fully ready for audio
     sendToClient(ws, { type: "ready" })
@@ -553,10 +590,10 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     // affects very short sessions or poor-connectivity scenarios. Acceptable
     // because the persistence is a best-effort fire-and-forget operation.
     if (sessionConfig?.conversationId && voiceSettings.model && voiceSettings.provider) {
-      transcriptContext = await resolveTranscriptContext(
+      session.transcriptContext = await resolveTranscriptContext(
         sessionConfig.conversationId, auth.sub, voiceSettings.model, voiceSettings.provider, log,
       )
-      if (transcriptContext) {
+      if (session.transcriptContext) {
         log.info("Transcript persistence enabled", {
           conversationId: sessionConfig.conversationId,
         })
@@ -564,7 +601,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     }
 
     // Step 8: Keepalive ping — cleanup() handles clearInterval on close/error
-    pingInterval = setInterval(() => {
+    session.pingInterval = setInterval(() => {
       if (ws.readyState === WS_OPEN) ws.ping()
     }, PING_INTERVAL_MS)
   } catch (error) {
