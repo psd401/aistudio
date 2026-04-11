@@ -12,11 +12,13 @@ jest.mock("@auth/core/jwt", () => ({
 // Mock constants with short timeout for tests
 jest.mock("../constants", () => ({
   MAX_AUDIO_DATA_LENGTH: 131_072,
-  PROVIDER_CONNECT_TIMEOUT_MS: 200, // 200ms instead of 30s for test speed
+  PROVIDER_CONNECT_TIMEOUT_MS: 200,
   MIN_AUDIO_INTERVAL_MS: 20,
   PING_INTERVAL_MS: 240_000,
   WS_OPEN: 1,
   MAX_CONVERSATION_ID_LENGTH: 36,
+  MAX_VOICE_CONTEXT_MESSAGES: 20,
+  MAX_SESSION_INSTRUCTION_LENGTH: 10_000,
 }))
 
 // Mock voice instruction builder (server-side instruction building from DB)
@@ -569,6 +571,44 @@ describe("handleVoiceConnection", () => {
         expect.objectContaining({
           systemInstruction: undefined,
         }),
+        expect.any(Function),
+        expect.anything(),
+      )
+    })
+  })
+
+  describe("session_config timeout", () => {
+    beforeEach(() => {
+      mockDecode.mockResolvedValue({ sub: "user-123" })
+      mockHasToolAccess.mockResolvedValue(true)
+      jest.useFakeTimers()
+    })
+
+    afterEach(() => {
+      jest.useRealTimers()
+    })
+
+    it("should proceed with default config when client sends nothing within timeout", async () => {
+      const ws = createMockWs()
+      // Do NOT call scheduleSessionConfig — simulate client sending nothing
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+
+      const connectionPromise = handleVoiceConnection(ws, req)
+
+      // Flush microtasks so the handler reaches waitForSessionConfig, then advance
+      // past the 5-second SESSION_CONFIG_TIMEOUT_MS and the 200ms provider connect timeout
+      await jest.advanceTimersByTimeAsync(6_000)
+
+      await connectionPromise
+
+      // Should NOT call instruction builder (no conversationId)
+      expect(mockBuildInstructionFromConversation).not.toHaveBeenCalled()
+
+      // Should still connect to provider with no systemInstruction
+      const { createVoiceProvider } = require("../provider-factory")
+      const mockProvider = createVoiceProvider.mock.results[0]?.value
+      expect(mockProvider.connect).toHaveBeenCalledWith(
+        expect.objectContaining({ systemInstruction: undefined }),
         expect.any(Function),
         expect.anything(),
       )

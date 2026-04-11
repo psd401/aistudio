@@ -16,22 +16,25 @@
  */
 
 import { createLogger } from "@/lib/logger"
+import { desc, eq } from "drizzle-orm"
 import { getUserIdByCognitoSub } from "@/lib/db/drizzle/users"
 import { getConversationById } from "@/lib/db/drizzle/nexus-conversations"
-import { getMessagesByConversation, getMessageCount } from "@/lib/db/drizzle/nexus-messages"
-import { MAX_SESSION_INSTRUCTION_LENGTH } from "./constants"
+import { executeQuery } from "@/lib/db/drizzle-client"
+import { nexusMessages } from "@/lib/db/schema"
+import { MAX_SESSION_INSTRUCTION_LENGTH, MAX_VOICE_CONTEXT_MESSAGES } from "./constants"
 import type { MessagePart } from "@/lib/db/drizzle/nexus-messages"
 
 const log = createLogger({ context: "voice-instruction-builder" })
-
-/** Max number of recent messages to include in voice context */
-const MAX_CONTEXT_MESSAGES = 20
 
 /**
  * Build a voice system instruction from a conversation's messages.
  *
  * Verifies that the authenticated user owns the conversation, fetches recent
  * messages, and formats them into a system instruction for the voice model.
+ *
+ * DB round-trips: getUserIdByCognitoSub → getConversationById → fetch messages
+ * (3 queries). The ownership check cannot be skipped — it prevents users from
+ * reading other users' conversations via crafted conversationId.
  *
  * @param conversationId - UUID of the conversation
  * @param cognitoSub - The authenticated user's Cognito sub claim
@@ -57,20 +60,31 @@ export async function buildInstructionFromConversation(
     return undefined
   }
 
-  // Fetch the most recent messages (ordered ASC, so compute offset for tail)
-  const totalCount = await getMessageCount(conversationId)
-  if (totalCount === 0) return undefined
+  // Fetch the most recent messages in a single query (DESC + LIMIT, reverse in memory).
+  // This avoids the count-then-fetch pattern which has a TOCTOU race if messages arrive
+  // between queries. The race is cosmetically harmless (slightly different tail window),
+  // but a single query is both correct and faster.
+  const rawMessages = await executeQuery(
+    (db) =>
+      db
+        .select({
+          role: nexusMessages.role,
+          content: nexusMessages.content,
+          parts: nexusMessages.parts,
+        })
+        .from(nexusMessages)
+        .where(eq(nexusMessages.conversationId, conversationId))
+        .orderBy(desc(nexusMessages.createdAt))
+        .limit(MAX_VOICE_CONTEXT_MESSAGES),
+    "getRecentMessagesForVoice",
+  )
 
-  const offset = Math.max(totalCount - MAX_CONTEXT_MESSAGES, 0)
-  const messages = await getMessagesByConversation(conversationId, {
-    limit: MAX_CONTEXT_MESSAGES,
-    offset,
-    includeModel: false,
-  })
+  // Reverse to chronological order (query returned newest-first)
+  rawMessages.reverse()
 
   // Extract text from messages
   const contextMessages: { role: string; text: string }[] = []
-  for (const msg of messages) {
+  for (const msg of rawMessages) {
     if (msg.role !== "user" && msg.role !== "assistant") continue
 
     let text = ""
@@ -121,6 +135,9 @@ function formatInstruction(messages: { role: string; text: string }[]): string {
     currentLength += line.length + 1
   }
 
+  // Reachable when every individual message exceeds maxContextLength (e.g., a single
+  // multi-thousand-char message). The upstream check (contextMessages.length === 0)
+  // catches the "no text at all" case; this catches "text exists but none fits."
   if (contextLines.length === 0) return "You are a helpful AI assistant in a voice conversation. Respond naturally and conversationally."
 
   const instruction = prefix + contextLines.join("\n") + suffix

@@ -33,9 +33,15 @@ export const PING_INTERVAL_MS = 240_000
 export const WS_OPEN = 1
 
 /**
- * Max length for system instruction built server-side from conversation messages (characters).
- * Used by voice-instruction-builder.ts when formatting messages for the Gemini Live session.
+ * Voice context budget constants — these two govern how much conversation
+ * history the voice model receives as system instruction.
+ *
+ * MAX_VOICE_CONTEXT_MESSAGES: How many recent messages to fetch from the DB.
+ * MAX_SESSION_INSTRUCTION_LENGTH: Character cap on the formatted instruction.
+ *
+ * Used by voice-instruction-builder.ts (server-side instruction building).
  */
+export const MAX_VOICE_CONTEXT_MESSAGES = 20
 export const MAX_SESSION_INSTRUCTION_LENGTH = 10_000
 
 /** Max length for conversationId in session_config (UUID = 36 chars) */

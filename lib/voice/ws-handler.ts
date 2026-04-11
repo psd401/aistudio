@@ -128,16 +128,16 @@ function isUuidFormat(value: string): boolean {
   return hexOnly.length === 32 && /^[\da-f]+$/i.test(hexOnly)
 }
 
-/** Validate that a parsed message has the expected shape. */
+const VALID_CLIENT_MESSAGE_TYPES = new Set(["audio", "session_config", "disconnect"])
+
+/** Validate that a parsed message has the expected shape and a known type. */
 function isValidClientMessage(msg: unknown): msg is VoiceClientMessage {
   if (typeof msg !== "object" || msg === null) return false
   const obj = msg as Record<string, unknown>
-  if (typeof obj.type !== "string") return false
+  if (typeof obj.type !== "string" || !VALID_CLIENT_MESSAGE_TYPES.has(obj.type)) return false
   if (obj.type === "audio" && typeof obj.data !== "string") return false
   if (obj.type === "session_config") {
-    // conversationId is optional string (UUID). systemInstruction is ignored (built server-side).
     if (obj.conversationId !== undefined && typeof obj.conversationId !== "string") return false
-    return true
   }
   return true
 }
@@ -252,6 +252,16 @@ function waitForSessionConfig(
   })
 }
 
+/** Returns a reason string if voice config is invalid, or null if OK. */
+function validateVoiceConfig(
+  settings: { provider: string | null; model: string | null },
+  googleApiKey: string | null,
+): string | null {
+  if (!googleApiKey) return "missing_api_key"
+  if (!settings.provider || !settings.model || !isSupportedVoiceProvider(settings.provider)) return "invalid_provider"
+  return null
+}
+
 /**
  * Build system instruction from conversation messages (server-side).
  * Non-fatal: returns undefined if conversation doesn't exist, isn't owned, or DB fails.
@@ -279,8 +289,9 @@ async function buildSystemInstruction(
  * 2. Check voice-mode tool access
  * 3. Get voice settings and create provider
  * 4. Register close/error handlers (BEFORE connect)
- * 5. Signal auth OK and wait for session_config from client
- * 6. Connect to AI service with timeout (including systemInstruction from config)
+ * 5a. Signal auth OK and wait for session_config from client
+ * 5b. Build system instruction server-side from conversation messages
+ * 6. Connect to AI service with timeout
  * 7. Register message handler (AFTER connect — clients must wait for "ready")
  * 8. Start keepalive ping
  */
@@ -342,50 +353,40 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       Settings.getGoogleAI(),
     ])
 
-    if (!googleApiKey) {
-      log.error("Google API key not configured")
+    const configError = validateVoiceConfig(voiceSettings, googleApiKey)
+    if (configError) {
+      log.error("Voice not configured", { reason: configError,
+        action: "Set VOICE_PROVIDER, VOICE_MODEL, and GOOGLE_API_KEY in Admin > System Settings" })
       sendToClient(ws, { type: "error", message: "Voice provider not configured" })
       ws.close(4500, "Provider not configured")
-      timer({ status: "error", reason: "missing_api_key" })
+      timer({ status: "error", reason: configError })
       return
     }
+    // Non-null safe: validateVoiceConfig returned null, so provider is valid
+    provider = createVoiceProvider(voiceSettings.provider!)
 
-    if (!voiceSettings.provider || !voiceSettings.model || !isSupportedVoiceProvider(voiceSettings.provider)) {
-      log.error("Voice settings not configured", { provider: voiceSettings.provider, model: voiceSettings.model })
-      sendToClient(ws, { type: "error", message: "Voice provider not configured" })
-      ws.close(4500, "Provider not configured")
-      timer({ status: "error", reason: "invalid_provider" })
-      return
-    }
-    provider = createVoiceProvider(voiceSettings.provider)
+    // Step 4: Register close/error handlers BEFORE provider.connect()
+    ws.on("close", (code, reason) => { log.info("Voice WS closed", { code, reason: reason.toString() }); cleanup("success") })
+    ws.on("error", (error) => { log.error("Voice WS error", { error: error.message }); cleanup("error") })
 
-    // Step 4: Register close/error handlers BEFORE provider.connect() so cleanup
-    // is guaranteed even if the WebSocket drops during the connect await.
-    ws.on("close", (code, reason) => {
-      log.info("Voice WebSocket closed", { code, reason: reason.toString() })
-      cleanup("success")
-    })
-
-    ws.on("error", (error) => {
-      log.error("Voice WebSocket error", { error: error.message })
-      cleanup("error")
-    })
-
-    // Step 5: Signal auth OK and wait for client session_config (conversationId only)
+    // Step 5a: Signal auth OK and wait for client session_config (conversationId only)
     sendToClient(ws, { type: "ready" })
     log.info("Auth complete, waiting for session config")
     const sessionConfig = await waitForSessionConfig(ws, log)
 
     // Abort if socket closed during wait — prevents leaking a provider connection with no client
-    if (sessionEnded || ws.readyState !== WS_OPEN) { log.info("Socket closed during config wait"); return }
+    if (sessionEnded || ws.readyState !== WS_OPEN) {
+      log.info("Socket closed during config wait")
+      return
+    }
 
     // Step 5b: Build system instruction server-side and create provider config
     const systemInstruction = await buildSystemInstruction(sessionConfig?.conversationId, auth.sub, log)
     const providerConfig: VoiceProviderConfig = {
-      model: voiceSettings.model,
+      model: voiceSettings.model!,
       language: voiceSettings.language,
       voiceName: voiceSettings.voiceName ?? undefined,
-      apiKey: googleApiKey,
+      apiKey: googleApiKey!,
       systemInstruction,
     }
     log.info("Connecting to voice provider", {

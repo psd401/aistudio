@@ -95,7 +95,9 @@ export function useVoiceSession({
 
     // Create adapter with conversationId. flushSync forces the state update to
     // commit synchronously so the voice runtime has the new adapter when VoiceButton
-    // calls controls.connect() immediately after.
+    // calls controls.connect() immediately after. This is a known React 18+ footgun
+    // (flushes all pending state), but assistant-ui requires the adapter to be in
+    // state before connect() — there's no API to inject an adapter at connect-time.
     flushSync(() => {
       setVoiceAdapter(createGeminiLiveVoiceAdapter({
         conversationId: currentConversationId ?? undefined,
