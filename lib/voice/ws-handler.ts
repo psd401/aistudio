@@ -120,6 +120,18 @@ const MAX_SESSION_INSTRUCTION_LENGTH = 10_000
 /** Max length for conversationId in session_config (UUID = 36 chars) */
 const MAX_CONVERSATION_ID_LENGTH = 36
 
+/** Simple UUID format check — validates 8-4-4-4-12 hex pattern without regex backtracking */
+function isUuidFormat(value: string): boolean {
+  if (value.length !== 36) return false
+  const hyphenPositions = [8, 13, 18, 23]
+  for (const pos of hyphenPositions) {
+    if (value[pos] !== "-") return false
+  }
+  // Check all non-hyphen chars are hex digits
+  const hexOnly = value.replace(/-/g, "")
+  return hexOnly.length === 32 && /^[\da-f]+$/i.test(hexOnly)
+}
+
 /** Validate that a parsed message has the expected shape. */
 function isValidClientMessage(msg: unknown): msg is VoiceClientMessage {
   if (typeof msg !== "object" || msg === null) return false
@@ -195,9 +207,15 @@ function waitForSessionConfig(
           ws.removeListener("message", onMessage)
 
           // Sanitize and validate inputs
-          const conversationId = typeof parsed.conversationId === "string"
+          const rawConversationId = typeof parsed.conversationId === "string"
             ? parsed.conversationId.slice(0, MAX_CONVERSATION_ID_LENGTH)
             : undefined
+          const conversationId = rawConversationId && isUuidFormat(rawConversationId)
+            ? rawConversationId
+            : undefined
+          if (rawConversationId && !conversationId) {
+            logFn.warn("Invalid conversationId format in session_config, discarding")
+          }
           const systemInstruction = typeof parsed.systemInstruction === "string"
             ? parsed.systemInstruction.slice(0, MAX_SESSION_INSTRUCTION_LENGTH)
             : undefined
@@ -318,7 +336,6 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       cleanup("error")
     })
 
-    // Step 5: Signal auth OK and wait for client session_config.
     // Step 5: Signal auth OK and wait for client session_config (conversationId + systemInstruction)
     sendToClient(ws, { type: "ready" })
     log.info("Auth complete, waiting for session config")

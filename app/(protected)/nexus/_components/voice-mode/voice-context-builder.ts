@@ -43,8 +43,10 @@ export async function fetchConversationContext(
   conversationId: string,
   maxMessages: number,
 ): Promise<ContextMessage[]> {
+  // Clamp to a safe range — server validates too, but defensive at call site
+  const clampedLimit = Math.min(Math.max(maxMessages, 1), 100)
   const response = await fetch(
-    `/api/nexus/conversations/${encodeURIComponent(conversationId)}/messages?limit=${maxMessages}`,
+    `/api/nexus/conversations/${encodeURIComponent(conversationId)}/messages?limit=${clampedLimit}`,
   )
 
   if (!response.ok) {
