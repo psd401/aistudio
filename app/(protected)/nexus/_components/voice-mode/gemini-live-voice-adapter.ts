@@ -131,6 +131,8 @@ class AudioPlaybackQueue {
     const int16 = new Int16Array(pcmData)
     if (int16.length === 0) return
 
+    // Asymmetric divisor is intentional: PCM16 range is -32768..+32767,
+    // so negative full-scale (-1.0) maps to -32768/32768, positive to +32767/32767
     const float32 = Float32Array.from(int16, (sample) =>
       sample / (sample < 0 ? 0x8000 : 0x7FFF)
     )
