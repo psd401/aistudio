@@ -28,12 +28,15 @@ import {
   MAX_CONVERSATION_ID_LENGTH,
 } from "./constants"
 import { buildInstructionFromConversation } from "./voice-instruction-builder"
+import { getUserIdByCognitoSub } from "@/lib/db/drizzle/users"
+import { saveVoiceTranscript } from "./transcript-service"
 import type {
   VoiceProvider,
   VoiceProviderConfig,
   VoiceClientMessage,
   VoiceServerMessage,
   VoiceProviderEvent,
+  TranscriptEntry,
 } from "./types"
 
 /**
@@ -303,18 +306,59 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
   let provider: VoiceProvider | null = null
   let pingInterval: ReturnType<typeof setInterval> | null = null
   let sessionEnded = false
+  /** Captured transcript for persistence — snapshot taken before provider.disconnect() clears it */
+  let capturedTranscript: TranscriptEntry[] = []
+  /** Session context for transcript persistence — set after auth + config */
+  let transcriptContext: { conversationId: string; userId: number; voiceModel: string } | null = null
 
   /** Idempotent cleanup — synchronous to avoid swallowed errors in event handlers */
   function cleanup(status: string) {
     if (sessionEnded) return
     sessionEnded = true
     if (pingInterval) { clearInterval(pingInterval); pingInterval = null }
+
+    // Capture transcript BEFORE disconnect clears it from provider memory
     if (provider) {
+      try {
+        const state = provider.getSessionState()
+        if (state.transcript.length > 0) {
+          capturedTranscript = state.transcript
+        }
+      } catch {
+        log.warn("Failed to capture transcript before disconnect")
+      }
+
       provider.disconnect().catch((e: Error) =>
         log.warn("Provider disconnect failed during cleanup", { error: e.message })
       )
       provider = null
     }
+
+    // Fire-and-forget transcript persistence — non-blocking, non-fatal
+    if (transcriptContext && capturedTranscript.length > 0) {
+      const { conversationId, userId, voiceModel } = transcriptContext
+      log.info("Persisting voice transcript", {
+        conversationId,
+        entryCount: capturedTranscript.length,
+      })
+      saveVoiceTranscript(conversationId, userId, capturedTranscript, voiceModel)
+        .then((result) => {
+          log.info("Voice transcript persisted", {
+            conversationId,
+            messageCount: result.messageCount,
+            filteredCount: result.filteredCount,
+            titleGenerated: result.titleGenerated,
+            processingTimeMs: result.processingTimeMs,
+          })
+        })
+        .catch((error: Error) => {
+          log.error("Failed to persist voice transcript", {
+            conversationId,
+            error: error.message,
+          })
+        })
+    }
+
     timer({ status })
   }
 
@@ -410,6 +454,28 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     // Signal session is fully ready for audio
     sendToClient(ws, { type: "ready" })
     log.info("Voice session ready")
+
+    // Set up transcript persistence context (requires conversationId + resolved userId)
+    if (sessionConfig?.conversationId) {
+      try {
+        const userIdStr = await getUserIdByCognitoSub(auth.sub)
+        if (userIdStr) {
+          transcriptContext = {
+            conversationId: sessionConfig.conversationId,
+            userId: Number.parseInt(userIdStr, 10),
+            voiceModel: voiceSettings.model!,
+          }
+          log.info("Transcript persistence enabled", {
+            conversationId: sessionConfig.conversationId,
+          })
+        } else {
+          log.warn("Could not resolve userId for transcript persistence")
+        }
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error)
+        log.warn("Failed to set up transcript persistence context", { error: msg })
+      }
+    }
 
     // Step 7: Register message handler AFTER connect (clients must wait for second "ready")
     let lastAudioTime = 0
