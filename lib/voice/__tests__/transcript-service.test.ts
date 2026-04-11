@@ -483,6 +483,80 @@ describe("saveVoiceTranscript", () => {
       saveVoiceTranscript("conv-123", 1, entries),
     ).rejects.toThrow("DB connection lost")
   })
+
+  it("should propagate getConversationById errors (DB failure vs returning null)", async () => {
+    mockGetConversationById.mockRejectedValue(new Error("Connection refused"))
+
+    const entries = [makeEntry("user", "hello")]
+    await expect(
+      saveVoiceTranscript("conv-123", 1, entries),
+    ).rejects.toThrow("Connection refused")
+  })
+
+  it("should fall back to original text when processedContent is null or undefined", async () => {
+    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Test" })
+    mockIsGuardrailsEnabled.mockReturnValue(true)
+    // Return null/undefined processedContent — should fall back to original entry text
+    mockCheckInputSafety.mockResolvedValue({ allowed: true, processedContent: null })
+    mockCheckOutputSafety.mockResolvedValue({ allowed: true, processedContent: undefined })
+
+    let capturedValues: unknown[] = []
+    mockExecuteTransaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
+      await fn({
+        insert: jest.fn().mockImplementation((_table: unknown) => ({
+          values: jest.fn().mockImplementation((vals: unknown[]) => {
+            capturedValues = vals
+          }),
+        })),
+        update: jest.fn().mockReturnValue({ set: jest.fn().mockReturnValue({ where: jest.fn() }) }),
+      })
+    })
+
+    const entries = [
+      makeEntry("user", "original user text"),
+      makeEntry("assistant", "original assistant text"),
+    ]
+
+    await saveVoiceTranscript("conv-123", 1, entries)
+
+    // With null/undefined processedContent, the original text should be used
+    expect(capturedValues).toHaveLength(2)
+    expect((capturedValues[0] as { content: string }).content).toBe("original user text")
+    expect((capturedValues[1] as { content: string }).content).toBe("original assistant text")
+  })
+
+  it("should process entries correctly across guardrail batch boundaries", async () => {
+    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Existing" })
+    mockIsGuardrailsEnabled.mockReturnValue(true)
+    mockCheckInputSafety.mockResolvedValue({ allowed: true, processedContent: "user msg" })
+    mockCheckOutputSafety.mockResolvedValue({ allowed: true, processedContent: "assistant msg" })
+
+    let capturedValues: unknown[] = []
+    mockExecuteTransaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
+      await fn({
+        insert: jest.fn().mockImplementation((_table: unknown) => ({
+          values: jest.fn().mockImplementation((vals: unknown[]) => {
+            capturedValues = vals
+          }),
+        })),
+        update: jest.fn().mockReturnValue({ set: jest.fn().mockReturnValue({ where: jest.fn() }) }),
+      })
+    })
+
+    // 25 entries — crosses the GUARDRAIL_CONCURRENCY_LIMIT (20) boundary
+    const entries: TranscriptEntry[] = []
+    for (let i = 0; i < 25; i++) {
+      entries.push(makeEntry(i % 2 === 0 ? "user" : "assistant", `message ${i}`))
+    }
+
+    const result = await saveVoiceTranscript("conv-123", 1, entries)
+
+    // All 25 entries should be saved — no entries dropped at batch boundary
+    expect(result.messageCount).toBe(25)
+    expect(capturedValues).toHaveLength(25)
+    // Verify guardrail checks were called for all entries
+    expect(mockCheckInputSafety.mock.calls.length + mockCheckOutputSafety.mock.calls.length).toBe(25)
+  })
 })
 
 // ============================================
@@ -515,7 +589,7 @@ describe("voice title generation", () => {
     const entries = [makeEntry("user", longMessage)]
     const result = await saveVoiceTranscript("conv-123", 1, entries)
     expect(result.titleGenerated).toBe(true)
-    // Title should be 40 chars + "..."
+    // Title is at most 40 chars + "..." (43 total); trim() may make it shorter
     expect(updateArgs.title).toBeDefined()
     const title = updateArgs.title as string
     expect(title.length).toBeLessThanOrEqual(43)

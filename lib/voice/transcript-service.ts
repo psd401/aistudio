@@ -67,6 +67,9 @@ const MAX_TITLE_LENGTH = 40
 /** Max concurrent guardrail checks — entries are processed in sequential batches of this size */
 const GUARDRAIL_CONCURRENCY_LIMIT = 20
 
+/** Maximum wall-clock time for all guardrail processing before falling back to unfiltered save */
+const GUARDRAIL_TOTAL_TIMEOUT_MS = 30_000
+
 const log = createLogger({ module: "TranscriptService" })
 
 // ============================================
@@ -101,6 +104,7 @@ export async function saveVoiceTranscript(
 ): Promise<TranscriptSaveResult> {
   const requestId = generateRequestId()
   const timer = startTimer("saveVoiceTranscript")
+  const startTime = Date.now()
 
   log.info("Saving voice transcript", {
     requestId,
@@ -124,8 +128,8 @@ export async function saveVoiceTranscript(
 
     if (mergedEntries.length === 0) {
       log.info("No transcript entries to save after preparation", { requestId })
-      const elapsed = timer({ status: "empty" })
-      return { messageCount: 0, filteredCount: 0, titleGenerated: false, processingTimeMs: typeof elapsed === "number" ? elapsed : 0 }
+      timer({ status: "empty" })
+      return { messageCount: 0, filteredCount: 0, titleGenerated: false, processingTimeMs: Date.now() - startTime }
     }
 
     log.info("Transcript entries prepared", {
@@ -186,21 +190,22 @@ export async function saveVoiceTranscript(
       "saveVoiceTranscript",
     )
 
-    const elapsed = timer({ status: "success" })
+    timer({ status: "success" })
+    const processingTimeMs = Date.now() - startTime
     log.info("Voice transcript saved", {
       requestId,
       conversationId,
       messageCount: processedEntries.length,
       filteredCount,
       titleGenerated: !!autoTitle,
-      processingTimeMs: elapsed,
+      processingTimeMs,
     })
 
     return {
       messageCount: processedEntries.length,
       filteredCount,
       titleGenerated: !!autoTitle,
-      processingTimeMs: typeof elapsed === "number" ? elapsed : 0,
+      processingTimeMs,
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -284,6 +289,7 @@ async function applyGuardrails(
   voiceModel?: string,
   voiceProvider?: string,
 ): Promise<ProcessedEntry[]> {
+  // getContentSafetyService is a singleton — no heavy init on repeated calls
   const safetySvc = getContentSafetyService()
 
   if (!safetySvc.isGuardrailsEnabled()) {
@@ -291,6 +297,33 @@ async function applyGuardrails(
     return entries.map((e) => ({ ...e, wasFiltered: false }))
   }
 
+  // Wrap the entire guardrail processing with a timeout to prevent hanging
+  // during Bedrock brownouts. On timeout, fall back to saving unfiltered.
+  try {
+    return await Promise.race([
+      applyGuardrailsBatched(entries, safetySvc, { conversationId, requestId, voiceModel, voiceProvider }),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("Guardrail processing timeout")), GUARDRAIL_TOTAL_TIMEOUT_MS),
+      ),
+    ])
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    log.warn("Guardrail processing timed out or failed, saving unfiltered", {
+      requestId,
+      entryCount: entries.length,
+      error: message,
+    })
+    return entries.map((e) => ({ ...e, wasFiltered: false }))
+  }
+}
+
+/** Process entries through guardrails in sequential batches of GUARDRAIL_CONCURRENCY_LIMIT. */
+async function applyGuardrailsBatched(
+  entries: Array<{ role: "user" | "assistant"; text: string; timestamp: Date }>,
+  safetySvc: ReturnType<typeof getContentSafetyService>,
+  opts: { conversationId: string; requestId: string; voiceModel?: string; voiceProvider?: string },
+): Promise<ProcessedEntry[]> {
+  const { conversationId, requestId, voiceModel, voiceProvider } = opts
   const processed: ProcessedEntry[] = []
 
   // Process in batches

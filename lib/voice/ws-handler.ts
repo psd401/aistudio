@@ -228,11 +228,14 @@ function registerMessageHandler(
 
 /** Mutable session state shared between handleVoiceConnection and its helpers. */
 interface VoiceSessionState {
+  /** Ref-wrapper so registerMessageHandler can read the provider after it's assigned post-connect */
   providerRef: { current: VoiceProvider | null }
   pingInterval: ReturnType<typeof setInterval> | null
   sessionEnded: boolean
   capturedTranscript: TranscriptEntry[]
   transcriptContext: { conversationId: string; userId: number; voiceModel: string; voiceProvider: string } | null
+  /** In-flight promise from resolveTranscriptContext — awaited by cleanup so early disconnects don't lose transcripts */
+  transcriptContextPromise: Promise<{ conversationId: string; userId: number; voiceModel: string; voiceProvider: string } | null> | null
 }
 
 /** Create a fresh session state object. */
@@ -243,19 +246,23 @@ function createSessionState(): VoiceSessionState {
     sessionEnded: false,
     capturedTranscript: [],
     transcriptContext: null,
+    transcriptContextPromise: null,
   }
 }
 
 /**
  * Idempotent session cleanup. Captures transcript, disconnects provider,
  * fires async persistence, and records timing.
+ *
+ * Awaits transcriptContextPromise if the context resolution is still in-flight,
+ * ensuring transcripts are not silently lost on early client disconnects.
  */
-function cleanupSession(
+async function cleanupSession(
   state: VoiceSessionState,
   status: string,
   logFn: ReturnType<typeof createLogger>,
   timer: ReturnType<typeof startTimer>,
-): void {
+): Promise<void> {
   if (state.sessionEnded) return
   state.sessionEnded = true
   if (state.pingInterval) { clearInterval(state.pingInterval); state.pingInterval = null }
@@ -278,6 +285,16 @@ function cleanupSession(
     state.providerRef.current = null
   }
 
+  // If transcriptContext hasn't resolved yet (early disconnect), await the in-flight promise
+  // so we don't silently lose the transcript. This is bounded by the DB query timeout.
+  if (!state.transcriptContext && state.transcriptContextPromise) {
+    try {
+      state.transcriptContext = await state.transcriptContextPromise
+    } catch {
+      logFn.warn("Transcript context resolution failed during cleanup")
+    }
+  }
+
   // Fire-and-forget transcript persistence — non-blocking, non-fatal
   if (state.transcriptContext && state.capturedTranscript.length > 0) {
     const { conversationId, userId, voiceModel, voiceProvider } = state.transcriptContext
@@ -287,14 +304,12 @@ function cleanupSession(
     })
     saveVoiceTranscript(conversationId, userId, state.capturedTranscript, voiceModel, voiceProvider)
       .then((result) => {
-        const logMethod = result.processingTimeMs > 5000 ? "warn" : "info"
-        logFn[logMethod]("Voice transcript persisted", {
+        logFn.info("Voice transcript persisted", {
           conversationId,
           messageCount: result.messageCount,
           filteredCount: result.filteredCount,
           titleGenerated: result.titleGenerated,
           processingTimeMs: result.processingTimeMs,
-          ...(result.processingTimeMs > 5000 ? { slow: true } : {}),
         })
       })
       .catch((error: Error) => {
@@ -585,14 +600,14 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     // The message handler is already registered above, so no audio frames are lost
     // during this async DB lookup.
     //
-    // Known limitation: if the client disconnects before this await completes,
-    // transcriptContext remains null and the transcript is not persisted. This
-    // affects very short sessions or poor-connectivity scenarios. Acceptable
-    // because the persistence is a best-effort fire-and-forget operation.
+    // The promise is stored on session state so cleanupSession can await it if the
+    // client disconnects before resolution completes — preventing silent transcript loss
+    // on very short sessions or poor-connectivity scenarios.
     if (sessionConfig?.conversationId && voiceSettings.model && voiceSettings.provider) {
-      session.transcriptContext = await resolveTranscriptContext(
+      session.transcriptContextPromise = resolveTranscriptContext(
         sessionConfig.conversationId, auth.sub, voiceSettings.model, voiceSettings.provider, log,
       )
+      session.transcriptContext = await session.transcriptContextPromise
       if (session.transcriptContext) {
         log.info("Transcript persistence enabled", {
           conversationId: sessionConfig.conversationId,
