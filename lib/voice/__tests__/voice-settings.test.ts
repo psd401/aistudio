@@ -40,12 +40,12 @@ describe("Settings.getVoice", () => {
     delete process.env.VOICE_NAME
   })
 
-  it("should return defaults when no settings are configured", async () => {
+  it("should return null provider/model when no settings are configured", async () => {
     const result = await Settings.getVoice()
 
     expect(result).toEqual({
-      provider: "gemini-live",
-      model: "gemini-2.0-flash-live-001",
+      provider: null,
+      model: null,
       language: "en-US",
       voiceName: null,
     })
@@ -80,7 +80,7 @@ describe("Settings.getVoice", () => {
 
     expect(result.provider).toBe("env-provider")
     expect(result.model).toBe("env-model")
-    // Defaults for language since no env var set
+    // Default for language since no env var set
     expect(result.language).toBe("en-US")
   })
 
@@ -93,7 +93,7 @@ describe("Settings.getVoice", () => {
     expect(mockGetSettingValue).toHaveBeenCalledWith("VOICE_NAME")
   })
 
-  it("should handle partial DB configuration with defaults", async () => {
+  it("should handle partial DB configuration — null for unconfigured fields", async () => {
     mockGetSettingValue.mockImplementation((key: string) => {
       if (key === "VOICE_MODEL") return Promise.resolve("custom-model")
       return Promise.resolve(null)
@@ -101,7 +101,7 @@ describe("Settings.getVoice", () => {
 
     const result = await Settings.getVoice()
 
-    expect(result.provider).toBe("gemini-live") // default
+    expect(result.provider).toBeNull() // null when not configured
     expect(result.model).toBe("custom-model") // from DB
     expect(result.language).toBe("en-US") // default
     expect(result.voiceName).toBeNull() // null when not set

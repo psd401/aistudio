@@ -131,6 +131,8 @@ interface ThreadProps {
   suggestedActions?: SuggestedAction[];
   /** Override the tool fallback component (e.g. ConnectorToolFallback in Nexus) */
   toolFallback?: ToolCallMessagePartComponent;
+  /** Extra action buttons to render in the composer action bar (e.g. voice mode button) */
+  composerExtraActions?: React.ReactNode;
 }
 
 export const Thread: FC<ThreadProps> = ({
@@ -147,6 +149,7 @@ export const Thread: FC<ThreadProps> = ({
   onReconnectSuccess,
   suggestedActions,
   toolFallback,
+  composerExtraActions,
 }) => {
   const contentComponents = useMemo(() =>
     toolFallback
@@ -200,6 +203,7 @@ export const Thread: FC<ThreadProps> = ({
             onConnectorsChange={onConnectorsChange}
             onReconnectSuccess={onReconnectSuccess}
             suggestedActions={suggestedActions}
+            composerExtraActions={composerExtraActions}
           />
         </ThreadPrimitive.Root>
       </ConversationIdContext.Provider>
@@ -313,6 +317,7 @@ interface ComposerProps {
   onConnectorsChange?: (connectors: string[]) => void;
   onReconnectSuccess?: (serverId: string) => void;
   suggestedActions?: SuggestedAction[];
+  composerExtraActions?: React.ReactNode;
 }
 
 const Composer: FC<ComposerProps> = ({
@@ -327,6 +332,7 @@ const Composer: FC<ComposerProps> = ({
   onConnectorsChange,
   onReconnectSuccess,
   suggestedActions,
+  composerExtraActions,
 }) => {
   return (
     <div className="bg-white relative mx-auto flex w-full max-w-[var(--thread-max-width)] flex-col gap-4 px-[var(--thread-padding-x)] pb-4 md:pb-6">
@@ -358,7 +364,7 @@ const Composer: FC<ComposerProps> = ({
           autoFocus
           aria-label="Message input"
         />
-        <ComposerAction processingAttachments={processingAttachments} />
+        <ComposerAction processingAttachments={processingAttachments} extraActions={composerExtraActions} />
       </ComposerPrimitive.Root>
     </div>
   );
@@ -366,14 +372,18 @@ const Composer: FC<ComposerProps> = ({
 
 interface ComposerActionProps {
   processingAttachments?: Set<string>;
+  extraActions?: React.ReactNode;
 }
 
-const ComposerAction: FC<ComposerActionProps> = ({ processingAttachments }) => {
+const ComposerAction: FC<ComposerActionProps> = ({ processingAttachments, extraActions }) => {
   const hasProcessingAttachments = processingAttachments && processingAttachments.size > 0;
-  
+
   return (
     <div className="bg-muted border-border dark:border-muted-foreground/15 relative flex items-center justify-between rounded-b-2xl border-x border-b p-2">
-      <ComposerAddAttachment />
+      <div className="flex items-center gap-1">
+        <ComposerAddAttachment />
+        {extraActions}
+      </div>
 
       <ThreadPrimitive.If running={false}>
         <ComposerPrimitive.Send asChild>

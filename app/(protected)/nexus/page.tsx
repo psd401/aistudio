@@ -1,6 +1,6 @@
 'use client'
 
-import { AssistantRuntimeProvider, type AttachmentAdapter, WebSpeechSynthesisAdapter } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, type AttachmentAdapter, type RealtimeVoiceAdapter, WebSpeechSynthesisAdapter } from '@assistant-ui/react'
 import { useChatRuntime, AssistantChatTransport } from '@assistant-ui/react-ai-sdk'
 import { type UIMessage } from '@ai-sdk/react'
 import { Thread } from '@/components/assistant-ui/thread'
@@ -26,6 +26,10 @@ import { toast } from 'sonner'
 import { handleContentBlockedResponse } from '@/lib/nexus/content-blocked-handler'
 import { getPromptSettings } from '@/actions/prompt-library.actions'
 import { ModelFallbackBanner } from './_components/model-fallback-banner'
+import { createGeminiLiveVoiceAdapter } from './_components/voice-mode/gemini-live-voice-adapter'
+import { VoiceModeOverlay } from './_components/voice-mode/voice-mode-overlay'
+import { VoiceButton } from './_components/voice-mode/voice-button'
+import { useVoiceAvailability } from './_components/voice-mode/use-voice-availability'
 
 const log = createLogger({ moduleName: 'nexus-page' })
 const uuidSchema = z.string().uuid()
@@ -60,6 +64,7 @@ interface ConversationRuntimeProviderProps {
   enabledTools: string[]
   enabledConnectors: string[]
   attachmentAdapter: AttachmentAdapter
+  voiceAdapter?: RealtimeVoiceAdapter
   initialMessages?: UIMessage[]
   onConversationIdChange?: (conversationId: string) => void
   onConnectorReconnect?: (failedServerIds: string[]) => void
@@ -67,6 +72,7 @@ interface ConversationRuntimeProviderProps {
 }
 
 /** UUID format for validating X-Connector-Reconnect header values */
+// eslint-disable-next-line unicorn/better-regex -- expanded form avoids security/detect-unsafe-regex on grouped quantifier
 const UUID_RE = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i
 const MAX_RECONNECT_IDS = 10
 
@@ -77,6 +83,7 @@ function ConversationRuntimeProvider({
   enabledTools,
   enabledConnectors,
   attachmentAdapter,
+  voiceAdapter,
   initialMessages = [],
   onConversationIdChange,
   onConnectorReconnect,
@@ -181,7 +188,7 @@ function ConversationRuntimeProvider({
   const runtime = useChatRuntime({
     transport: new AssistantChatTransport({
       api: '/api/nexus/chat',
-      fetch: customFetch,
+      fetch: customFetch as typeof fetch,
       body: () => selectedModel ? {
         modelId: selectedModel.modelId,
         provider: selectedModel.provider,
@@ -194,6 +201,7 @@ function ConversationRuntimeProvider({
       attachments: attachmentAdapter,
       history: historyAdapter,
       speech: new WebSpeechSynthesisAdapter(),
+      voice: voiceAdapter,
     },
     messages: initialMessages
   })
@@ -215,6 +223,7 @@ interface NexusRuntimeWrapperProps {
   enabledTools: string[]
   enabledConnectors: string[]
   attachmentAdapter: AttachmentAdapter
+  voiceAdapter?: RealtimeVoiceAdapter
   initialMessages: UIMessage[]
   onConversationIdChange: (id: string) => void
   processingAttachments: Set<string>
@@ -231,6 +240,7 @@ function NexusRuntimeWrapper({
   enabledTools,
   enabledConnectors,
   attachmentAdapter,
+  voiceAdapter,
   initialMessages,
   onConversationIdChange,
   processingAttachments,
@@ -278,6 +288,24 @@ function NexusRuntimeWrapper({
     }
   }, [registerConnectorTools])
 
+  // Voice overlay state — open when user clicks voice button, close on End/Escape
+  const [voiceOverlayOpen, setVoiceOverlayOpen] = useState(false)
+
+  const handleVoiceStart = useCallback(() => {
+    setVoiceOverlayOpen(true)
+  }, [])
+
+  const handleVoiceClose = useCallback(() => {
+    setVoiceOverlayOpen(false)
+  }, [])
+
+  // Voice button rendered in composer extra actions slot — memoized to avoid
+  // re-creating JSX on every render (prevents unnecessary Thread re-renders)
+  const composerExtraActions = useMemo(
+    () => voiceAdapter ? <VoiceButton onVoiceStart={handleVoiceStart} /> : null,
+    [voiceAdapter, handleVoiceStart]
+  )
+
   return (
     <ConversationRuntimeProvider
       conversationId={conversationId}
@@ -285,6 +313,7 @@ function NexusRuntimeWrapper({
       enabledTools={enabledTools}
       enabledConnectors={enabledConnectors}
       attachmentAdapter={attachmentAdapter}
+      voiceAdapter={voiceAdapter}
       initialMessages={initialMessages}
       onConversationIdChange={onConversationIdChange}
       onConnectorReconnect={handleConnectorReconnect}
@@ -320,8 +349,12 @@ function NexusRuntimeWrapper({
           onConnectorsChange={onConnectorsChange}
           onReconnectSuccess={removeFailedServerId}
           toolFallback={ConnectorToolFallback}
+          composerExtraActions={composerExtraActions}
         />
       </div>
+
+      {/* Full-screen voice mode overlay */}
+      <VoiceModeOverlay open={voiceOverlayOpen} onClose={handleVoiceClose} />
     </ConversationRuntimeProvider>
   )
 }
@@ -533,6 +566,13 @@ function NexusPageContent() {
     })
   }, [handleAttachmentProcessingStart, handleAttachmentProcessingComplete])
 
+  // Voice mode — check availability and create stable adapter
+  const voiceAvailability = useVoiceAvailability()
+  const voiceAdapter = useMemo(
+    () => voiceAvailability.available ? createGeminiLiveVoiceAdapter() : undefined,
+    [voiceAvailability.available]
+  )
+
 
   
   // Show loading state while checking authentication
@@ -580,6 +620,7 @@ function NexusPageContent() {
                         enabledTools={enabledTools}
                         enabledConnectors={enabledConnectors}
                         attachmentAdapter={attachmentAdapter}
+                        voiceAdapter={voiceAdapter}
                         initialMessages={initialMessages}
                         onConversationIdChange={handleConversationIdChange}
                         processingAttachments={processingAttachments}

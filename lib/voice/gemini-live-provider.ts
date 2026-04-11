@@ -170,6 +170,9 @@ export class GeminiLiveProvider implements VoiceProvider {
       this.log.warn("Error during disconnect", { error: message })
     } finally {
       this.session = null
+      // Defense-in-depth: explicitly clear transcript data (student speech)
+      // so it doesn't linger in memory if the provider instance is retained
+      this.state.transcript = []
       this.updateState({ connected: false, speaking: "none" })
       this.onEvent?.({ type: "session_ended", reason: "cancelled" })
       this.onEvent = null

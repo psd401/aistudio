@@ -128,7 +128,7 @@ function DecisionRuntimeProvider({
   const runtime = useChatRuntime({
     transport: new AssistantChatTransport({
       api: '/api/nexus/decision-chat',
-      fetch: customFetch,
+      fetch: customFetch as typeof fetch,
       body: () => ({
         conversationId: conversationId || undefined,
       }),

@@ -272,7 +272,7 @@ jest.mock('@/components/ui/use-toast', () => ({
 }))
 
 // Mock fetch
-global.fetch = jest.fn()
+global.fetch = jest.fn() as unknown as typeof fetch
 
 // Import component after mocks are set up
 import { SettingsClient } from './settings-client'
@@ -306,7 +306,7 @@ describe('SettingsClient', () => {
 
   it('should close the modal after successful save', async () => {
     // Mock successful API response
-    ;(fetch as jest.Mock).mockResolvedValueOnce({
+    ;(fetch as unknown as jest.Mock).mockResolvedValueOnce({
       ok: true,
       json: async () => ({
         isSuccess: true,
@@ -373,7 +373,7 @@ describe('SettingsClient', () => {
     };
     
     // Mock failed API response
-    ;(fetch as jest.Mock).mockResolvedValueOnce({
+    ;(fetch as unknown as jest.Mock).mockResolvedValueOnce({
       ok: true,
       json: async () => ({
         isSuccess: false,

@@ -52,12 +52,12 @@ async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: st
 
   try {
     const cookieHeader = req.headers.cookie || ""
-    const cookies = Object.fromEntries(
-      cookieHeader.split(";").map((c) => {
-        const [key, ...vals] = c.trim().split("=")
-        return [key.trim(), vals.join("=").trim()]
-      })
-    )
+    // Use Object.create(null) — cookie names are user-controlled input
+    const cookies: Record<string, string> = Object.create(null)
+    for (const c of cookieHeader.split(";")) {
+      const [key, ...vals] = c.trim().split("=")
+      cookies[key.trim()] = vals.join("=").trim()
+    }
 
     const cookieNames = ["__Secure-authjs.session-token", "authjs.session-token", "next-auth.session-token"]
     let sessionToken: string | undefined
@@ -237,8 +237,11 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       return
     }
 
-    if (!isSupportedVoiceProvider(voiceSettings.provider)) {
-      log.error("Invalid voice provider configured", { provider: voiceSettings.provider })
+    if (!voiceSettings.provider || !voiceSettings.model || !isSupportedVoiceProvider(voiceSettings.provider)) {
+      log.error("Voice settings not configured — set VOICE_PROVIDER and VOICE_MODEL in Admin > System Settings > Voice Mode", {
+        provider: voiceSettings.provider,
+        model: voiceSettings.model,
+      })
       sendToClient(ws, { type: "error", message: "Voice provider not configured" })
       ws.close(4500, "Provider not configured")
       timer({ status: "error", reason: "invalid_provider" })

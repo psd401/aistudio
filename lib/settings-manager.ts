@@ -315,8 +315,8 @@ export const Settings = {
       getSetting('VOICE_NAME'),
     ])
     return {
-      provider: provider || 'gemini-live',
-      model: model || 'gemini-2.0-flash-live-001',
+      provider: provider || null,
+      model: model || null,
       language: language || 'en-US',
       voiceName: voiceName || null,
     }
