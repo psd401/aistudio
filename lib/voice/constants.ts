@@ -33,10 +33,8 @@ export const PING_INTERVAL_MS = 240_000
 export const WS_OPEN = 1
 
 /**
- * Max length for systemInstruction passed via session_config (characters).
- * Shared between:
- *   - Client: voice-context-builder.ts (caps instruction before sending)
- *   - Server: ws-handler.ts (truncates on receipt as defense-in-depth)
+ * Max length for system instruction built server-side from conversation messages (characters).
+ * Used by voice-instruction-builder.ts when formatting messages for the Gemini Live session.
  */
 export const MAX_SESSION_INSTRUCTION_LENGTH = 10_000
 

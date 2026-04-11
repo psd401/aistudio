@@ -169,8 +169,6 @@ class AudioPlaybackQueue {
 export interface GeminiLiveVoiceAdapterOptions {
   /** Current conversation ID (if continuing an existing conversation) */
   conversationId?: string | null
-  /** System instruction built from prior conversation messages */
-  systemInstruction?: string
 }
 
 /**
@@ -178,8 +176,8 @@ export interface GeminiLiveVoiceAdapterOptions {
  * WebSocket proxy and manages audio capture/playback.
  *
  * @param options - Optional conversation context for voice sessions.
- *   If conversationId is provided, the voice model receives prior
- *   conversation messages as system instruction context.
+ *   If conversationId is provided, the server fetches prior messages
+ *   from DB and builds the system instruction server-side.
  */
 export function createGeminiLiveVoiceAdapter(
   options?: GeminiLiveVoiceAdapterOptions,
@@ -367,9 +365,6 @@ class VoiceSession {
             const config: Record<string, string> = { type: 'session_config' }
             if (this.adapterOptions?.conversationId) {
               config.conversationId = this.adapterOptions.conversationId
-            }
-            if (this.adapterOptions?.systemInstruction) {
-              config.systemInstruction = this.adapterOptions.systemInstruction
             }
             socket.send(JSON.stringify(config))
             log.debug('Session config sent, waiting for provider connect')

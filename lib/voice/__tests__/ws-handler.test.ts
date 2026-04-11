@@ -16,6 +16,13 @@ jest.mock("../constants", () => ({
   MIN_AUDIO_INTERVAL_MS: 20,
   PING_INTERVAL_MS: 240_000,
   WS_OPEN: 1,
+  MAX_CONVERSATION_ID_LENGTH: 36,
+}))
+
+// Mock voice instruction builder (server-side instruction building from DB)
+const mockBuildInstructionFromConversation = jest.fn()
+jest.mock("../voice-instruction-builder", () => ({
+  buildInstructionFromConversation: (...args: unknown[]) => mockBuildInstructionFromConversation(...args),
 }))
 
 // Mock logger
@@ -137,7 +144,7 @@ function createMockReq(cookies: Record<string, string> = {}): IncomingMessage {
  * registers its listener. Needed because the two-phase handshake waits up to 5s
  * for session_config, causing tests that pass auth to hang without this.
  */
-function scheduleSessionConfig(ws: MockWs, config?: { conversationId?: string; systemInstruction?: string }) {
+function scheduleSessionConfig(ws: MockWs, config?: { conversationId?: string }) {
   setTimeout(() => {
     ws._emit("message", Buffer.from(JSON.stringify({ type: "session_config", ...config })))
   }, 10)
@@ -496,38 +503,66 @@ describe("handleVoiceConnection", () => {
       mockHasToolAccess.mockResolvedValue(true)
     })
 
-    it("should pass systemInstruction to provider when provided in session_config", async () => {
-      const ws = createMockWs()
-      const testInstruction = "You are a helpful assistant. Prior context: User asked about photosynthesis."
+    it("should build systemInstruction server-side from conversationId", async () => {
       const testConversationId = "550e8400-e29b-41d4-a716-446655440000"
-      scheduleSessionConfig(ws, {
-        conversationId: testConversationId,
-        systemInstruction: testInstruction,
-      })
+      const serverBuiltInstruction = "You are a helpful AI assistant. Prior conversation:\nUser: Hello"
+      mockBuildInstructionFromConversation.mockResolvedValue(serverBuiltInstruction)
+
+      const ws = createMockWs()
+      scheduleSessionConfig(ws, { conversationId: testConversationId })
       const req = createMockReq({ "authjs.session-token": "valid-token" })
 
       await handleVoiceConnection(ws, req)
 
+      // Verify server-side instruction builder was called with conversationId and user sub
+      expect(mockBuildInstructionFromConversation).toHaveBeenCalledWith(
+        testConversationId,
+        "user-123",
+      )
+
+      // Verify the server-built instruction was passed to the provider
       const { createVoiceProvider } = require("../provider-factory")
-      // createVoiceProvider is called during handleVoiceConnection; the returned mock's
-      // connect method receives the config. Verify it was called with systemInstruction.
       const mockProvider = createVoiceProvider.mock.results[0]?.value
       expect(mockProvider.connect).toHaveBeenCalledWith(
         expect.objectContaining({
-          systemInstruction: testInstruction,
+          systemInstruction: serverBuiltInstruction,
         }),
         expect.any(Function),
         expect.anything(),
       )
     })
 
-    it("should pass undefined systemInstruction when session_config omits it", async () => {
+    it("should pass undefined systemInstruction when no conversationId provided", async () => {
       const ws = createMockWs()
       scheduleSessionConfig(ws)
       const req = createMockReq({ "authjs.session-token": "valid-token" })
 
       await handleVoiceConnection(ws, req)
 
+      // Should NOT call the instruction builder
+      expect(mockBuildInstructionFromConversation).not.toHaveBeenCalled()
+
+      const { createVoiceProvider } = require("../provider-factory")
+      const mockProvider = createVoiceProvider.mock.results[0]?.value
+      expect(mockProvider.connect).toHaveBeenCalledWith(
+        expect.objectContaining({
+          systemInstruction: undefined,
+        }),
+        expect.any(Function),
+        expect.anything(),
+      )
+    })
+
+    it("should proceed without instruction when builder fails", async () => {
+      mockBuildInstructionFromConversation.mockRejectedValue(new Error("DB connection error"))
+
+      const ws = createMockWs()
+      scheduleSessionConfig(ws, { conversationId: "550e8400-e29b-41d4-a716-446655440000" })
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+
+      await handleVoiceConnection(ws, req)
+
+      // Should still connect, just without systemInstruction
       const { createVoiceProvider } = require("../provider-factory")
       const mockProvider = createVoiceProvider.mock.results[0]?.value
       expect(mockProvider.connect).toHaveBeenCalledWith(

@@ -11,8 +11,8 @@
  *   1. Client connects with session cookie for authentication
  *   2. Server validates JWT, checks hasToolAccess("voice-mode")
  *   3. Server sends { type: "ready" } (Phase 1: auth complete)
- *   4. Client sends { type: "session_config", conversationId?, systemInstruction? }
- *   5. Server connects to Gemini Live with systemInstruction (if provided)
+ *   4. Client sends { type: "session_config", conversationId? }
+ *   5. Server fetches messages from DB (verifying ownership), builds systemInstruction, connects to Gemini Live
  *   6. Server sends { type: "ready" } (Phase 2: provider connected, audio can flow)
  *   7. Client sends { type: "audio", data: "<base64 PCM16 16kHz mono>" }
  *   8. Server forwards audio to Gemini, relays responses back:
@@ -128,7 +128,7 @@ export interface VoiceProvider {
  */
 export type VoiceClientMessage =
   | { type: "audio"; data: string } // base64-encoded audio
-  | { type: "session_config"; conversationId?: string; systemInstruction?: string }
+  | { type: "session_config"; conversationId?: string }
   | { type: "disconnect" }
 
 export type VoiceServerMessage =

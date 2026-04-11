@@ -25,9 +25,9 @@ import {
   MIN_AUDIO_INTERVAL_MS,
   PING_INTERVAL_MS,
   WS_OPEN,
-  MAX_SESSION_INSTRUCTION_LENGTH,
   MAX_CONVERSATION_ID_LENGTH,
 } from "./constants"
+import { buildInstructionFromConversation } from "./voice-instruction-builder"
 import type {
   VoiceProvider,
   VoiceProviderConfig,
@@ -135,10 +135,8 @@ function isValidClientMessage(msg: unknown): msg is VoiceClientMessage {
   if (typeof obj.type !== "string") return false
   if (obj.type === "audio" && typeof obj.data !== "string") return false
   if (obj.type === "session_config") {
-    // conversationId is optional string (UUID)
+    // conversationId is optional string (UUID). systemInstruction is ignored (built server-side).
     if (obj.conversationId !== undefined && typeof obj.conversationId !== "string") return false
-    // systemInstruction is optional string
-    if (obj.systemInstruction !== undefined && typeof obj.systemInstruction !== "string") return false
     return true
   }
   return true
@@ -196,9 +194,8 @@ const SESSION_CONFIG_TIMEOUT_MS = 5_000
 function waitForSessionConfig(
   ws: WebSocket,
   logFn: ReturnType<typeof createLogger>,
-): Promise<{ conversationId?: string; systemInstruction?: string } | null> {
+): Promise<{ conversationId?: string } | null> {
   return new Promise((resolve) => {
-    /** Remove all listeners registered by this function */
     function cleanupListeners() {
       clearTimeout(timeout)
       ws.removeListener("message", onMessage)
@@ -231,7 +228,6 @@ function waitForSessionConfig(
         if (parsed.type === "session_config") {
           cleanupListeners()
 
-          // Sanitize and validate inputs
           const rawConversationId = typeof parsed.conversationId === "string"
             ? parsed.conversationId.slice(0, MAX_CONVERSATION_ID_LENGTH)
             : undefined
@@ -241,27 +237,9 @@ function waitForSessionConfig(
           if (rawConversationId && !conversationId) {
             logFn.warn("Invalid conversationId format in session_config, discarding")
           }
-          // THREAT MODEL: systemInstruction is client-supplied and passed verbatim to
-          // the Gemini Live session. A user whose conversation history contains adversarially
-          // crafted text (e.g., "Ignore all previous instructions…") will have that text
-          // injected into the voice model's system prompt. This is an inherent architectural
-          // risk when embedding user-controlled content in system instructions. Mitigations:
-          // (1) length cap prevents unlimited injection, (2) Bedrock guardrails apply to
-          // the model output, (3) the same content is already visible to the text model.
-          // Full mitigation would require server-side instruction building from conversationId
-          // (fetching messages from DB and verifying ownership), which is deferred as a
-          // follow-on to this PR.
-          const systemInstruction = typeof parsed.systemInstruction === "string"
-            ? parsed.systemInstruction.slice(0, MAX_SESSION_INSTRUCTION_LENGTH)
-            : undefined
 
-          logFn.info("Session config received", {
-            hasConversationId: !!conversationId,
-            hasSystemInstruction: !!systemInstruction,
-            instructionLength: systemInstruction?.length,
-          })
-
-          resolve({ conversationId, systemInstruction })
+          logFn.info("Session config received", { hasConversationId: !!conversationId })
+          resolve({ conversationId })
         }
       } catch {
         logFn.debug("Non-JSON message received while waiting for session_config")
@@ -272,6 +250,25 @@ function waitForSessionConfig(
     ws.on("close", onClose)
     ws.on("error", onError)
   })
+}
+
+/**
+ * Build system instruction from conversation messages (server-side).
+ * Non-fatal: returns undefined if conversation doesn't exist, isn't owned, or DB fails.
+ */
+async function buildSystemInstruction(
+  conversationId: string | undefined,
+  cognitoSub: string,
+  logFn: ReturnType<typeof createLogger>,
+): Promise<string | undefined> {
+  if (!conversationId) return undefined
+  try {
+    return await buildInstructionFromConversation(conversationId, cognitoSub)
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    logFn.warn("Failed to build voice instruction from conversation", { error: msg })
+    return undefined
+  }
 }
 
 /**
@@ -374,7 +371,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       cleanup("error")
     })
 
-    // Step 5: Signal auth OK and wait for client session_config (conversationId + systemInstruction)
+    // Step 5: Signal auth OK and wait for client session_config (conversationId only)
     sendToClient(ws, { type: "ready" })
     log.info("Auth complete, waiting for session config")
     const sessionConfig = await waitForSessionConfig(ws, log)
@@ -382,18 +379,18 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     // Abort if socket closed during wait — prevents leaking a provider connection with no client
     if (sessionEnded || ws.readyState !== WS_OPEN) { log.info("Socket closed during config wait"); return }
 
-    // Step 6: Connect to AI service with timeout + abort signal
+    // Step 5b: Build system instruction server-side and create provider config
+    const systemInstruction = await buildSystemInstruction(sessionConfig?.conversationId, auth.sub, log)
     const providerConfig: VoiceProviderConfig = {
       model: voiceSettings.model,
       language: voiceSettings.language,
       voiceName: voiceSettings.voiceName ?? undefined,
       apiKey: googleApiKey,
-      systemInstruction: sessionConfig?.systemInstruction,
+      systemInstruction,
     }
-
     log.info("Connecting to voice provider", {
       hasConversationContext: !!sessionConfig?.conversationId,
-      hasSystemInstruction: !!providerConfig.systemInstruction,
+      hasSystemInstruction: !!systemInstruction,
     })
 
     const connectAbort = new AbortController()
@@ -438,12 +435,9 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
             break
           }
 
-          case "session_config": {
-            // session_config after provider connect is a no-op — system instruction
-            // is immutable once the Gemini session starts. Log and ignore.
+          case "session_config":
             log.debug("Ignoring late session_config (provider already connected)")
             break
-          }
 
           case "disconnect": {
             log.info("Client requested disconnect")
