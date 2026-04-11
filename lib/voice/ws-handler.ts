@@ -116,12 +116,25 @@ function sendToClient(ws: WebSocket, message: VoiceServerMessage): void {
   }
 }
 
+/** Max length for systemInstruction passed via session_config (10K chars) */
+const MAX_SESSION_INSTRUCTION_LENGTH = 10_000
+
+/** Max length for conversationId in session_config (UUID = 36 chars) */
+const MAX_CONVERSATION_ID_LENGTH = 36
+
 /** Validate that a parsed message has the expected shape. */
 function isValidClientMessage(msg: unknown): msg is VoiceClientMessage {
   if (typeof msg !== "object" || msg === null) return false
   const obj = msg as Record<string, unknown>
   if (typeof obj.type !== "string") return false
   if (obj.type === "audio" && typeof obj.data !== "string") return false
+  if (obj.type === "session_config") {
+    // conversationId is optional string (UUID)
+    if (obj.conversationId !== undefined && typeof obj.conversationId !== "string") return false
+    // systemInstruction is optional string
+    if (obj.systemInstruction !== undefined && typeof obj.systemInstruction !== "string") return false
+    return true
+  }
   return true
 }
 
@@ -155,6 +168,59 @@ function forwardProviderEvent(ws: WebSocket, event: VoiceProviderEvent): void {
   }
 }
 
+/** Timeout for waiting for session_config message from client (ms) */
+const SESSION_CONFIG_TIMEOUT_MS = 5_000
+
+/**
+ * Wait for the client to send a session_config message.
+ * The client MUST send session_config as its first message after WebSocket open.
+ * Returns the config or null if the client sends nothing within the timeout
+ * (in which case the session proceeds with default settings).
+ */
+function waitForSessionConfig(
+  ws: WebSocket,
+  logFn: ReturnType<typeof createLogger>,
+): Promise<{ conversationId?: string; systemInstruction?: string } | null> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      ws.removeListener("message", onMessage)
+      logFn.debug("No session_config received within timeout, proceeding with defaults")
+      resolve(null)
+    }, SESSION_CONFIG_TIMEOUT_MS)
+
+    function onMessage(data: WebSocket.RawData) {
+      try {
+        const parsed: unknown = JSON.parse(data.toString())
+        if (!isValidClientMessage(parsed)) return
+        if (parsed.type === "session_config") {
+          clearTimeout(timeout)
+          ws.removeListener("message", onMessage)
+
+          // Sanitize and validate inputs
+          const conversationId = typeof parsed.conversationId === "string"
+            ? parsed.conversationId.slice(0, MAX_CONVERSATION_ID_LENGTH)
+            : undefined
+          const systemInstruction = typeof parsed.systemInstruction === "string"
+            ? parsed.systemInstruction.slice(0, MAX_SESSION_INSTRUCTION_LENGTH)
+            : undefined
+
+          logFn.info("Session config received", {
+            hasConversationId: !!conversationId,
+            hasSystemInstruction: !!systemInstruction,
+            instructionLength: systemInstruction?.length,
+          })
+
+          resolve({ conversationId, systemInstruction })
+        }
+      } catch {
+        logFn.debug("Non-JSON message received while waiting for session_config")
+      }
+    }
+
+    ws.on("message", onMessage)
+  })
+}
+
 /**
  * Handle a new WebSocket connection for voice sessions.
  *
@@ -163,9 +229,10 @@ function forwardProviderEvent(ws: WebSocket, event: VoiceProviderEvent): void {
  * 2. Check voice-mode tool access
  * 3. Get voice settings and create provider
  * 4. Register close/error handlers (BEFORE connect)
- * 5. Connect to AI service with timeout
- * 6. Register message handler (AFTER connect — clients must wait for "ready")
- * 7. Start keepalive ping
+ * 5. Signal auth OK and wait for session_config from client
+ * 6. Connect to AI service with timeout (including systemInstruction from config)
+ * 7. Register message handler (AFTER connect — clients must wait for "ready")
+ * 8. Start keepalive ping
  */
 export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage): Promise<void> {
   const requestId = generateRequestId()
@@ -261,7 +328,17 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       cleanup("error")
     })
 
-    // Step 5: Connect to AI service with timeout + abort signal
+    // Step 5: Signal auth OK and wait for client session_config.
+    // The client sends session_config with conversationId and systemInstruction
+    // (built from prior conversation messages) before the provider connects.
+    // This allows the Gemini Live session to receive conversation context
+    // as part of its initial system instruction.
+    sendToClient(ws, { type: "ready" })
+    log.info("Auth complete, waiting for session config")
+
+    const sessionConfig = await waitForSessionConfig(ws, log)
+
+    // Step 6: Connect to AI service with timeout + abort signal
     // AbortSignal cancels the in-flight connect if timeout fires, preventing
     // a leaked Gemini session from running in the background with no client.
     const providerConfig: VoiceProviderConfig = {
@@ -269,7 +346,13 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       language: voiceSettings.language,
       voiceName: voiceSettings.voiceName ?? undefined,
       apiKey: googleApiKey,
+      systemInstruction: sessionConfig?.systemInstruction,
     }
+
+    log.info("Connecting to voice provider", {
+      hasConversationContext: !!sessionConfig?.conversationId,
+      hasSystemInstruction: !!providerConfig.systemInstruction,
+    })
 
     const connectAbort = new AbortController()
     const connectTimer = setTimeout(() => connectAbort.abort(), PROVIDER_CONNECT_TIMEOUT_MS)
@@ -284,11 +367,11 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       clearTimeout(connectTimer)
     }
 
-    // Signal ready to client
+    // Signal session is fully ready for audio
     sendToClient(ws, { type: "ready" })
     log.info("Voice session ready")
 
-    // Step 6: Register message handler AFTER connect (clients must wait for "ready")
+    // Step 7: Register message handler AFTER connect (clients must wait for second "ready")
     let lastAudioTime = 0
     ws.on("message", (data) => {
       try {
@@ -313,6 +396,13 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
             break
           }
 
+          case "session_config": {
+            // session_config after provider connect is a no-op — system instruction
+            // is immutable once the Gemini session starts. Log and ignore.
+            log.debug("Ignoring late session_config (provider already connected)")
+            break
+          }
+
           case "disconnect": {
             log.info("Client requested disconnect")
             provider?.disconnect().catch((e: Error) =>
@@ -327,7 +417,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       }
     })
 
-    // Step 7: Keepalive ping — cleanup() handles clearInterval on close/error
+    // Step 8: Keepalive ping — cleanup() handles clearInterval on close/error
     pingInterval = setInterval(() => {
       if (ws.readyState === WS_OPEN) ws.ping()
     }, PING_INTERVAL_MS)

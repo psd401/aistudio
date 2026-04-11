@@ -165,15 +165,29 @@ class AudioPlaybackQueue {
   }
 }
 
+/** Options for configuring the voice adapter with conversation context */
+export interface GeminiLiveVoiceAdapterOptions {
+  /** Current conversation ID (if continuing an existing conversation) */
+  conversationId?: string | null
+  /** System instruction built from prior conversation messages */
+  systemInstruction?: string
+}
+
 /**
  * Creates a RealtimeVoiceAdapter that connects to the Gemini Live
  * WebSocket proxy and manages audio capture/playback.
+ *
+ * @param options - Optional conversation context for voice sessions.
+ *   If conversationId is provided, the voice model receives prior
+ *   conversation messages as system instruction context.
  */
-export function createGeminiLiveVoiceAdapter(): RealtimeVoiceAdapter {
+export function createGeminiLiveVoiceAdapter(
+  options?: GeminiLiveVoiceAdapterOptions,
+): RealtimeVoiceAdapter {
   return {
-    connect(options) {
-      return createVoiceSession(options, async (helpers) => {
-        const session = new VoiceSession(helpers, options.abortSignal)
+    connect(connectOptions) {
+      return createVoiceSession(connectOptions, async (helpers) => {
+        const session = new VoiceSession(helpers, connectOptions.abortSignal, options)
         return session.start()
       })
     },
@@ -187,6 +201,7 @@ export function createGeminiLiveVoiceAdapter(): RealtimeVoiceAdapter {
 class VoiceSession {
   private helpers: VoiceSessionHelpers
   private abortSignal?: AbortSignal
+  private adapterOptions?: GeminiLiveVoiceAdapterOptions
   private ws: WebSocket | null = null
   private mediaStream: MediaStream | null = null
   private captureContext: AudioContext | null = null
@@ -200,9 +215,14 @@ class VoiceSession {
   private reconnectAttempts = 0
   private wakeLock: WakeLockSentinel | null = null
 
-  constructor(helpers: VoiceSessionHelpers, abortSignal?: AbortSignal) {
+  constructor(
+    helpers: VoiceSessionHelpers,
+    abortSignal?: AbortSignal,
+    adapterOptions?: GeminiLiveVoiceAdapterOptions,
+  ) {
     this.helpers = helpers
     this.abortSignal = abortSignal
+    this.adapterOptions = adapterOptions
   }
 
   /** Main entry point — connects and returns session controls. */
@@ -280,7 +300,12 @@ class VoiceSession {
     this.ws = null
   }
 
-  /** Connect WebSocket and wait for "ready" signal. */
+  /**
+   * Connect WebSocket and complete the two-phase handshake:
+   * 1. Wait for first "ready" (auth complete)
+   * 2. Send session_config with conversation context
+   * 3. Wait for second "ready" (provider connected, audio can flow)
+   */
   private connectWebSocket(): Promise<WebSocket> {
     return new Promise((resolve, reject) => {
       const signal = this.abortSignal
@@ -293,12 +318,12 @@ class VoiceSession {
 
       const socket = new WebSocket(getWebSocketUrl())
 
-      // Timeout: reject if server never sends "ready" (e.g., hung proxy)
+      // Timeout: reject if server never completes handshake (e.g., hung proxy)
       const connectTimeout = setTimeout(() => {
         signal?.removeEventListener('abort', onAbort)
         socket.close()
         reject(new Error('Connection timed out'))
-      }, 10_000)
+      }, 30_000) // 30s total for both phases (auth + provider connect)
 
       const onAbort = () => {
         clearTimeout(connectTimeout)
@@ -307,12 +332,31 @@ class VoiceSession {
       }
       signal?.addEventListener('abort', onAbort, { once: true })
 
+      // Track handshake phase: first "ready" = auth done, second = provider connected
+      let authReady = false
+
       // Handshake listeners are removed after resolve/reject to avoid
       // stale message/error/close handlers running during the active session
       const onHandshakeMessage = (event: MessageEvent) => {
         try {
           const parsed: unknown = JSON.parse(event.data as string)
-          if (isValidServerMessage(parsed) && parsed.type === 'ready') {
+          if (!isValidServerMessage(parsed)) return
+          if (parsed.type !== 'ready') return
+
+          if (!authReady) {
+            // Phase 1 complete: auth OK. Send session_config with conversation context.
+            authReady = true
+            const config: Record<string, string> = { type: 'session_config' }
+            if (this.adapterOptions?.conversationId) {
+              config.conversationId = this.adapterOptions.conversationId
+            }
+            if (this.adapterOptions?.systemInstruction) {
+              config.systemInstruction = this.adapterOptions.systemInstruction
+            }
+            socket.send(JSON.stringify(config))
+            log.debug('Session config sent, waiting for provider connect')
+          } else {
+            // Phase 2 complete: provider connected, ready for audio.
             clearTimeout(connectTimeout)
             signal?.removeEventListener('abort', onAbort)
             socket.removeEventListener('message', onHandshakeMessage)

@@ -125,6 +125,7 @@ export interface VoiceProvider {
  */
 export type VoiceClientMessage =
   | { type: "audio"; data: string } // base64-encoded audio
+  | { type: "session_config"; conversationId?: string; systemInstruction?: string }
   | { type: "disconnect" }
 
 export type VoiceServerMessage =
