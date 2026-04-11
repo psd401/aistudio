@@ -261,7 +261,9 @@ export function prepareTranscriptEntries(
     }
   }
 
-  // Step 3: Cap at maximum — log if truncation occurs so data loss is visible
+  // Step 3: Cap at maximum — keep the MOST RECENT entries (tail) so late-session
+  // context is preserved. In long voice sessions, the tail typically contains the
+  // user's most recent intent. Log if truncation occurs so data loss is visible.
   if (merged.length > MAX_TRANSCRIPT_ENTRIES) {
     log.warn("Transcript truncated to maximum entry limit", {
       originalCount: merged.length,
@@ -269,7 +271,7 @@ export function prepareTranscriptEntries(
       droppedCount: merged.length - MAX_TRANSCRIPT_ENTRIES,
     })
   }
-  return merged.slice(0, MAX_TRANSCRIPT_ENTRIES)
+  return merged.slice(-MAX_TRANSCRIPT_ENTRIES)
 }
 
 /**
@@ -299,12 +301,13 @@ async function applyGuardrails(
 
   // Wrap the entire guardrail processing with a timeout to prevent hanging
   // during Bedrock brownouts. On timeout, fall back to saving unfiltered.
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([
       applyGuardrailsBatched(entries, safetySvc, { conversationId, requestId, voiceModel, voiceProvider }),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("Guardrail processing timeout")), GUARDRAIL_TOTAL_TIMEOUT_MS),
-      ),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(() => reject(new Error("Guardrail processing timeout")), GUARDRAIL_TOTAL_TIMEOUT_MS)
+      }),
     ])
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -314,6 +317,9 @@ async function applyGuardrails(
       error: message,
     })
     return entries.map((e) => ({ ...e, wasFiltered: false }))
+  } finally {
+    // Clear the timeout to prevent resource leak when batched processing resolves first
+    if (timeoutHandle) clearTimeout(timeoutHandle)
   }
 }
 

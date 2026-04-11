@@ -547,8 +547,20 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     session.providerRef.current = createVoiceProvider(voiceSettings.provider!)
 
     // Step 4: Register close/error handlers BEFORE provider.connect()
-    ws.on("close", (code, reason) => { log.info("Voice WS closed", { code, reason: reason.toString() }); cleanup("success") })
-    ws.on("error", (error) => { log.error("Voice WS error", { error: error.message }); cleanup("error") })
+    // cleanup() is async — attach .catch() to prevent unhandled rejections
+    // from unexpected throws inside cleanupSession.
+    ws.on("close", (code, reason) => {
+      log.info("Voice WS closed", { code, reason: reason.toString() })
+      cleanup("success").catch((e: Error) =>
+        log.error("Unexpected cleanup failure on close", { error: e.message })
+      )
+    })
+    ws.on("error", (error) => {
+      log.error("Voice WS error", { error: error.message })
+      cleanup("error").catch((e: Error) =>
+        log.error("Unexpected cleanup failure on error", { error: e.message })
+      )
+    })
 
     // Step 5a: Signal auth OK and wait for client session_config (conversationId only)
     sendToClient(ws, { type: "ready" })
@@ -600,9 +612,12 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     // The message handler is already registered above, so no audio frames are lost
     // during this async DB lookup.
     //
-    // The promise is stored on session state so cleanupSession can await it if the
-    // client disconnects before resolution completes — preventing silent transcript loss
-    // on very short sessions or poor-connectivity scenarios.
+    // The promise is stored on session state separately from the awaited result
+    // because cleanupSession needs it as a fallback: if the client disconnects
+    // during THIS await, cleanup fires (setting sessionEnded=true and clearing
+    // the ping interval), then awaits transcriptContextPromise to capture the
+    // in-flight result. Without storing the promise, early disconnects would
+    // silently lose the transcript context.
     if (sessionConfig?.conversationId && voiceSettings.model && voiceSettings.provider) {
       session.transcriptContextPromise = resolveTranscriptContext(
         sessionConfig.conversationId, auth.sub, voiceSettings.model, voiceSettings.provider, log,
@@ -615,7 +630,14 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       }
     }
 
-    // Step 8: Keepalive ping — cleanup() handles clearInterval on close/error
+    // Step 8: Keepalive ping — cleanup() handles clearInterval on close/error.
+    // Guard against the session ending during the transcriptContextPromise await above:
+    // if cleanup already ran, starting a new interval would leak because cleanup
+    // already cleared pingInterval and won't run again (idempotent guard).
+    if (session.sessionEnded) {
+      log.info("Session ended during context resolution, skipping ping setup")
+      return
+    }
     session.pingInterval = setInterval(() => {
       if (ws.readyState === WS_OPEN) ws.ping()
     }, PING_INTERVAL_MS)

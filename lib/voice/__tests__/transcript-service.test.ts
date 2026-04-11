@@ -170,7 +170,7 @@ describe("prepareTranscriptEntries", () => {
     expect(prepareTranscriptEntries(entries)).toHaveLength(0)
   })
 
-  it("should cap at 500 entries", () => {
+  it("should cap at 500 entries, keeping the most recent (tail)", () => {
     const entries: TranscriptEntry[] = []
     for (let i = 0; i < 600; i++) {
       entries.push(
@@ -180,6 +180,9 @@ describe("prepareTranscriptEntries", () => {
 
     const result = prepareTranscriptEntries(entries)
     expect(result.length).toBeLessThanOrEqual(500)
+    // Verify tail entries are kept (most recent), not head entries
+    const lastEntry = result[result.length - 1]
+    expect(lastEntry.text).toBe("message 599")
   })
 
   it("should warn when transcript is truncated beyond MAX_TRANSCRIPT_ENTRIES", () => {
