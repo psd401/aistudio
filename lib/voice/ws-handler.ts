@@ -47,43 +47,41 @@ import type {
  * Note: Cookie values are not URL-decoded. Auth.js does not URL-encode
  * session cookie values, so this is correct for the current implementation.
  */
+/** Parse raw cookie header into a key-value map. Uses Object.create(null) since cookie names are user-controlled. */
+function parseCookies(cookieHeader: string): Record<string, string> {
+  const cookies: Record<string, string> = Object.create(null)
+  for (const c of cookieHeader.split(";")) {
+    const [key, ...vals] = c.trim().split("=")
+    cookies[key.trim()] = vals.join("=").trim()
+  }
+  return cookies
+}
+
+/** Find Auth.js session token from cookies, handling chunked cookies. */
+function findSessionToken(cookies: Record<string, string>): { token: string; salt: string } | null {
+  const cookieNames = ["__Secure-authjs.session-token", "authjs.session-token", "next-auth.session-token"]
+  for (const name of cookieNames) {
+    if (cookies[name]) return { token: cookies[name], salt: name }
+    // Chunked cookies: name.0, name.1, ... (Auth.js splits large tokens, typically 2-3 chunks)
+    const chunks: string[] = []
+    for (let i = 0; i < 20; i++) {
+      const chunk = cookies[`${name}.${i}`]
+      if (!chunk) break
+      chunks.push(chunk)
+    }
+    if (chunks.length > 0) return { token: chunks.join(""), salt: name }
+  }
+  return null
+}
+
 async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: string; sub: string } | null> {
   const log = createLogger({ context: "voice-ws-auth" })
 
   try {
-    const cookieHeader = req.headers.cookie || ""
-    // Use Object.create(null) — cookie names are user-controlled input
-    const cookies: Record<string, string> = Object.create(null)
-    for (const c of cookieHeader.split(";")) {
-      const [key, ...vals] = c.trim().split("=")
-      cookies[key.trim()] = vals.join("=").trim()
-    }
+    const cookies = parseCookies(req.headers.cookie || "")
+    const session = findSessionToken(cookies)
 
-    const cookieNames = ["__Secure-authjs.session-token", "authjs.session-token", "next-auth.session-token"]
-    let sessionToken: string | undefined
-    let cookieSalt: string | undefined
-
-    for (const name of cookieNames) {
-      if (cookies[name]) {
-        sessionToken = cookies[name]
-        cookieSalt = name
-        break
-      }
-      // Chunked cookies: name.0, name.1, ... (Auth.js splits large tokens, typically 2-3 chunks)
-      const chunks: string[] = []
-      for (let i = 0; i < 20; i++) {
-        const chunk = cookies[`${name}.${i}`]
-        if (!chunk) break
-        chunks.push(chunk)
-      }
-      if (chunks.length > 0) {
-        sessionToken = chunks.join("")
-        cookieSalt = name
-        break
-      }
-    }
-
-    if (!sessionToken || !cookieSalt) {
+    if (!session) {
       log.warn("No session token found in WebSocket cookies")
       return null
     }
@@ -94,7 +92,7 @@ async function authenticateWebSocket(req: IncomingMessage): Promise<{ userId: st
       return null
     }
 
-    const payload = await decode({ token: sessionToken, salt: cookieSalt, secret })
+    const payload = await decode({ token: session.token, salt: session.salt, secret })
 
     if (!payload?.sub) {
       log.warn("Session token missing sub claim")
@@ -272,8 +270,6 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     log.info("Voice connection authenticated", { userId: sanitizeForLogging(auth.userId) })
 
     // Step 2: Check voice access (fail-closed on error)
-    // Tool access check ensures only users with the "voice-mode" permission
-    // can access voice features and see configuration details.
     let hasAccess = false
     try {
       hasAccess = await hasToolAccess(auth.sub, "voice-mode")
@@ -288,9 +284,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       return
     }
 
-    // Step 3: Get voice settings and API key
-    // Settings are cached with 5-min TTL in settings-manager. Active WS sessions
-    // use the config from connection time; config changes take effect on new sessions.
+    // Step 3: Get voice settings and API key (cached 5-min TTL; changes take effect on new sessions)
     const [voiceSettings, googleApiKey] = await Promise.all([
       Settings.getVoice(),
       Settings.getGoogleAI(),
@@ -305,10 +299,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     }
 
     if (!voiceSettings.provider || !voiceSettings.model || !isSupportedVoiceProvider(voiceSettings.provider)) {
-      log.error("Voice settings not configured — set VOICE_PROVIDER and VOICE_MODEL in Admin > System Settings > Voice Mode", {
-        provider: voiceSettings.provider,
-        model: voiceSettings.model,
-      })
+      log.error("Voice settings not configured", { provider: voiceSettings.provider, model: voiceSettings.model })
       sendToClient(ws, { type: "error", message: "Voice provider not configured" })
       ws.close(4500, "Provider not configured")
       timer({ status: "error", reason: "invalid_provider" })
@@ -316,8 +307,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     }
     provider = createVoiceProvider(voiceSettings.provider)
 
-    // Step 4: Register close/error handlers BEFORE provider.connect() so cleanup
-    // is guaranteed even if the WebSocket drops during the connect await.
+    // Step 4: Register close/error handlers BEFORE provider.connect()
     ws.on("close", (code, reason) => {
       log.info("Voice WebSocket closed", { code, reason: reason.toString() })
       cleanup("success")
@@ -329,18 +319,12 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     })
 
     // Step 5: Signal auth OK and wait for client session_config.
-    // The client sends session_config with conversationId and systemInstruction
-    // (built from prior conversation messages) before the provider connects.
-    // This allows the Gemini Live session to receive conversation context
-    // as part of its initial system instruction.
+    // Step 5: Signal auth OK and wait for client session_config (conversationId + systemInstruction)
     sendToClient(ws, { type: "ready" })
     log.info("Auth complete, waiting for session config")
-
     const sessionConfig = await waitForSessionConfig(ws, log)
 
     // Step 6: Connect to AI service with timeout + abort signal
-    // AbortSignal cancels the in-flight connect if timeout fires, preventing
-    // a leaked Gemini session from running in the background with no client.
     const providerConfig: VoiceProviderConfig = {
       model: voiceSettings.model,
       language: voiceSettings.language,
@@ -425,10 +409,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     const message = error instanceof Error ? error.message : String(error)
     log.error("Voice session setup failed", { error: message })
     sendToClient(ws, { type: "error", message: "Failed to establish voice session" })
-    // cleanup() first: sets sessionEnded=true, clears interval, disconnects provider.
-    // Then remove listeners so ws.close()'s "close" event doesn't re-enter cleanup.
-    // This is safe because cleanup is idempotent via the sessionEnded guard.
-    cleanup("error")
+    cleanup("error") // idempotent — sets sessionEnded, clears interval, disconnects provider
     ws.removeAllListeners("message")
     ws.removeAllListeners("close")
     ws.removeAllListeners("error")

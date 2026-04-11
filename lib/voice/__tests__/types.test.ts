@@ -99,6 +99,26 @@ describe("WebSocket protocol messages", () => {
     })
 
 
+    it("should represent a session_config message with full context", () => {
+      const msg: VoiceClientMessage = {
+        type: "session_config",
+        conversationId: "550e8400-e29b-41d4-a716-446655440000",
+        systemInstruction: "You are a helpful assistant. Prior conversation context follows.",
+      }
+      expect(msg.type).toBe("session_config")
+      expect(msg.conversationId).toBe("550e8400-e29b-41d4-a716-446655440000")
+      expect(msg.systemInstruction).toContain("Prior conversation")
+    })
+
+    it("should represent a session_config message with no context (new conversation)", () => {
+      const msg: VoiceClientMessage = {
+        type: "session_config",
+      }
+      expect(msg.type).toBe("session_config")
+      expect(msg.conversationId).toBeUndefined()
+      expect(msg.systemInstruction).toBeUndefined()
+    })
+
     it("should represent a disconnect message", () => {
       const msg: VoiceClientMessage = {
         type: "disconnect",
