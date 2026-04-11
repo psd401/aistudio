@@ -198,7 +198,7 @@ describe("saveVoiceTranscript", () => {
     const entries = [makeEntry("user", "hello")]
     await expect(
       saveVoiceTranscript("conv-123", 1, entries),
-    ).rejects.toThrow("Conversation conv-123 not found")
+    ).rejects.toThrow("Conversation not found or access denied")
   })
 
   it("should return early with zero counts for empty transcript", async () => {
@@ -326,6 +326,64 @@ describe("saveVoiceTranscript", () => {
     expect(result.filteredCount).toBe(1)
     expect(mockCheckInputSafety).toHaveBeenCalledTimes(2)
     expect(mockCheckOutputSafety).toHaveBeenCalledTimes(1)
+  })
+
+  it("should pass voiceModel and voiceProvider to checkOutputSafety", async () => {
+    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Test" })
+    mockIsGuardrailsEnabled.mockReturnValue(true)
+    mockCheckInputSafety.mockResolvedValue({ allowed: true, processedContent: "hello" })
+    mockCheckOutputSafety.mockResolvedValue({ allowed: true, processedContent: "hi" })
+
+    mockExecuteTransaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
+      await fn({
+        insert: jest.fn().mockReturnValue({ values: jest.fn() }),
+        update: jest.fn().mockReturnValue({ set: jest.fn().mockReturnValue({ where: jest.fn() }) }),
+      })
+    })
+
+    const entries = [
+      makeEntry("user", "hello"),
+      makeEntry("assistant", "hi there"),
+    ]
+
+    await saveVoiceTranscript("conv-123", 1, entries, "gemini-2.0-flash-live-001", "gemini-live")
+
+    // Verify checkOutputSafety received the actual model and provider, not hardcoded values
+    expect(mockCheckOutputSafety).toHaveBeenCalledWith(
+      "hi there",
+      "gemini-2.0-flash-live-001",
+      "gemini-live",
+      "voice-conv-123",
+    )
+  })
+
+  it("should use fallback strings when voiceModel/voiceProvider are undefined", async () => {
+    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Test" })
+    mockIsGuardrailsEnabled.mockReturnValue(true)
+    mockCheckInputSafety.mockResolvedValue({ allowed: true, processedContent: "hello" })
+    mockCheckOutputSafety.mockResolvedValue({ allowed: true, processedContent: "hi" })
+
+    mockExecuteTransaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
+      await fn({
+        insert: jest.fn().mockReturnValue({ values: jest.fn() }),
+        update: jest.fn().mockReturnValue({ set: jest.fn().mockReturnValue({ where: jest.fn() }) }),
+      })
+    })
+
+    const entries = [
+      makeEntry("user", "hello"),
+      makeEntry("assistant", "hi there"),
+    ]
+
+    // Call without voiceModel and voiceProvider
+    await saveVoiceTranscript("conv-123", 1, entries)
+
+    expect(mockCheckOutputSafety).toHaveBeenCalledWith(
+      "hi there",
+      "unknown-voice-model",
+      "unknown-voice-provider",
+      "voice-conv-123",
+    )
   })
 
   it("should gracefully handle guardrail API errors", async () => {

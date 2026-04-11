@@ -25,6 +25,12 @@ import { getContentSafetyService } from "@/lib/safety"
 import { getConversationById } from "@/lib/db/drizzle/nexus-conversations"
 import type { TranscriptEntry } from "./types"
 
+/**
+ * Default conversation title — shared sentinel used by conversation creation
+ * (nexus-conversations.ts, chat-helpers.ts, route.ts) to detect untitled conversations.
+ */
+const DEFAULT_CONVERSATION_TITLE = "New Conversation"
+
 // ============================================
 // Types
 // ============================================
@@ -87,6 +93,7 @@ const log = createLogger({ module: "TranscriptService" })
  * @param userId - Numeric user ID (for ownership verification)
  * @param transcript - Ordered array of transcript entries from the voice session
  * @param voiceModel - The voice model identifier (e.g. "gemini-2.0-flash-live-001")
+ * @param voiceProvider - The voice provider identifier (e.g. "gemini-live") for guardrail audit trails
  * @returns Result with message count, filtered count, and processing time
  * @throws Error if conversation not found/not owned, or transaction fails
  */
@@ -95,6 +102,7 @@ export async function saveVoiceTranscript(
   userId: number,
   transcript: TranscriptEntry[],
   voiceModel?: string,
+  voiceProvider?: string,
 ): Promise<TranscriptSaveResult> {
   const requestId = generateRequestId()
   const timer = startTimer("saveVoiceTranscript")
@@ -109,9 +117,10 @@ export async function saveVoiceTranscript(
 
   try {
     // Step 1: Verify conversation exists and is owned by user
+    // getConversationById checks both id AND userId (ownership) — returns null for either mismatch
     const conversation = await getConversationById(conversationId, userId)
     if (!conversation) {
-      throw new Error(`Conversation ${conversationId} not found`)
+      throw new Error("Conversation not found or access denied")
     }
 
     // Step 2: Prepare entries — filter non-final, merge consecutive same-role
@@ -119,8 +128,8 @@ export async function saveVoiceTranscript(
 
     if (mergedEntries.length === 0) {
       log.info("No transcript entries to save after preparation", { requestId })
-      timer({ status: "empty" })
-      return { messageCount: 0, filteredCount: 0, titleGenerated: false, processingTimeMs: 0 }
+      const elapsed = timer({ status: "empty" })
+      return { messageCount: 0, filteredCount: 0, titleGenerated: false, processingTimeMs: typeof elapsed === "number" ? elapsed : 0 }
     }
 
     log.info("Transcript entries prepared", {
@@ -130,7 +139,7 @@ export async function saveVoiceTranscript(
     })
 
     // Step 3: Run content through Bedrock guardrails
-    const processedEntries = await applyGuardrails(mergedEntries, conversationId, requestId, voiceModel)
+    const processedEntries = await applyGuardrails(mergedEntries, conversationId, requestId, voiceModel, voiceProvider)
     const filteredCount = processedEntries.filter((e) => e.wasFiltered).length
 
     if (filteredCount > 0) {
@@ -143,7 +152,7 @@ export async function saveVoiceTranscript(
     }
 
     // Step 4: Determine if title needs to be auto-generated
-    const needsTitle = !conversation.title || conversation.title === "New Conversation"
+    const needsTitle = !conversation.title || conversation.title === DEFAULT_CONVERSATION_TITLE
     const autoTitle = needsTitle ? generateVoiceTitle(processedEntries) : null
 
     // Step 5: Atomic save — all messages + conversation metadata in one transaction
@@ -162,28 +171,20 @@ export async function saveVoiceTranscript(
           createdAt: entry.timestamp,
         }))
 
-        if (messageValues.length > 0) {
-          await tx.insert(nexusMessages).values(messageValues)
-        }
+        // processedEntries is guaranteed non-empty (early return above for empty case)
+        await tx.insert(nexusMessages).values(messageValues)
 
-        // Update conversation metadata
-        const updateFields: Record<string, unknown> = {
-          messageCount: sql`COALESCE(${nexusConversations.messageCount}, 0) + ${processedEntries.length}`,
-          lastMessageAt: processedEntries[processedEntries.length - 1].timestamp,
-          updatedAt: new Date(),
-        }
-
-        if (voiceModel) {
-          updateFields.modelUsed = voiceModel
-        }
-
-        if (autoTitle) {
-          updateFields.title = autoTitle
-        }
-
+        // Update conversation metadata — use explicit typed fields to prevent
+        // silent no-ops from misspelled column names (CLAUDE.md silent failure pattern)
         await tx
           .update(nexusConversations)
-          .set(updateFields)
+          .set({
+            messageCount: sql`COALESCE(${nexusConversations.messageCount}, 0) + ${processedEntries.length}`,
+            lastMessageAt: processedEntries[processedEntries.length - 1].timestamp,
+            updatedAt: new Date(),
+            ...(voiceModel ? { modelUsed: voiceModel } : {}),
+            ...(autoTitle ? { title: autoTitle } : {}),
+          })
           .where(eq(nexusConversations.id, conversationId))
       },
       "saveVoiceTranscript",
@@ -259,7 +260,14 @@ export function prepareTranscriptEntries(
     }
   }
 
-  // Step 3: Cap at maximum
+  // Step 3: Cap at maximum — log if truncation occurs so data loss is visible
+  if (merged.length > MAX_TRANSCRIPT_ENTRIES) {
+    log.warn("Transcript truncated to maximum entry limit", {
+      originalCount: merged.length,
+      maxEntries: MAX_TRANSCRIPT_ENTRIES,
+      droppedCount: merged.length - MAX_TRANSCRIPT_ENTRIES,
+    })
+  }
   return merged.slice(0, MAX_TRANSCRIPT_ENTRIES)
 }
 
@@ -278,6 +286,7 @@ async function applyGuardrails(
   conversationId: string,
   requestId: string,
   voiceModel?: string,
+  voiceProvider?: string,
 ): Promise<ProcessedEntry[]> {
   const safetySvc = getContentSafetyService()
 
@@ -301,7 +310,7 @@ async function applyGuardrails(
           // Use the appropriate check based on role
           const result = entry.role === "user"
             ? await safetySvc.checkInputSafety(entry.text, sessionId)
-            : await safetySvc.checkOutputSafety(entry.text, voiceModel ?? "unknown", "gemini-live", sessionId)
+            : await safetySvc.checkOutputSafety(entry.text, voiceModel ?? "unknown-voice-model", voiceProvider ?? "unknown-voice-provider", sessionId)
 
           if (!result.allowed) {
             log.warn("Voice transcript entry filtered by guardrails", {

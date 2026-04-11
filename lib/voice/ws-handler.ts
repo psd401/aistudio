@@ -28,7 +28,7 @@ import {
   MAX_CONVERSATION_ID_LENGTH,
 } from "./constants"
 import { buildInstructionFromConversation } from "./voice-instruction-builder"
-import { getUserIdByCognitoSub } from "@/lib/db/drizzle/users"
+import { getUserIdByCognitoSubAsNumber } from "@/lib/db/drizzle/utils"
 import { saveVoiceTranscript } from "./transcript-service"
 import type {
   VoiceProvider,
@@ -148,28 +148,28 @@ function isValidClientMessage(msg: unknown): msg is VoiceClientMessage {
 /**
  * Resolve the numeric userId from a Cognito sub and build the transcript context.
  * Non-fatal: returns null if userId cannot be resolved.
+ *
+ * Uses the canonical `getUserIdByCognitoSubAsNumber` utility (lib/db/drizzle/utils)
+ * which handles string→number conversion and NaN validation internally.
  */
 async function resolveTranscriptContext(
   conversationId: string,
   cognitoSub: string,
   voiceModel: string,
+  voiceProvider: string,
   logFn: ReturnType<typeof createLogger>,
-): Promise<{ conversationId: string; userId: number; voiceModel: string } | null> {
+): Promise<{ conversationId: string; userId: number; voiceModel: string; voiceProvider: string } | null> {
   try {
-    const userIdStr = await getUserIdByCognitoSub(cognitoSub)
-    if (!userIdStr) {
+    const userId = await getUserIdByCognitoSubAsNumber(cognitoSub)
+    if (!userId) {
       logFn.warn("Could not resolve userId for transcript persistence")
-      return null
-    }
-    const userId = Number.parseInt(userIdStr, 10)
-    if (Number.isNaN(userId) || userId <= 0) {
-      logFn.warn("Resolved userId is not a valid positive integer", { rawValue: userIdStr })
       return null
     }
     return {
       conversationId,
       userId,
       voiceModel,
+      voiceProvider,
     }
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error)
@@ -391,7 +391,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
   /** Captured transcript for persistence — snapshot taken before provider.disconnect() clears it */
   let capturedTranscript: TranscriptEntry[] = []
   /** Session context for transcript persistence — set after auth + config */
-  let transcriptContext: { conversationId: string; userId: number; voiceModel: string } | null = null
+  let transcriptContext: { conversationId: string; userId: number; voiceModel: string; voiceProvider: string } | null = null
 
   /** Idempotent cleanup — synchronous to avoid swallowed errors in event handlers */
   function cleanup(status: string) {
@@ -399,12 +399,13 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     sessionEnded = true
     if (pingInterval) { clearInterval(pingInterval); pingInterval = null }
 
-    // Capture transcript BEFORE disconnect clears it from provider memory
+    // Capture transcript BEFORE disconnect clears it from provider memory.
+    // Shallow copy the array — disconnect() may mutate/clear the original.
     if (providerRef.current) {
       try {
         const state = providerRef.current.getSessionState()
         if (state.transcript.length > 0) {
-          capturedTranscript = state.transcript
+          capturedTranscript = [...state.transcript]
         }
       } catch {
         log.warn("Failed to capture transcript before disconnect")
@@ -418,12 +419,12 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
 
     // Fire-and-forget transcript persistence — non-blocking, non-fatal
     if (transcriptContext && capturedTranscript.length > 0) {
-      const { conversationId, userId, voiceModel } = transcriptContext
+      const { conversationId, userId, voiceModel, voiceProvider } = transcriptContext
       log.info("Persisting voice transcript", {
         conversationId,
         entryCount: capturedTranscript.length,
       })
-      saveVoiceTranscript(conversationId, userId, capturedTranscript, voiceModel)
+      saveVoiceTranscript(conversationId, userId, capturedTranscript, voiceModel, voiceProvider)
         .then((result) => {
           const logMethod = result.processingTimeMs > 5000 ? "warn" : "info"
           log[logMethod]("Voice transcript persisted", {
@@ -535,14 +536,20 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       clearTimeout(connectTimer)
     }
 
+    // Step 7: Register message handler BEFORE signaling ready — prevents
+    // dropping early audio frames if the client sends immediately after "ready".
+    registerMessageHandler(ws, providerRef, log)
+
     // Signal session is fully ready for audio
     sendToClient(ws, { type: "ready" })
     log.info("Voice session ready")
 
-    // Set up transcript persistence context (requires conversationId + resolved userId)
-    if (sessionConfig?.conversationId) {
+    // Set up transcript persistence context in the background (non-blocking).
+    // The message handler is already registered above, so no audio frames are lost
+    // during this async DB lookup.
+    if (sessionConfig?.conversationId && voiceSettings.model && voiceSettings.provider) {
       transcriptContext = await resolveTranscriptContext(
-        sessionConfig.conversationId, auth.sub, voiceSettings.model!, log,
+        sessionConfig.conversationId, auth.sub, voiceSettings.model, voiceSettings.provider, log,
       )
       if (transcriptContext) {
         log.info("Transcript persistence enabled", {
@@ -550,9 +557,6 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
         })
       }
     }
-
-    // Step 7: Register message handler AFTER connect (clients must wait for second "ready")
-    registerMessageHandler(ws, providerRef, log)
 
     // Step 8: Keepalive ping — cleanup() handles clearInterval on close/error
     pingInterval = setInterval(() => {
