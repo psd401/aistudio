@@ -145,6 +145,82 @@ function isValidClientMessage(msg: unknown): msg is VoiceClientMessage {
   return true
 }
 
+/**
+ * Resolve the numeric userId from a Cognito sub and build the transcript context.
+ * Non-fatal: returns null if userId cannot be resolved.
+ */
+async function resolveTranscriptContext(
+  conversationId: string,
+  cognitoSub: string,
+  voiceModel: string,
+  logFn: ReturnType<typeof createLogger>,
+): Promise<{ conversationId: string; userId: number; voiceModel: string } | null> {
+  try {
+    const userIdStr = await getUserIdByCognitoSub(cognitoSub)
+    if (!userIdStr) {
+      logFn.warn("Could not resolve userId for transcript persistence")
+      return null
+    }
+    return {
+      conversationId,
+      userId: Number.parseInt(userIdStr, 10),
+      voiceModel,
+    }
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
+    logFn.warn("Failed to set up transcript persistence context", { error: msg })
+    return null
+  }
+}
+
+/** Register the client message handler on the WebSocket. */
+function registerMessageHandler(
+  ws: WebSocket,
+  providerRef: { current: VoiceProvider | null },
+  logFn: ReturnType<typeof createLogger>,
+): void {
+  let lastAudioTime = 0
+  ws.on("message", (data) => {
+    try {
+      const parsed: unknown = JSON.parse(data.toString())
+      if (!isValidClientMessage(parsed)) {
+        logFn.warn("Invalid client message format")
+        return
+      }
+
+      switch (parsed.type) {
+        case "audio": {
+          if (!providerRef.current?.isConnected()) break
+          if (parsed.data.length > MAX_AUDIO_DATA_LENGTH) {
+            logFn.warn("Audio data too large", { length: parsed.data.length })
+            break
+          }
+          const now = Date.now()
+          if (now - lastAudioTime < MIN_AUDIO_INTERVAL_MS) break
+          lastAudioTime = now
+          providerRef.current.sendAudio(Buffer.from(parsed.data, "base64"))
+          break
+        }
+
+        case "session_config":
+          logFn.debug("Ignoring late session_config (provider already connected)")
+          break
+
+        case "disconnect": {
+          logFn.info("Client requested disconnect")
+          providerRef.current?.disconnect().catch((e: Error) =>
+            logFn.warn("Error during client-requested disconnect", { error: e.message })
+          )
+          break
+        }
+      }
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error)
+      logFn.error("Error processing client message", { error: errorMessage })
+    }
+  })
+}
+
 /** Forward a provider event to the client WebSocket. */
 function forwardProviderEvent(ws: WebSocket, event: VoiceProviderEvent): void {
   switch (event.type) {
@@ -303,7 +379,8 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
   const log = createLogger({ requestId, context: "voice-ws" })
   const timer = startTimer("voice-session")
 
-  let provider: VoiceProvider | null = null
+  /** Mutable ref so both cleanup() and registerMessageHandler() share the same provider pointer */
+  const providerRef: { current: VoiceProvider | null } = { current: null }
   let pingInterval: ReturnType<typeof setInterval> | null = null
   let sessionEnded = false
   /** Captured transcript for persistence — snapshot taken before provider.disconnect() clears it */
@@ -318,9 +395,9 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     if (pingInterval) { clearInterval(pingInterval); pingInterval = null }
 
     // Capture transcript BEFORE disconnect clears it from provider memory
-    if (provider) {
+    if (providerRef.current) {
       try {
-        const state = provider.getSessionState()
+        const state = providerRef.current.getSessionState()
         if (state.transcript.length > 0) {
           capturedTranscript = state.transcript
         }
@@ -328,10 +405,10 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
         log.warn("Failed to capture transcript before disconnect")
       }
 
-      provider.disconnect().catch((e: Error) =>
+      providerRef.current.disconnect().catch((e: Error) =>
         log.warn("Provider disconnect failed during cleanup", { error: e.message })
       )
-      provider = null
+      providerRef.current = null
     }
 
     // Fire-and-forget transcript persistence — non-blocking, non-fatal
@@ -407,7 +484,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       return
     }
     // Non-null safe: validateVoiceConfig returned null, so provider is valid
-    provider = createVoiceProvider(voiceSettings.provider!)
+    providerRef.current = createVoiceProvider(voiceSettings.provider!)
 
     // Step 4: Register close/error handlers BEFORE provider.connect()
     ws.on("close", (code, reason) => { log.info("Voice WS closed", { code, reason: reason.toString() }); cleanup("success") })
@@ -442,7 +519,7 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     const connectTimer = setTimeout(() => connectAbort.abort(), PROVIDER_CONNECT_TIMEOUT_MS)
 
     try {
-      await provider.connect(
+      await providerRef.current.connect(
         providerConfig,
         (event) => forwardProviderEvent(ws, event),
         connectAbort.signal,
@@ -457,68 +534,18 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
 
     // Set up transcript persistence context (requires conversationId + resolved userId)
     if (sessionConfig?.conversationId) {
-      try {
-        const userIdStr = await getUserIdByCognitoSub(auth.sub)
-        if (userIdStr) {
-          transcriptContext = {
-            conversationId: sessionConfig.conversationId,
-            userId: Number.parseInt(userIdStr, 10),
-            voiceModel: voiceSettings.model!,
-          }
-          log.info("Transcript persistence enabled", {
-            conversationId: sessionConfig.conversationId,
-          })
-        } else {
-          log.warn("Could not resolve userId for transcript persistence")
-        }
-      } catch (error) {
-        const msg = error instanceof Error ? error.message : String(error)
-        log.warn("Failed to set up transcript persistence context", { error: msg })
+      transcriptContext = await resolveTranscriptContext(
+        sessionConfig.conversationId, auth.sub, voiceSettings.model!, log,
+      )
+      if (transcriptContext) {
+        log.info("Transcript persistence enabled", {
+          conversationId: sessionConfig.conversationId,
+        })
       }
     }
 
     // Step 7: Register message handler AFTER connect (clients must wait for second "ready")
-    let lastAudioTime = 0
-    ws.on("message", (data) => {
-      try {
-        const parsed: unknown = JSON.parse(data.toString())
-        if (!isValidClientMessage(parsed)) {
-          log.warn("Invalid client message format")
-          return
-        }
-
-        switch (parsed.type) {
-          case "audio": {
-            if (!provider?.isConnected()) break
-            // Validate base64 string length (aligned with WS_MAX_PAYLOAD via 4:3 ratio)
-            if (parsed.data.length > MAX_AUDIO_DATA_LENGTH) {
-              log.warn("Audio data too large", { length: parsed.data.length })
-              break
-            }
-            const now = Date.now()
-            if (now - lastAudioTime < MIN_AUDIO_INTERVAL_MS) break
-            lastAudioTime = now
-            provider.sendAudio(Buffer.from(parsed.data, "base64"))
-            break
-          }
-
-          case "session_config":
-            log.debug("Ignoring late session_config (provider already connected)")
-            break
-
-          case "disconnect": {
-            log.info("Client requested disconnect")
-            provider?.disconnect().catch((e: Error) =>
-              log.warn("Error during client-requested disconnect", { error: e.message })
-            )
-            break
-          }
-        }
-      } catch (error) {
-        const errorMessage = error instanceof Error ? error.message : String(error)
-        log.error("Error processing client message", { error: errorMessage })
-      }
-    })
+    registerMessageHandler(ws, providerRef, log)
 
     // Step 8: Keepalive ping — cleanup() handles clearInterval on close/error
     pingInterval = setInterval(() => {
