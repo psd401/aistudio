@@ -161,9 +161,14 @@ async function resolveTranscriptContext(
       logFn.warn("Could not resolve userId for transcript persistence")
       return null
     }
+    const userId = Number.parseInt(userIdStr, 10)
+    if (Number.isNaN(userId) || userId <= 0) {
+      logFn.warn("Resolved userId is not a valid positive integer", { rawValue: userIdStr })
+      return null
+    }
     return {
       conversationId,
-      userId: Number.parseInt(userIdStr, 10),
+      userId,
       voiceModel,
     }
   } catch (error) {
@@ -420,12 +425,14 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
       })
       saveVoiceTranscript(conversationId, userId, capturedTranscript, voiceModel)
         .then((result) => {
-          log.info("Voice transcript persisted", {
+          const logMethod = result.processingTimeMs > 5000 ? "warn" : "info"
+          log[logMethod]("Voice transcript persisted", {
             conversationId,
             messageCount: result.messageCount,
             filteredCount: result.filteredCount,
             titleGenerated: result.titleGenerated,
             processingTimeMs: result.processingTimeMs,
+            ...(result.processingTimeMs > 5000 ? { slow: true } : {}),
           })
         })
         .catch((error: Error) => {

@@ -63,8 +63,8 @@ const FILTERED_CONTENT_NOTICE = "[Content filtered by safety policy]"
 /** Maximum title length (matches DB constraint of 500, but we target 40 for consistency) */
 const MAX_TITLE_LENGTH = 40
 
-/** Batch size for guardrail checks — process this many entries per API call */
-const GUARDRAIL_BATCH_SIZE = 20
+/** Max concurrent guardrail checks — entries are processed in sequential batches of this size */
+const GUARDRAIL_CONCURRENCY_LIMIT = 20
 
 const log = createLogger({ module: "TranscriptService" })
 
@@ -111,7 +111,7 @@ export async function saveVoiceTranscript(
     // Step 1: Verify conversation exists and is owned by user
     const conversation = await getConversationById(conversationId, userId)
     if (!conversation) {
-      throw new Error(`Conversation ${conversationId} not found or not owned by user ${userId}`)
+      throw new Error(`Conversation ${conversationId} not found`)
     }
 
     // Step 2: Prepare entries — filter non-final, merge consecutive same-role
@@ -130,7 +130,7 @@ export async function saveVoiceTranscript(
     })
 
     // Step 3: Run content through Bedrock guardrails
-    const processedEntries = await applyGuardrails(mergedEntries, conversationId, requestId)
+    const processedEntries = await applyGuardrails(mergedEntries, conversationId, requestId, voiceModel)
     const filteredCount = processedEntries.filter((e) => e.wasFiltered).length
 
     if (filteredCount > 0) {
@@ -277,6 +277,7 @@ async function applyGuardrails(
   entries: Array<{ role: "user" | "assistant"; text: string; timestamp: Date }>,
   conversationId: string,
   requestId: string,
+  voiceModel?: string,
 ): Promise<ProcessedEntry[]> {
   const safetySvc = getContentSafetyService()
 
@@ -288,8 +289,8 @@ async function applyGuardrails(
   const processed: ProcessedEntry[] = []
 
   // Process in batches
-  for (let i = 0; i < entries.length; i += GUARDRAIL_BATCH_SIZE) {
-    const batch = entries.slice(i, i + GUARDRAIL_BATCH_SIZE)
+  for (let i = 0; i < entries.length; i += GUARDRAIL_CONCURRENCY_LIMIT) {
+    const batch = entries.slice(i, i + GUARDRAIL_CONCURRENCY_LIMIT)
 
     // Process each entry in the batch concurrently
     const batchResults = await Promise.all(
@@ -300,7 +301,7 @@ async function applyGuardrails(
           // Use the appropriate check based on role
           const result = entry.role === "user"
             ? await safetySvc.checkInputSafety(entry.text, sessionId)
-            : await safetySvc.checkOutputSafety(entry.text, "voice-model", "gemini-live", sessionId)
+            : await safetySvc.checkOutputSafety(entry.text, voiceModel ?? "unknown", "gemini-live", sessionId)
 
           if (!result.allowed) {
             log.warn("Voice transcript entry filtered by guardrails", {
