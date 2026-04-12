@@ -455,6 +455,50 @@ describe("saveVoiceTranscript", () => {
     expect((capturedValues[1] as { content: string }).content).toBe("transformed response")
   })
 
+  it("should log error when all entries are filtered by guardrails", async () => {
+    mockLogger.error.mockClear()
+    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Test" })
+    mockIsGuardrailsEnabled.mockReturnValue(true)
+    // Block every entry
+    mockCheckInputSafety.mockResolvedValue({
+      allowed: false,
+      processedContent: "blocked",
+      blockedReason: "Violence",
+      blockedCategories: ["Violence"],
+    })
+    mockCheckOutputSafety.mockResolvedValue({
+      allowed: false,
+      processedContent: "blocked",
+      blockedReason: "Violence",
+      blockedCategories: ["Violence"],
+    })
+
+    mockExecuteTransaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
+      await fn({
+        insert: jest.fn().mockReturnValue({ values: jest.fn() }),
+        update: jest.fn().mockReturnValue({ set: jest.fn().mockReturnValue({ where: jest.fn() }) }),
+      })
+    })
+
+    const entries = [
+      makeEntry("user", "bad content"),
+      makeEntry("assistant", "bad response"),
+    ]
+
+    const result = await saveVoiceTranscript("conv-123", 1, entries)
+    expect(result.filteredCount).toBe(2)
+    expect(result.messageCount).toBe(2)
+    // When 100% of entries are filtered, an error-level log should be emitted
+    expect(mockLogger.error).toHaveBeenCalledWith(
+      "Voice transcript entries filtered by guardrails",
+      expect.objectContaining({
+        filteredCount: 2,
+        totalCount: 2,
+        allFiltered: true,
+      }),
+    )
+  })
+
   it("should gracefully handle guardrail API errors", async () => {
     mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Test" })
     mockIsGuardrailsEnabled.mockReturnValue(true)
@@ -543,6 +587,27 @@ describe("saveVoiceTranscript", () => {
     ).rejects.toThrow("DB connection lost")
   })
 
+  it("should propagate errors when transaction callback throws (rollback path)", async () => {
+    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Test" })
+    mockIsGuardrailsEnabled.mockReturnValue(false)
+    // Simulate executeTransaction throwing because the callback itself failed —
+    // in production, Drizzle rolls back automatically on callback throw.
+    mockExecuteTransaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
+      const mockTx = {
+        insert: jest.fn().mockReturnValue({
+          values: jest.fn().mockRejectedValue(new Error("unique constraint violation")),
+        }),
+        update: jest.fn().mockReturnValue({ set: jest.fn().mockReturnValue({ where: jest.fn() }) }),
+      }
+      await fn(mockTx)
+    })
+
+    const entries = [makeEntry("user", "hello")]
+    await expect(
+      saveVoiceTranscript("conv-123", 1, entries),
+    ).rejects.toThrow("unique constraint violation")
+  })
+
   it("should propagate getConversationById errors (DB failure vs returning null)", async () => {
     mockGetConversationById.mockRejectedValue(new Error("Connection refused"))
 
@@ -550,6 +615,34 @@ describe("saveVoiceTranscript", () => {
     await expect(
       saveVoiceTranscript("conv-123", 1, entries),
     ).rejects.toThrow("Connection refused")
+  })
+
+  it("should warn when processedContent is null or undefined from safety service", async () => {
+    mockLogger.warn.mockClear()
+    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Test" })
+    mockIsGuardrailsEnabled.mockReturnValue(true)
+    mockCheckInputSafety.mockResolvedValue({ allowed: true, processedContent: null })
+    mockCheckOutputSafety.mockResolvedValue({ allowed: true, processedContent: undefined })
+
+    mockExecuteTransaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
+      await fn({
+        insert: jest.fn().mockReturnValue({ values: jest.fn() }),
+        update: jest.fn().mockReturnValue({ set: jest.fn().mockReturnValue({ where: jest.fn() }) }),
+      })
+    })
+
+    const entries = [
+      makeEntry("user", "hello"),
+      makeEntry("assistant", "hi"),
+    ]
+
+    await saveVoiceTranscript("conv-123", 1, entries)
+
+    // Should warn for each entry with null/undefined processedContent
+    const processedContentWarns = mockLogger.warn.mock.calls.filter(
+      (call: unknown[]) => call[0] === "Safety service returned no processedContent, using original text",
+    )
+    expect(processedContentWarns).toHaveLength(2)
   })
 
   it("should fall back to original text when processedContent is null or undefined", async () => {
@@ -648,10 +741,10 @@ describe("voice title generation", () => {
     const entries = [makeEntry("user", longMessage)]
     const result = await saveVoiceTranscript("conv-123", 1, entries)
     expect(result.titleGenerated).toBe(true)
-    // Title is at most 40 chars + "..." (43 total); trim() may make it shorter
+    // Title is at most MAX_TITLE_LENGTH (40) including the "..." suffix
     expect(updateArgs.title).toBeDefined()
     const title = updateArgs.title as string
-    expect(title.length).toBeLessThanOrEqual(43)
+    expect(title.length).toBeLessThanOrEqual(40)
     expect(title.endsWith("...")).toBe(true)
   })
 

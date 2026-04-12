@@ -70,7 +70,11 @@ const MAX_TRANSCRIPT_ENTRIES = 500
 /** Placeholder text for content blocked by safety guardrails */
 const FILTERED_CONTENT_NOTICE = "[Content filtered by safety policy]"
 
-/** Maximum title length (matches DB constraint of 500, but we target 40 for consistency) */
+/**
+ * Maximum title length INCLUDING the "..." suffix.
+ * Titles longer than this are truncated to (MAX_TITLE_LENGTH - 3) + "...".
+ * Matches the DB constraint of 500, but we target 40 total for UI consistency.
+ */
 const MAX_TITLE_LENGTH = 40
 
 /** Max concurrent guardrail checks — entries are processed in sequential batches of this size */
@@ -126,9 +130,15 @@ export async function saveVoiceTranscript(
 
   try {
     // Step 1: Verify conversation exists and is owned by user
-    // getConversationById checks both id AND userId (ownership) — returns null for either mismatch
+    // getConversationById checks both id AND userId (ownership) — returns null for either mismatch.
+    // A null result can mean the conversation was deleted mid-session or userId doesn't match.
     const conversation = await getConversationById(conversationId, userId)
     if (!conversation) {
+      log.warn("Conversation not found or not owned — transcript will not be saved", {
+        requestId,
+        conversationId,
+        userId,
+      })
       throw new Error("Conversation not found or access denied")
     }
 
@@ -154,11 +164,16 @@ export async function saveVoiceTranscript(
     const filteredCount = processedEntries.filter((e) => e.wasFiltered).length
 
     if (filteredCount > 0) {
-      log.warn("Voice transcript entries filtered by guardrails", {
+      const allFiltered = filteredCount === processedEntries.length
+      // Elevated to error when 100% of entries are filtered — may indicate guardrail
+      // misconfiguration or systematic abuse. Operators should investigate.
+      const logLevel = allFiltered ? "error" : "warn"
+      log[logLevel]("Voice transcript entries filtered by guardrails", {
         requestId,
         conversationId,
         filteredCount,
         totalCount: processedEntries.length,
+        allFiltered,
       })
     }
 
@@ -384,6 +399,12 @@ async function applyGuardrailsBatched(
           // Use processedContent if the safety service transformed the text (e.g., PII redaction).
           // Currently the quick check methods don't modify content, but this is defensive
           // against future safety service changes that may introduce content transformations.
+          if (result.processedContent == null) {
+            log.warn("Safety service returned no processedContent, using original text", {
+              requestId,
+              role: entry.role,
+            })
+          }
           return { ...entry, text: result.processedContent ?? entry.text, wasFiltered: false }
         } catch (error) {
           // Graceful degradation — allow entry through on error
@@ -422,5 +443,6 @@ function generateVoiceTitle(entries: ProcessedEntry[]): string | null {
   if (!cleaned) return null
 
   if (cleaned.length <= MAX_TITLE_LENGTH) return cleaned
-  return `${cleaned.slice(0, MAX_TITLE_LENGTH).trim()}...`
+  // Truncate to (MAX_TITLE_LENGTH - 3) so total with "..." never exceeds MAX_TITLE_LENGTH
+  return `${cleaned.slice(0, MAX_TITLE_LENGTH - 3).trim()}...`
 }

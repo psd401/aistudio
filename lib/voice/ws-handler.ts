@@ -26,6 +26,7 @@ import {
   PING_INTERVAL_MS,
   WS_OPEN,
   MAX_CONVERSATION_ID_LENGTH,
+  TRANSCRIPT_CONTEXT_TIMEOUT_MS,
 } from "./constants"
 import { buildInstructionFromConversation } from "./voice-instruction-builder"
 import { getUserIdByCognitoSubAsNumber } from "@/lib/db/drizzle/utils"
@@ -147,7 +148,8 @@ function isValidClientMessage(msg: unknown): msg is VoiceClientMessage {
 
 /**
  * Resolve the numeric userId from a Cognito sub and build the transcript context.
- * Non-fatal: returns null if userId cannot be resolved.
+ * Non-fatal: returns null if userId cannot be resolved or if the DB lookup
+ * exceeds TRANSCRIPT_CONTEXT_TIMEOUT_MS (prevents hanging cleanup on slow DB).
  *
  * Uses the canonical `getUserIdByCognitoSubAsNumber` utility (lib/db/drizzle/utils)
  * which handles string→number conversion and NaN validation internally.
@@ -159,8 +161,17 @@ async function resolveTranscriptContext(
   voiceProvider: string,
   logFn: ReturnType<typeof createLogger>,
 ): Promise<{ conversationId: string; userId: number; voiceModel: string; voiceProvider: string } | null> {
+  let timeoutHandle: ReturnType<typeof setTimeout> | undefined
   try {
-    const userId = await getUserIdByCognitoSubAsNumber(cognitoSub)
+    const userId = await Promise.race([
+      getUserIdByCognitoSubAsNumber(cognitoSub),
+      new Promise<never>((_, reject) => {
+        timeoutHandle = setTimeout(
+          () => reject(new Error("Transcript context resolution timed out")),
+          TRANSCRIPT_CONTEXT_TIMEOUT_MS,
+        )
+      }),
+    ])
     if (!userId) {
       logFn.warn("Could not resolve userId for transcript persistence")
       return null
@@ -175,6 +186,8 @@ async function resolveTranscriptContext(
     const msg = error instanceof Error ? error.message : String(error)
     logFn.warn("Failed to set up transcript persistence context", { error: msg })
     return null
+  } finally {
+    if (timeoutHandle) clearTimeout(timeoutHandle)
   }
 }
 
@@ -294,7 +307,12 @@ async function cleanupSession(
   }
 
   // If transcriptContext hasn't resolved yet (early disconnect), await the in-flight promise
-  // so we don't silently lose the transcript. This is bounded by the DB query timeout.
+  // so we don't silently lose the transcript. This is bounded by TRANSCRIPT_CONTEXT_TIMEOUT_MS.
+  //
+  // Double-await safety: handleVoiceConnection also awaits this same promise. Since JS
+  // promises settle exactly once, both awaits resolve to the same value. The sessionEnded
+  // flag (set synchronously above) prevents handleVoiceConnection from mutating state
+  // after cleanup has run — it checks sessionEnded before starting the ping interval.
   if (!state.transcriptContext && state.transcriptContextPromise) {
     try {
       state.transcriptContext = await state.transcriptContextPromise

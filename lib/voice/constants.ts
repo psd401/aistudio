@@ -46,3 +46,11 @@ export const MAX_SESSION_INSTRUCTION_LENGTH = 10_000
 
 /** Max length for conversationId in session_config (UUID = 36 chars) */
 export const MAX_CONVERSATION_ID_LENGTH = 36
+
+/**
+ * Timeout for resolveTranscriptContext DB lookup during session setup (ms).
+ * If the DB is slow, this prevents the in-flight promise from blocking
+ * cleanup resource release indefinitely. On timeout, transcript persistence
+ * is silently skipped (non-fatal).
+ */
+export const TRANSCRIPT_CONTEXT_TIMEOUT_MS = 5_000
