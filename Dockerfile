@@ -54,6 +54,11 @@ ENV RDS_SECRET_ARN=${RDS_SECRET_ARN}
 RUN --mount=type=cache,target=/app/.next/cache \
     node_modules/.bin/next build --webpack
 
+# Bundle voice WebSocket handler as a self-contained CJS artifact for voice-server.js.
+# The script fails the build if any non-builtin runtime externals leak into the bundle.
+# Writing into .next/standalone ensures the runner-stage COPY picks it up automatically.
+RUN node scripts/build-voice-ws-handler.mjs
+
 # ============================================================================
 # Stage 3: Production Runner
 # ============================================================================

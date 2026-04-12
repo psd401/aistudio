@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build --webpack",
+    "build:voice-ws-handler": "node scripts/build-voice-ws-handler.mjs",
     "start": "next start",
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",

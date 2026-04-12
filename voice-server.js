@@ -28,11 +28,11 @@ const { parse } = require('url')
 
 const VOICE_WS_PATH = '/api/nexus/voice'
 
-// WS handler module path in Next.js standalone output.
-// This is a build output path, not a public API — if Next.js changes the
-// standalone structure, update this path. The app will log a clear error
-// and continue serving HTTP if this path becomes stale.
-const WS_HANDLER_PATH = './.next/server/lib/voice/ws-handler'
+// WS handler module: pre-bundled CJS file built by esbuild during Docker build.
+// Next.js standalone output doesn't include ws-handler.ts (it's outside the
+// page/route dependency graph), so we bundle it separately in the Dockerfile.
+// See scripts/build-voice-ws-handler.mjs for the bundle definition.
+const WS_HANDLER_PATH = './ws-handler-bundle.cjs'
 
 let wss = null
 let wsHandlerAvailable = false
