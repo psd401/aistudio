@@ -422,6 +422,7 @@ VALUES (
 ON CONFLICT (key) DO NOTHING;
 
 -- Voice mode global kill switch - Issue #876
+-- Use DO UPDATE so this overrides the migration default of 'false' for local dev
 INSERT INTO settings (key, value, description, category, is_secret)
 VALUES (
     'VOICE_ENABLED',
@@ -430,7 +431,7 @@ VALUES (
     'voice',
     false
 )
-ON CONFLICT (key) DO NOTHING;
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 
 -- ============================================================================
 -- Summary

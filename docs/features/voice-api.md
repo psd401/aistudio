@@ -50,14 +50,14 @@ Possible reasons:
 
 Bidirectional audio streaming for real-time voice conversations.
 
-**Auth:** Session cookie (Auth.js encrypted JWT) validated on upgrade. `hasToolAccess("voice-mode")` checked before session starts.
+**Auth:** Session cookie (Auth.js encrypted JWT) validated on upgrade. Centralized `getVoiceAvailability()` checked before session starts.
 
 **Origin:** Validated against `ALLOWED_ORIGINS` env var, `NEXTAUTH_URL`, or same-origin fallback.
 
 **Close codes:**
 - `4001` — Unauthorized (invalid/missing session)
-- `4003` — Forbidden (no voice-mode access)
-- `4500` — Server error (provider unavailable, config missing)
+- `4003` — Forbidden (admin disabled voice, or user lacks voice-mode permission)
+- `4500` — Server error (provider unavailable, config missing, API key absent)
 
 #### Connection Flow
 

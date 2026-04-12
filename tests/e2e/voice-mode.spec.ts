@@ -5,20 +5,20 @@
  * and keyboard interaction. Does NOT test actual audio capture/playback
  * (Web Audio API is not available in Playwright).
  *
- * Issue #873
+ * Issue #873, #876
  */
 
 import { test, expect } from '@playwright/test'
 
 test.describe('Voice Mode', () => {
   test.describe('Voice button visibility', () => {
-    test('voice button is hidden when user lacks voice-mode permission', async ({ page }) => {
-      // Mock the voice-info endpoint to return unavailable
-      await page.route('**/api/nexus/voice-info', (route) =>
+    test('voice button is hidden when voice mode is disabled by administrator', async ({ page }) => {
+      // Mock the availability endpoint — hook now calls /api/nexus/voice/availability
+      await page.route('**/api/nexus/voice/availability', (route) =>
         route.fulfill({
-          status: 403,
+          status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ error: 'Voice mode not enabled' }),
+          body: JSON.stringify({ available: false, reason: 'Voice mode is disabled by administrator' }),
         })
       )
 
@@ -30,12 +30,28 @@ test.describe('Voice Mode', () => {
       await expect(voiceButton).not.toBeAttached()
     })
 
-    test('voice button is hidden when voice provider is not configured', async ({ page }) => {
-      await page.route('**/api/nexus/voice-info', (route) =>
+    test('voice button is hidden when user lacks voice-mode permission', async ({ page }) => {
+      await page.route('**/api/nexus/voice/availability', (route) =>
         route.fulfill({
           status: 200,
           contentType: 'application/json',
-          body: JSON.stringify({ available: false }),
+          body: JSON.stringify({ available: false, reason: 'Voice mode is not enabled for your role' }),
+        })
+      )
+
+      await page.goto('/nexus')
+      await page.waitForSelector('[data-role="user"], [placeholder="How can I help you today?"]', { timeout: 10000 })
+
+      const voiceButton = page.getByTestId('voice-mode-button')
+      await expect(voiceButton).not.toBeAttached()
+    })
+
+    test('voice button is hidden when voice provider is not configured', async ({ page }) => {
+      await page.route('**/api/nexus/voice/availability', (route) =>
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({ available: false, reason: 'Voice mode is not currently available' }),
         })
       )
 
@@ -47,7 +63,7 @@ test.describe('Voice Mode', () => {
     })
 
     test('voice button is visible when voice mode is available', async ({ page }) => {
-      await page.route('**/api/nexus/voice-info', (route) =>
+      await page.route('**/api/nexus/voice/availability', (route) =>
         route.fulfill({
           status: 200,
           contentType: 'application/json',

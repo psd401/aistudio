@@ -288,7 +288,7 @@ describe("handleVoiceConnection", () => {
     })
 
     it("should close with 4003 when user lacks voice-mode access", async () => {
-      mockGetVoiceAvailability.mockResolvedValue({ available: false, reason: "Voice mode is not enabled for your role" })
+      mockGetVoiceAvailability.mockResolvedValue({ available: false, reason: "Voice mode is not enabled for your role", type: "permission" })
 
       const ws = createMockWs()
       const req = createMockReq({ "authjs.session-token": "valid-token" })
@@ -302,7 +302,7 @@ describe("handleVoiceConnection", () => {
       expect(ws.close).toHaveBeenCalledWith(4003, "Forbidden")
     })
 
-    it("should close with 4003 when availability check throws (fail-closed)", async () => {
+    it("should close with 4500 when availability check throws (fail-closed)", async () => {
       mockGetVoiceAvailability.mockRejectedValue(new Error("DB error"))
 
       const ws = createMockWs()
@@ -310,7 +310,8 @@ describe("handleVoiceConnection", () => {
 
       await handleVoiceConnection(ws, req)
 
-      expect(ws.close).toHaveBeenCalledWith(4003, "Forbidden")
+      // Caught exceptions are treated as config errors (4500)
+      expect(ws.close).toHaveBeenCalledWith(4500, "Provider not configured")
     })
 
     it("should proceed when user has voice-mode access", async () => {
@@ -344,12 +345,13 @@ describe("handleVoiceConnection", () => {
       expect(ws.close).toHaveBeenCalledWith(4001, "Unauthorized")
     })
 
-    it("should close with 4003 when Google API key is missing (caught by availability check)", async () => {
+    it("should close with 4500 when Google API key is missing (caught by availability check)", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
       mockGetVoiceAvailability.mockResolvedValue({
         available: false,
         reason: "Voice mode is not currently available",
         internalReason: "Voice provider API key not configured",
+        type: "config",
       })
 
       const ws = createMockWs()
@@ -361,7 +363,8 @@ describe("handleVoiceConnection", () => {
       expect(ws.send).toHaveBeenCalledWith(
         expect.stringContaining("Voice mode is not currently available")
       )
-      expect(ws.close).toHaveBeenCalledWith(4003, "Forbidden")
+      // Config issues use 4500, not 4003
+      expect(ws.close).toHaveBeenCalledWith(4500, "Provider not configured")
     })
 
     it("should close with 4500 when provider.connect() times out", async () => {

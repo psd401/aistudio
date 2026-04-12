@@ -17,6 +17,10 @@
 
 import { Settings } from "@/lib/settings-manager"
 import { hasToolAccess } from "@/lib/db/drizzle/users"
+import { isSupportedVoiceProvider } from "./provider-factory"
+
+/** Categorizes the type of unavailability for downstream close-code decisions */
+export type UnavailabilityType = "permission" | "config"
 
 export interface VoiceAvailabilityResult {
   /** Whether voice mode is available for this user */
@@ -25,6 +29,8 @@ export interface VoiceAvailabilityResult {
   reason?: string
   /** Detailed internal reason for server-side logging only (may contain config details) */
   internalReason?: string
+  /** Category of failure — "permission" for user/admin issues, "config" for server-side issues */
+  type?: UnavailabilityType
 }
 
 /**
@@ -37,21 +43,22 @@ export async function getVoiceAvailability(cognitoSub: string): Promise<VoiceAva
   // 1. Check global voice enabled setting
   const voiceSettings = await Settings.getVoice()
   if (!voiceSettings.enabled) {
-    return { available: false, reason: "Voice mode is disabled by administrator" }
+    return { available: false, reason: "Voice mode is disabled by administrator", type: "permission" }
   }
 
   // 2. Check user has voice-mode permission
   const hasAccess = await hasToolAccess(cognitoSub, "voice-mode")
   if (!hasAccess) {
-    return { available: false, reason: "Voice mode is not enabled for your role" }
+    return { available: false, reason: "Voice mode is not enabled for your role", type: "permission" }
   }
 
-  // 3. Check provider and model are configured
-  if (!voiceSettings.provider || !voiceSettings.model) {
+  // 3. Check provider and model are configured and provider is supported
+  if (!voiceSettings.provider || !voiceSettings.model || !isSupportedVoiceProvider(voiceSettings.provider)) {
     return {
       available: false,
       reason: "Voice mode is not currently available",
-      internalReason: "Voice provider not configured",
+      internalReason: "Voice provider not configured or unsupported",
+      type: "config",
     }
   }
 
@@ -62,6 +69,7 @@ export async function getVoiceAvailability(cognitoSub: string): Promise<VoiceAva
       available: false,
       reason: "Voice mode is not currently available",
       internalReason: "Voice provider API key not configured",
+      type: "config",
     }
   }
 
