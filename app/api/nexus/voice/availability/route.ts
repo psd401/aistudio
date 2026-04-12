@@ -35,13 +35,15 @@ export async function GET() {
 
     log.info("Voice availability checked", {
       available: result.available,
-      reason: result.reason,
+      reason: result.internalReason ?? result.reason,
     })
 
     timer({ status: "success" })
-    return NextResponse.json(result, {
-      headers: { "Cache-Control": "max-age=30, private" },
-    })
+    // Only send client-safe fields — omit internalReason which may contain config details
+    return NextResponse.json(
+      { available: result.available, reason: result.reason },
+      { headers: { "Cache-Control": "max-age=30, private" } },
+    )
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     log.error("Error checking voice availability", { error: message })

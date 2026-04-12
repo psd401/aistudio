@@ -21,8 +21,10 @@ import { hasToolAccess } from "@/lib/db/drizzle/users"
 export interface VoiceAvailabilityResult {
   /** Whether voice mode is available for this user */
   available: boolean
-  /** Human-readable reason when voice is not available */
+  /** Human-readable reason when voice is not available (safe for client display) */
   reason?: string
+  /** Detailed internal reason for server-side logging only (may contain config details) */
+  internalReason?: string
 }
 
 /**
@@ -46,13 +48,21 @@ export async function getVoiceAvailability(cognitoSub: string): Promise<VoiceAva
 
   // 3. Check provider and model are configured
   if (!voiceSettings.provider || !voiceSettings.model) {
-    return { available: false, reason: "Voice provider not configured" }
+    return {
+      available: false,
+      reason: "Voice mode is not currently available",
+      internalReason: "Voice provider not configured",
+    }
   }
 
   // 4. Check API key is configured
   const googleApiKey = await Settings.getGoogleAI()
   if (!googleApiKey) {
-    return { available: false, reason: "Voice provider API key not configured" }
+    return {
+      available: false,
+      reason: "Voice mode is not currently available",
+      internalReason: "Voice provider API key not configured",
+    }
   }
 
   return { available: true }

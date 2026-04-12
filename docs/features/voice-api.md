@@ -40,8 +40,7 @@ Returns voice availability with reason string for user-facing messages. Issue #8
 Possible reasons:
 - `"Voice mode is disabled by administrator"` — VOICE_ENABLED is not "true"
 - `"Voice mode is not enabled for your role"` — User lacks voice-mode tool access
-- `"Voice provider not configured"` — VOICE_PROVIDER or VOICE_MODEL not set
-- `"Voice provider API key not configured"` — GOOGLE_API_KEY not set
+- `"Voice mode is not currently available"` — Provider or API key not configured (details logged server-side only)
 
 **Error responses:**
 - `401` — No authenticated session

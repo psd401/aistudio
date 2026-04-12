@@ -487,7 +487,7 @@ async function authenticateAndAuthorize(
 
   logFn.info("Voice connection authenticated", { userId: sanitizeForLogging(auth.userId) })
 
-  let availability: { available: boolean; reason?: string }
+  let availability: { available: boolean; reason?: string; internalReason?: string }
   try {
     availability = await getVoiceAvailability(auth.sub)
   } catch {
@@ -496,7 +496,7 @@ async function authenticateAndAuthorize(
   if (!availability.available) {
     logFn.warn("Voice not available for user", {
       userId: sanitizeForLogging(auth.userId),
-      reason: availability.reason,
+      reason: availability.internalReason ?? availability.reason,
     })
     sendToClient(ws, { type: "error", message: availability.reason ?? "Voice mode not available" })
     ws.close(4003, "Forbidden")

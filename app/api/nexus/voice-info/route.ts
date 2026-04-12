@@ -44,7 +44,7 @@ export async function GET() {
 
     log.info("Voice info requested", {
       available: result.available,
-      reason: result.reason,
+      reason: result.internalReason ?? result.reason,
     })
 
     timer({ status: "success" })

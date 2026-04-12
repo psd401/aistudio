@@ -346,15 +346,20 @@ describe("handleVoiceConnection", () => {
 
     it("should close with 4003 when Google API key is missing (caught by availability check)", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockGetVoiceAvailability.mockResolvedValue({ available: false, reason: "Voice provider API key not configured" })
+      mockGetVoiceAvailability.mockResolvedValue({
+        available: false,
+        reason: "Voice mode is not currently available",
+        internalReason: "Voice provider API key not configured",
+      })
 
       const ws = createMockWs()
       const req = createMockReq({ "authjs.session-token": "valid-token" })
 
       await handleVoiceConnection(ws, req)
 
+      // Client receives generic reason, not internal config details
       expect(ws.send).toHaveBeenCalledWith(
-        expect.stringContaining("Voice provider API key not configured")
+        expect.stringContaining("Voice mode is not currently available")
       )
       expect(ws.close).toHaveBeenCalledWith(4003, "Forbidden")
     })
