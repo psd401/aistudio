@@ -6,26 +6,45 @@ Real-time voice conversations via WebSocket proxy to Gemini Live API.
 
 ## Endpoints
 
-### GET /api/nexus/voice
+### GET /api/nexus/voice-info
 
-Returns voice configuration and availability. Clients call this before attempting a WebSocket connection.
+Returns voice availability status. Clients call this before attempting a WebSocket connection.
 
-**Auth:** Requires authenticated session + `voice-mode` tool access.
+**Auth:** Requires authenticated session.
 
 **Response (200):**
 ```json
 {
-  "available": true,
-  "provider": "gemini-live",
-  "model": "gemini-2.0-flash-live-001",
-  "language": "en-US",
-  "wsEndpoint": "/api/nexus/voice"
+  "available": true
 }
 ```
 
 **Error responses:**
 - `401` — No authenticated session
-- `403` — User lacks `voice-mode` tool access
+- `500` — Internal server error
+
+### GET /api/nexus/voice/availability
+
+Returns voice availability with reason string for user-facing messages. Issue #876.
+
+**Auth:** Requires authenticated session.
+
+**Response (200):**
+```json
+{
+  "available": false,
+  "reason": "Voice mode is disabled by administrator"
+}
+```
+
+Possible reasons:
+- `"Voice mode is disabled by administrator"` — VOICE_ENABLED is not "true"
+- `"Voice mode is not enabled for your role"` — User lacks voice-mode tool access
+- `"Voice provider not configured"` — VOICE_PROVIDER or VOICE_MODEL not set
+- `"Voice provider API key not configured"` — GOOGLE_API_KEY not set
+
+**Error responses:**
+- `401` — No authenticated session
 - `500` — Internal server error
 
 ### WebSocket /api/nexus/voice
@@ -80,12 +99,28 @@ Voice settings are managed via the Settings admin UI or environment variables:
 
 | Setting | Default | Description |
 |---------|---------|-------------|
-| `VOICE_PROVIDER` | `gemini-live` | Voice provider ID |
-| `VOICE_MODEL` | `gemini-2.0-flash-live-001` | Gemini Live model ID |
+| `VOICE_ENABLED` | `false` | Global kill switch — must be `"true"` to enable voice |
+| `VOICE_PROVIDER` | — | Voice provider ID (e.g., `gemini-live`) |
+| `VOICE_MODEL` | — | Gemini Live model ID |
 | `VOICE_LANGUAGE` | `en-US` | BCP47 language code |
 | `VOICE_NAME` | — | Provider voice name (e.g., "Aoede") |
 
 The Google API key is read from `GOOGLE_API_KEY` via `Settings.getGoogleAI()` and never sent to the client.
+
+## Permissions (Issue #876)
+
+Voice mode uses the existing `hasToolAccess()` permission system:
+
+- **Tool identifier:** `voice-mode`
+- **Default:** Not assigned to any role (opt-in rollout)
+- **Admin control:** Admin > Role Management > Tool Assignments
+- **Global kill switch:** `VOICE_ENABLED` setting (Admin > System Settings > Voice Mode tab)
+
+The centralized `getVoiceAvailability(cognitoSub)` utility in `/lib/voice/availability.ts` checks all conditions:
+1. Global `VOICE_ENABLED` setting
+2. User has `voice-mode` tool access
+3. Voice provider and model configured
+4. Google API key present
 
 ## Infrastructure
 

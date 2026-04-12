@@ -18,7 +18,7 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { Settings } from "@/lib/settings-manager"
 import { createVoiceProvider, isSupportedVoiceProvider } from "./provider-factory"
 import { decode } from "@auth/core/jwt"
-import { hasToolAccess } from "@/lib/db/drizzle/users"
+import { getVoiceAvailability } from "./availability"
 import {
   MAX_AUDIO_DATA_LENGTH,
   PROVIDER_CONNECT_TIMEOUT_MS,
@@ -463,6 +463,12 @@ function waitForSessionConfig(
 /**
  * Authenticate and authorize a WebSocket connection for voice.
  * Returns auth info on success, or sends the appropriate error/close and returns null.
+ *
+ * Uses centralized getVoiceAvailability() which checks:
+ * 1. Global voice enabled setting (admin kill switch)
+ * 2. User has voice-mode tool access (role-based permission)
+ * 3. Voice provider and model are configured
+ * 4. Google API key is present
  */
 async function authenticateAndAuthorize(
   ws: WebSocket,
@@ -481,15 +487,18 @@ async function authenticateAndAuthorize(
 
   logFn.info("Voice connection authenticated", { userId: sanitizeForLogging(auth.userId) })
 
-  let hasAccess = false
+  let availability: { available: boolean; reason?: string }
   try {
-    hasAccess = await hasToolAccess(auth.sub, "voice-mode")
+    availability = await getVoiceAvailability(auth.sub)
   } catch {
-    hasAccess = false
+    availability = { available: false, reason: "Failed to check voice availability" }
   }
-  if (!hasAccess) {
-    logFn.warn("User lacks voice-mode access", { userId: sanitizeForLogging(auth.userId) })
-    sendToClient(ws, { type: "error", message: "Voice mode not enabled for this user" })
+  if (!availability.available) {
+    logFn.warn("Voice not available for user", {
+      userId: sanitizeForLogging(auth.userId),
+      reason: availability.reason,
+    })
+    sendToClient(ws, { type: "error", message: availability.reason ?? "Voice mode not available" })
     ws.close(4003, "Forbidden")
     timer({ status: "forbidden" })
     return null

@@ -6,19 +6,24 @@
  * (handled by server.ts). This route is at /api/nexus/voice-info to avoid
  * Next.js claiming the WebSocket upgrade path.
  *
- * GET /api/nexus/voice-info — Returns voice configuration and availability
+ * GET /api/nexus/voice-info — Returns voice availability for the current user
  *
- * Issue #872, #873
+ * Uses the centralized getVoiceAvailability() utility which checks:
+ * 1. Global voice enabled setting (admin kill switch)
+ * 2. User has voice-mode tool access (role-based permission)
+ * 3. Voice provider and model are configured
+ * 4. Google API key is present
+ *
+ * Issue #872, #873, #876
  */
 
 import { NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
-import { Settings } from "@/lib/settings-manager"
-import { hasToolAccess } from "@/lib/db/drizzle/users"
+import { getVoiceAvailability } from "@/lib/voice/availability"
 
 /**
- * GET handler — returns voice configuration for authenticated users.
+ * GET handler — returns voice availability for authenticated users.
  * Clients use this to check availability before attempting WebSocket connection.
  */
 export async function GET() {
@@ -34,31 +39,19 @@ export async function GET() {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     }
 
-    // Tool access check
-    const hasAccess = await hasToolAccess(session.sub, "voice-mode")
-    if (!hasAccess) {
-      timer({ status: "forbidden" })
-      return NextResponse.json({ error: "Voice mode not enabled" }, { status: 403 })
-    }
-
-    // Get voice settings
-    const voiceSettings = await Settings.getVoice()
-
-    // Voice is available only when provider, model, and API key are all configured
-    const googleApiKey = await Settings.getGoogleAI()
-    const isConfigured = !!googleApiKey && !!voiceSettings.provider && !!voiceSettings.model
+    // Centralized availability check
+    const result = await getVoiceAvailability(session.sub)
 
     log.info("Voice info requested", {
-      provider: voiceSettings.provider,
-      model: voiceSettings.model,
-      isConfigured,
+      available: result.available,
+      reason: result.reason,
     })
 
     timer({ status: "success" })
     // Only return availability — internal config (provider, model, wsEndpoint)
     // is not needed by the client and would expose infrastructure details
     return NextResponse.json(
-      { available: isConfigured },
+      { available: result.available },
       { headers: { 'Cache-Control': 'max-age=30, private' } }
     )
   } catch (error) {

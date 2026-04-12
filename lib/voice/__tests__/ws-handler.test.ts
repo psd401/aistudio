@@ -48,16 +48,31 @@ jest.mock("@/lib/settings-manager", () => ({
       model: "gemini-2.0-flash-live-001",
       language: "en-US",
       voiceName: null,
+      enabled: true,
     }),
     getGoogleAI: jest.fn().mockResolvedValue("test-api-key"),
   },
 }))
 
-// Mock DB hasToolAccess
-const mockHasToolAccess = jest.fn()
-jest.mock("@/lib/db/drizzle/users", () => ({
-  hasToolAccess: (...args: unknown[]) => mockHasToolAccess(...args),
+// Mock voice availability (centralized check — Issue #876)
+const mockGetVoiceAvailability = jest.fn()
+jest.mock("../availability", () => ({
+  getVoiceAvailability: (...args: unknown[]) => mockGetVoiceAvailability(...args),
 }))
+
+// Keep mockHasToolAccess as alias for backward-compat in test bodies
+const mockHasToolAccess = {
+  mockResolvedValue(val: boolean) {
+    if (val) {
+      mockGetVoiceAvailability.mockResolvedValue({ available: true })
+    } else {
+      mockGetVoiceAvailability.mockResolvedValue({ available: false, reason: "Voice mode is not enabled for your role" })
+    }
+  },
+  mockRejectedValue(err: Error) {
+    mockGetVoiceAvailability.mockRejectedValue(err)
+  },
+}
 
 // Mock provider factory
 jest.mock("../provider-factory", () => ({
@@ -273,22 +288,22 @@ describe("handleVoiceConnection", () => {
     })
 
     it("should close with 4003 when user lacks voice-mode access", async () => {
-      mockHasToolAccess.mockResolvedValue(false)
+      mockGetVoiceAvailability.mockResolvedValue({ available: false, reason: "Voice mode is not enabled for your role" })
 
       const ws = createMockWs()
       const req = createMockReq({ "authjs.session-token": "valid-token" })
 
       await handleVoiceConnection(ws, req)
 
-      expect(mockHasToolAccess).toHaveBeenCalledWith("user-123", "voice-mode")
+      expect(mockGetVoiceAvailability).toHaveBeenCalledWith("user-123")
       expect(ws.send).toHaveBeenCalledWith(
-        expect.stringContaining("Voice mode not enabled")
+        expect.stringContaining("Voice mode is not enabled for your role")
       )
       expect(ws.close).toHaveBeenCalledWith(4003, "Forbidden")
     })
 
-    it("should close with 4003 when tool access check throws (fail-closed)", async () => {
-      mockHasToolAccess.mockRejectedValue(new Error("DB error"))
+    it("should close with 4003 when availability check throws (fail-closed)", async () => {
+      mockGetVoiceAvailability.mockRejectedValue(new Error("DB error"))
 
       const ws = createMockWs()
       const req = createMockReq({ "authjs.session-token": "valid-token" })
@@ -329,12 +344,9 @@ describe("handleVoiceConnection", () => {
       expect(ws.close).toHaveBeenCalledWith(4001, "Unauthorized")
     })
 
-    it("should close with 4500 when Google API key is missing", async () => {
+    it("should close with 4003 when Google API key is missing (caught by availability check)", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
-
-      const { Settings } = require("@/lib/settings-manager")
-      Settings.getGoogleAI.mockResolvedValueOnce(null)
+      mockGetVoiceAvailability.mockResolvedValue({ available: false, reason: "Voice provider API key not configured" })
 
       const ws = createMockWs()
       const req = createMockReq({ "authjs.session-token": "valid-token" })
@@ -342,9 +354,9 @@ describe("handleVoiceConnection", () => {
       await handleVoiceConnection(ws, req)
 
       expect(ws.send).toHaveBeenCalledWith(
-        expect.stringContaining("Voice provider not configured")
+        expect.stringContaining("Voice provider API key not configured")
       )
-      expect(ws.close).toHaveBeenCalledWith(4500, "Provider not configured")
+      expect(ws.close).toHaveBeenCalledWith(4003, "Forbidden")
     })
 
     it("should close with 4500 when provider.connect() times out", async () => {

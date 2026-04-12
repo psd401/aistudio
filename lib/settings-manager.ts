@@ -306,19 +306,21 @@ export const Settings = {
     }
   },
 
-  // Voice (Issue #872)
+  // Voice (Issue #872, #876)
   async getVoice() {
-    const [provider, model, language, voiceName] = await Promise.all([
+    const [provider, model, language, voiceName, enabled] = await Promise.all([
       getSetting('VOICE_PROVIDER'),
       getSetting('VOICE_MODEL'),
       getSetting('VOICE_LANGUAGE'),
       getSetting('VOICE_NAME'),
+      getSetting('VOICE_ENABLED'),
     ])
     return {
       provider: provider || null,
       model: model || null,
       language: language || 'en-US',
       voiceName: voiceName || null,
+      enabled: enabled === 'true', // Default to false if not set or not 'true'
     }
   }
 }

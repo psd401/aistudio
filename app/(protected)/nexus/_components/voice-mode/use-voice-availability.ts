@@ -1,14 +1,16 @@
 /**
  * Hook to check voice mode availability for the current user.
  *
- * Fetches GET /api/nexus/voice-info to verify:
+ * Fetches GET /api/nexus/voice/availability to verify:
+ * - Global voice enabled setting (admin kill switch)
  * - User has hasToolAccess("voice-mode") permission
  * - Voice provider and model are configured
  * - Google API key exists
  *
- * Returns { available: boolean } — no infrastructure details exposed.
+ * Returns { available, loading, reason } — reason explains why voice
+ * is unavailable (e.g., "Voice mode is disabled by administrator").
  *
- * Issue #873
+ * Issue #873, #876
  */
 
 'use client'
@@ -20,6 +22,8 @@ export interface VoiceAvailability {
   available: boolean
   /** Whether the check is still loading */
   loading: boolean
+  /** Human-readable reason when voice is not available */
+  reason?: string
 }
 
 /**
@@ -33,7 +37,7 @@ export function useVoiceAvailability(): VoiceAvailability {
   useEffect(() => {
     const controller = new AbortController()
 
-    fetch('/api/nexus/voice-info', { signal: controller.signal })
+    fetch('/api/nexus/voice/availability', { signal: controller.signal })
       .then((res) => {
         if (!res.ok) {
           setState({ available: false, loading: false })
@@ -43,7 +47,11 @@ export function useVoiceAvailability(): VoiceAvailability {
       })
       .then((data) => {
         if (data && !controller.signal.aborted) {
-          setState({ available: !!data.available, loading: false })
+          setState({
+            available: !!data.available,
+            loading: false,
+            reason: data.reason,
+          })
         }
       })
       .catch(() => {
