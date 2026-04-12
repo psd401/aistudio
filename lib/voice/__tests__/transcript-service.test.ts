@@ -242,6 +242,7 @@ describe("saveVoiceTranscript", () => {
     expect(result.messageCount).toBe(0)
     expect(result.filteredCount).toBe(0)
     expect(result.titleGenerated).toBe(false)
+    expect(result.guardrailsBypassed).toBe(false)
     expect(mockExecuteTransaction).not.toHaveBeenCalled()
   })
 
@@ -276,6 +277,7 @@ describe("saveVoiceTranscript", () => {
     expect(result.messageCount).toBe(2)
     expect(result.filteredCount).toBe(0)
     expect(result.titleGenerated).toBe(false)
+    expect(result.guardrailsBypassed).toBe(true)
     expect(mockExecuteTransaction).toHaveBeenCalledTimes(1)
     // Guardrail checks should not have been called
     expect(mockCheckInputSafety).not.toHaveBeenCalled()
@@ -358,6 +360,7 @@ describe("saveVoiceTranscript", () => {
     const result = await saveVoiceTranscript("conv-123", 1, entries)
     expect(result.messageCount).toBe(3)
     expect(result.filteredCount).toBe(1)
+    expect(result.guardrailsBypassed).toBe(false)
     expect(mockCheckInputSafety).toHaveBeenCalledTimes(2)
     expect(mockCheckOutputSafety).toHaveBeenCalledTimes(1)
   })
@@ -474,6 +477,59 @@ describe("saveVoiceTranscript", () => {
     const result = await saveVoiceTranscript("conv-123", 1, entries)
     expect(result.messageCount).toBe(2)
     expect(result.filteredCount).toBe(0)
+    // Individual entry errors are handled gracefully within the batch — the guardrail
+    // pipeline itself completed, so bypassed is false. bypassed=true only when the
+    // entire pipeline was skipped (disabled or timed out).
+    expect(result.guardrailsBypassed).toBe(false)
+  })
+
+  it("should write modelUsed to conversation metadata when voiceModel is provided", async () => {
+    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Existing" })
+    mockIsGuardrailsEnabled.mockReturnValue(false)
+
+    let updateArgs: Record<string, unknown> = {}
+    mockExecuteTransaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
+      await fn({
+        insert: jest.fn().mockReturnValue({ values: jest.fn() }),
+        update: jest.fn().mockReturnValue({
+          set: jest.fn().mockImplementation((args: Record<string, unknown>) => {
+            updateArgs = args
+            return { where: jest.fn() }
+          }),
+        }),
+      })
+    })
+
+    const entries = [makeEntry("user", "hello")]
+    await saveVoiceTranscript("conv-123", 1, entries, "gemini-2.0-flash-live-001")
+
+    // Verify modelUsed is passed in the .set() call — confirms the column name
+    // matches the schema (nexusConversations.modelUsed → model_used varchar(100))
+    expect(updateArgs.modelUsed).toBe("gemini-2.0-flash-live-001")
+  })
+
+  it("should not write modelUsed when voiceModel is not provided", async () => {
+    mockGetConversationById.mockResolvedValue({ id: "conv-123", title: "Existing" })
+    mockIsGuardrailsEnabled.mockReturnValue(false)
+
+    let updateArgs: Record<string, unknown> = {}
+    mockExecuteTransaction.mockImplementation(async (fn: (tx: unknown) => Promise<void>) => {
+      await fn({
+        insert: jest.fn().mockReturnValue({ values: jest.fn() }),
+        update: jest.fn().mockReturnValue({
+          set: jest.fn().mockImplementation((args: Record<string, unknown>) => {
+            updateArgs = args
+            return { where: jest.fn() }
+          }),
+        }),
+      })
+    })
+
+    const entries = [makeEntry("user", "hello")]
+    await saveVoiceTranscript("conv-123", 1, entries)
+
+    // When voiceModel is undefined, modelUsed should NOT be in the update
+    expect(updateArgs.modelUsed).toBeUndefined()
   })
 
   it("should propagate transaction errors", async () => {

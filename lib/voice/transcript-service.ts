@@ -40,6 +40,8 @@ export interface TranscriptSaveResult {
   titleGenerated: boolean
   /** Processing time in milliseconds */
   processingTimeMs: number
+  /** Whether guardrails were bypassed due to timeout, error, or being disabled */
+  guardrailsBypassed: boolean
 }
 
 /** A transcript entry after guardrail processing */
@@ -49,6 +51,13 @@ interface ProcessedEntry {
   timestamp: Date
   /** Whether guardrails modified this entry's content */
   wasFiltered: boolean
+}
+
+/** Result from guardrail processing, including bypass status */
+interface GuardrailResult {
+  entries: ProcessedEntry[]
+  /** True if guardrails were bypassed (disabled, timed out, or errored) */
+  bypassed: boolean
 }
 
 // ============================================
@@ -124,12 +133,12 @@ export async function saveVoiceTranscript(
     }
 
     // Step 2: Prepare entries — filter non-final, merge consecutive same-role
-    const mergedEntries = prepareTranscriptEntries(transcript)
+    const mergedEntries = prepareTranscriptEntries(transcript, requestId)
 
     if (mergedEntries.length === 0) {
       log.info("No transcript entries to save after preparation", { requestId })
       timer({ status: "empty" })
-      return { messageCount: 0, filteredCount: 0, titleGenerated: false, processingTimeMs: Date.now() - startTime }
+      return { messageCount: 0, filteredCount: 0, titleGenerated: false, processingTimeMs: Date.now() - startTime, guardrailsBypassed: false }
     }
 
     log.info("Transcript entries prepared", {
@@ -139,7 +148,9 @@ export async function saveVoiceTranscript(
     })
 
     // Step 3: Run content through Bedrock guardrails
-    const processedEntries = await applyGuardrails(mergedEntries, conversationId, requestId, voiceModel, voiceProvider)
+    const guardrailResult = await applyGuardrails(mergedEntries, conversationId, requestId, voiceModel, voiceProvider)
+    const processedEntries = guardrailResult.entries
+    const guardrailsBypassed = guardrailResult.bypassed
     const filteredCount = processedEntries.filter((e) => e.wasFiltered).length
 
     if (filteredCount > 0) {
@@ -198,6 +209,7 @@ export async function saveVoiceTranscript(
       messageCount: processedEntries.length,
       filteredCount,
       titleGenerated: !!autoTitle,
+      guardrailsBypassed,
       processingTimeMs,
     })
 
@@ -206,6 +218,7 @@ export async function saveVoiceTranscript(
       filteredCount,
       titleGenerated: !!autoTitle,
       processingTimeMs,
+      guardrailsBypassed,
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -236,6 +249,7 @@ export async function saveVoiceTranscript(
  */
 export function prepareTranscriptEntries(
   entries: TranscriptEntry[],
+  requestId?: string,
 ): Array<{ role: "user" | "assistant"; text: string; timestamp: Date }> {
   // Step 1: Filter to final, non-empty entries
   const finalEntries = entries.filter(
@@ -266,6 +280,7 @@ export function prepareTranscriptEntries(
   // user's most recent intent. Log if truncation occurs so data loss is visible.
   if (merged.length > MAX_TRANSCRIPT_ENTRIES) {
     log.warn("Transcript truncated to maximum entry limit", {
+      requestId,
       originalCount: merged.length,
       maxEntries: MAX_TRANSCRIPT_ENTRIES,
       droppedCount: merged.length - MAX_TRANSCRIPT_ENTRIES,
@@ -290,33 +305,37 @@ async function applyGuardrails(
   requestId: string,
   voiceModel?: string,
   voiceProvider?: string,
-): Promise<ProcessedEntry[]> {
+): Promise<GuardrailResult> {
   // getContentSafetyService is a singleton — no heavy init on repeated calls
   const safetySvc = getContentSafetyService()
 
   if (!safetySvc.isGuardrailsEnabled()) {
     log.info("Guardrails disabled, skipping transcript safety check", { requestId })
-    return entries.map((e) => ({ ...e, wasFiltered: false }))
+    return { entries: entries.map((e) => ({ ...e, wasFiltered: false })), bypassed: true }
   }
 
   // Wrap the entire guardrail processing with a timeout to prevent hanging
   // during Bedrock brownouts. On timeout, fall back to saving unfiltered.
   let timeoutHandle: ReturnType<typeof setTimeout> | undefined
   try {
-    return await Promise.race([
+    const processed = await Promise.race([
       applyGuardrailsBatched(entries, safetySvc, { conversationId, requestId, voiceModel, voiceProvider }),
       new Promise<never>((_, reject) => {
         timeoutHandle = setTimeout(() => reject(new Error("Guardrail processing timeout")), GUARDRAIL_TOTAL_TIMEOUT_MS)
       }),
     ])
+    return { entries: processed, bypassed: false }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
-    log.warn("Guardrail processing timed out or failed, saving unfiltered", {
+    // Elevated to error level — content is being saved without safety filtering,
+    // which callers should audit. guardrailsBypassed in the result enables alerting.
+    log.error("Guardrail processing failed, saving unfiltered content", {
       requestId,
+      conversationId,
       entryCount: entries.length,
       error: message,
     })
-    return entries.map((e) => ({ ...e, wasFiltered: false }))
+    return { entries: entries.map((e) => ({ ...e, wasFiltered: false })), bypassed: true }
   } finally {
     // Clear the timeout to prevent resource leak when batched processing resolves first
     if (timeoutHandle) clearTimeout(timeoutHandle)

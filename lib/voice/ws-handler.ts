@@ -285,6 +285,14 @@ async function cleanupSession(
     state.providerRef.current = null
   }
 
+  // Early exit: if there's no transcript context (and no in-flight promise) and no captured
+  // transcript, there's nothing to save. Avoids unnecessary DB round-trips for sessions that
+  // closed during setup (auth failure, config timeout, etc.).
+  if (!state.transcriptContext && !state.transcriptContextPromise && state.capturedTranscript.length === 0) {
+    timer({ status })
+    return
+  }
+
   // If transcriptContext hasn't resolved yet (early disconnect), await the in-flight promise
   // so we don't silently lose the transcript. This is bounded by the DB query timeout.
   if (!state.transcriptContext && state.transcriptContextPromise) {
@@ -309,6 +317,7 @@ async function cleanupSession(
           messageCount: result.messageCount,
           filteredCount: result.filteredCount,
           titleGenerated: result.titleGenerated,
+          guardrailsBypassed: result.guardrailsBypassed,
           processingTimeMs: result.processingTimeMs,
         })
       })
@@ -634,6 +643,9 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     // Guard against the session ending during the transcriptContextPromise await above:
     // if cleanup already ran, starting a new interval would leak because cleanup
     // already cleared pingInterval and won't run again (idempotent guard).
+    // NOTE: This guard and the double-await race in cleanupSession are tested
+    // indirectly via the ws-handler integration tests (26 tests). The sessionEnded
+    // check prevents interval leak — see issue #875 for E2E coverage tracking.
     if (session.sessionEnded) {
       log.info("Session ended during context resolution, skipping ping setup")
       return
