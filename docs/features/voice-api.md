@@ -6,23 +6,6 @@ Real-time voice conversations via WebSocket proxy to Gemini Live API.
 
 ## Endpoints
 
-### GET /api/nexus/voice-info
-
-Returns voice availability status. Clients call this before attempting a WebSocket connection.
-
-**Auth:** Requires authenticated session.
-
-**Response (200):**
-```json
-{
-  "available": true
-}
-```
-
-**Error responses:**
-- `401` — No authenticated session
-- `500` — Internal server error
-
 ### GET /api/nexus/voice/availability
 
 Returns voice availability with reason string for user-facing messages. Issue #876.

@@ -8,9 +8,8 @@
  * 4. Google API key is present
  *
  * Used by:
- * - /api/nexus/voice-info (HTTP availability check for client)
+ * - /api/nexus/voice/availability (HTTP availability check for client)
  * - WebSocket proxy (authorize connection)
- * - Admin settings (show status)
  *
  * Issue #876
  */

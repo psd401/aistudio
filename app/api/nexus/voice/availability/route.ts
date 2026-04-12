@@ -7,9 +7,8 @@
  *
  * GET /api/nexus/voice/availability
  *
- * Unlike /api/nexus/voice-info (which only returns { available: boolean }),
- * this endpoint includes the reason string so the client can display
- * context-appropriate messages to the user.
+ * Returns { available, reason } so the client can display context-appropriate
+ * messages to the user.
  *
  * Issue #876
  */
