@@ -25,6 +25,7 @@ import {
   nexusConversationEvents,
 } from "@/lib/db/schema";
 import { countAsInt } from "@/lib/db/drizzle/helpers/pagination";
+import { DEFAULT_CONVERSATION_TITLE } from "@/lib/constants/conversation";
 import type {
   NexusConversationMetadata,
   NexusFolderSettings,
@@ -280,7 +281,7 @@ export async function createConversation(data: CreateConversationData) {
   }
 
   // Use provided title or default (handles undefined, null, empty, or whitespace-only strings)
-  const title = data.title?.trim() || "New Conversation";
+  const title = data.title?.trim() || DEFAULT_CONVERSATION_TITLE;
 
   const result = await executeQuery(
     (db) =>

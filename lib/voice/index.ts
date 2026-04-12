@@ -18,3 +18,5 @@ export type {
 
 export { GeminiLiveProvider } from "./gemini-live-provider"
 export { createVoiceProvider } from "./provider-factory"
+export { saveVoiceTranscript } from "./transcript-service"
+export type { TranscriptSaveResult } from "./transcript-service"
