@@ -492,7 +492,7 @@ async function authenticateAndAuthorize(
     availability = await getVoiceAvailability(auth.sub)
   } catch (err) {
     logFn.error("Availability check failed", { error: err instanceof Error ? err.message : String(err) })
-    availability = { available: false, reason: "Failed to check voice availability", type: "error" }
+    availability = { available: false, reason: "Availability check failed", type: "error" }
   }
   if (!availability.available) {
     logFn.warn("Voice not available for user", {

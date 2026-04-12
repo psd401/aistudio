@@ -61,7 +61,7 @@ jest.mock("../availability", () => ({
 }))
 
 // Convenience helper — translates a boolean into the full availability mock shape.
-// Named mockVoiceAccess (not mockVoiceAccess) to reflect it mocks getVoiceAvailability.
+// Named mockVoiceAccess (not mockHasToolAccess) to reflect it mocks getVoiceAvailability.
 const mockVoiceAccess = {
   mockResolvedValue(val: boolean) {
     if (val) {
@@ -313,6 +313,9 @@ describe("handleVoiceConnection", () => {
 
       // Caught exceptions use a distinct close reason (4500) — not "Provider not configured"
       // since the provider may be configured but the availability check itself failed
+      expect(ws.send).toHaveBeenCalledWith(
+        expect.stringContaining("Availability check failed")
+      )
       expect(ws.close).toHaveBeenCalledWith(4500, "Availability check failed")
     })
 
