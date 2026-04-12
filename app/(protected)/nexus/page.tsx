@@ -27,7 +27,7 @@ import { handleContentBlockedResponse } from '@/lib/nexus/content-blocked-handle
 import { getPromptSettings } from '@/actions/prompt-library.actions'
 import { ModelFallbackBanner } from './_components/model-fallback-banner'
 import { VoiceModeOverlay } from './_components/voice-mode/voice-mode-overlay'
-import { VoiceButton } from './_components/voice-mode/voice-button'
+import { VoiceButton, DisabledVoiceButton } from './_components/voice-mode/voice-button'
 import { useVoiceAvailability } from './_components/voice-mode/use-voice-availability'
 import { useVoiceSession } from './_components/voice-mode/use-voice-session'
 
@@ -224,6 +224,7 @@ interface NexusRuntimeWrapperProps {
   enabledConnectors: string[]
   attachmentAdapter: AttachmentAdapter
   voiceAvailable: boolean
+  voiceUnavailableReason?: string
   initialMessages: UIMessage[]
   onConversationIdChange: (id: string) => void
   processingAttachments: Set<string>
@@ -241,6 +242,7 @@ function NexusRuntimeWrapper({
   enabledConnectors,
   attachmentAdapter,
   voiceAvailable,
+  voiceUnavailableReason,
   initialMessages,
   onConversationIdChange,
   processingAttachments,
@@ -299,10 +301,16 @@ function NexusRuntimeWrapper({
   } = useVoiceSession({ voiceAvailable, conversationId })
 
   // Voice button rendered in composer extra actions slot — memoized to avoid
-  // re-creating JSX on every render (prevents unnecessary Thread re-renders)
+  // re-creating JSX on every render (prevents unnecessary Thread re-renders).
+  // When voice is unavailable with a reason, show a disabled mic with tooltip
+  // so users understand why voice is not accessible (Issue #876 reviewer feedback).
   const composerExtraActions = useMemo(
-    () => voiceAvailable ? <VoiceButton onVoiceStart={handleVoiceStart} /> : null,
-    [voiceAvailable, handleVoiceStart]
+    () => {
+      if (voiceAvailable) return <VoiceButton onVoiceStart={handleVoiceStart} />
+      if (voiceUnavailableReason) return <DisabledVoiceButton reason={voiceUnavailableReason} />
+      return null
+    },
+    [voiceAvailable, voiceUnavailableReason, handleVoiceStart]
   )
 
   return (
@@ -616,6 +624,7 @@ function NexusPageContent() {
                         enabledConnectors={enabledConnectors}
                         attachmentAdapter={attachmentAdapter}
                         voiceAvailable={voiceAvailability.available}
+                        voiceUnavailableReason={!voiceAvailability.available && !voiceAvailability.loading ? voiceAvailability.reason : undefined}
                         initialMessages={initialMessages}
                         onConversationIdChange={handleConversationIdChange}
                         processingAttachments={processingAttachments}

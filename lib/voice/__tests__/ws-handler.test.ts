@@ -40,24 +40,37 @@ jest.mock("@/lib/logger", () => ({
   sanitizeForLogging: (v: unknown) => v,
 }))
 
-// Mock settings
-jest.mock("@/lib/settings-manager", () => ({
-  Settings: {
-    getVoice: jest.fn().mockResolvedValue({
-      provider: "gemini-live",
-      model: "gemini-2.0-flash-live-001",
-      language: "en-US",
-      voiceName: null,
-    }),
-    getGoogleAI: jest.fn().mockResolvedValue("test-api-key"),
-  },
+// Mock voice availability (centralized check — Issue #876)
+// Note: Settings is no longer imported by ws-handler (config comes from
+// getVoiceAvailability().config), so no Settings mock is needed here.
+const mockGetVoiceAvailability = jest.fn()
+jest.mock("../availability", () => ({
+  getVoiceAvailability: (...args: unknown[]) => mockGetVoiceAvailability(...args),
 }))
 
-// Mock DB hasToolAccess
-const mockHasToolAccess = jest.fn()
-jest.mock("@/lib/db/drizzle/users", () => ({
-  hasToolAccess: (...args: unknown[]) => mockHasToolAccess(...args),
-}))
+// Convenience helper — translates a boolean into the full availability mock shape.
+// Named mockVoiceAccess (not mockHasToolAccess) to reflect it mocks getVoiceAvailability.
+const mockVoiceAccess = {
+  mockResolvedValue(val: boolean) {
+    if (val) {
+      mockGetVoiceAvailability.mockResolvedValue({
+        available: true,
+        config: {
+          provider: "gemini-live",
+          model: "gemini-2.0-flash-live-001",
+          language: "en-US",
+          voiceName: null,
+          apiKey: "test-api-key",
+        },
+      })
+    } else {
+      mockGetVoiceAvailability.mockResolvedValue({ available: false, reason: "Voice mode is not enabled for your role" })
+    }
+  },
+  mockRejectedValue(err: Error) {
+    mockGetVoiceAvailability.mockRejectedValue(err)
+  },
+}
 
 // Mock provider factory
 jest.mock("../provider-factory", () => ({
@@ -213,7 +226,7 @@ describe("handleVoiceConnection", () => {
 
     it("should use @auth/core/jwt decode with correct salt and secret", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
       scheduleSessionConfig(ws)
@@ -230,7 +243,7 @@ describe("handleVoiceConnection", () => {
 
     it("should handle __Secure- prefixed cookies", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
       scheduleSessionConfig(ws)
@@ -247,7 +260,7 @@ describe("handleVoiceConnection", () => {
 
     it("should reassemble chunked session cookies", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
       scheduleSessionConfig(ws)
@@ -273,33 +286,69 @@ describe("handleVoiceConnection", () => {
     })
 
     it("should close with 4003 when user lacks voice-mode access", async () => {
-      mockHasToolAccess.mockResolvedValue(false)
+      mockGetVoiceAvailability.mockResolvedValue({ available: false, reason: "Voice mode is not enabled for your role", type: "permission" })
 
       const ws = createMockWs()
       const req = createMockReq({ "authjs.session-token": "valid-token" })
 
       await handleVoiceConnection(ws, req)
 
-      expect(mockHasToolAccess).toHaveBeenCalledWith("user-123", "voice-mode")
+      expect(mockGetVoiceAvailability).toHaveBeenCalledWith("user-123")
       expect(ws.send).toHaveBeenCalledWith(
-        expect.stringContaining("Voice mode not enabled")
+        expect.stringContaining("Voice mode is not enabled for your role")
       )
       expect(ws.close).toHaveBeenCalledWith(4003, "Forbidden")
     })
 
-    it("should close with 4003 when tool access check throws (fail-closed)", async () => {
-      mockHasToolAccess.mockRejectedValue(new Error("DB error"))
+    it("should close with 4003 when VOICE_ENABLED is false (admin kill switch)", async () => {
+      mockGetVoiceAvailability.mockResolvedValue({ available: false, reason: "Voice mode is disabled by administrator", type: "permission" })
 
       const ws = createMockWs()
       const req = createMockReq({ "authjs.session-token": "valid-token" })
 
       await handleVoiceConnection(ws, req)
 
+      expect(mockGetVoiceAvailability).toHaveBeenCalledWith("user-123")
+      expect(ws.send).toHaveBeenCalledWith(
+        expect.stringContaining("Voice mode is disabled by administrator")
+      )
       expect(ws.close).toHaveBeenCalledWith(4003, "Forbidden")
     })
 
+    it("should close with 4500 when availability check throws (fail-closed)", async () => {
+      mockGetVoiceAvailability.mockRejectedValue(new Error("DB error"))
+
+      const ws = createMockWs()
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+
+      await handleVoiceConnection(ws, req)
+
+      // Client receives generic message — not the internal "Availability check failed" string
+      expect(ws.send).toHaveBeenCalledWith(
+        expect.stringContaining("Voice mode is not currently available")
+      )
+      expect(ws.close).toHaveBeenCalledWith(4500, "Availability check failed")
+    })
+
+    it("should close with 4500 when availability returns true but config is missing (invariant violation)", async () => {
+      // Simulate an impossible state: available=true but no config object
+      mockGetVoiceAvailability.mockResolvedValue({ available: true })
+
+      const ws = createMockWs()
+      scheduleSessionConfig(ws)
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+
+      await handleVoiceConnection(ws, req)
+
+      // The invariant throw propagates to the outer catch which sends "Failed to establish voice session"
+      expect(ws.send).toHaveBeenCalledWith(
+        expect.stringContaining("Failed to establish voice session")
+      )
+      expect(ws.close).toHaveBeenCalledWith(4500, "Internal error")
+    })
+
     it("should proceed when user has voice-mode access", async () => {
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
       scheduleSessionConfig(ws)
@@ -329,27 +378,31 @@ describe("handleVoiceConnection", () => {
       expect(ws.close).toHaveBeenCalledWith(4001, "Unauthorized")
     })
 
-    it("should close with 4500 when Google API key is missing", async () => {
+    it("should close with 4500 when Google API key is missing (caught by availability check)", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
-
-      const { Settings } = require("@/lib/settings-manager")
-      Settings.getGoogleAI.mockResolvedValueOnce(null)
+      mockGetVoiceAvailability.mockResolvedValue({
+        available: false,
+        reason: "Voice mode is not currently available",
+        internalReason: "Voice provider API key not configured",
+        type: "config",
+      })
 
       const ws = createMockWs()
       const req = createMockReq({ "authjs.session-token": "valid-token" })
 
       await handleVoiceConnection(ws, req)
 
+      // Client receives generic reason, not internal config details
       expect(ws.send).toHaveBeenCalledWith(
-        expect.stringContaining("Voice provider not configured")
+        expect.stringContaining("Voice mode is not currently available")
       )
+      // Config issues use 4500, not 4003
       expect(ws.close).toHaveBeenCalledWith(4500, "Provider not configured")
     })
 
     it("should close with 4500 when provider.connect() times out", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       // Mock connect that hangs but rejects when aborted (via AbortSignal)
       const { createVoiceProvider } = require("../provider-factory")
@@ -380,7 +433,7 @@ describe("handleVoiceConnection", () => {
 
     it("should remove listeners on connect failure", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       const { createVoiceProvider } = require("../provider-factory")
       createVoiceProvider.mockReturnValueOnce({
@@ -407,7 +460,7 @@ describe("handleVoiceConnection", () => {
   describe("message handling", () => {
     beforeEach(() => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
     })
 
     /** Connect and return the ws mock. Messages can be sent via ws._emit("message", ...) */
@@ -502,7 +555,7 @@ describe("handleVoiceConnection", () => {
   describe("session_config handling", () => {
     beforeEach(() => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
     })
 
     it("should build systemInstruction server-side from conversationId", async () => {
@@ -580,7 +633,7 @@ describe("handleVoiceConnection", () => {
   describe("session_config timeout", () => {
     beforeEach(() => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
       jest.useFakeTimers()
     })
 
@@ -618,7 +671,7 @@ describe("handleVoiceConnection", () => {
   describe("chunked cookie edge cases", () => {
     it("should handle cookies with = in value", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
       scheduleSessionConfig(ws)
@@ -638,7 +691,7 @@ describe("handleVoiceConnection", () => {
 
     it("should stop chunk assembly at first missing index", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
       scheduleSessionConfig(ws)

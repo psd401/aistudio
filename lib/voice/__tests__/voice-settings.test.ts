@@ -38,9 +38,10 @@ describe("Settings.getVoice", () => {
     delete process.env.VOICE_MODEL
     delete process.env.VOICE_LANGUAGE
     delete process.env.VOICE_NAME
+    delete process.env.VOICE_ENABLED
   })
 
-  it("should return null provider/model when no settings are configured", async () => {
+  it("should return null provider/model and enabled=false when no settings are configured", async () => {
     const result = await Settings.getVoice()
 
     expect(result).toEqual({
@@ -48,6 +49,7 @@ describe("Settings.getVoice", () => {
       model: null,
       language: "en-US",
       voiceName: null,
+      enabled: false,
     })
   })
 
@@ -58,6 +60,7 @@ describe("Settings.getVoice", () => {
         VOICE_MODEL: "gpt-4o-realtime",
         VOICE_LANGUAGE: "fr-FR",
         VOICE_NAME: "alloy",
+        VOICE_ENABLED: "true",
       }
       return Promise.resolve(values[key] || null)
     })
@@ -69,6 +72,7 @@ describe("Settings.getVoice", () => {
       model: "gpt-4o-realtime",
       language: "fr-FR",
       voiceName: "alloy",
+      enabled: true,
     })
   })
 
@@ -91,6 +95,7 @@ describe("Settings.getVoice", () => {
     expect(mockGetSettingValue).toHaveBeenCalledWith("VOICE_MODEL")
     expect(mockGetSettingValue).toHaveBeenCalledWith("VOICE_LANGUAGE")
     expect(mockGetSettingValue).toHaveBeenCalledWith("VOICE_NAME")
+    expect(mockGetSettingValue).toHaveBeenCalledWith("VOICE_ENABLED")
   })
 
   it("should handle partial DB configuration — null for unconfigured fields", async () => {
@@ -105,5 +110,37 @@ describe("Settings.getVoice", () => {
     expect(result.model).toBe("custom-model") // from DB
     expect(result.language).toBe("en-US") // default
     expect(result.voiceName).toBeNull() // null when not set
+    expect(result.enabled).toBe(false) // default to false
+  })
+
+  it("should return enabled=true only when VOICE_ENABLED is exactly 'true'", async () => {
+    // 'false' string → false
+    mockGetSettingValue.mockImplementation((key: string) => {
+      if (key === "VOICE_ENABLED") return Promise.resolve("false")
+      return Promise.resolve(null)
+    })
+    let result = await Settings.getVoice()
+    expect(result.enabled).toBe(false)
+
+    // Clear cache so next call re-fetches
+    await revalidateSettingsCache()
+
+    // 'true' string → true
+    mockGetSettingValue.mockImplementation((key: string) => {
+      if (key === "VOICE_ENABLED") return Promise.resolve("true")
+      return Promise.resolve(null)
+    })
+    result = await Settings.getVoice()
+    expect(result.enabled).toBe(true)
+
+    await revalidateSettingsCache()
+
+    // Any other value → false
+    mockGetSettingValue.mockImplementation((key: string) => {
+      if (key === "VOICE_ENABLED") return Promise.resolve("yes")
+      return Promise.resolve(null)
+    })
+    result = await Settings.getVoice()
+    expect(result.enabled).toBe(false)
   })
 })

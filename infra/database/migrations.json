@@ -58,6 +58,7 @@
     "060-mcp-cognito-passthrough-auth.sql",
     "061-mcp-oauth-credentials.sql",
     "062-mcp-tool-source.sql",
-    "063-prompt-library-settings.sql"
+    "063-prompt-library-settings.sql",
+    "064-add-voice-mode-tool.sql"
   ]
 }
