@@ -514,8 +514,12 @@ async function authenticateAndAuthorize(
     return null
   }
 
-  // config is guaranteed non-null when available === true
-  return { ...auth, config: availability.config! }
+  // config is set by getVoiceAvailability when available === true;
+  // guard explicitly rather than relying on non-null assertion
+  if (!availability.config) {
+    throw new Error("availability.config missing when available=true")
+  }
+  return { ...auth, config: availability.config }
 }
 
 

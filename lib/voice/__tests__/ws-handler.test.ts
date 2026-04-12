@@ -300,6 +300,21 @@ describe("handleVoiceConnection", () => {
       expect(ws.close).toHaveBeenCalledWith(4003, "Forbidden")
     })
 
+    it("should close with 4003 when VOICE_ENABLED is false (admin kill switch)", async () => {
+      mockGetVoiceAvailability.mockResolvedValue({ available: false, reason: "Voice mode is disabled by administrator", type: "permission" })
+
+      const ws = createMockWs()
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+
+      await handleVoiceConnection(ws, req)
+
+      expect(mockGetVoiceAvailability).toHaveBeenCalledWith("user-123")
+      expect(ws.send).toHaveBeenCalledWith(
+        expect.stringContaining("Voice mode is disabled by administrator")
+      )
+      expect(ws.close).toHaveBeenCalledWith(4003, "Forbidden")
+    })
+
     it("should close with 4500 when availability check throws (fail-closed)", async () => {
       mockGetVoiceAvailability.mockRejectedValue(new Error("DB error"))
 
