@@ -53,10 +53,17 @@ describe("getVoiceAvailability", () => {
     mockGetGoogleAI.mockResolvedValue("test-google-api-key")
   })
 
-  it("should return available: true when all checks pass", async () => {
+  it("should return available: true with validated config when all checks pass", async () => {
     const result = await getVoiceAvailability(TEST_SUB)
 
-    expect(result).toEqual({ available: true })
+    expect(result.available).toBe(true)
+    expect(result.config).toEqual({
+      provider: "gemini-live",
+      model: "gemini-2.0-flash-live-001",
+      language: "en-US",
+      voiceName: null,
+      apiKey: "test-google-api-key",
+    })
     expect(mockGetVoice).toHaveBeenCalled()
     expect(mockHasToolAccess).toHaveBeenCalledWith(TEST_SUB, "voice-mode")
     expect(mockIsSupportedVoiceProvider).toHaveBeenCalledWith("gemini-live")
@@ -157,6 +164,52 @@ describe("getVoiceAvailability", () => {
     expect(result.reason).toBe("Voice mode is not currently available")
     expect(result.internalReason).toBe("Voice provider API key not configured")
     expect(result.type).toBe("config")
+  })
+
+  it("should return config with provider, model, language, voiceName, and apiKey when available", async () => {
+    const result = await getVoiceAvailability(TEST_SUB)
+
+    expect(result.available).toBe(true)
+    expect(result.config).toEqual({
+      provider: "gemini-live",
+      model: "gemini-2.0-flash-live-001",
+      language: "en-US",
+      voiceName: null,
+      apiKey: "test-google-api-key",
+    })
+  })
+
+  it("should not include config when unavailable", async () => {
+    mockGetVoice.mockResolvedValue({
+      provider: "gemini-live",
+      model: "gemini-2.0-flash-live-001",
+      language: "en-US",
+      voiceName: null,
+      enabled: false,
+    })
+
+    const result = await getVoiceAvailability(TEST_SUB)
+
+    expect(result.available).toBe(false)
+    expect(result.config).toBeUndefined()
+  })
+
+  it("should propagate errors when Settings.getVoice() throws", async () => {
+    mockGetVoice.mockRejectedValue(new Error("DB connection timeout"))
+
+    await expect(getVoiceAvailability(TEST_SUB)).rejects.toThrow("DB connection timeout")
+  })
+
+  it("should propagate errors when hasToolAccess() throws", async () => {
+    mockHasToolAccess.mockRejectedValue(new Error("Database unavailable"))
+
+    await expect(getVoiceAvailability(TEST_SUB)).rejects.toThrow("Database unavailable")
+  })
+
+  it("should propagate errors when Settings.getGoogleAI() throws", async () => {
+    mockGetGoogleAI.mockRejectedValue(new Error("Secrets Manager error"))
+
+    await expect(getVoiceAvailability(TEST_SUB)).rejects.toThrow("Secrets Manager error")
   })
 
   it("should check conditions in order and short-circuit", async () => {

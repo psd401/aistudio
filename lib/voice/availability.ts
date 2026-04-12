@@ -31,6 +31,18 @@ export interface VoiceAvailabilityResult {
   internalReason?: string
   /** Category of failure — "permission" for user/admin issues, "config" for server-side issues */
   type?: UnavailabilityType
+  /**
+   * Validated voice config — only present when available is true.
+   * Returned so callers (e.g., ws-handler) can reuse the validated settings
+   * without re-fetching from cache, avoiding a TOCTOU window.
+   */
+  config?: {
+    provider: string
+    model: string
+    language: string
+    voiceName: string | null
+    apiKey: string
+  }
 }
 
 /**
@@ -73,5 +85,14 @@ export async function getVoiceAvailability(cognitoSub: string): Promise<VoiceAva
     }
   }
 
-  return { available: true }
+  return {
+    available: true,
+    config: {
+      provider: voiceSettings.provider,
+      model: voiceSettings.model,
+      language: voiceSettings.language,
+      voiceName: voiceSettings.voiceName ?? null,
+      apiKey: googleApiKey,
+    },
+  }
 }

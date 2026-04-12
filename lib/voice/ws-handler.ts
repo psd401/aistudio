@@ -15,8 +15,7 @@
 import type { IncomingMessage } from "node:http"
 import type WebSocket from "ws"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
-import { Settings } from "@/lib/settings-manager"
-import { createVoiceProvider, isSupportedVoiceProvider } from "./provider-factory"
+import { createVoiceProvider } from "./provider-factory"
 import { decode } from "@auth/core/jwt"
 import { getVoiceAvailability, type VoiceAvailabilityResult } from "./availability"
 import {
@@ -475,7 +474,7 @@ async function authenticateAndAuthorize(
   req: IncomingMessage,
   logFn: ReturnType<typeof createLogger>,
   timer: ReturnType<typeof startTimer>,
-): Promise<{ userId: string; sub: string } | null> {
+): Promise<{ userId: string; sub: string; config: NonNullable<VoiceAvailabilityResult["config"]> } | null> {
   const auth = await authenticateWebSocket(req)
   if (!auth) {
     logFn.warn("Unauthorized voice connection attempt")
@@ -515,18 +514,10 @@ async function authenticateAndAuthorize(
     return null
   }
 
-  return auth
+  // config is guaranteed non-null when available === true
+  return { ...auth, config: availability.config! }
 }
 
-/** Returns a reason string if voice config is invalid, or null if OK. */
-function validateVoiceConfig(
-  settings: { provider: string | null; model: string | null },
-  googleApiKey: string | null,
-): string | null {
-  if (!googleApiKey) return "missing_api_key"
-  if (!settings.provider || !settings.model || !isSupportedVoiceProvider(settings.provider)) return "invalid_provider"
-  return null
-}
 
 /**
  * Build system instruction from conversation messages (server-side).
@@ -570,28 +561,15 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
   const cleanup = (status: string) => cleanupSession(session, status, log, timer)
 
   try {
-    // Steps 1-2: Authenticate and check voice-mode access
+    // Steps 1-2: Authenticate, check voice-mode access, and get validated config
     log.info("New voice WebSocket connection")
     const auth = await authenticateAndAuthorize(ws, req, log, timer)
     if (!auth) return
 
-    // Step 3: Get voice settings and API key (cached 5-min TTL; changes take effect on new sessions)
-    const [voiceSettings, googleApiKey] = await Promise.all([
-      Settings.getVoice(),
-      Settings.getGoogleAI(),
-    ])
-
-    const configError = validateVoiceConfig(voiceSettings, googleApiKey)
-    if (configError) {
-      log.error("Voice not configured", { reason: configError,
-        action: "Set VOICE_PROVIDER, VOICE_MODEL, and GOOGLE_API_KEY in Admin > System Settings" })
-      sendToClient(ws, { type: "error", message: "Voice provider not configured" })
-      ws.close(4500, "Provider not configured")
-      timer({ status: "error", reason: configError })
-      return
-    }
-    // Non-null safe: validateVoiceConfig returned null, so provider is valid
-    session.providerRef.current = createVoiceProvider(voiceSettings.provider!)
+    // Step 3: Use validated config from availability check (avoids redundant Settings fetch
+    // and eliminates TOCTOU window where settings could change between check and use)
+    const { config } = auth
+    session.providerRef.current = createVoiceProvider(config.provider)
 
     // Step 4: Register close/error handlers BEFORE provider.connect()
     // cleanup() is async — attach .catch() to prevent unhandled rejections
@@ -623,10 +601,10 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     // Step 5b: Build system instruction server-side and create provider config
     const systemInstruction = await buildSystemInstruction(sessionConfig?.conversationId, auth.sub, log)
     const providerConfig: VoiceProviderConfig = {
-      model: voiceSettings.model!,
-      language: voiceSettings.language,
-      voiceName: voiceSettings.voiceName ?? undefined,
-      apiKey: googleApiKey!,
+      model: config.model,
+      language: config.language,
+      voiceName: config.voiceName ?? undefined,
+      apiKey: config.apiKey,
       systemInstruction,
     }
     log.info("Connecting to voice provider", {
@@ -665,9 +643,9 @@ export async function handleVoiceConnection(ws: WebSocket, req: IncomingMessage)
     // the ping interval), then awaits transcriptContextPromise to capture the
     // in-flight result. Without storing the promise, early disconnects would
     // silently lose the transcript context.
-    if (sessionConfig?.conversationId && voiceSettings.model && voiceSettings.provider) {
+    if (sessionConfig?.conversationId) {
       session.transcriptContextPromise = resolveTranscriptContext(
-        sessionConfig.conversationId, auth.sub, voiceSettings.model, voiceSettings.provider, log,
+        sessionConfig.conversationId, auth.sub, config.model, config.provider, log,
       )
       session.transcriptContext = await session.transcriptContextPromise
       if (session.transcriptContext) {

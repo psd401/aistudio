@@ -40,21 +40,9 @@ jest.mock("@/lib/logger", () => ({
   sanitizeForLogging: (v: unknown) => v,
 }))
 
-// Mock settings
-jest.mock("@/lib/settings-manager", () => ({
-  Settings: {
-    getVoice: jest.fn().mockResolvedValue({
-      provider: "gemini-live",
-      model: "gemini-2.0-flash-live-001",
-      language: "en-US",
-      voiceName: null,
-      enabled: true,
-    }),
-    getGoogleAI: jest.fn().mockResolvedValue("test-api-key"),
-  },
-}))
-
 // Mock voice availability (centralized check — Issue #876)
+// Note: Settings is no longer imported by ws-handler (config comes from
+// getVoiceAvailability().config), so no Settings mock is needed here.
 const mockGetVoiceAvailability = jest.fn()
 jest.mock("../availability", () => ({
   getVoiceAvailability: (...args: unknown[]) => mockGetVoiceAvailability(...args),
@@ -65,7 +53,16 @@ jest.mock("../availability", () => ({
 const mockVoiceAccess = {
   mockResolvedValue(val: boolean) {
     if (val) {
-      mockGetVoiceAvailability.mockResolvedValue({ available: true })
+      mockGetVoiceAvailability.mockResolvedValue({
+        available: true,
+        config: {
+          provider: "gemini-live",
+          model: "gemini-2.0-flash-live-001",
+          language: "en-US",
+          voiceName: null,
+          apiKey: "test-api-key",
+        },
+      })
     } else {
       mockGetVoiceAvailability.mockResolvedValue({ available: false, reason: "Voice mode is not enabled for your role" })
     }
