@@ -40,7 +40,9 @@ export function useVoiceAvailability(): VoiceAvailability {
     fetch('/api/nexus/voice/availability', { signal: controller.signal })
       .then(async (res) => {
         if (!res.ok) {
-          setState({ available: false, loading: false, reason: "Voice mode is temporarily unavailable" })
+          if (!controller.signal.aborted) {
+            setState({ available: false, loading: false, reason: "Voice mode is temporarily unavailable" })
+          }
           return
         }
         const data = await res.json()
