@@ -20,7 +20,7 @@ import { hasToolAccess } from "@/lib/db/drizzle/users"
 import { isSupportedVoiceProvider } from "./provider-factory"
 
 /** Categorizes the type of unavailability for downstream close-code decisions */
-export type UnavailabilityType = "permission" | "config"
+export type UnavailabilityType = "permission" | "config" | "error"
 
 export interface VoiceAvailabilityResult {
   /** Whether voice mode is available for this user */

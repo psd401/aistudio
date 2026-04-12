@@ -492,7 +492,7 @@ async function authenticateAndAuthorize(
     availability = await getVoiceAvailability(auth.sub)
   } catch (err) {
     logFn.error("Availability check failed", { error: err instanceof Error ? err.message : String(err) })
-    availability = { available: false, reason: "Failed to check voice availability", type: "config" }
+    availability = { available: false, reason: "Failed to check voice availability", type: "error" }
   }
   if (!availability.available) {
     logFn.warn("Voice not available for user", {
@@ -500,9 +500,12 @@ async function authenticateAndAuthorize(
       reason: availability.internalReason ?? availability.reason,
     })
     sendToClient(ws, { type: "error", message: availability.reason ?? "Voice mode not available" })
-    // Use 4003 for permission issues (admin disabled, user role), 4500 for config issues (missing provider/key)
-    const closeCode = availability.type === "config" ? 4500 : 4003
-    const closeReason = availability.type === "config" ? "Provider not configured" : "Forbidden"
+    // Use 4003 for permission issues (admin disabled, user role), 4500 for config issues (missing provider/key),
+    // 4500 also for transient errors (availability check failed) since we can't confirm availability
+    const closeCode = availability.type === "permission" ? 4003 : 4500
+    const closeReason = availability.type === "permission" ? "Forbidden"
+      : availability.type === "error" ? "Availability check failed"
+      : "Provider not configured"
     ws.close(closeCode, closeReason)
     timer({ status: availability.type === "config" ? "config_error" : "forbidden" })
     return null

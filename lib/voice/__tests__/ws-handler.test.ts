@@ -60,8 +60,9 @@ jest.mock("../availability", () => ({
   getVoiceAvailability: (...args: unknown[]) => mockGetVoiceAvailability(...args),
 }))
 
-// Keep mockHasToolAccess as alias for backward-compat in test bodies
-const mockHasToolAccess = {
+// Convenience helper — translates a boolean into the full availability mock shape.
+// Named mockVoiceAccess (not mockVoiceAccess) to reflect it mocks getVoiceAvailability.
+const mockVoiceAccess = {
   mockResolvedValue(val: boolean) {
     if (val) {
       mockGetVoiceAvailability.mockResolvedValue({ available: true })
@@ -228,7 +229,7 @@ describe("handleVoiceConnection", () => {
 
     it("should use @auth/core/jwt decode with correct salt and secret", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
       scheduleSessionConfig(ws)
@@ -245,7 +246,7 @@ describe("handleVoiceConnection", () => {
 
     it("should handle __Secure- prefixed cookies", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
       scheduleSessionConfig(ws)
@@ -262,7 +263,7 @@ describe("handleVoiceConnection", () => {
 
     it("should reassemble chunked session cookies", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
       scheduleSessionConfig(ws)
@@ -310,12 +311,13 @@ describe("handleVoiceConnection", () => {
 
       await handleVoiceConnection(ws, req)
 
-      // Caught exceptions are treated as config errors (4500)
-      expect(ws.close).toHaveBeenCalledWith(4500, "Provider not configured")
+      // Caught exceptions use a distinct close reason (4500) — not "Provider not configured"
+      // since the provider may be configured but the availability check itself failed
+      expect(ws.close).toHaveBeenCalledWith(4500, "Availability check failed")
     })
 
     it("should proceed when user has voice-mode access", async () => {
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
       scheduleSessionConfig(ws)
@@ -369,7 +371,7 @@ describe("handleVoiceConnection", () => {
 
     it("should close with 4500 when provider.connect() times out", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       // Mock connect that hangs but rejects when aborted (via AbortSignal)
       const { createVoiceProvider } = require("../provider-factory")
@@ -400,7 +402,7 @@ describe("handleVoiceConnection", () => {
 
     it("should remove listeners on connect failure", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       const { createVoiceProvider } = require("../provider-factory")
       createVoiceProvider.mockReturnValueOnce({
@@ -427,7 +429,7 @@ describe("handleVoiceConnection", () => {
   describe("message handling", () => {
     beforeEach(() => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
     })
 
     /** Connect and return the ws mock. Messages can be sent via ws._emit("message", ...) */
@@ -522,7 +524,7 @@ describe("handleVoiceConnection", () => {
   describe("session_config handling", () => {
     beforeEach(() => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
     })
 
     it("should build systemInstruction server-side from conversationId", async () => {
@@ -600,7 +602,7 @@ describe("handleVoiceConnection", () => {
   describe("session_config timeout", () => {
     beforeEach(() => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
       jest.useFakeTimers()
     })
 
@@ -638,7 +640,7 @@ describe("handleVoiceConnection", () => {
   describe("chunked cookie edge cases", () => {
     it("should handle cookies with = in value", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
       scheduleSessionConfig(ws)
@@ -658,7 +660,7 @@ describe("handleVoiceConnection", () => {
 
     it("should stop chunk assembly at first missing index", async () => {
       mockDecode.mockResolvedValue({ sub: "user-123" })
-      mockHasToolAccess.mockResolvedValue(true)
+      mockVoiceAccess.mockResolvedValue(true)
 
       const ws = createMockWs()
       scheduleSessionConfig(ws)

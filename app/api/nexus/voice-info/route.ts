@@ -8,6 +8,10 @@
  *
  * GET /api/nexus/voice-info — Returns voice availability for the current user
  *
+ * @deprecated Prefer /api/nexus/voice/availability which also returns a
+ * human-readable `reason` string. This endpoint only returns { available }.
+ * Kept for backward compatibility with existing consumers.
+ *
  * Uses the centralized getVoiceAvailability() utility which checks:
  * 1. Global voice enabled setting (admin kill switch)
  * 2. User has voice-mode tool access (role-based permission)

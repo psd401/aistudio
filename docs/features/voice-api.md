@@ -57,7 +57,9 @@ Bidirectional audio streaming for real-time voice conversations.
 **Close codes:**
 - `4001` — Unauthorized (invalid/missing session)
 - `4003` — Forbidden (admin disabled voice, or user lacks voice-mode permission)
-- `4500` — Server error (provider unavailable, config missing, API key absent)
+- `4500` — Server error — with distinct close reasons:
+  - `"Provider not configured"` — provider/model/API key not configured
+  - `"Availability check failed"` — transient error (e.g., DB timeout) during availability check
 
 #### Connection Flow
 
