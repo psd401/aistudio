@@ -11,7 +11,7 @@
  * @deprecated Prefer /api/nexus/voice/availability which also returns a
  * human-readable `reason` string. This endpoint only returns { available }.
  * Kept for backward compatibility with existing consumers.
- * TODO: Remove once all consumers have migrated to /api/nexus/voice/availability.
+ * TODO(#898): Remove once all consumers have migrated to /api/nexus/voice/availability.
  *
  * **Breaking behavior changes from the original implementation:**
  * - Previously returned 403 when a user lacked voice-mode access; now returns

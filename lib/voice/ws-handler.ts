@@ -506,11 +506,11 @@ async function authenticateAndAuthorize(
       : availability.type === "error" ? "Availability check failed"
       : "Provider not configured"
     ws.close(closeCode, closeReason)
-    timer({ status:
+    const timerStatus =
       availability.type === "config" ? "config_error" :
       availability.type === "error" ? "error" :
       "forbidden"
-    })
+    timer({ status: timerStatus })
     return null
   }
 
