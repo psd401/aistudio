@@ -724,5 +724,18 @@ If conversation handling breaks again:
 
 ---
 
+## Voice Mode Integration (Issue #877)
+
+Voice transcripts are saved as standard Nexus messages via `TranscriptService` (`lib/voice/transcript-service.ts`). Key integration points:
+
+- **Conversation creation**: Voice sessions can start a new conversation or attach to an existing one. New conversations are created via `createNexusConversation()` before transcripts are saved.
+- **Message format**: Transcripts are converted to `nexus_messages` rows with `role: 'user'` or `role: 'assistant'`. Metadata includes `source: "voice"` to distinguish from typed messages.
+- **Content safety**: Transcripts pass through Bedrock guardrails before persistence. Filtered entries get `metadata.filtered: true`.
+- **Text continuation**: After a voice session ends, the conversation appears in the normal Nexus UI and can be continued via text.
+- **Permissions**: Voice access requires both `VOICE_ENABLED=true` (admin kill switch) and `voice-mode` tool access (role-based). See `lib/voice/availability.ts`.
+- **Full docs**: See [features/voice-api.md](./voice-api.md) for the WebSocket protocol, endpoints, and configuration.
+
+---
+
 **Last Verified Working:** January 26, 2025
 **Next Review:** When upgrading @assistant-ui/react or AI SDK

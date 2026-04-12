@@ -59,49 +59,43 @@ tags:
     description: Assistant listing, execution, and multi-turn conversations
   - name: Jobs
     description: Async job polling and cancellation
+  - name: Voice
+    description: Real-time voice conversations via WebSocket with Gemini Live API
 
 # ============================================
 # Paths
 # ============================================
 
 paths:
-  /api/nexus/voice:
+  /api/nexus/voice/availability:
     get:
-      operationId: getVoiceConfig
+      operationId: getVoiceAvailability
       tags: [Voice]
-      summary: Voice configuration and availability
+      summary: Voice mode availability check
       description: |
-        Returns voice provider configuration and availability status.
-        Clients should call this before attempting a WebSocket connection
-        to verify the user has access and the provider is configured.
+        Returns voice availability with a human-readable reason string.
+        Clients call this before attempting a WebSocket connection.
 
-        Requires authenticated session and `voice-mode` tool access.
+        Checks: admin kill switch, role-based permission, provider config, API key.
+        Response is cached (Cache-Control: max-age=30, private).
       security:
         - sessionAuth: []
       responses:
         "200":
-          description: Voice configuration
+          description: Voice availability status
           content:
             application/json:
               schema:
                 type: object
+                required: [available]
                 properties:
                   available:
                     type: boolean
-                    description: Whether the voice provider is configured and ready
-                  provider:
+                    description: Whether voice mode is available for this user
+                  reason:
                     type: string
-                    example: gemini-live
-                  model:
-                    type: string
-                    example: gemini-2.0-flash-live-001
-                  language:
-                    type: string
-                    example: en-US
-                  wsEndpoint:
-                    type: string
-                    description: WebSocket endpoint path for voice sessions
-                    example: /api/nexus/voice
+                    description: Human-readable reason when unavailable
+                    example: Voice mode is disabled by administrator
         "401":
           description: Not authenticated
           content:
@@ -112,16 +106,6 @@ paths:
                   error:
                     type: string
                     example: Unauthorized
-        "403":
-          description: User lacks voice-mode tool access
-          content:
-            application/json:
-              schema:
-                type: object
-                properties:
-                  error:
-                    type: string
-                    example: Voice mode not enabled
         "500":
           description: Internal server error
 

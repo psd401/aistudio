@@ -207,6 +207,9 @@ Structured decision capture and context graph system.
 #### [features/k12-content-safety.md](./features/k12-content-safety.md)
 K-12 content filtering with Amazon Bedrock Guardrails.
 
+#### [features/voice-api.md](./features/voice-api.md)
+Real-time voice conversations via WebSocket with Gemini Live API, transcript persistence, permissions, and content safety guardrails.
+
 ## 🚀 Quick Start
 
 ### For New Developers
@@ -335,7 +338,7 @@ Key architectural decisions documented:
 
 ---
 
-**Last updated**: February 2026
+**Last updated**: April 2026
 **Status**: Active - comprehensive documentation with 9 architectural diagrams
 **Total Documentation**: 10,000+ lines across 50+ files
 *For AI assistant guidelines, see [CLAUDE.md](../CLAUDE.md)*

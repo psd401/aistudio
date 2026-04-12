@@ -561,39 +561,34 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 
 ---
 
-## Voice API (Issue #872)
+## Voice API (Issue #872, #877)
 
-### GET `/api/nexus/voice`
+### GET `/api/nexus/voice/availability`
 
-Returns voice provider configuration and availability. Clients call this before attempting a WebSocket connection to verify access and provider status.
+Returns voice availability with a human-readable reason string. Clients call this before attempting a WebSocket connection.
 
-**Auth:** Session cookie (not API key). Requires `voice-mode` tool access.
+**Auth:** Session cookie (not API key).
 
 **Response `200`:**
 
 ```json
 {
-  "available": true,
-  "provider": "gemini-live",
-  "model": "gemini-2.0-flash-live-001",
-  "language": "en-US",
-  "wsEndpoint": "/api/nexus/voice"
+  "available": false,
+  "reason": "Voice mode is disabled by administrator"
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `available` | boolean | Whether the voice provider is configured (API key exists) |
-| `provider` | string | Voice provider ID (e.g. `gemini-live`) |
-| `model` | string | Gemini Live model ID |
-| `language` | string | BCP47 language code |
-| `wsEndpoint` | string | WebSocket endpoint path for voice sessions |
+| `available` | boolean | Whether voice mode is available for this user |
+| `reason` | string? | Human-readable reason when unavailable |
+
+**Caching:** `Cache-Control: max-age=30, private`. Server-side settings cache TTL is 5 minutes.
 
 **Response `401`** — No authenticated session.
-**Response `403`** — User lacks `voice-mode` tool access.
 **Response `500`** — Internal error.
 
 ### WebSocket `/api/nexus/voice`
 
-Bidirectional audio streaming for real-time voice conversations. See [`docs/features/voice-api.md`](../features/voice-api.md) for the full WebSocket protocol specification including message types, close codes, and connection flow.
+Bidirectional audio streaming for real-time voice conversations. See [`features/voice-api.md`](../../features/voice-api.md) for the full WebSocket protocol specification including message types, close codes, and connection flow.
 
