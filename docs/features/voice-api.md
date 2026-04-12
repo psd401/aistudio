@@ -42,6 +42,12 @@ Possible reasons:
 - `"Voice mode is not enabled for your role"` — User lacks voice-mode tool access
 - `"Voice mode is not currently available"` — Provider or API key not configured (details logged server-side only)
 
+**Caching:** Response includes `Cache-Control: max-age=30, private`. After an admin
+toggles `VOICE_ENABLED` or changes role assignments, individual users may see stale
+availability for up to 30 seconds (HTTP cache) plus up to 5 minutes (server-side
+settings cache TTL). WebSocket connections check availability at connect time and are
+not affected by the HTTP cache.
+
 **Error responses:**
 - `401` — No authenticated session
 - `500` — Internal server error

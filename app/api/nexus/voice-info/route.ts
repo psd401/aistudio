@@ -12,6 +12,13 @@
  * human-readable `reason` string. This endpoint only returns { available }.
  * Kept for backward compatibility with existing consumers.
  *
+ * **Breaking behavior changes from the original implementation:**
+ * - Previously returned 403 when a user lacked voice-mode access; now returns
+ *   200 with `{ available: false }` (via centralized getVoiceAvailability).
+ * - Now also enforces the `VOICE_ENABLED` kill switch, which the original did not check.
+ * Consumers that relied on 403 status to show role-specific UI messages should
+ * migrate to /api/nexus/voice/availability which provides a `reason` field.
+ *
  * Uses the centralized getVoiceAvailability() utility which checks:
  * 1. Global voice enabled setting (admin kill switch)
  * 2. User has voice-mode tool access (role-based permission)

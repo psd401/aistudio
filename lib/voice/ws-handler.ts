@@ -18,7 +18,7 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { Settings } from "@/lib/settings-manager"
 import { createVoiceProvider, isSupportedVoiceProvider } from "./provider-factory"
 import { decode } from "@auth/core/jwt"
-import { getVoiceAvailability } from "./availability"
+import { getVoiceAvailability, type VoiceAvailabilityResult } from "./availability"
 import {
   MAX_AUDIO_DATA_LENGTH,
   PROVIDER_CONNECT_TIMEOUT_MS,
@@ -487,7 +487,7 @@ async function authenticateAndAuthorize(
 
   logFn.info("Voice connection authenticated", { userId: sanitizeForLogging(auth.userId) })
 
-  let availability: { available: boolean; reason?: string; internalReason?: string; type?: string }
+  let availability: VoiceAvailabilityResult
   try {
     availability = await getVoiceAvailability(auth.sub)
   } catch (err) {
@@ -507,7 +507,11 @@ async function authenticateAndAuthorize(
       : availability.type === "error" ? "Availability check failed"
       : "Provider not configured"
     ws.close(closeCode, closeReason)
-    timer({ status: availability.type === "config" ? "config_error" : "forbidden" })
+    timer({ status:
+      availability.type === "config" ? "config_error" :
+      availability.type === "error" ? "error" :
+      "forbidden"
+    })
     return null
   }
 
