@@ -1,5 +1,5 @@
 -- 064-add-voice-mode-tool.sql: Add Voice Mode tool and VOICE_ENABLED setting
--- Migration file - only runs on existing databases (not fresh installs)
+-- Runs on all databases via the Lambda migration runner.
 -- Issue #876 — Voice Mode Permissions + Admin Configuration UI
 --
 -- Registers 'voice-mode' as a tool in the permission system so admins can

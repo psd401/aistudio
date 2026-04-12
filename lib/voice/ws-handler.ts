@@ -491,14 +491,19 @@ async function authenticateAndAuthorize(
     availability = await getVoiceAvailability(auth.sub)
   } catch (err) {
     logFn.error("Availability check failed", { error: err instanceof Error ? err.message : String(err) })
-    availability = { available: false, reason: "Availability check failed", type: "error" }
+    availability = { available: false, reason: "Voice mode is not currently available", type: "error" }
   }
   if (!availability.available) {
     logFn.warn("Voice not available for user", {
       userId: sanitizeForLogging(auth.userId),
       reason: availability.internalReason ?? availability.reason,
     })
-    sendToClient(ws, { type: "error", message: availability.reason ?? "Voice mode not available" })
+    // Send generic message for error/config types to avoid leaking internal state to client.
+    // Permission reasons ("disabled by administrator", "not enabled for your role") are user-safe.
+    const clientMessage = availability.type === "permission"
+      ? (availability.reason ?? "Voice mode not available")
+      : "Voice mode is not currently available"
+    sendToClient(ws, { type: "error", message: clientMessage })
     // Use 4003 for permission issues (admin disabled, user role), 4500 for config issues (missing provider/key),
     // 4500 also for transient errors (availability check failed) since we can't confirm availability
     const closeCode = availability.type === "permission" ? 4003 : 4500
@@ -517,6 +522,7 @@ async function authenticateAndAuthorize(
   // config is set by getVoiceAvailability when available === true;
   // guard explicitly rather than relying on non-null assertion
   if (!availability.config) {
+    logFn.error("Invariant violation: availability.config missing when available=true")
     throw new Error("availability.config missing when available=true")
   }
   return { ...auth, config: availability.config }

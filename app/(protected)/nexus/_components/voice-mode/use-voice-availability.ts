@@ -44,7 +44,7 @@ export function useVoiceAvailability(): VoiceAvailability {
           return
         }
         const data = await res.json()
-        if (!controller.signal.aborted) {
+        if (data && !controller.signal.aborted) {
           setState({
             available: !!data.available,
             loading: false,

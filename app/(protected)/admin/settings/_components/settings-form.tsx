@@ -77,7 +77,7 @@ const commonSettings = [
   { key: "BRANDING_PRIMARY_COLOR", category: "branding", description: "Primary brand color as hex value (e.g., #1B365D)", isSecret: false },
   { key: "BRANDING_SUPPORT_URL", category: "branding", description: "Organization website or support URL", isSecret: false },
   { key: "BRANDING_APP_URL", category: "branding", description: "Canonical application URL (e.g., https://ai.example.com) — used in download links and SEO metadata", isSecret: false },
-  { key: "VOICE_ENABLED", category: "voice", description: "Global kill switch for voice mode — set to 'true' to enable. Changes may take up to 5 minutes to propagate to active sessions.", isSecret: false },
+  { key: "VOICE_ENABLED", category: "voice", description: "Global kill switch for voice mode — set to 'true' to enable. New connections are blocked immediately. Active sessions are not terminated — users lose access when their current session ends. Changes may take up to 6 minutes to reach new connections (server cache + HTTP cache).", isSecret: false },
   { key: "VOICE_PROVIDER", category: "voice", description: "Voice provider identifier (e.g., gemini-live)", isSecret: false },
   { key: "VOICE_MODEL", category: "voice", description: "Voice model ID (e.g., gemini-3.1-flash-live-preview)", isSecret: false },
   { key: "VOICE_LANGUAGE", category: "voice", description: "BCP-47 language code for voice conversations (e.g., en-US)", isSecret: false },

@@ -28,8 +28,13 @@ Possible reasons:
 **Caching:** Response includes `Cache-Control: max-age=30, private`. After an admin
 toggles `VOICE_ENABLED` or changes role assignments, individual users may see stale
 availability for up to 30 seconds (HTTP cache) plus up to 5 minutes (server-side
-settings cache TTL). WebSocket connections check availability at connect time and are
-not affected by the HTTP cache.
+settings cache TTL) — worst case ~5.5 minutes total. WebSocket connections check
+availability at connect time and are not affected by the HTTP cache.
+
+**Active sessions:** The availability check runs only at connection time. Disabling
+voice via the kill switch blocks new connections immediately but does **not** terminate
+sessions already in progress. Users on active voice sessions retain access until their
+current session ends naturally.
 
 **Error responses:**
 - `401` — No authenticated session

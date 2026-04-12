@@ -90,7 +90,7 @@ export async function getVoiceAvailability(cognitoSub: string): Promise<VoiceAva
       provider: voiceSettings.provider,
       model: voiceSettings.model,
       language: voiceSettings.language,
-      voiceName: voiceSettings.voiceName ?? null,
+      voiceName: voiceSettings.voiceName,
       apiKey: googleApiKey,
     },
   }

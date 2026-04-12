@@ -19,6 +19,26 @@ interface VoiceButtonProps {
   onVoiceStart: () => void
 }
 
+/**
+ * Disabled Voice Mode Button — shown when voice is unavailable.
+ * Displays a disabled mic with a tooltip explaining why (e.g., role or admin setting).
+ * Issue #876 — reviewer feedback: render reason in the UI.
+ */
+export function DisabledVoiceButton({ reason }: { reason: string }) {
+  return (
+    <TooltipIconButton
+      tooltip={reason}
+      variant="ghost"
+      className="text-muted-foreground opacity-50 cursor-not-allowed"
+      disabled
+      aria-label={reason}
+      data-testid="voice-mode-button-disabled"
+    >
+      <Mic className="size-5" />
+    </TooltipIconButton>
+  )
+}
+
 export function VoiceButton({ onVoiceStart }: VoiceButtonProps) {
   const controls = useVoiceControls()
   const voiceState = useVoiceState()

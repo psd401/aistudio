@@ -323,12 +323,28 @@ describe("handleVoiceConnection", () => {
 
       await handleVoiceConnection(ws, req)
 
-      // Caught exceptions use a distinct close reason (4500) — not "Provider not configured"
-      // since the provider may be configured but the availability check itself failed
+      // Client receives generic message — not the internal "Availability check failed" string
       expect(ws.send).toHaveBeenCalledWith(
-        expect.stringContaining("Availability check failed")
+        expect.stringContaining("Voice mode is not currently available")
       )
       expect(ws.close).toHaveBeenCalledWith(4500, "Availability check failed")
+    })
+
+    it("should close with 4500 when availability returns true but config is missing (invariant violation)", async () => {
+      // Simulate an impossible state: available=true but no config object
+      mockGetVoiceAvailability.mockResolvedValue({ available: true })
+
+      const ws = createMockWs()
+      scheduleSessionConfig(ws)
+      const req = createMockReq({ "authjs.session-token": "valid-token" })
+
+      await handleVoiceConnection(ws, req)
+
+      // The invariant throw propagates to the outer catch which sends "Failed to establish voice session"
+      expect(ws.send).toHaveBeenCalledWith(
+        expect.stringContaining("Failed to establish voice session")
+      )
+      expect(ws.close).toHaveBeenCalledWith(4500, "Internal error")
     })
 
     it("should proceed when user has voice-mode access", async () => {
