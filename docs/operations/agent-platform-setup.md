@@ -13,71 +13,66 @@ Complete deployment guide for the PSD AI Agent Platform. This enables staff to i
 
 ## Deployment Sequence
 
-### Phase 1: GCP Setup (Manual — Console)
+### Phase 1: GCP Setup (Console)
 
-These steps must be done in the Google Cloud Console. They create the GCP-side infrastructure that sends messages to AWS.
+All GCP steps are done in the web console. No `gcloud` CLI required.
 
 #### 1.1 Create GCP Project
 
-1. Go to [GCP Console](https://console.cloud.google.com) → Create Project
+1. Go to [GCP Console](https://console.cloud.google.com) → **Select a project** (top bar) → **New Project**
 2. Name: `psd-agent-platform` (or your district's naming convention)
-3. Note the **Project Number** (numeric, not project ID) — needed for AWS federation
+3. Click **Create**
+4. Once created, go to the project **Dashboard** and note the **Project Number** (numeric, not the project ID) — needed for AWS federation in Phase 3
 
 #### 1.2 Enable APIs
 
-```bash
-gcloud services enable chat.googleapis.com pubsub.googleapis.com iam.googleapis.com
-```
+1. Go to **APIs & Services** → **Library**
+2. Search for and enable each of these:
+   - **Google Chat API**
+   - **Cloud Pub/Sub API**
+   - **Identity and Access Management (IAM) API**
 
 #### 1.3 Create Service Account
 
-```bash
-gcloud iam service-accounts create psd-agent-chat \
-  --display-name="PSD Agent Chat Bot" \
-  --project=psd-agent-platform
-
-# Download the key JSON
-gcloud iam service-accounts keys create service-account.json \
-  --iam-account=psd-agent-chat@psd-agent-platform.iam.gserviceaccount.com
-```
+1. Go to **IAM & Admin** → **Service Accounts** → **Create Service Account**
+2. Name: `psd-agent-chat`
+3. Description: "PSD Agent Chat Bot — sends/receives Google Chat messages"
+4. Click **Create and Continue** → skip the optional role grants → **Done**
+5. Click the new service account → **Keys** tab → **Add Key** → **Create new key** → **JSON** → **Create**
+6. Save the downloaded JSON file — this goes into AWS Secrets Manager in Phase 2
 
 #### 1.4 Configure Domain-Wide Delegation
 
-1. Go to [Admin Console](https://admin.google.com) → Security → API controls → Domain-wide delegation
-2. Add the service account client ID
-3. Grant scopes:
-   - `https://www.googleapis.com/auth/chat.bot` — send/receive Chat messages
+1. On the service account page, copy the **Client ID** (numeric)
+2. Go to [Google Admin Console](https://admin.google.com) → **Security** → **Access and data control** → **API controls** → **Manage Domain Wide Delegation**
+3. Click **Add new**
+4. Client ID: paste the service account client ID
+5. OAuth scopes: `https://www.googleapis.com/auth/chat.bot`
+6. Click **Authorize**
 
 #### 1.5 Create Pub/Sub Topic
 
-```bash
-gcloud pubsub topics create agent-chat-messages --project=psd-agent-platform
-```
+1. Go to **Pub/Sub** → **Topics** → **Create Topic**
+2. Topic ID: `agent-chat-messages`
+3. Leave defaults, click **Create**
 
 #### 1.6 Register Chat App
 
-1. Go to [Google Chat API config](https://console.cloud.google.com/apis/api/chat.googleapis.com/hangouts-chat)
-2. App name: "PSD Agent" (or your district name)
-3. Connection settings: **Cloud Pub/Sub**
-4. Topic: `projects/psd-agent-platform/topics/agent-chat-messages`
-5. Visibility: **Internal — people in your domain**
-6. Permissions: **Specific people and groups** or **Everyone in your org**
+1. Go to **APIs & Services** → **Enabled APIs** → click **Google Chat API** → **Configuration** tab
+2. Fill in:
+   - App name: `PSD Agent` (or your district name)
+   - Avatar URL: (optional, leave blank for now)
+   - Description: "Personal AI agent for district staff"
+   - Enable **Interactive features**
+   - Connection settings: **Cloud Pub/Sub**
+   - Pub/Sub topic: `projects/<your-project-id>/topics/agent-chat-messages`
+   - Visibility: **Make this Chat app available to specific people and groups in [your domain]**
+   - Logs: **Log errors to Logging**
+3. Click **Save**
 
 ### Phase 2: AWS Infrastructure Deploy
 
-#### 2.1 Store Google Credentials
-
-The CDK creates an empty secret. Populate it with the service account JSON from step 1.3:
-
-```bash
-# After the first CDK deploy (Phase 2.2), populate the secret:
-aws secretsmanager put-secret-value \
-  --secret-id psd-agent-google-sa-dev \
-  --secret-string file://service-account.json \
-  --region us-east-1
-```
-
-#### 2.2 Deploy CDK Stacks
+#### 2.1 Deploy CDK Stacks
 
 ```bash
 cd infra
@@ -93,6 +88,17 @@ Note the outputs:
 - `ECRRepositoryUri` — needed for Docker push
 - `RouterQueueArn` — needed for GCP bridge
 - `RouterQueueUrl` — needed for GCP bridge
+
+#### 2.2 Store Google Credentials
+
+The CDK creates an empty secret. Populate it with the service account JSON from step 1.3:
+
+```bash
+aws secretsmanager put-secret-value \
+  --secret-id psd-agent-google-sa-dev \
+  --secret-string file://service-account.json \
+  --region us-east-1
+```
 
 #### 2.3 Build and Push Docker Image
 
@@ -198,19 +204,18 @@ bunx cdk deploy AIStudio-AgentPlatformStack-Dev \
   --context gcpBridgeRoleArn=${BRIDGE_ROLE_ARN}
 ```
 
-#### 3.4 Create GCP Pub/Sub Push Subscription
+#### 3.4 Create GCP Pub/Sub Subscription
 
-```bash
-# Replace <ROUTER_QUEUE_URL> with the CDK output value
-# Replace <BRIDGE_ROLE_ARN> with the IAM role ARN
-gcloud pubsub subscriptions create agent-chat-to-sqs \
-  --topic=agent-chat-messages \
-  --push-endpoint=https://sqs.us-east-1.amazonaws.com/<AWS_ACCOUNT_ID>/psd-agent-router-dev \
-  --push-auth-service-account=psd-agent-chat@psd-agent-platform.iam.gserviceaccount.com \
-  --project=psd-agent-platform
-```
+1. In GCP Console, go to **Pub/Sub** → **Subscriptions** → **Create Subscription**
+2. Subscription ID: `agent-chat-to-sqs`
+3. Select topic: `agent-chat-messages`
+4. Delivery type: **Push**
+5. Endpoint URL: the SQS queue URL from CDK output (`RouterQueueUrl`)
+6. Enable authentication: check **Enable authentication**
+7. Service account: `psd-agent-chat@<project-id>.iam.gserviceaccount.com`
+8. Click **Create**
 
-> **Note:** GCP Pub/Sub push to SQS uses HTTP with IAM authentication. The exact push endpoint format and auth mechanism depend on whether you use a direct push subscription or an intermediary (e.g., EventBridge). If direct HTTP push to SQS isn't supported, use an API Gateway → SQS proxy or a small forwarding Lambda in GCP Cloud Functions.
+> **Note:** GCP Pub/Sub push to SQS requires the push endpoint to accept HTTP POST. If direct push to the SQS URL doesn't work (SQS expects signed requests), you'll need an API Gateway → SQS proxy or a small Cloud Function in GCP as a bridge. See the Troubleshooting section.
 
 ### Phase 4: Testing
 
@@ -299,7 +304,9 @@ bunx cdk deploy AIStudio-AgentPlatformStack-Dev \
 |---------|-------|-----|
 | No messages arriving | GCP bridge not configured | Check `GCPBridgeStatus` CDK output |
 | Lambda timeout | AgentCore Runtime not deployed | Deploy with `--context agentImageTag=<tag>` |
-| "Google credentials secret contains invalid JSON" | Secret not populated | Run `aws secretsmanager put-secret-value` from step 2.1 |
+| "Google credentials secret contains invalid JSON" | Secret not populated | Run `aws secretsmanager put-secret-value` from step 2.2 |
 | "Database not configured, skipping telemetry" | DATABASE_HOST not set | Check Lambda env vars in CloudWatch |
 | Guardrail blocks everything | GUARDRAIL_FAIL_OPEN=false + guardrail misconfigured | Check guardrail rules in Bedrock console |
 | DLQ alarm firing | Messages failing after 3 retries | Check CloudWatch logs for Router Lambda errors |
+| Pub/Sub push fails to SQS | SQS requires signed requests | Add API Gateway → SQS proxy in front of the queue |
+| Migration 065 failed | PL/pgSQL not compatible with RDS Data API | Fixed — redeploy DatabaseStack to retry |

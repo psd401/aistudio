@@ -2,9 +2,10 @@
  * Agent Sessions Table Schema
  * Session-level aggregates for the Agent Platform (migration 065)
  *
- * NOTE: The updated_at column is maintained by a PostgreSQL trigger
- * (trigger_agent_sessions_updated_at in migration 065), NOT by application code.
- * Drizzle cannot express triggers — see the migration for the trigger definition.
+ * NOTE: The updated_at column is maintained by the Router Lambda's
+ * ON CONFLICT DO UPDATE SET session_end = NOW() clause, not a trigger.
+ * A PL/pgSQL trigger was removed because the RDS Data API migration
+ * runner cannot execute CREATE FUNCTION statements.
  */
 
 import {
