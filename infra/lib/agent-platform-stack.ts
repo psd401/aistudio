@@ -10,7 +10,10 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as path from 'path';
@@ -40,6 +43,8 @@ export interface AgentPlatformStackProps extends cdk.StackProps {
   guardrailVersion?: string;
   /** Aurora database name (default: 'aistudio') — sourced from CDK props for consistency */
   databaseName?: string;
+  /** Email for alarm notifications (DLQ, Lambda errors). If omitted, alarms fire but don't notify. */
+  alertEmail?: string;
 }
 
 /**
@@ -749,13 +754,32 @@ export class AgentPlatformStack extends cdk.Stack {
       new lambdaEventSources.SqsEventSource(this.routerQueue, {
         batchSize: 1, // Process one message at a time for reliable error handling
         maxBatchingWindow: cdk.Duration.seconds(0), // No batching delay — respond ASAP
+        // Enable partial batch failure reporting — Lambda returns which records
+        // failed so only those are retried. Prevents duplicate Google Chat messages
+        // for records that already succeeded. Safe at any batch size.
+        reportBatchItemFailures: true,
       }),
     );
+
+    // SNS topic for alarm notifications — only created if alertEmail is provided.
+    // Without a notification target, alarms fire but nobody is notified.
+    let alarmTopic: sns.Topic | undefined;
+    if (props.alertEmail) {
+      alarmTopic = new sns.Topic(this, 'RouterAlarmTopic', {
+        topicName: `psd-agent-router-alarms-${environment}`,
+        displayName: `Agent Router Alarms (${environment})`,
+      });
+      alarmTopic.addSubscription(
+        new snsSubscriptions.EmailSubscription(props.alertEmail)
+      );
+      cdk.Tags.of(alarmTopic).add('Environment', environment);
+      cdk.Tags.of(alarmTopic).add('ManagedBy', 'cdk');
+    }
 
     // CloudWatch alarm on the DLQ — fires when any message lands in the dead-letter
     // queue, meaning a user's message was silently dropped after 3 retries. In a K-12
     // environment this warrants immediate investigation.
-    new cloudwatch.Alarm(this, 'RouterDlqAlarm', {
+    const dlqAlarm = new cloudwatch.Alarm(this, 'RouterDlqAlarm', {
       alarmName: `psd-agent-router-dlq-${environment}`,
       alarmDescription: 'Agent Router DLQ received messages — investigate dropped messages',
       metric: routerDlq.metricApproximateNumberOfMessagesVisible({
@@ -771,7 +795,7 @@ export class AgentPlatformStack extends cdk.Stack {
     // Lambda error rate alarm — catches transient errors (e.g., Google Chat API 5xx)
     // that succeed on retry and never reach the DLQ. Without this, invisible failures
     // go undetected. Fires if ≥5 errors in a 5-minute window.
-    new cloudwatch.Alarm(this, 'RouterLambdaErrorAlarm', {
+    const errorAlarm = new cloudwatch.Alarm(this, 'RouterLambdaErrorAlarm', {
       alarmName: `psd-agent-router-errors-${environment}`,
       alarmDescription: 'Agent Router Lambda error rate elevated — investigate transient failures',
       metric: this.routerLambda.metricErrors({
@@ -783,6 +807,13 @@ export class AgentPlatformStack extends cdk.Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
+
+    // Wire alarm notifications if SNS topic is configured
+    if (alarmTopic) {
+      const snsAction = new cloudwatchActions.SnsAction(alarmTopic);
+      dlqAlarm.addAlarmAction(snsAction);
+      errorAlarm.addAlarmAction(snsAction);
+    }
 
     // =====================================================================
     // 10. SSM Parameters — Cross-Stack References

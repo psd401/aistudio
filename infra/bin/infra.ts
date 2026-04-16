@@ -164,6 +164,7 @@ const devAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatfor
   databaseSecretArn: devDbStack.databaseSecretArn,
   guardrailArn: devGuardrailsStack.guardrail.attrGuardrailArn,
   guardrailId: devGuardrailsStack.guardrail.attrGuardrailId,
+  alertEmail,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 devAgentPlatformStack.addDependency(devDbStack);
@@ -303,6 +304,7 @@ const prodAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatfo
   // After publishing a guardrail version in the Bedrock console, update this value.
   // Dev uses 'DRAFT' (default) for rapid iteration.
   guardrailVersion: '1',
+  alertEmail,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 prodAgentPlatformStack.addDependency(prodDbStack);

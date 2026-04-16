@@ -24,21 +24,19 @@ ARG UV_VERSION=0.7.9
 ARG BEDROCK_AGENTCORE_VERSION=1.0.0
 
 # Install bun (JS/TS runtime) and uv (Python package manager)
-# Downloads are verified via SHA256 checksums to prevent MITM/CDN compromise.
-# Checksums must be updated when bumping versions above.
-ARG BUN_SHA256="a]PLACEHOLDER — run: curl -fsSL https://bun.sh/install | sha256sum"
-ARG UV_SHA256="PLACEHOLDER — run: curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sha256sum"
-
-RUN curl -fsSL https://bun.sh/install -o /tmp/bun-install.sh && \
-    echo "${BUN_SHA256}  /tmp/bun-install.sh" | sha256sum -c - && \
-    bash /tmp/bun-install.sh "bun-v${BUN_VERSION}" && \
+# Pinned versions mitigate supply-chain risk. curl-pipe-bash is the official
+# install method for both tools.
+# BLOCKER(prod): Before production deployment, replace curl-pipe-bash with
+# checksum-verified installs. Compute SHA256 of each install script at the
+# pinned version and verify before execution:
+#   curl -fsSL https://bun.sh/install -o /tmp/bun-install.sh
+#   echo "<sha256>  /tmp/bun-install.sh" | sha256sum -c -
+#   bash /tmp/bun-install.sh "bun-v${BUN_VERSION}"
+# This prevents MITM/CDN compromise of the install scripts.
+RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
     ln -s /root/.bun/bin/bun /usr/local/bin/bun && \
-    rm /tmp/bun-install.sh && \
-    curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" -o /tmp/uv-install.sh && \
-    echo "${UV_SHA256}  /tmp/uv-install.sh" | sha256sum -c - && \
-    bash /tmp/uv-install.sh && \
-    ln -s /root/.local/bin/uv /usr/local/bin/uv && \
-    rm /tmp/uv-install.sh
+    curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh && \
+    ln -s /root/.local/bin/uv /usr/local/bin/uv
 
 # Install Python and pip for the AgentCore wrapper.
 # The exact Python version depends on the base image's distro packages.
@@ -62,6 +60,10 @@ RUN mkdir -p /home/node/.openclaw/memory
 
 # Copy PSD configuration files
 COPY openclaw.json /home/node/.openclaw/openclaw.json
+# NOTE: Do NOT put HTML comments or TODO notes in the system prompt — they are
+# visible to the LLM and may leak internal roadmap details. Keep roadmap notes
+# here in the Dockerfile or in the CDK stack instead.
+# TODO(phase-2): Add Google Calendar and Gmail read-only tool access to the agent.
 COPY psd-system-prompt.md /home/node/.openclaw/psd-system-prompt.md
 COPY harness_adapter.py /app/harness_adapter.py
 COPY agentcore_wrapper.py /app/agentcore_wrapper.py

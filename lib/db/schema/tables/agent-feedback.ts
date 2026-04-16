@@ -5,8 +5,8 @@
 
 import {
   bigint,
-  bigserial,
   boolean,
+  index,
   pgTable,
   timestamp,
   uniqueIndex,
@@ -15,7 +15,8 @@ import {
 import { agentMessages } from "./agent-messages";
 
 export const agentFeedback = pgTable("agent_feedback", {
-  id: bigserial("id", { mode: "number" }).primaryKey(),
+  // BIGINT GENERATED ALWAYS AS IDENTITY — matches migration 065 exactly.
+  id: bigint("id", { mode: "number" }).generatedAlwaysAsIdentity().primaryKey(),
   userId: varchar("user_id", { length: 255 }).notNull(),
   messageId: bigint("message_id", { mode: "number" })
     .notNull()
@@ -24,4 +25,5 @@ export const agentFeedback = pgTable("agent_feedback", {
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   uniqueIndex("idx_agent_feedback_unique").on(table.userId, table.messageId),
+  index("idx_agent_feedback_message_id").on(table.messageId),
 ]);

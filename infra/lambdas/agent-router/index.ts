@@ -55,7 +55,7 @@ import { SignatureV4 } from '@smithy/signature-v4';
 import { Sha256 } from '@aws-crypto/sha256-js';
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { HttpRequest } from '@smithy/protocol-http';
-import { Context as LambdaContext, SQSEvent, SQSRecord } from 'aws-lambda';
+import { Context as LambdaContext, SQSBatchResponse, SQSEvent, SQSRecord } from 'aws-lambda';
 import * as crypto from 'crypto';
 import * as chatPkg from '@googleapis/chat';
 
@@ -677,16 +677,32 @@ async function logTelemetry(
 export async function handler(
   event: SQSEvent,
   _context: LambdaContext
-): Promise<void> {
+): Promise<SQSBatchResponse> {
   const requestId = generateRequestId();
   const log = createLogger({ requestId, environment: ENVIRONMENT });
 
   log.info('Router invoked', { recordCount: event.Records.length });
 
-  // Process records concurrently. With batchSize: 1 (set in CDK event source
-  // mapping) this is a single record today, but handles multiple safely if
-  // batchSize is ever increased — avoids serial processing bottleneck.
-  await Promise.all(event.Records.map((record) => processRecord(record, log)));
+  // Process records concurrently with partial failure reporting.
+  // Uses reportBatchItemFailures so only failed records are retried —
+  // prevents duplicate Google Chat messages for records that already succeeded.
+  // Safe at any batchSize (currently 1 in CDK, but this handles increases).
+  const results = await Promise.allSettled(
+    event.Records.map((record) => processRecord(record, log))
+  );
+
+  const batchItemFailures: { itemIdentifier: string }[] = [];
+  results.forEach((result, idx) => {
+    if (result.status === 'rejected') {
+      batchItemFailures.push({ itemIdentifier: event.Records[idx].messageId });
+      log.error('Record processing failed', {
+        messageId: event.Records[idx].messageId,
+        error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+      });
+    }
+  });
+
+  return { batchItemFailures };
 }
 
 async function processRecord(
@@ -817,10 +833,8 @@ async function processRecord(
 
     // Use the same stable session ID as non-blocked messages so session-level
     // blocking stats aggregate correctly (not a throwaway timestamp-based ID).
-    const blockedRawSessionId = `${user.workspacePrefix}-${encodeURIComponent(spaceName)}`;
-    const blockedSessionId = blockedRawSessionId.length > 512
-      ? blockedRawSessionId.substring(0, 512)
-      : blockedRawSessionId;
+    const blockedSpaceHash = crypto.createHash('sha256').update(spaceName).digest('hex');
+    const blockedSessionId = `${user.workspacePrefix}-${blockedSpaceHash}`;
 
     await logTelemetry(
       {
@@ -839,10 +853,12 @@ async function processRecord(
   }
 
   // Step 3: Invoke AgentCore
-  // Use space name as session ID for conversation continuity.
-  // Cap at 512 chars to fit the agent_sessions.session_id VARCHAR(512) column.
-  const rawSessionId = `${user.workspacePrefix}-${encodeURIComponent(spaceName)}`;
-  const sessionId = rawSessionId.length > 512 ? rawSessionId.substring(0, 512) : rawSessionId;
+  // Session ID = workspace prefix + SHA-256 hash of space name.
+  // Using a hash instead of truncation prevents collisions: two spaces with a
+  // long common prefix would truncate to the same session_id, silently merging
+  // telemetry. SHA-256 hex is 64 chars, always fits VARCHAR(512).
+  const spaceHash = crypto.createHash('sha256').update(spaceName).digest('hex');
+  const sessionId = `${user.workspacePrefix}-${spaceHash}`;
   const agentResult = await invokeAgentCore(
     messageText,
     senderEmail,
@@ -863,6 +879,13 @@ async function processRecord(
       threshold: TOKEN_LIMIT,
     });
   }
+
+  // KNOWN GAP: Output is not run through Bedrock Guardrails.
+  // applyGuardrails() only filters INPUT (source: 'INPUT'). The agent response
+  // is sent directly to Google Chat without content filtering. For K-12
+  // deployments, consider adding an output guardrail check via source: 'OUTPUT'
+  // before sendGoogleChatResponse(). The Bedrock ApplyGuardrail API supports
+  // this in the same call. Deferred to Phase 2 to avoid doubling latency.
 
   // Step 5: Send response
   // Prefix with [User's Agent] in shared spaces for clarity.
