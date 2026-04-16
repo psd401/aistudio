@@ -1,0 +1,24 @@
+{
+  "name": "agent-router",
+  "version": "1.0.0",
+  "description": "Agent Router Lambda — Routes Google Chat messages through Bedrock Guardrails to AgentCore",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "prebuild": "rm -rf dist"
+  },
+  "dependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.0.0",
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/client-rds-data": "^3.0.0",
+    "@aws-sdk/client-secrets-manager": "^3.0.0",
+    "@aws-sdk/client-ssm": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "googleapis": "^144.0.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

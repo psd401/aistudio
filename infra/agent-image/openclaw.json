@@ -1,0 +1,89 @@
+{
+  "$schema": "https://docs.openclaw.ai/schema/config.json",
+  "agent": {
+    "name": "PSD AI Agent",
+    "description": "Peninsula School District personal AI agent",
+    "systemPromptFile": "/home/node/.openclaw/psd-system-prompt.md"
+  },
+  "providers": {
+    "bedrock": {
+      "type": "bedrock",
+      "baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+      "api": "bedrock-converse-stream",
+      "auth": "aws-sdk"
+    }
+  },
+  "models": {
+    "default": "kimi-k2.5",
+    "available": {
+      "kimi-k2.5": {
+        "provider": "bedrock",
+        "modelId": "moonshotai.kimi-k2.5",
+        "contextWindow": 262144,
+        "maxOutputTokens": 65535,
+        "description": "Kimi K2.5 — primary model, 262K context"
+      },
+      "glm-5": {
+        "provider": "bedrock",
+        "modelId": "zai.glm-5",
+        "contextWindow": 131072,
+        "maxOutputTokens": 16384,
+        "description": "GLM 5 — fast reasoning"
+      },
+      "deepseek-v3.2": {
+        "provider": "bedrock",
+        "modelId": "deepseek.v3.2",
+        "contextWindow": 131072,
+        "maxOutputTokens": 16384,
+        "description": "DeepSeek V3.2 — strong coding"
+      },
+      "qwen3-next": {
+        "provider": "bedrock",
+        "modelId": "qwen.qwen3-next-80b-a3b",
+        "contextWindow": 131072,
+        "maxOutputTokens": 16384,
+        "description": "Qwen3 Next 80B — multilingual"
+      },
+      "claude-haiku-4.5": {
+        "provider": "bedrock",
+        "modelId": "anthropic.claude-3-5-haiku-20241022-v1:0",
+        "contextWindow": 200000,
+        "maxOutputTokens": 8192,
+        "description": "Claude Haiku 4.5 — fast, affordable"
+      },
+      "claude-sonnet-4.6": {
+        "provider": "bedrock",
+        "modelId": "anthropic.claude-sonnet-4-6-20250514-v1:0",
+        "contextWindow": 200000,
+        "maxOutputTokens": 64000,
+        "description": "Claude Sonnet 4.6 — balanced performance"
+      }
+    }
+  },
+  "memory": {
+    "daily": {
+      "directory": "memory",
+      "filenamePattern": "YYYY-MM-DD.md",
+      "template": "# {date}\n\n## Notes\n\n## Tasks\n\n## Decisions\n"
+    },
+    "longTerm": {
+      "file": "MEMORY.md",
+      "description": "Agent-curated long-term memory from daily notes"
+    }
+  },
+  "workspace": {
+    "root": "/home/node/.openclaw",
+    "description": "S3 Files mount point — persists across sessions"
+  },
+  "operational": {
+    "morningBrief": {
+      "template": "## Morning Brief — {date}\n\n### Calendar\n{calendar}\n\n### Priority Tasks\n{tasks}\n\n### FYI\n{fyi}\n"
+    },
+    "eveningWrap": {
+      "template": "## Evening Wrap — {date}\n\n### Completed\n{completed}\n\n### Pending\n{pending}\n\n### Tomorrow\n{tomorrow}\n"
+    },
+    "weeklySummary": {
+      "template": "## Week of {weekStart}\n\n### Accomplishments\n{accomplishments}\n\n### Metrics\n{metrics}\n\n### Next Week\n{nextWeek}\n"
+    }
+  }
+}

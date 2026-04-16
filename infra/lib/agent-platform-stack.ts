@@ -6,7 +6,13 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
+import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
+import * as path from 'path';
 // ALPHA CDK CONSTRUCT: @aws-cdk/aws-bedrock-agentcore-alpha has no API stability
 // guarantee and may introduce breaking changes on any release. Version is pinned
 // (not caret) in infra/package.json. Review changelog before upgrading.
@@ -26,6 +32,8 @@ export interface AgentPlatformStackProps extends cdk.StackProps {
   databaseSecretArn: string;
   /** Bedrock Guardrail ARN from GuardrailsStack */
   guardrailArn: string;
+  /** Bedrock Guardrail ID from GuardrailsStack */
+  guardrailId: string;
 }
 
 /**
@@ -62,6 +70,12 @@ export class AgentPlatformStack extends cdk.Stack {
   public readonly routerLambdaRole: iam.Role;
   /** Cron Lambda IAM role */
   public readonly cronLambdaRole: iam.Role;
+  /** Router Lambda function */
+  public readonly routerLambda: lambda.Function;
+  /** SQS queue for Google Chat Pub/Sub messages */
+  public readonly routerQueue: sqs.Queue;
+  /** Google service account credentials secret */
+  public readonly googleCredentialsSecret: secretsmanager.ISecret;
 
   constructor(scope: Construct, id: string, props: AgentPlatformStackProps) {
     super(scope, id, props);
@@ -535,7 +549,129 @@ export class AgentPlatformStack extends cdk.Stack {
     }
 
     // =====================================================================
-    // 8. SSM Parameters — Cross-Stack References
+    // 8. Google Credentials Secret (imported, created manually in console)
+    // =====================================================================
+    // The Google service account JSON is stored in Secrets Manager. It must
+    // be created before deploying this stack:
+    //   aws secretsmanager create-secret --name psd-agent-google-sa-<env> \
+    //     --secret-string file://service-account.json
+    this.googleCredentialsSecret = secretsmanager.Secret.fromSecretNameV2(
+      this, 'GoogleCredentialsSecret',
+      `psd-agent-google-sa-${environment}`,
+    );
+
+    // Grant the Router Lambda role access to read the Google credentials
+    this.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'GoogleCredentialsAccess',
+      effect: iam.Effect.ALLOW,
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [this.googleCredentialsSecret.secretArn],
+    }));
+
+    // =====================================================================
+    // 9. SQS Queue — Google Chat Pub/Sub Inbound
+    // =====================================================================
+    // Messages flow: Google Chat → GCP Pub/Sub → (push subscription to SQS) → Lambda
+    // Dead-letter queue captures messages that fail processing after retries.
+
+    const routerDlq = new sqs.Queue(this, 'RouterDLQ', {
+      queueName: `psd-agent-router-dlq-${environment}`,
+      retentionPeriod: cdk.Duration.days(14),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+    });
+    cdk.Tags.of(routerDlq).add('Environment', environment);
+    cdk.Tags.of(routerDlq).add('ManagedBy', 'cdk');
+
+    this.routerQueue = new sqs.Queue(this, 'RouterQueue', {
+      queueName: `psd-agent-router-${environment}`,
+      visibilityTimeout: cdk.Duration.minutes(5), // Must exceed Lambda timeout
+      retentionPeriod: cdk.Duration.days(4),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      deadLetterQueue: {
+        queue: routerDlq,
+        maxReceiveCount: 3, // 3 retries before DLQ
+      },
+    });
+    cdk.Tags.of(this.routerQueue).add('Environment', environment);
+    cdk.Tags.of(this.routerQueue).add('ManagedBy', 'cdk');
+
+    // =====================================================================
+    // 10. Router Lambda Function
+    // =====================================================================
+
+    const routerLogGroup = new logs.LogGroup(this, 'RouterLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-router-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(routerLogGroup).add('Environment', environment);
+    cdk.Tags.of(routerLogGroup).add('ManagedBy', 'cdk');
+
+    this.routerLambda = new lambda.Function(this, 'RouterLambda', {
+      functionName: `psd-agent-router-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-router'),
+        {
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            command: [
+              'bash', '-c',
+              [
+                'npm ci --production',
+                'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp -r node_modules /asset-output/',
+              ].join(' && '),
+            ],
+            environment: {
+              NPM_CONFIG_CACHE: '/tmp/.npm',
+            },
+          },
+        },
+      ),
+      memorySize: config.compute.lambdaMemory,
+      timeout: cdk.Duration.minutes(3), // Agent responses can take time
+      architecture: lambda.Architecture.ARM_64,
+      role: this.routerLambdaRole,
+      logGroup: routerLogGroup,
+      tracing: config.monitoring.tracingEnabled
+        ? lambda.Tracing.ACTIVE
+        : lambda.Tracing.DISABLED,
+      environment: {
+        ENVIRONMENT: environment,
+        USERS_TABLE: this.usersTable.tableName,
+        SIGNALS_TABLE: this.signalsTable.tableName,
+        WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
+        GUARDRAIL_ID: props.guardrailId,
+        GUARDRAIL_VERSION: 'DRAFT',
+        DATABASE_RESOURCE_ARN: props.databaseResourceArn,
+        DATABASE_SECRET_ARN: props.databaseSecretArn,
+        DATABASE_NAME: 'aistudio',
+        GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,
+        TOKEN_LIMIT_PER_INTERACTION: '100000',
+        NODE_ENV: 'production',
+      },
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+    });
+
+    cdk.Tags.of(this.routerLambda).add('Environment', environment);
+    cdk.Tags.of(this.routerLambda).add('ManagedBy', 'cdk');
+
+    // Wire SQS → Lambda trigger
+    this.routerLambda.addEventSource(
+      new lambdaEventSources.SqsEventSource(this.routerQueue, {
+        batchSize: 1, // Process one message at a time for reliable error handling
+        maxBatchingWindow: cdk.Duration.seconds(0), // No batching delay — respond ASAP
+      }),
+    );
+
+    // =====================================================================
+    // 11. SSM Parameters — Cross-Stack References
     // =====================================================================
     // All SSM parameters tagged for IAM tag-based access control compliance.
 
@@ -584,6 +720,21 @@ export class AgentPlatformStack extends cdk.Stack {
         parameterName: `/aistudio/${environment}/agent-cron-lambda-role-arn`,
         stringValue: this.cronLambdaRole.roleArn,
         description: 'Cron Lambda role ARN',
+      }),
+      new ssm.StringParameter(this, 'RouterQueueUrlParam', {
+        parameterName: `/aistudio/${environment}/agent-router-queue-url`,
+        stringValue: this.routerQueue.queueUrl,
+        description: 'SQS queue URL for Google Chat Pub/Sub messages',
+      }),
+      new ssm.StringParameter(this, 'RouterQueueArnParam', {
+        parameterName: `/aistudio/${environment}/agent-router-queue-arn`,
+        stringValue: this.routerQueue.queueArn,
+        description: 'SQS queue ARN for Google Chat Pub/Sub messages',
+      }),
+      new ssm.StringParameter(this, 'RouterLambdaArnParam', {
+        parameterName: `/aistudio/${environment}/agent-router-lambda-arn`,
+        stringValue: this.routerLambda.functionArn,
+        description: 'Router Lambda function ARN',
       }),
     ];
 
@@ -641,6 +792,21 @@ export class AgentPlatformStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'CronLambdaRoleArn', {
       value: this.cronLambdaRole.roleArn,
       description: 'Cron Lambda role ARN',
+    });
+
+    new cdk.CfnOutput(this, 'RouterLambdaArn', {
+      value: this.routerLambda.functionArn,
+      description: 'Router Lambda function ARN',
+    });
+
+    new cdk.CfnOutput(this, 'RouterQueueUrl', {
+      value: this.routerQueue.queueUrl,
+      description: 'SQS queue URL for Google Chat messages',
+    });
+
+    new cdk.CfnOutput(this, 'RouterQueueArn', {
+      value: this.routerQueue.queueArn,
+      description: 'SQS queue ARN for Google Chat messages',
     });
   }
 }

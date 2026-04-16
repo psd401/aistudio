@@ -156,13 +156,14 @@ const devGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-De
 cdk.Tags.of(devGuardrailsStack).add('Environment', 'Dev');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devGuardrailsStack).add(key, value));
 
-// Agent Platform Stack — AgentCore Runtime, ECR, S3, DynamoDB, EventBridge, IAM
+// Agent Platform Stack — AgentCore Runtime, ECR, S3, DynamoDB, EventBridge, IAM, Router Lambda
 const devAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatformStack-Dev', {
   environment: 'dev',
   config: EnvironmentConfig.get('dev'),
   databaseResourceArn: devDbStack.databaseResourceArn,
   databaseSecretArn: devDbStack.databaseSecretArn,
   guardrailArn: devGuardrailsStack.guardrail.attrGuardrailArn,
+  guardrailId: devGuardrailsStack.guardrail.attrGuardrailId,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 devAgentPlatformStack.addDependency(devDbStack);
@@ -290,13 +291,14 @@ const prodGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-P
 cdk.Tags.of(prodGuardrailsStack).add('Environment', 'Prod');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodGuardrailsStack).add(key, value));
 
-// Agent Platform Stack — AgentCore Runtime, ECR, S3, DynamoDB, EventBridge, IAM
+// Agent Platform Stack — AgentCore Runtime, ECR, S3, DynamoDB, EventBridge, IAM, Router Lambda
 const prodAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatformStack-Prod', {
   environment: 'prod',
   config: EnvironmentConfig.get('prod'),
   databaseResourceArn: prodDbStack.databaseResourceArn,
   databaseSecretArn: prodDbStack.databaseSecretArn,
   guardrailArn: prodGuardrailsStack.guardrail.attrGuardrailArn,
+  guardrailId: prodGuardrailsStack.guardrail.attrGuardrailId,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 prodAgentPlatformStack.addDependency(prodDbStack);
