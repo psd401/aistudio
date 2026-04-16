@@ -9,10 +9,12 @@ import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as path from 'path';
+import { execSync } from 'child_process';
 // ALPHA CDK CONSTRUCT: @aws-cdk/aws-bedrock-agentcore-alpha has no API stability
 // guarantee and may introduce breaking changes on any release. Version is pinned
 // (not caret) in infra/package.json. Review changelog before upgrading.
@@ -36,6 +38,8 @@ export interface AgentPlatformStackProps extends cdk.StackProps {
   guardrailId: string;
   /** Bedrock Guardrail version — use 'DRAFT' for dev, a published version number for prod */
   guardrailVersion?: string;
+  /** Aurora database name (default: 'aistudio') — sourced from CDK props for consistency */
+  databaseName?: string;
 }
 
 /**
@@ -638,7 +642,6 @@ export class AgentPlatformStack extends cdk.Stack {
             local: {
               tryBundle(outputDir: string): boolean {
                 try {
-                  const execSync = require('child_process').execSync;
                   const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-router');
                   // Build with all deps (including devDependencies for tsc)
                   execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
@@ -682,7 +685,7 @@ export class AgentPlatformStack extends cdk.Stack {
         GUARDRAIL_VERSION: props.guardrailVersion || 'DRAFT',
         DATABASE_RESOURCE_ARN: props.databaseResourceArn,
         DATABASE_SECRET_ARN: props.databaseSecretArn,
-        DATABASE_NAME: 'aistudio',
+        DATABASE_NAME: props.databaseName || 'aistudio',
         GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,
         TOKEN_LIMIT_PER_INTERACTION: '100000',
         // K-12 safety: fail closed when guardrails are unavailable
@@ -702,12 +705,34 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(this.routerLambda).add('ManagedBy', 'cdk');
 
     // Wire SQS → Lambda trigger
+    // NOTE on duplicate processing: With batchSize=1 and 18-min visibility timeout
+    // (6x Lambda timeout), duplicates are unlikely but possible if the Lambda times
+    // out after invoking AgentCore but before completing (e.g., Google Chat API slow).
+    // The blast radius is one duplicate response per affected message. If this occurs
+    // in production, add SQS messageId-keyed dedup (e.g., DynamoDB conditional write
+    // before calling Google Chat) as a follow-up optimization.
     this.routerLambda.addEventSource(
       new lambdaEventSources.SqsEventSource(this.routerQueue, {
         batchSize: 1, // Process one message at a time for reliable error handling
         maxBatchingWindow: cdk.Duration.seconds(0), // No batching delay — respond ASAP
       }),
     );
+
+    // CloudWatch alarm on the DLQ — fires when any message lands in the dead-letter
+    // queue, meaning a user's message was silently dropped after 3 retries. In a K-12
+    // environment this warrants immediate investigation.
+    new cloudwatch.Alarm(this, 'RouterDlqAlarm', {
+      alarmName: `psd-agent-router-dlq-${environment}`,
+      alarmDescription: 'Agent Router DLQ received messages — investigate dropped messages',
+      metric: routerDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(1),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
 
     // =====================================================================
     // 10. SSM Parameters — Cross-Stack References

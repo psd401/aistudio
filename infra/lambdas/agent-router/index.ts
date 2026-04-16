@@ -56,6 +56,8 @@ import { Sha256 } from '@aws-crypto/sha256-js';
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { HttpRequest } from '@smithy/protocol-http';
 import { Context as LambdaContext, SQSEvent, SQSRecord } from 'aws-lambda';
+import * as crypto from 'crypto';
+import * as chatPkg from '@googleapis/chat';
 
 // ---------------------------------------------------------------------------
 // Structured logging (Lambda-compatible, no console.* per CLAUDE.md exception)
@@ -102,6 +104,17 @@ const dynamoClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const rdsClient = new RDSDataClient({});
 const secretsClient = new SecretsManagerClient({});
 const ssmClient = new SSMClient({});
+
+// SigV4 signer — promoted to module scope to avoid re-creating the credential
+// provider chain on every invocation. In a Lambda context credentials are stable
+// for the container lifetime; defaultProvider() caches after first resolution.
+const agentCoreCredentials = defaultProvider();
+const agentCoreSigner = new SignatureV4({
+  service: 'bedrock-agentcore',
+  region: process.env.AWS_REGION || 'us-east-1',
+  credentials: agentCoreCredentials,
+  sha256: Sha256,
+});
 
 // ---------------------------------------------------------------------------
 // Environment
@@ -231,19 +244,14 @@ async function getOrCreateUser(
     }
   }
 
-  // New user — create record with workspace prefix
-  // Use full email (lowercased) to avoid collisions between users with similar
-  // local parts (e.g., john.smith@ vs john-smith@). The hash suffix ensures
-  // uniqueness even if normalization produces identical base prefixes.
+  // New user — create record with workspace prefix.
+  // Use email local part + UUID suffix for guaranteed collision-free prefixes.
+  // Previous approach used a custom hash (2.2B values) which had theoretical
+  // collision risk; UUID v4 eliminates this entirely.
   const emailNormalized = senderEmail.toLowerCase();
   const localPart = emailNormalized.split('@')[0].replace(/[^a-z0-9-]/gi, '-').toLowerCase();
-  // Simple hash: sum char codes and take mod to create a short suffix
-  let hashNum = 0;
-  for (let i = 0; i < emailNormalized.length; i++) {
-    hashNum = ((hashNum << 5) - hashNum + emailNormalized.charCodeAt(i)) | 0;
-  }
-  const hashSuffix = Math.abs(hashNum).toString(36).substring(0, 6);
-  const workspacePrefix = `${localPart}-${hashSuffix}`;
+  const uuidSuffix = crypto.randomUUID().split('-')[0]; // 8 hex chars
+  const workspacePrefix = `${localPart}-${uuidSuffix}`;
   const newUser: AgentUser = {
     googleIdentity: senderName,
     email: senderEmail,
@@ -255,19 +263,45 @@ async function getOrCreateUser(
     sessionCount: 0,
   };
 
-  await dynamoClient.send(
-    new PutCommand({
-      TableName: USERS_TABLE,
-      Item: newUser,
-    })
-  );
+  // Conditional put prevents race condition: if two messages arrive simultaneously
+  // from the same new user, only the first PutCommand succeeds. The second gets
+  // ConditionalCheckFailedException and falls through to fetch the existing record.
+  try {
+    await dynamoClient.send(
+      new PutCommand({
+        TableName: USERS_TABLE,
+        Item: newUser,
+        ConditionExpression: 'attribute_not_exists(googleIdentity)',
+      })
+    );
 
-  log.info('New agent user created', {
-    googleIdentity: senderName,
-    workspacePrefix,
-  });
+    log.info('New agent user created', {
+      googleIdentity: senderName,
+      workspacePrefix,
+    });
 
-  return newUser;
+    return newUser;
+  } catch (putError: unknown) {
+    const putErrorName = (putError as { name?: string }).name;
+    if (putErrorName !== 'ConditionalCheckFailedException') {
+      throw putError;
+    }
+    // Another concurrent invocation created the user first — fetch their record
+    log.info('Concurrent user creation detected, fetching existing record', {
+      googleIdentity: senderName,
+    });
+    const retryResult = await dynamoClient.send(
+      new UpdateCommand({
+        TableName: USERS_TABLE,
+        Key: { googleIdentity: senderName },
+        UpdateExpression: 'SET lastActiveAt = :now',
+        ConditionExpression: 'attribute_exists(googleIdentity)',
+        ExpressionAttributeValues: { ':now': new Date().toISOString() },
+        ReturnValues: 'ALL_NEW',
+      })
+    );
+    return retryResult.Attributes as AgentUser;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -402,14 +436,7 @@ async function invokeAgentCore(
       body,
     });
 
-    const signer = new SignatureV4({
-      service: 'bedrock-agentcore',
-      region,
-      credentials: defaultProvider(),
-      sha256: Sha256,
-    });
-
-    const signed = await signer.sign(request);
+    const signed = await agentCoreSigner.sign(request);
 
     const response = await fetch(
       `https://${signed.hostname}${signed.path}`,
@@ -495,10 +522,9 @@ async function sendGoogleChatResponse(
   }
 
   // Use @googleapis/chat (lightweight, ~2MB) instead of full googleapis (~100MB).
-  // Use the auth class re-exported by @googleapis/chat to avoid version mismatch
+  // Static top-level import avoids module resolution overhead on the hot path.
+  // The auth class is re-exported by @googleapis/chat to avoid version mismatch
   // between google-auth-library as a direct dep and the one bundled internally.
-  const chatPkg = await import('@googleapis/chat');
-
   const googleAuth = new chatPkg.auth.GoogleAuth({
     credentials,
     scopes: ['https://www.googleapis.com/auth/chat.bot'],
@@ -662,12 +688,24 @@ async function processRecord(
   if (chatEvent.type !== 'MESSAGE') {
     log.info('Ignoring non-message event', { type: chatEvent.type });
     if (chatEvent.type === 'ADDED_TO_SPACE') {
-      await sendGoogleChatResponse(
-        chatEvent.space.name,
-        undefined,
-        "Hello! I'm your PSD AI Agent. Send me a message to get started.",
-        log
-      );
+      // Validate that ADDED_TO_SPACE events come from an allowed domain before
+      // responding. An injected event with no sender or an outside-domain sender
+      // should not receive a welcome message (confirms the agent is active).
+      const addedByEmail = chatEvent.message?.sender?.email;
+      const addedByDomain = addedByEmail?.split('@')[1]?.toLowerCase();
+      if (addedByDomain && ALLOWED_DOMAINS.includes(addedByDomain)) {
+        await sendGoogleChatResponse(
+          chatEvent.space.name,
+          undefined,
+          "Hello! I'm your PSD AI Agent. Send me a message to get started.",
+          log
+        );
+      } else {
+        log.warn('ADDED_TO_SPACE from unverified domain, skipping welcome message', {
+          space: chatEvent.space.name,
+          domain: addedByDomain || 'unknown',
+        });
+      }
     }
     return;
   }
