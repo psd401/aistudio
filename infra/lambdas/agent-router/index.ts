@@ -42,10 +42,7 @@ import {
   PutCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
-import {
-  RDSDataClient,
-  ExecuteStatementCommand,
-} from '@aws-sdk/client-rds-data';
+import postgres from 'postgres';
 import {
   SecretsManagerClient,
   GetSecretValueCommand,
@@ -101,10 +98,6 @@ function createLogger(context: Record<string, unknown> = {}) {
 
 const bedrockClient = new BedrockRuntimeClient({});
 const dynamoClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
-// IMPORTANT: Requires Aurora Data API to be enabled on the cluster.
-// Data API is disabled by default on Aurora Serverless v2 — if not enabled,
-// telemetry writes fail silently (caught by logTelemetry's try/catch).
-const rdsClient = new RDSDataClient({});
 const secretsClient = new SecretsManagerClient({});
 const ssmClient = new SSMClient({});
 
@@ -127,9 +120,10 @@ const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
 const USERS_TABLE = process.env.USERS_TABLE || '';
 const GUARDRAIL_ID = process.env.GUARDRAIL_ID || '';
 const GUARDRAIL_VERSION = process.env.GUARDRAIL_VERSION || 'DRAFT';
-const DATABASE_RESOURCE_ARN = process.env.DATABASE_RESOURCE_ARN || '';
 const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || '';
+const DATABASE_HOST = process.env.DATABASE_HOST || '';
 const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
+const DATABASE_PORT = parseInt(process.env.DATABASE_PORT || '5432', 10);
 const GOOGLE_CREDENTIALS_SECRET_ARN =
   process.env.GOOGLE_CREDENTIALS_SECRET_ARN || '';
 const TOKEN_LIMIT = parseInt(
@@ -219,6 +213,43 @@ let cachedChatClient: ReturnType<typeof chatPkg.chat> | null = null;
 let cachedRuntimeId: string | null = null;
 let runtimeIdCachedAt: number | null = null;
 const RUNTIME_ID_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+// Lazy-initialized postgres.js connection — reused across warm invocations.
+// Uses direct PostgreSQL (same as the rest of the app) instead of RDS Data API
+// for consistency and ~100-300ms lower latency per query.
+let pgClient: postgres.Sql | null = null;
+
+async function getDbClient(): Promise<postgres.Sql> {
+  if (pgClient) return pgClient;
+
+  if (!DATABASE_HOST || !DATABASE_SECRET_ARN) {
+    throw new Error('DATABASE_HOST and DATABASE_SECRET_ARN must be configured for telemetry');
+  }
+
+  // Read DB credentials from Secrets Manager (same secret used by the ECS app)
+  const result = await secretsClient.send(
+    new GetSecretValueCommand({ SecretId: DATABASE_SECRET_ARN })
+  );
+  const secret = JSON.parse(result.SecretString || '{}') as {
+    username: string;
+    password: string;
+  };
+
+  pgClient = postgres({
+    host: DATABASE_HOST,
+    port: DATABASE_PORT,
+    database: DATABASE_NAME,
+    username: secret.username,
+    password: secret.password,
+    ssl: 'require',
+    // Lambda-appropriate pool settings — small pool, short idle timeout
+    max: 2,
+    idle_timeout: 60,
+    connect_timeout: 10,
+  });
+
+  return pgClient;
+}
 
 async function getGoogleCredentials(): Promise<string> {
   if (
@@ -597,71 +628,39 @@ async function logTelemetry(
   },
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
-  if (!DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) {
-    log.warn('Database ARNs not configured, skipping telemetry');
+  if (!DATABASE_HOST || !DATABASE_SECRET_ARN) {
+    log.warn('Database not configured, skipping telemetry');
     return;
   }
 
   try {
-    // Insert message-level telemetry
-    await rdsClient.send(
-      new ExecuteStatementCommand({
-        resourceArn: DATABASE_RESOURCE_ARN,
-        secretArn: DATABASE_SECRET_ARN,
-        database: DATABASE_NAME,
-        sql: `INSERT INTO agent_messages
-              (user_id, session_id, model, input_tokens, output_tokens,
-               latency_ms, guardrail_blocked, space_name, created_at)
-              VALUES (:userId, :sessionId, :model, :inputTokens, :outputTokens,
-                      :latencyMs, :guardrailBlocked, :spaceName, NOW())`,
-        parameters: [
-          { name: 'userId', value: { stringValue: params.userId } },
-          { name: 'sessionId', value: { stringValue: params.sessionId } },
-          { name: 'model', value: params.model ? { stringValue: params.model } : { isNull: true } },
-          {
-            name: 'inputTokens',
-            value: { longValue: params.inputTokens },
-          },
-          {
-            name: 'outputTokens',
-            value: { longValue: params.outputTokens },
-          },
-          {
-            name: 'latencyMs',
-            value: { longValue: params.latencyMs },
-          },
-          {
-            name: 'guardrailBlocked',
-            value: { booleanValue: params.guardrailBlocked },
-          },
-          { name: 'spaceName', value: { stringValue: params.spaceName } },
-        ],
-      })
-    );
-
-    // Upsert session-level aggregates — creates the session row on first message,
-    // increments counters on subsequent messages. Uses ON CONFLICT on session_id
-    // unique constraint to achieve idempotent upserts.
+    const sql = await getDbClient();
     const totalTokens = params.inputTokens + params.outputTokens;
-    await rdsClient.send(
-      new ExecuteStatementCommand({
-        resourceArn: DATABASE_RESOURCE_ARN,
-        secretArn: DATABASE_SECRET_ARN,
-        database: DATABASE_NAME,
-        sql: `INSERT INTO agent_sessions
-              (user_id, session_id, session_start, total_messages, total_tokens, created_at, updated_at)
-              VALUES (:userId, :sessionId, NOW(), 1, :totalTokens, NOW(), NOW())
-              ON CONFLICT (session_id) DO UPDATE SET
-                total_messages = agent_sessions.total_messages + 1,
-                total_tokens = agent_sessions.total_tokens + EXCLUDED.total_tokens,
-                session_end = NOW()`,
-        parameters: [
-          { name: 'userId', value: { stringValue: params.userId } },
-          { name: 'sessionId', value: { stringValue: params.sessionId } },
-          { name: 'totalTokens', value: { longValue: totalTokens } },
-        ],
-      })
-    );
+
+    // Run both telemetry writes in parallel — they're independent.
+    // Uses direct PostgreSQL (postgres.js) consistent with the rest of the app,
+    // instead of RDS Data API which adds ~100-300ms latency per call.
+    await Promise.all([
+      // Insert message-level telemetry
+      sql`INSERT INTO agent_messages
+          (user_id, session_id, model, input_tokens, output_tokens,
+           latency_ms, guardrail_blocked, space_name, created_at)
+          VALUES (${params.userId}, ${params.sessionId}, ${params.model},
+                  ${params.inputTokens}, ${params.outputTokens},
+                  ${params.latencyMs}, ${params.guardrailBlocked},
+                  ${params.spaceName}, NOW())`,
+
+      // Upsert session-level aggregates — creates the session row on first message,
+      // increments counters on subsequent messages. Uses ON CONFLICT on session_id
+      // unique constraint to achieve idempotent upserts.
+      sql`INSERT INTO agent_sessions
+          (user_id, session_id, session_start, total_messages, total_tokens, created_at, updated_at)
+          VALUES (${params.userId}, ${params.sessionId}, NOW(), 1, ${totalTokens}, NOW(), NOW())
+          ON CONFLICT (session_id) DO UPDATE SET
+            total_messages = agent_sessions.total_messages + 1,
+            total_tokens = agent_sessions.total_tokens + EXCLUDED.total_tokens,
+            session_end = NOW()`,
+    ]);
   } catch (error) {
     // Telemetry failure should not affect user experience
     log.error('Failed to write telemetry', {

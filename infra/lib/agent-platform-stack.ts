@@ -41,6 +41,8 @@ export interface AgentPlatformStackProps extends cdk.StackProps {
   guardrailId: string;
   /** Bedrock Guardrail version — use 'DRAFT' for dev, a published version number for prod */
   guardrailVersion?: string;
+  /** Aurora cluster endpoint hostname for direct PostgreSQL connection */
+  databaseHost: string;
   /** Aurora database name (default: 'aistudio') — sourced from CDK props for consistency */
   databaseName?: string;
   /** Email for alarm notifications (DLQ, Lambda errors). If omitted, alarms fire but don't notify. */
@@ -407,7 +409,7 @@ export class AgentPlatformStack extends cdk.Stack {
     // VPC access via managed policy (not vpcEnabled) to avoid policy validator
     // flagging ENI wildcard resources. AgentCore-specific policies passed as
     // additionalPolicies since ServiceRoleFactory doesn't have built-in props
-    // for bedrock-agentcore, guardrails, or rds-data.
+    // for bedrock-agentcore and guardrails.
     this.routerLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'RouterLambdaRole', {
       functionName: 'psd-agent-router',
       environment,
@@ -425,15 +427,6 @@ export class AgentPlatformStack extends cdk.Stack {
             effect: iam.Effect.ALLOW,
             actions: ['bedrock:ApplyGuardrail', 'bedrock:GetGuardrail'],
             resources: [props.guardrailArn],
-          })],
-        }),
-        // Aurora rds-data for telemetry writes
-        new iam.PolicyDocument({
-          statements: [new iam.PolicyStatement({
-            sid: 'AuroraAccess',
-            effect: iam.Effect.ALLOW,
-            actions: ['rds-data:ExecuteStatement', 'rds-data:BatchExecuteStatement'],
-            resources: [props.databaseResourceArn],
           })],
         }),
         // AgentCore session invoke
@@ -722,7 +715,7 @@ export class AgentPlatformStack extends cdk.Stack {
         USERS_TABLE: this.usersTable.tableName,
         GUARDRAIL_ID: props.guardrailId,
         GUARDRAIL_VERSION: props.guardrailVersion || 'DRAFT',
-        DATABASE_RESOURCE_ARN: props.databaseResourceArn,
+        DATABASE_HOST: props.databaseHost,
         DATABASE_SECRET_ARN: props.databaseSecretArn,
         DATABASE_NAME: props.databaseName || 'aistudio',
         GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,

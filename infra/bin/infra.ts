@@ -162,6 +162,7 @@ const devAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatfor
   config: EnvironmentConfig.get('dev'),
   databaseResourceArn: devDbStack.databaseResourceArn,
   databaseSecretArn: devDbStack.databaseSecretArn,
+  databaseHost: devDbStack.cluster.clusterEndpoint.hostname,
   guardrailArn: devGuardrailsStack.guardrail.attrGuardrailArn,
   guardrailId: devGuardrailsStack.guardrail.attrGuardrailId,
   alertEmail,
@@ -298,6 +299,7 @@ const prodAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatfo
   config: EnvironmentConfig.get('prod'),
   databaseResourceArn: prodDbStack.databaseResourceArn,
   databaseSecretArn: prodDbStack.databaseSecretArn,
+  databaseHost: prodDbStack.cluster.clusterEndpoint.hostname,
   guardrailArn: prodGuardrailsStack.guardrail.attrGuardrailArn,
   guardrailId: prodGuardrailsStack.guardrail.attrGuardrailId,
   // Pin to published version in prod — DRAFT allows live edits without deployment.
