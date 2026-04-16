@@ -187,6 +187,10 @@ let cachedGoogleCredentials: string | null = null;
 let credentialsCachedAt: number | null = null;
 const CREDENTIALS_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
+// Cached Google Chat API client — reuses OAuth token across warm invocations.
+// Invalidated when credentials are refreshed (TTL expiry or parse error).
+let cachedChatClient: ReturnType<typeof chatPkg.chat> | null = null;
+
 // Cache SSM lookups at module scope to avoid redundant API calls on every invocation.
 // The Runtime ID is resolved from SSM because it's not known at CDK deploy time.
 let cachedRuntimeId: string | null = null;
@@ -209,6 +213,8 @@ async function getGoogleCredentials(): Promise<string> {
   );
   cachedGoogleCredentials = result.SecretString || '';
   credentialsCachedAt = Date.now();
+  // Invalidate the Chat API client so it picks up fresh credentials
+  cachedChatClient = null;
   return cachedGoogleCredentials;
 }
 
@@ -370,7 +376,7 @@ async function invokeAgentCore(
   userId: string,
   sessionId: string,
   log: ReturnType<typeof createLogger>
-): Promise<{ response: string; inputTokens: number; outputTokens: number; model: string }> {
+): Promise<{ response: string; inputTokens: number; outputTokens: number; model: string | null }> {
   // Resolve the AgentCore Runtime ID — check env var, then module-level cache,
   // then SSM. Cached at module scope with TTL to avoid redundant SSM API calls
   // on every invocation (~5–20ms + cost per call).
@@ -406,7 +412,7 @@ async function invokeAgentCore(
         'Your agent is not yet deployed. An administrator needs to push the agent image and deploy the AgentCore Runtime.',
       inputTokens: 0,
       outputTokens: 0,
-      model: 'none',
+      model: null,
     };
   }
 
@@ -460,7 +466,7 @@ async function invokeAgentCore(
             "I'm temporarily busy. Please try again in a moment.",
           inputTokens: 0,
           outputTokens: 0,
-          model: 'none',
+          model: null,
         };
       }
 
@@ -469,7 +475,7 @@ async function invokeAgentCore(
           'I encountered an error processing your message. Please try again.',
         inputTokens: 0,
         outputTokens: 0,
-        model: 'none',
+        model: null,
       };
     }
 
@@ -492,7 +498,7 @@ async function invokeAgentCore(
         "I'm temporarily unable to help. Please try again shortly.",
       inputTokens: 0,
       outputTokens: 0,
-      model: 'none',
+      model: null,
     };
   }
 }
@@ -518,19 +524,22 @@ async function sendGoogleChatResponse(
     // Secrets Manager in case the secret was recently updated/fixed.
     cachedGoogleCredentials = null;
     credentialsCachedAt = null;
+    cachedChatClient = null;
     throw new Error('Google credentials secret contains invalid JSON');
   }
 
-  // Use @googleapis/chat (lightweight, ~2MB) instead of full googleapis (~100MB).
-  // Static top-level import avoids module resolution overhead on the hot path.
-  // The auth class is re-exported by @googleapis/chat to avoid version mismatch
-  // between google-auth-library as a direct dep and the one bundled internally.
-  const googleAuth = new chatPkg.auth.GoogleAuth({
-    credentials,
-    scopes: ['https://www.googleapis.com/auth/chat.bot'],
-  });
+  // Reuse the cached Chat API client across warm invocations to avoid an
+  // OAuth token round-trip on every response. The cache is invalidated when
+  // credentials are refreshed (TTL expiry or JSON parse error above).
+  if (!cachedChatClient) {
+    const googleAuth = new chatPkg.auth.GoogleAuth({
+      credentials,
+      scopes: ['https://www.googleapis.com/auth/chat.bot'],
+    });
+    cachedChatClient = chatPkg.chat({ version: 'v1', auth: googleAuth });
+  }
 
-  const chatClient = chatPkg.chat({ version: 'v1', auth: googleAuth });
+  const chatClient = cachedChatClient;
 
   const messageBody: Record<string, string | Record<string, string>> = { text };
   if (threadName) {
@@ -556,7 +565,7 @@ async function logTelemetry(
   params: {
     userId: string;
     sessionId: string;
-    model: string;
+    model: string | null;
     inputTokens: number;
     outputTokens: number;
     latencyMs: number;
@@ -585,7 +594,7 @@ async function logTelemetry(
         parameters: [
           { name: 'userId', value: { stringValue: params.userId } },
           { name: 'sessionId', value: { stringValue: params.sessionId } },
-          { name: 'model', value: { stringValue: params.model } },
+          { name: 'model', value: params.model ? { stringValue: params.model } : { isNull: true } },
           {
             name: 'inputTokens',
             value: { longValue: params.inputTokens },
@@ -768,7 +777,7 @@ async function processRecord(
 
     // Use the same stable session ID as non-blocked messages so session-level
     // blocking stats aggregate correctly (not a throwaway timestamp-based ID).
-    const blockedRawSessionId = `${user.workspacePrefix}-${spaceName.replace(/\//g, '-')}`;
+    const blockedRawSessionId = `${user.workspacePrefix}-${encodeURIComponent(spaceName)}`;
     const blockedSessionId = blockedRawSessionId.length > 512
       ? blockedRawSessionId.substring(0, 512)
       : blockedRawSessionId;
@@ -777,7 +786,7 @@ async function processRecord(
       {
         userId: senderEmail,
         sessionId: blockedSessionId,
-        model: 'none',
+        model: null,
         inputTokens: 0,
         outputTokens: 0,
         latencyMs: Date.now() - startTime,
@@ -792,7 +801,7 @@ async function processRecord(
   // Step 3: Invoke AgentCore
   // Use space name as session ID for conversation continuity.
   // Cap at 512 chars to fit the agent_sessions.session_id VARCHAR(512) column.
-  const rawSessionId = `${user.workspacePrefix}-${spaceName.replace(/\//g, '-')}`;
+  const rawSessionId = `${user.workspacePrefix}-${encodeURIComponent(spaceName)}`;
   const sessionId = rawSessionId.length > 512 ? rawSessionId.substring(0, 512) : rawSessionId;
   const agentResult = await invokeAgentCore(
     messageText,

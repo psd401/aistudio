@@ -95,18 +95,16 @@ def main():
         if not user_message.strip():
             return {"result": "I didn't receive a message. Could you try again?"}
 
-        # If a model override is specified, configure it before processing
-        if model_override:
-            adapter.configure({"model": model_override})
-
         # Process through the harness — offload blocking I/O to a thread
         # to avoid blocking the async event loop (adapter.process uses
         # synchronous urllib internally).
+        # model_override is passed per-request (not stored on adapter) to
+        # avoid race conditions when AgentCore invokes concurrently.
         # get_running_loop() is the correct call inside a coroutine —
         # get_event_loop() is deprecated in Python 3.10+ and removed in 3.12.
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
-            None, adapter.process, user_message, session_id
+            None, adapter.process, user_message, session_id, model_override
         )
 
         logger.info(

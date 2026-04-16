@@ -21,7 +21,7 @@ class HarnessAdapter(abc.ABC):
     """Abstract base class for agent harness adapters."""
 
     @abc.abstractmethod
-    def process(self, message: str, session_id: str) -> str:
+    def process(self, message: str, session_id: str, model_override: Optional[str] = None) -> str:
         """Send a message to the harness and return the response."""
 
     @abc.abstractmethod
@@ -50,22 +50,13 @@ class OpenClawAdapter(HarnessAdapter):
         self._gateway_url: str = "http://127.0.0.1:3100"
         self._process: Optional[subprocess.Popen] = None
         self._ready: bool = False
-        self._model_override: Optional[str] = None
-
     def configure(self, config: dict) -> None:
         """Configure the OpenClaw adapter. Idempotent — safe to call multiple times.
 
         Supported config keys:
           - gateway_port (int): Port for the OpenClaw gateway. When provided,
             starts the gateway process if not already running.
-          - model (str): Override the default model for subsequent requests.
-            Can be set without restarting the gateway.
         """
-        # Capture model override for use in process() requests
-        model = config.get("model")
-        if model:
-            logger.info("Model override set: %s", model)
-            self._model_override = model
 
         # Only update the gateway URL and start the process when gateway_port
         # is explicitly provided. This prevents a model-only configure() call
@@ -113,20 +104,29 @@ class OpenClawAdapter(HarnessAdapter):
             f"OpenClaw gateway did not become ready within {timeout}s"
         )
 
-    def process(self, message: str, session_id: str) -> str:
-        """Send a message to OpenClaw and return the full response."""
+    def process(self, message: str, session_id: str, model_override: Optional[str] = None) -> str:
+        """Send a message to OpenClaw and return the full response.
+
+        Args:
+            model_override: Per-request model override. Passed as a parameter
+                (not stored on the instance) to avoid race conditions when
+                AgentCore invokes the entrypoint concurrently.
+        """
         import urllib.request
         import urllib.error
 
         if not self._ready:
-            return "Agent is starting up. Please try again in a moment."
+            raise RuntimeError(
+                "OpenClaw gateway is not ready — configure() with gateway_port "
+                "must be called before process()"
+            )
 
         request_data: dict = {
             "message": message,
             "sessionId": session_id,
         }
-        if self._model_override:
-            request_data["model"] = self._model_override
+        if model_override:
+            request_data["model"] = model_override
 
         payload = json.dumps(request_data).encode("utf-8")
 

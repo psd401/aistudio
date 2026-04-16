@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS agent_messages (
     id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     user_id         VARCHAR(255) NOT NULL,       -- Google Workspace email
     session_id      VARCHAR(512) NOT NULL,       -- AgentCore session identifier
-    model           VARCHAR(128) NOT NULL,       -- Model used (e.g., kimi-k2.5)
+    model           VARCHAR(128),                -- Model used (e.g., kimi-k2.5), NULL for guardrail blocks/errors
     input_tokens    INTEGER NOT NULL DEFAULT 0,
     output_tokens   INTEGER NOT NULL DEFAULT 0,
     latency_ms      INTEGER NOT NULL DEFAULT 0,  -- End-to-end Router Lambda latency

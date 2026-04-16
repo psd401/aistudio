@@ -615,8 +615,15 @@ export class AgentPlatformStack extends cdk.Stack {
     // PLACEHOLDER: GCP Pub/Sub bridge policy — grants sqs:SendMessage to the
     // GCP push subscription service account. Replace the principal ARN below
     // with the actual GCP-to-AWS federation role ARN during cross-cloud setup.
-    // Without this policy, no messages will arrive from Google Chat (silent failure).
-    // TODO(phase-2): Replace placeholder principal with actual GCP bridge role ARN
+    //
+    // WARNING: This deploys a queue policy referencing a role that may not yet
+    // exist. AWS accepts the policy but it's non-functional until the role is
+    // created. cdk diff will look clean either way — this is a silent failure
+    // vector if cross-cloud setup steps are skipped.
+    //
+    // TODO(phase-2): Replace placeholder principal with actual GCP bridge role ARN.
+    // Consider adding a CloudFormation custom resource or CfnCondition that
+    // validates the role exists at deploy time.
     this.routerQueue.addToResourcePolicy(new iam.PolicyStatement({
       sid: 'AllowGCPPubSubBridge',
       effect: iam.Effect.ALLOW,
@@ -666,7 +673,12 @@ export class AgentPlatformStack extends cdk.Stack {
                   execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
-                } catch {
+                } catch (e) {
+                  // Log the error so build failures aren't silently swallowed.
+                  // Docker fallback may use a different TS version, producing
+                  // subtle bundle differences — surface the root cause here.
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
                   return false;
                 }
               },
