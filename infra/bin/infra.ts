@@ -13,7 +13,6 @@ import { EmailNotificationStack } from '../lib/email-notification-stack';
 import { PowerTuningStack } from '../lib/power-tuning-stack';
 import { SecretsManagerStack } from '../lib/secrets-manager-stack';
 import { GuardrailsStack } from '../lib/guardrails-stack';
-import { AgentPlatformStack } from '../lib/agent-platform-stack';
 import { SecretValue } from 'aws-cdk-lib';
 import { PermissionBoundaryConstruct } from '../lib/constructs/security';
 import { AccessAnalyzerStack } from '../lib/stacks/access-analyzer-stack';
@@ -155,20 +154,6 @@ const devGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-De
 });
 cdk.Tags.of(devGuardrailsStack).add('Environment', 'Dev');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devGuardrailsStack).add(key, value));
-
-// Agent Platform Stack — AgentCore Runtime, ECR, S3, DynamoDB, EventBridge, IAM
-const devAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatformStack-Dev', {
-  environment: 'dev',
-  config: EnvironmentConfig.get('dev'),
-  databaseResourceArn: devDbStack.databaseResourceArn,
-  databaseSecretArn: devDbStack.databaseSecretArn,
-  guardrailArn: devGuardrailsStack.guardrail.attrGuardrailArn,
-  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
-});
-devAgentPlatformStack.addDependency(devDbStack);
-devAgentPlatformStack.addDependency(devGuardrailsStack);
-cdk.Tags.of(devAgentPlatformStack).add('Environment', 'Dev');
-Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAgentPlatformStack).add(key, value));
 
 const devProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-Dev', {
   environment: 'dev',

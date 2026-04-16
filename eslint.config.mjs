@@ -346,7 +346,6 @@ export default [
       "tests/**/*.ts",
       "tests/**/*.tsx",
       "scripts/**/*.ts",
-      "scripts/**/*.mjs",
     ],
     rules: {
       "no-console": "off",
@@ -355,23 +354,12 @@ export default [
 
   // Rule 6: Relaxed rules for build/utility scripts (dynamic paths, complexity inherent)
   {
-    files: ["scripts/**/*.ts", "scripts/**/*.mjs"],
+    files: ["scripts/**/*.ts"],
     rules: {
       "security/detect-non-literal-fs-filename": "off",
       "max-depth": "off",
       "complexity": "off",
       "max-lines-per-function": "off",
-    },
-  },
-
-  // Rule 6b: Node.js globals for ESM build scripts (console, process, etc.)
-  {
-    files: ["scripts/**/*.mjs"],
-    languageOptions: {
-      globals: {
-        console: "readonly",
-        process: "readonly",
-      },
     },
   },
 
