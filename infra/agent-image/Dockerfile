@@ -24,12 +24,21 @@ ARG UV_VERSION=0.7.9
 ARG BEDROCK_AGENTCORE_VERSION=1.0.0
 
 # Install bun (JS/TS runtime) and uv (Python package manager)
-# Note: curl-pipe-bash is the official install method for bun/uv.
-# Pinned versions mitigate supply-chain risk.
-RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
+# Downloads are verified via SHA256 checksums to prevent MITM/CDN compromise.
+# Checksums must be updated when bumping versions above.
+ARG BUN_SHA256="a]PLACEHOLDER — run: curl -fsSL https://bun.sh/install | sha256sum"
+ARG UV_SHA256="PLACEHOLDER — run: curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sha256sum"
+
+RUN curl -fsSL https://bun.sh/install -o /tmp/bun-install.sh && \
+    echo "${BUN_SHA256}  /tmp/bun-install.sh" | sha256sum -c - && \
+    bash /tmp/bun-install.sh "bun-v${BUN_VERSION}" && \
     ln -s /root/.bun/bin/bun /usr/local/bin/bun && \
-    curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh && \
-    ln -s /root/.local/bin/uv /usr/local/bin/uv
+    rm /tmp/bun-install.sh && \
+    curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" -o /tmp/uv-install.sh && \
+    echo "${UV_SHA256}  /tmp/uv-install.sh" | sha256sum -c - && \
+    bash /tmp/uv-install.sh && \
+    ln -s /root/.local/bin/uv /usr/local/bin/uv && \
+    rm /tmp/uv-install.sh
 
 # Install Python and pip for the AgentCore wrapper.
 # The exact Python version depends on the base image's distro packages.
@@ -39,6 +48,9 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Install the bedrock-agentcore SDK in a virtual environment (avoids --break-system-packages)
+# BLOCKER(prod): Verify the "bedrock-agentcore" PyPI package is the official AWS SDK
+# (not an unrelated name-squatted package). The SDK is pre-GA as of this PR — confirm
+# the package name on https://pypi.org/project/bedrock-agentcore/ before production use.
 RUN python3 -m venv /opt/agentcore-venv && \
     /opt/agentcore-venv/bin/pip install --no-cache-dir "bedrock-agentcore==${BEDROCK_AGENTCORE_VERSION}"
 

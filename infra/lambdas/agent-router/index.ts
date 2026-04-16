@@ -64,7 +64,7 @@ import * as chatPkg from '@googleapis/chat';
 // ---------------------------------------------------------------------------
 
 function generateRequestId(): string {
-  return `req_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  return `req_${crypto.randomUUID()}`;
 }
 
 function createLogger(context: Record<string, unknown> = {}) {
@@ -101,6 +101,9 @@ function createLogger(context: Record<string, unknown> = {}) {
 
 const bedrockClient = new BedrockRuntimeClient({});
 const dynamoClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+// IMPORTANT: Requires Aurora Data API to be enabled on the cluster.
+// Data API is disabled by default on Aurora Serverless v2 — if not enabled,
+// telemetry writes fail silently (caught by logTelemetry's try/catch).
 const rdsClient = new RDSDataClient({});
 const secretsClient = new SecretsManagerClient({});
 const ssmClient = new SSMClient({});
@@ -139,6 +142,26 @@ const GUARDRAIL_FAIL_OPEN = process.env.GUARDRAIL_FAIL_OPEN === 'true';
 const ALLOWED_DOMAINS = (process.env.ALLOWED_DOMAINS || 'psd401.net')
   .split(',')
   .map((d) => d.trim().toLowerCase());
+// Max message length before hitting Guardrails/AgentCore — prevents timeouts
+// and unexpected costs from unusually long inputs (e.g., pasted documents).
+const MAX_MESSAGE_LENGTH = parseInt(
+  process.env.MAX_MESSAGE_LENGTH || '10000',
+  10
+);
+
+// Cold-start diagnostic: log if AGENTCORE_RUNTIME_ID is not set at module load.
+// When the env var is absent, every invocation pays an SSM GetParameter call.
+// This makes the operational issue visible immediately in CloudWatch.
+if (!process.env.AGENTCORE_RUNTIME_ID) {
+  process.stdout.write(
+    JSON.stringify({
+      level: 'WARN',
+      message: 'AGENTCORE_RUNTIME_ID not set — will resolve from SSM on each cold start',
+      service: 'agent-router',
+      timestamp: new Date().toISOString(),
+    }) + '\n'
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -255,7 +278,7 @@ async function getOrCreateUser(
   // Previous approach used a custom hash (2.2B values) which had theoretical
   // collision risk; UUID v4 eliminates this entirely.
   const emailNormalized = senderEmail.toLowerCase();
-  const localPart = emailNormalized.split('@')[0].replace(/[^a-z0-9-]/gi, '-').toLowerCase();
+  const localPart = emailNormalized.split('@')[0].replace(/[^a-z0-9-]/g, '-');
   const uuidSuffix = crypto.randomUUID().split('-')[0]; // 8 hex chars
   const workspacePrefix = `${localPart}-${uuidSuffix}`;
   const newUser: AgentUser = {
@@ -756,6 +779,23 @@ async function processRecord(
     textLength: messageText.length,
   });
 
+  // Guard: reject messages that exceed the configured length limit before
+  // hitting Guardrails or AgentCore — prevents timeouts and unexpected costs.
+  if (messageText.length > MAX_MESSAGE_LENGTH) {
+    log.warn('Message exceeds maximum length', {
+      length: messageText.length,
+      limit: MAX_MESSAGE_LENGTH,
+    });
+    await sendGoogleChatResponse(
+      spaceName,
+      threadName,
+      `Your message is too long (${messageText.length.toLocaleString()} characters). ` +
+        `Please keep messages under ${MAX_MESSAGE_LENGTH.toLocaleString()} characters.`,
+      log
+    );
+    return;
+  }
+
   // Step 1: Resolve user
   const user = await getOrCreateUser(
     senderName,
@@ -825,19 +865,21 @@ async function processRecord(
   }
 
   // Step 5: Send response
-  // Prefix with [User's Agent] in shared spaces for clarity
-  const isDM = chatEvent.space.type === 'DM';
-  const responseText = isDM
-    ? agentResult.response
-    : `[${senderDisplayName}'s Agent] ${agentResult.response}`;
-
-  // Truncate to Google Chat's 4096 character limit
+  // Prefix with [User's Agent] in shared spaces for clarity.
+  // Truncate the raw response BEFORE adding the prefix so truncation
+  // behavior is consistent between DMs and shared spaces (the prefix
+  // would otherwise consume ~30 chars of the 4096 limit only in shared spaces).
   const maxLength = 4096;
-  const finalResponse =
-    responseText.length > maxLength
-      ? responseText.substring(0, maxLength - 50) +
-        '\n\n_(Response truncated — ask me to continue)_'
-      : responseText;
+  const truncationSuffix = '\n\n_(Response truncated — ask me to continue)_';
+  const isDM = chatEvent.space.type === 'DM';
+  const prefix = isDM ? '' : `[${senderDisplayName}'s Agent] `;
+  const availableLength = maxLength - prefix.length;
+  const truncatedResponse =
+    agentResult.response.length > availableLength
+      ? agentResult.response.substring(0, availableLength - truncationSuffix.length) +
+        truncationSuffix
+      : agentResult.response;
+  const finalResponse = `${prefix}${truncatedResponse}`;
 
   await sendGoogleChatResponse(spaceName, threadName, finalResponse, log);
 

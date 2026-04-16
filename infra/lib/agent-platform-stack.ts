@@ -634,6 +634,13 @@ export class AgentPlatformStack extends cdk.Stack {
       )],
     }));
 
+    // Output the expected bridge role ARN so operators know exactly what to create.
+    // This makes the prerequisite harder to skip during deployment.
+    new cdk.CfnOutput(this, 'GCPBridgeRoleRequired', {
+      value: `arn:aws:iam::${this.account}:role/gcp-pubsub-bridge-${environment}`,
+      description: 'REQUIRED: Create this IAM role for GCP Pub/Sub → SQS bridge. Without it, no Google Chat messages will arrive.',
+    });
+
     // =====================================================================
     // 9. Router Lambda Function
     // =====================================================================
@@ -756,6 +763,22 @@ export class AgentPlatformStack extends cdk.Stack {
         statistic: 'Sum',
       }),
       threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // Lambda error rate alarm — catches transient errors (e.g., Google Chat API 5xx)
+    // that succeed on retry and never reach the DLQ. Without this, invisible failures
+    // go undetected. Fires if ≥5 errors in a 5-minute window.
+    new cloudwatch.Alarm(this, 'RouterLambdaErrorAlarm', {
+      alarmName: `psd-agent-router-errors-${environment}`,
+      alarmDescription: 'Agent Router Lambda error rate elevated — investigate transient failures',
+      metric: this.routerLambda.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 5,
       evaluationPeriods: 1,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,

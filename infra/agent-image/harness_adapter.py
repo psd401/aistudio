@@ -50,6 +50,7 @@ class OpenClawAdapter(HarnessAdapter):
         self._gateway_url: str = "http://127.0.0.1:3100"
         self._process: Optional[subprocess.Popen] = None
         self._ready: bool = False
+
     def configure(self, config: dict) -> None:
         """Configure the OpenClaw adapter. Idempotent — safe to call multiple times.
 
@@ -159,6 +160,7 @@ class OpenClawAdapter(HarnessAdapter):
 
     def shutdown(self) -> None:
         """Stop the OpenClaw gateway process."""
+        self._ready = False
         if self._process and self._process.poll() is None:
             logger.info("Stopping OpenClaw gateway")
             self._process.terminate()
