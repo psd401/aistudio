@@ -612,6 +612,21 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(this.routerQueue).add('Environment', environment);
     cdk.Tags.of(this.routerQueue).add('ManagedBy', 'cdk');
 
+    // PLACEHOLDER: GCP Pub/Sub bridge policy — grants sqs:SendMessage to the
+    // GCP push subscription service account. Replace the principal ARN below
+    // with the actual GCP-to-AWS federation role ARN during cross-cloud setup.
+    // Without this policy, no messages will arrive from Google Chat (silent failure).
+    // TODO(phase-2): Replace placeholder principal with actual GCP bridge role ARN
+    this.routerQueue.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'AllowGCPPubSubBridge',
+      effect: iam.Effect.ALLOW,
+      actions: ['sqs:SendMessage'],
+      resources: [this.routerQueue.queueArn],
+      principals: [new iam.ArnPrincipal(
+        `arn:aws:iam::${this.account}:role/gcp-pubsub-bridge-${environment}`,
+      )],
+    }));
+
     // =====================================================================
     // 9. Router Lambda Function
     // =====================================================================

@@ -651,9 +651,10 @@ export async function handler(
 
   log.info('Router invoked', { recordCount: event.Records.length });
 
-  for (const record of event.Records) {
-    await processRecord(record, log);
-  }
+  // Process records concurrently. With batchSize: 1 (set in CDK event source
+  // mapping) this is a single record today, but handles multiple safely if
+  // batchSize is ever increased — avoids serial processing bottleneck.
+  await Promise.all(event.Records.map((record) => processRecord(record, log)));
 }
 
 async function processRecord(

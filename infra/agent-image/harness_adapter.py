@@ -105,8 +105,13 @@ class OpenClawAdapter(HarnessAdapter):
                 pass
             time.sleep(1)
 
-        logger.warning("OpenClaw gateway did not become ready within %ds", timeout)
-        self._ready = False
+        # Raise instead of silently degrading — if the gateway doesn't start,
+        # every subsequent process() call returns a "starting up" message that
+        # SQS retries indefinitely. Raising causes a non-zero exit so AgentCore
+        # restarts the container rather than serving degraded responses forever.
+        raise RuntimeError(
+            f"OpenClaw gateway did not become ready within {timeout}s"
+        )
 
     def process(self, message: str, session_id: str) -> str:
         """Send a message to OpenClaw and return the full response."""
