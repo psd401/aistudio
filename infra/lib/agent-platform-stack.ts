@@ -10,13 +10,12 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import {
   VPCProvider,
-  EnvironmentConfig,
   IEnvironmentConfig,
 } from './constructs';
 import { ServiceRoleFactory } from './constructs/security';
 
 export interface AgentPlatformStackProps extends cdk.StackProps {
-  environment: 'dev' | 'prod';
+  environment: 'dev' | 'staging' | 'prod';
   config: IEnvironmentConfig;
   /** Aurora database resource ARN from DatabaseStack */
   databaseResourceArn: string;
@@ -109,7 +108,11 @@ export class AgentPlatformStack extends cdk.Stack {
         ? cdk.RemovalPolicy.RETAIN
         : cdk.RemovalPolicy.DESTROY,
       autoDeleteObjects: environment !== 'prod',
-      // S3 Intelligent Tiering for cost optimization (no expiration — keep forever)
+      // S3 Intelligent Tiering for cost optimization (no expiration — keep forever).
+      // Archive Access (90d): objects retrievable in minutes.
+      // Deep Archive (180d): objects require a Restore request (12-48 hours).
+      // If ad-hoc access to older workspace data is needed (audits, replays),
+      // either remove deepArchiveAccessTierTime or plan for restore latency.
       intelligentTieringConfigurations: [
         {
           name: 'agent-workspace-tiering',
@@ -149,6 +152,8 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(this.usersTable).add('ManagedBy', 'cdk');
 
     // 4b. Agent Signals table — Organizational Nervous System (Phase 2-3, create now)
+    // TTL enabled on 'expiresAt' attribute for automatic cleanup of stale signals.
+    // Application code must set 'expiresAt' (epoch seconds) on each item.
     this.signalsTable = new dynamodb.Table(this, 'AgentSignalsTable', {
       tableName: `psd-agent-signals-${environment}`,
       partitionKey: { name: 'building', type: dynamodb.AttributeType.STRING },
@@ -156,6 +161,7 @@ export class AgentPlatformStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      timeToLiveAttribute: 'expiresAt',
       removalPolicy: environment === 'prod'
         ? cdk.RemovalPolicy.RETAIN
         : cdk.RemovalPolicy.DESTROY,
@@ -170,15 +176,17 @@ export class AgentPlatformStack extends cdk.Stack {
 
     // 5a. AgentCore execution role
     // BYPASS ServiceRoleFactory: AgentCore requires bedrock-agentcore.amazonaws.com
-    // as trust principal (CompositePrincipal with bedrock + ecs-tasks). ServiceRoleFactory
-    // only supports lambda.amazonaws.com and ecs-tasks.amazonaws.com trust principals.
+    // as trust principal, which ServiceRoleFactory doesn't support. Only the AgentCore
+    // service principal is included — bedrock.amazonaws.com and ecs-tasks.amazonaws.com
+    // were removed as they are not required by AgentCore Runtime and broaden the
+    // attack surface unnecessarily. aws:SourceAccount condition prevents confused-deputy.
     this.agentCoreExecutionRole = new iam.Role(this, 'AgentCoreExecutionRole', {
       roleName: `psd-agentcore-execution-${environment}`,
-      assumedBy: new iam.CompositePrincipal(
-        new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
-        new iam.ServicePrincipal('bedrock.amazonaws.com'),
-        new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
-      ),
+      assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com', {
+        conditions: {
+          StringEquals: { 'aws:SourceAccount': this.account },
+        },
+      }),
       description: `AgentCore execution role for PSD AI Agent Platform (${environment})`,
     });
 
@@ -198,13 +206,22 @@ export class AgentPlatformStack extends cdk.Stack {
         'bedrock:InvokeModelWithResponseStream',
         'bedrock:Converse',
         'bedrock:ConverseStream',
-        'bedrock:ListFoundationModels',
       ],
       resources: [
         `arn:aws:bedrock:${this.region}::foundation-model/*`,
         `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
+        // Cross-region inference profiles use region-less format (us, eu, ap)
+        // See: https://docs.aws.amazon.com/bedrock/latest/userguide/cross-region-inference.html
         `arn:aws:bedrock:us:${this.account}:inference-profile/*`,
       ],
+    }));
+
+    // ListFoundationModels does not support resource-level permissions — must use '*'
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'BedrockListModels',
+      effect: iam.Effect.ALLOW,
+      actions: ['bedrock:ListFoundationModels'],
+      resources: ['*'],
     }));
 
     // S3 workspace read/write
@@ -244,9 +261,9 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: ['*'], // GetAuthorizationToken does not support resource-level permissions
     }));
 
-    // SSM managed instance core (for debugging)
+    // SSM Parameter Store — read config/cross-stack references at runtime
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'SSMDebugAccess',
+      sid: 'SSMParameterAccess',
       effect: iam.Effect.ALLOW,
       actions: [
         'ssm:GetParameter',
@@ -258,7 +275,9 @@ export class AgentPlatformStack extends cdk.Stack {
       ],
     }));
 
-    // CloudWatch Logs
+    // CloudWatch Logs — both log group and log stream ARNs required for
+    // CreateLogStream/PutLogEvents. Covering both /aws/bedrock/agentcore/ and
+    // /aws/bedrock-agentcore/ patterns since the alpha construct may use either.
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'CloudWatchLogs',
       effect: iam.Effect.ALLOW,
@@ -269,6 +288,9 @@ export class AgentPlatformStack extends cdk.Stack {
       ],
       resources: [
         `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock/agentcore/*`,
+        `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock/agentcore/*:*`,
+        `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/*`,
+        `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/*:*`,
       ],
     }));
 
@@ -409,10 +431,12 @@ export class AgentPlatformStack extends cdk.Stack {
     // Use a CloudFormation parameter for initial image tag to avoid requiring
     // a pre-existing image in ECR at stack creation time. The Dockerfile/image
     // will be pushed separately as part of the agent build pipeline.
+    // NOTE: Default 'placeholder' intentionally does not reference a real image —
+    // a real tag must be provided via --parameters AgentImageTag=<tag> at deploy time.
     const imageTag = new cdk.CfnParameter(this, 'AgentImageTag', {
       type: 'String',
-      default: 'latest',
-      description: 'Docker image tag for the agent base image in ECR',
+      default: 'placeholder',
+      description: 'Docker image tag for the agent base image in ECR (must be pushed before deploy)',
     });
 
     this.runtime = new agentcore.Runtime(this, 'AgentCoreRuntime', {
@@ -454,93 +478,109 @@ export class AgentPlatformStack extends cdk.Stack {
 
     const cronSchedules = config.agent.cronSchedules;
 
-    // Rules stored as properties for future Cron Lambda target attachment.
-    // Prefixed with _ to suppress unused-variable lint until targets are added.
-    const _morningBriefRule = new events.Rule(this, 'MorningBriefRule', {
+    // EventBridge rules for agent cron jobs. Disabled until Cron Lambda is created.
+    // CDK registers these in the construct tree by ID — no variable reference needed
+    // until addTarget() is called when the Cron Lambda is implemented.
+    const morningBriefRule = new events.Rule(this, 'MorningBriefRule', {
       ruleName: `psd-agent-morning-brief-${environment}`,
       description: 'Morning briefing for PSD AI agents — 9 AM PDT / 16:00 UTC weekdays',
       schedule: events.Schedule.expression(cronSchedules.morningBrief),
-      enabled: false, // Disabled until Cron Lambda exists
+      enabled: false,
     });
+    cdk.Tags.of(morningBriefRule).add('Environment', environment);
+    cdk.Tags.of(morningBriefRule).add('ManagedBy', 'cdk');
 
-    const _eveningWrapRule = new events.Rule(this, 'EveningWrapRule', {
+    const eveningWrapRule = new events.Rule(this, 'EveningWrapRule', {
       ruleName: `psd-agent-evening-wrap-${environment}`,
       description: 'Evening wrap-up for PSD AI agents — 6 PM PDT / 01:00 UTC weekdays',
       schedule: events.Schedule.expression(cronSchedules.eveningWrap),
       enabled: false,
     });
+    cdk.Tags.of(eveningWrapRule).add('Environment', environment);
+    cdk.Tags.of(eveningWrapRule).add('ManagedBy', 'cdk');
 
-    const _weeklySummaryRule = new events.Rule(this, 'WeeklySummaryRule', {
+    const weeklySummaryRule = new events.Rule(this, 'WeeklySummaryRule', {
       ruleName: `psd-agent-weekly-summary-${environment}`,
       description: 'Weekly summary for PSD AI agents — 3 PM PDT Friday / 22:00 UTC',
       schedule: events.Schedule.expression(cronSchedules.weeklySummary),
       enabled: false,
     });
+    cdk.Tags.of(weeklySummaryRule).add('Environment', environment);
+    cdk.Tags.of(weeklySummaryRule).add('ManagedBy', 'cdk');
 
-    const _kaizenScanRule = new events.Rule(this, 'KaizenScanRule', {
+    const kaizenScanRule = new events.Rule(this, 'KaizenScanRule', {
       ruleName: `psd-agent-kaizen-scan-${environment}`,
       description: 'Kaizen improvement scan for PSD AI agents — 8 PM PDT Sunday / 03:00 UTC Monday',
       schedule: events.Schedule.expression(cronSchedules.kaizenScan),
       enabled: false,
     });
+    cdk.Tags.of(kaizenScanRule).add('Environment', environment);
+    cdk.Tags.of(kaizenScanRule).add('ManagedBy', 'cdk');
+
+    // Suppress lint: rules are registered in CloudFormation by construct ID.
+    // Variables will be used for addTarget() when Cron Lambda is implemented.
+    void morningBriefRule;
+    void eveningWrapRule;
+    void weeklySummaryRule;
+    void kaizenScanRule;
 
     // =====================================================================
     // 8. SSM Parameters — Cross-Stack References
     // =====================================================================
+    // All SSM parameters tagged for IAM tag-based access control compliance.
 
-    new ssm.StringParameter(this, 'ECRRepositoryArnParam', {
-      parameterName: `/aistudio/${environment}/agent-ecr-repository-arn`,
-      stringValue: this.ecrRepository.repositoryArn,
-      description: 'ECR repository ARN for agent base image',
-    });
+    const ssmParams = [
+      new ssm.StringParameter(this, 'ECRRepositoryArnParam', {
+        parameterName: `/aistudio/${environment}/agent-ecr-repository-arn`,
+        stringValue: this.ecrRepository.repositoryArn,
+        description: 'ECR repository ARN for agent base image',
+      }),
+      new ssm.StringParameter(this, 'ECRRepositoryUriParam', {
+        parameterName: `/aistudio/${environment}/agent-ecr-repository-uri`,
+        stringValue: this.ecrRepository.repositoryUri,
+        description: 'ECR repository URI for agent base image',
+      }),
+      new ssm.StringParameter(this, 'WorkspaceBucketNameParam', {
+        parameterName: `/aistudio/${environment}/agent-workspace-bucket-name`,
+        stringValue: this.workspaceBucket.bucketName,
+        description: 'S3 bucket name for agent workspaces',
+      }),
+      new ssm.StringParameter(this, 'UsersTableNameParam', {
+        parameterName: `/aistudio/${environment}/agent-users-table-name`,
+        stringValue: this.usersTable.tableName,
+        description: 'DynamoDB table name for agent user identity mapping',
+      }),
+      new ssm.StringParameter(this, 'SignalsTableNameParam', {
+        parameterName: `/aistudio/${environment}/agent-signals-table-name`,
+        stringValue: this.signalsTable.tableName,
+        description: 'DynamoDB table name for organizational signals',
+      }),
+      new ssm.StringParameter(this, 'AgentCoreRuntimeIdParam', {
+        parameterName: `/aistudio/${environment}/agentcore-runtime-id`,
+        stringValue: this.runtime.agentRuntimeId,
+        description: 'AgentCore Runtime ID',
+      }),
+      new ssm.StringParameter(this, 'AgentCoreExecutionRoleArnParam', {
+        parameterName: `/aistudio/${environment}/agentcore-execution-role-arn`,
+        stringValue: this.agentCoreExecutionRole.roleArn,
+        description: 'AgentCore execution role ARN',
+      }),
+      new ssm.StringParameter(this, 'RouterLambdaRoleArnParam', {
+        parameterName: `/aistudio/${environment}/agent-router-lambda-role-arn`,
+        stringValue: this.routerLambdaRole.roleArn,
+        description: 'Router Lambda role ARN',
+      }),
+      new ssm.StringParameter(this, 'CronLambdaRoleArnParam', {
+        parameterName: `/aistudio/${environment}/agent-cron-lambda-role-arn`,
+        stringValue: this.cronLambdaRole.roleArn,
+        description: 'Cron Lambda role ARN',
+      }),
+    ];
 
-    new ssm.StringParameter(this, 'ECRRepositoryUriParam', {
-      parameterName: `/aistudio/${environment}/agent-ecr-repository-uri`,
-      stringValue: this.ecrRepository.repositoryUri,
-      description: 'ECR repository URI for agent base image',
-    });
-
-    new ssm.StringParameter(this, 'WorkspaceBucketNameParam', {
-      parameterName: `/aistudio/${environment}/agent-workspace-bucket-name`,
-      stringValue: this.workspaceBucket.bucketName,
-      description: 'S3 bucket name for agent workspaces',
-    });
-
-    new ssm.StringParameter(this, 'UsersTableNameParam', {
-      parameterName: `/aistudio/${environment}/agent-users-table-name`,
-      stringValue: this.usersTable.tableName,
-      description: 'DynamoDB table name for agent user identity mapping',
-    });
-
-    new ssm.StringParameter(this, 'SignalsTableNameParam', {
-      parameterName: `/aistudio/${environment}/agent-signals-table-name`,
-      stringValue: this.signalsTable.tableName,
-      description: 'DynamoDB table name for organizational signals',
-    });
-
-    new ssm.StringParameter(this, 'AgentCoreRuntimeIdParam', {
-      parameterName: `/aistudio/${environment}/agentcore-runtime-id`,
-      stringValue: this.runtime.agentRuntimeId,
-      description: 'AgentCore Runtime ID',
-    });
-
-    new ssm.StringParameter(this, 'AgentCoreExecutionRoleArnParam', {
-      parameterName: `/aistudio/${environment}/agentcore-execution-role-arn`,
-      stringValue: this.agentCoreExecutionRole.roleArn,
-      description: 'AgentCore execution role ARN',
-    });
-
-    new ssm.StringParameter(this, 'RouterLambdaRoleArnParam', {
-      parameterName: `/aistudio/${environment}/agent-router-lambda-role-arn`,
-      stringValue: this.routerLambdaRole.roleArn,
-      description: 'Router Lambda role ARN',
-    });
-
-    new ssm.StringParameter(this, 'CronLambdaRoleArnParam', {
-      parameterName: `/aistudio/${environment}/agent-cron-lambda-role-arn`,
-      stringValue: this.cronLambdaRole.roleArn,
-      description: 'Cron Lambda role ARN',
-    });
+    for (const param of ssmParams) {
+      cdk.Tags.of(param).add('Environment', environment);
+      cdk.Tags.of(param).add('ManagedBy', 'cdk');
+    }
 
     // =====================================================================
     // 9. CloudFormation Outputs
@@ -569,6 +609,11 @@ export class AgentPlatformStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'AgentCoreRuntimeId', {
       value: this.runtime.agentRuntimeId,
       description: 'AgentCore Runtime ID',
+    });
+
+    new cdk.CfnOutput(this, 'AgentCoreRuntimeArn', {
+      value: this.runtime.agentRuntimeArn,
+      description: 'AgentCore Runtime ARN',
     });
 
     new cdk.CfnOutput(this, 'AgentCoreExecutionRoleArn', {

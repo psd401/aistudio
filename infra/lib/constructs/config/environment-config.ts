@@ -52,6 +52,19 @@ export interface IEnvironmentConfig {
   securityAlertEmail?: string
 }
 
+/**
+ * Default cron schedules for agent recurring jobs.
+ * EventBridge cron expressions are always UTC. Times target Pacific Daylight (UTC-7).
+ * During PST (Nov-Mar), these fire 1 hour earlier Pacific time.
+ * Defined once to avoid duplication across environments.
+ */
+const DEFAULT_AGENT_CRON_SCHEDULES: AgentConfig['cronSchedules'] = {
+  morningBrief: 'cron(0 16 ? * MON-FRI *)', // 9 AM PDT
+  eveningWrap: 'cron(0 1 ? * TUE-SAT *)', // 6 PM PDT (next UTC day)
+  weeklySummary: 'cron(0 22 ? * FRI *)', // 3 PM PDT
+  kaizenScan: 'cron(0 3 ? * MON *)', // 8 PM PDT Sunday (Monday UTC)
+}
+
 export class EnvironmentConfig {
   private static configs: Map<string, IEnvironmentConfig> = new Map()
 
@@ -86,15 +99,7 @@ export class EnvironmentConfig {
       },
       agent: {
         microVmIdleTimeoutMinutes: 30,
-        // EventBridge cron expressions are UTC. Times below target Pacific Daylight (UTC-7).
-        // During PST (Nov-Mar), these fire 1 hour earlier Pacific time.
-        // Adjust to UTC-8 offsets if PST alignment is preferred.
-        cronSchedules: {
-          morningBrief: "cron(0 16 ? * MON-FRI *)", // 9 AM PDT
-          eveningWrap: "cron(0 1 ? * TUE-SAT *)", // 6 PM PDT (next UTC day)
-          weeklySummary: "cron(0 22 ? * FRI *)", // 3 PM PDT
-          kaizenScan: "cron(0 3 ? * MON *)", // 8 PM PDT Sunday (Monday UTC)
-        },
+        cronSchedules: DEFAULT_AGENT_CRON_SCHEDULES,
       },
       costOptimization: true,
     })
@@ -142,13 +147,7 @@ export class EnvironmentConfig {
       },
       agent: {
         microVmIdleTimeoutMinutes: 60,
-        // EventBridge cron expressions are UTC. Times below target Pacific Daylight (UTC-7).
-        cronSchedules: {
-          morningBrief: "cron(0 16 ? * MON-FRI *)", // 9 AM PDT
-          eveningWrap: "cron(0 1 ? * TUE-SAT *)", // 6 PM PDT (next UTC day)
-          weeklySummary: "cron(0 22 ? * FRI *)", // 3 PM PDT
-          kaizenScan: "cron(0 3 ? * MON *)", // 8 PM PDT Sunday (Monday UTC)
-        },
+        cronSchedules: DEFAULT_AGENT_CRON_SCHEDULES,
       },
       costOptimization: false,
     })
@@ -186,13 +185,7 @@ export class EnvironmentConfig {
       },
       agent: {
         microVmIdleTimeoutMinutes: 30,
-        // EventBridge cron expressions are UTC. Times below target Pacific Daylight (UTC-7).
-        cronSchedules: {
-          morningBrief: "cron(0 16 ? * MON-FRI *)", // 9 AM PDT
-          eveningWrap: "cron(0 1 ? * TUE-SAT *)", // 6 PM PDT (next UTC day)
-          weeklySummary: "cron(0 22 ? * FRI *)", // 3 PM PDT
-          kaizenScan: "cron(0 3 ? * MON *)", // 8 PM PDT Sunday (Monday UTC)
-        },
+        cronSchedules: DEFAULT_AGENT_CRON_SCHEDULES,
       },
       costOptimization: false,
     })
