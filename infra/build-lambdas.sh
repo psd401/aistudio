@@ -22,6 +22,13 @@ cd lambdas/url-processor
 bun install --production
 cd ../..
 
+# Install dependencies for agent-router
+echo "Installing dependencies for agent-router..."
+cd lambdas/agent-router
+bun install --production
+bunx tsc
+cd ../..
+
 # Create processing layer
 echo "Creating processing layer..."
 mkdir -p layers/processing/nodejs
