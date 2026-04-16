@@ -86,11 +86,14 @@ export class EnvironmentConfig {
       },
       agent: {
         microVmIdleTimeoutMinutes: 30,
+        // EventBridge cron expressions are UTC. Times below target Pacific Daylight (UTC-7).
+        // During PST (Nov-Mar), these fire 1 hour earlier Pacific time.
+        // Adjust to UTC-8 offsets if PST alignment is preferred.
         cronSchedules: {
-          morningBrief: "cron(0 9 ? * MON-FRI *)",
-          eveningWrap: "cron(0 18 ? * MON-FRI *)",
-          weeklySummary: "cron(0 15 ? * FRI *)",
-          kaizenScan: "cron(0 20 ? * SUN *)",
+          morningBrief: "cron(0 16 ? * MON-FRI *)", // 9 AM PDT
+          eveningWrap: "cron(0 1 ? * TUE-SAT *)", // 6 PM PDT (next UTC day)
+          weeklySummary: "cron(0 22 ? * FRI *)", // 3 PM PDT
+          kaizenScan: "cron(0 3 ? * MON *)", // 8 PM PDT Sunday (Monday UTC)
         },
       },
       costOptimization: true,
@@ -139,11 +142,12 @@ export class EnvironmentConfig {
       },
       agent: {
         microVmIdleTimeoutMinutes: 60,
+        // EventBridge cron expressions are UTC. Times below target Pacific Daylight (UTC-7).
         cronSchedules: {
-          morningBrief: "cron(0 9 ? * MON-FRI *)",
-          eveningWrap: "cron(0 18 ? * MON-FRI *)",
-          weeklySummary: "cron(0 15 ? * FRI *)",
-          kaizenScan: "cron(0 20 ? * SUN *)",
+          morningBrief: "cron(0 16 ? * MON-FRI *)", // 9 AM PDT
+          eveningWrap: "cron(0 1 ? * TUE-SAT *)", // 6 PM PDT (next UTC day)
+          weeklySummary: "cron(0 22 ? * FRI *)", // 3 PM PDT
+          kaizenScan: "cron(0 3 ? * MON *)", // 8 PM PDT Sunday (Monday UTC)
         },
       },
       costOptimization: false,
@@ -182,11 +186,12 @@ export class EnvironmentConfig {
       },
       agent: {
         microVmIdleTimeoutMinutes: 30,
+        // EventBridge cron expressions are UTC. Times below target Pacific Daylight (UTC-7).
         cronSchedules: {
-          morningBrief: "cron(0 9 ? * MON-FRI *)",
-          eveningWrap: "cron(0 18 ? * MON-FRI *)",
-          weeklySummary: "cron(0 15 ? * FRI *)",
-          kaizenScan: "cron(0 20 ? * SUN *)",
+          morningBrief: "cron(0 16 ? * MON-FRI *)", // 9 AM PDT
+          eveningWrap: "cron(0 1 ? * TUE-SAT *)", // 6 PM PDT (next UTC day)
+          weeklySummary: "cron(0 22 ? * FRI *)", // 3 PM PDT
+          kaizenScan: "cron(0 3 ? * MON *)", // 8 PM PDT Sunday (Monday UTC)
         },
       },
       costOptimization: false,

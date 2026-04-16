@@ -98,6 +98,9 @@ export class AgentPlatformStack extends cdk.Stack {
     this.workspaceBucket = new s3.Bucket(this, 'AgentWorkspaceBucket', {
       bucketName: `psd-agents-${environment}-${cdk.Aws.ACCOUNT_ID}`,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      // SSE-S3 chosen over SSE-KMS: workspace data is agent-generated artifacts
+      // (not direct student PII). KMS adds ~$1/mo per key + $0.03/10k API calls.
+      // Upgrade to SSE-KMS with dedicated key if student data is stored here.
       encryption: s3.BucketEncryption.S3_MANAGED,
       versioned: true,
       enforceSSL: true,
@@ -165,6 +168,9 @@ export class AgentPlatformStack extends cdk.Stack {
     // =====================================================================
 
     // 5a. AgentCore execution role
+    // BYPASS ServiceRoleFactory: AgentCore requires bedrock-agentcore.amazonaws.com
+    // as trust principal (CompositePrincipal with bedrock + ecs-tasks). ServiceRoleFactory
+    // only supports lambda.amazonaws.com and ecs-tasks.amazonaws.com trust principals.
     this.agentCoreExecutionRole = new iam.Role(this, 'AgentCoreExecutionRole', {
       roleName: `psd-agentcore-execution-${environment}`,
       assumedBy: new iam.CompositePrincipal(
@@ -179,6 +185,10 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(this.agentCoreExecutionRole).add('ManagedBy', 'cdk');
 
     // Bedrock model invocation
+    // INTENTIONAL: Broad model access (foundation-model/*) because the agent platform
+    // must support model selection at runtime based on admin configuration in AI Studio.
+    // Cost guardrails are enforced at the application layer via the Guardrails stack,
+    // not at the IAM layer. Tighten to specific model ARNs if static model set is adopted.
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'BedrockModelInvocation',
       effect: iam.Effect.ALLOW,
@@ -272,11 +282,56 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: [props.guardrailArn],
     }));
 
+    // DynamoDB read/write — agent container accesses USERS_TABLE and SIGNALS_TABLE
+    // Note: DynamoDB does not support aws:ResourceTag condition keys.
+    // Table ARN scoping provides equivalent isolation.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'DynamoDBAccess',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'dynamodb:GetItem',
+        'dynamodb:PutItem',
+        'dynamodb:UpdateItem',
+        'dynamodb:DeleteItem',
+        'dynamodb:Query',
+        'dynamodb:Scan',
+      ],
+      resources: [
+        this.usersTable.tableArn,
+        `${this.usersTable.tableArn}/index/*`,
+        this.signalsTable.tableArn,
+        `${this.signalsTable.tableArn}/index/*`,
+      ],
+    }));
+
+    // Aurora access — agent container uses DATABASE_RESOURCE_ARN for telemetry writes
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'AuroraAccess',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'rds-data:ExecuteStatement',
+        'rds-data:BatchExecuteStatement',
+      ],
+      resources: [props.databaseResourceArn],
+    }));
+
+    // Secrets Manager — read DB credentials referenced by DATABASE_SECRET_ARN
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SecretsManagerAccess',
+      effect: iam.Effect.ALLOW,
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [props.databaseSecretArn],
+    }));
+
     // Cost allocation tags on role sessions
     cdk.Tags.of(this.agentCoreExecutionRole).add('department', 'technology');
     cdk.Tags.of(this.agentCoreExecutionRole).add('costCenter', 'ai-agents');
 
-    // 5b. Router Lambda role (created via ServiceRoleFactory pattern — inline for custom trust)
+    // 5b. Router Lambda role
+    // BYPASS ServiceRoleFactory: This role requires AgentCore-specific policies
+    // (bedrock-agentcore:InvokeRuntime) and cross-service permissions (DynamoDB +
+    // Aurora + S3 + Guardrails) that don't map to ServiceRoleFactory's prop-based
+    // model. The policies below follow the same least-privilege pattern.
     this.routerLambdaRole = new iam.Role(this, 'RouterLambdaRole', {
       roleName: `psd-agent-router-lambda-${environment}`,
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
@@ -310,6 +365,9 @@ export class AgentPlatformStack extends cdk.Stack {
     }));
 
     // Router: DynamoDB read/write (both tables)
+    // Note: DynamoDB does not support aws:ResourceTag condition keys for
+    // authorization. Scoping to specific table ARNs provides equivalent
+    // isolation. See: https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazondynamodb.html
     this.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
       sid: 'DynamoDBAccess',
       effect: iam.Effect.ALLOW,
@@ -327,12 +385,6 @@ export class AgentPlatformStack extends cdk.Stack {
         this.signalsTable.tableArn,
         `${this.signalsTable.tableArn}/index/*`,
       ],
-      conditions: {
-        StringEquals: {
-          'aws:ResourceTag/Environment': environment,
-          'aws:ResourceTag/ManagedBy': 'cdk',
-        },
-      },
     }));
 
     // Router: Aurora write (telemetry — uses existing DB cluster)
@@ -382,6 +434,8 @@ export class AgentPlatformStack extends cdk.Stack {
     }));
 
     // 5c. Cron Lambda role
+    // BYPASS ServiceRoleFactory: Requires bedrock-agentcore:InvokeRuntime which
+    // ServiceRoleFactory does not support. Follows same least-privilege pattern.
     this.cronLambdaRole = new iam.Role(this, 'CronLambdaRole', {
       roleName: `psd-agent-cron-lambda-${environment}`,
       assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
@@ -412,6 +466,8 @@ export class AgentPlatformStack extends cdk.Stack {
     }));
 
     // Cron: DynamoDB read (user table — to enumerate users for cron jobs)
+    // Note: DynamoDB does not support aws:ResourceTag condition keys.
+    // Table ARN scoping provides equivalent isolation.
     this.cronLambdaRole.addToPolicy(new iam.PolicyStatement({
       sid: 'DynamoDBRead',
       effect: iam.Effect.ALLOW,
@@ -424,12 +480,6 @@ export class AgentPlatformStack extends cdk.Stack {
         this.usersTable.tableArn,
         `${this.usersTable.tableArn}/index/*`,
       ],
-      conditions: {
-        StringEquals: {
-          'aws:ResourceTag/Environment': environment,
-          'aws:ResourceTag/ManagedBy': 'cdk',
-        },
-      },
     }));
 
     // =====================================================================
@@ -484,30 +534,32 @@ export class AgentPlatformStack extends cdk.Stack {
 
     const cronSchedules = config.agent.cronSchedules;
 
-    const morningBriefRule = new events.Rule(this, 'MorningBriefRule', {
+    // Rules stored as properties for future Cron Lambda target attachment.
+    // Prefixed with _ to suppress unused-variable lint until targets are added.
+    const _morningBriefRule = new events.Rule(this, 'MorningBriefRule', {
       ruleName: `psd-agent-morning-brief-${environment}`,
-      description: 'Morning briefing for PSD AI agents — 9am weekdays (Pacific)',
+      description: 'Morning briefing for PSD AI agents — 9 AM PDT / 16:00 UTC weekdays',
       schedule: events.Schedule.expression(cronSchedules.morningBrief),
       enabled: false, // Disabled until Cron Lambda exists
     });
 
-    const eveningWrapRule = new events.Rule(this, 'EveningWrapRule', {
+    const _eveningWrapRule = new events.Rule(this, 'EveningWrapRule', {
       ruleName: `psd-agent-evening-wrap-${environment}`,
-      description: 'Evening wrap-up for PSD AI agents — 6pm weekdays (Pacific)',
+      description: 'Evening wrap-up for PSD AI agents — 6 PM PDT / 01:00 UTC weekdays',
       schedule: events.Schedule.expression(cronSchedules.eveningWrap),
       enabled: false,
     });
 
-    const weeklySummaryRule = new events.Rule(this, 'WeeklySummaryRule', {
+    const _weeklySummaryRule = new events.Rule(this, 'WeeklySummaryRule', {
       ruleName: `psd-agent-weekly-summary-${environment}`,
-      description: 'Weekly summary for PSD AI agents — 3pm Friday (Pacific)',
+      description: 'Weekly summary for PSD AI agents — 3 PM PDT Friday / 22:00 UTC',
       schedule: events.Schedule.expression(cronSchedules.weeklySummary),
       enabled: false,
     });
 
-    const kaizenScanRule = new events.Rule(this, 'KaizenScanRule', {
+    const _kaizenScanRule = new events.Rule(this, 'KaizenScanRule', {
       ruleName: `psd-agent-kaizen-scan-${environment}`,
-      description: 'Kaizen improvement scan for PSD AI agents — 8pm Sunday (Pacific)',
+      description: 'Kaizen improvement scan for PSD AI agents — 8 PM PDT Sunday / 03:00 UTC Monday',
       schedule: events.Schedule.expression(cronSchedules.kaizenScan),
       enabled: false,
     });
