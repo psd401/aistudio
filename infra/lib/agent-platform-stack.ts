@@ -54,8 +54,8 @@ export class AgentPlatformStack extends cdk.Stack {
   public readonly usersTable: dynamodb.Table;
   /** DynamoDB table for organizational signals (Nervous System) */
   public readonly signalsTable: dynamodb.Table;
-  /** AgentCore Runtime */
-  public readonly runtime: agentcore.Runtime;
+  /** AgentCore Runtime (undefined until an image is pushed to ECR) */
+  public readonly runtime?: agentcore.Runtime;
   /** AgentCore execution IAM role */
   public readonly agentCoreExecutionRole: iam.Role;
   /** Router Lambda IAM role */
@@ -445,52 +445,43 @@ export class AgentPlatformStack extends cdk.Stack {
     // 6. AgentCore Runtime
     // =====================================================================
 
-    // Use a CloudFormation parameter for initial image tag to avoid requiring
-    // a pre-existing image in ECR at stack creation time. The Dockerfile/image
-    // will be pushed separately as part of the agent build pipeline.
-    // NOTE: Default 'placeholder' intentionally does not reference a real image —
-    // a real tag must be provided via --parameters AgentImageTag=<tag> at deploy time.
-    const imageTag = new cdk.CfnParameter(this, 'AgentImageTag', {
-      type: 'String',
-      default: 'placeholder',
-      description: 'Docker image tag for the agent base image in ECR (must be pushed before deploy)',
-    });
+    // AgentCore Runtime — only created when a real image tag is provided.
+    // Pass --context agentImageTag=<tag> to deploy. Without it, the stack
+    // deploys all supporting resources (ECR, S3, DynamoDB, IAM, EventBridge)
+    // and the Runtime is added on a subsequent deploy after pushing an image.
+    const imageTag = this.node.tryGetContext('agentImageTag') as string | undefined;
 
-    this.runtime = new agentcore.Runtime(this, 'AgentCoreRuntime', {
-      runtimeName: `psd_agent_${environment}`,
-      agentRuntimeArtifact: agentcore.AgentRuntimeArtifact.fromEcrRepository(
-        this.ecrRepository,
-        imageTag.valueAsString,
-      ),
-      executionRole: this.agentCoreExecutionRole,
-      networkConfiguration: agentcore.RuntimeNetworkConfiguration.usingVpc(this, {
-        vpc,
-        vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
-      }),
-      description: `PSD AI Agent Platform runtime (${environment})`,
-      environmentVariables: {
-        ENVIRONMENT: environment,
-        WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
-        USERS_TABLE: this.usersTable.tableName,
-        SIGNALS_TABLE: this.signalsTable.tableName,
-        GUARDRAIL_ARN: props.guardrailArn,
-        DATABASE_RESOURCE_ARN: props.databaseResourceArn,
-        // DATABASE_SECRET_ARN is an ARN reference, not a secret value — the container
-        // still needs IAM permission (SecretsManagerAccess policy above) to read the
-        // actual secret. Safe to pass as an env var for Secrets Manager lookups.
-        DATABASE_SECRET_ARN: props.databaseSecretArn,
-      },
-      lifecycleConfiguration: {
-        idleRuntimeSessionTimeout: cdk.Duration.minutes(config.agent.microVmIdleTimeoutMinutes),
-      },
-    });
+    if (imageTag) {
+      this.runtime = new agentcore.Runtime(this, 'AgentCoreRuntime', {
+        runtimeName: `psd_agent_${environment}`,
+        agentRuntimeArtifact: agentcore.AgentRuntimeArtifact.fromEcrRepository(
+          this.ecrRepository,
+          imageTag,
+        ),
+        executionRole: this.agentCoreExecutionRole,
+        networkConfiguration: agentcore.RuntimeNetworkConfiguration.usingVpc(this, {
+          vpc,
+          vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+        }),
+        description: `PSD AI Agent Platform runtime (${environment})`,
+        environmentVariables: {
+          ENVIRONMENT: environment,
+          WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
+          USERS_TABLE: this.usersTable.tableName,
+          SIGNALS_TABLE: this.signalsTable.tableName,
+          GUARDRAIL_ARN: props.guardrailArn,
+          DATABASE_RESOURCE_ARN: props.databaseResourceArn,
+          DATABASE_SECRET_ARN: props.databaseSecretArn,
+        },
+        lifecycleConfiguration: {
+          idleRuntimeSessionTimeout: cdk.Duration.minutes(config.agent.microVmIdleTimeoutMinutes),
+        },
+      });
 
-    // Use cdk.Tags.of() for consistency with all other constructs in this stack.
-    // Inline 'tags' property works but may not appear in cdk.Tags.of() traversals
-    // used by post-deploy tag audits.
-    cdk.Tags.of(this.runtime).add('Environment', environment);
-    cdk.Tags.of(this.runtime).add('ManagedBy', 'cdk');
-    cdk.Tags.of(this.runtime).add('Project', 'AIStudio');
+      cdk.Tags.of(this.runtime).add('Environment', environment);
+      cdk.Tags.of(this.runtime).add('ManagedBy', 'cdk');
+      cdk.Tags.of(this.runtime).add('Project', 'AIStudio');
+    }
 
     // =====================================================================
     // 7. EventBridge Rules — Agent Cron Jobs
@@ -574,11 +565,11 @@ export class AgentPlatformStack extends cdk.Stack {
         stringValue: this.signalsTable.tableName,
         description: 'DynamoDB table name for organizational signals',
       }),
-      new ssm.StringParameter(this, 'AgentCoreRuntimeIdParam', {
+      ...(this.runtime ? [new ssm.StringParameter(this, 'AgentCoreRuntimeIdParam', {
         parameterName: `/aistudio/${environment}/agentcore-runtime-id`,
         stringValue: this.runtime.agentRuntimeId,
         description: 'AgentCore Runtime ID',
-      }),
+      })] : []),
       new ssm.StringParameter(this, 'AgentCoreExecutionRoleArnParam', {
         parameterName: `/aistudio/${environment}/agentcore-execution-role-arn`,
         stringValue: this.agentCoreExecutionRole.roleArn,
@@ -625,15 +616,17 @@ export class AgentPlatformStack extends cdk.Stack {
       description: 'DynamoDB table for organizational signals',
     });
 
-    new cdk.CfnOutput(this, 'AgentCoreRuntimeId', {
-      value: this.runtime.agentRuntimeId,
-      description: 'AgentCore Runtime ID',
-    });
+    if (this.runtime) {
+      new cdk.CfnOutput(this, 'AgentCoreRuntimeId', {
+        value: this.runtime.agentRuntimeId,
+        description: 'AgentCore Runtime ID',
+      });
 
-    new cdk.CfnOutput(this, 'AgentCoreRuntimeArn', {
-      value: this.runtime.agentRuntimeArn,
-      description: 'AgentCore Runtime ARN',
-    });
+      new cdk.CfnOutput(this, 'AgentCoreRuntimeArn', {
+        value: this.runtime.agentRuntimeArn,
+        description: 'AgentCore Runtime ARN',
+      });
+    }
 
     new cdk.CfnOutput(this, 'AgentCoreExecutionRoleArn', {
       value: this.agentCoreExecutionRole.roleArn,
