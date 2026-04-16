@@ -34,6 +34,8 @@ export interface AgentPlatformStackProps extends cdk.StackProps {
   guardrailArn: string;
   /** Bedrock Guardrail ID from GuardrailsStack */
   guardrailId: string;
+  /** Bedrock Guardrail version — use 'DRAFT' for dev, a published version number for prod */
+  guardrailVersion?: string;
 }
 
 /**
@@ -421,6 +423,17 @@ export class AgentPlatformStack extends cdk.Stack {
             resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
           })],
         }),
+        // SSM Parameter Store — resolve AgentCore Runtime ID and config at runtime
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'SSMParameterAccess',
+            effect: iam.Effect.ALLOW,
+            actions: ['ssm:GetParameter', 'ssm:GetParameters'],
+            resources: [
+              `arn:aws:ssm:${this.region}:${this.account}:parameter/aistudio/${environment}/*`,
+            ],
+          })],
+        }),
       ],
     });
 
@@ -573,6 +586,11 @@ export class AgentPlatformStack extends cdk.Stack {
     // =====================================================================
     // Messages flow: Google Chat → GCP Pub/Sub → (push subscription to SQS) → Lambda
     // Dead-letter queue captures messages that fail processing after retries.
+    //
+    // PREREQUISITE: The GCP Pub/Sub → SQS bridge requires an SQS queue policy
+    // granting sqs:SendMessage to the GCP push subscription's IAM principal.
+    // This is configured outside CDK as part of the cross-cloud bridge setup.
+    // See PR #902 prerequisites in the README for setup instructions.
 
     const routerDlq = new sqs.Queue(this, 'RouterDLQ', {
       queueName: `psd-agent-router-dlq-${environment}`,
@@ -644,10 +662,8 @@ export class AgentPlatformStack extends cdk.Stack {
       environment: {
         ENVIRONMENT: environment,
         USERS_TABLE: this.usersTable.tableName,
-        SIGNALS_TABLE: this.signalsTable.tableName,
-        WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
         GUARDRAIL_ID: props.guardrailId,
-        GUARDRAIL_VERSION: 'DRAFT',
+        GUARDRAIL_VERSION: props.guardrailVersion || 'DRAFT',
         DATABASE_RESOURCE_ARN: props.databaseResourceArn,
         DATABASE_SECRET_ARN: props.databaseSecretArn,
         DATABASE_NAME: 'aistudio',
@@ -744,7 +760,7 @@ export class AgentPlatformStack extends cdk.Stack {
     }
 
     // =====================================================================
-    // 9. CloudFormation Outputs
+    // 12. CloudFormation Outputs
     // =====================================================================
 
     new cdk.CfnOutput(this, 'ECRRepositoryUri', {

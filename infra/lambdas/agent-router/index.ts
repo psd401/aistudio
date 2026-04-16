@@ -17,8 +17,6 @@
  * Environment variables (injected by CDK):
  *   ENVIRONMENT            — dev/staging/prod
  *   USERS_TABLE            — DynamoDB table name
- *   SIGNALS_TABLE          — DynamoDB table name
- *   WORKSPACE_BUCKET       — S3 bucket name for agent workspaces
  *   GUARDRAIL_ID           — Bedrock Guardrail ID
  *   GUARDRAIL_VERSION      — Bedrock Guardrail version
  *   AGENTCORE_RUNTIME_ID   — AgentCore Runtime ID (if deployed)
@@ -115,7 +113,6 @@ const TOKEN_LIMIT = parseInt(
   process.env.TOKEN_LIMIT_PER_INTERACTION || '100000',
   10
 );
-const WORKSPACE_BUCKET = process.env.WORKSPACE_BUCKET || '';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -227,7 +224,6 @@ async function getOrCreateUser(
 
   log.info('New agent user created', {
     googleIdentity: senderName,
-    email: senderEmail,
     workspacePrefix,
   });
 
@@ -607,7 +603,7 @@ async function processRecord(
   const threadName = message.thread?.name;
 
   log.info('Processing message', {
-    sender: senderEmail,
+    sender: senderName,
     space: spaceName,
     textLength: messageText.length,
   });
@@ -657,14 +653,16 @@ async function processRecord(
     log
   );
 
-  // Step 4: Token limit check
+  // Step 4: Token usage alerting threshold
+  // This is a monitoring alert, not a hard cap. The response is still delivered.
+  // Hard enforcement would require pre-invocation token estimation or session tracking.
   if (
     agentResult.inputTokens + agentResult.outputTokens > TOKEN_LIMIT
   ) {
-    log.warn('Token limit exceeded', {
+    log.warn('Token usage exceeds alerting threshold', {
       inputTokens: agentResult.inputTokens,
       outputTokens: agentResult.outputTokens,
-      limit: TOKEN_LIMIT,
+      threshold: TOKEN_LIMIT,
     });
   }
 
@@ -702,7 +700,7 @@ async function processRecord(
   );
 
   log.info('Message processed', {
-    sender: senderEmail,
+    sender: senderName,
     model: agentResult.model,
     latencyMs,
     inputTokens: agentResult.inputTokens,
