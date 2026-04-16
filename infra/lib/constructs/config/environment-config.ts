@@ -57,6 +57,9 @@ export interface IEnvironmentConfig {
  * EventBridge cron expressions are always UTC. Times target Pacific Daylight (UTC-7).
  * During PST (Nov-Mar), these fire 1 hour earlier Pacific time.
  * Defined once to avoid duplication across environments.
+ *
+ * If DST-exact firing is required, EventBridge Scheduler (not Rules) supports
+ * timezone-aware schedules: https://docs.aws.amazon.com/scheduler/latest/UserGuide/schedule-types.html
  */
 const DEFAULT_AGENT_CRON_SCHEDULES: AgentConfig['cronSchedules'] = {
   morningBrief: 'cron(0 16 ? * MON-FRI *)', // 9 AM PDT

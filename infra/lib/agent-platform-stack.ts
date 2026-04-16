@@ -7,6 +7,9 @@ import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
+// ALPHA CDK CONSTRUCT: @aws-cdk/aws-bedrock-agentcore-alpha has no API stability
+// guarantee and may introduce breaking changes on any release. Version is pinned
+// (not caret) in infra/package.json. Review changelog before upgrading.
 import * as agentcore from '@aws-cdk/aws-bedrock-agentcore-alpha';
 import {
   VPCProvider,
@@ -64,6 +67,18 @@ export class AgentPlatformStack extends cdk.Stack {
     super(scope, id, props);
 
     const { environment, config } = props;
+
+    // Validate required ARN props at synth time to surface errors early
+    // rather than waiting for opaque CloudFormation deploy-time failures.
+    if (!props.guardrailArn) {
+      throw new Error('AgentPlatformStack: guardrailArn is required');
+    }
+    if (!props.databaseResourceArn) {
+      throw new Error('AgentPlatformStack: databaseResourceArn is required');
+    }
+    if (!props.databaseSecretArn) {
+      throw new Error('AgentPlatformStack: databaseSecretArn is required');
+    }
 
     // =====================================================================
     // 1. VPC — shared from DatabaseStack
@@ -404,6 +419,8 @@ export class AgentPlatformStack extends cdk.Stack {
     // 5c. Cron Lambda role — via ServiceRoleFactory
     // Note: ServiceRoleFactory grants full DynamoDB CRUD; cron only needs read.
     // Accepted tradeoff for consistency — table ARN scoping limits blast radius.
+    // TODO(#887): Tighten to read-only DynamoDB when ServiceRoleFactory supports
+    // granular permission levels (track as follow-up).
     this.cronLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'CronLambdaRole', {
       functionName: 'psd-agent-cron',
       environment,
@@ -458,17 +475,22 @@ export class AgentPlatformStack extends cdk.Stack {
         SIGNALS_TABLE: this.signalsTable.tableName,
         GUARDRAIL_ARN: props.guardrailArn,
         DATABASE_RESOURCE_ARN: props.databaseResourceArn,
+        // DATABASE_SECRET_ARN is an ARN reference, not a secret value — the container
+        // still needs IAM permission (SecretsManagerAccess policy above) to read the
+        // actual secret. Safe to pass as an env var for Secrets Manager lookups.
         DATABASE_SECRET_ARN: props.databaseSecretArn,
       },
       lifecycleConfiguration: {
         idleRuntimeSessionTimeout: cdk.Duration.minutes(config.agent.microVmIdleTimeoutMinutes),
       },
-      tags: {
-        Environment: environment,
-        ManagedBy: 'cdk',
-        Project: 'AIStudio',
-      },
     });
+
+    // Use cdk.Tags.of() for consistency with all other constructs in this stack.
+    // Inline 'tags' property works but may not appear in cdk.Tags.of() traversals
+    // used by post-deploy tag audits.
+    cdk.Tags.of(this.runtime).add('Environment', environment);
+    cdk.Tags.of(this.runtime).add('ManagedBy', 'cdk');
+    cdk.Tags.of(this.runtime).add('Project', 'AIStudio');
 
     // =====================================================================
     // 7. EventBridge Rules — Agent Cron Jobs
@@ -479,50 +501,47 @@ export class AgentPlatformStack extends cdk.Stack {
     const cronSchedules = config.agent.cronSchedules;
 
     // EventBridge rules for agent cron jobs. Disabled until Cron Lambda is created.
-    // CDK registers these in the construct tree by ID — no variable reference needed
-    // until addTarget() is called when the Cron Lambda is implemented.
-    const morningBriefRule = new events.Rule(this, 'MorningBriefRule', {
-      ruleName: `psd-agent-morning-brief-${environment}`,
-      description: 'Morning briefing for PSD AI agents — 9 AM PDT / 16:00 UTC weekdays',
-      schedule: events.Schedule.expression(cronSchedules.morningBrief),
-      enabled: false,
-    });
-    cdk.Tags.of(morningBriefRule).add('Environment', environment);
-    cdk.Tags.of(morningBriefRule).add('ManagedBy', 'cdk');
+    // CDK registers constructs in the construct tree by ID at construction time —
+    // no variable reference needed. Variables will be added when addTarget() is
+    // called after the Cron Lambda is implemented.
 
-    const eveningWrapRule = new events.Rule(this, 'EveningWrapRule', {
-      ruleName: `psd-agent-evening-wrap-${environment}`,
-      description: 'Evening wrap-up for PSD AI agents — 6 PM PDT / 01:00 UTC weekdays',
-      schedule: events.Schedule.expression(cronSchedules.eveningWrap),
-      enabled: false,
-    });
-    cdk.Tags.of(eveningWrapRule).add('Environment', environment);
-    cdk.Tags.of(eveningWrapRule).add('ManagedBy', 'cdk');
+    const ruleDefinitions = [
+      {
+        id: 'MorningBriefRule',
+        name: `psd-agent-morning-brief-${environment}`,
+        description: 'Morning briefing for PSD AI agents — 9 AM PDT / 16:00 UTC weekdays',
+        schedule: cronSchedules.morningBrief,
+      },
+      {
+        id: 'EveningWrapRule',
+        name: `psd-agent-evening-wrap-${environment}`,
+        description: 'Evening wrap-up for PSD AI agents — 6 PM PDT / 01:00 UTC weekdays',
+        schedule: cronSchedules.eveningWrap,
+      },
+      {
+        id: 'WeeklySummaryRule',
+        name: `psd-agent-weekly-summary-${environment}`,
+        description: 'Weekly summary for PSD AI agents — 3 PM PDT Friday / 22:00 UTC',
+        schedule: cronSchedules.weeklySummary,
+      },
+      {
+        id: 'KaizenScanRule',
+        name: `psd-agent-kaizen-scan-${environment}`,
+        description: 'Kaizen improvement scan for PSD AI agents — 8 PM PDT Sunday / 03:00 UTC Monday',
+        schedule: cronSchedules.kaizenScan,
+      },
+    ];
 
-    const weeklySummaryRule = new events.Rule(this, 'WeeklySummaryRule', {
-      ruleName: `psd-agent-weekly-summary-${environment}`,
-      description: 'Weekly summary for PSD AI agents — 3 PM PDT Friday / 22:00 UTC',
-      schedule: events.Schedule.expression(cronSchedules.weeklySummary),
-      enabled: false,
-    });
-    cdk.Tags.of(weeklySummaryRule).add('Environment', environment);
-    cdk.Tags.of(weeklySummaryRule).add('ManagedBy', 'cdk');
-
-    const kaizenScanRule = new events.Rule(this, 'KaizenScanRule', {
-      ruleName: `psd-agent-kaizen-scan-${environment}`,
-      description: 'Kaizen improvement scan for PSD AI agents — 8 PM PDT Sunday / 03:00 UTC Monday',
-      schedule: events.Schedule.expression(cronSchedules.kaizenScan),
-      enabled: false,
-    });
-    cdk.Tags.of(kaizenScanRule).add('Environment', environment);
-    cdk.Tags.of(kaizenScanRule).add('ManagedBy', 'cdk');
-
-    // Suppress lint: rules are registered in CloudFormation by construct ID.
-    // Variables will be used for addTarget() when Cron Lambda is implemented.
-    void morningBriefRule;
-    void eveningWrapRule;
-    void weeklySummaryRule;
-    void kaizenScanRule;
+    for (const def of ruleDefinitions) {
+      const rule = new events.Rule(this, def.id, {
+        ruleName: def.name,
+        description: def.description,
+        schedule: events.Schedule.expression(def.schedule),
+        enabled: false,
+      });
+      cdk.Tags.of(rule).add('Environment', environment);
+      cdk.Tags.of(rule).add('ManagedBy', 'cdk');
+    }
 
     // =====================================================================
     // 8. SSM Parameters — Cross-Stack References
