@@ -30,11 +30,24 @@ export interface NetworkConfig {
   vpcEndpoints: string[]
 }
 
+export interface AgentConfig {
+  /** Idle timeout for AgentCore microVMs in minutes */
+  microVmIdleTimeoutMinutes: number
+  /** Cron schedule expressions for agent recurring jobs */
+  cronSchedules: {
+    morningBrief: string
+    eveningWrap: string
+    weeklySummary: string
+    kaizenScan: string
+  }
+}
+
 export interface IEnvironmentConfig {
   database: DatabaseConfig
   compute: ComputeConfig
   monitoring: MonitoringConfig
   network: NetworkConfig
+  agent: AgentConfig
   costOptimization: boolean
   securityAlertEmail?: string
 }
@@ -70,6 +83,15 @@ export class EnvironmentConfig {
         maxAzs: 2,
         natGateways: 1,
         vpcEndpoints: ["s3", "secretsmanager"],
+      },
+      agent: {
+        microVmIdleTimeoutMinutes: 30,
+        cronSchedules: {
+          morningBrief: "cron(0 9 ? * MON-FRI *)",
+          eveningWrap: "cron(0 18 ? * MON-FRI *)",
+          weeklySummary: "cron(0 15 ? * FRI *)",
+          kaizenScan: "cron(0 20 ? * SUN *)",
+        },
       },
       costOptimization: true,
     })
@@ -115,6 +137,15 @@ export class EnvironmentConfig {
           "logs",
         ],
       },
+      agent: {
+        microVmIdleTimeoutMinutes: 60,
+        cronSchedules: {
+          morningBrief: "cron(0 9 ? * MON-FRI *)",
+          eveningWrap: "cron(0 18 ? * MON-FRI *)",
+          weeklySummary: "cron(0 15 ? * FRI *)",
+          kaizenScan: "cron(0 20 ? * SUN *)",
+        },
+      },
       costOptimization: false,
     })
 
@@ -149,6 +180,15 @@ export class EnvironmentConfig {
         natGateways: 2,
         vpcEndpoints: ["s3", "secretsmanager", "rds", "ecs"],
       },
+      agent: {
+        microVmIdleTimeoutMinutes: 30,
+        cronSchedules: {
+          morningBrief: "cron(0 9 ? * MON-FRI *)",
+          eveningWrap: "cron(0 18 ? * MON-FRI *)",
+          weeklySummary: "cron(0 15 ? * FRI *)",
+          kaizenScan: "cron(0 20 ? * SUN *)",
+        },
+      },
       costOptimization: false,
     })
   }
@@ -173,6 +213,14 @@ export class EnvironmentConfig {
       compute: { ...baseConfig.compute, ...overrides.compute },
       monitoring: { ...baseConfig.monitoring, ...overrides.monitoring },
       network: { ...baseConfig.network, ...overrides.network },
+      agent: {
+        ...baseConfig.agent,
+        ...overrides.agent,
+        cronSchedules: {
+          ...baseConfig.agent.cronSchedules,
+          ...overrides.agent?.cronSchedules,
+        },
+      },
     })
   }
 }
