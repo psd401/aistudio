@@ -52,13 +52,15 @@ CREATE INDEX IF NOT EXISTS idx_agent_sessions_user_id
     ON agent_sessions (user_id, session_start DESC);
 
 -- Trigger to auto-update updated_at
+-- Note: Uses single-quote style (not $$) because the CDK migration Lambda's
+-- SQL splitter doesn't recognize dollar-quoting and breaks on internal semicolons.
 CREATE OR REPLACE FUNCTION update_agent_sessions_updated_at()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER AS '
 BEGIN
     NEW.updated_at = NOW();
     RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+' LANGUAGE plpgsql;
 
 DROP TRIGGER IF EXISTS trigger_agent_sessions_updated_at ON agent_sessions;
 CREATE TRIGGER trigger_agent_sessions_updated_at
