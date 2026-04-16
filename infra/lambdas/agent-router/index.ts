@@ -39,7 +39,6 @@ import {
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
-  GetCommand,
   PutCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
@@ -175,6 +174,12 @@ let cachedGoogleCredentials: string | null = null;
 let credentialsCachedAt: number | null = null;
 const CREDENTIALS_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
+// Cache SSM lookups at module scope to avoid redundant API calls on every invocation.
+// The Runtime ID is resolved from SSM because it's not known at CDK deploy time.
+let cachedRuntimeId: string | null = null;
+let runtimeIdCachedAt: number | null = null;
+const RUNTIME_ID_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
 async function getGoogleCredentials(): Promise<string> {
   if (
     cachedGoogleCredentials &&
@@ -204,25 +209,26 @@ async function getOrCreateUser(
   senderDisplayName: string,
   log: ReturnType<typeof createLogger>
 ): Promise<AgentUser> {
-  // Look up by Google identity (users/{id})
-  const existing = await dynamoClient.send(
-    new GetCommand({
-      TableName: USERS_TABLE,
-      Key: { googleIdentity: senderName },
-    })
-  );
-
-  if (existing.Item) {
-    // Update last active timestamp
-    await dynamoClient.send(
+  // Optimized: single conditional UpdateCommand for existing users instead of
+  // Get + Update (saves ~10–30ms per message). Falls back to PutCommand for new users.
+  try {
+    const updateResult = await dynamoClient.send(
       new UpdateCommand({
         TableName: USERS_TABLE,
         Key: { googleIdentity: senderName },
         UpdateExpression: 'SET lastActiveAt = :now',
+        ConditionExpression: 'attribute_exists(googleIdentity)',
         ExpressionAttributeValues: { ':now': new Date().toISOString() },
+        ReturnValues: 'ALL_NEW',
       })
     );
-    return existing.Item as AgentUser;
+    return updateResult.Attributes as AgentUser;
+  } catch (error: unknown) {
+    // ConditionalCheckFailedException means user doesn't exist — create new record
+    const errorName = (error as { name?: string }).name;
+    if (errorName !== 'ConditionalCheckFailedException') {
+      throw error;
+    }
   }
 
   // New user — create record with workspace prefix
@@ -331,18 +337,32 @@ async function invokeAgentCore(
   sessionId: string,
   log: ReturnType<typeof createLogger>
 ): Promise<{ response: string; inputTokens: number; outputTokens: number; model: string }> {
-  // Resolve the AgentCore Runtime ID from SSM if not in env
+  // Resolve the AgentCore Runtime ID — check env var, then module-level cache,
+  // then SSM. Cached at module scope with TTL to avoid redundant SSM API calls
+  // on every invocation (~5–20ms + cost per call).
   let runtimeId = process.env.AGENTCORE_RUNTIME_ID || '';
   if (!runtimeId) {
-    try {
-      const param = await ssmClient.send(
-        new GetParameterCommand({
-          Name: `/aistudio/${ENVIRONMENT}/agentcore-runtime-id`,
-        })
-      );
-      runtimeId = param.Parameter?.Value || '';
-    } catch {
-      log.error('Failed to resolve AgentCore Runtime ID from SSM');
+    if (
+      cachedRuntimeId &&
+      runtimeIdCachedAt &&
+      Date.now() - runtimeIdCachedAt < RUNTIME_ID_TTL_MS
+    ) {
+      runtimeId = cachedRuntimeId;
+    } else {
+      try {
+        const param = await ssmClient.send(
+          new GetParameterCommand({
+            Name: `/aistudio/${ENVIRONMENT}/agentcore-runtime-id`,
+          })
+        );
+        runtimeId = param.Parameter?.Value || '';
+        if (runtimeId) {
+          cachedRuntimeId = runtimeId;
+          runtimeIdCachedAt = Date.now();
+        }
+      } catch {
+        log.error('Failed to resolve AgentCore Runtime ID from SSM');
+      }
     }
   }
 
@@ -463,7 +483,16 @@ async function sendGoogleChatResponse(
   // Throw on failure so SQS marks the message as failed and retries (or DLQs).
   // Callers must let the error propagate for retry semantics to work.
   const credentialsJson = await getGoogleCredentials();
-  const credentials = JSON.parse(credentialsJson);
+  let credentials: Record<string, unknown>;
+  try {
+    credentials = JSON.parse(credentialsJson) as Record<string, unknown>;
+  } catch {
+    // Clear the cache so the next invocation fetches fresh credentials from
+    // Secrets Manager in case the secret was recently updated/fixed.
+    cachedGoogleCredentials = null;
+    credentialsCachedAt = null;
+    throw new Error('Google credentials secret contains invalid JSON');
+  }
 
   // Use @googleapis/chat (lightweight, ~2MB) instead of full googleapis (~100MB).
   // Use the auth class re-exported by @googleapis/chat to avoid version mismatch
@@ -516,6 +545,7 @@ async function logTelemetry(
   }
 
   try {
+    // Insert message-level telemetry
     await rdsClient.send(
       new ExecuteStatementCommand({
         resourceArn: DATABASE_RESOURCE_ARN,
@@ -547,6 +577,30 @@ async function logTelemetry(
             value: { booleanValue: params.guardrailBlocked },
           },
           { name: 'spaceName', value: { stringValue: params.spaceName } },
+        ],
+      })
+    );
+
+    // Upsert session-level aggregates — creates the session row on first message,
+    // increments counters on subsequent messages. Uses ON CONFLICT on session_id
+    // unique constraint to achieve idempotent upserts.
+    const totalTokens = params.inputTokens + params.outputTokens;
+    await rdsClient.send(
+      new ExecuteStatementCommand({
+        resourceArn: DATABASE_RESOURCE_ARN,
+        secretArn: DATABASE_SECRET_ARN,
+        database: DATABASE_NAME,
+        sql: `INSERT INTO agent_sessions
+              (user_id, session_id, session_start, total_messages, total_tokens, created_at, updated_at)
+              VALUES (:userId, :sessionId, NOW(), 1, :totalTokens, NOW(), NOW())
+              ON CONFLICT (session_id) DO UPDATE SET
+                total_messages = agent_sessions.total_messages + 1,
+                total_tokens = agent_sessions.total_tokens + EXCLUDED.total_tokens,
+                session_end = NOW()`,
+        parameters: [
+          { name: 'userId', value: { stringValue: params.userId } },
+          { name: 'sessionId', value: { stringValue: params.sessionId } },
+          { name: 'totalTokens', value: { longValue: totalTokens } },
         ],
       })
     );
@@ -673,10 +727,17 @@ async function processRecord(
       log
     );
 
+    // Use the same stable session ID as non-blocked messages so session-level
+    // blocking stats aggregate correctly (not a throwaway timestamp-based ID).
+    const blockedRawSessionId = `${user.workspacePrefix}-${spaceName.replace(/\//g, '-')}`;
+    const blockedSessionId = blockedRawSessionId.length > 512
+      ? blockedRawSessionId.substring(0, 512)
+      : blockedRawSessionId;
+
     await logTelemetry(
       {
         userId: senderEmail,
-        sessionId: `${spaceName}-${Date.now()}`,
+        sessionId: blockedSessionId,
         model: 'none',
         inputTokens: 0,
         outputTokens: 0,

@@ -299,6 +299,10 @@ const prodAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatfo
   databaseSecretArn: prodDbStack.databaseSecretArn,
   guardrailArn: prodGuardrailsStack.guardrail.attrGuardrailArn,
   guardrailId: prodGuardrailsStack.guardrail.attrGuardrailId,
+  // Pin to published version in prod — DRAFT allows live edits without deployment.
+  // After publishing a guardrail version in the Bedrock console, update this value.
+  // Dev uses 'DRAFT' (default) for rapid iteration.
+  guardrailVersion: '1',
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 prodAgentPlatformStack.addDependency(prodDbStack);

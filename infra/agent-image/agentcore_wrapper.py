@@ -101,8 +101,10 @@ def main():
 
         # Process through the harness — offload blocking I/O to a thread
         # to avoid blocking the async event loop (adapter.process uses
-        # synchronous urllib internally)
-        loop = asyncio.get_event_loop()
+        # synchronous urllib internally).
+        # get_running_loop() is the correct call inside a coroutine —
+        # get_event_loop() is deprecated in Python 3.10+ and removed in 3.12.
+        loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None, adapter.process, user_message, session_id
         )

@@ -10,7 +10,9 @@
 #   docker push <ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com/psd-agent-base-dev:<TAG>
 
 # Pin base image version for reproducible builds. Update tag periodically.
-# TODO: Pin to digest (@sha256:...) once a stable release is available.
+# BLOCKER(prod): Pin to digest (@sha256:...) before deploying to production.
+# :latest is a supply-chain risk — any upstream change is pulled silently.
+# Track: Once OpenClaw publishes a stable semver release, pin to that tag+digest.
 FROM ghcr.io/openclaw/openclaw:latest
 
 # Switch to root for installations
@@ -29,7 +31,9 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
     curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh && \
     ln -s /root/.local/bin/uv /usr/local/bin/uv
 
-# Install Python 3.12 and pip for the AgentCore wrapper
+# Install Python and pip for the AgentCore wrapper.
+# The exact Python version depends on the base image's distro packages.
+# Verify with: docker run --rm psd-agent-base:latest python3 --version
 RUN apt-get update && \
     apt-get install -y --no-install-recommends python3 python3-pip python3-venv && \
     rm -rf /var/lib/apt/lists/*

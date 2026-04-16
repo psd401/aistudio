@@ -202,6 +202,19 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(this.signalsTable).add('ManagedBy', 'cdk');
 
     // =====================================================================
+    // 4c. Google Credentials Secret (imported, created manually in console)
+    // =====================================================================
+    // Imported before IAM roles so the secret ARN can be included in the
+    // ServiceRoleFactory `secrets` array (avoids standalone addToPolicy calls).
+    // The Google service account JSON must be created before deploying:
+    //   aws secretsmanager create-secret --name psd-agent-google-sa-<env> \
+    //     --secret-string file://service-account.json
+    this.googleCredentialsSecret = secretsmanager.Secret.fromSecretNameV2(
+      this, 'GoogleCredentialsSecret',
+      `psd-agent-google-sa-${environment}`,
+    );
+
+    // =====================================================================
     // 5. IAM Roles
     // =====================================================================
 
@@ -394,7 +407,7 @@ export class AgentPlatformStack extends cdk.Stack {
       vpcEnabled: false,
       dynamodbTables: [this.usersTable.tableName, this.signalsTable.tableName],
       s3Buckets: [this.workspaceBucket.bucketName],
-      secrets: [props.databaseSecretArn],
+      secrets: [props.databaseSecretArn, this.googleCredentialsSecret.secretArn],
       additionalPolicies: [
         // Guardrails invoke
         new iam.PolicyDocument({
@@ -562,27 +575,7 @@ export class AgentPlatformStack extends cdk.Stack {
     }
 
     // =====================================================================
-    // 8. Google Credentials Secret (imported, created manually in console)
-    // =====================================================================
-    // The Google service account JSON is stored in Secrets Manager. It must
-    // be created before deploying this stack:
-    //   aws secretsmanager create-secret --name psd-agent-google-sa-<env> \
-    //     --secret-string file://service-account.json
-    this.googleCredentialsSecret = secretsmanager.Secret.fromSecretNameV2(
-      this, 'GoogleCredentialsSecret',
-      `psd-agent-google-sa-${environment}`,
-    );
-
-    // Grant the Router Lambda role access to read the Google credentials
-    this.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'GoogleCredentialsAccess',
-      effect: iam.Effect.ALLOW,
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [this.googleCredentialsSecret.secretArn],
-    }));
-
-    // =====================================================================
-    // 9. SQS Queue — Google Chat Pub/Sub Inbound
+    // 8. SQS Queue — Google Chat Pub/Sub Inbound
     // =====================================================================
     // Messages flow: Google Chat → GCP Pub/Sub → (push subscription to SQS) → Lambda
     // Dead-letter queue captures messages that fail processing after retries.
@@ -616,7 +609,7 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(this.routerQueue).add('ManagedBy', 'cdk');
 
     // =====================================================================
-    // 10. Router Lambda Function
+    // 9. Router Lambda Function
     // =====================================================================
 
     const routerLogGroup = new logs.LogGroup(this, 'RouterLogGroup', {
@@ -717,7 +710,7 @@ export class AgentPlatformStack extends cdk.Stack {
     );
 
     // =====================================================================
-    // 11. SSM Parameters — Cross-Stack References
+    // 10. SSM Parameters — Cross-Stack References
     // =====================================================================
     // All SSM parameters tagged for IAM tag-based access control compliance.
 
@@ -790,7 +783,7 @@ export class AgentPlatformStack extends cdk.Stack {
     }
 
     // =====================================================================
-    // 12. CloudFormation Outputs
+    // 11. CloudFormation Outputs
     // =====================================================================
 
     new cdk.CfnOutput(this, 'ECRRepositoryUri', {

@@ -53,11 +53,13 @@ class OpenClawAdapter(HarnessAdapter):
         self._model_override: Optional[str] = None
 
     def configure(self, config: dict) -> None:
-        """Start the OpenClaw gateway process if not already running.
+        """Configure the OpenClaw adapter. Idempotent — safe to call multiple times.
 
         Supported config keys:
-          - gateway_port (int): Port for the OpenClaw gateway (default: 3100)
-          - model (str): Override the default model for subsequent requests
+          - gateway_port (int): Port for the OpenClaw gateway. When provided,
+            starts the gateway process if not already running.
+          - model (str): Override the default model for subsequent requests.
+            Can be set without restarting the gateway.
         """
         # Capture model override for use in process() requests
         model = config.get("model")
@@ -65,21 +67,25 @@ class OpenClawAdapter(HarnessAdapter):
             logger.info("Model override set: %s", model)
             self._model_override = model
 
-        gateway_port = config.get("gateway_port", 3100)
-        self._gateway_url = f"http://127.0.0.1:{gateway_port}"
+        # Only update the gateway URL and start the process when gateway_port
+        # is explicitly provided. This prevents a model-only configure() call
+        # from resetting the URL or re-evaluating process state unnecessarily.
+        if "gateway_port" in config:
+            gateway_port = config["gateway_port"]
+            self._gateway_url = f"http://127.0.0.1:{gateway_port}"
 
-        if self._process is None or self._process.poll() is not None:
-            logger.info("Starting OpenClaw gateway on port %d", gateway_port)
-            # Forward stdout/stderr to container logs instead of PIPE to avoid
-            # deadlock when the OS pipe buffer (~64KB) fills without a reader.
-            self._process = subprocess.Popen(
-                ["openclaw", "gateway", "--port", str(gateway_port)],
-                stdout=sys.stdout,
-                stderr=sys.stderr,
-                env={**os.environ},
-            )
-            # Wait for gateway to become ready (up to 30 seconds)
-            self._wait_for_ready(timeout=30)
+            if self._process is None or self._process.poll() is not None:
+                logger.info("Starting OpenClaw gateway on port %d", gateway_port)
+                # Forward stdout/stderr to container logs instead of PIPE to avoid
+                # deadlock when the OS pipe buffer (~64KB) fills without a reader.
+                self._process = subprocess.Popen(
+                    ["openclaw", "gateway", "--port", str(gateway_port)],
+                    stdout=sys.stdout,
+                    stderr=sys.stderr,
+                    env={**os.environ},
+                )
+                # Wait for gateway to become ready (up to 30 seconds)
+                self._wait_for_ready(timeout=30)
 
     def _wait_for_ready(self, timeout: int = 30) -> None:
         """Poll the gateway health endpoint until ready."""
