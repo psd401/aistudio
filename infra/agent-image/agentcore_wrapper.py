@@ -17,6 +17,7 @@ Environment variables (injected by AgentCore from CDK stack):
   DATABASE_SECRET_ARN  — Aurora credentials secret ARN
 """
 
+import asyncio
 import json
 import logging
 import os
@@ -98,8 +99,13 @@ def main():
         if model_override:
             adapter.configure({"model": model_override})
 
-        # Process through the harness
-        result = adapter.process(user_message, session_id)
+        # Process through the harness — offload blocking I/O to a thread
+        # to avoid blocking the async event loop (adapter.process uses
+        # synchronous urllib internally)
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None, adapter.process, user_message, session_id
+        )
 
         logger.info(
             "Invocation complete: session=%s response_length=%d",

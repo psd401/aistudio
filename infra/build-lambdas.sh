@@ -22,11 +22,15 @@ cd lambdas/url-processor
 bun install --production
 cd ../..
 
-# Install dependencies for agent-router
-echo "Installing dependencies for agent-router..."
+# Install dependencies and build agent-router
+echo "Building agent-router..."
 cd lambdas/agent-router
-bun install --production
+# Install all deps (including devDependencies for tsc build)
+bun install
 bunx tsc
+# Prune to production-only for smaller Lambda package
+rm -rf node_modules
+bun install --production
 cd ../..
 
 # Create processing layer

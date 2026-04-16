@@ -602,7 +602,9 @@ export class AgentPlatformStack extends cdk.Stack {
 
     this.routerQueue = new sqs.Queue(this, 'RouterQueue', {
       queueName: `psd-agent-router-${environment}`,
-      visibilityTimeout: cdk.Duration.minutes(5), // Must exceed Lambda timeout
+      // AWS recommends visibility timeout >= 6x Lambda timeout to prevent
+      // duplicate processing. Lambda timeout is 3 min, so 18 min minimum.
+      visibilityTimeout: cdk.Duration.minutes(18),
       retentionPeriod: cdk.Duration.days(4),
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       deadLetterQueue: {
@@ -627,6 +629,10 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(routerLogGroup).add('Environment', environment);
     cdk.Tags.of(routerLogGroup).add('ManagedBy', 'cdk');
 
+    // Pre-build the Router Lambda locally using bun (consistent with build-lambdas.sh).
+    // The bundling.local command runs first; Docker is the fallback. Since the project
+    // uses bun (not npm), and the Docker bundling image doesn't have bun, local bundling
+    // is the primary path. CI/CD should run build-lambdas.sh before cdk synth.
     this.routerLambda = new lambda.Function(this, 'RouterLambda', {
       functionName: `psd-agent-router-${environment}`,
       runtime: lambda.Runtime.NODEJS_20_X,
@@ -636,18 +642,35 @@ export class AgentPlatformStack extends cdk.Stack {
         {
           bundling: {
             image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const execSync = require('child_process').execSync;
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-router');
+                  // Build with all deps (including devDependencies for tsc)
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  // Copy compiled JS to output
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  // Copy package.json and install production-only deps in output
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch {
+                  return false;
+                }
+              },
+            },
             command: [
               'bash', '-c',
               [
-                'npm ci --production',
+                // Docker fallback: use npm since it's available in the bundling image
+                'npm install',
                 'npm run build',
                 'cp -r dist/* /asset-output/',
-                'cp -r node_modules /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
               ].join(' && '),
             ],
-            environment: {
-              NPM_CONFIG_CACHE: '/tmp/.npm',
-            },
           },
         },
       ),
@@ -669,7 +692,14 @@ export class AgentPlatformStack extends cdk.Stack {
         DATABASE_NAME: 'aistudio',
         GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,
         TOKEN_LIMIT_PER_INTERACTION: '100000',
+        // K-12 safety: fail closed when guardrails are unavailable
+        GUARDRAIL_FAIL_OPEN: 'false',
+        // Only allow messages from PSD domain emails
+        ALLOWED_DOMAINS: 'psd401.net',
         NODE_ENV: 'production',
+        // AGENTCORE_RUNTIME_ID is intentionally NOT set here — it is resolved
+        // from SSM at runtime because the Runtime resource is conditionally
+        // created only when an image tag is provided via CDK context.
       },
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },

@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import time
 from typing import Optional
 
@@ -31,6 +32,10 @@ class HarnessAdapter(abc.ABC):
     def health(self) -> bool:
         """Return True if the harness is ready to accept messages."""
 
+    @abc.abstractmethod
+    def shutdown(self) -> None:
+        """Gracefully stop the harness process."""
+
 
 class OpenClawAdapter(HarnessAdapter):
     """
@@ -45,18 +50,32 @@ class OpenClawAdapter(HarnessAdapter):
         self._gateway_url: str = "http://127.0.0.1:3100"
         self._process: Optional[subprocess.Popen] = None
         self._ready: bool = False
+        self._model_override: Optional[str] = None
 
     def configure(self, config: dict) -> None:
-        """Start the OpenClaw gateway process if not already running."""
+        """Start the OpenClaw gateway process if not already running.
+
+        Supported config keys:
+          - gateway_port (int): Port for the OpenClaw gateway (default: 3100)
+          - model (str): Override the default model for subsequent requests
+        """
+        # Capture model override for use in process() requests
+        model = config.get("model")
+        if model:
+            logger.info("Model override set: %s", model)
+            self._model_override = model
+
         gateway_port = config.get("gateway_port", 3100)
         self._gateway_url = f"http://127.0.0.1:{gateway_port}"
 
         if self._process is None or self._process.poll() is not None:
             logger.info("Starting OpenClaw gateway on port %d", gateway_port)
+            # Forward stdout/stderr to container logs instead of PIPE to avoid
+            # deadlock when the OS pipe buffer (~64KB) fills without a reader.
             self._process = subprocess.Popen(
                 ["openclaw", "gateway", "--port", str(gateway_port)],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stdout=sys.stdout,
+                stderr=sys.stderr,
                 env={**os.environ},
             )
             # Wait for gateway to become ready (up to 30 seconds)
@@ -91,10 +110,14 @@ class OpenClawAdapter(HarnessAdapter):
         if not self._ready:
             return "Agent is starting up. Please try again in a moment."
 
-        payload = json.dumps({
+        request_data: dict = {
             "message": message,
             "sessionId": session_id,
-        }).encode("utf-8")
+        }
+        if self._model_override:
+            request_data["model"] = self._model_override
+
+        payload = json.dumps(request_data).encode("utf-8")
 
         req = urllib.request.Request(
             f"{self._gateway_url}/api/chat",

@@ -7,24 +7,29 @@
  * Flow:
  *   1. Receive Google Chat event via Pub/Sub (SNS/SQS trigger)
  *   2. Extract sender identity from event payload
- *   3. Look up user in DynamoDB (create record if new)
- *   4. Run message through Bedrock Guardrails (K-12 content safety)
- *   5. If blocked → respond with safety message, log to telemetry
- *   6. Invoke user's AgentCore session
- *   7. Log telemetry to Aurora (user, model, tokens, timestamp, latency)
- *   8. Send response back via Google Chat API
+ *   3. Validate sender belongs to allowed domain (@psd401.net)
+ *   4. Look up user in DynamoDB (create record if new)
+ *   5. Run message through Bedrock Guardrails (K-12 content safety)
+ *   6. If blocked → respond with safety message, log to telemetry
+ *   7. Invoke user's AgentCore session
+ *   8. Log telemetry to Aurora (user, model, tokens, timestamp, latency)
+ *   9. Send response back via Google Chat API
  *
  * Environment variables (injected by CDK):
  *   ENVIRONMENT            — dev/staging/prod
  *   USERS_TABLE            — DynamoDB table name
  *   GUARDRAIL_ID           — Bedrock Guardrail ID
  *   GUARDRAIL_VERSION      — Bedrock Guardrail version
- *   AGENTCORE_RUNTIME_ID   — AgentCore Runtime ID (if deployed)
+ *   AGENTCORE_RUNTIME_ID   — AgentCore Runtime ID (resolved from SSM at runtime if not set;
+ *                              the value is not known at CDK deploy time because the Runtime
+ *                              is conditionally created only when an image tag is provided)
  *   DATABASE_RESOURCE_ARN  — Aurora cluster ARN
  *   DATABASE_SECRET_ARN    — Aurora credentials secret ARN
  *   DATABASE_NAME          — Aurora database name
  *   GOOGLE_CREDENTIALS_SECRET_ARN — Secrets Manager ARN for Google service account JSON
- *   TOKEN_LIMIT_PER_INTERACTION — Hard token limit (default 100000)
+ *   TOKEN_LIMIT_PER_INTERACTION — Alerting threshold for token usage (default 100000)
+ *   GUARDRAIL_FAIL_OPEN    — 'true' to allow messages when guardrail service fails (default: 'false')
+ *   ALLOWED_DOMAINS        — Comma-separated list of allowed email domains (default: 'psd401.net')
  */
 
 import {
@@ -47,6 +52,10 @@ import {
   GetSecretValueCommand,
 } from '@aws-sdk/client-secrets-manager';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
+import { SignatureV4 } from '@smithy/signature-v4';
+import { Sha256 } from '@aws-crypto/sha256-js';
+import { defaultProvider } from '@aws-sdk/credential-provider-node';
+import { HttpRequest } from '@smithy/protocol-http';
 import { Context as LambdaContext, SQSEvent, SQSRecord } from 'aws-lambda';
 
 // ---------------------------------------------------------------------------
@@ -59,7 +68,6 @@ function generateRequestId(): string {
 
 function createLogger(context: Record<string, unknown> = {}) {
   const baseContext = {
-    timestamp: new Date().toISOString(),
     service: 'agent-router',
     ...context,
   };
@@ -67,19 +75,19 @@ function createLogger(context: Record<string, unknown> = {}) {
   return {
     info: (message: string, meta: Record<string, unknown> = {}) => {
       process.stdout.write(
-        JSON.stringify({ level: 'INFO', message, ...baseContext, ...meta }) +
+        JSON.stringify({ level: 'INFO', message, timestamp: new Date().toISOString(), ...baseContext, ...meta }) +
           '\n'
       );
     },
     error: (message: string, meta: Record<string, unknown> = {}) => {
       process.stderr.write(
-        JSON.stringify({ level: 'ERROR', message, ...baseContext, ...meta }) +
+        JSON.stringify({ level: 'ERROR', message, timestamp: new Date().toISOString(), ...baseContext, ...meta }) +
           '\n'
       );
     },
     warn: (message: string, meta: Record<string, unknown> = {}) => {
       process.stdout.write(
-        JSON.stringify({ level: 'WARN', message, ...baseContext, ...meta }) +
+        JSON.stringify({ level: 'WARN', message, timestamp: new Date().toISOString(), ...baseContext, ...meta }) +
           '\n'
       );
     },
@@ -113,6 +121,12 @@ const TOKEN_LIMIT = parseInt(
   process.env.TOKEN_LIMIT_PER_INTERACTION || '100000',
   10
 );
+// Fail closed by default in K-12 environment — only allow through on explicit opt-in
+const GUARDRAIL_FAIL_OPEN = process.env.GUARDRAIL_FAIL_OPEN === 'true';
+// Domain allowlist for sender identity validation
+const ALLOWED_DOMAINS = (process.env.ALLOWED_DOMAINS || 'psd401.net')
+  .split(',')
+  .map((d) => d.trim().toLowerCase());
 
 // ---------------------------------------------------------------------------
 // Types
@@ -158,9 +172,17 @@ interface AgentUser {
 // ---------------------------------------------------------------------------
 
 let cachedGoogleCredentials: string | null = null;
+let credentialsCachedAt: number | null = null;
+const CREDENTIALS_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 async function getGoogleCredentials(): Promise<string> {
-  if (cachedGoogleCredentials) return cachedGoogleCredentials;
+  if (
+    cachedGoogleCredentials &&
+    credentialsCachedAt &&
+    Date.now() - credentialsCachedAt < CREDENTIALS_TTL_MS
+  ) {
+    return cachedGoogleCredentials;
+  }
   if (!GOOGLE_CREDENTIALS_SECRET_ARN) {
     throw new Error('GOOGLE_CREDENTIALS_SECRET_ARN not configured');
   }
@@ -168,6 +190,7 @@ async function getGoogleCredentials(): Promise<string> {
     new GetSecretValueCommand({ SecretId: GOOGLE_CREDENTIALS_SECRET_ARN })
   );
   cachedGoogleCredentials = result.SecretString || '';
+  credentialsCachedAt = Date.now();
   return cachedGoogleCredentials;
 }
 
@@ -203,7 +226,18 @@ async function getOrCreateUser(
   }
 
   // New user — create record with workspace prefix
-  const workspacePrefix = senderEmail.split('@')[0].replace(/[^a-z0-9-]/gi, '-').toLowerCase();
+  // Use full email (lowercased) to avoid collisions between users with similar
+  // local parts (e.g., john.smith@ vs john-smith@). The hash suffix ensures
+  // uniqueness even if normalization produces identical base prefixes.
+  const emailNormalized = senderEmail.toLowerCase();
+  const localPart = emailNormalized.split('@')[0].replace(/[^a-z0-9-]/gi, '-').toLowerCase();
+  // Simple hash: sum char codes and take mod to create a short suffix
+  let hashNum = 0;
+  for (let i = 0; i < emailNormalized.length; i++) {
+    hashNum = ((hashNum << 5) - hashNum + emailNormalized.charCodeAt(i)) | 0;
+  }
+  const hashSuffix = Math.abs(hashNum).toString(36).substring(0, 6);
+  const workspacePrefix = `${localPart}-${hashSuffix}`;
   const newUser: AgentUser = {
     googleIdentity: senderName,
     email: senderEmail,
@@ -270,11 +304,20 @@ async function applyGuardrails(
 
     return { allowed: true };
   } catch (error) {
-    // Guardrail failure should not block the user — log and allow
-    log.error('Guardrail invocation failed, allowing message through', {
+    // K-12 safety: fail closed by default. Only allow through if explicitly
+    // configured via GUARDRAIL_FAIL_OPEN=true (not recommended for production).
+    log.error('Guardrail invocation failed', {
       error: error instanceof Error ? error.message : String(error),
+      failOpen: GUARDRAIL_FAIL_OPEN,
     });
-    return { allowed: true };
+    if (GUARDRAIL_FAIL_OPEN) {
+      return { allowed: true };
+    }
+    return {
+      allowed: false,
+      blockedReason:
+        'Our content safety system is temporarily unavailable. Please try again shortly.',
+    };
   }
 }
 
@@ -321,11 +364,6 @@ async function invokeAgentCore(
   // TODO: Replace with @aws-sdk/client-bedrock-agentcore when GA SDK is released.
   // Using fetch with SigV4 signing for the alpha API.
   try {
-    const { SignatureV4 } = await import('@smithy/signature-v4');
-    const { Sha256 } = await import('@aws-crypto/sha256-js');
-    const { defaultProvider } = await import('@aws-sdk/credential-provider-node');
-    const { HttpRequest } = await import('@smithy/protocol-http');
-
     const region = process.env.AWS_REGION || 'us-east-1';
     const body = JSON.stringify({
       prompt: message,
@@ -422,42 +460,37 @@ async function sendGoogleChatResponse(
   text: string,
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
-  try {
-    const credentialsJson = await getGoogleCredentials();
-    const credentials = JSON.parse(credentialsJson);
+  // Throw on failure so SQS marks the message as failed and retries (or DLQs).
+  // Callers must let the error propagate for retry semantics to work.
+  const credentialsJson = await getGoogleCredentials();
+  const credentials = JSON.parse(credentialsJson);
 
-    // Use googleapis to create a Chat message
-    const { google } = await import('googleapis');
-    const auth = new google.auth.GoogleAuth({
-      credentials,
-      scopes: ['https://www.googleapis.com/auth/chat.bot'],
-    });
+  // Use @googleapis/chat (lightweight, ~2MB) instead of full googleapis (~100MB).
+  // Use the auth class re-exported by @googleapis/chat to avoid version mismatch
+  // between google-auth-library as a direct dep and the one bundled internally.
+  const chatPkg = await import('@googleapis/chat');
 
-    const chat = google.chat({ version: 'v1', auth });
+  const googleAuth = new chatPkg.auth.GoogleAuth({
+    credentials,
+    scopes: ['https://www.googleapis.com/auth/chat.bot'],
+  });
 
-    const messageBody: Record<string, unknown> = { text };
-    if (threadName) {
-      messageBody.thread = { name: threadName };
-    }
+  const chatClient = chatPkg.chat({ version: 'v1', auth: googleAuth });
 
-    await chat.spaces.messages.create({
-      parent: spaceName,
-      requestBody: messageBody,
-      messageReplyOption: threadName
-        ? 'REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD'
-        : undefined,
-    });
-
-    log.info('Response sent to Google Chat', {
-      space: spaceName,
-      responseLength: text.length,
-    });
-  } catch (error) {
-    log.error('Failed to send Google Chat response', {
-      error: error instanceof Error ? error.message : String(error),
-      space: spaceName,
-    });
+  const messageBody: Record<string, string | Record<string, string>> = { text };
+  if (threadName) {
+    messageBody.thread = { name: threadName };
   }
+
+  await chatClient.spaces.messages.create({
+    parent: spaceName,
+    requestBody: messageBody,
+  });
+
+  log.info('Response sent to Google Chat', {
+    space: spaceName,
+    responseLength: text.length,
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -567,7 +600,8 @@ async function processRecord(
       error: error instanceof Error ? error.message : String(error),
       body: record.body.substring(0, 500),
     });
-    return;
+    // Rethrow so SQS marks as failed and retries/DLQs the message
+    throw error;
   }
 
   // Only process MESSAGE events
@@ -601,6 +635,18 @@ async function processRecord(
   const messageText = message.text;
   const spaceName = chatEvent.space.name;
   const threadName = message.thread?.name;
+
+  // Validate sender belongs to an allowed domain — prevents abuse if
+  // an actor injects messages into the SQS queue with arbitrary emails.
+  const emailDomain = senderEmail.split('@')[1]?.toLowerCase();
+  if (!emailDomain || !ALLOWED_DOMAINS.includes(emailDomain)) {
+    log.warn('Sender email not in allowed domains', {
+      sender: senderName,
+      domain: emailDomain,
+      allowedDomains: ALLOWED_DOMAINS,
+    });
+    return;
+  }
 
   log.info('Processing message', {
     sender: senderName,
@@ -644,8 +690,10 @@ async function processRecord(
   }
 
   // Step 3: Invoke AgentCore
-  // Use space name as session ID for conversation continuity
-  const sessionId = `${user.workspacePrefix}-${spaceName.replace(/\//g, '-')}`;
+  // Use space name as session ID for conversation continuity.
+  // Cap at 512 chars to fit the agent_sessions.session_id VARCHAR(512) column.
+  const rawSessionId = `${user.workspacePrefix}-${spaceName.replace(/\//g, '-')}`;
+  const sessionId = rawSessionId.length > 512 ? rawSessionId.substring(0, 512) : rawSessionId;
   const agentResult = await invokeAgentCore(
     messageText,
     senderEmail,
@@ -653,15 +701,16 @@ async function processRecord(
     log
   );
 
-  // Step 4: Token usage alerting threshold
-  // This is a monitoring alert, not a hard cap. The response is still delivered.
-  // Hard enforcement would require pre-invocation token estimation or session tracking.
-  if (
-    agentResult.inputTokens + agentResult.outputTokens > TOKEN_LIMIT
-  ) {
+  // Step 4: Token usage alerting threshold (warn-only, not enforcement)
+  // The response is still delivered — this is for monitoring/alerting.
+  // Hard enforcement requires pre-invocation token estimation via session
+  // tracking in DynamoDB, which is planned for Phase 2.
+  const totalTokens = agentResult.inputTokens + agentResult.outputTokens;
+  if (totalTokens > TOKEN_LIMIT) {
     log.warn('Token usage exceeds alerting threshold', {
       inputTokens: agentResult.inputTokens,
       outputTokens: agentResult.outputTokens,
+      totalTokens,
       threshold: TOKEN_LIMIT,
     });
   }

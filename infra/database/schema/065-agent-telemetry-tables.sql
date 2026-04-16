@@ -68,6 +68,9 @@ CREATE TRIGGER trigger_agent_sessions_updated_at
 
 
 -- agent_feedback: User reactions to agent messages
+-- Design: One feedback per user per message (unique constraint below).
+-- Feedback is immutable by design — to change a reaction, delete and re-insert.
+-- This simplifies audit trails and prevents accidental overwrites.
 CREATE TABLE IF NOT EXISTS agent_feedback (
     id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     user_id         VARCHAR(255) NOT NULL,

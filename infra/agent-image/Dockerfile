@@ -34,8 +34,12 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends python3 python3-pip python3-venv && \
     rm -rf /var/lib/apt/lists/*
 
-# Install the bedrock-agentcore SDK (pinned version)
-RUN pip3 install --no-cache-dir --break-system-packages "bedrock-agentcore==${BEDROCK_AGENTCORE_VERSION}"
+# Install the bedrock-agentcore SDK in a virtual environment (avoids --break-system-packages)
+RUN python3 -m venv /opt/agentcore-venv && \
+    /opt/agentcore-venv/bin/pip install --no-cache-dir "bedrock-agentcore==${BEDROCK_AGENTCORE_VERSION}"
+
+# Add venv to PATH so python3 uses the venv by default
+ENV PATH="/opt/agentcore-venv/bin:$PATH"
 
 # Create workspace and config directories
 RUN mkdir -p /home/node/.openclaw/memory
