@@ -30,11 +30,24 @@ export interface NetworkConfig {
   vpcEndpoints: string[]
 }
 
+export interface AgentCronSchedules {
+  morningBrief: string
+  eveningWrap: string
+  weeklySummary: string
+  kaizenScan: string
+}
+
+export interface AgentConfig {
+  microVmIdleTimeoutMinutes: number
+  cronSchedules: AgentCronSchedules
+}
+
 export interface IEnvironmentConfig {
   database: DatabaseConfig
   compute: ComputeConfig
   monitoring: MonitoringConfig
   network: NetworkConfig
+  agent: AgentConfig
   costOptimization: boolean
   securityAlertEmail?: string
 }
@@ -70,6 +83,15 @@ export class EnvironmentConfig {
         maxAzs: 2,
         natGateways: 1,
         vpcEndpoints: ["s3", "secretsmanager"],
+      },
+      agent: {
+        microVmIdleTimeoutMinutes: 30,
+        cronSchedules: {
+          morningBrief: "cron(0 16 ? * MON-FRI *)",
+          eveningWrap: "cron(0 1 ? * TUE-SAT *)",
+          weeklySummary: "cron(0 22 ? * FRI *)",
+          kaizenScan: "cron(0 3 ? * MON *)",
+        },
       },
       costOptimization: true,
     })
@@ -115,6 +137,15 @@ export class EnvironmentConfig {
           "logs",
         ],
       },
+      agent: {
+        microVmIdleTimeoutMinutes: 60,
+        cronSchedules: {
+          morningBrief: "cron(0 16 ? * MON-FRI *)",
+          eveningWrap: "cron(0 1 ? * TUE-SAT *)",
+          weeklySummary: "cron(0 22 ? * FRI *)",
+          kaizenScan: "cron(0 3 ? * MON *)",
+        },
+      },
       costOptimization: false,
     })
 
@@ -149,6 +180,15 @@ export class EnvironmentConfig {
         natGateways: 2,
         vpcEndpoints: ["s3", "secretsmanager", "rds", "ecs"],
       },
+      agent: {
+        microVmIdleTimeoutMinutes: 30,
+        cronSchedules: {
+          morningBrief: "cron(0 16 ? * MON-FRI *)",
+          eveningWrap: "cron(0 1 ? * TUE-SAT *)",
+          weeklySummary: "cron(0 22 ? * FRI *)",
+          kaizenScan: "cron(0 3 ? * MON *)",
+        },
+      },
       costOptimization: false,
     })
   }
@@ -173,6 +213,14 @@ export class EnvironmentConfig {
       compute: { ...baseConfig.compute, ...overrides.compute },
       monitoring: { ...baseConfig.monitoring, ...overrides.monitoring },
       network: { ...baseConfig.network, ...overrides.network },
+      agent: {
+        ...baseConfig.agent,
+        ...overrides.agent,
+        cronSchedules: {
+          ...baseConfig.agent.cronSchedules,
+          ...overrides.agent?.cronSchedules,
+        },
+      },
     })
   }
 }

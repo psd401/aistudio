@@ -10,6 +10,8 @@ export {
   ComputeConfig,
   MonitoringConfig,
   NetworkConfig,
+  AgentConfig,
+  AgentCronSchedules,
 } from "./config/environment-config"
 
 // Compute constructs
