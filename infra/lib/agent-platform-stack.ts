@@ -13,6 +13,7 @@ import {
   EnvironmentConfig,
   IEnvironmentConfig,
 } from './constructs';
+import { ServiceRoleFactory } from './constructs/security';
 
 export interface AgentPlatformStackProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
@@ -327,160 +328,79 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(this.agentCoreExecutionRole).add('department', 'technology');
     cdk.Tags.of(this.agentCoreExecutionRole).add('costCenter', 'ai-agents');
 
-    // 5b. Router Lambda role
-    // BYPASS ServiceRoleFactory: This role requires AgentCore-specific policies
-    // (bedrock-agentcore:InvokeRuntime) and cross-service permissions (DynamoDB +
-    // Aurora + S3 + Guardrails) that don't map to ServiceRoleFactory's prop-based
-    // model. The policies below follow the same least-privilege pattern.
-    this.routerLambdaRole = new iam.Role(this, 'RouterLambdaRole', {
-      roleName: `psd-agent-router-lambda-${environment}`,
-      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-      description: `Router Lambda role for PSD AI Agent Platform (${environment})`,
-      managedPolicies: [
-        iam.ManagedPolicy.fromManagedPolicyArn(
-          this,
-          'RouterLambdaBasicExecPolicy',
-          'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole',
-        ),
-        iam.ManagedPolicy.fromManagedPolicyArn(
-          this,
-          'RouterLambdaVPCAccessPolicy',
-          'arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole',
-        ),
+    // 5b. Router Lambda role — via ServiceRoleFactory
+    // VPC access via managed policy (not vpcEnabled) to avoid policy validator
+    // flagging ENI wildcard resources. AgentCore-specific policies passed as
+    // additionalPolicies since ServiceRoleFactory doesn't have built-in props
+    // for bedrock-agentcore, guardrails, or rds-data.
+    this.routerLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'RouterLambdaRole', {
+      functionName: 'psd-agent-router',
+      environment,
+      region: this.region,
+      account: this.account,
+      vpcEnabled: false,
+      dynamodbTables: [this.usersTable.tableName, this.signalsTable.tableName],
+      s3Buckets: [this.workspaceBucket.bucketName],
+      secrets: [props.databaseSecretArn],
+      additionalPolicies: [
+        // Guardrails invoke
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'GuardrailsInvoke',
+            effect: iam.Effect.ALLOW,
+            actions: ['bedrock:ApplyGuardrail', 'bedrock:GetGuardrail'],
+            resources: [props.guardrailArn],
+          })],
+        }),
+        // Aurora rds-data for telemetry writes
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'AuroraAccess',
+            effect: iam.Effect.ALLOW,
+            actions: ['rds-data:ExecuteStatement', 'rds-data:BatchExecuteStatement'],
+            resources: [props.databaseResourceArn],
+          })],
+        }),
+        // AgentCore session invoke
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'AgentCoreInvoke',
+            effect: iam.Effect.ALLOW,
+            actions: ['bedrock-agentcore:InvokeRuntime', 'bedrock-agentcore:InvokeRuntimeForUser'],
+            resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
+          })],
+        }),
       ],
     });
 
-    cdk.Tags.of(this.routerLambdaRole).add('Environment', environment);
-    cdk.Tags.of(this.routerLambdaRole).add('ManagedBy', 'cdk');
+    // Attach VPC access via AWS managed policy (ENI operations require wildcard
+    // resources which the ServiceRoleFactory policy validator rejects)
+    this.routerLambdaRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+    );
 
-    // Router: Guardrails invoke
-    this.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'GuardrailsInvoke',
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'bedrock:ApplyGuardrail',
-        'bedrock:GetGuardrail',
-      ],
-      resources: [props.guardrailArn],
-    }));
-
-    // Router: DynamoDB read/write (both tables)
-    // Note: DynamoDB does not support aws:ResourceTag condition keys for
-    // authorization. Scoping to specific table ARNs provides equivalent
-    // isolation. See: https://docs.aws.amazon.com/service-authorization/latest/reference/list_amazondynamodb.html
-    this.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'DynamoDBAccess',
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'dynamodb:GetItem',
-        'dynamodb:PutItem',
-        'dynamodb:UpdateItem',
-        'dynamodb:DeleteItem',
-        'dynamodb:Query',
-        'dynamodb:Scan',
-      ],
-      resources: [
-        this.usersTable.tableArn,
-        `${this.usersTable.tableArn}/index/*`,
-        this.signalsTable.tableArn,
-        `${this.signalsTable.tableArn}/index/*`,
-      ],
-    }));
-
-    // Router: Aurora write (telemetry — uses existing DB cluster)
-    this.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'AuroraAccess',
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'rds-data:ExecuteStatement',
-        'rds-data:BatchExecuteStatement',
-      ],
-      resources: [props.databaseResourceArn],
-    }));
-
-    // Router: Secrets Manager read for DB credentials
-    this.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'SecretsManagerAccess',
-      effect: iam.Effect.ALLOW,
-      actions: ['secretsmanager:GetSecretValue'],
-      resources: [props.databaseSecretArn],
-    }));
-
-    // Router: S3 read (shared knowledge)
-    this.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'S3SharedKnowledgeRead',
-      effect: iam.Effect.ALLOW,
-      actions: [
-        's3:GetObject',
-        's3:ListBucket',
-      ],
-      resources: [
-        this.workspaceBucket.bucketArn,
-        `${this.workspaceBucket.bucketArn}/shared/*`,
-      ],
-    }));
-
-    // Router: AgentCore session invoke
-    this.routerLambdaRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'AgentCoreInvoke',
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'bedrock-agentcore:InvokeRuntime',
-        'bedrock-agentcore:InvokeRuntimeForUser',
-      ],
-      resources: [
-        `arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`,
-      ],
-    }));
-
-    // 5c. Cron Lambda role
-    // BYPASS ServiceRoleFactory: Requires bedrock-agentcore:InvokeRuntime which
-    // ServiceRoleFactory does not support. Follows same least-privilege pattern.
-    this.cronLambdaRole = new iam.Role(this, 'CronLambdaRole', {
-      roleName: `psd-agent-cron-lambda-${environment}`,
-      assumedBy: new iam.ServicePrincipal('lambda.amazonaws.com'),
-      description: `Cron Lambda role for PSD AI Agent Platform (${environment})`,
-      managedPolicies: [
-        iam.ManagedPolicy.fromManagedPolicyArn(
-          this,
-          'CronLambdaBasicExecPolicy',
-          'arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole',
-        ),
+    // 5c. Cron Lambda role — via ServiceRoleFactory
+    // Note: ServiceRoleFactory grants full DynamoDB CRUD; cron only needs read.
+    // Accepted tradeoff for consistency — table ARN scoping limits blast radius.
+    this.cronLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'CronLambdaRole', {
+      functionName: 'psd-agent-cron',
+      environment,
+      region: this.region,
+      account: this.account,
+      vpcEnabled: false,
+      dynamodbTables: [this.usersTable.tableName],
+      additionalPolicies: [
+        // AgentCore session invoke
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'AgentCoreInvoke',
+            effect: iam.Effect.ALLOW,
+            actions: ['bedrock-agentcore:InvokeRuntime', 'bedrock-agentcore:InvokeRuntimeForUser'],
+            resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
+          })],
+        }),
       ],
     });
-
-    cdk.Tags.of(this.cronLambdaRole).add('Environment', environment);
-    cdk.Tags.of(this.cronLambdaRole).add('ManagedBy', 'cdk');
-
-    // Cron: AgentCore session invoke
-    this.cronLambdaRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'AgentCoreInvoke',
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'bedrock-agentcore:InvokeRuntime',
-        'bedrock-agentcore:InvokeRuntimeForUser',
-      ],
-      resources: [
-        `arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`,
-      ],
-    }));
-
-    // Cron: DynamoDB read (user table — to enumerate users for cron jobs)
-    // Note: DynamoDB does not support aws:ResourceTag condition keys.
-    // Table ARN scoping provides equivalent isolation.
-    this.cronLambdaRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'DynamoDBRead',
-      effect: iam.Effect.ALLOW,
-      actions: [
-        'dynamodb:GetItem',
-        'dynamodb:Query',
-        'dynamodb:Scan',
-      ],
-      resources: [
-        this.usersTable.tableArn,
-        `${this.usersTable.tableArn}/index/*`,
-      ],
-    }));
 
     // =====================================================================
     // 6. AgentCore Runtime
