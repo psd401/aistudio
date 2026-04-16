@@ -47,6 +47,8 @@ export interface AgentPlatformStackProps extends cdk.StackProps {
   databaseName?: string;
   /** Email for alarm notifications (DLQ, Lambda errors). If omitted, alarms fire but don't notify. */
   alertEmail?: string;
+  /** Comma-separated email domains allowed to send messages (default: 'psd401.net') */
+  allowedDomains?: string;
 }
 
 /**
@@ -213,17 +215,21 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(this.signalsTable).add('ManagedBy', 'cdk');
 
     // =====================================================================
-    // 4c. Google Credentials Secret (imported, created manually in console)
+    // 4c. Google Credentials Secret (CDK-managed, operator populates)
     // =====================================================================
-    // Imported before IAM roles so the secret ARN can be included in the
-    // ServiceRoleFactory `secrets` array (avoids standalone addToPolicy calls).
-    // The Google service account JSON must be created before deploying:
-    //   aws secretsmanager create-secret --name psd-agent-google-sa-<env> \
+    // CDK creates the secret with placeholder value. After deploy, populate
+    // it with the Google service account JSON:
+    //   aws secretsmanager put-secret-value \
+    //     --secret-id psd-agent-google-sa-<env> \
     //     --secret-string file://service-account.json
-    this.googleCredentialsSecret = secretsmanager.Secret.fromSecretNameV2(
-      this, 'GoogleCredentialsSecret',
-      `psd-agent-google-sa-${environment}`,
-    );
+    //
+    // The Lambda reads this at runtime for Google Chat API authentication.
+    this.googleCredentialsSecret = new secretsmanager.Secret(this, 'GoogleCredentialsSecret', {
+      secretName: `psd-agent-google-sa-${environment}`,
+      description: 'Google service account JSON for Chat API authentication. Populate after deploy with: aws secretsmanager put-secret-value --secret-id psd-agent-google-sa-<env> --secret-string file://service-account.json',
+    });
+    cdk.Tags.of(this.googleCredentialsSecret).add('Environment', environment);
+    cdk.Tags.of(this.googleCredentialsSecret).add('ManagedBy', 'cdk');
 
     // =====================================================================
     // 5. IAM Roles
@@ -610,33 +616,29 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(this.routerQueue).add('Environment', environment);
     cdk.Tags.of(this.routerQueue).add('ManagedBy', 'cdk');
 
-    // PLACEHOLDER: GCP Pub/Sub bridge policy — grants sqs:SendMessage to the
-    // GCP push subscription service account. Replace the principal ARN below
-    // with the actual GCP-to-AWS federation role ARN during cross-cloud setup.
+    // GCP Pub/Sub bridge policy — grants sqs:SendMessage to the GCP push
+    // subscription's IAM principal. Pass --context gcpBridgeRoleArn=<arn> to
+    // enable. Without it, the queue deploys but no messages can arrive.
     //
-    // WARNING: This deploys a queue policy referencing a role that may not yet
-    // exist. AWS accepts the policy but it's non-functional until the role is
-    // created. cdk diff will look clean either way — this is a silent failure
-    // vector if cross-cloud setup steps are skipped.
-    //
-    // TODO(phase-2): Replace placeholder principal with actual GCP bridge role ARN.
-    // Consider adding a CloudFormation custom resource or CfnCondition that
-    // validates the role exists at deploy time.
-    this.routerQueue.addToResourcePolicy(new iam.PolicyStatement({
-      sid: 'AllowGCPPubSubBridge',
-      effect: iam.Effect.ALLOW,
-      actions: ['sqs:SendMessage'],
-      resources: [this.routerQueue.queueArn],
-      principals: [new iam.ArnPrincipal(
-        `arn:aws:iam::${this.account}:role/gcp-pubsub-bridge-${environment}`,
-      )],
-    }));
+    // The bridge role is an IAM role with an OIDC trust policy for GCP Workload
+    // Identity Federation. See docs/operations/agent-platform-setup.md for
+    // how to create it.
+    const gcpBridgeRoleArn = this.node.tryGetContext('gcpBridgeRoleArn') as string | undefined;
+    if (gcpBridgeRoleArn) {
+      this.routerQueue.addToResourcePolicy(new iam.PolicyStatement({
+        sid: 'AllowGCPPubSubBridge',
+        effect: iam.Effect.ALLOW,
+        actions: ['sqs:SendMessage'],
+        resources: [this.routerQueue.queueArn],
+        principals: [new iam.ArnPrincipal(gcpBridgeRoleArn)],
+      }));
+    }
 
-    // Output the expected bridge role ARN so operators know exactly what to create.
-    // This makes the prerequisite harder to skip during deployment.
-    new cdk.CfnOutput(this, 'GCPBridgeRoleRequired', {
-      value: `arn:aws:iam::${this.account}:role/gcp-pubsub-bridge-${environment}`,
-      description: 'REQUIRED: Create this IAM role for GCP Pub/Sub → SQS bridge. Without it, no Google Chat messages will arrive.',
+    new cdk.CfnOutput(this, 'GCPBridgeStatus', {
+      value: gcpBridgeRoleArn
+        ? `Configured: ${gcpBridgeRoleArn}`
+        : 'NOT CONFIGURED — pass --context gcpBridgeRoleArn=<arn> to enable Google Chat messages',
+      description: 'GCP Pub/Sub → SQS bridge status',
     });
 
     // =====================================================================
@@ -722,8 +724,8 @@ export class AgentPlatformStack extends cdk.Stack {
         TOKEN_LIMIT_PER_INTERACTION: '100000',
         // K-12 safety: fail closed when guardrails are unavailable
         GUARDRAIL_FAIL_OPEN: 'false',
-        // Only allow messages from PSD domain emails
-        ALLOWED_DOMAINS: 'psd401.net',
+        // Only allow messages from configured domain emails
+        ALLOWED_DOMAINS: props.allowedDomains || 'psd401.net',
         NODE_ENV: 'production',
         // AGENTCORE_RUNTIME_ID is intentionally NOT set here — it is resolved
         // from SSM at runtime because the Runtime resource is conditionally
