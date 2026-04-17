@@ -66,7 +66,7 @@ All GCP steps are done in the web console. No `gcloud` CLI required.
    - Enable **Interactive features**
    - Connection settings: **Cloud Pub/Sub**
    - Pub/Sub topic: `projects/<your-project-id>/topics/agent-chat-messages`
-   - Visibility: **Make this Chat app available to specific people and groups in [your domain]**
+   - Visibility: **Make this Chat app available to everyone in [your domain]** (the Router Lambda's `ALLOWED_DOMAINS` handles access control on the AWS side)
    - Logs: **Log errors to Logging**
 3. Click **Save**
 
