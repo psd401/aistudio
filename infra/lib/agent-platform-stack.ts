@@ -507,9 +507,17 @@ export class AgentPlatformStack extends cdk.Stack {
           imageTag,
         ),
         executionRole: this.agentCoreExecutionRole,
+        // AgentCore only supports specific AZ IDs: use1-az1, use1-az2, use1-az4.
+        // Our VPC includes us-east-1a (use1-az6) which is NOT supported.
+        // Filter to only us-east-1b (use1-az1) and us-east-1c (use1-az2).
+        // NOTE: AZ name-to-ID mapping varies per account. If deploying in a
+        // different account, verify AZ IDs with: aws ec2 describe-availability-zones
         networkConfiguration: agentcore.RuntimeNetworkConfiguration.usingVpc(this, {
           vpc,
-          vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+          vpcSubnets: {
+            subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+            availabilityZones: ['us-east-1b', 'us-east-1c'],
+          },
         }),
         description: `PSD AI Agent Platform runtime (${environment})`,
         environmentVariables: {
