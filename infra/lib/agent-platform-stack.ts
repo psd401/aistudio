@@ -748,6 +748,8 @@ export class AgentPlatformStack extends cdk.Stack {
         GUARDRAIL_FAIL_OPEN: 'false',
         // Only allow messages from configured domain emails
         ALLOWED_DOMAINS: props.allowedDomains || 'psd401.net',
+        // Account ID needed to construct AgentCore Runtime ARN from the runtime ID
+        AWS_ACCOUNT_ID: this.account,
         NODE_ENV: 'production',
         // AGENTCORE_RUNTIME_ID is intentionally NOT set here — it is resolved
         // from SSM at runtime because the Runtime resource is conditionally

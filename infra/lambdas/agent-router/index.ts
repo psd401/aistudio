@@ -470,28 +470,35 @@ async function invokeAgentCore(
     };
   }
 
-  // Use the AWS SDK to invoke AgentCore Runtime
-  // The bedrock-agentcore APIs are accessed via generic HTTP signing since
-  // the TypeScript SDK client may not yet exist for bedrock-agentcore.
-  // For now, we use a signed HTTP request via the AWS SDK's generic caller.
+  // Invoke AgentCore Runtime via SigV4-signed HTTP request.
+  // The bedrock-agentcore TypeScript SDK is not yet GA, so we use generic HTTP
+  // signing. The API expects:
+  //   POST /runtimes/{runtimeArn}/invocations
+  //   X-Amzn-Bedrock-AgentCore-Runtime-Session-Id: {sessionId}
+  //   X-Amzn-Bedrock-AgentCore-Runtime-User-Id: {userId}
   //
   // TODO: Replace with @aws-sdk/client-bedrock-agentcore when GA SDK is released.
-  // Using fetch with SigV4 signing for the alpha API.
   try {
     const region = process.env.AWS_REGION || 'us-east-1';
+    const account = process.env.AWS_ACCOUNT_ID || '';
+    // Construct the full Runtime ARN — the API requires the ARN, not the runtime ID
+    const runtimeArn = runtimeId.startsWith('arn:')
+      ? runtimeId
+      : `arn:aws:bedrock-agentcore:${region}:${account}:runtime/${runtimeId}`;
     const body = JSON.stringify({
       prompt: message,
-      user_id: userId,
     });
 
     const request = new HttpRequest({
       method: 'POST',
       protocol: 'https:',
       hostname: `bedrock-agentcore.${region}.amazonaws.com`,
-      path: `/runtimes/${runtimeId}/sessions/${sessionId}/invoke`,
+      path: `/runtimes/${encodeURIComponent(runtimeArn)}/invocations`,
       headers: {
         'Content-Type': 'application/json',
         host: `bedrock-agentcore.${region}.amazonaws.com`,
+        'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': sessionId,
+        'X-Amzn-Bedrock-AgentCore-Runtime-User-Id': userId,
       },
       body,
     });
