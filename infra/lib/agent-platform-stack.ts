@@ -424,7 +424,11 @@ export class AgentPlatformStack extends cdk.Stack {
       vpcEnabled: false,
       dynamodbTables: [this.usersTable.tableName, this.signalsTable.tableName],
       s3Buckets: [this.workspaceBucket.bucketName],
-      secrets: [props.databaseSecretArn, this.googleCredentialsSecret.secretArn],
+      // WORKAROUND: ServiceRoleFactory checks startsWith("arn:") to detect full
+      // ARNs vs names. CDK cross-stack refs and new Secret() produce tokens that
+      // don't start with "arn:" at synth time, causing double-wrapped ARNs.
+      // Grant read access directly instead of going through the factory.
+      secrets: [],
       additionalPolicies: [
         // Guardrails invoke
         new iam.PolicyDocument({
@@ -463,6 +467,16 @@ export class AgentPlatformStack extends cdk.Stack {
     this.routerLambdaRole.addManagedPolicy(
       iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
     );
+
+    // Grant Secrets Manager read access directly (not through ServiceRoleFactory).
+    // CDK cross-stack refs and new Secret() produce tokens that don't start with
+    // "arn:" at synth time, causing ServiceRoleFactory to double-wrap the ARN.
+    this.googleCredentialsSecret.grantRead(this.routerLambdaRole);
+    // DB secret — construct the secret from the ARN prop
+    const dbSecret = secretsmanager.Secret.fromSecretCompleteArn(
+      this, 'ImportedDbSecret', props.databaseSecretArn
+    );
+    dbSecret.grantRead(this.routerLambdaRole);
 
     // 5c. Cron Lambda role — via ServiceRoleFactory
     // Note: ServiceRoleFactory grants full DynamoDB CRUD; cron only needs read.
