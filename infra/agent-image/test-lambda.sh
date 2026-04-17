@@ -26,7 +26,8 @@
 set -euo pipefail
 
 ENVIRONMENT="${ENVIRONMENT:-dev}"
-STACK_NAME="AIStudio-AgentPlatformStack-${ENVIRONMENT^}"
+ENV_CAPITALIZED="$(echo "${ENVIRONMENT}" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
+STACK_NAME="AIStudio-AgentPlatformStack-${ENV_CAPITALIZED}"
 REGION="${AWS_REGION:-us-east-1}"
 SENDER_EMAIL="${SENDER_EMAIL:-test@psd401.net}"
 SENDER_NAME="users/test-user-123"

@@ -29,7 +29,14 @@
         "ecr:BatchGetImage",
         "ecs:*",
         "bedrock:InvokeModel",
-        "bedrock:InvokeModelWithResponseStream"
+        "bedrock:InvokeModelWithResponseStream",
+        "bedrock:ApplyGuardrail",
+        "bedrock:GetGuardrail",
+        "bedrock-agentcore:InvokeRuntime",
+        "bedrock-agentcore:InvokeRuntimeForUser",
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:GetParametersByPath"
       ],
       "Resource": "*"
     },
