@@ -15,7 +15,9 @@
 set -euo pipefail
 
 ENVIRONMENT="${ENVIRONMENT:-dev}"
-STACK_NAME="AIStudio-AgentPlatformStack-${ENVIRONMENT^}"
+# Capitalize first letter for stack name (portable — no bashisms or GNU sed)
+ENV_CAPITALIZED="$(echo "${ENVIRONMENT}" | awk '{print toupper(substr($0,1,1)) substr($0,2)}')"
+STACK_NAME="AIStudio-AgentPlatformStack-${ENV_CAPITALIZED}"
 REGION="${AWS_REGION:-us-east-1}"
 TAG="${1:-$(date +%Y-%m-%d)-initial}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
