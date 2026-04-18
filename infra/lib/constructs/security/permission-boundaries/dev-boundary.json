@@ -32,6 +32,7 @@
         "bedrock:InvokeModelWithResponseStream",
         "bedrock:ApplyGuardrail",
         "bedrock:GetGuardrail",
+        "bedrock-agentcore:InvokeAgentRuntime",
         "bedrock-agentcore:InvokeRuntime",
         "bedrock-agentcore:InvokeRuntimeForUser",
         "ssm:GetParameter",

@@ -444,7 +444,7 @@ export class AgentPlatformStack extends cdk.Stack {
           statements: [new iam.PolicyStatement({
             sid: 'AgentCoreInvoke',
             effect: iam.Effect.ALLOW,
-            actions: ['bedrock-agentcore:InvokeRuntime', 'bedrock-agentcore:InvokeRuntimeForUser'],
+            actions: ['bedrock-agentcore:InvokeAgentRuntime', 'bedrock-agentcore:InvokeRuntime', 'bedrock-agentcore:InvokeRuntimeForUser'],
             resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
           })],
         }),
@@ -496,7 +496,7 @@ export class AgentPlatformStack extends cdk.Stack {
           statements: [new iam.PolicyStatement({
             sid: 'AgentCoreInvoke',
             effect: iam.Effect.ALLOW,
-            actions: ['bedrock-agentcore:InvokeRuntime', 'bedrock-agentcore:InvokeRuntimeForUser'],
+            actions: ['bedrock-agentcore:InvokeAgentRuntime', 'bedrock-agentcore:InvokeRuntime', 'bedrock-agentcore:InvokeRuntimeForUser'],
             resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
           })],
         }),
