@@ -33,8 +33,7 @@
         "bedrock:ApplyGuardrail",
         "bedrock:GetGuardrail",
         "bedrock-agentcore:InvokeAgentRuntime",
-        "bedrock-agentcore:InvokeRuntime",
-        "bedrock-agentcore:InvokeRuntimeForUser",
+        "bedrock-agentcore:InvokeAgentRuntimeForUser",
         "ssm:GetParameter",
         "ssm:GetParameters",
         "ssm:GetParametersByPath"
