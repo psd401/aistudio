@@ -120,6 +120,7 @@ class OpenClawAdapter(HarnessAdapter):
             "openclaw", "agent",
             "-m", message,
             "--session-id", session_id,
+            "--url", f"ws://127.0.0.1:{self._gateway_port}",
             "--token", self.GATEWAY_TOKEN,
             "--json",
             "--timeout", "120",
@@ -140,9 +141,10 @@ class OpenClawAdapter(HarnessAdapter):
 
             if result.returncode != 0:
                 logger.error(
-                    "OpenClaw agent command failed: exit=%d stderr=%s",
+                    "OpenClaw agent command failed: exit=%d stderr=%s stdout=%s",
                     result.returncode,
                     result.stderr[:500] if result.stderr else "(empty)",
+                    result.stdout[:500] if result.stdout else "(empty)",
                 )
                 return "I encountered an error processing your message. Please try again."
 
