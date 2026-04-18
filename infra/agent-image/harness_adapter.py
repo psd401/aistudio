@@ -67,11 +67,12 @@ class OpenClawAdapter(HarnessAdapter):
 
             if self._process is None or self._process.poll() is not None:
                 logger.info("Starting OpenClaw gateway on port %d", self._gateway_port)
+                # Don't pass --token on CLI — use gateway.auth.token from
+                # openclaw.json instead. CLI --token may conflict with config.
                 self._process = subprocess.Popen(
                     [
                         "openclaw", "gateway",
                         "--port", str(self._gateway_port),
-                        "--token", self.GATEWAY_TOKEN,
                     ],
                     stdout=sys.stdout,
                     stderr=sys.stderr,
