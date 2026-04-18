@@ -225,8 +225,15 @@ class OpenClawAdapter(HarnessAdapter):
 
                 if not connect_resp.get("ok"):
                     error = connect_resp.get("error") or connect_resp.get("payload") or {}
-                    logger.error("WebSocket auth failed: %s", json.dumps(error)[:500])
+                    logger.error(
+                        "WebSocket auth failed: full_response=%s token_used=%s",
+                        json.dumps(connect_resp)[:800],
+                        gateway_token,
+                    )
                     sys.stdout.flush()
+                    sys.stderr.flush()
+                    # Write to stderr as well since stdout may not reach CloudWatch
+                    print(f"[AUTH_FAIL] response={json.dumps(connect_resp)[:500]} token={gateway_token}", file=sys.stderr, flush=True)
                     return "I encountered an authentication error. Please try again."
 
                 # Step 3: Send chat message
