@@ -542,6 +542,12 @@ export class AgentPlatformStack extends cdk.Stack {
           GUARDRAIL_ARN: props.guardrailArn,
           DATABASE_RESOURCE_ARN: props.databaseResourceArn,
           DATABASE_SECRET_ARN: props.databaseSecretArn,
+          // OpenClaw's auth gate checks for AWS_PROFILE, AWS_ACCESS_KEY_ID, or
+          // AWS_BEARER_TOKEN_BEDROCK before allowing Bedrock API calls. In AgentCore
+          // containers, credentials come from the ECS task role (via the SDK's
+          // default credential chain), but no env var is set. Setting AWS_PROFILE
+          // makes the gate pass; the SDK still uses the task role, not a profile.
+          AWS_PROFILE: 'default',
         },
         lifecycleConfiguration: {
           idleRuntimeSessionTimeout: cdk.Duration.minutes(config.agent.microVmIdleTimeoutMinutes),
