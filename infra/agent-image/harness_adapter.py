@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import uuid
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("harness_adapter")
@@ -52,18 +53,26 @@ class OpenClawAdapter(HarnessAdapter):
     4. Collect chat events until state: "final"
     """
 
-    # Gateway auth token — must match gateway.auth.token in openclaw.json.
-    GATEWAY_TOKEN = "psd-agent-internal-gateway-token"
+    DEFAULT_CONFIG_PATH = Path("/home/node/.openclaw/openclaw.json")
+    CLIENT_INFO = {
+        "id": "openclaw-control-ui",
+        "mode": "backend",
+        "version": "dev",
+        "platform": "linux",
+    }
 
     def __init__(self) -> None:
         self._gateway_port: int = 3100
         self._process: Optional[subprocess.Popen] = None
         self._ready: bool = False
+        self._config_path = Path(os.environ.get("OPENCLAW_CONFIG", self.DEFAULT_CONFIG_PATH))
+        self._gateway_token: Optional[str] = None
 
     def configure(self, config: dict) -> None:
         """Configure the OpenClaw adapter. Idempotent — safe to call multiple times."""
         if "gateway_port" in config:
             self._gateway_port = config["gateway_port"]
+            self._refresh_gateway_token()
 
             if self._process is None or self._process.poll() is not None:
                 logger.info("Starting OpenClaw gateway on port %d", self._gateway_port)
@@ -82,6 +91,43 @@ class OpenClawAdapter(HarnessAdapter):
                     },
                 )
                 self._wait_for_ready(timeout=30)
+                # Re-read the effective config after startup in case OpenClaw rewrote
+                # the gateway token on boot.
+                self._refresh_gateway_token(required=True)
+
+    def _refresh_gateway_token(self, required: bool = False) -> Optional[str]:
+        """Load the gateway auth token from the active OpenClaw config file."""
+        try:
+            config = json.loads(self._config_path.read_text())
+        except FileNotFoundError:
+            if required:
+                raise RuntimeError(f"OpenClaw config not found: {self._config_path}")
+            logger.info("OpenClaw config not found yet at %s", self._config_path)
+            return self._gateway_token
+        except json.JSONDecodeError as exc:
+            if required:
+                raise RuntimeError(f"OpenClaw config is invalid JSON: {exc}") from exc
+            logger.warning("Failed to parse OpenClaw config %s: %s", self._config_path, exc)
+            return self._gateway_token
+
+        token = (
+            config.get("gateway", {})
+            .get("auth", {})
+            .get("token")
+        )
+        if isinstance(token, str) and token.strip():
+            token = token.strip()
+            if token != self._gateway_token:
+                logger.info("Loaded gateway token from %s", self._config_path)
+            self._gateway_token = token
+            return token
+
+        if required:
+            raise RuntimeError(
+                f"OpenClaw gateway.auth.token missing in {self._config_path}"
+            )
+        logger.warning("OpenClaw config %s does not contain gateway.auth.token", self._config_path)
+        return self._gateway_token
 
     def _wait_for_ready(self, timeout: int = 30) -> None:
         """Poll the gateway health endpoint until ready."""
@@ -124,11 +170,16 @@ class OpenClawAdapter(HarnessAdapter):
             logger.error("websocket-client not installed, falling back to error")
             return "Agent communication library not available. Please contact an administrator."
 
+        gateway_token = self._refresh_gateway_token(required=True)
         ws_url = f"ws://127.0.0.1:{self._gateway_port}"
         response_text = ""
 
         try:
-            ws = websocket.create_connection(ws_url, timeout=120)
+            ws = websocket.create_connection(
+                ws_url,
+                timeout=120,
+                origin=f"http://127.0.0.1:{self._gateway_port}",
+            )
 
             try:
                 # Step 1: Wait for connect.challenge
@@ -136,6 +187,10 @@ class OpenClawAdapter(HarnessAdapter):
                 challenge = json.loads(challenge_raw)
                 logger.info("WS step 1 received: %s", challenge_raw[:300])
                 sys.stdout.flush()
+                if challenge.get("type") != "event" or challenge.get("event") != "connect.challenge":
+                    raise RuntimeError(
+                        f"Unexpected initial WebSocket message: {challenge_raw[:300]}"
+                    )
 
                 # Step 2: Authenticate
                 connect_id = str(uuid.uuid4())
@@ -146,12 +201,14 @@ class OpenClawAdapter(HarnessAdapter):
                     "params": {
                         "minProtocol": 3,
                         "maxProtocol": 3,
-                        "auth": {"token": self.GATEWAY_TOKEN},
+                        "client": self.CLIENT_INFO,
+                        "caps": [],
+                        "auth": {"token": gateway_token},
                         "role": "operator",
                         "scopes": ["operator.admin", "operator.read", "operator.write"],
                     },
                 }
-                logger.info("WS step 2 sending connect with token=%s...", self.GATEWAY_TOKEN[:10])
+                logger.info("WS step 2 sending connect with token=%s...", gateway_token[:10])
                 ws.send(json.dumps(connect_req))
 
                 # Wait for connect response — skip non-res messages
@@ -165,12 +222,10 @@ class OpenClawAdapter(HarnessAdapter):
                     # The connect response is type "res" with our request id
                     if connect_resp.get("type") == "res" and connect_resp.get("id") == connect_id:
                         break
-                    # Also accept top-level ok for simpler protocol versions
-                    if "ok" in connect_resp:
-                        break
 
                 if not connect_resp.get("ok"):
-                    logger.error("WebSocket auth failed: %s", connect_resp_raw[:500])
+                    error = connect_resp.get("error") or connect_resp.get("payload") or {}
+                    logger.error("WebSocket auth failed: %s", json.dumps(error)[:500])
                     sys.stdout.flush()
                     return "I encountered an authentication error. Please try again."
 
@@ -181,9 +236,9 @@ class OpenClawAdapter(HarnessAdapter):
                     "id": chat_id,
                     "method": "chat.send",
                     "params": {
-                        "sessionKey": session_id,
+                        "sessionKey": "global",
                         "message": message,
-                        "idempotencyKey": str(uuid.uuid4()),
+                        "idempotencyKey": chat_id,
                     },
                 }))
 
@@ -193,25 +248,27 @@ class OpenClawAdapter(HarnessAdapter):
                     raw = ws.recv()
                     msg = json.loads(raw)
 
-                    if msg.get("event") == "chat":
+                    if msg.get("type") == "event" and msg.get("event") == "chat":
                         payload = msg.get("payload", {})
                         state = payload.get("state")
+                        event_message = payload.get("message")
+                        content = event_message.get("content") if isinstance(event_message, dict) else None
+                        text = self._extract_text(content) or self._extract_text(event_message)
 
                         if state == "delta":
-                            # Accumulate streaming text
-                            content = payload.get("message", {}).get("content", "")
-                            if isinstance(content, str):
-                                response_text += content
-                            elif isinstance(content, list):
-                                for block in content:
-                                    if isinstance(block, dict) and block.get("type") == "text":
-                                        response_text += block.get("text", "")
+                            if text:
+                                response_text = text
 
                         elif state == "final":
-                            # Extract final text if we didn't get deltas
-                            if not response_text:
-                                final_content = payload.get("message", {}).get("content", "")
-                                response_text = self._extract_text(final_content)
+                            if text:
+                                response_text = text
+                            break
+
+                        elif state == "error":
+                            logger.error("chat event error: %s", payload.get("errorMessage", "unknown"))
+                            return response_text or "I encountered an error processing your message."
+
+                        elif state == "aborted":
                             break
 
                     elif msg.get("type") == "res" and msg.get("id") == chat_id:
@@ -220,6 +277,11 @@ class OpenClawAdapter(HarnessAdapter):
                             error = msg.get("error", {})
                             logger.error("chat.send error: %s", json.dumps(error)[:500])
                             return "I encountered an error processing your message."
+                        status = msg.get("payload", {}).get("status")
+                        if status in {"started", "accepted"}:
+                            continue
+                        if status in {"final", "done"}:
+                            break
 
             finally:
                 ws.close()
