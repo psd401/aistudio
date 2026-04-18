@@ -3,8 +3,8 @@
     "providers": {
       "bedrock-proxy": {
         "baseUrl": "http://127.0.0.1:18790/v1",
-        "api": "openai-chat",
-        "auth": "none",
+        "api": "openai-completions",
+        "auth": "aws-sdk",
         "models": [
           {
             "id": "bedrock-agent",
@@ -30,7 +30,7 @@
   "gateway": {
     "port": 3100,
     "mode": "local",
-    "bind": "0.0.0.0",
+    "bind": "lan",
     "auth": {
       "mode": "token",
       "token": "psd-agent-internal-gateway-token"
