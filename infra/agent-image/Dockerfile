@@ -60,6 +60,10 @@ ENV PATH="/opt/agentcore-venv/bin:$PATH"
 # Create workspace and config directories
 RUN mkdir -p /home/node/.openclaw/memory
 
+# Install Bedrock proxy dependencies (Node.js — uses bun for speed)
+COPY bedrock-proxy.js /app/bedrock-proxy.js
+RUN cd /app && bun install @aws-sdk/client-bedrock-runtime
+
 # Copy PSD configuration files
 COPY openclaw.json /home/node/.openclaw/openclaw.json
 # OpenClaw auto-injects SOUL.md as the system prompt every turn.
