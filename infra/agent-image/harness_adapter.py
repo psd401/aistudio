@@ -41,17 +41,16 @@ class OpenClawAdapter(HarnessAdapter):
     """
     Adapter for OpenClaw running in the same container.
 
-    OpenClaw exposes a local HTTP gateway. The adapter sends messages via HTTP
-    and collects the streamed response. The gateway is started as a subprocess
-    when the adapter is configured.
+    OpenClaw gateway uses WebSocket, not HTTP REST. The adapter uses the
+    `openclaw agent` CLI command which handles the WebSocket connection
+    internally and returns the response as JSON.
     """
 
     # Gateway auth token — must match gateway.auth.token in openclaw.json.
-    # Container-internal only, not exposed externally.
     GATEWAY_TOKEN = "psd-agent-internal-gateway-token"
 
     def __init__(self) -> None:
-        self._gateway_url: str = "http://127.0.0.1:3100"
+        self._gateway_port: int = 3100
         self._process: Optional[subprocess.Popen] = None
         self._ready: bool = False
 
@@ -62,25 +61,24 @@ class OpenClawAdapter(HarnessAdapter):
           - gateway_port (int): Port for the OpenClaw gateway. When provided,
             starts the gateway process if not already running.
         """
-
-        # Only update the gateway URL and start the process when gateway_port
-        # is explicitly provided. This prevents a model-only configure() call
-        # from resetting the URL or re-evaluating process state unnecessarily.
         if "gateway_port" in config:
-            gateway_port = config["gateway_port"]
-            self._gateway_url = f"http://127.0.0.1:{gateway_port}"
+            self._gateway_port = config["gateway_port"]
 
             if self._process is None or self._process.poll() is not None:
-                logger.info("Starting OpenClaw gateway on port %d", gateway_port)
-                # Forward stdout/stderr to container logs instead of PIPE to avoid
-                # deadlock when the OS pipe buffer (~64KB) fills without a reader.
+                logger.info("Starting OpenClaw gateway on port %d", self._gateway_port)
                 self._process = subprocess.Popen(
-                    ["openclaw", "gateway", "--port", str(gateway_port)],
+                    [
+                        "openclaw", "gateway",
+                        "--port", str(self._gateway_port),
+                        "--token", self.GATEWAY_TOKEN,
+                    ],
                     stdout=sys.stdout,
                     stderr=sys.stderr,
-                    env={**os.environ},
+                    env={
+                        **os.environ,
+                        "OPENCLAW_NO_RESPAWN": "1",
+                    },
                 )
-                # Wait for gateway to become ready (up to 30 seconds)
                 self._wait_for_ready(timeout=30)
 
     def _wait_for_ready(self, timeout: int = 30) -> None:
@@ -88,13 +86,11 @@ class OpenClawAdapter(HarnessAdapter):
         import urllib.request
         import urllib.error
 
+        url = f"http://127.0.0.1:{self._gateway_port}/health"
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                req = urllib.request.Request(
-                    f"{self._gateway_url}/health",
-                    headers={"Authorization": f"Bearer {self.GATEWAY_TOKEN}"},
-                )
+                req = urllib.request.Request(url)
                 with urllib.request.urlopen(req, timeout=2) as resp:
                     if resp.status == 200:
                         self._ready = True
@@ -104,64 +100,71 @@ class OpenClawAdapter(HarnessAdapter):
                 pass
             time.sleep(1)
 
-        # Raise instead of silently degrading — if the gateway doesn't start,
-        # every subsequent process() call returns a "starting up" message that
-        # SQS retries indefinitely. Raising causes a non-zero exit so AgentCore
-        # restarts the container rather than serving degraded responses forever.
         raise RuntimeError(
             f"OpenClaw gateway did not become ready within {timeout}s"
         )
 
     def process(self, message: str, session_id: str, model_override: Optional[str] = None) -> str:
-        """Send a message to OpenClaw and return the full response.
+        """Send a message to OpenClaw via the CLI and return the response.
 
-        Args:
-            model_override: Per-request model override. Passed as a parameter
-                (not stored on the instance) to avoid race conditions when
-                AgentCore invokes the entrypoint concurrently.
+        Uses `openclaw agent` which connects to the gateway via WebSocket
+        internally. Returns the agent's text response.
         """
-        import urllib.request
-        import urllib.error
-
         if not self._ready:
             raise RuntimeError(
                 "OpenClaw gateway is not ready — configure() with gateway_port "
                 "must be called before process()"
             )
 
-        request_data: dict = {
-            "message": message,
-            "sessionId": session_id,
-        }
-        if model_override:
-            request_data["model"] = model_override
-
-        payload = json.dumps(request_data).encode("utf-8")
-
-        req = urllib.request.Request(
-            f"{self._gateway_url}/api/chat",
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.GATEWAY_TOKEN}",
-            },
-            method="POST",
-        )
+        cmd = [
+            "openclaw", "agent",
+            "-m", message,
+            "--session-id", session_id,
+            "--token", self.GATEWAY_TOKEN,
+            "--json",
+            "--timeout", "120",
+        ]
 
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                body = resp.read().decode("utf-8")
-                # OpenClaw gateway returns JSON with a "response" field
-                try:
-                    data = json.loads(body)
-                    return data.get("response", body)
-                except json.JSONDecodeError:
-                    return body
-        except urllib.error.HTTPError as exc:
-            logger.error("OpenClaw HTTP error: %d %s", exc.code, exc.reason)
-            return f"I encountered an error processing your message. (HTTP {exc.code})"
-        except urllib.error.URLError as exc:
-            logger.error("OpenClaw connection error: %s", exc.reason)
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=130,
+                env={
+                    **os.environ,
+                    "OPENCLAW_NO_RESPAWN": "1",
+                    "NO_COLOR": "1",
+                },
+            )
+
+            if result.returncode != 0:
+                logger.error(
+                    "OpenClaw agent command failed: exit=%d stderr=%s",
+                    result.returncode,
+                    result.stderr[:500] if result.stderr else "(empty)",
+                )
+                return "I encountered an error processing your message. Please try again."
+
+            # Parse JSON output
+            try:
+                data = json.loads(result.stdout)
+                # The CLI outputs { text: "...", ... } or { response: "...", ... }
+                return (
+                    data.get("text")
+                    or data.get("response")
+                    or data.get("message")
+                    or result.stdout.strip()
+                )
+            except json.JSONDecodeError:
+                # Non-JSON output — return raw text (strip ANSI/emoji)
+                return result.stdout.strip() or "I processed your message but had no response."
+
+        except subprocess.TimeoutExpired:
+            logger.error("OpenClaw agent command timed out after 130s")
+            return "I'm taking too long to respond. Please try a shorter question."
+        except Exception as exc:
+            logger.error("OpenClaw agent command error: %s", exc)
             return "I'm temporarily unable to respond. The agent process may be restarting."
 
     def health(self) -> bool:
