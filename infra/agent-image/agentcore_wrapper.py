@@ -48,7 +48,7 @@ def start_bedrock_proxy():
     global proxy_process
     logger.info("Starting Bedrock proxy on port 18790")
     proxy_process = subprocess.Popen(
-        ["node", "/app/bedrock-proxy.js"],
+        ["node", "/opt/bedrock-proxy/bedrock-proxy.js"],
         stdout=sys.stdout,
         stderr=sys.stderr,
         env={**os.environ},
