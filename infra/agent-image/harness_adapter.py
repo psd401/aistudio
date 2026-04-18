@@ -54,8 +54,14 @@ class OpenClawAdapter(HarnessAdapter):
     """
 
     DEFAULT_CONFIG_PATH = Path("/home/node/.openclaw/openclaw.json")
+    # client.id MUST be "openclaw-tui" — verified by reading OpenClaw source:
+    # - "cli" passes auth but scopes are cleared (not an operator UI client)
+    # - "openclaw-control-ui" triggers browser origin check (rejects non-browser)
+    # - "openclaw-tui" passes isOperatorUiClient (scopes preserved) without
+    #   triggering isBrowserOperatorUiClient (no origin check)
+    # See: /app/dist/message-channel-CBqCPFa_.js lines 80-85
     CLIENT_INFO = {
-        "id": "openclaw-control-ui",
+        "id": "openclaw-tui",
         "mode": "backend",
         "version": "dev",
         "platform": "linux",
@@ -175,65 +181,61 @@ class OpenClawAdapter(HarnessAdapter):
         response_text = ""
 
         try:
-            ws = websocket.create_connection(
-                ws_url,
-                timeout=120,
-                origin=f"http://127.0.0.1:{self._gateway_port}",
-            )
+            # Do NOT set origin header — it triggers Control UI origin
+            # validation which rejects non-browser connections.
+            ws = websocket.create_connection(ws_url, timeout=120)
 
             try:
                 # Step 1: Wait for connect.challenge
                 challenge_raw = ws.recv()
                 challenge = json.loads(challenge_raw)
-                logger.info("WS step 1 received: %s", challenge_raw[:300])
-                sys.stdout.flush()
                 if challenge.get("type") != "event" or challenge.get("event") != "connect.challenge":
                     raise RuntimeError(
                         f"Unexpected initial WebSocket message: {challenge_raw[:300]}"
                     )
 
                 # Step 2: Authenticate
+                # Extract any nonce/challenge data from the challenge event
+                challenge_payload = challenge.get("payload", {})
+
                 connect_id = str(uuid.uuid4())
+                connect_params = {
+                    "minProtocol": 3,
+                    "maxProtocol": 3,
+                    "client": self.CLIENT_INFO,
+                    "caps": [],
+                    "auth": {"token": gateway_token},
+                    "role": "operator",
+                    "scopes": ["operator.admin", "operator.read", "operator.write"],
+                }
+
+                # If the challenge contains a nonce, echo it back
+                if "nonce" in challenge_payload:
+                    connect_params["auth"]["nonce"] = challenge_payload["nonce"]
+                # Also pass any challenge field that might be expected
+                if "challenge" in challenge_payload:
+                    connect_params["auth"]["challenge"] = challenge_payload["challenge"]
+
                 connect_req = {
                     "type": "req",
                     "id": connect_id,
                     "method": "connect",
-                    "params": {
-                        "minProtocol": 3,
-                        "maxProtocol": 3,
-                        "client": self.CLIENT_INFO,
-                        "caps": [],
-                        "auth": {"token": gateway_token},
-                        "role": "operator",
-                        "scopes": ["operator.admin", "operator.read", "operator.write"],
-                    },
+                    "params": connect_params,
                 }
-                logger.info("WS step 2 sending connect with token=%s...", gateway_token[:10])
+                logger.info("WS connecting with token auth")
                 ws.send(json.dumps(connect_req))
 
                 # Wait for connect response — skip non-res messages
                 while True:
                     connect_resp_raw = ws.recv()
                     connect_resp = json.loads(connect_resp_raw)
-                    logger.info("WS step 2 received: type=%s ok=%s id=%s",
-                                connect_resp.get("type"), connect_resp.get("ok"),
-                                connect_resp.get("id"))
-                    sys.stdout.flush()
-                    # The connect response is type "res" with our request id
                     if connect_resp.get("type") == "res" and connect_resp.get("id") == connect_id:
                         break
 
                 if not connect_resp.get("ok"):
                     error = connect_resp.get("error") or connect_resp.get("payload") or {}
-                    logger.error(
-                        "WebSocket auth failed: full_response=%s token_used=%s",
-                        json.dumps(connect_resp)[:800],
-                        gateway_token,
-                    )
+                    logger.error("WebSocket auth failed: %s", json.dumps(error)[:500])
                     sys.stdout.flush()
-                    sys.stderr.flush()
-                    # Write to stderr as well since stdout may not reach CloudWatch
-                    print(f"[AUTH_FAIL] response={json.dumps(connect_resp)[:500]} token={gateway_token}", file=sys.stderr, flush=True)
                     return "I encountered an authentication error. Please try again."
 
                 # Step 3: Send chat message
