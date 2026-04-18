@@ -134,12 +134,12 @@ class OpenClawAdapter(HarnessAdapter):
                 # Step 1: Wait for connect.challenge
                 challenge_raw = ws.recv()
                 challenge = json.loads(challenge_raw)
-                if challenge.get("event") != "connect.challenge":
-                    logger.warning("Unexpected first message: %s", challenge_raw[:200])
+                logger.info("WS step 1 received: %s", challenge_raw[:300])
+                sys.stdout.flush()
 
                 # Step 2: Authenticate
                 connect_id = str(uuid.uuid4())
-                ws.send(json.dumps({
+                connect_req = {
                     "type": "req",
                     "id": connect_id,
                     "method": "connect",
@@ -150,13 +150,28 @@ class OpenClawAdapter(HarnessAdapter):
                         "role": "operator",
                         "scopes": ["operator.admin", "operator.read", "operator.write"],
                     },
-                }))
+                }
+                logger.info("WS step 2 sending connect with token=%s...", self.GATEWAY_TOKEN[:10])
+                ws.send(json.dumps(connect_req))
 
-                # Wait for connect response
-                connect_resp_raw = ws.recv()
-                connect_resp = json.loads(connect_resp_raw)
+                # Wait for connect response — skip non-res messages
+                while True:
+                    connect_resp_raw = ws.recv()
+                    connect_resp = json.loads(connect_resp_raw)
+                    logger.info("WS step 2 received: type=%s ok=%s id=%s",
+                                connect_resp.get("type"), connect_resp.get("ok"),
+                                connect_resp.get("id"))
+                    sys.stdout.flush()
+                    # The connect response is type "res" with our request id
+                    if connect_resp.get("type") == "res" and connect_resp.get("id") == connect_id:
+                        break
+                    # Also accept top-level ok for simpler protocol versions
+                    if "ok" in connect_resp:
+                        break
+
                 if not connect_resp.get("ok"):
                     logger.error("WebSocket auth failed: %s", connect_resp_raw[:500])
+                    sys.stdout.flush()
                     return "I encountered an authentication error. Please try again."
 
                 # Step 3: Send chat message
