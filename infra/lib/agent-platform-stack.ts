@@ -688,6 +688,10 @@ export class AgentPlatformStack extends cdk.Stack {
       code: lambda.Code.fromAsset(
         path.join(__dirname, '..', 'lambdas', 'agent-router'),
         {
+          // Force asset hash from source files so CDK detects code changes.
+          // Without this, CDK caches the bundled output hash and may skip
+          // Lambda code updates when only TypeScript source changes.
+          assetHashType: cdk.AssetHashType.SOURCE,
           bundling: {
             image: lambda.Runtime.NODEJS_20_X.bundlingImage,
             local: {
