@@ -46,6 +46,10 @@ class OpenClawAdapter(HarnessAdapter):
     when the adapter is configured.
     """
 
+    # Gateway auth token — must match gateway.auth.token in openclaw.json.
+    # Container-internal only, not exposed externally.
+    GATEWAY_TOKEN = "psd-agent-internal-gateway-token"
+
     def __init__(self) -> None:
         self._gateway_url: str = "http://127.0.0.1:3100"
         self._process: Optional[subprocess.Popen] = None
@@ -87,7 +91,10 @@ class OpenClawAdapter(HarnessAdapter):
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                req = urllib.request.Request(f"{self._gateway_url}/health")
+                req = urllib.request.Request(
+                    f"{self._gateway_url}/health",
+                    headers={"Authorization": f"Bearer {self.GATEWAY_TOKEN}"},
+                )
                 with urllib.request.urlopen(req, timeout=2) as resp:
                     if resp.status == 200:
                         self._ready = True
@@ -134,7 +141,10 @@ class OpenClawAdapter(HarnessAdapter):
         req = urllib.request.Request(
             f"{self._gateway_url}/api/chat",
             data=payload,
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.GATEWAY_TOKEN}",
+            },
             method="POST",
         )
 

@@ -78,6 +78,10 @@
   "gateway": {
     "port": 3100,
     "mode": "local",
-    "bind": "0.0.0.0"
+    "bind": "0.0.0.0",
+    "auth": {
+      "mode": "token",
+      "token": "psd-agent-internal-gateway-token"
+    }
   }
 }
