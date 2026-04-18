@@ -82,6 +82,13 @@
     "auth": {
       "mode": "token",
       "token": "psd-agent-internal-gateway-token"
+    },
+    "http": {
+      "endpoints": {
+        "chatCompletions": {
+          "enabled": true
+        }
+      }
     }
   }
 }

@@ -41,9 +41,9 @@ class OpenClawAdapter(HarnessAdapter):
     """
     Adapter for OpenClaw running in the same container.
 
-    OpenClaw gateway uses WebSocket, not HTTP REST. The adapter uses the
-    `openclaw agent` CLI command which handles the WebSocket connection
-    internally and returns the response as JSON.
+    Uses the OpenAI-compatible /v1/chat/completions HTTP endpoint exposed
+    by the gateway (enabled via gateway.http.endpoints.chatCompletions).
+    This is simpler and more reliable than the WebSocket CLI approach.
     """
 
     # Gateway auth token — must match gateway.auth.token in openclaw.json.
@@ -51,6 +51,7 @@ class OpenClawAdapter(HarnessAdapter):
 
     def __init__(self) -> None:
         self._gateway_port: int = 3100
+        self._gateway_url: str = "http://127.0.0.1:3100"
         self._process: Optional[subprocess.Popen] = None
         self._ready: bool = False
 
@@ -63,6 +64,7 @@ class OpenClawAdapter(HarnessAdapter):
         """
         if "gateway_port" in config:
             self._gateway_port = config["gateway_port"]
+            self._gateway_url = f"http://127.0.0.1:{self._gateway_port}"
 
             if self._process is None or self._process.poll() is not None:
                 logger.info("Starting OpenClaw gateway on port %d", self._gateway_port)
@@ -86,7 +88,7 @@ class OpenClawAdapter(HarnessAdapter):
         import urllib.request
         import urllib.error
 
-        url = f"http://127.0.0.1:{self._gateway_port}/health"
+        url = f"{self._gateway_url}/health"
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -105,68 +107,61 @@ class OpenClawAdapter(HarnessAdapter):
         )
 
     def process(self, message: str, session_id: str, model_override: Optional[str] = None) -> str:
-        """Send a message to OpenClaw via the CLI and return the response.
+        """Send a message via the OpenAI-compatible /v1/chat/completions endpoint.
 
-        Uses `openclaw agent` which connects to the gateway via WebSocket
-        internally. Returns the agent's text response.
+        This endpoint is enabled via gateway.http.endpoints.chatCompletions
+        in openclaw.json. It accepts standard OpenAI chat format and returns
+        the agent's response.
         """
+        import urllib.request
+        import urllib.error
+
         if not self._ready:
             raise RuntimeError(
                 "OpenClaw gateway is not ready — configure() with gateway_port "
                 "must be called before process()"
             )
 
-        cmd = [
-            "openclaw", "agent",
-            "-m", message,
-            "--session-id", session_id,
-            "--url", f"ws://127.0.0.1:{self._gateway_port}",
-            "--token", self.GATEWAY_TOKEN,
-            "--json",
-            "--timeout", "120",
-        ]
+        # OpenAI chat completions format
+        request_data = {
+            "messages": [
+                {"role": "user", "content": message}
+            ],
+            "stream": False,
+        }
+        if model_override:
+            request_data["model"] = model_override
+
+        payload = json.dumps(request_data).encode("utf-8")
+
+        req = urllib.request.Request(
+            f"{self._gateway_url}/v1/chat/completions",
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.GATEWAY_TOKEN}",
+            },
+            method="POST",
+        )
 
         try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=130,
-                env={
-                    **os.environ,
-                    "OPENCLAW_NO_RESPAWN": "1",
-                    "NO_COLOR": "1",
-                },
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                body = resp.read().decode("utf-8")
+                data = json.loads(body)
+                # Standard OpenAI response format
+                choices = data.get("choices", [])
+                if choices:
+                    return choices[0].get("message", {}).get("content", "")
+                return data.get("response", body)
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")[:500]
+            logger.error(
+                "OpenClaw HTTP error: %d %s body=%s",
+                exc.code, exc.reason, error_body,
             )
-
-            if result.returncode != 0:
-                logger.error(
-                    "OpenClaw agent command failed: exit=%d stderr=%s stdout=%s",
-                    result.returncode,
-                    result.stderr[:500] if result.stderr else "(empty)",
-                    result.stdout[:500] if result.stdout else "(empty)",
-                )
-                return "I encountered an error processing your message. Please try again."
-
-            # Parse JSON output
-            try:
-                data = json.loads(result.stdout)
-                # The CLI outputs { text: "...", ... } or { response: "...", ... }
-                return (
-                    data.get("text")
-                    or data.get("response")
-                    or data.get("message")
-                    or result.stdout.strip()
-                )
-            except json.JSONDecodeError:
-                # Non-JSON output — return raw text (strip ANSI/emoji)
-                return result.stdout.strip() or "I processed your message but had no response."
-
-        except subprocess.TimeoutExpired:
-            logger.error("OpenClaw agent command timed out after 130s")
-            return "I'm taking too long to respond. Please try a shorter question."
-        except Exception as exc:
-            logger.error("OpenClaw agent command error: %s", exc)
+            return f"I encountered an error processing your message. (HTTP {exc.code})"
+        except urllib.error.URLError as exc:
+            logger.error("OpenClaw connection error: %s", exc.reason)
             return "I'm temporarily unable to respond. The agent process may be restarting."
 
     def health(self) -> bool:
