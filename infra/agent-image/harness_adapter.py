@@ -12,6 +12,7 @@ import os
 import subprocess
 import sys
 import time
+import uuid
 from typing import Optional
 
 logger = logging.getLogger("harness_adapter")
@@ -41,9 +42,14 @@ class OpenClawAdapter(HarnessAdapter):
     """
     Adapter for OpenClaw running in the same container.
 
-    Uses the OpenAI-compatible /v1/chat/completions HTTP endpoint exposed
-    by the gateway (enabled via gateway.http.endpoints.chatCompletions).
-    This is simpler and more reliable than the WebSocket CLI approach.
+    Communicates with the OpenClaw gateway via its native WebSocket protocol.
+    Based on the AWS sample: aws-samples/sample-host-openclaw-on-amazon-bedrock-agentcore
+
+    Protocol:
+    1. Connect to ws://127.0.0.1:{port}
+    2. Respond to connect.challenge with auth token
+    3. Send chat.send with the user message
+    4. Collect chat events until state: "final"
     """
 
     # Gateway auth token — must match gateway.auth.token in openclaw.json.
@@ -51,20 +57,13 @@ class OpenClawAdapter(HarnessAdapter):
 
     def __init__(self) -> None:
         self._gateway_port: int = 3100
-        self._gateway_url: str = "http://127.0.0.1:3100"
         self._process: Optional[subprocess.Popen] = None
         self._ready: bool = False
 
     def configure(self, config: dict) -> None:
-        """Configure the OpenClaw adapter. Idempotent — safe to call multiple times.
-
-        Supported config keys:
-          - gateway_port (int): Port for the OpenClaw gateway. When provided,
-            starts the gateway process if not already running.
-        """
+        """Configure the OpenClaw adapter. Idempotent — safe to call multiple times."""
         if "gateway_port" in config:
             self._gateway_port = config["gateway_port"]
-            self._gateway_url = f"http://127.0.0.1:{self._gateway_port}"
 
             if self._process is None or self._process.poll() is not None:
                 logger.info("Starting OpenClaw gateway on port %d", self._gateway_port)
@@ -73,7 +72,6 @@ class OpenClawAdapter(HarnessAdapter):
                         "openclaw", "gateway",
                         "--port", str(self._gateway_port),
                         "--token", self.GATEWAY_TOKEN,
-                        "--verbose",
                     ],
                     stdout=sys.stdout,
                     stderr=sys.stderr,
@@ -89,7 +87,7 @@ class OpenClawAdapter(HarnessAdapter):
         import urllib.request
         import urllib.error
 
-        url = f"{self._gateway_url}/health"
+        url = f"http://127.0.0.1:{self._gateway_port}/health"
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
@@ -108,63 +106,133 @@ class OpenClawAdapter(HarnessAdapter):
         )
 
     def process(self, message: str, session_id: str, model_override: Optional[str] = None) -> str:
-        """Send a message via the OpenAI-compatible /v1/chat/completions endpoint.
+        """Send a message to OpenClaw via WebSocket and return the response.
 
-        This endpoint is enabled via gateway.http.endpoints.chatCompletions
-        in openclaw.json. It accepts standard OpenAI chat format and returns
-        the agent's response.
+        Uses the native OpenClaw gateway WebSocket protocol:
+        connect.challenge → connect (auth) → chat.send → collect chat events
         """
-        import urllib.request
-        import urllib.error
-
         if not self._ready:
             raise RuntimeError(
                 "OpenClaw gateway is not ready — configure() with gateway_port "
                 "must be called before process()"
             )
 
-        # OpenAI chat completions format
-        request_data = {
-            "messages": [
-                {"role": "user", "content": message}
-            ],
-            "stream": False,
-        }
-        if model_override:
-            request_data["model"] = model_override
+        try:
+            import websocket  # websocket-client library
+        except ImportError:
+            logger.error("websocket-client not installed, falling back to error")
+            return "Agent communication library not available. Please contact an administrator."
 
-        payload = json.dumps(request_data).encode("utf-8")
-
-        req = urllib.request.Request(
-            f"{self._gateway_url}/v1/chat/completions",
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {self.GATEWAY_TOKEN}",
-            },
-            method="POST",
-        )
+        ws_url = f"ws://127.0.0.1:{self._gateway_port}"
+        response_text = ""
 
         try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                body = resp.read().decode("utf-8")
-                data = json.loads(body)
-                # Standard OpenAI response format
-                choices = data.get("choices", [])
-                if choices:
-                    return choices[0].get("message", {}).get("content", "")
-                return data.get("response", body)
-        except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")[:1000]
-            logger.error(
-                "OpenClaw HTTP error: %d %s body=%s",
-                exc.code, exc.reason, error_body,
-            )
+            ws = websocket.create_connection(ws_url, timeout=120)
+
+            try:
+                # Step 1: Wait for connect.challenge
+                challenge_raw = ws.recv()
+                challenge = json.loads(challenge_raw)
+                if challenge.get("event") != "connect.challenge":
+                    logger.warning("Unexpected first message: %s", challenge_raw[:200])
+
+                # Step 2: Authenticate
+                connect_id = str(uuid.uuid4())
+                ws.send(json.dumps({
+                    "type": "req",
+                    "id": connect_id,
+                    "method": "connect",
+                    "params": {
+                        "minProtocol": 3,
+                        "maxProtocol": 3,
+                        "auth": {"token": self.GATEWAY_TOKEN},
+                        "role": "operator",
+                        "scopes": ["operator.admin", "operator.read", "operator.write"],
+                    },
+                }))
+
+                # Wait for connect response
+                connect_resp_raw = ws.recv()
+                connect_resp = json.loads(connect_resp_raw)
+                if not connect_resp.get("ok"):
+                    logger.error("WebSocket auth failed: %s", connect_resp_raw[:500])
+                    return "I encountered an authentication error. Please try again."
+
+                # Step 3: Send chat message
+                chat_id = str(uuid.uuid4())
+                ws.send(json.dumps({
+                    "type": "req",
+                    "id": chat_id,
+                    "method": "chat.send",
+                    "params": {
+                        "sessionKey": session_id,
+                        "message": message,
+                        "idempotencyKey": str(uuid.uuid4()),
+                    },
+                }))
+
+                # Step 4: Collect response events until final
+                deadline = time.time() + 120
+                while time.time() < deadline:
+                    raw = ws.recv()
+                    msg = json.loads(raw)
+
+                    if msg.get("event") == "chat":
+                        payload = msg.get("payload", {})
+                        state = payload.get("state")
+
+                        if state == "delta":
+                            # Accumulate streaming text
+                            content = payload.get("message", {}).get("content", "")
+                            if isinstance(content, str):
+                                response_text += content
+                            elif isinstance(content, list):
+                                for block in content:
+                                    if isinstance(block, dict) and block.get("type") == "text":
+                                        response_text += block.get("text", "")
+
+                        elif state == "final":
+                            # Extract final text if we didn't get deltas
+                            if not response_text:
+                                final_content = payload.get("message", {}).get("content", "")
+                                response_text = self._extract_text(final_content)
+                            break
+
+                    elif msg.get("type") == "res" and msg.get("id") == chat_id:
+                        # Response to chat.send — check for errors
+                        if not msg.get("ok"):
+                            error = msg.get("error", {})
+                            logger.error("chat.send error: %s", json.dumps(error)[:500])
+                            return "I encountered an error processing your message."
+
+            finally:
+                ws.close()
+
+        except Exception as exc:
+            logger.error("WebSocket error: %s", str(exc)[:500])
             sys.stdout.flush()
-            return f"I encountered an error processing your message. (HTTP {exc.code})"
-        except urllib.error.URLError as exc:
-            logger.error("OpenClaw connection error: %s", exc.reason)
-            return "I'm temporarily unable to respond. The agent process may be restarting."
+            return f"I'm temporarily unable to respond. Error: {str(exc)[:100]}"
+
+        return response_text.strip() or "I processed your message but had no response."
+
+    @staticmethod
+    def _extract_text(content) -> str:
+        """Recursively extract text from OpenClaw content blocks."""
+        if isinstance(content, str):
+            try:
+                parsed = json.loads(content)
+                return OpenClawAdapter._extract_text(parsed)
+            except (json.JSONDecodeError, TypeError):
+                return content
+        if isinstance(content, list):
+            parts = []
+            for block in content:
+                if isinstance(block, dict) and block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif isinstance(block, str):
+                    parts.append(block)
+            return "".join(parts)
+        return str(content) if content else ""
 
     def health(self) -> bool:
         """Check if the OpenClaw gateway is responsive."""

@@ -50,7 +50,9 @@ RUN apt-get update && \
 # (not an unrelated name-squatted package). The SDK is pre-GA as of this PR — confirm
 # the package name on https://pypi.org/project/bedrock-agentcore/ before production use.
 RUN python3 -m venv /opt/agentcore-venv && \
-    /opt/agentcore-venv/bin/pip install --no-cache-dir "bedrock-agentcore==${BEDROCK_AGENTCORE_VERSION}"
+    /opt/agentcore-venv/bin/pip install --no-cache-dir \
+      "bedrock-agentcore==${BEDROCK_AGENTCORE_VERSION}" \
+      "websocket-client>=1.7.0"
 
 # Add venv to PATH so python3 uses the venv by default
 ENV PATH="/opt/agentcore-venv/bin:$PATH"
