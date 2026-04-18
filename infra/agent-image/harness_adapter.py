@@ -73,6 +73,7 @@ class OpenClawAdapter(HarnessAdapter):
                         "openclaw", "gateway",
                         "--port", str(self._gateway_port),
                         "--token", self.GATEWAY_TOKEN,
+                        "--verbose",
                     ],
                     stdout=sys.stdout,
                     stderr=sys.stderr,
@@ -154,11 +155,12 @@ class OpenClawAdapter(HarnessAdapter):
                     return choices[0].get("message", {}).get("content", "")
                 return data.get("response", body)
         except urllib.error.HTTPError as exc:
-            error_body = exc.read().decode("utf-8", errors="replace")[:500]
+            error_body = exc.read().decode("utf-8", errors="replace")[:1000]
             logger.error(
                 "OpenClaw HTTP error: %d %s body=%s",
                 exc.code, exc.reason, error_body,
             )
+            sys.stdout.flush()
             return f"I encountered an error processing your message. (HTTP {exc.code})"
         except urllib.error.URLError as exc:
             logger.error("OpenClaw connection error: %s", exc.reason)
