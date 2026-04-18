@@ -60,11 +60,11 @@ RUN mkdir -p /home/node/.openclaw/memory
 
 # Copy PSD configuration files
 COPY openclaw.json /home/node/.openclaw/openclaw.json
-# NOTE: Do NOT put HTML comments or TODO notes in the system prompt — they are
-# visible to the LLM and may leak internal roadmap details. Keep roadmap notes
-# here in the Dockerfile or in the CDK stack instead.
+# OpenClaw auto-injects SOUL.md as the system prompt every turn.
+# NOTE: Do NOT put HTML comments or TODO notes in this file — they are
+# visible to the LLM. Keep roadmap notes here in the Dockerfile instead.
 # TODO(phase-2): Add Google Calendar and Gmail read-only tool access to the agent.
-COPY psd-system-prompt.md /home/node/.openclaw/psd-system-prompt.md
+COPY SOUL.md /home/node/.openclaw/SOUL.md
 COPY harness_adapter.py /app/harness_adapter.py
 COPY agentcore_wrapper.py /app/agentcore_wrapper.py
 
