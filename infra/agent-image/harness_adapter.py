@@ -224,34 +224,21 @@ class OpenClawAdapter(HarnessAdapter):
                     )
 
                 # Step 2: Authenticate
-                # Extract any nonce/challenge data from the challenge event
-                challenge_payload = challenge.get("payload", {})
-
                 connect_id = str(uuid.uuid4())
-                connect_params = {
-                    "minProtocol": 3,
-                    "maxProtocol": 3,
-                    "client": self.CLIENT_INFO,
-                    "caps": [],
-                    "auth": {"token": gateway_token},
-                    "role": "operator",
-                    "scopes": ["operator.admin", "operator.read", "operator.write"],
-                }
-
-                # If the challenge contains a nonce, echo it back
-                if "nonce" in challenge_payload:
-                    connect_params["auth"]["nonce"] = challenge_payload["nonce"]
-                # Also pass any challenge field that might be expected
-                if "challenge" in challenge_payload:
-                    connect_params["auth"]["challenge"] = challenge_payload["challenge"]
-
                 connect_req = {
                     "type": "req",
                     "id": connect_id,
                     "method": "connect",
-                    "params": connect_params,
+                    "params": {
+                        "minProtocol": 3,
+                        "maxProtocol": 3,
+                        "client": self.CLIENT_INFO,
+                        "caps": [],
+                        "auth": {"token": gateway_token},
+                        "role": "operator",
+                        "scopes": ["operator.admin", "operator.read", "operator.write"],
+                    },
                 }
-                logger.info("WS connecting with token auth")
                 ws.send(json.dumps(connect_req))
 
                 # Wait for connect response — skip non-res messages
@@ -262,7 +249,9 @@ class OpenClawAdapter(HarnessAdapter):
                         break
 
                 if not connect_resp.get("ok"):
-                    return f"[DEBUG] Auth failed: {json.dumps(connect_resp)[:500]} token={gateway_token}"
+                    error = connect_resp.get("error", {})
+                    logger.error("WebSocket auth failed: %s", json.dumps(error)[:500])
+                    return "I encountered an authentication error. Please try again."
 
                 # Step 3: Send chat message
                 chat_id = str(uuid.uuid4())
@@ -322,7 +311,8 @@ class OpenClawAdapter(HarnessAdapter):
                 ws.close()
 
         except Exception as exc:
-            return f"[DEBUG] WS exception: {type(exc).__name__}: {str(exc)[:400]}"
+            logger.error("WebSocket error: %s", str(exc)[:500])
+            return "I'm temporarily unable to respond. The agent process may be restarting."
 
         return response_text.strip() or "I processed your message but had no response."
 

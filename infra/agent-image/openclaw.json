@@ -1,8 +1,10 @@
 {
   "models": {
     "providers": {
-      "bedrock-proxy": {
+      "amazon-bedrock": {
         "baseUrl": "http://127.0.0.1:18790/v1",
+        "api": "openai-completions",
+        "auth": "aws-sdk",
         "models": [
           {
             "id": "bedrock-agent",
@@ -20,7 +22,7 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "bedrock-proxy/bedrock-agent"
+        "primary": "amazon-bedrock/bedrock-agent"
       },
       "workspace": "/home/node/.openclaw"
     }
