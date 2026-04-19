@@ -13,7 +13,6 @@ import subprocess
 import sys
 import time
 import uuid
-from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger("harness_adapter")
@@ -53,10 +52,11 @@ class OpenClawAdapter(HarnessAdapter):
     4. Collect chat events until state: "final"
     """
 
-    # Use the explicit node home path. This must match where OpenClaw writes
-    # its config — enforced by pinning HOME=/home/node in the subprocess env
-    # below so AgentCore cannot override it.
-    DEFAULT_CONFIG_PATH = Path("/home/node/.openclaw/openclaw.json")
+    DEFAULT_CONFIG_PATH = "/home/node/.openclaw/openclaw.json"
+    # Fixed gateway token passed via --token CLI flag. OpenClaw overwrites the
+    # config file on startup (generating a new random token), so reading from
+    # the config is unreliable. The --token CLI flag overrides the config value.
+    GATEWAY_TOKEN = "psd-agent-internal-gateway-token"
     # client.id MUST be "openclaw-tui" — verified by reading OpenClaw source:
     # - "cli" passes auth but scopes are cleared (not an operator UI client)
     # - "openclaw-control-ui" triggers browser origin check (rejects non-browser)
@@ -74,81 +74,35 @@ class OpenClawAdapter(HarnessAdapter):
         self._gateway_port: int = 3100
         self._process: Optional[subprocess.Popen] = None
         self._ready: bool = False
-        self._config_path = Path(os.environ.get("OPENCLAW_CONFIG", self.DEFAULT_CONFIG_PATH))
-        self._gateway_token: Optional[str] = None
 
     def configure(self, config: dict) -> None:
         """Configure the OpenClaw adapter. Idempotent — safe to call multiple times."""
         if "gateway_port" in config:
             self._gateway_port = config["gateway_port"]
-            self._refresh_gateway_token()
 
             if self._process is None or self._process.poll() is not None:
                 logger.info("Starting OpenClaw gateway on port %d", self._gateway_port)
-                # Don't pass --token on CLI — use gateway.auth.token from
-                # openclaw.json instead. CLI --token may conflict with config.
+                # Pass --token on CLI so it survives config overwrites.
+                # OpenClaw overwrites openclaw.json on startup, generating a
+                # new random token. The --token CLI flag overrides the config
+                # file value, ensuring the adapter and gateway always agree.
                 self._process = subprocess.Popen(
                     [
                         "openclaw", "gateway",
                         "--port", str(self._gateway_port),
+                        "--token", self.GATEWAY_TOKEN,
                     ],
                     stdout=sys.stdout,
                     stderr=sys.stderr,
                     env={
                         **os.environ,
-                        # Pin HOME so OpenClaw always resolves its config at
-                        # /home/node/.openclaw regardless of what AgentCore injects
-                        # into the process environment. Without this, if AgentCore
-                        # sets HOME=/root, OpenClaw writes the (possibly regenerated)
-                        # gateway token to /root/.openclaw/openclaw.json while the
-                        # adapter reads from /home/node/.openclaw/openclaw.json,
-                        # causing every WebSocket auth to fail with ok: false.
                         "HOME": "/home/node",
                         "OPENCLAW_NO_RESPAWN": "1",
                     },
                 )
                 self._wait_for_ready(timeout=30)
-                # Give the gateway a moment to fully initialize WebSocket handling
-                # after the health endpoint starts responding. In AgentCore, the
-                # first invocation can arrive within milliseconds of health=200.
-                time.sleep(5)
-                # Re-read the effective config after startup in case OpenClaw rewrote
-                # the gateway token on boot.
-                self._refresh_gateway_token(required=True)
-
-    def _refresh_gateway_token(self, required: bool = False) -> Optional[str]:
-        """Load the gateway auth token from the active OpenClaw config file."""
-        try:
-            config = json.loads(self._config_path.read_text())
-        except FileNotFoundError:
-            if required:
-                raise RuntimeError(f"OpenClaw config not found: {self._config_path}")
-            logger.info("OpenClaw config not found yet at %s", self._config_path)
-            return self._gateway_token
-        except json.JSONDecodeError as exc:
-            if required:
-                raise RuntimeError(f"OpenClaw config is invalid JSON: {exc}") from exc
-            logger.warning("Failed to parse OpenClaw config %s: %s", self._config_path, exc)
-            return self._gateway_token
-
-        token = (
-            config.get("gateway", {})
-            .get("auth", {})
-            .get("token")
-        )
-        if isinstance(token, str) and token.strip():
-            token = token.strip()
-            if token != self._gateway_token:
-                logger.info("Loaded gateway token from %s", self._config_path)
-            self._gateway_token = token
-            return token
-
-        if required:
-            raise RuntimeError(
-                f"OpenClaw gateway.auth.token missing in {self._config_path}"
-            )
-        logger.warning("OpenClaw config %s does not contain gateway.auth.token", self._config_path)
-        return self._gateway_token
+                # Give the gateway time to fully initialize WebSocket handling
+                time.sleep(3)
 
     def _wait_for_ready(self, timeout: int = 30) -> None:
         """Poll the gateway health endpoint until ready."""
@@ -191,7 +145,7 @@ class OpenClawAdapter(HarnessAdapter):
             logger.error("websocket-client not installed, falling back to error")
             return "Agent communication library not available. Please contact an administrator."
 
-        gateway_token = self._refresh_gateway_token(required=True)
+        gateway_token = self.GATEWAY_TOKEN
         ws_url = f"ws://127.0.0.1:{self._gateway_port}"
         response_text = ""
 
