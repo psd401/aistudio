@@ -97,6 +97,10 @@ class OpenClawAdapter(HarnessAdapter):
                     },
                 )
                 self._wait_for_ready(timeout=30)
+                # Give the gateway a moment to fully initialize WebSocket handling
+                # after the health endpoint starts responding. In AgentCore, the
+                # first invocation can arrive within milliseconds of health=200.
+                time.sleep(3)
                 # Re-read the effective config after startup in case OpenClaw rewrote
                 # the gateway token on boot.
                 self._refresh_gateway_token(required=True)
@@ -180,10 +184,24 @@ class OpenClawAdapter(HarnessAdapter):
         ws_url = f"ws://127.0.0.1:{self._gateway_port}"
         response_text = ""
 
+        # Retry WebSocket connection up to 3 times — the gateway may still
+        # be initializing WebSocket handling even after /health returns 200.
+        ws = None
+        last_error = None
+        for attempt in range(3):
+            try:
+                ws = websocket.create_connection(ws_url, timeout=120)
+                break
+            except Exception as exc:
+                last_error = exc
+                logger.warning("WS connect attempt %d failed: %s", attempt + 1, exc)
+                time.sleep(2)
+
+        if ws is None:
+            logger.error("Failed to connect to gateway after 3 attempts: %s", last_error)
+            return f"I'm temporarily unable to respond. Error: {str(last_error)[:100]}"
+
         try:
-            # Do NOT set origin header — it triggers Control UI origin
-            # validation which rejects non-browser connections.
-            ws = websocket.create_connection(ws_url, timeout=120)
 
             try:
                 # Step 1: Wait for connect.challenge
@@ -234,7 +252,15 @@ class OpenClawAdapter(HarnessAdapter):
 
                 if not connect_resp.get("ok"):
                     error = connect_resp.get("error") or connect_resp.get("payload") or {}
-                    logger.error("WebSocket auth failed: %s", json.dumps(error)[:500])
+                    full_resp = json.dumps(connect_resp)[:800]
+                    logger.error("WebSocket auth failed: %s", full_resp)
+                    # Also write to a file for debugging since logger may not flush to CloudWatch
+                    try:
+                        Path("/tmp/ws-auth-fail.log").write_text(
+                            f"token={gateway_token}\nresponse={full_resp}\n"
+                        )
+                    except Exception:
+                        pass
                     sys.stdout.flush()
                     return "I encountered an authentication error. Please try again."
 
