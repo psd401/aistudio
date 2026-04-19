@@ -251,11 +251,9 @@ class OpenClawAdapter(HarnessAdapter):
                         break
 
                 if not connect_resp.get("ok"):
-                    # Return the ACTUAL error in the response so it appears in
-                    # Google Chat and Lambda logs — generic messages are useless
-                    # for debugging AgentCore-specific failures.
                     error = connect_resp.get("error", {})
-                    return f"[DEBUG] Auth failed: {json.dumps(error)[:300]}"
+                    logger.error("WebSocket auth failed: %s", json.dumps(error)[:500])
+                    return "I encountered an authentication error. Please try again."
 
                 # Step 3: Send chat message
                 chat_id = str(uuid.uuid4())
@@ -315,7 +313,8 @@ class OpenClawAdapter(HarnessAdapter):
                 ws.close()
 
         except Exception as exc:
-            return f"[DEBUG] WS error: {type(exc).__name__}: {str(exc)[:300]}"
+            logger.error("WebSocket error: %s", str(exc)[:500])
+            return "I'm temporarily unable to respond. The agent process may be restarting."
 
         return response_text.strip() or "I processed your message but had no response."
 
