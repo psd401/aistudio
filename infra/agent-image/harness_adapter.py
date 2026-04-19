@@ -53,6 +53,9 @@ class OpenClawAdapter(HarnessAdapter):
     4. Collect chat events until state: "final"
     """
 
+    # Use the explicit node home path. This must match where OpenClaw writes
+    # its config — enforced by pinning HOME=/home/node in the subprocess env
+    # below so AgentCore cannot override it.
     DEFAULT_CONFIG_PATH = Path("/home/node/.openclaw/openclaw.json")
     # client.id MUST be "openclaw-tui" — verified by reading OpenClaw source:
     # - "cli" passes auth but scopes are cleared (not an operator UI client)
@@ -93,6 +96,14 @@ class OpenClawAdapter(HarnessAdapter):
                     stderr=sys.stderr,
                     env={
                         **os.environ,
+                        # Pin HOME so OpenClaw always resolves its config at
+                        # /home/node/.openclaw regardless of what AgentCore injects
+                        # into the process environment. Without this, if AgentCore
+                        # sets HOME=/root, OpenClaw writes the (possibly regenerated)
+                        # gateway token to /root/.openclaw/openclaw.json while the
+                        # adapter reads from /home/node/.openclaw/openclaw.json,
+                        # causing every WebSocket auth to fail with ok: false.
+                        "HOME": "/home/node",
                         "OPENCLAW_NO_RESPAWN": "1",
                     },
                 )
@@ -100,7 +111,7 @@ class OpenClawAdapter(HarnessAdapter):
                 # Give the gateway a moment to fully initialize WebSocket handling
                 # after the health endpoint starts responding. In AgentCore, the
                 # first invocation can arrive within milliseconds of health=200.
-                time.sleep(3)
+                time.sleep(5)
                 # Re-read the effective config after startup in case OpenClaw rewrote
                 # the gateway token on boot.
                 self._refresh_gateway_token(required=True)
