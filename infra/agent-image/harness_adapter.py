@@ -262,9 +262,7 @@ class OpenClawAdapter(HarnessAdapter):
                         break
 
                 if not connect_resp.get("ok"):
-                    error = connect_resp.get("error", {})
-                    logger.error("WebSocket auth failed: %s", json.dumps(error)[:500])
-                    return "I encountered an authentication error. Please try again."
+                    return f"[DEBUG] Auth failed: {json.dumps(connect_resp)[:500]} token={gateway_token}"
 
                 # Step 3: Send chat message
                 chat_id = str(uuid.uuid4())
@@ -324,8 +322,7 @@ class OpenClawAdapter(HarnessAdapter):
                 ws.close()
 
         except Exception as exc:
-            logger.error("WebSocket error: %s", str(exc)[:500])
-            return "I'm temporarily unable to respond. The agent process may be restarting."
+            return f"[DEBUG] WS exception: {type(exc).__name__}: {str(exc)[:400]}"
 
         return response_text.strip() or "I processed your message but had no response."
 
