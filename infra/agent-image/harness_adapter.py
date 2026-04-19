@@ -251,18 +251,11 @@ class OpenClawAdapter(HarnessAdapter):
                         break
 
                 if not connect_resp.get("ok"):
-                    error = connect_resp.get("error") or connect_resp.get("payload") or {}
-                    full_resp = json.dumps(connect_resp)[:800]
-                    logger.error("WebSocket auth failed: %s", full_resp)
-                    # Also write to a file for debugging since logger may not flush to CloudWatch
-                    try:
-                        Path("/tmp/ws-auth-fail.log").write_text(
-                            f"token={gateway_token}\nresponse={full_resp}\n"
-                        )
-                    except Exception:
-                        pass
-                    sys.stdout.flush()
-                    return "I encountered an authentication error. Please try again."
+                    # Return the ACTUAL error in the response so it appears in
+                    # Google Chat and Lambda logs — generic messages are useless
+                    # for debugging AgentCore-specific failures.
+                    error = connect_resp.get("error", {})
+                    return f"[DEBUG] Auth failed: {json.dumps(error)[:300]}"
 
                 # Step 3: Send chat message
                 chat_id = str(uuid.uuid4())
@@ -322,9 +315,7 @@ class OpenClawAdapter(HarnessAdapter):
                 ws.close()
 
         except Exception as exc:
-            logger.error("WebSocket error: %s", str(exc)[:500])
-            sys.stdout.flush()
-            return f"I'm temporarily unable to respond. Error: {str(exc)[:100]}"
+            return f"[DEBUG] WS error: {type(exc).__name__}: {str(exc)[:300]}"
 
         return response_text.strip() or "I processed your message but had no response."
 
