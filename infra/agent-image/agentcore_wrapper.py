@@ -88,6 +88,10 @@ signal.signal(signal.SIGINT, handle_shutdown)
 
 def main():
     """Start the AgentCore wrapper."""
+    # Log the build marker FIRST so it appears even if startup fails. This is
+    # the only reliable way to confirm AgentCore is running the deployed image.
+    logger.info("BUILD_MARKER=%s", os.environ.get("BUILD_MARKER", "unset"))
+
     try:
         from bedrock_agentcore.runtime import BedrockAgentCoreApp
     except ImportError:

@@ -128,94 +128,65 @@ The Runtime ID is stored in SSM automatically. The Router Lambda resolves it at 
 
 ### Phase 3: Cross-Cloud Bridge (GCP Pub/Sub → AWS SQS)
 
-This connects GCP Pub/Sub to the SQS queue using Workload Identity Federation.
+> **CORRECTION (Apr 2026):** The earlier Workload Identity Federation
+> approach in this section was a dead-end. GCP Pub/Sub push only sends a
+> Google OIDC JWT — it does not perform AWS SigV4 signing, so no IAM role
+> swap can authorize it to call SQS directly. The bridge is now an HTTP API
+> with a JWT authorizer (issuer = `https://accounts.google.com`) and a tiny
+> Lambda forwarder that writes to SQS. If you previously created
+> `gcp-pubsub-bridge-dev` IAM role and the OIDC provider for
+> `accounts.google.com`, you can delete them — they are unused.
 
-#### 3.1 Create AWS IAM OIDC Provider for GCP
+#### 3.1 First Deploy (creates the HTTP API endpoint URL)
 
-```bash
-# Replace <GCP_PROJECT_NUMBER> with your numeric project number from step 1.1
-aws iam create-open-id-connect-provider \
-  --url https://accounts.google.com \
-  --client-id-list <GCP_PROJECT_NUMBER> \
-  --thumbprint-list 08745487e891c19e3078c1f2a07e452950ef36f6
-```
-
-#### 3.2 Create Bridge IAM Role
-
-```bash
-# Replace <AWS_ACCOUNT_ID> and <GCP_PROJECT_NUMBER>
-cat > trust-policy.json << 'TRUST'
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Principal": {
-        "Federated": "arn:aws:iam::<AWS_ACCOUNT_ID>:oidc-provider/accounts.google.com"
-      },
-      "Action": "sts:AssumeRoleWithWebIdentity",
-      "Condition": {
-        "StringEquals": {
-          "accounts.google.com:aud": "<GCP_PROJECT_NUMBER>"
-        }
-      }
-    }
-  ]
-}
-TRUST
-
-aws iam create-role \
-  --role-name gcp-pubsub-bridge-dev \
-  --assume-role-policy-document file://trust-policy.json \
-  --tags Key=Environment,Value=dev Key=ManagedBy,Value=manual
-
-# Grant SQS send permission (get queue ARN from CDK output)
-cat > sqs-policy.json << 'SQS'
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": "sqs:SendMessage",
-      "Resource": "<ROUTER_QUEUE_ARN>"
-    }
-  ]
-}
-SQS
-
-aws iam put-role-policy \
-  --role-name gcp-pubsub-bridge-dev \
-  --policy-name sqs-send \
-  --policy-document file://sqs-policy.json
-
-rm trust-policy.json sqs-policy.json
-```
-
-#### 3.3 Re-deploy with Bridge Role ARN
+The CDK bridge needs to know the JWT audience (which GCP will sign) up front.
+The simplest correct value is the API endpoint URL itself, but we don't know
+that URL until the API is deployed once. Two-pass deploy:
 
 ```bash
 cd infra
-BRIDGE_ROLE_ARN=$(aws iam get-role --role-name gcp-pubsub-bridge-dev --query 'Role.Arn' --output text)
 
+# Pass 1 — deploy with a placeholder audience to allocate the API URL
 bunx cdk deploy AIStudio-AgentPlatformStack-Dev \
   --context baseDomain=yourdomain.com \
   --context alertEmail=your-team@yourdomain.com \
-  --context agentImageTag=2026-04-16-initial \
-  --context gcpBridgeRoleArn=${BRIDGE_ROLE_ARN}
+  --context agentImageTag=<current-tag> \
+  --context agentImageDigest=<current-digest> \
+  --context gcpPubsubAudience=https://placeholder.invalid/chat
+
+# Read the assigned API URL from the stack output
+CHAT_BRIDGE_URL=$(aws cloudformation describe-stacks \
+  --stack-name AIStudio-AgentPlatformStack-Dev \
+  --region us-east-1 \
+  --query "Stacks[0].Outputs[?OutputKey=='ChatBridgeEndpoint'].OutputValue" \
+  --output text)
+echo "Bridge URL: ${CHAT_BRIDGE_URL}"
 ```
 
-#### 3.4 Create GCP Pub/Sub Subscription
+#### 3.2 Second Deploy (pin audience to the real URL)
+
+```bash
+bunx cdk deploy AIStudio-AgentPlatformStack-Dev \
+  --context baseDomain=yourdomain.com \
+  --context alertEmail=your-team@yourdomain.com \
+  --context agentImageTag=<current-tag> \
+  --context agentImageDigest=<current-digest> \
+  --context gcpPubsubAudience=${CHAT_BRIDGE_URL}
+```
+
+#### 3.3 Create GCP Pub/Sub Subscription
 
 1. In GCP Console, go to **Pub/Sub** → **Subscriptions** → **Create Subscription**
 2. Subscription ID: `agent-chat-to-sqs`
 3. Select topic: `agent-chat-messages`
 4. Delivery type: **Push**
-5. Endpoint URL: the SQS queue URL from CDK output (`RouterQueueUrl`)
+5. Endpoint URL: the `ChatBridgeEndpoint` value from CDK output (`https://…/chat`)
 6. Enable authentication: check **Enable authentication**
 7. Service account: `psd-agent-chat@<project-id>.iam.gserviceaccount.com`
-8. Click **Create**
-
-> **Note:** GCP Pub/Sub push to SQS requires the push endpoint to accept HTTP POST. If direct push to the SQS URL doesn't work (SQS expects signed requests), you'll need an API Gateway → SQS proxy or a small Cloud Function in GCP as a bridge. See the Troubleshooting section.
+8. **Audience**: leave blank (defaults to the endpoint URL, which matches the
+   `gcpPubsubAudience` we configured). If you set a custom audience, redeploy
+   the stack with that value as `gcpPubsubAudience`.
+9. Click **Create**
 
 ### Phase 4: Testing
 
@@ -264,7 +235,8 @@ psql $DATABASE_URL -c "SELECT * FROM agent_sessions ORDER BY created_at DESC LIM
 | `baseDomain` | Yes | Base domain for the deployment |
 | `alertEmail` | No | Email for CloudWatch alarm notifications |
 | `agentImageTag` | No | Docker image tag in ECR. Omit on first deploy. |
-| `gcpBridgeRoleArn` | No | IAM role ARN for GCP Pub/Sub bridge. Omit until bridge is configured. |
+| `agentImageDigest` | No | ECR image digest (`sha256:…`). Pin alongside `agentImageTag` so AgentCore receives an immutable identity (tag-only deploys have caused stale containers). |
+| `gcpPubsubAudience` | No | The HTTPS URL the GCP Pub/Sub push subscription is configured to call (defaults to the API endpoint URL itself). Required to wire up the JWT authorizer; omit on first deploy to allocate the API URL. |
 
 ### Environment Variables (Lambda)
 
@@ -302,7 +274,9 @@ bunx cdk deploy AIStudio-AgentPlatformStack-Dev \
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| No messages arriving | GCP bridge not configured | Check `GCPBridgeStatus` CDK output |
+| No messages arriving | Chat bridge not deployed or audience mismatch | Check `ChatBridgeEndpoint` CDK output; confirm Pub/Sub subscription points at this URL and `gcpPubsubAudience` matches the URL the JWT is signed for |
+| 401 from chat bridge | JWT audience claim doesn't match `gcpPubsubAudience` | Check API Gateway JWT authorizer logs; redeploy stack with the audience the subscription actually sends |
+| Bridge Lambda 5xx | SQS send failing | Check `/aws/lambda/psd-agent-chat-bridge-<env>` logs |
 | Lambda timeout | AgentCore Runtime not deployed | Deploy with `--context agentImageTag=<tag>` |
 | "Google credentials secret contains invalid JSON" | Secret not populated | Run `aws secretsmanager put-secret-value` from step 2.2 |
 | "Database not configured, skipping telemetry" | DATABASE_HOST not set | Check Lambda env vars in CloudWatch |

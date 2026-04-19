@@ -59,25 +59,35 @@ echo "Building image (ARM64)..."
 docker build \
   --platform linux/arm64 \
   -t "${ECR_URI}:${TAG}" \
-  -t "${ECR_URI}:latest" \
   "${SCRIPT_DIR}"
 
-# Push both tags
 echo ""
 echo "Pushing ${ECR_URI}:${TAG}..."
 docker push "${ECR_URI}:${TAG}"
 
-echo "Pushing ${ECR_URI}:latest..."
-docker push "${ECR_URI}:latest"
+# Resolve the immutable digest so the caller can pin AgentCore by digest.
+# Tag-based pinning has produced stale image serving in AgentCore — see PR #902.
+echo ""
+echo "Resolving image digest..."
+DIGEST=$(aws ecr describe-images \
+  --region "${REGION}" \
+  --repository-name "${ECR_URI##*/}" \
+  --image-ids "imageTag=${TAG}" \
+  --query 'imageDetails[0].imageDigest' \
+  --output text)
 
 echo ""
 echo "=== Done ==="
 echo ""
-echo "Image pushed: ${ECR_URI}:${TAG}"
+echo "Image:  ${ECR_URI}:${TAG}"
+echo "Digest: ${DIGEST}"
 echo ""
-echo "Next steps:"
-echo "  1. Deploy AgentCore Runtime with this image tag:"
-echo "     cd infra && bunx cdk deploy ${STACK_NAME} --context agentImageTag=${TAG}"
+echo "Next step — deploy AgentCore Runtime pinned to the immutable digest:"
 echo ""
-echo "  2. The Runtime ID will appear in stack outputs. The Router Lambda"
-echo "     resolves it from SSM automatically — no manual config needed."
+echo "  cd infra && bunx cdk deploy ${STACK_NAME} \\"
+echo "    --context agentImageTag=${TAG} \\"
+echo "    --context agentImageDigest=${DIGEST}"
+echo ""
+echo "After deploy, confirm the running build via CloudWatch:"
+echo "  aws logs tail /aws/bedrock-agentcore/runtimes/<runtime-id>-DEFAULT \\"
+echo "    --region ${REGION} --since 5m | grep BUILD_MARKER"

@@ -16,6 +16,9 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
+import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
+import * as apigwv2Authorizers from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
+import * as apigwv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
 import * as path from 'path';
 import { execSync } from 'child_process';
 // ALPHA CDK CONSTRUCT: @aws-cdk/aws-bedrock-agentcore-alpha has no API stability
@@ -120,6 +123,7 @@ export class AgentPlatformStack extends cdk.Stack {
     this.ecrRepository = new ecr.Repository(this, 'AgentBaseRepository', {
       repositoryName: `psd-agent-base-${environment}`,
       imageScanOnPush: true,
+      imageTagMutability: ecr.TagMutability.IMMUTABLE,
       removalPolicy: environment === 'prod'
         ? cdk.RemovalPolicy.RETAIN
         : cdk.RemovalPolicy.DESTROY,
@@ -511,15 +515,25 @@ export class AgentPlatformStack extends cdk.Stack {
     // Pass --context agentImageTag=<tag> to deploy. Without it, the stack
     // deploys all supporting resources (ECR, S3, DynamoDB, IAM, EventBridge)
     // and the Runtime is added on a subsequent deploy after pushing an image.
+    // Prefer digest pinning (immutable) over tag pinning (mutable). AgentCore
+    // resolves tags at deploy time but does not surface the resolved digest,
+    // and we have observed stale image serving when only a tag is supplied.
+    // Pass --context agentImageDigest=sha256:... for guaranteed identity.
     const imageTag = this.node.tryGetContext('agentImageTag') as string | undefined;
+    const imageDigest = this.node.tryGetContext('agentImageDigest') as string | undefined;
 
-    if (imageTag) {
+    const artifact = imageDigest
+      ? agentcore.AgentRuntimeArtifact.fromImageUri(
+          `${this.ecrRepository.repositoryUri}@${imageDigest}`,
+        )
+      : imageTag
+        ? agentcore.AgentRuntimeArtifact.fromEcrRepository(this.ecrRepository, imageTag)
+        : undefined;
+
+    if (artifact) {
       this.runtime = new agentcore.Runtime(this, 'AgentCoreRuntime', {
         runtimeName: `psd_agent_${environment}`,
-        agentRuntimeArtifact: agentcore.AgentRuntimeArtifact.fromEcrRepository(
-          this.ecrRepository,
-          imageTag,
-        ),
+        agentRuntimeArtifact: artifact,
         executionRole: this.agentCoreExecutionRole,
         // AgentCore only supports specific AZ IDs: use1-az1, use1-az2, use1-az4.
         // Our VPC includes us-east-1a (use1-az6) which is NOT supported.
@@ -548,6 +562,11 @@ export class AgentPlatformStack extends cdk.Stack {
           // default credential chain), but no env var is set. Setting AWS_PROFILE
           // makes the gate pass; the SDK still uses the task role, not a profile.
           AWS_PROFILE: 'default',
+          // Identity marker — surfaced in container startup log so we can
+          // verify the running code matches the deployed image manifest.
+          BUILD_MARKER: imageDigest
+            ? `${imageTag ?? 'no-tag'}@${imageDigest}`
+            : (imageTag ?? 'unset'),
         },
         lifecycleConfiguration: {
           idleRuntimeSessionTimeout: cdk.Duration.minutes(config.agent.microVmIdleTimeoutMinutes),
@@ -644,30 +663,12 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(this.routerQueue).add('Environment', environment);
     cdk.Tags.of(this.routerQueue).add('ManagedBy', 'cdk');
 
-    // GCP Pub/Sub bridge policy — grants sqs:SendMessage to the GCP push
-    // subscription's IAM principal. Pass --context gcpBridgeRoleArn=<arn> to
-    // enable. Without it, the queue deploys but no messages can arrive.
-    //
-    // The bridge role is an IAM role with an OIDC trust policy for GCP Workload
-    // Identity Federation. See docs/operations/agent-platform-setup.md for
-    // how to create it.
-    const gcpBridgeRoleArn = this.node.tryGetContext('gcpBridgeRoleArn') as string | undefined;
-    if (gcpBridgeRoleArn) {
-      this.routerQueue.addToResourcePolicy(new iam.PolicyStatement({
-        sid: 'AllowGCPPubSubBridge',
-        effect: iam.Effect.ALLOW,
-        actions: ['sqs:SendMessage'],
-        resources: [this.routerQueue.queueArn],
-        principals: [new iam.ArnPrincipal(gcpBridgeRoleArn)],
-      }));
-    }
-
-    new cdk.CfnOutput(this, 'GCPBridgeStatus', {
-      value: gcpBridgeRoleArn
-        ? `Configured: ${gcpBridgeRoleArn}`
-        : 'NOT CONFIGURED — pass --context gcpBridgeRoleArn=<arn> to enable Google Chat messages',
-      description: 'GCP Pub/Sub → SQS bridge status',
-    });
+    // GCP Pub/Sub → SQS bridge is implemented as an HTTP API with a Google JWT
+    // authorizer and a small Lambda forwarder (see Section 9b below). The earlier
+    // Workload-Identity-Federation approach in agent-platform-setup.md is a
+    // dead-end: GCP Pub/Sub push only sends a Google OIDC JWT, it does not
+    // perform AWS SigV4 signing, so no IAM role swap can authorize it to call
+    // SQS directly.
 
     // =====================================================================
     // 9. Router Lambda Function
@@ -789,6 +790,119 @@ export class AgentPlatformStack extends cdk.Stack {
         reportBatchItemFailures: true,
       }),
     );
+
+    // =====================================================================
+    // 9b. GCP Pub/Sub → SQS Bridge (HTTP API + JWT Authorizer + Lambda)
+    // =====================================================================
+    // GCP Pub/Sub push subscriptions deliver messages over HTTPS with a Google
+    // OIDC ID token in the Authorization header. They cannot SigV4-sign for
+    // SQS, so we expose a public HTTPS endpoint that:
+    //   1. Validates the JWT via API Gateway's built-in authorizer
+    //      (issuer = https://accounts.google.com, audience = the API URL)
+    //   2. Forwards the raw Pub/Sub envelope to the Router SQS queue via a
+    //      tiny Lambda (HTTP API has no native SQS service integration)
+    //
+    // To enable: pass --context gcpPubsubAudience=<url> (the URL the Pub/Sub
+    // push subscription is configured to call). Setting this to the API URL
+    // itself is the simplest correct value.
+
+    const gcpPubsubAudience = this.node.tryGetContext('gcpPubsubAudience') as string | undefined;
+
+    const bridgeLogGroup = new logs.LogGroup(this, 'ChatBridgeLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-chat-bridge-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+
+    const bridgeLambda = new lambda.Function(this, 'ChatBridgeLambda', {
+      functionName: `psd-agent-chat-bridge-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-chat-bridge'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-chat-bridge');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install',
+                'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: 256,
+      timeout: cdk.Duration.seconds(10),
+      architecture: lambda.Architecture.ARM_64,
+      logGroup: bridgeLogGroup,
+      environment: {
+        ROUTER_QUEUE_URL: this.routerQueue.queueUrl,
+      },
+    });
+    this.routerQueue.grantSendMessages(bridgeLambda);
+    cdk.Tags.of(bridgeLambda).add('Environment', environment);
+    cdk.Tags.of(bridgeLambda).add('ManagedBy', 'cdk');
+
+    const chatHttpApi = new apigwv2.HttpApi(this, 'ChatBridgeApi', {
+      apiName: `psd-agent-chat-bridge-${environment}`,
+      description: 'Receives Google Chat Pub/Sub push deliveries and forwards them to SQS',
+    });
+
+    // JWT authorizer — only valid Google-signed tokens whose audience matches
+    // the configured value are accepted. If audience is not yet configured,
+    // skip authorizer wiring; the route below will then 401 every request,
+    // which is the safe default (no anonymous access).
+    if (gcpPubsubAudience) {
+      const jwtAuthorizer = new apigwv2Authorizers.HttpJwtAuthorizer(
+        'ChatBridgeJwtAuthorizer',
+        'https://accounts.google.com',
+        {
+          jwtAudience: [gcpPubsubAudience],
+          identitySource: ['$request.header.Authorization'],
+        },
+      );
+
+      chatHttpApi.addRoutes({
+        path: '/chat',
+        methods: [apigwv2.HttpMethod.POST],
+        integration: new apigwv2Integrations.HttpLambdaIntegration(
+          'ChatBridgeIntegration',
+          bridgeLambda,
+        ),
+        authorizer: jwtAuthorizer,
+      });
+    }
+
+    new cdk.CfnOutput(this, 'ChatBridgeEndpoint', {
+      value: gcpPubsubAudience
+        ? `${chatHttpApi.apiEndpoint}/chat`
+        : 'NOT CONFIGURED — pass --context gcpPubsubAudience=<https-url> (set this to the API endpoint URL itself), then redeploy. Update Pub/Sub push subscription endpoint + audience to match.',
+      description: 'Google Chat Pub/Sub push endpoint URL',
+    });
 
     // SNS topic for alarm notifications — only created if alertEmail is provided.
     // Without a notification target, alarms fire but nobody is notified.

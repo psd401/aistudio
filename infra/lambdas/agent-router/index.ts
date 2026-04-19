@@ -185,6 +185,81 @@ interface GoogleChatEvent {
   };
 }
 
+/**
+ * Normalize a Chat event into the legacy `{type, space, message}` shape that
+ * the rest of this Lambda consumes. Accepts either:
+ *   - the legacy webhook format (already normalized), or
+ *   - the Workspace common-event format published by Pub/Sub-connected
+ *     Chat apps: `{commonEventObject, chat: {user, eventTime, messagePayload}}`
+ *
+ * For the common-event format the event type is inferred from which payload
+ * key is present (`messagePayload`, `addedToSpacePayload`, etc.). We only
+ * need MESSAGE and ADDED_TO_SPACE; other event types degrade to
+ * `TYPE_UNSPECIFIED` and are ignored downstream.
+ */
+function normalizeChatEvent(raw: Record<string, unknown>): GoogleChatEvent {
+  // Already legacy shape
+  if (typeof (raw as { type?: unknown }).type === 'string') {
+    return raw as unknown as GoogleChatEvent;
+  }
+
+  const chat = (raw.chat ?? {}) as Record<string, unknown>;
+  const eventTime = (chat.eventTime as string | undefined) ?? '';
+  const messagePayload = chat.messagePayload as
+    | { space?: GoogleChatEvent['space']; message?: GoogleChatEvent['message'] }
+    | undefined;
+  const addedPayload = chat.addedToSpacePayload as
+    | { space?: GoogleChatEvent['space']; user?: NonNullable<GoogleChatEvent['message']>['sender'] }
+    | undefined;
+  const removedPayload = chat.removedFromSpacePayload as
+    | { space?: GoogleChatEvent['space'] }
+    | undefined;
+
+  if (messagePayload?.message && messagePayload?.space) {
+    return {
+      type: 'MESSAGE',
+      eventTime,
+      space: messagePayload.space,
+      message: messagePayload.message,
+    };
+  }
+
+  if (addedPayload?.space) {
+    // Synthesize a minimal message envelope so the existing welcome path can
+    // read `chatEvent.message.sender.email` for domain validation.
+    const user = (chat.user as NonNullable<GoogleChatEvent['message']>['sender'] | undefined)
+      ?? addedPayload.user;
+    return {
+      type: 'ADDED_TO_SPACE',
+      eventTime,
+      space: addedPayload.space,
+      message: user
+        ? ({
+            name: '',
+            text: '',
+            sender: user,
+            createTime: eventTime,
+          } as GoogleChatEvent['message'])
+        : undefined,
+    };
+  }
+
+  if (removedPayload?.space) {
+    return {
+      type: 'REMOVED_FROM_SPACE',
+      eventTime,
+      space: removedPayload.space,
+    };
+  }
+
+  // Unknown common-event variant; mark unspecified and let caller skip it.
+  return {
+    type: 'TYPE_UNSPECIFIED' as GoogleChatEvent['type'],
+    eventTime,
+    space: { name: '', type: 'TYPE_UNSPECIFIED' },
+  };
+}
+
 interface AgentUser {
   googleIdentity: string;
   email: string;
@@ -719,6 +794,14 @@ async function processRecord(
 
   // Parse the Pub/Sub message from SQS
   // Google Chat Pub/Sub → GCP Pub/Sub → (bridge) → SQS → Lambda
+  //
+  // Chat publishes events in the **Workspace common-event format**, not the
+  // legacy webhook format. The two shapes are very different:
+  //   Common:  { commonEventObject, chat: { user, eventTime, messagePayload: { space, message } } }
+  //   Legacy:  { type, eventTime, space, message: { sender, text, ... } }
+  // Older Google docs (and older snippets in this codebase) describe legacy.
+  // We normalize both to the legacy shape so the rest of this Lambda is
+  // unchanged.
   let chatEvent: GoogleChatEvent;
   try {
     // The SQS message body contains the Pub/Sub message data
@@ -729,7 +812,8 @@ async function processRecord(
       typeof pubsubData === 'string'
         ? Buffer.from(pubsubData, 'base64').toString('utf-8')
         : JSON.stringify(pubsubData);
-    chatEvent = JSON.parse(decoded) as GoogleChatEvent;
+    const raw = JSON.parse(decoded) as Record<string, unknown>;
+    chatEvent = normalizeChatEvent(raw);
   } catch (error) {
     log.error('Failed to parse chat event', {
       error: error instanceof Error ? error.message : String(error),
