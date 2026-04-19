@@ -203,9 +203,7 @@ class OpenClawAdapter(HarnessAdapter):
                         break
 
                 if not connect_resp.get("ok"):
-                    error = connect_resp.get("error", {})
-                    logger.error("WebSocket auth failed: %s", json.dumps(error)[:500])
-                    return "I encountered an authentication error. Please try again."
+                    return f"[WS_AUTH_FAIL] {json.dumps(connect_resp)[:800]}"
 
                 # Step 3: Send chat message
                 chat_id = str(uuid.uuid4())
