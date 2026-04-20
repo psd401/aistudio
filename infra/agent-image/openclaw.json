@@ -27,6 +27,22 @@
       "workspace": "/home/node/.openclaw"
     }
   },
+  "plugins": {
+    "entries": {
+      "active-memory": {
+        "enabled": true,
+        "config": {
+          "agents": ["main"],
+          "queryMode": "recent",
+          "promptStyle": "balanced",
+          "timeoutMs": 15000,
+          "maxSummaryChars": 220,
+          "persistTranscripts": false,
+          "logging": true
+        }
+      }
+    }
+  },
   "gateway": {
     "port": 3100,
     "mode": "local",

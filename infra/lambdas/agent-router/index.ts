@@ -294,6 +294,50 @@ const RUNTIME_ID_TTL_MS = 10 * 60 * 1000; // 10 minutes
 // for consistency and ~100-300ms lower latency per query.
 let pgClient: postgres.Sql | null = null;
 
+/**
+ * Returns true if this message name has already been processed (or is being
+ * processed concurrently) by claiming its row via a conditional PutItem. The
+ * row carries a 1-hour TTL so the table self-prunes.
+ *
+ * Conservative on errors: if the dedup table is unreachable we return `false`
+ * so the message still flows. Better to risk a rare double-send than to drop
+ * messages on a transient DDB blip.
+ */
+async function isDuplicateMessage(
+  messageName: string,
+  log: ReturnType<typeof createLogger>
+): Promise<boolean> {
+  const tableName = process.env.MESSAGE_DEDUP_TABLE;
+  if (!tableName) {
+    return false; // Dedup not configured (e.g., local tests) — pass through
+  }
+
+  const expiresAt = Math.floor(Date.now() / 1000) + 3600; // 1 hour TTL
+  try {
+    await dynamoClient.send(
+      new PutCommand({
+        TableName: tableName,
+        Item: {
+          messageName,
+          expiresAt,
+          claimedAt: new Date().toISOString(),
+        },
+        ConditionExpression: 'attribute_not_exists(messageName)',
+      })
+    );
+    return false; // Successfully claimed → first time we've seen this msg
+  } catch (error) {
+    const errName = (error as { name?: string } | null)?.name;
+    if (errName === 'ConditionalCheckFailedException') {
+      return true; // Someone else already claimed it
+    }
+    log.warn('Dedup check failed; proceeding without dedup', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
 async function getDbClient(): Promise<postgres.Sql> {
   if (pgClient) return pgClient;
 
@@ -504,7 +548,8 @@ async function invokeAgentCore(
   message: string,
   userId: string,
   sessionId: string,
-  log: ReturnType<typeof createLogger>
+  log: ReturnType<typeof createLogger>,
+  userContext?: { displayName?: string; workspacePrefix?: string }
 ): Promise<{ response: string; inputTokens: number; outputTokens: number; model: string | null }> {
   // Resolve the AgentCore Runtime ID — check env var, then module-level cache,
   // then SSM. Cached at module scope with TTL to avoid redundant SSM API calls
@@ -562,6 +607,9 @@ async function invokeAgentCore(
       : `arn:aws:bedrock-agentcore:${region}:${account}:runtime/${runtimeId}`;
     const body = JSON.stringify({
       prompt: message,
+      user_email: userId,
+      user_display_name: userContext?.displayName ?? '',
+      workspace_prefix: userContext?.workspacePrefix ?? '',
     });
 
     const request = new HttpRequest({
@@ -867,6 +915,19 @@ async function processRecord(
   const spaceName = chatEvent.space.name;
   const threadName = message.thread?.name;
 
+  // Idempotency guard — Google Chat retries Pub/Sub deliveries when the bot
+  // is slow to ack, and SQS may also redeliver under partial-batch-failure.
+  // Without this, two invocations land on the same OpenClaw session in
+  // parallel and the second is rejected in ~135ms with an empty fallback
+  // string, which the user sees as "I processed your message but had no
+  // response." The Chat message resource name is immutable per send, so
+  // it's the right idempotency key.
+  const messageNameKey = message.name;
+  if (messageNameKey && await isDuplicateMessage(messageNameKey, log)) {
+    log.info('Duplicate Chat message — skipping', { messageName: messageNameKey });
+    return;
+  }
+
   // Validate sender belongs to an allowed domain — prevents abuse if
   // an actor injects messages into the SQS queue with arbitrary emails.
   const emailDomain = senderEmail.split('@')[1]?.toLowerCase();
@@ -921,10 +982,12 @@ async function processRecord(
       log
     );
 
-    // Use the same stable session ID as non-blocked messages so session-level
-    // blocking stats aggregate correctly (not a throwaway timestamp-based ID).
+    // Use the same stable session ID format as non-blocked messages so
+    // session-level blocking stats aggregate correctly. Build tag included
+    // for consistency with the AgentCore call path (see comment below).
     const blockedSpaceHash = crypto.createHash('sha256').update(spaceName).digest('hex');
-    const blockedSessionId = `${user.workspacePrefix}-${blockedSpaceHash}`;
+    const blockedBuildTag = process.env.AGENT_BUILD_TAG || 'unset';
+    const blockedSessionId = `${user.workspacePrefix}-${blockedSpaceHash}-${blockedBuildTag}`;
 
     await logTelemetry(
       {
@@ -943,17 +1006,30 @@ async function processRecord(
   }
 
   // Step 3: Invoke AgentCore
-  // Session ID = workspace prefix + SHA-256 hash of space name.
-  // Using a hash instead of truncation prevents collisions: two spaces with a
-  // long common prefix would truncate to the same session_id, silently merging
-  // telemetry. SHA-256 hex is 64 chars, always fits VARCHAR(512).
+  // Session ID = workspace prefix + SHA-256 hash of space name + build tag.
+  //
+  // Using a hash (not truncation) prevents two spaces with a long common
+  // prefix from silently merging into one session.
+  //
+  // The trailing build tag is critical: AgentCore sticky-routes by session ID
+  // and existing microVMs survive the idle window. Without rotating the
+  // session ID per deploy, an active user can be pinned to a microVM running
+  // OLD code for hours. Mixing AGENT_BUILD_TAG into the session forces every
+  // deploy to spawn a fresh microVM on the next message — old microVMs
+  // receive no further traffic and time out naturally. Long-term memory
+  // survives because the S3 workspace is keyed only on workspacePrefix.
   const spaceHash = crypto.createHash('sha256').update(spaceName).digest('hex');
-  const sessionId = `${user.workspacePrefix}-${spaceHash}`;
+  const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
+  const sessionId = `${user.workspacePrefix}-${spaceHash}-${buildTag}`;
   const agentResult = await invokeAgentCore(
     messageText,
     senderEmail,
     sessionId,
-    log
+    log,
+    {
+      displayName: senderDisplayName,
+      workspacePrefix: user.workspacePrefix,
+    }
   );
 
   // Step 4: Token usage alerting threshold (warn-only, not enforcement)

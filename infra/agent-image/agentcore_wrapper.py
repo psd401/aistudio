@@ -35,12 +35,17 @@ logger = logging.getLogger("agentcore_wrapper")
 
 # Import the harness adapter
 from harness_adapter import OpenClawAdapter
+import workspace_sync
 
 # Initialize the adapter
 adapter = OpenClawAdapter()
 
 # Track the proxy process for cleanup
 proxy_process = None
+
+# Track which workspace prefix this microVM is currently serving so we can
+# (a) skip redundant S3 pulls and (b) push to the right prefix on shutdown.
+_current_workspace_prefix: str | None = None
 
 
 def start_bedrock_proxy():
@@ -74,8 +79,14 @@ def start_bedrock_proxy():
 
 
 def handle_shutdown(signum, frame):
-    """Graceful shutdown on SIGTERM/SIGINT."""
+    """Graceful shutdown on SIGTERM/SIGINT — push workspace to S3 first."""
     logger.info("Received signal %d, shutting down", signum)
+    workspace_sync.stop_periodic_push()
+    if _current_workspace_prefix:
+        try:
+            workspace_sync.push_workspace(_current_workspace_prefix)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("shutdown workspace push failed: %s", exc)
     adapter.shutdown()
     if proxy_process and proxy_process.poll() is None:
         proxy_process.terminate()
@@ -119,30 +130,66 @@ def main():
         """
         Handle an agent invocation from AgentCore.
 
-        Args:
-            payload: dict with at minimum a "prompt" key containing the user message
-            context: AgentCore runtime context with session_id attribute
+        Expected payload keys (all optional except `prompt`):
+            prompt             — the user's text
+            user_email         — caller's email (used as stable identity)
+            user_display_name  — caller's display name for greetings
+            workspace_prefix   — S3 prefix to mount as long-term memory
+            model              — optional model override
         """
+        global _current_workspace_prefix
+
         session_id = getattr(context, "session_id", "unknown")
         user_message = payload.get("prompt", "")
-        user_id = payload.get("user_id", "unknown")
+        user_email = payload.get("user_email") or payload.get("user_id", "unknown")
+        display_name = payload.get("user_display_name", "")
+        workspace_prefix = payload.get("workspace_prefix", "")
         model_override = payload.get("model")
 
         logger.info(
-            "Invocation received: session=%s user=%s msg_length=%d",
+            "Invocation received: session=%s user=%s prefix=%s msg_length=%d",
             session_id,
-            user_id,
+            user_email,
+            workspace_prefix or "-",
             len(user_message),
         )
 
         if not user_message.strip():
             return {"result": "I didn't receive a message. Could you try again?"}
 
+        # First invocation for a new workspace prefix → pull memory from S3.
+        # Subsequent invocations on this microVM reuse the already-mounted state.
+        if workspace_prefix and workspace_prefix != _current_workspace_prefix:
+            try:
+                # Run blocking S3 calls off the event loop
+                pulled = await asyncio.get_running_loop().run_in_executor(
+                    None, workspace_sync.pull_workspace, workspace_prefix
+                )
+                logger.info(
+                    "workspace mounted: prefix=%s files=%d",
+                    workspace_prefix, pulled,
+                )
+                _current_workspace_prefix = workspace_prefix
+                workspace_sync.start_periodic_push(workspace_prefix, interval_s=120)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("workspace mount failed: %s", exc)
+
+        # Inject a brief identity preamble so the agent always knows who is
+        # speaking (the system prompt alone can't carry per-request identity).
+        # Kept minimal — the agent's own SOUL.md handles persona/style.
+        if display_name or user_email != "unknown":
+            framed = (
+                f"[caller: {display_name or user_email} <{user_email}>]\n\n"
+                f"{user_message}"
+            )
+        else:
+            framed = user_message
+
         # Process through the harness — offload blocking WebSocket I/O to a thread
         # to avoid blocking the async event loop.
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
-            None, adapter.process, user_message, session_id, model_override
+            None, adapter.process, framed, session_id, model_override
         )
 
         logger.info(
@@ -155,7 +202,7 @@ def main():
             "result": result,
             "metadata": {
                 "session_id": session_id,
-                "user_id": user_id,
+                "user_id": user_email,
                 "model": model_override or "default",
             },
         }

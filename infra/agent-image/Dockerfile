@@ -52,7 +52,8 @@ RUN apt-get update && \
 RUN python3 -m venv /opt/agentcore-venv && \
     /opt/agentcore-venv/bin/pip install --no-cache-dir \
       "bedrock-agentcore==${BEDROCK_AGENTCORE_VERSION}" \
-      "websocket-client>=1.7.0"
+      "websocket-client>=1.7.0" \
+      "boto3>=1.34.0"
 
 # Add venv to PATH so python3 uses the venv by default
 ENV PATH="/opt/agentcore-venv/bin:$PATH"
@@ -73,8 +74,18 @@ COPY openclaw.json /home/node/.openclaw/openclaw.json
 # visible to the LLM. Keep roadmap notes here in the Dockerfile instead.
 # TODO(phase-2): Add Google Calendar and Gmail read-only tool access to the agent.
 COPY SOUL.md /home/node/.openclaw/SOUL.md
+# OpenClaw also auto-loads IDENTITY.md, USER.md, MEMORY.md (and AGENTS.md,
+# TOOLS.md, HEARTBEAT.md, BOOTSTRAP.md) when present. We seed empty stubs so
+# every brand-new user workspace boots with the same scaffolding; the agent
+# fills them in as it learns. Per-user content overrides these on next pull
+# from S3 (workspace_sync). Files agent already populated in S3 will replace
+# these defaults at startup.
+COPY IDENTITY.md /home/node/.openclaw/IDENTITY.md
+COPY USER.md /home/node/.openclaw/USER.md
+COPY MEMORY.md /home/node/.openclaw/MEMORY.md
 COPY harness_adapter.py /app/harness_adapter.py
 COPY agentcore_wrapper.py /app/agentcore_wrapper.py
+COPY workspace_sync.py /app/workspace_sync.py
 
 # Set ownership for the node user (OpenClaw runs as node)
 RUN chown -R node:node /home/node/.openclaw /app

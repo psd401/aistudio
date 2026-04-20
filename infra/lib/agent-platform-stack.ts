@@ -80,6 +80,8 @@ export class AgentPlatformStack extends cdk.Stack {
   public readonly usersTable: dynamodb.Table;
   /** DynamoDB table for organizational signals (Nervous System) */
   public readonly signalsTable: dynamodb.Table;
+  /** DynamoDB table for Chat message idempotency (dedup of retries) */
+  public readonly messageDedupTable: dynamodb.Table;
   /** AgentCore Runtime (undefined until an image is pushed to ECR) */
   public readonly runtime?: agentcore.Runtime;
   /** AgentCore execution IAM role */
@@ -217,6 +219,29 @@ export class AgentPlatformStack extends cdk.Stack {
 
     cdk.Tags.of(this.signalsTable).add('Environment', environment);
     cdk.Tags.of(this.signalsTable).add('ManagedBy', 'cdk');
+
+    // 4c. Message Dedup table — idempotency guard for Chat → AgentCore.
+    // Google Chat retries Pub/Sub deliveries when a bot is slow to ack, and
+    // SQS may also redeliver under load. Without dedup, two invocations land
+    // on the same OpenClaw session in parallel; OpenClaw rejects the second
+    // with an empty fallback in ~135ms (observed). Conditional write keyed on
+    // the immutable Chat message resource name (`spaces/X/messages/Y`)
+    // collapses retries into one real invocation.
+    //
+    // TTL of 1 hour is plenty: a duplicate that arrives an hour after the
+    // original is effectively a new request from the user's perspective.
+    this.messageDedupTable = new dynamodb.Table(this, 'AgentMessageDedupTable', {
+      tableName: `psd-agent-message-dedup-${environment}`,
+      partitionKey: { name: 'messageName', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      timeToLiveAttribute: 'expiresAt',
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(this.messageDedupTable).add('Environment', environment);
+    cdk.Tags.of(this.messageDedupTable).add('ManagedBy', 'cdk');
 
     // =====================================================================
     // 4c. Google Credentials Secret (CDK-managed, operator populates)
@@ -426,7 +451,11 @@ export class AgentPlatformStack extends cdk.Stack {
       region: this.region,
       account: this.account,
       vpcEnabled: false,
-      dynamodbTables: [this.usersTable.tableName, this.signalsTable.tableName],
+      dynamodbTables: [
+        this.usersTable.tableName,
+        this.signalsTable.tableName,
+        this.messageDedupTable.tableName,
+      ],
       s3Buckets: [this.workspaceBucket.bucketName],
       // WORKAROUND: ServiceRoleFactory checks startsWith("arn:") to detect full
       // ARNs vs names. CDK cross-stack refs and new Secret() produce tokens that
@@ -651,8 +680,8 @@ export class AgentPlatformStack extends cdk.Stack {
     this.routerQueue = new sqs.Queue(this, 'RouterQueue', {
       queueName: `psd-agent-router-${environment}`,
       // AWS recommends visibility timeout >= 6x Lambda timeout to prevent
-      // duplicate processing. Lambda timeout is 3 min, so 18 min minimum.
-      visibilityTimeout: cdk.Duration.minutes(18),
+      // duplicate processing. Lambda timeout is 5 min, so 30 min minimum.
+      visibilityTimeout: cdk.Duration.minutes(30),
       retentionPeriod: cdk.Duration.days(4),
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       deadLetterQueue: {
@@ -738,7 +767,12 @@ export class AgentPlatformStack extends cdk.Stack {
         },
       ),
       memorySize: config.compute.lambdaMemory,
-      timeout: cdk.Duration.minutes(3), // Agent responses can take time
+      // Agent responses can take time. Observed >120s for fresh microVM cold
+      // starts (S3 workspace pull + LLM cold path). 5 min gives headroom for
+      // legitimate slow runs without hiding genuine hangs. Bumping the SQS
+      // visibilityTimeout below would also need updating to stay >= 6x this
+      // value if we go higher.
+      timeout: cdk.Duration.minutes(5),
       architecture: lambda.Architecture.ARM_64,
       role: this.routerLambdaRole,
       logGroup: routerLogGroup,
@@ -748,6 +782,7 @@ export class AgentPlatformStack extends cdk.Stack {
       environment: {
         ENVIRONMENT: environment,
         USERS_TABLE: this.usersTable.tableName,
+        MESSAGE_DEDUP_TABLE: this.messageDedupTable.tableName,
         GUARDRAIL_ID: props.guardrailId,
         GUARDRAIL_VERSION: props.guardrailVersion || 'DRAFT',
         DATABASE_HOST: props.databaseHost,
@@ -765,6 +800,17 @@ export class AgentPlatformStack extends cdk.Stack {
         // AGENTCORE_RUNTIME_ID is intentionally NOT set here — it is resolved
         // from SSM at runtime because the Runtime resource is conditionally
         // created only when an image tag is provided via CDK context.
+        //
+        // AGENT_BUILD_TAG — short stable identifier for the deployed AgentCore
+        // image. Mixed into the AgentCore session ID so every deploy
+        // invalidates sticky-routed microVMs. Without this, AgentCore happily
+        // serves an existing user's session from a microVM running an OLD
+        // image until idleRuntimeSessionTimeout, which can be hours for an
+        // active user — a real correctness/security risk at scale. Empty
+        // string is fine; it just means we did not pin a digest this deploy.
+        AGENT_BUILD_TAG: imageDigest
+          ? imageDigest.replace('sha256:', '').substring(0, 12)
+          : (imageTag ?? ''),
       },
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
