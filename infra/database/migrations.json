@@ -60,6 +60,7 @@
     "062-mcp-tool-source.sql",
     "063-prompt-library-settings.sql",
     "064-add-voice-mode-tool.sql",
-    "065-agent-telemetry-tables.sql"
+    "065-agent-telemetry-tables.sql",
+    "066-agent-operations-tables.sql"
   ]
 }

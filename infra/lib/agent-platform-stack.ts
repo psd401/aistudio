@@ -3,6 +3,7 @@ import { Construct } from 'constructs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -251,8 +252,24 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(this.messageDedupTable).add('Environment', environment);
     cdk.Tags.of(this.messageDedupTable).add('ManagedBy', 'cdk');
 
+    // 4d. Inter-Agent Communication table — tracks agent-to-agent messages
+    // for rate limiting and anti-loop detection. Uses TTL for automatic cleanup.
+    const interAgentTable = new dynamodb.Table(this, 'AgentInterAgentTable', {
+      tableName: `psd-agent-interagent-${environment}`,
+      partitionKey: { name: 'senderBotId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sentAt', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      timeToLiveAttribute: 'expiresAt',
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(interAgentTable).add('Environment', environment);
+    cdk.Tags.of(interAgentTable).add('ManagedBy', 'cdk');
+
     // =====================================================================
-    // 4c. Google Credentials Secret (CDK-managed, operator populates)
+    // 4e. Google Credentials Secret (CDK-managed, operator populates)
     // =====================================================================
     // CDK creates the secret with placeholder value. After deploy, populate
     // it with the Google service account JSON:
@@ -680,6 +697,7 @@ export class AgentPlatformStack extends cdk.Stack {
         this.usersTable.tableName,
         this.signalsTable.tableName,
         this.messageDedupTable.tableName,
+        interAgentTable.tableName,
       ],
       s3Buckets: [this.workspaceBucket.bucketName],
       // WORKAROUND: ServiceRoleFactory checks startsWith("arn:") to detect full
@@ -834,42 +852,134 @@ export class AgentPlatformStack extends cdk.Stack {
     }
 
     // =====================================================================
-    // 7. EventBridge Rules — Agent Cron Jobs
+    // 6b. Cedar Policies — S3 Upload
     // =====================================================================
-    // All rules DISABLED by default until the Cron Lambda is created in a
-    // separate issue. The rules will target the Cron Lambda once it exists.
+    // Upload Cedar governance policies to the workspace bucket under policies/.
+    // AgentCore reads these at session start. Policies can be updated by
+    // re-uploading to S3 without redeploying the stack.
+
+    new s3deploy.BucketDeployment(this, 'CedarPolicyDeployment', {
+      sources: [s3deploy.Source.asset(path.join(__dirname, '..', 'policies'))],
+      destinationBucket: this.workspaceBucket,
+      destinationKeyPrefix: 'policies/',
+      prune: false, // Don't delete other objects in the prefix
+    });
+
+    // =====================================================================
+    // 7. Cron Lambda & EventBridge Rules — Agent Scheduled Tasks
+    // =====================================================================
 
     const cronSchedules = config.agent.cronSchedules;
 
-    // EventBridge rules for agent cron jobs. Disabled until Cron Lambda is created.
-    // CDK registers constructs in the construct tree by ID at construction time —
-    // no variable reference needed. Variables will be added when addTarget() is
-    // called after the Cron Lambda is implemented.
+    const cronLogGroup = new logs.LogGroup(this, 'CronLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-cron-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(cronLogGroup).add('Environment', environment);
+    cdk.Tags.of(cronLogGroup).add('ManagedBy', 'cdk');
 
+    const cronLambda = new lambda.Function(this, 'CronLambda', {
+      functionName: `psd-agent-cron-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-cron'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-cron');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: config.compute.lambdaMemory,
+      // Generous timeout: Cron Lambda processes users sequentially with 30s stagger.
+      // 6 users × 30s stagger + ~60s per AgentCore invocation = ~9 minutes max.
+      // 15 minutes gives headroom for more users and slow responses.
+      timeout: cdk.Duration.minutes(15),
+      architecture: lambda.Architecture.ARM_64,
+      role: this.cronLambdaRole,
+      logGroup: cronLogGroup,
+      environment: {
+        ENVIRONMENT: environment,
+        USERS_TABLE: this.usersTable.tableName,
+        GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,
+        STAGGER_DELAY_MS: '30000',
+        AWS_ACCOUNT_ID: this.account,
+        AGENT_BUILD_TAG: imageDigest
+          ? imageDigest.replace('sha256:', '').substring(0, 12)
+          : (imageTag ?? ''),
+      },
+    });
+
+    cdk.Tags.of(cronLambda).add('Environment', environment);
+    cdk.Tags.of(cronLambda).add('ManagedBy', 'cdk');
+
+    // Grant Cron Lambda access to Google credentials secret
+    this.googleCredentialsSecret.grantRead(this.cronLambdaRole);
+
+    // Grant Cron Lambda SSM access for AgentCore Runtime ID
+    this.cronLambdaRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+    );
+
+    // EventBridge rules targeting the Cron Lambda — ENABLED now that the
+    // Lambda exists. Each rule passes the scheduleType in the event detail.
     const ruleDefinitions = [
       {
         id: 'MorningBriefRule',
         name: `psd-agent-morning-brief-${environment}`,
         description: 'Morning briefing for PSD AI agents — 9 AM PDT / 16:00 UTC weekdays',
         schedule: cronSchedules.morningBrief,
+        scheduleType: 'morning-brief',
       },
       {
         id: 'EveningWrapRule',
         name: `psd-agent-evening-wrap-${environment}`,
         description: 'Evening wrap-up for PSD AI agents — 6 PM PDT / 01:00 UTC weekdays',
         schedule: cronSchedules.eveningWrap,
+        scheduleType: 'evening-wrap',
       },
       {
         id: 'WeeklySummaryRule',
         name: `psd-agent-weekly-summary-${environment}`,
         description: 'Weekly summary for PSD AI agents — 3 PM PDT Friday / 22:00 UTC',
         schedule: cronSchedules.weeklySummary,
+        scheduleType: 'weekly-summary',
       },
       {
         id: 'KaizenScanRule',
         name: `psd-agent-kaizen-scan-${environment}`,
         description: 'Kaizen improvement scan for PSD AI agents — 8 PM PDT Sunday / 03:00 UTC Monday',
         schedule: cronSchedules.kaizenScan,
+        scheduleType: 'kaizen-scan',
       },
     ];
 
@@ -878,8 +988,15 @@ export class AgentPlatformStack extends cdk.Stack {
         ruleName: def.name,
         description: def.description,
         schedule: events.Schedule.expression(def.schedule),
-        enabled: false,
+        enabled: true, // Enabled — Cron Lambda is now wired
       });
+      rule.addTarget(new eventsTargets.LambdaFunction(cronLambda, {
+        event: events.RuleTargetInput.fromObject({
+          source: 'psd-agent-platform',
+          'detail-type': 'Scheduled Agent Task',
+          detail: { scheduleType: def.scheduleType },
+        }),
+      }));
       cdk.Tags.of(rule).add('Environment', environment);
       cdk.Tags.of(rule).add('ManagedBy', 'cdk');
     }
@@ -1009,6 +1126,8 @@ export class AgentPlatformStack extends cdk.Stack {
         ENVIRONMENT: environment,
         USERS_TABLE: this.usersTable.tableName,
         MESSAGE_DEDUP_TABLE: this.messageDedupTable.tableName,
+        INTERAGENT_TABLE: interAgentTable.tableName,
+        MAX_INTERAGENT_MESSAGES_PER_HOUR: '5',
         GUARDRAIL_ID: props.guardrailId,
         GUARDRAIL_VERSION: props.guardrailVersion || 'DRAFT',
         DATABASE_HOST: props.databaseHost,
@@ -1303,6 +1422,16 @@ export class AgentPlatformStack extends cdk.Stack {
         stringValue: this.routerLambda.functionArn,
         description: 'Router Lambda function ARN',
       }),
+      new ssm.StringParameter(this, 'CronLambdaArnParam', {
+        parameterName: `/aistudio/${environment}/agent-cron-lambda-arn`,
+        stringValue: cronLambda.functionArn,
+        description: 'Cron Lambda function ARN',
+      }),
+      new ssm.StringParameter(this, 'InterAgentTableNameParam', {
+        parameterName: `/aistudio/${environment}/agent-interagent-table-name`,
+        stringValue: interAgentTable.tableName,
+        description: 'DynamoDB table name for inter-agent communication tracking',
+      }),
     ];
 
     for (const param of ssmParams) {
@@ -1374,6 +1503,16 @@ export class AgentPlatformStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'RouterQueueArn', {
       value: this.routerQueue.queueArn,
       description: 'SQS queue ARN for Google Chat messages',
+    });
+
+    new cdk.CfnOutput(this, 'CronLambdaArn', {
+      value: cronLambda.functionArn,
+      description: 'Cron Lambda function ARN',
+    });
+
+    new cdk.CfnOutput(this, 'InterAgentTableName', {
+      value: interAgentTable.tableName,
+      description: 'DynamoDB table for inter-agent communication tracking',
     });
   }
 }
