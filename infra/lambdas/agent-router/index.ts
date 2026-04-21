@@ -1126,16 +1126,18 @@ async function processRecord(
         spaceName,
         threadName,
         `🔄 Anti-loop protection: This agent-to-agent conversation has been paused after 2 exchanges. ` +
-        `A human must approve continuing. Reply "continue" to resume.`,
+        `A human can continue the conversation by sending a direct message to either agent.`,
         log
       );
       return;
     }
 
-    // Record the inter-agent message for rate limiting
+    // Record the inter-agent message for rate limiting and anti-loop tracking.
+    // targetBotId is 'any-bot' to match the anti-loop query which checks
+    // both directions using the same sentinel value.
     await recordInterAgentMessage(
       senderBotId,
-      'shared-space',
+      'any-bot',
       spaceName,
       threadName,
       log

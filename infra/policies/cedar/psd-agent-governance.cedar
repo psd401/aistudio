@@ -134,9 +134,11 @@ forbid(
 )
 unless { resource.source like "s3://psd-agents-*" };
 
-// Block all external HTTP requests unless explicitly allowlisted above
+// Block all external HTTP requests unless explicitly allowlisted below.
 // This is the default-deny catch-all for network access.
-// To add new allowed endpoints, add a permit() rule above this forbid().
+// To allow new endpoints, add them to the `unless` clause below.
+// NOTE: In Cedar, forbid always overrides permit — adding a permit()
+// for http.request would NOT bypass this rule.
 forbid(
   principal,
   action == Action::"http.request",

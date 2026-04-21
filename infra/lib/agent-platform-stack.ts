@@ -776,6 +776,17 @@ export class AgentPlatformStack extends cdk.Stack {
             resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
           })],
         }),
+        // SSM Parameter Store — resolve AgentCore Runtime ID at runtime
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'SSMParameterAccess',
+            effect: iam.Effect.ALLOW,
+            actions: ['ssm:GetParameter', 'ssm:GetParameters'],
+            resources: [
+              `arn:aws:ssm:${this.region}:${this.account}:parameter/aistudio/${environment}/*`,
+            ],
+          })],
+        }),
       ],
     });
 
@@ -945,7 +956,7 @@ export class AgentPlatformStack extends cdk.Stack {
     // Grant Cron Lambda access to Google credentials secret
     this.googleCredentialsSecret.grantRead(this.cronLambdaRole);
 
-    // Grant Cron Lambda SSM access for AgentCore Runtime ID
+    // Grant Cron Lambda basic CloudWatch Logs permissions
     this.cronLambdaRole.addManagedPolicy(
       iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
     );

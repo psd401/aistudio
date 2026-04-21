@@ -40,6 +40,17 @@ import * as chatPkg from '@googleapis/chat';
 import * as crypto from 'crypto';
 
 // ---------------------------------------------------------------------------
+// PII sanitization — mask email addresses in logs (FERPA compliance)
+// ---------------------------------------------------------------------------
+
+function sanitizeEmail(email: string): string {
+  if (!email) return '';
+  const [local, domain] = email.split('@');
+  if (!domain) return `${email.charAt(0)}***`;
+  return `${local.charAt(0)}***@${domain}`;
+}
+
+// ---------------------------------------------------------------------------
 // Structured logging
 // ---------------------------------------------------------------------------
 
@@ -506,7 +517,7 @@ export async function handler(
     const dmSpaceName = user.dmSpaceName || dmSpaces.get(user.googleIdentity);
     if (!dmSpaceName) {
       log.warn('No DM space found for user — skipping (user has not DM\'d the bot yet)', {
-        email: user.email,
+        email: sanitizeEmail(user.email),
         googleIdentity: user.googleIdentity,
       });
       failed++;
@@ -523,7 +534,7 @@ export async function handler(
       const sessionId = `${user.workspacePrefix}-sched-${scheduleHash}-${buildTag}`;
 
       log.info('Invoking agent for scheduled task', {
-        email: user.email,
+        email: sanitizeEmail(user.email),
         scheduleType,
         sessionId,
       });
@@ -547,7 +558,7 @@ export async function handler(
       );
 
       log.info('Scheduled task completed', {
-        email: user.email,
+        email: sanitizeEmail(user.email),
         scheduleType,
         inputTokens: result.inputTokens,
         outputTokens: result.outputTokens,
@@ -555,7 +566,7 @@ export async function handler(
       succeeded++;
     } catch (error) {
       log.error('Scheduled task failed for user', {
-        email: user.email,
+        email: sanitizeEmail(user.email),
         scheduleType,
         error: error instanceof Error ? error.message : String(error),
       });

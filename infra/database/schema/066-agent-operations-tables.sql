@@ -5,6 +5,10 @@
 --   agent_scheduled_runs  — history of scheduled cron executions
 --   agent_interagent_log  — inter-agent message audit trail
 --   agent_policy_events   — Cedar governance enforcement events
+--
+-- NOTE: These tables are pre-provisioned. Write paths will be added
+-- incrementally: cron telemetry in a follow-up to #889, interagent
+-- and policy logging once AgentCore Cedar integration is wired.
 
 -- Mark any previous failed attempts as completed so the runner stops retrying.
 UPDATE migration_log SET status = 'completed'
