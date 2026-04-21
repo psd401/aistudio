@@ -61,6 +61,7 @@
     "063-prompt-library-settings.sql",
     "064-add-voice-mode-tool.sql",
     "065-agent-telemetry-tables.sql",
-    "066-agent-operations-tables.sql"
+    "066-agent-operations-tables.sql",
+    "067-agent-schedules-columns.sql"
   ]
 }

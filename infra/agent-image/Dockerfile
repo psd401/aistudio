@@ -106,6 +106,7 @@ COPY harness_adapter.py /app/harness_adapter.py
 COPY agentcore_wrapper.py /app/agentcore_wrapper.py
 COPY workspace_sync.py /app/workspace_sync.py
 COPY mantle_proxy.py /app/mantle_proxy.py
+COPY agent_schedules.py /app/agent_schedules.py
 
 # Set ownership for the node user (OpenClaw runs as node)
 RUN chown -R node:node /home/node/.openclaw /app

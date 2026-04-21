@@ -39,6 +39,27 @@ permit(
   resource
 );
 
+// Allow per-user schedule management via DynamoDB on the schedules table only.
+// The agent can only act on schedule rows keyed to the authenticated caller's
+// email (enforced in application logic — DynamoDB does not natively scope by
+// item attribute). The ${env} placeholder is rendered server-side when
+// AgentCore loads the policy bundle from S3.
+permit(
+  principal,
+  action in [
+    Action::"dynamodb.PutItem",
+    Action::"dynamodb.UpdateItem",
+    Action::"dynamodb.DeleteItem",
+    Action::"dynamodb.GetItem",
+    Action::"dynamodb.Query"
+  ],
+  resource
+)
+when {
+  principal.type == "AgentCore::Runtime" &&
+  resource.table like "psd-agent-schedules-*"
+};
+
 // Allow file writes within the agent's own workspace (sandboxed per-user in S3)
 permit(
   principal,

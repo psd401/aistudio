@@ -1,30 +1,29 @@
 /**
- * Agent Cron Lambda
+ * Agent Cron Lambda — v2 (per-user, per-schedule)
  *
- * Triggered by EventBridge rules for scheduled agent tasks:
- *   - Morning Brief (9 AM weekdays)
- *   - Evening Wrap (6 PM weekdays)
- *   - Weekly Summary (3 PM Friday)
- *   - Kaizen Scan (8 PM Sunday)
+ * Triggered by EventBridge Scheduler. Each user-defined schedule in the
+ * psd-agent-schedules-{env} DynamoDB table has exactly one corresponding
+ * EventBridge Scheduler entry that targets this Lambda with a payload
+ * describing a single invocation:
  *
- * Flow:
- *   1. Receive EventBridge event with schedule type
- *   2. Scan DynamoDB for all active users
- *   3. For each user, stagger by 30s to avoid Bedrock API throttling
- *   4. Invoke AgentCore session with the scheduled prompt
- *   5. Deliver output to user's Google Chat DM
+ *   {
+ *     scheduleId:      "3f1e9d...",       // UUID, primary key in schedules table
+ *     scheduleName:    "Morning Brief",   // user-defined label
+ *     userEmail:       "hagelk@psd401.net",
+ *     googleIdentity:  "users/12345",     // Google Chat stable user ID
+ *     prompt:          "Generate my morning brief...",
+ *     dmSpaceName:     "spaces/abc"       // optional — resolved on demand if absent
+ *   }
  *
- * Environment variables (injected by CDK):
- *   ENVIRONMENT            — dev/staging/prod
- *   USERS_TABLE            — DynamoDB table name
- *   GOOGLE_CREDENTIALS_SECRET_ARN — Secrets Manager ARN for Google service account JSON
- *   STAGGER_DELAY_MS       — Delay between user wakeups (default 30000)
+ * One payload = one user = one AgentCore invocation = one DM. No batching,
+ * no cross-user stagger, no hard cap. Writes a row to `agent_scheduled_runs`
+ * for every invocation (success or failure).
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
-  ScanCommand as DocScanCommand,
+  GetCommand,
 } from '@aws-sdk/lib-dynamodb';
 import {
   SecretsManagerClient,
@@ -35,9 +34,10 @@ import { SignatureV4 } from '@smithy/signature-v4';
 import { Sha256 } from '@aws-crypto/sha256-js';
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import { HttpRequest } from '@smithy/protocol-http';
-import type { EventBridgeEvent, Context as LambdaContext } from 'aws-lambda';
+import type { Context as LambdaContext } from 'aws-lambda';
 import * as chatPkg from '@googleapis/chat';
 import * as crypto from 'crypto';
+import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
 
 // ---------------------------------------------------------------------------
 // PII sanitization — mask email addresses in logs (FERPA compliance)
@@ -58,41 +58,45 @@ function generateRequestId(): string {
   return `cron_${crypto.randomUUID()}`;
 }
 
-function createLogger(context: Record<string, unknown> = {}) {
-  const baseContext = {
-    service: 'agent-cron',
-    ...context,
-  };
+type Logger = {
+  info: (msg: string, meta?: Record<string, unknown>) => void;
+  warn: (msg: string, meta?: Record<string, unknown>) => void;
+  error: (msg: string, meta?: Record<string, unknown>) => void;
+};
 
+function createLogger(context: Record<string, unknown> = {}): Logger {
+  const base = { service: 'agent-cron', ...context };
+  const emit = (
+    level: 'INFO' | 'WARN' | 'ERROR',
+    stream: NodeJS.WritableStream,
+    msg: string,
+    meta: Record<string, unknown> = {},
+  ) => {
+    stream.write(
+      JSON.stringify({
+        level,
+        message: msg,
+        timestamp: new Date().toISOString(),
+        ...base,
+        ...meta,
+      }) + '\n',
+    );
+  };
   return {
-    info: (message: string, meta: Record<string, unknown> = {}) => {
-      process.stdout.write(
-        JSON.stringify({ level: 'INFO', message, timestamp: new Date().toISOString(), ...baseContext, ...meta }) +
-          '\n'
-      );
-    },
-    error: (message: string, meta: Record<string, unknown> = {}) => {
-      process.stderr.write(
-        JSON.stringify({ level: 'ERROR', message, timestamp: new Date().toISOString(), ...baseContext, ...meta }) +
-          '\n'
-      );
-    },
-    warn: (message: string, meta: Record<string, unknown> = {}) => {
-      process.stdout.write(
-        JSON.stringify({ level: 'WARN', message, timestamp: new Date().toISOString(), ...baseContext, ...meta }) +
-          '\n'
-      );
-    },
+    info: (m, meta) => emit('INFO', process.stdout, m, meta),
+    warn: (m, meta) => emit('WARN', process.stdout, m, meta),
+    error: (m, meta) => emit('ERROR', process.stderr, m, meta),
   };
 }
 
 // ---------------------------------------------------------------------------
-// AWS SDK clients (re-used across invocations)
+// AWS SDK clients (shared across warm invocations)
 // ---------------------------------------------------------------------------
 
 const dynamoClient = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const secretsClient = new SecretsManagerClient({});
 const ssmClient = new SSMClient({});
+const rdsDataClient = new RDSDataClient({});
 
 const agentCoreCredentials = defaultProvider();
 const agentCoreSigner = new SignatureV4({
@@ -109,81 +113,12 @@ const agentCoreSigner = new SignatureV4({
 const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
 const USERS_TABLE = process.env.USERS_TABLE || '';
 const GOOGLE_CREDENTIALS_SECRET_ARN = process.env.GOOGLE_CREDENTIALS_SECRET_ARN || '';
-const STAGGER_DELAY_MS = parseInt(process.env.STAGGER_DELAY_MS || '30000', 10);
-
-// Hard cap on users per cron run to prevent Lambda timeout.
-// At 30s stagger + ~60s per invocation, 6 users ≈ 8.5 minutes.
-// Lambda has a hard 15-minute ceiling. Default of 6 gives ~6.5 minutes of
-// headroom for slow AgentCore responses (which can take 2-3 min under load).
-// At 10 users the budget was 14.5 min — essentially no margin.
-// Increase only with architectural change (SQS fan-out).
-const MAX_USERS_PER_RUN = parseInt(process.env.MAX_USERS_PER_RUN || '6', 10);
+const DATABASE_RESOURCE_ARN = process.env.DATABASE_RESOURCE_ARN || '';
+const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || '';
+const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
 
 // ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-interface AgentUser {
-  googleIdentity: string;
-  email: string;
-  displayName: string;
-  department: string;
-  workspacePrefix: string;
-  /** Google Chat DM space name — populated after first welcome */
-  dmSpaceName?: string;
-  createdAt: string;
-  lastActiveAt: string;
-  sessionCount: number;
-}
-
-interface ScheduleDetail {
-  scheduleType: 'morning-brief' | 'evening-wrap' | 'weekly-summary' | 'kaizen-scan';
-}
-
-// ---------------------------------------------------------------------------
-// Schedule prompts — baked into the Cron Lambda image
-// ---------------------------------------------------------------------------
-
-const SCHEDULE_PROMPTS: Record<string, string> = {
-  'morning-brief': [
-    'Generate my morning brief. Include:',
-    '- Today\'s calendar events and meetings',
-    '- Overdue or high-priority tasks',
-    '- Relevant email highlights from overnight',
-    '- Any items that need my attention before 10 AM',
-    'Keep it concise and actionable.',
-  ].join('\n'),
-
-  'evening-wrap': [
-    'Generate my evening wrap-up. Include:',
-    '- Summary of what happened today (meetings attended, decisions made)',
-    '- Tasks that stalled or need follow-up',
-    '- Items to prepare for tomorrow',
-    '- Any threads I should respond to before end of day',
-    'Keep it concise.',
-  ].join('\n'),
-
-  'weekly-summary': [
-    'Generate my weekly summary for this week. Include:',
-    '- Completed items and key accomplishments',
-    '- Pending items and blockers',
-    '- Patterns you\'ve noticed across the week (recurring topics, escalations)',
-    '- Recommended focus areas for next week',
-    'Format as a brief executive summary.',
-  ].join('\n'),
-
-  'kaizen-scan': [
-    'Run your weekly self-improvement scan. Include:',
-    '- AI developments relevant to my role this week',
-    '- New tools, techniques, or frameworks worth knowing about',
-    '- Suggestions for improving our workflows based on this week\'s patterns',
-    '- One specific thing I could try next week to be more effective',
-    'Keep it focused and practical.',
-  ].join('\n'),
-};
-
-// ---------------------------------------------------------------------------
-// Cached secrets
+// Cached secrets and clients
 // ---------------------------------------------------------------------------
 
 let cachedGoogleCredentials: string | null = null;
@@ -196,14 +131,29 @@ let cachedRuntimeId: string | null = null;
 let runtimeIdCachedAt: number | null = null;
 const RUNTIME_ID_TTL_MS = 10 * 60 * 1000;
 
-// Cache discovered DM spaces across warm invocations to avoid N+1 Google Chat
-// API calls on every cron fire.
-let cachedDmSpaces: Map<string, string> | null = null;
-let dmSpacesCachedAt: number | null = null;
-const DM_SPACES_TTL_MS = 10 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
-// Helper functions
+// Types
+// ---------------------------------------------------------------------------
+
+interface ScheduleEvent {
+  scheduleId: string;
+  scheduleName: string;
+  userEmail: string;
+  googleIdentity?: string;
+  prompt: string;
+  dmSpaceName?: string;
+}
+
+interface InvokeResult {
+  response: string;
+  inputTokens: number;
+  outputTokens: number;
+  ok: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
 // ---------------------------------------------------------------------------
 
 async function getGoogleCredentials(): Promise<string> {
@@ -218,7 +168,7 @@ async function getGoogleCredentials(): Promise<string> {
     throw new Error('GOOGLE_CREDENTIALS_SECRET_ARN not configured');
   }
   const result = await secretsClient.send(
-    new GetSecretValueCommand({ SecretId: GOOGLE_CREDENTIALS_SECRET_ARN })
+    new GetSecretValueCommand({ SecretId: GOOGLE_CREDENTIALS_SECRET_ARN }),
   );
   cachedGoogleCredentials = result.SecretString || '';
   credentialsCachedAt = Date.now();
@@ -228,10 +178,8 @@ async function getGoogleCredentials(): Promise<string> {
 
 async function getChatClient(): Promise<ReturnType<typeof chatPkg.chat>> {
   if (cachedChatClient) return cachedChatClient;
-
   const credentialsJson = await getGoogleCredentials();
   const credentials = JSON.parse(credentialsJson) as Record<string, unknown>;
-
   const googleAuth = new chatPkg.auth.GoogleAuth({
     credentials,
     scopes: ['https://www.googleapis.com/auth/chat.bot'],
@@ -240,87 +188,81 @@ async function getChatClient(): Promise<ReturnType<typeof chatPkg.chat>> {
   return cachedChatClient;
 }
 
-async function getRuntimeId(log: ReturnType<typeof createLogger>): Promise<string> {
+async function getRuntimeId(log: Logger): Promise<string> {
   let runtimeId = process.env.AGENTCORE_RUNTIME_ID || '';
-  if (!runtimeId) {
-    if (
-      cachedRuntimeId &&
-      runtimeIdCachedAt &&
-      Date.now() - runtimeIdCachedAt < RUNTIME_ID_TTL_MS
-    ) {
-      runtimeId = cachedRuntimeId;
-    } else {
-      try {
-        const param = await ssmClient.send(
-          new GetParameterCommand({
-            Name: `/aistudio/${ENVIRONMENT}/agentcore-runtime-id`,
-          })
-        );
-        runtimeId = param.Parameter?.Value || '';
-        if (runtimeId) {
-          cachedRuntimeId = runtimeId;
-          runtimeIdCachedAt = Date.now();
-        }
-      } catch {
-        log.error('Failed to resolve AgentCore Runtime ID from SSM');
-      }
+  if (runtimeId) return runtimeId;
+  if (
+    cachedRuntimeId &&
+    runtimeIdCachedAt &&
+    Date.now() - runtimeIdCachedAt < RUNTIME_ID_TTL_MS
+  ) {
+    return cachedRuntimeId;
+  }
+  try {
+    const param = await ssmClient.send(
+      new GetParameterCommand({
+        Name: `/aistudio/${ENVIRONMENT}/agentcore-runtime-id`,
+      }),
+    );
+    runtimeId = param.Parameter?.Value || '';
+    if (runtimeId) {
+      cachedRuntimeId = runtimeId;
+      runtimeIdCachedAt = Date.now();
     }
+  } catch (error) {
+    log.error('Failed to resolve AgentCore Runtime ID from SSM', {
+      error: error instanceof Error ? error.message : String(error),
+    });
   }
   return runtimeId;
 }
 
-/**
- * Fetch all users eligible for scheduled tasks. Uses a Scan with a
- * FilterExpression to skip users who have never been active (no email).
- *
- * NOTE: At 6 users this Scan is fine. When user count exceeds ~50, add a
- * GSI on an `agentEnabled` boolean attribute to avoid full-table scans.
- */
-async function getAllActiveUsers(
-  log: ReturnType<typeof createLogger>
-): Promise<AgentUser[]> {
-  const users: AgentUser[] = [];
-  let lastKey: Record<string, unknown> | undefined;
-
-  do {
-    const result = await dynamoClient.send(
-      new DocScanCommand({
-        TableName: USERS_TABLE,
-        ExclusiveStartKey: lastKey,
-        // Basic filter: skip entries without a valid email (malformed records)
-        FilterExpression: 'attribute_exists(email) AND email <> :empty',
-        ExpressionAttributeValues: {
-          ':empty': '',
-        },
-      })
-    );
-
-    if (result.Items) {
-      users.push(...(result.Items as AgentUser[]));
-    }
-    lastKey = result.LastEvaluatedKey as Record<string, unknown> | undefined;
-  } while (lastKey);
-
-  log.info('Fetched active users', { count: users.length });
-  return users;
+async function resolveDmSpace(
+  googleIdentity: string,
+  log: Logger,
+): Promise<string | null> {
+  try {
+    const chatClient = await getChatClient();
+    // List spaces and find the DM that contains this user.
+    // Bounded by the bot's DM count (one per user who has messaged the bot),
+    // so this is cheap and has no per-user N+1 when handling a single user.
+    let pageToken: string | undefined;
+    do {
+      const resp = await chatClient.spaces.list({ pageToken, pageSize: 100 });
+      const spaces = resp.data.spaces || [];
+      for (const space of spaces) {
+        if (!space.name || !space.singleUserBotDm) continue;
+        const membersResp = await chatClient.spaces.members.list({
+          parent: space.name,
+          pageSize: 10,
+        });
+        for (const m of membersResp.data.memberships || []) {
+          if (m.member?.type === 'HUMAN' && m.member?.name === googleIdentity) {
+            return space.name;
+          }
+        }
+      }
+      pageToken = resp.data.nextPageToken || undefined;
+    } while (pageToken);
+  } catch (error) {
+    log.error('Failed to resolve DM space', {
+      googleIdentity,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+  return null;
 }
 
 async function invokeAgentCore(
-  message: string,
-  userId: string,
+  prompt: string,
+  userEmail: string,
   sessionId: string,
-  log: ReturnType<typeof createLogger>,
-  userContext?: { displayName?: string; workspacePrefix?: string }
-): Promise<{ response: string; inputTokens: number; outputTokens: number; ok: boolean }> {
+  log: Logger,
+  userContext: { displayName?: string; workspacePrefix?: string },
+): Promise<InvokeResult> {
   const runtimeId = await getRuntimeId(log);
-
   if (!runtimeId) {
-    return {
-      response: 'Agent is not yet deployed.',
-      inputTokens: 0,
-      outputTokens: 0,
-      ok: false,
-    };
+    return { response: 'Agent is not yet deployed.', inputTokens: 0, outputTokens: 0, ok: false };
   }
 
   try {
@@ -345,10 +287,10 @@ async function invokeAgentCore(
     }
 
     const body = JSON.stringify({
-      prompt: message,
-      user_email: userId,
-      user_display_name: userContext?.displayName ?? '',
-      workspace_prefix: userContext?.workspacePrefix ?? '',
+      prompt,
+      user_email: userEmail,
+      user_display_name: userContext.displayName ?? '',
+      workspace_prefix: userContext.workspacePrefix ?? '',
       source: 'scheduled',
     });
 
@@ -361,27 +303,23 @@ async function invokeAgentCore(
         'Content-Type': 'application/json',
         host: `bedrock-agentcore.${region}.amazonaws.com`,
         'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': sessionId,
-        'X-Amzn-Bedrock-AgentCore-Runtime-User-Id': userId,
+        'X-Amzn-Bedrock-AgentCore-Runtime-User-Id': userEmail,
       },
       body,
     });
 
     const signed = await agentCoreSigner.sign(request);
-
-    const response = await fetch(
-      `https://${signed.hostname}${signed.path}`,
-      {
-        method: signed.method,
-        headers: signed.headers as Record<string, string>,
-        body: signed.body as string,
-      }
-    );
+    const response = await fetch(`https://${signed.hostname}${signed.path}`, {
+      method: signed.method,
+      headers: signed.headers as Record<string, string>,
+      body: signed.body as string,
+    });
 
     if (!response.ok) {
-      const errorBody = await response.text();
+      const errBody = await response.text();
       log.error('AgentCore invocation failed', {
         status: response.status,
-        body: errorBody.substring(0, 500),
+        body: errBody.substring(0, 500),
       });
       return {
         response: 'Agent encountered an error processing scheduled task.',
@@ -391,10 +329,9 @@ async function invokeAgentCore(
       };
     }
 
-    const responseBody = await response.json() as Record<string, unknown>;
+    const responseBody = (await response.json()) as Record<string, unknown>;
     const result = (responseBody.result as string) || 'No response from agent.';
     const metadata = (responseBody.metadata as Record<string, unknown>) || {};
-
     return {
       response: result,
       inputTokens: (metadata.input_tokens as number) || 0,
@@ -414,108 +351,109 @@ async function invokeAgentCore(
   }
 }
 
-/**
- * Send a message to a Google Chat space. Throws on failure so the caller
- * can count the delivery as failed (rather than silently succeeding).
- */
-async function sendGoogleChatResponse(
+async function sendChatMessage(
   spaceName: string,
   text: string,
-  log: ReturnType<typeof createLogger>
+  log: Logger,
 ): Promise<void> {
   const chatClient = await getChatClient();
-
-  // Truncate response for Google Chat API limits
   const maxLength = 4096;
-  const truncatedText =
+  const truncated =
     text.length > maxLength
       ? text.substring(0, maxLength - 50) + '\n\n_(Response truncated)_'
       : text;
-
   await chatClient.spaces.messages.create({
     parent: spaceName,
-    requestBody: { text: truncatedText },
+    requestBody: { text: truncated },
   });
-
   log.info('Scheduled response sent to Google Chat', {
     space: spaceName,
-    responseLength: truncatedText.length,
+    responseLength: truncated.length,
   });
 }
 
-/**
- * List all DM spaces where the bot has been added.
- * Uses Google Chat API to list spaces, filtering for DMs.
- * Returns a map of google identity (users/{userId}) → space name.
- */
-async function getBotDmSpaces(
-  log: ReturnType<typeof createLogger>
-): Promise<Map<string, string>> {
-  const dmMap = new Map<string, string>();
-
+async function recordRun(params: {
+  userEmail: string;
+  scheduleId: string;
+  scheduleName: string;
+  sessionId: string;
+  inputTokens: number;
+  outputTokens: number;
+  latencyMs: number;
+  status: 'success' | 'error' | 'skipped';
+  errorMessage?: string;
+}, log: Logger): Promise<void> {
+  if (!DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) {
+    log.warn('Database not configured — skipping run telemetry', {
+      scheduleId: params.scheduleId,
+    });
+    return;
+  }
   try {
-    const chatClient = await getChatClient();
-    let pageToken: string | undefined;
-
-    do {
-      const response = await chatClient.spaces.list({
-        pageToken,
-        pageSize: 100,
-      });
-
-      const spaces = response.data.spaces || [];
-
-      // Batch member lookups: collect DM spaces first, then resolve members
-      // concurrently to avoid N+1 sequential API calls.
-      const dmSpacesToResolve = spaces.filter(
-        (s) => !!s.name && !!s.singleUserBotDm
-      );
-
-      // Resolve members in parallel batches (cap at 10 concurrent to respect
-      // Google Chat API rate limits of ~50 QPS for service accounts)
-      const MEMBER_BATCH_SIZE = 10;
-      for (let batch = 0; batch < dmSpacesToResolve.length; batch += MEMBER_BATCH_SIZE) {
-        const chunk = dmSpacesToResolve.slice(batch, batch + MEMBER_BATCH_SIZE);
-        const results = await Promise.allSettled(
-          chunk.map(async (space) => {
-            const membersResp = await chatClient.spaces.members.list({
-              parent: space.name!,
-              pageSize: 10,
-            });
-            return { spaceName: space.name!, members: membersResp.data.memberships || [] };
-          })
-        );
-
-        for (const result of results) {
-          if (result.status === 'fulfilled') {
-            for (const membership of result.value.members) {
-              if (membership.member?.type === 'HUMAN' && membership.member?.name) {
-                dmMap.set(membership.member.name, result.value.spaceName);
-              }
-            }
-          } else {
-            log.warn('Failed to list members for DM space batch', {
-              error: result.reason instanceof Error ? result.reason.message : String(result.reason),
-            });
-          }
-        }
-      }
-
-      pageToken = response.data.nextPageToken || undefined;
-    } while (pageToken);
-
-    log.info('Discovered bot DM spaces', { count: dmMap.size });
+    await rdsDataClient.send(
+      new ExecuteStatementCommand({
+        resourceArn: DATABASE_RESOURCE_ARN,
+        secretArn: DATABASE_SECRET_ARN,
+        database: DATABASE_NAME,
+        sql: `INSERT INTO agent_scheduled_runs
+                (user_id, schedule_id, schedule_name, session_id,
+                 input_tokens, output_tokens, latency_ms, status, error_message)
+              VALUES
+                (:user_id, :schedule_id, :schedule_name, :session_id,
+                 :input_tokens, :output_tokens, :latency_ms, :status, :error_message)`,
+        parameters: [
+          { name: 'user_id', value: { stringValue: params.userEmail } },
+          { name: 'schedule_id', value: { stringValue: params.scheduleId } },
+          { name: 'schedule_name', value: { stringValue: params.scheduleName } },
+          { name: 'session_id', value: { stringValue: params.sessionId } },
+          { name: 'input_tokens', value: { longValue: params.inputTokens } },
+          { name: 'output_tokens', value: { longValue: params.outputTokens } },
+          { name: 'latency_ms', value: { longValue: params.latencyMs } },
+          { name: 'status', value: { stringValue: params.status } },
+          params.errorMessage
+            ? { name: 'error_message', value: { stringValue: params.errorMessage } }
+            : { name: 'error_message', value: { isNull: true } },
+        ],
+      }),
+    );
   } catch (error) {
-    log.error('Failed to list bot DM spaces', {
+    // Telemetry failure must not break delivery; log and continue.
+    log.error('Failed to record scheduled run', {
+      scheduleId: params.scheduleId,
       error: error instanceof Error ? error.message : String(error),
     });
   }
-
-  return dmMap;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+async function lookupUserByGoogleIdentity(
+  googleIdentity: string,
+  log: Logger,
+): Promise<{
+  displayName?: string;
+  workspacePrefix?: string;
+  dmSpaceName?: string;
+} | null> {
+  if (!USERS_TABLE) return null;
+  try {
+    const resp = await dynamoClient.send(
+      new GetCommand({
+        TableName: USERS_TABLE,
+        Key: { googleIdentity },
+      }),
+    );
+    const item = resp.Item;
+    if (!item) return null;
+    return {
+      displayName: item.displayName as string | undefined,
+      workspacePrefix: item.workspacePrefix as string | undefined,
+      dmSpaceName: item.dmSpaceName as string | undefined,
+    };
+  } catch (error) {
+    log.error('User lookup failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -523,148 +461,147 @@ function sleep(ms: number): Promise<void> {
 // ---------------------------------------------------------------------------
 
 export async function handler(
-  event: EventBridgeEvent<string, ScheduleDetail>,
-  _context: LambdaContext
-): Promise<{ processed: number; succeeded: number; failed: number }> {
+  event: ScheduleEvent,
+  _context: LambdaContext,
+): Promise<{ status: 'success' | 'error' | 'skipped'; scheduleId: string }> {
   const requestId = generateRequestId();
-  const log = createLogger({ requestId, environment: ENVIRONMENT });
+  const log = createLogger({
+    requestId,
+    environment: ENVIRONMENT,
+    scheduleId: event?.scheduleId,
+  });
 
-  // Determine schedule type from the event detail
-  // EventBridge rules pass { scheduleType: 'morning-brief' | ... } in detail
-  const scheduleType = event.detail?.scheduleType || 'morning-brief';
-  const prompt = SCHEDULE_PROMPTS[scheduleType];
-
-  if (!prompt) {
-    log.error('Unknown schedule type', { scheduleType });
-    return { processed: 0, succeeded: 0, failed: 0 };
-  }
-
-  log.info('Cron job started', { scheduleType, staggerDelayMs: STAGGER_DELAY_MS });
-
-  // Step 1: Get all active users
-  const users = await getAllActiveUsers(log);
-  if (users.length === 0) {
-    log.warn('No active users found');
-    return { processed: 0, succeeded: 0, failed: 0 };
-  }
-
-  // Step 2: Discover bot DM spaces (cached across warm invocations)
-  let dmSpaces: Map<string, string>;
-  if (
-    cachedDmSpaces &&
-    dmSpacesCachedAt &&
-    Date.now() - dmSpacesCachedAt < DM_SPACES_TTL_MS
-  ) {
-    dmSpaces = cachedDmSpaces;
-    log.info('Using cached DM space map', { count: dmSpaces.size });
-  } else {
-    dmSpaces = await getBotDmSpaces(log);
-    cachedDmSpaces = dmSpaces;
-    dmSpacesCachedAt = Date.now();
-  }
-
-  // Step 3: Process each user with staggered execution
-  // Enforce hard cap to prevent Lambda timeout (15 min budget).
-  if (users.length > MAX_USERS_PER_RUN) {
-    log.warn('User count exceeds per-run cap — processing first batch only', {
-      totalUsers: users.length,
-      maxUsersPerRun: MAX_USERS_PER_RUN,
+  // Validate payload.
+  if (!event?.scheduleId || !event?.userEmail || !event?.prompt) {
+    log.error('Invalid schedule payload', {
+      hasScheduleId: !!event?.scheduleId,
+      hasUserEmail: !!event?.userEmail,
+      hasPrompt: !!event?.prompt,
     });
-  }
-  const usersToProcess = users.slice(0, MAX_USERS_PER_RUN);
-
-  let succeeded = 0;
-  let failed = 0;
-  const buildTag = process.env.AGENT_BUILD_TAG || 'cron';
-
-  for (let i = 0; i < usersToProcess.length; i++) {
-    const user = usersToProcess[i];
-
-    // Stagger — wait between users to avoid Bedrock API throttling
-    if (i > 0) {
-      log.info('Staggering next user', { delayMs: STAGGER_DELAY_MS, userIndex: i });
-      await sleep(STAGGER_DELAY_MS);
-    }
-
-    // Find the user's DM space
-    const dmSpaceName = user.dmSpaceName || dmSpaces.get(user.googleIdentity);
-    if (!dmSpaceName) {
-      log.warn('No DM space found for user — skipping (user has not DM\'d the bot yet)', {
-        email: sanitizeEmail(user.email),
-        googleIdentity: user.googleIdentity,
-      });
-      failed++;
-      continue;
-    }
-
-    try {
-      // Build a schedule-specific session ID — keeps scheduled invocations
-      // separate from interactive sessions so they don't share context.
-      const scheduleHash = crypto.createHash('sha256')
-        .update(`${scheduleType}-${new Date().toISOString().split('T')[0]}`)
-        .digest('hex')
-        .substring(0, 16);
-      const prefix = user.workspacePrefix || user.email.split('@')[0] || 'unknown';
-      const sessionId = `${prefix}-sched-${scheduleHash}-${buildTag}`;
-
-      log.info('Invoking agent for scheduled task', {
-        email: sanitizeEmail(user.email),
-        scheduleType,
-        sessionId,
-      });
-
-      const result = await invokeAgentCore(
-        prompt,
-        user.email,
-        sessionId,
-        log,
-        {
-          displayName: user.displayName,
-          workspacePrefix: user.workspacePrefix,
-        }
-      );
-
-      // Deliver response to the user's DM (even on failure, so they know
-      // something went wrong rather than seeing nothing)
-      await sendGoogleChatResponse(
-        dmSpaceName,
-        `📋 **${scheduleType.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}**\n\n${result.response}`,
-        log
-      );
-
-      if (result.ok) {
-        log.info('Scheduled task completed', {
-          email: sanitizeEmail(user.email),
-          scheduleType,
-          inputTokens: result.inputTokens,
-          outputTokens: result.outputTokens,
-        });
-        succeeded++;
-      } else {
-        log.warn('Scheduled task returned error response', {
-          email: sanitizeEmail(user.email),
-          scheduleType,
-        });
-        failed++;
-      }
-    } catch (error) {
-      log.error('Scheduled task failed for user', {
-        email: sanitizeEmail(user.email),
-        scheduleType,
-        error: error instanceof Error ? error.message : String(error),
-      });
-      failed++;
-    }
+    return { status: 'error', scheduleId: event?.scheduleId ?? 'unknown' };
   }
 
-  const skipped = users.length - usersToProcess.length;
-  const summary = {
-    processed: usersToProcess.length,
-    succeeded,
-    failed,
-    ...(skipped > 0 ? { skipped } : {}),
-  };
+  const scheduleName = event.scheduleName || 'Scheduled Task';
+  const startTime = Date.now();
 
-  log.info('Cron job completed', { ...summary, scheduleType });
-  return { processed: summary.processed, succeeded, failed };
+  log.info('Scheduled task started', {
+    scheduleId: event.scheduleId,
+    scheduleName,
+    email: sanitizeEmail(event.userEmail),
+  });
+
+  // Resolve user metadata from DynamoDB if googleIdentity provided.
+  let userContext: { displayName?: string; workspacePrefix?: string; dmSpaceName?: string } = {};
+  if (event.googleIdentity) {
+    const lookup = await lookupUserByGoogleIdentity(event.googleIdentity, log);
+    if (lookup) userContext = lookup;
+  }
+
+  // Resolve DM space: payload > user record > Google Chat API scan.
+  let dmSpace = event.dmSpaceName || userContext.dmSpaceName || null;
+  if (!dmSpace && event.googleIdentity) {
+    dmSpace = await resolveDmSpace(event.googleIdentity, log);
+  }
+  if (!dmSpace) {
+    log.warn('No DM space found — skipping (user has not DM\'d the bot yet)', {
+      email: sanitizeEmail(event.userEmail),
+      googleIdentity: event.googleIdentity,
+    });
+    await recordRun(
+      {
+        userEmail: event.userEmail,
+        scheduleId: event.scheduleId,
+        scheduleName,
+        sessionId: 'skipped',
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: Date.now() - startTime,
+        status: 'skipped',
+        errorMessage: 'No DM space — user has not initiated DM with bot',
+      },
+      log,
+    );
+    return { status: 'skipped', scheduleId: event.scheduleId };
+  }
+
+  // Session ID — unique per schedule invocation, not shared with interactive
+  // sessions. Keeps scheduled context isolated.
+  const dateKey = new Date().toISOString().split('T')[0];
+  const prefix =
+    userContext.workspacePrefix || event.userEmail.split('@')[0] || 'unknown';
+  const sessionId = `${prefix}-sched-${event.scheduleId.substring(0, 12)}-${dateKey}`;
+
+  // Invoke AgentCore.
+  log.info('Invoking agent for scheduled task', {
+    email: sanitizeEmail(event.userEmail),
+    scheduleName,
+    sessionId,
+  });
+
+  const result = await invokeAgentCore(
+    event.prompt,
+    event.userEmail,
+    sessionId,
+    log,
+    {
+      displayName: userContext.displayName,
+      workspacePrefix: userContext.workspacePrefix,
+    },
+  );
+
+  // Deliver response to DM regardless of success (so user sees errors).
+  try {
+    await sendChatMessage(
+      dmSpace,
+      `📋 **${scheduleName}**\n\n${result.response}`,
+      log,
+    );
+  } catch (error) {
+    log.error('Failed to deliver scheduled response', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    await recordRun(
+      {
+        userEmail: event.userEmail,
+        scheduleId: event.scheduleId,
+        scheduleName,
+        sessionId,
+        inputTokens: result.inputTokens,
+        outputTokens: result.outputTokens,
+        latencyMs: Date.now() - startTime,
+        status: 'error',
+        errorMessage: `Chat delivery failed: ${error instanceof Error ? error.message : String(error)}`,
+      },
+      log,
+    );
+    return { status: 'error', scheduleId: event.scheduleId };
+  }
+
+  const status: 'success' | 'error' = result.ok ? 'success' : 'error';
+  await recordRun(
+    {
+      userEmail: event.userEmail,
+      scheduleId: event.scheduleId,
+      scheduleName,
+      sessionId,
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens,
+      latencyMs: Date.now() - startTime,
+      status,
+      errorMessage: result.ok ? undefined : result.response.substring(0, 500),
+    },
+    log,
+  );
+
+  log.info('Scheduled task completed', {
+    scheduleId: event.scheduleId,
+    scheduleName,
+    status,
+    email: sanitizeEmail(event.userEmail),
+    inputTokens: result.inputTokens,
+    outputTokens: result.outputTokens,
+    latencyMs: Date.now() - startTime,
+  });
+
+  return { status, scheduleId: event.scheduleId };
 }

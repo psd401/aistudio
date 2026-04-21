@@ -1,7 +1,7 @@
 {
   "name": "agent-cron",
-  "version": "1.0.0",
-  "description": "Agent Cron Lambda — Triggers scheduled agent tasks (morning briefs, evening wraps) via EventBridge with staggered execution",
+  "version": "2.0.0",
+  "description": "Agent Cron Lambda — processes a single user-defined schedule invocation (one user, one prompt) triggered by EventBridge Scheduler. Per-schedule invocation replaced the legacy fan-out model.",
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
@@ -16,7 +16,8 @@
     "@aws-sdk/lib-dynamodb": "^3.0.0",
     "@googleapis/chat": "^5.0.0",
     "@smithy/protocol-http": "^4.0.0",
-    "@smithy/signature-v4": "^4.0.0"
+    "@smithy/signature-v4": "^4.0.0",
+    "@aws-sdk/client-rds-data": "^3.0.0"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.145",
