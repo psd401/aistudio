@@ -19,6 +19,8 @@ import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
 import * as apigwv2Authorizers from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import * as apigwv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
+import * as customResources from 'aws-cdk-lib/custom-resources';
 import * as path from 'path';
 import { execSync } from 'child_process';
 // ALPHA CDK CONSTRUCT: @aws-cdk/aws-bedrock-agentcore-alpha has no API stability
@@ -82,6 +84,12 @@ export class AgentPlatformStack extends cdk.Stack {
   public readonly signalsTable: dynamodb.Table;
   /** DynamoDB table for Chat message idempotency (dedup of retries) */
   public readonly messageDedupTable: dynamodb.Table;
+  /** IAM user that owns the Bedrock API key (service-specific credential) */
+  public readonly bedrockApiUser: iam.User;
+  /** Secrets Manager secret carrying the Bedrock API key for Mantle auth */
+  public readonly bedrockApiKeySecret: secretsmanager.Secret;
+  /** SNS topic for platform alarms (DLQ, API key expiry, etc.) */
+  public readonly agentAlarmTopic?: sns.Topic;
   /** AgentCore Runtime (undefined until an image is pushed to ECR) */
   public readonly runtime?: agentcore.Runtime;
   /** AgentCore execution IAM role */
@@ -261,6 +269,219 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(this.googleCredentialsSecret).add('ManagedBy', 'cdk');
 
     // =====================================================================
+    // 4d. Bedrock API key — CDK-provisioned service-specific credential
+    // =====================================================================
+    // OpenClaw authenticates to Bedrock Mantle (the OpenAI-compatible
+    // endpoint) with a Bearer token, which is an IAM "service-specific
+    // credential" tied to a dedicated IAM user. The plumbing below makes
+    // the whole lifecycle self-sufficient — no operator CLI step per env:
+    //
+    //   - IAM user       `psd-agent-bedrock-<env>` (CDK-managed)
+    //   - Inline policy  scoped to bedrock:InvokeModel* on foundation models
+    //   - Secret         `psd-agent-bedrock-api-key-<env>` (placeholder)
+    //   - Lambda         bedrock-api-key-manager — provisions on CREATE,
+    //                    handles scheduled rotation + expiry watchdog
+    //   - Custom Resource fires the Lambda onCreate, which calls
+    //                    iam:CreateServiceSpecificCredential and stashes
+    //                    ServiceCredentialSecret into the Secret above
+    //                    (the secret is only returned by IAM at CREATE time,
+    //                    so this is the single atomic step that populates SM)
+    //   - EventBridge    weekly watchdog, monthly rotation
+    //
+    // Delete the stack → Custom Resource revokes the credential, CDK deletes
+    // user + secret. Nothing to clean up by hand.
+
+    this.bedrockApiUser = new iam.User(this, 'BedrockApiUser', {
+      userName: `psd-agent-bedrock-${environment}`,
+    });
+    // Mantle uses its own IAM namespace (`bedrock-mantle:*`) distinct from
+    // `bedrock:*`. `AmazonBedrockMantleInferenceAccess` grants Get*/List*/
+    // CreateInference/CallWithBearerToken — but we've observed OpenClaw
+    // hitting `/v1/models` at gateway startup (`resolving authentication`)
+    // and getting `access_denied: bedrock-mantle:ListModels` DESPITE the
+    // `List*` wildcard. If ListModels fails, OpenClaw marks the provider
+    // unauthorized for the rest of the session and every inference call
+    // returns "401 Invalid bearer token". Grant `bedrock-mantle:*` broadly
+    // on the default project — this user exists for nothing else.
+    this.bedrockApiUser.attachInlinePolicy(
+      new iam.Policy(this, 'BedrockApiUserMantlePolicy', {
+        statements: [
+          new iam.PolicyStatement({
+            sid: 'MantleFullAccessOnDefaultProject',
+            effect: iam.Effect.ALLOW,
+            actions: ['bedrock-mantle:*'],
+            resources: [
+              `arn:aws:bedrock-mantle:${this.region}:${this.account}:project/*`,
+              `arn:aws:bedrock-mantle:${this.region}:${this.account}:*`,
+              '*', // CallWithBearerToken uses "*" resource per the managed policy reference
+            ],
+          }),
+          // Also grant native Bedrock invoke in case a component bypasses
+          // Mantle. Scoped to foundation models + inference profiles in
+          // this region.
+          new iam.PolicyStatement({
+            sid: 'InvokeBedrockModels',
+            effect: iam.Effect.ALLOW,
+            actions: [
+              'bedrock:InvokeModel',
+              'bedrock:InvokeModelWithResponseStream',
+              'bedrock:Converse',
+              'bedrock:ConverseStream',
+            ],
+            resources: [
+              `arn:aws:bedrock:${this.region}::foundation-model/*`,
+              `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
+            ],
+          }),
+          new iam.PolicyStatement({
+            sid: 'ListModels',
+            effect: iam.Effect.ALLOW,
+            actions: ['bedrock:ListFoundationModels', 'bedrock:GetFoundationModel'],
+            resources: ['*'],
+          }),
+        ],
+      }),
+    );
+    cdk.Tags.of(this.bedrockApiUser).add('Environment', environment);
+    cdk.Tags.of(this.bedrockApiUser).add('ManagedBy', 'cdk');
+
+    this.bedrockApiKeySecret = new secretsmanager.Secret(this, 'BedrockApiKeySecret', {
+      secretName: `psd-agent-bedrock-api-key-${environment}`,
+      description: `Bedrock API key (long-term service-specific credential) for the agent platform. CDK-provisioned on stack create via BedrockApiKeyProvisioner custom resource. IAM user: psd-agent-bedrock-${environment}. Auto-rotated monthly.`,
+    });
+    cdk.Tags.of(this.bedrockApiKeySecret).add('Environment', environment);
+    cdk.Tags.of(this.bedrockApiKeySecret).add('ManagedBy', 'cdk');
+
+    // Alarm topic used by the watchdog — reuses the same alarm topic we
+    // create for Router DLQ alerts further down. But we need it early here,
+    // so we create it right now if alertEmail is configured; the DLQ block
+    // below will reuse it.
+    if (props.alertEmail) {
+      this.agentAlarmTopic = new sns.Topic(this, 'AgentAlarmTopic', {
+        topicName: `psd-agent-alarms-${environment}`,
+        displayName: `PSD Agent Platform Alarms (${environment})`,
+      });
+      this.agentAlarmTopic.addSubscription(
+        new snsSubscriptions.EmailSubscription(props.alertEmail),
+      );
+      cdk.Tags.of(this.agentAlarmTopic).add('Environment', environment);
+      cdk.Tags.of(this.agentAlarmTopic).add('ManagedBy', 'cdk');
+    }
+
+    const bedrockKeyManagerLogGroup = new logs.LogGroup(this, 'BedrockKeyManagerLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-bedrock-key-manager-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+
+    const bedrockKeyManager = new lambda.Function(this, 'BedrockKeyManagerLambda', {
+      functionName: `psd-agent-bedrock-key-manager-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'bedrock-api-key-manager'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'bedrock-api-key-manager');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: 256,
+      timeout: cdk.Duration.minutes(2),
+      architecture: lambda.Architecture.ARM_64,
+      logGroup: bedrockKeyManagerLogGroup,
+      environment: {
+        IAM_USER_NAME: this.bedrockApiUser.userName,
+        SECRET_ID: this.bedrockApiKeySecret.secretArn,
+        ALARM_TOPIC_ARN: this.agentAlarmTopic?.topicArn ?? '',
+        ENVIRONMENT: environment,
+      },
+    });
+
+    // Manager needs to manage the specific IAM user's credentials and write
+    // the provisioned secret.
+    bedrockKeyManager.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'ManageBedrockUserCredentials',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iam:CreateServiceSpecificCredential',
+        'iam:DeleteServiceSpecificCredential',
+        'iam:ListServiceSpecificCredentials',
+        'iam:UpdateServiceSpecificCredential',
+      ],
+      resources: [this.bedrockApiUser.userArn],
+    }));
+    this.bedrockApiKeySecret.grantWrite(bedrockKeyManager);
+    if (this.agentAlarmTopic) {
+      this.agentAlarmTopic.grantPublish(bedrockKeyManager);
+    }
+
+    // Custom Resource — fires bedrockKeyManager with {RequestType: Create|Update|Delete}
+    // on stack events. Provider wires up the two-step CloudFormation dance.
+    const bedrockKeyProvider = new customResources.Provider(this, 'BedrockKeyProvider', {
+      onEventHandler: bedrockKeyManager,
+    });
+    const bedrockKeyProvisioner = new cdk.CustomResource(this, 'BedrockKeyProvisioner', {
+      serviceToken: bedrockKeyProvider.serviceToken,
+    });
+    bedrockKeyProvisioner.node.addDependency(this.bedrockApiUser);
+    bedrockKeyProvisioner.node.addDependency(this.bedrockApiKeySecret);
+
+    // Scheduled rotation — monthly
+    new events.Rule(this, 'BedrockKeyRotationSchedule', {
+      description: 'Monthly rotation of the Bedrock API key',
+      schedule: events.Schedule.rate(cdk.Duration.days(30)),
+      targets: [new eventsTargets.LambdaFunction(bedrockKeyManager, {
+        event: events.RuleTargetInput.fromObject({
+          source: 'psd-agent-platform',
+          'detail-type': 'Scheduled Event',
+          detail: { action: 'rotate' },
+        }),
+      })],
+    });
+
+    // Scheduled watchdog — weekly
+    new events.Rule(this, 'BedrockKeyWatchdogSchedule', {
+      description: 'Weekly expiry check for the Bedrock API key',
+      schedule: events.Schedule.rate(cdk.Duration.days(7)),
+      targets: [new eventsTargets.LambdaFunction(bedrockKeyManager, {
+        event: events.RuleTargetInput.fromObject({
+          source: 'psd-agent-platform',
+          'detail-type': 'Scheduled Event',
+          detail: { action: 'watchdog' },
+        }),
+      })],
+    });
+
+    // =====================================================================
     // 5. IAM Roles
     // =====================================================================
 
@@ -331,6 +552,10 @@ export class AgentPlatformStack extends cdk.Stack {
         `${this.workspaceBucket.bucketArn}/*`,
       ],
     }));
+
+    // Read the Bedrock API key secret at container startup so the wrapper
+    // can expose it to OpenClaw as AWS_BEARER_TOKEN_BEDROCK.
+    this.bedrockApiKeySecret.grantRead(this.agentCoreExecutionRole);
 
     // ECR pull for agent images
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
@@ -585,12 +810,13 @@ export class AgentPlatformStack extends cdk.Stack {
           GUARDRAIL_ARN: props.guardrailArn,
           DATABASE_RESOURCE_ARN: props.databaseResourceArn,
           DATABASE_SECRET_ARN: props.databaseSecretArn,
-          // OpenClaw's auth gate checks for AWS_PROFILE, AWS_ACCESS_KEY_ID, or
-          // AWS_BEARER_TOKEN_BEDROCK before allowing Bedrock API calls. In AgentCore
-          // containers, credentials come from the ECS task role (via the SDK's
-          // default credential chain), but no env var is set. Setting AWS_PROFILE
-          // makes the gate pass; the SDK still uses the task role, not a profile.
-          AWS_PROFILE: 'default',
+          // ARN of the Secrets Manager secret holding the Bedrock API key.
+          // `agentcore_wrapper.py` fetches this on startup and exports its
+          // value as AWS_BEARER_TOKEN_BEDROCK so OpenClaw can authenticate
+          // to Bedrock Mantle (the OpenAI-compatible endpoint). Using a
+          // reference rather than embedding the secret value keeps rotation
+          // seamless — new microVMs just re-read the latest version.
+          BEDROCK_API_KEY_SECRET_ARN: this.bedrockApiKeySecret.secretArn,
           // Identity marker — surfaced in container startup log so we can
           // verify the running code matches the deployed image manifest.
           BUILD_MARKER: imageDigest
@@ -923,11 +1149,29 @@ export class AgentPlatformStack extends cdk.Stack {
     // skip authorizer wiring; the route below will then 401 every request,
     // which is the safe default (no anonymous access).
     if (gcpPubsubAudience) {
+      // Google Pub/Sub signs the OIDC token's `aud` field with the push
+      // subscription's configured audience. Depending on how the
+      // subscription is set up, this may be either the API origin
+      // (https://<api-id>.execute-api.<region>.amazonaws.com) OR the full
+      // push endpoint URL (https://<api-id>...amazonaws.com/chat). We accept
+      // both so a redeploy cannot silently lock out Pub/Sub by narrowing the
+      // audience — real outage 2026-04-20, restored via live authorizer
+      // patch + this widened list.
+      const stripped = gcpPubsubAudience.replace(/\/chat\/*$/, '');
+      const withPath = stripped.endsWith('/chat')
+        ? stripped
+        : `${stripped.replace(/\/$/, '')}/chat`;
+      const acceptedAudiences = Array.from(new Set([
+        gcpPubsubAudience,
+        stripped,
+        withPath,
+      ]));
+
       const jwtAuthorizer = new apigwv2Authorizers.HttpJwtAuthorizer(
         'ChatBridgeJwtAuthorizer',
         'https://accounts.google.com',
         {
-          jwtAudience: [gcpPubsubAudience],
+          jwtAudience: acceptedAudiences,
           identitySource: ['$request.header.Authorization'],
         },
       );
@@ -950,20 +1194,9 @@ export class AgentPlatformStack extends cdk.Stack {
       description: 'Google Chat Pub/Sub push endpoint URL',
     });
 
-    // SNS topic for alarm notifications — only created if alertEmail is provided.
-    // Without a notification target, alarms fire but nobody is notified.
-    let alarmTopic: sns.Topic | undefined;
-    if (props.alertEmail) {
-      alarmTopic = new sns.Topic(this, 'RouterAlarmTopic', {
-        topicName: `psd-agent-router-alarms-${environment}`,
-        displayName: `Agent Router Alarms (${environment})`,
-      });
-      alarmTopic.addSubscription(
-        new snsSubscriptions.EmailSubscription(props.alertEmail)
-      );
-      cdk.Tags.of(alarmTopic).add('Environment', environment);
-      cdk.Tags.of(alarmTopic).add('ManagedBy', 'cdk');
-    }
+    // Alarm topic is created in section 4d (needed early for the Bedrock
+    // key manager's watchdog). Reuse it here for Router/DLQ alerts.
+    const alarmTopic = this.agentAlarmTopic;
 
     // CloudWatch alarm on the DLQ — fires when any message lands in the dead-letter
     // queue, meaning a user's message was silently dropped after 3 retries. In a K-12

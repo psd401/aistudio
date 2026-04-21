@@ -1,22 +1,35 @@
 """
-AgentCore Wrapper — Entrypoint that satisfies the Bedrock AgentCore Runtime contract.
+AgentCore Wrapper — entrypoint that satisfies the Bedrock AgentCore Runtime
+contract.
 
-Architecture (based on aws-samples/sample-host-openclaw-on-amazon-bedrock-agentcore):
-1. Starts the Bedrock proxy (OpenAI → Bedrock ConverseStream adapter) on port 18790
-2. Starts the OpenClaw gateway (connects to proxy as its model provider)
-3. Registers the agent_invocation entrypoint with BedrockAgentCoreApp
-4. Routes incoming payloads through the harness adapter via WebSocket
+Flow on container start:
+  1. Log BUILD_MARKER so CloudWatch proves which image is running
+  2. Fetch the Bedrock API key from Secrets Manager and export it as
+     AWS_BEARER_TOKEN_BEDROCK so OpenClaw can authenticate to Bedrock Mantle
+     (the OpenAI-compatible endpoint)
+  3. Start the OpenClaw gateway configured for Mantle — no local proxy
+  4. Register the agent_invocation entrypoint with BedrockAgentCoreApp
+  5. Route incoming payloads through the harness adapter via WebSocket
 
-Environment variables (injected by AgentCore from CDK stack):
-  ENVIRONMENT          — dev/staging/prod
-  WORKSPACE_BUCKET     — S3 bucket for agent workspaces
-  USERS_TABLE          — DynamoDB table for user identity
-  AWS_PROFILE          — Set to 'default' so OpenClaw auth gate passes
-  AWS_REGION           — AWS region for Bedrock API calls
+Environment variables (injected by AgentCore from the CDK stack):
+  ENVIRONMENT                 — dev/staging/prod
+  WORKSPACE_BUCKET            — S3 bucket for agent workspaces
+  USERS_TABLE                 — DynamoDB table for user identity
+  BEDROCK_API_KEY_SECRET_ARN  — Secrets Manager ARN holding the Bedrock
+                                 API key (service-specific credential). CDK
+                                 provisions + rotates this; we just read it
+                                 on startup and forget about it.
+  AWS_REGION                  — AWS region for the task role's SDK calls
+  BUILD_MARKER                — `tag@sha256:…` of the deployed image
+
+We intentionally no longer run a local Bedrock proxy. Mantle is AWS's
+OpenAI-compatible Bedrock endpoint — OpenClaw speaks OpenAI natively, so
+we point its provider config directly at Mantle. Killing the proxy also
+kills the class of Converse format-translation bugs we used to own
+(orphaned toolUse, parallel tool-result grouping, etc.).
 """
 
 import asyncio
-import json
 import logging
 import os
 import signal
@@ -33,49 +46,151 @@ logging.basicConfig(
 )
 logger = logging.getLogger("agentcore_wrapper")
 
-# Import the harness adapter
 from harness_adapter import OpenClawAdapter
 import workspace_sync
 
-# Initialize the adapter
 adapter = OpenClawAdapter()
 
-# Track the proxy process for cleanup
-proxy_process = None
+# Transparent logging proxy sitting between OpenClaw and Mantle.
+# Track the process so we can reap it on shutdown and log if it crashes.
+_mantle_proxy_process: subprocess.Popen | None = None
+
+
+def start_mantle_proxy() -> None:
+    """
+    Launch the Mantle logging proxy on 127.0.0.1:18791 and block until
+    /health returns 200. If it can't come up, exit — OpenClaw's openclaw.json
+    points its baseUrl at the proxy, so no proxy means no model calls.
+    """
+    global _mantle_proxy_process
+    import urllib.request
+    import urllib.error
+
+    logger.info("Starting Mantle logging proxy on 127.0.0.1:18791")
+    _mantle_proxy_process = subprocess.Popen(
+        [sys.executable, "/app/mantle_proxy.py"],
+        stdout=sys.stdout,
+        stderr=sys.stderr,
+        env={**os.environ},
+    )
+
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        if _mantle_proxy_process.poll() is not None:
+            logger.error(
+                "Mantle proxy exited during startup (rc=%s)",
+                _mantle_proxy_process.returncode,
+            )
+            sys.exit(1)
+        try:
+            with urllib.request.urlopen(
+                "http://127.0.0.1:18791/health", timeout=2
+            ) as r:
+                if r.status == 200:
+                    logger.info("Mantle proxy is ready")
+                    return
+        except (urllib.error.URLError, OSError):
+            pass
+        time.sleep(0.5)
+
+    logger.error("Mantle proxy did not become ready within 20s")
+    sys.exit(1)
 
 # Track which workspace prefix this microVM is currently serving so we can
 # (a) skip redundant S3 pulls and (b) push to the right prefix on shutdown.
 _current_workspace_prefix: str | None = None
 
 
-def start_bedrock_proxy():
-    """Start the Bedrock proxy server (OpenAI → Bedrock ConverseStream)."""
-    global proxy_process
-    logger.info("Starting Bedrock proxy on port 18790")
-    proxy_process = subprocess.Popen(
-        ["node", "/opt/bedrock-proxy/bedrock-proxy.js"],
-        stdout=sys.stdout,
-        stderr=sys.stderr,
-        env={**os.environ},
-    )
+def hydrate_bedrock_api_key() -> None:
+    """
+    Fetch the Bedrock API key from Secrets Manager, export it as
+    AWS_BEARER_TOKEN_BEDROCK, AND inline the literal value into
+    openclaw.json's provider config.
 
-    # Wait for proxy to be ready
-    import urllib.request
-    import urllib.error
+    Why inline and not just env var: OpenClaw has (at least) two code paths
+    that read the provider apiKey — the main chat pipeline and the
+    embedded-agent runner used by plugins. In practice the embedded path
+    has not been resolving `${AWS_BEARER_TOKEN_BEDROCK}` / `env:VAR` refs
+    correctly in the installed gateway version, causing plugins (notably
+    active-memory) to send an empty or literal-string bearer to Mantle and
+    get HTTP 401 on every call. The embedded failure cascades to the main
+    reply as `surface_error` on follow-up turns, breaking memory entirely.
 
-    deadline = time.time() + 15
-    while time.time() < deadline:
+    Writing the literal token into the on-disk config eliminates env-var
+    resolution as a variable. The token is short-lived in the container FS
+    (ephemeral microVM, no persistent storage for this path). We still
+    export the env var for belt-and-suspenders and for any OpenClaw
+    auto-discovery that reads it directly.
+
+    Fails fast (SystemExit) if the secret is unreachable.
+    """
+    import boto3
+    import json
+
+    secret_arn = os.environ.get("BEDROCK_API_KEY_SECRET_ARN")
+    if not secret_arn:
+        logger.error("BEDROCK_API_KEY_SECRET_ARN env var is not set")
+        sys.exit(1)
+
+    try:
+        # AWS_PROFILE may be set elsewhere to satisfy OpenClaw's pre-flight
+        # auth-detection heuristic; pop it here so boto3 doesn't try to load
+        # a (non-existent) profile file. Restored after the client is built.
+        # AgentCore doesn't inject AWS_REGION, and secretsmanager requires
+        # one. Default to us-east-1 (where this stack lives); make it
+        # overridable via env for multi-region deployments.
+        region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+        saved_profile = os.environ.pop("AWS_PROFILE", None)
         try:
-            req = urllib.request.Request("http://127.0.0.1:18790/health")
-            with urllib.request.urlopen(req, timeout=2) as resp:
-                if resp.status == 200:
-                    logger.info("Bedrock proxy is ready")
-                    return
-        except (urllib.error.URLError, OSError):
-            pass
-        time.sleep(0.5)
+            sm = boto3.client("secretsmanager", region_name=region)
+        finally:
+            if saved_profile is not None:
+                os.environ["AWS_PROFILE"] = saved_profile
 
-    raise RuntimeError("Bedrock proxy did not become ready within 15s")
+        resp = sm.get_secret_value(SecretId=secret_arn)
+        value = resp.get("SecretString")
+        if not value:
+            logger.error("secret %s has empty SecretString", secret_arn)
+            sys.exit(1)
+        value = value.strip()
+        if not value:
+            logger.error("secret %s resolved to empty value after trimming", secret_arn)
+            sys.exit(1)
+        os.environ["AWS_BEARER_TOKEN_BEDROCK"] = value
+        version = resp.get("VersionId", "?")
+
+        # Inline the literal token into openclaw.json. OpenClaw rewrites
+        # this file on gateway startup (see `Config overwrite` logs), but
+        # it preserves the `apiKey` string as written. Substituting the
+        # literal here means every OpenClaw code path that reads the
+        # provider config — main pipeline, embedded runner, plugins —
+        # sees an identical, already-resolved value.
+        config_path = "/home/node/.openclaw/openclaw.json"
+        try:
+            with open(config_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            providers = cfg.get("models", {}).get("providers", {})
+            mantle = providers.get("amazon-bedrock-mantle")
+            if not mantle:
+                logger.error(
+                    "openclaw.json has no amazon-bedrock-mantle provider — "
+                    "cannot inline token"
+                )
+                sys.exit(1)
+            mantle["apiKey"] = value
+            with open(config_path, "w", encoding="utf-8") as f:
+                json.dump(cfg, f, indent=2)
+            logger.info(
+                "Bedrock API key hydrated + inlined (secret=%s version=%s "
+                "config=%s)",
+                secret_arn.split(":")[-1], version, config_path,
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            logger.error("failed to inline API key into %s: %s", config_path, exc)
+            sys.exit(1)
+    except Exception as exc:  # noqa: BLE001
+        logger.error("failed to hydrate Bedrock API key: %s", exc)
+        sys.exit(1)
 
 
 def handle_shutdown(signum, frame):
@@ -88,8 +203,12 @@ def handle_shutdown(signum, frame):
         except Exception as exc:  # noqa: BLE001
             logger.warning("shutdown workspace push failed: %s", exc)
     adapter.shutdown()
-    if proxy_process and proxy_process.poll() is None:
-        proxy_process.terminate()
+    if _mantle_proxy_process and _mantle_proxy_process.poll() is None:
+        _mantle_proxy_process.terminate()
+        try:
+            _mantle_proxy_process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            _mantle_proxy_process.kill()
     sys.exit(0)
 
 
@@ -99,8 +218,7 @@ signal.signal(signal.SIGINT, handle_shutdown)
 
 def main():
     """Start the AgentCore wrapper."""
-    # Log the build marker FIRST so it appears even if startup fails. This is
-    # the only reliable way to confirm AgentCore is running the deployed image.
+    # Log the build marker FIRST so it appears even if startup fails.
     logger.info("BUILD_MARKER=%s", os.environ.get("BUILD_MARKER", "unset"))
 
     try:
@@ -112,17 +230,22 @@ def main():
         )
         sys.exit(1)
 
-    # Step 1: Start the Bedrock proxy (translates OpenAI format → Bedrock API)
-    # This must start before OpenClaw so the gateway can connect to it.
-    start_bedrock_proxy()
+    # Step 1: hydrate the Bedrock API key for OpenClaw's Mantle provider.
+    # This MUST happen before adapter.configure() because OpenClaw reads the
+    # env var once at gateway start.
+    hydrate_bedrock_api_key()
 
-    # Step 2: Start the OpenClaw gateway (uses proxy as its model provider)
+    # Step 1b: start the transparent Mantle proxy BEFORE OpenClaw. Its role
+    # is purely diagnostic (logging every request + response to CloudWatch)
+    # but it must be healthy first because OpenClaw's baseUrl points at it.
+    start_mantle_proxy()
+
+    # Step 2: start the OpenClaw gateway
     logger.info("Configuring OpenClaw adapter")
     adapter.configure({
         "gateway_port": 3100,
     })
 
-    # Create the AgentCore app
     app = BedrockAgentCoreApp()
 
     @app.entrypoint
@@ -148,20 +271,15 @@ def main():
 
         logger.info(
             "Invocation received: session=%s user=%s prefix=%s msg_length=%d",
-            session_id,
-            user_email,
-            workspace_prefix or "-",
-            len(user_message),
+            session_id, user_email, workspace_prefix or "-", len(user_message),
         )
 
         if not user_message.strip():
             return {"result": "I didn't receive a message. Could you try again?"}
 
         # First invocation for a new workspace prefix → pull memory from S3.
-        # Subsequent invocations on this microVM reuse the already-mounted state.
         if workspace_prefix and workspace_prefix != _current_workspace_prefix:
             try:
-                # Run blocking S3 calls off the event loop
                 pulled = await asyncio.get_running_loop().run_in_executor(
                     None, workspace_sync.pull_workspace, workspace_prefix
                 )
@@ -174,9 +292,9 @@ def main():
             except Exception as exc:  # noqa: BLE001
                 logger.warning("workspace mount failed: %s", exc)
 
-        # Inject a brief identity preamble so the agent always knows who is
-        # speaking (the system prompt alone can't carry per-request identity).
-        # Kept minimal — the agent's own SOUL.md handles persona/style.
+        # Inject a brief identity preamble so the agent always knows who's
+        # speaking. The per-user USER.md / IDENTITY.md files do the heavier
+        # lifting; this is the per-request stamp.
         if display_name or user_email != "unknown":
             framed = (
                 f"[caller: {display_name or user_email} <{user_email}>]\n\n"
@@ -185,8 +303,6 @@ def main():
         else:
             framed = user_message
 
-        # Process through the harness — offload blocking WebSocket I/O to a thread
-        # to avoid blocking the async event loop.
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(
             None, adapter.process, framed, session_id, model_override
@@ -194,8 +310,7 @@ def main():
 
         logger.info(
             "Invocation complete: session=%s response_length=%d",
-            session_id,
-            len(result),
+            session_id, len(result),
         )
 
         return {
@@ -213,7 +328,6 @@ def main():
         os.environ.get("WORKSPACE_BUCKET", "unknown"),
     )
 
-    # Run the AgentCore app (blocks until shutdown)
     app.run()
 
 

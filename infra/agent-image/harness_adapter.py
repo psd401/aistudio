@@ -205,31 +205,94 @@ class OpenClawAdapter(HarnessAdapter):
                 if not connect_resp.get("ok"):
                     return f"[WS_AUTH_FAIL] {json.dumps(connect_resp)[:800]}"
 
+                # Diagnostic: ask the gateway what tools are actually
+                # wired for the default agent. If the model says "let me
+                # check" but never calls a tool, it's usually because the
+                # tools.catalog is empty for this session.
+                try:
+                    catalog_id = str(uuid.uuid4())
+                    ws.send(json.dumps({
+                        "type": "req",
+                        "id": catalog_id,
+                        "method": "tools.catalog",
+                        "params": {},
+                    }))
+                    # Drain until we see this req's response
+                    catalog_deadline = time.time() + 10
+                    while time.time() < catalog_deadline:
+                        raw_c = ws.recv()
+                        msg_c = json.loads(raw_c)
+                        if msg_c.get("type") == "res" and msg_c.get("id") == catalog_id:
+                            if msg_c.get("ok"):
+                                payload = msg_c.get("payload", {})
+                                tools = payload.get("tools") or payload.get("grouped") or payload
+                                logger.info(
+                                    "tools.catalog ok: %s",
+                                    json.dumps(tools)[:1500],
+                                )
+                            else:
+                                logger.warning(
+                                    "tools.catalog error: %s",
+                                    json.dumps(msg_c.get("error", {}))[:500],
+                                )
+                            break
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("tools.catalog probe failed: %s", str(exc)[:200])
+
                 # Step 3: Send chat message
+                #
+                # sessionKey MUST be per-invocation caller, not "global".
+                # OpenClaw uses sessionKey to key its conversation state, so
+                # sharing "global" across every Google Chat user and every
+                # turn causes cross-contamination: turn N inherits turn N-1's
+                # half-finished tool calls, error markers, and (in the
+                # multi-user case) other users' history entirely. The
+                # AgentCore runtime gives us a stable per-user session_id;
+                # use it directly.
                 chat_id = str(uuid.uuid4())
                 ws.send(json.dumps({
                     "type": "req",
                     "id": chat_id,
                     "method": "chat.send",
                     "params": {
-                        "sessionKey": "global",
+                        "sessionKey": session_id or "default",
                         "message": message,
                         "idempotencyKey": chat_id,
                     },
                 }))
 
-                # Step 4: Collect response events until final
+                # Step 4: Collect response events until final.
+                # Instrumented to log every event type we see so we can
+                # understand what OpenClaw is actually emitting when a turn
+                # hangs (CloudWatch only — no secrets leak).
                 deadline = time.time() + 120
+                got_final = False
+                event_counts: dict = {}
+                first_event_types: list = []
+                last_state: Optional[str] = None
+                last_payload_sample: str = ""
+                raw_event_samples: list = []
                 while time.time() < deadline:
                     raw = ws.recv()
                     msg = json.loads(raw)
+                    mtype = msg.get("type")
+                    mevent = msg.get("event") if mtype == "event" else None
+                    key = f"{mtype}:{mevent}" if mevent else str(mtype)
+                    event_counts[key] = event_counts.get(key, 0) + 1
+                    if len(first_event_types) < 12:
+                        first_event_types.append(key)
+                    if len(raw_event_samples) < 3:
+                        raw_event_samples.append(raw[:600] if isinstance(raw, str) else str(raw)[:600])
 
-                    if msg.get("type") == "event" and msg.get("event") == "chat":
+                    if mtype == "event" and mevent == "chat":
                         payload = msg.get("payload", {})
                         state = payload.get("state")
+                        last_state = state
                         event_message = payload.get("message")
                         content = event_message.get("content") if isinstance(event_message, dict) else None
                         text = self._extract_text(content) or self._extract_text(event_message)
+                        if text and not last_payload_sample:
+                            last_payload_sample = text[:300]
 
                         if state == "delta":
                             if text:
@@ -238,17 +301,22 @@ class OpenClawAdapter(HarnessAdapter):
                         elif state == "final":
                             if text:
                                 response_text = text
+                            got_final = True
                             break
 
                         elif state == "error":
-                            logger.error("chat event error: %s", payload.get("errorMessage", "unknown"))
+                            logger.error(
+                                "chat event error: %s | full_payload=%s",
+                                payload.get("errorMessage", "unknown"),
+                                json.dumps(payload)[:800],
+                            )
                             return response_text or "I encountered an error processing your message."
 
                         elif state == "aborted":
+                            logger.warning("chat aborted: payload=%s", json.dumps(payload)[:500])
                             break
 
-                    elif msg.get("type") == "res" and msg.get("id") == chat_id:
-                        # Response to chat.send — check for errors
+                    elif mtype == "res" and msg.get("id") == chat_id:
                         if not msg.get("ok"):
                             error = msg.get("error", {})
                             logger.error("chat.send error: %s", json.dumps(error)[:500])
@@ -257,6 +325,7 @@ class OpenClawAdapter(HarnessAdapter):
                         if status in {"started", "accepted"}:
                             continue
                         if status in {"final", "done"}:
+                            got_final = True
                             break
 
             finally:
@@ -265,6 +334,31 @@ class OpenClawAdapter(HarnessAdapter):
         except Exception as exc:
             logger.error("WebSocket error: %s", str(exc)[:500])
             return "I'm temporarily unable to respond. The agent process may be restarting."
+
+        if not got_final:
+            logger.error(
+                "chat deadline expired: partial_len=%d last_state=%s "
+                "event_counts=%s first_events=%s text_head=%r raw_sample=%r",
+                len(response_text),
+                last_state,
+                json.dumps(event_counts),
+                first_event_types,
+                response_text[:400],
+                raw_event_samples[0] if raw_event_samples else "",
+            )
+            return (
+                "I wasn't able to finish responding in time — the agent "
+                "stalled. Please try again in a moment."
+            )
+
+        # Happy path: still log the event summary so we can audit whether
+        # tool_call / tool_result / thinking events ever flowed for this turn.
+        logger.info(
+            "chat turn ok: resp_len=%d last_state=%s event_counts=%s",
+            len(response_text),
+            last_state,
+            json.dumps(event_counts),
+        )
 
         return response_text.strip() or "I processed your message but had no response."
 

@@ -1,18 +1,19 @@
 {
   "models": {
     "providers": {
-      "amazon-bedrock": {
-        "baseUrl": "http://127.0.0.1:18790/v1",
+      "amazon-bedrock-mantle": {
+        "baseUrl": "http://127.0.0.1:18791/v1",
         "api": "openai-completions",
-        "auth": "aws-sdk",
+        "auth": "api-key",
+        "apiKey": "env:AWS_BEARER_TOKEN_BEDROCK",
         "models": [
           {
-            "id": "bedrock-agent",
-            "name": "Bedrock Agent (via proxy)",
-            "reasoning": true,
+            "id": "zai.glm-5",
+            "name": "GLM-5 (via Bedrock Mantle)",
+            "reasoning": false,
             "input": ["text"],
-            "contextWindow": 262144,
-            "maxTokens": 65535,
+            "contextWindow": 203000,
+            "maxTokens": 32768,
             "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
           }
         ]
@@ -22,24 +23,18 @@
   "agents": {
     "defaults": {
       "model": {
-        "primary": "amazon-bedrock/bedrock-agent"
+        "primary": "amazon-bedrock-mantle/zai.glm-5"
       },
       "workspace": "/home/node/.openclaw"
     }
   },
+  "tools": {
+    "profile": "full"
+  },
   "plugins": {
     "entries": {
       "active-memory": {
-        "enabled": true,
-        "config": {
-          "agents": ["main"],
-          "queryMode": "recent",
-          "promptStyle": "balanced",
-          "timeoutMs": 15000,
-          "maxSummaryChars": 220,
-          "persistTranscripts": false,
-          "logging": true
-        }
+        "enabled": false
       }
     }
   },

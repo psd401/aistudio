@@ -53,7 +53,8 @@ RUN python3 -m venv /opt/agentcore-venv && \
     /opt/agentcore-venv/bin/pip install --no-cache-dir \
       "bedrock-agentcore==${BEDROCK_AGENTCORE_VERSION}" \
       "websocket-client>=1.7.0" \
-      "boto3>=1.34.0"
+      "boto3>=1.34.0" \
+      "aiohttp>=3.9.0"
 
 # Add venv to PATH so python3 uses the venv by default
 ENV PATH="/opt/agentcore-venv/bin:$PATH"
@@ -61,13 +62,31 @@ ENV PATH="/opt/agentcore-venv/bin:$PATH"
 # Create workspace and config directories
 RUN mkdir -p /home/node/.openclaw/memory
 
-# Install Bedrock proxy in its own directory (NOT /app — that's OpenClaw's
-# directory and bun install there triggers OpenClaw's preinstall script).
-RUN mkdir -p /opt/bedrock-proxy
-COPY bedrock-proxy.js /opt/bedrock-proxy/bedrock-proxy.js
-RUN cd /opt/bedrock-proxy && bun init -y && bun add @aws-sdk/client-bedrock-runtime
-
 # Copy PSD configuration files
+# openclaw.json tuning notes (keep here — JSON can't carry comments and
+# OpenClaw's config validator rejects "//" pseudo-keys):
+#
+#   providers.amazon-bedrock — points at Bedrock Mantle, AWS's
+#   OpenAI-compatible endpoint for Bedrock. We used to run a local
+#   bedrock-proxy.js that translated OpenAI → Converse; Mantle removes that
+#   translation layer entirely. Result: we own no per-model format adapter
+#   code; any Bedrock model works by changing the `id` below.
+#
+#   plugins.entries.active-memory — blocking memory sub-agent that runs before
+#   every main reply, shares the inherited session model, and its failure
+#   cascades to the main reply as `surface_error`. Config rationale:
+#     queryMode=message     — smallest workload (only the latest user msg)
+#     promptStyle=strict    — recommended pairing for message mode
+#     timeoutMs=30000       — stock 15000 timed out on trivial inputs; 30s
+#                             gives Bedrock cold-start headroom without
+#                             letting a truly stuck sub-agent hold the turn
+#                             hostage
+#     maxSummaryChars=220   — keep the injected snippet tiny
+#     persistTranscripts=false — we don't need per-sub-agent transcripts
+#
+#   TODO: give the sub-agent a dedicated fast model (Haiku/Nova) via
+#   config.model — requires adding a second model to bedrock-proxy. Until
+#   then the sub-agent adds ~5-10s to every turn's wall-clock latency.
 COPY openclaw.json /home/node/.openclaw/openclaw.json
 # OpenClaw auto-injects SOUL.md as the system prompt every turn.
 # NOTE: Do NOT put HTML comments or TODO notes in this file — they are
@@ -86,6 +105,7 @@ COPY MEMORY.md /home/node/.openclaw/MEMORY.md
 COPY harness_adapter.py /app/harness_adapter.py
 COPY agentcore_wrapper.py /app/agentcore_wrapper.py
 COPY workspace_sync.py /app/workspace_sync.py
+COPY mantle_proxy.py /app/mantle_proxy.py
 
 # Set ownership for the node user (OpenClaw runs as node)
 RUN chown -R node:node /home/node/.openclaw /app

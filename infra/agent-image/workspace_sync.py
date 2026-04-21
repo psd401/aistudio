@@ -38,38 +38,61 @@ logger = logging.getLogger("workspace_sync")
 
 WORKSPACE_DIR = Path("/home/node/.openclaw")
 
-# Files/dirs we never sync — runtime cruft that should not persist
-_SKIP_PATTERNS = {
-    "openclaw.json.bak",  # config backup written every startup
-    ".sock",
-    ".pid",
-}
+# Paths (relative to WORKSPACE_DIR) we never sync in either direction.
+#
+# These are gateway/agent config owned by the container image — pushing them
+# back to S3 then pulling them next boot has caused a real outage: the S3
+# copy overwrote the freshly-hydrated apiKey, causing every Mantle call to
+# 401 with "Invalid bearer token". Config belongs to the deploy, not the
+# workspace. Only user-generated content (notes, sessions, embeddings,
+# canvases) should round-trip through S3.
+#
+# Match is: "skip if the relative path equals or starts with any entry".
+_SKIP_RELATIVE_PREFIXES = (
+    "openclaw.json",                  # gateway config
+    "openclaw.json.bak",               # gateway config backup
+    "agents/main/agent/models.json",   # per-agent provider/model config
+    "logs/",                           # gateway telemetry, not memory
+    "update-check.json",               # gateway version probe state
+    ".openclaw/",                      # nested OpenClaw internal state
+)
+
+# Filename suffixes that are always runtime cruft (socket files, pid files).
+_SKIP_SUFFIXES = (".sock", ".pid")
+
+
+def _should_skip_relative(relative: str) -> bool:
+    """True if this workspace-relative path is gateway-owned, not user memory."""
+    rel = relative.lstrip("/")
+    for prefix in _SKIP_RELATIVE_PREFIXES:
+        if rel == prefix or rel.startswith(prefix):
+            return True
+    return any(rel.endswith(suf) for suf in _SKIP_SUFFIXES)
 
 
 def _should_skip(path: Path) -> bool:
-    name = path.name
-    if name.startswith("."):
-        # OpenClaw legitimately uses dotfiles for state — only skip clear cruft
+    """Path-based wrapper for push-side filtering."""
+    try:
+        relative = path.relative_to(WORKSPACE_DIR).as_posix()
+    except ValueError:
         return False
-    return any(p in name for p in _SKIP_PATTERNS)
+    return _should_skip_relative(relative)
 
 
 def _s3():
     """
     Build an S3 client that uses the AgentCore task role.
 
-    AWS_PROFILE is set to "default" elsewhere in the container to satisfy
-    OpenClaw's credential auth gate. boto3 honors that env var by trying
-    to load the named profile from ~/.aws/credentials — which does not
-    exist in the AgentCore microVM — and raises ProfileNotFound. Pop the
-    var only for client construction so boto3 falls through to the
-    container's IMDS-backed task role credentials, then restore it so the
-    rest of the process is unaffected.
+    AgentCore doesn't set AWS_REGION; boto3 requires one for most services.
+    Default to us-east-1 (where this stack lives). The AWS_PROFILE pop
+    below is a legacy concern — we no longer set AWS_PROFILE — but kept as
+    a defensive measure in case anything downstream reintroduces it.
     """
     import boto3
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
     saved = os.environ.pop("AWS_PROFILE", None)
     try:
-        return boto3.client("s3")
+        return boto3.client("s3", region_name=region)
     finally:
         if saved is not None:
             os.environ["AWS_PROFILE"] = saved
@@ -94,12 +117,18 @@ def pull_workspace(prefix: str) -> int:
     paginator = s3.get_paginator("list_objects_v2")
 
     count = 0
+    skipped = 0
     s3_prefix = f"{prefix.rstrip('/')}/"
     for page in paginator.paginate(Bucket=bucket, Prefix=s3_prefix):
         for obj in page.get("Contents", []):
             key = obj["Key"]
             relative = key[len(s3_prefix):]
             if not relative:
+                continue
+            if _should_skip_relative(relative):
+                # Gateway-owned config or telemetry. Never let S3 state
+                # override the image-provided version.
+                skipped += 1
                 continue
             dest = WORKSPACE_DIR / relative
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -109,7 +138,10 @@ def pull_workspace(prefix: str) -> int:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("workspace pull skip %s: %s", key, exc)
 
-    logger.info("workspace pull: prefix=%s files=%d", prefix, count)
+    logger.info(
+        "workspace pull: prefix=%s files=%d skipped_config=%d",
+        prefix, count, skipped,
+    )
     return count
 
 
