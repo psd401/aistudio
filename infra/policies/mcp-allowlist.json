@@ -1,5 +1,5 @@
 {
-  "description": "Allowlisted MCP server endpoints that agents may connect to. Stored in SSM Parameter Store for runtime reads without redeployment.",
+  "description": "Allowlisted MCP server endpoints that agents may connect to. Stored as a policy file in S3 under the policies/ prefix for runtime reads without redeployment.",
   "version": "1.0.0",
   "allowedEndpoints": [
     {

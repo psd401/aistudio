@@ -956,7 +956,9 @@ export class AgentPlatformStack extends cdk.Stack {
     // Grant Cron Lambda access to Google credentials secret
     this.googleCredentialsSecret.grantRead(this.cronLambdaRole);
 
-    // Grant Cron Lambda basic CloudWatch Logs permissions
+    // Grant Cron Lambda basic CloudWatch Logs permissions.
+    // Note: SSM access for AgentCore Runtime ID lookup is provided via
+    // additionalPolicies in the ServiceRoleFactory role above (SSMParameterAccess).
     this.cronLambdaRole.addManagedPolicy(
       iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
     );

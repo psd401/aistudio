@@ -6,13 +6,10 @@
 --   agent_interagent_log  — inter-agent message audit trail
 --   agent_policy_events   — Cedar governance enforcement events
 --
--- NOTE: These tables are pre-provisioned. Write paths will be added
--- incrementally: cron telemetry in a follow-up to #889, interagent
+-- NOTE: These tables are pre-provisioned for audit/observability. Write paths
+-- will be added incrementally: cron telemetry in a follow-up to #889, interagent
 -- and policy logging once AgentCore Cedar integration is wired.
-
--- Mark any previous failed attempts as completed so the runner stops retrying.
-UPDATE migration_log SET status = 'completed'
-WHERE description = '066-agent-operations-tables.sql' AND status = 'failed';
+-- All tables use CREATE TABLE IF NOT EXISTS for idempotent re-runs.
 
 -- agent_scheduled_runs: Tracks each scheduled cron execution (morning briefs, etc.)
 CREATE TABLE IF NOT EXISTS agent_scheduled_runs (

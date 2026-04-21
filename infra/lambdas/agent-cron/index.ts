@@ -21,7 +21,7 @@
  *   STAGGER_DELAY_MS       — Delay between user wakeups (default 30000)
  */
 
-import { DynamoDBClient, ScanCommand } from '@aws-sdk/client-dynamodb';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
   ScanCommand as DocScanCommand,
@@ -111,6 +111,11 @@ const USERS_TABLE = process.env.USERS_TABLE || '';
 const GOOGLE_CREDENTIALS_SECRET_ARN = process.env.GOOGLE_CREDENTIALS_SECRET_ARN || '';
 const STAGGER_DELAY_MS = parseInt(process.env.STAGGER_DELAY_MS || '30000', 10);
 
+// Hard cap on users per cron run to prevent Lambda timeout.
+// At 30s stagger + ~60s per invocation, 10 users ≈ 15 minutes.
+// Increase only with architectural change (SQS fan-out).
+const MAX_USERS_PER_RUN = parseInt(process.env.MAX_USERS_PER_RUN || '10', 10);
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -187,6 +192,12 @@ let cachedChatClient: ReturnType<typeof chatPkg.chat> | null = null;
 let cachedRuntimeId: string | null = null;
 let runtimeIdCachedAt: number | null = null;
 const RUNTIME_ID_TTL_MS = 10 * 60 * 1000;
+
+// Cache discovered DM spaces across warm invocations to avoid N+1 Google Chat
+// API calls on every cron fire.
+let cachedDmSpaces: Map<string, string> | null = null;
+let dmSpacesCachedAt: number | null = null;
+const DM_SPACES_TTL_MS = 10 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Helper functions
@@ -370,36 +381,33 @@ async function invokeAgentCore(
   }
 }
 
+/**
+ * Send a message to a Google Chat space. Throws on failure so the caller
+ * can count the delivery as failed (rather than silently succeeding).
+ */
 async function sendGoogleChatResponse(
   spaceName: string,
   text: string,
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
-  try {
-    const chatClient = await getChatClient();
+  const chatClient = await getChatClient();
 
-    // Truncate response for Google Chat API limits
-    const maxLength = 4096;
-    const truncatedText =
-      text.length > maxLength
-        ? text.substring(0, maxLength - 50) + '\n\n_(Response truncated)_'
-        : text;
+  // Truncate response for Google Chat API limits
+  const maxLength = 4096;
+  const truncatedText =
+    text.length > maxLength
+      ? text.substring(0, maxLength - 50) + '\n\n_(Response truncated)_'
+      : text;
 
-    await chatClient.spaces.messages.create({
-      parent: spaceName,
-      requestBody: { text: truncatedText },
-    });
+  await chatClient.spaces.messages.create({
+    parent: spaceName,
+    requestBody: { text: truncatedText },
+  });
 
-    log.info('Scheduled response sent to Google Chat', {
-      space: spaceName,
-      responseLength: truncatedText.length,
-    });
-  } catch (error) {
-    log.error('Failed to send Google Chat response', {
-      space: spaceName,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  log.info('Scheduled response sent to Google Chat', {
+    space: spaceName,
+    responseLength: truncatedText.length,
+  });
 }
 
 /**
@@ -496,16 +504,37 @@ export async function handler(
     return { processed: 0, succeeded: 0, failed: 0 };
   }
 
-  // Step 2: Discover bot DM spaces to know where to deliver responses
-  const dmSpaces = await getBotDmSpaces(log);
+  // Step 2: Discover bot DM spaces (cached across warm invocations)
+  let dmSpaces: Map<string, string>;
+  if (
+    cachedDmSpaces &&
+    dmSpacesCachedAt &&
+    Date.now() - dmSpacesCachedAt < DM_SPACES_TTL_MS
+  ) {
+    dmSpaces = cachedDmSpaces;
+    log.info('Using cached DM space map', { count: dmSpaces.size });
+  } else {
+    dmSpaces = await getBotDmSpaces(log);
+    cachedDmSpaces = dmSpaces;
+    dmSpacesCachedAt = Date.now();
+  }
 
   // Step 3: Process each user with staggered execution
+  // Enforce hard cap to prevent Lambda timeout (15 min budget).
+  if (users.length > MAX_USERS_PER_RUN) {
+    log.warn('User count exceeds per-run cap — processing first batch only', {
+      totalUsers: users.length,
+      maxUsersPerRun: MAX_USERS_PER_RUN,
+    });
+  }
+  const usersToProcess = users.slice(0, MAX_USERS_PER_RUN);
+
   let succeeded = 0;
   let failed = 0;
   const buildTag = process.env.AGENT_BUILD_TAG || 'cron';
 
-  for (let i = 0; i < users.length; i++) {
-    const user = users[i];
+  for (let i = 0; i < usersToProcess.length; i++) {
+    const user = usersToProcess[i];
 
     // Stagger — wait between users to avoid Bedrock API throttling
     if (i > 0) {
@@ -574,12 +603,14 @@ export async function handler(
     }
   }
 
+  const skipped = users.length - usersToProcess.length;
   const summary = {
-    processed: users.length,
+    processed: usersToProcess.length,
     succeeded,
     failed,
+    ...(skipped > 0 ? { skipped } : {}),
   };
 
   log.info('Cron job completed', { ...summary, scheduleType });
-  return summary;
+  return { processed: summary.processed, succeeded, failed };
 }

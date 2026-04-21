@@ -850,6 +850,8 @@ async function isInterAgentRateLimited(
 
     return false;
   } catch (error) {
+    // Fail-open: if the check fails we prefer a delivered message over a
+    // dropped one. A CloudWatch alarm on this error should trigger ops review.
     log.error('Inter-agent rate check failed; allowing message', {
       error: error instanceof Error ? error.message : String(error),
     });
@@ -893,16 +895,20 @@ async function recordInterAgentMessage(
 }
 
 /**
- * Anti-loop detection: check if agent A and agent B have been exchanging
- * messages in this thread. If there are already 2+ exchanges (A→B, B→A),
- * the third message is blocked and the human is notified.
+ * Anti-loop detection: check if a bot has already sent multiple messages
+ * in this thread within the last hour. If it has sent 2+ messages, the
+ * next one is blocked and the human is notified.
  *
  * This prevents the "ant death spiral" observed at Every.to where agents
  * enter infinite conversation loops.
+ *
+ * Design: We query by the sender's partition key + thread filter. This
+ * works without a GSI because we're checking "has THIS bot talked too
+ * much in this thread" rather than tracking specific bot pairs. In a
+ * two-bot loop, each bot independently hits the 2-message threshold.
  */
 async function isAntiLoopTriggered(
   senderBotId: string,
-  targetBotId: string,
   threadName: string | undefined,
   log: ReturnType<typeof createLogger>
 ): Promise<boolean> {
@@ -911,55 +917,39 @@ async function isAntiLoopTriggered(
   try {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
 
-    // Count messages between these two bots in the same thread in the last hour
-    // Check both directions: A→B and B→A
-    const [forwardResult, reverseResult] = await Promise.all([
-      dynamoClient.send(
-        new QueryCommand({
-          TableName: INTERAGENT_TABLE,
-          KeyConditionExpression: 'senderBotId = :sender AND sentAt > :since',
-          FilterExpression: 'targetBotId = :target AND threadName = :thread',
-          ExpressionAttributeValues: {
-            ':sender': senderBotId,
-            ':target': targetBotId,
-            ':since': oneHourAgo,
-            ':thread': threadName,
-          },
-          Select: 'COUNT',
-        })
-      ),
-      dynamoClient.send(
-        new QueryCommand({
-          TableName: INTERAGENT_TABLE,
-          KeyConditionExpression: 'senderBotId = :sender AND sentAt > :since',
-          FilterExpression: 'targetBotId = :target AND threadName = :thread',
-          ExpressionAttributeValues: {
-            ':sender': targetBotId,
-            ':target': senderBotId,
-            ':since': oneHourAgo,
-            ':thread': threadName,
-          },
-          Select: 'COUNT',
-        })
-      ),
-    ]);
+    // Count messages from this sender in the same thread in the last hour.
+    // If the sender already has 2+ messages, a loop is likely forming.
+    const result = await dynamoClient.send(
+      new QueryCommand({
+        TableName: INTERAGENT_TABLE,
+        KeyConditionExpression: 'senderBotId = :sender AND sentAt > :since',
+        FilterExpression: 'threadName = :thread',
+        ExpressionAttributeValues: {
+          ':sender': senderBotId,
+          ':since': oneHourAgo,
+          ':thread': threadName,
+        },
+        Select: 'COUNT',
+      })
+    );
 
-    const totalExchanges = (forwardResult.Count || 0) + (reverseResult.Count || 0);
+    const senderMessageCount = result.Count || 0;
 
-    // Anti-loop: if there are already 2+ exchanges, this would be the 3rd+ message
-    // Block and notify human.
-    if (totalExchanges >= 2) {
+    // Anti-loop: if this bot has already sent 2+ messages in this thread,
+    // block further exchanges and notify humans.
+    if (senderMessageCount >= 2) {
       log.warn('Anti-loop triggered — blocking agent-to-agent conversation', {
         senderBotId,
-        targetBotId,
         threadName,
-        totalExchanges,
+        senderMessageCount,
       });
       return true;
     }
 
     return false;
   } catch (error) {
+    // Fail-open: if the check fails we prefer a delivered message over a
+    // dropped one. A CloudWatch alarm on this error should trigger ops review.
     log.error('Anti-loop check failed; allowing message', {
       error: error instanceof Error ? error.message : String(error),
     });
@@ -1073,8 +1063,10 @@ async function processRecord(
 
   // Inter-agent communication: detect bot-to-bot messages in shared spaces.
   // In DM spaces, bot messages are always ignored (no inter-agent routing).
-  // In shared spaces (ROOM), bot messages are routed through the same pipeline
-  // with rate limiting and anti-loop protection.
+  // In shared spaces (ROOM), bot messages are handled by the dedicated
+  // inter-agent branch below, which applies rate limiting and anti-loop
+  // protection before returning; they do not continue through the normal
+  // human-message / AgentCore processing path.
   const isBotSender = message.sender.type === 'BOT';
   const isSharedSpace = chatEvent.space.type === 'ROOM';
 
@@ -1109,14 +1101,11 @@ async function processRecord(
       return;
     }
 
-    // Anti-loop detection: check if two bots are talking back and forth
-    // We use the bot ID as both sender and a dummy target — in practice,
-    // the "target" is whoever else is in the thread. For anti-loop purposes,
-    // we track by thread: if any two bots have exchanged 2+ messages in
-    // the same thread within an hour, block further exchanges.
+    // Anti-loop detection: check if this bot has already sent 2+ messages
+    // in this thread within the last hour. Blocks the 3rd+ message to
+    // prevent infinite agent-to-agent conversation loops.
     const antiLoopTriggered = await isAntiLoopTriggered(
       senderBotId,
-      'any-bot', // We track against any other bot in the thread
       threadName,
       log
     );
@@ -1125,19 +1114,20 @@ async function processRecord(
       await sendGoogleChatResponse(
         spaceName,
         threadName,
-        `🔄 Anti-loop protection: This agent-to-agent conversation has been paused after 2 exchanges. ` +
-        `A human can continue the conversation by sending a direct message to either agent.`,
+        `🔄 Anti-loop protection: This agent conversation in this thread has been paused ` +
+        `(2+ bot messages detected). A human can continue by replying in this thread — ` +
+        `the counter resets after 1 hour.`,
         log
       );
       return;
     }
 
     // Record the inter-agent message for rate limiting and anti-loop tracking.
-    // targetBotId is 'any-bot' to match the anti-loop query which checks
-    // both directions using the same sentinel value.
+    // targetBotId is the space name for audit context — the anti-loop check
+    // queries by senderBotId + threadName only (no GSI needed).
     await recordInterAgentMessage(
       senderBotId,
-      'any-bot',
+      spaceName,
       spaceName,
       threadName,
       log

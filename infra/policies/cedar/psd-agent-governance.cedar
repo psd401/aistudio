@@ -46,7 +46,12 @@ permit(
 )
 when { resource.path like "/workspace/*" };
 
-// Allow shell execution — the microVM IS the sandbox
+// Allow shell execution — unrestricted because the AgentCore microVM IS the
+// sandbox. Each agent session runs in an ephemeral VM that is destroyed after
+// the session ends. No persistent filesystem access, no network access to
+// internal resources (controlled by Cedar http.request rules above/below).
+// This is intentionally broad for Phase 1 — scope to specific principals if
+// multi-tenant agent types are introduced.
 permit(
   principal,
   action == Action::"shell.execute",
@@ -60,6 +65,21 @@ permit(
   resource
 )
 when { resource.url like "https://api.psd401.net/*" };
+
+// Allow Google API access (required for Calendar, Gmail, Drive operations)
+permit(
+  principal,
+  action == Action::"http.request",
+  resource
+)
+when { resource.url like "https://*.googleapis.com/*" };
+
+permit(
+  principal,
+  action == Action::"http.request",
+  resource
+)
+when { resource.url like "https://*.google.com/*" };
 
 // =========================================================================
 // CONFIRM-REQUIRED ACTIONS (agent must present draft for human approval)
@@ -126,13 +146,17 @@ forbid(
 )
 when { resource.url like "*synergysis*" };
 
-// Block installing external skills from non-approved sources
+// Block installing external skills from non-approved sources.
+// The bucket naming convention is psd-agents-{env}-{accountId}.
+// Restrict to that pattern — a bare "psd-agents-*" would match attacker-created
+// buckets like "psd-agents-pwned". The "*-*" suffix requires at least two
+// segments (env + account).
 forbid(
   principal,
   action == Action::"skill.install",
   resource
 )
-unless { resource.source like "s3://psd-agents-*" };
+unless { resource.source like "s3://psd-agents-*-*/*" };
 
 // Block all external HTTP requests unless explicitly allowlisted below.
 // This is the default-deny catch-all for network access.
