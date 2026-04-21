@@ -1123,11 +1123,14 @@ async function processRecord(
     }
 
     // Record the inter-agent message for rate limiting and anti-loop tracking.
-    // targetBotId is the space name for audit context — the anti-loop check
-    // queries by senderBotId + threadName only (no GSI needed).
+    // In a shared space, there is no single target bot — the message is
+    // broadcast to all bots in the room. We store 'broadcast' as the
+    // targetBotId for audit clarity. The anti-loop check queries by
+    // senderBotId + threadName only (no GSI needed), so this value is
+    // not used for loop detection.
     await recordInterAgentMessage(
       senderBotId,
-      spaceName,
+      'broadcast',
       spaceName,
       threadName,
       log

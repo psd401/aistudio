@@ -9,7 +9,8 @@
 //
 // Action Authorization Tiers:
 //   Auto    — permitted without human confirmation
-//   Confirm — requires human approval (agent presents draft in Chat)
+//   Blocked (Confirm at App Layer) — Cedar blocks; app code must implement
+//            approval flow (agent presents draft in Chat, human approves)
 //   Blocked — permanently forbidden
 //
 // Reference: https://www.cedarpolicy.com/
@@ -46,19 +47,24 @@ permit(
 )
 when { resource.path like "/workspace/*" };
 
-// Allow shell execution — unrestricted because the AgentCore microVM IS the
-// sandbox. Each agent session runs in an ephemeral VM that is destroyed after
+// Allow shell execution within AgentCore microVM sandbox.
+// Each agent session runs in an ephemeral VM that is destroyed after
 // the session ends. No persistent filesystem access, no network access to
 // internal resources (controlled by Cedar http.request rules above/below).
-// This is intentionally broad for Phase 1 — scope to specific principals if
-// multi-tenant agent types are introduced.
+// Scoped to AgentCore::Runtime principals to prevent future multi-tenant
+// agent types from inheriting unrestricted shell access.
 permit(
   principal,
   action == Action::"shell.execute",
   resource
-);
+)
+when { principal.type == "AgentCore::Runtime" };
 
-// Allow reading district data from approved internal systems
+// HTTP request permits — these express intent but are NOT what allows the URLs.
+// In Cedar, the catch-all `forbid(... http.request ...)` at the bottom of this
+// file overrides all permits. The actual allowlist lives in that forbid's
+// `unless` clause. These permits are kept for documentation and in case the
+// catch-all forbid is removed in the future.
 permit(
   principal,
   action == Action::"http.request",
@@ -66,7 +72,6 @@ permit(
 )
 when { resource.url like "https://api.psd401.net/*" };
 
-// Allow Google API access (required for Calendar, Gmail, Drive operations)
 permit(
   principal,
   action == Action::"http.request",
@@ -82,7 +87,11 @@ permit(
 when { resource.url like "https://*.google.com/*" };
 
 // =========================================================================
-// CONFIRM-REQUIRED ACTIONS (agent must present draft for human approval)
+// BLOCKED — REQUIRE CONFIRMATION FLOW AT APP LAYER
+// Cedar only has permit/forbid — there is no native "confirm" tier.
+// These actions are BLOCKED by Cedar. The confirmation UX (agent presents
+// a draft in Chat, human approves, then the app layer calls the action
+// without going through Cedar) must be implemented in application code.
 // =========================================================================
 
 // Block sending email — agent must present draft in Chat for approval
@@ -144,7 +153,7 @@ forbid(
   action == Action::"http.request",
   resource
 )
-when { resource.url like "*synergysis*" };
+when { resource.url like "*synergy*" };
 
 // Block installing external skills from non-approved sources.
 // The bucket naming convention is psd-agents-{env}-{accountId}.

@@ -932,8 +932,10 @@ export class AgentPlatformStack extends cdk.Stack {
       ),
       memorySize: config.compute.lambdaMemory,
       // Generous timeout: Cron Lambda processes users sequentially with 30s stagger.
-      // 6 users × 30s stagger + ~60s per AgentCore invocation = ~9 minutes max.
-      // 15 minutes gives headroom for more users and slow responses.
+      // MAX_USERS_PER_RUN defaults to 10. At 10 users:
+      //   9 staggers × 30s + 10 × ~60s AgentCore invocation ≈ 14.5 minutes.
+      // 15 minutes is tight — if AgentCore latency increases, bump to 20 min or
+      // reduce MAX_USERS_PER_RUN. Long-term fix: SQS fan-out.
       timeout: cdk.Duration.minutes(15),
       architecture: lambda.Architecture.ARM_64,
       role: this.cronLambdaRole,
@@ -942,7 +944,8 @@ export class AgentPlatformStack extends cdk.Stack {
         ENVIRONMENT: environment,
         USERS_TABLE: this.usersTable.tableName,
         GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,
-        STAGGER_DELAY_MS: '30000',
+        // STAGGER_DELAY_MS defaults to 30000 in the Lambda code.
+        // Override here only if a different stagger is needed per environment.
         AWS_ACCOUNT_ID: this.account,
         AGENT_BUILD_TAG: imageDigest
           ? imageDigest.replace('sha256:', '').substring(0, 12)

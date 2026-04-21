@@ -266,6 +266,13 @@ async function getRuntimeId(log: ReturnType<typeof createLogger>): Promise<strin
   return runtimeId;
 }
 
+/**
+ * Fetch all users eligible for scheduled tasks. Uses a Scan with a
+ * FilterExpression to skip users who have never been active (no email).
+ *
+ * NOTE: At 6 users this Scan is fine. When user count exceeds ~50, add a
+ * GSI on an `agentEnabled` boolean attribute to avoid full-table scans.
+ */
 async function getAllActiveUsers(
   log: ReturnType<typeof createLogger>
 ): Promise<AgentUser[]> {
@@ -277,6 +284,11 @@ async function getAllActiveUsers(
       new DocScanCommand({
         TableName: USERS_TABLE,
         ExclusiveStartKey: lastKey,
+        // Basic filter: skip entries without a valid email (malformed records)
+        FilterExpression: 'attribute_exists(email) AND email <> :empty',
+        ExpressionAttributeValues: {
+          ':empty': '',
+        },
       })
     );
 
@@ -296,7 +308,7 @@ async function invokeAgentCore(
   sessionId: string,
   log: ReturnType<typeof createLogger>,
   userContext?: { displayName?: string; workspacePrefix?: string }
-): Promise<{ response: string; inputTokens: number; outputTokens: number }> {
+): Promise<{ response: string; inputTokens: number; outputTokens: number; ok: boolean }> {
   const runtimeId = await getRuntimeId(log);
 
   if (!runtimeId) {
@@ -304,6 +316,7 @@ async function invokeAgentCore(
       response: 'Agent is not yet deployed.',
       inputTokens: 0,
       outputTokens: 0,
+      ok: false,
     };
   }
 
@@ -357,6 +370,7 @@ async function invokeAgentCore(
         response: 'Agent encountered an error processing scheduled task.',
         inputTokens: 0,
         outputTokens: 0,
+        ok: false,
       };
     }
 
@@ -368,6 +382,7 @@ async function invokeAgentCore(
       response: result,
       inputTokens: (metadata.input_tokens as number) || 0,
       outputTokens: (metadata.output_tokens as number) || 0,
+      ok: true,
     };
   } catch (error) {
     log.error('AgentCore invocation error', {
@@ -377,6 +392,7 @@ async function invokeAgentCore(
       response: 'Agent temporarily unavailable for scheduled task.',
       inputTokens: 0,
       outputTokens: 0,
+      ok: false,
     };
   }
 }
@@ -433,25 +449,40 @@ async function getBotDmSpaces(
 
       const data = (response as { data?: { spaces?: Array<{ name?: string; singleUserBotDm?: boolean }>; nextPageToken?: string } }).data;
       const spaces = data?.spaces || [];
-      for (const space of spaces) {
-        if (space.name && space.singleUserBotDm) {
-          // For single-user bot DMs, list members to find the human
-          try {
+
+      // Batch member lookups: collect DM spaces first, then resolve members
+      // concurrently to avoid N+1 sequential API calls.
+      const dmSpacesToResolve = spaces.filter(
+        (s): s is { name: string; singleUserBotDm: boolean } =>
+          !!s.name && !!s.singleUserBotDm
+      );
+
+      // Resolve members in parallel batches (cap at 10 concurrent to respect
+      // Google Chat API rate limits of ~50 QPS for service accounts)
+      const MEMBER_BATCH_SIZE = 10;
+      for (let batch = 0; batch < dmSpacesToResolve.length; batch += MEMBER_BATCH_SIZE) {
+        const chunk = dmSpacesToResolve.slice(batch, batch + MEMBER_BATCH_SIZE);
+        const results = await Promise.allSettled(
+          chunk.map(async (space) => {
             const membersResp = await chatClient.spaces.members.list({
               parent: space.name,
               pageSize: 10,
             } as Record<string, unknown>);
             const membersData = (membersResp as { data?: { memberships?: Array<{ member?: { type?: string; name?: string } }> } }).data;
-            const members = membersData?.memberships || [];
-            for (const member of members) {
+            return { spaceName: space.name, members: membersData?.memberships || [] };
+          })
+        );
+
+        for (const result of results) {
+          if (result.status === 'fulfilled') {
+            for (const member of result.value.members) {
               if (member.member?.type === 'HUMAN' && member.member?.name) {
-                dmMap.set(member.member.name, space.name);
+                dmMap.set(member.member.name, result.value.spaceName);
               }
             }
-          } catch (memberErr) {
-            log.warn('Failed to list members for DM space', {
-              space: space.name,
-              error: memberErr instanceof Error ? memberErr.message : String(memberErr),
+          } else {
+            log.warn('Failed to list members for DM space batch', {
+              error: result.reason instanceof Error ? result.reason.message : String(result.reason),
             });
           }
         }
@@ -579,20 +610,29 @@ export async function handler(
         }
       );
 
-      // Deliver response to the user's DM
+      // Deliver response to the user's DM (even on failure, so they know
+      // something went wrong rather than seeing nothing)
       await sendGoogleChatResponse(
         dmSpaceName,
         `📋 **${scheduleType.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase())}**\n\n${result.response}`,
         log
       );
 
-      log.info('Scheduled task completed', {
-        email: sanitizeEmail(user.email),
-        scheduleType,
-        inputTokens: result.inputTokens,
-        outputTokens: result.outputTokens,
-      });
-      succeeded++;
+      if (result.ok) {
+        log.info('Scheduled task completed', {
+          email: sanitizeEmail(user.email),
+          scheduleType,
+          inputTokens: result.inputTokens,
+          outputTokens: result.outputTokens,
+        });
+        succeeded++;
+      } else {
+        log.warn('Scheduled task returned error response', {
+          email: sanitizeEmail(user.email),
+          scheduleType,
+        });
+        failed++;
+      }
     } catch (error) {
       log.error('Scheduled task failed for user', {
         email: sanitizeEmail(user.email),
