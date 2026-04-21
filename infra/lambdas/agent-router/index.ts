@@ -839,7 +839,10 @@ async function isInterAgentRateLimited(
     );
 
     const messageCount = count || 0;
-    if (messageCount >= MAX_INTERAGENT_MESSAGES_PER_HOUR) {
+    // With write-before-read ordering, the current message is already counted.
+    // Use > (not >=) to maintain the same effective limit: N messages allowed,
+    // the (N+1)th is blocked.
+    if (messageCount > MAX_INTERAGENT_MESSAGES_PER_HOUR) {
       log.warn('Inter-agent rate limit exceeded', {
         senderBotId,
         messageCount,
@@ -882,7 +885,11 @@ async function recordInterAgentMessage(
           sentAt: new Date().toISOString(),
           targetBotId,
           spaceName,
-          threadName: threadName || 'none',
+          // Use a UUID for unthreaded messages to avoid false-positive anti-loop
+          // triggers. A shared sentinel like 'none' would group unrelated top-level
+          // messages into one "thread", causing a bot that sends 2 separate
+          // unthreaded messages to trip the anti-loop check erroneously.
+          threadName: threadName || `unthreaded-${crypto.randomUUID()}`,
           expiresAt,
         },
       })
@@ -895,9 +902,10 @@ async function recordInterAgentMessage(
 }
 
 /**
- * Anti-loop detection: check if a bot has already sent multiple messages
- * in this thread within the last hour. If it has sent 2+ messages, the
- * next one is blocked and the human is notified.
+ * Anti-loop detection: check if a bot has already sent too many messages
+ * in this thread within the last hour. With write-before-read ordering,
+ * the current message is already recorded, so the threshold is 3 (allows
+ * 2 actual exchanges before blocking the 3rd).
  *
  * This prevents the "ant death spiral" observed at Every.to where agents
  * enter infinite conversation loops.
@@ -905,7 +913,7 @@ async function recordInterAgentMessage(
  * Design: We query by the sender's partition key + thread filter. This
  * works without a GSI because we're checking "has THIS bot talked too
  * much in this thread" rather than tracking specific bot pairs. In a
- * two-bot loop, each bot independently hits the 2-message threshold.
+ * two-bot loop, each bot independently hits the threshold.
  */
 async function isAntiLoopTriggered(
   senderBotId: string,
@@ -935,9 +943,10 @@ async function isAntiLoopTriggered(
 
     const senderMessageCount = result.Count || 0;
 
-    // Anti-loop: if this bot has already sent 2+ messages in this thread,
-    // block further exchanges and notify humans.
-    if (senderMessageCount >= 2) {
+    // Anti-loop: if this bot has sent 3+ messages in this thread (including
+    // the one just recorded via write-before-read), block further exchanges.
+    // The threshold of 3 allows 2 actual exchanges before blocking the 3rd.
+    if (senderMessageCount >= 3) {
       log.warn('Anti-loop triggered — blocking agent-to-agent conversation', {
         senderBotId,
         threadName,
@@ -1080,6 +1089,7 @@ async function processRecord(
     const senderBotId = message.sender.name;
     const threadName = message.thread?.name;
     const spaceName = chatEvent.space.name;
+    const interAgentStartTime = Date.now();
 
     log.info('Inter-agent message detected', {
       senderBot: senderBotId,
@@ -1088,7 +1098,19 @@ async function processRecord(
       thread: threadName,
     });
 
-    // Rate limit check
+    // Record FIRST, then check counts. Write-before-read prevents the race
+    // condition where concurrent writers both pass the check before either
+    // writes — both would see stale counts and allow 2× the intended limit.
+    // By recording first, the count query always reflects the current message.
+    await recordInterAgentMessage(
+      senderBotId,
+      'broadcast',
+      spaceName,
+      threadName,
+      log
+    );
+
+    // Rate limit check (queries count AFTER this message was recorded)
     const rateLimited = await isInterAgentRateLimited(senderBotId, log);
     if (rateLimited) {
       log.warn('Inter-agent message rate-limited', { senderBot: senderBotId });
@@ -1101,9 +1123,9 @@ async function processRecord(
       return;
     }
 
-    // Anti-loop detection: check if this bot has already sent 2+ messages
-    // in this thread within the last hour. Blocks the 3rd+ message to
-    // prevent infinite agent-to-agent conversation loops.
+    // Anti-loop detection: check if this bot has already sent 3+ messages
+    // in this thread within the last hour (including the one just recorded).
+    // Blocks further exchanges to prevent infinite agent-to-agent loops.
     const antiLoopTriggered = await isAntiLoopTriggered(
       senderBotId,
       threadName,
@@ -1115,28 +1137,16 @@ async function processRecord(
         spaceName,
         threadName,
         `🔄 Anti-loop protection: This agent conversation in this thread has been paused ` +
-        `(2+ bot messages detected). A human can continue by replying in this thread — ` +
+        `(too many bot messages detected). A human can continue by replying in this thread — ` +
         `the counter resets after 1 hour.`,
         log
       );
       return;
     }
 
-    // Record the inter-agent message for rate limiting and anti-loop tracking.
-    // In a shared space, there is no single target bot — the message is
-    // broadcast to all bots in the room. We store 'broadcast' as the
-    // targetBotId for audit clarity. The anti-loop check queries by
-    // senderBotId + threadName only (no GSI needed), so this value is
-    // not used for loop detection.
-    await recordInterAgentMessage(
-      senderBotId,
-      'broadcast',
-      spaceName,
-      threadName,
-      log
-    );
-
-    // Log inter-agent telemetry separately
+    // Log inter-agent telemetry separately.
+    // Note: latency measured from inter-agent branch entry, not processRecord
+    // start, so it excludes upstream deduplication/parsing overhead.
     await logTelemetry(
       {
         userId: `bot:${senderBotId}`,
@@ -1144,7 +1154,7 @@ async function processRecord(
         model: null,
         inputTokens: 0,
         outputTokens: 0,
-        latencyMs: Date.now() - startTime,
+        latencyMs: Date.now() - interAgentStartTime,
         guardrailBlocked: false,
         spaceName,
       },

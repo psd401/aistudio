@@ -92,6 +92,11 @@ when { resource.url like "https://*.google.com/*" };
 // These actions are BLOCKED by Cedar. The confirmation UX (agent presents
 // a draft in Chat, human approves, then the app layer calls the action
 // without going through Cedar) must be implemented in application code.
+//
+// Until the confirmation UX is built, AgentCore returns a Cedar policy
+// denial to the agent, which surfaces as a tool-call failure. The agent
+// will explain that it cannot perform the action due to governance policy.
+// Tracked: confirmation UX is part of the Phase 2 agent platform roadmap.
 // =========================================================================
 
 // Block sending email — agent must present draft in Chat for approval

@@ -759,6 +759,10 @@ export class AgentPlatformStack extends cdk.Stack {
     // Accepted tradeoff for consistency — table ARN scoping limits blast radius.
     // TODO(#887): Tighten to read-only DynamoDB when ServiceRoleFactory supports
     // granular permission levels (track as follow-up).
+    // NOTE: Cron Lambda role only has access to the users table — intentionally
+    // no access to the inter-agent table. The cron Lambda invokes AgentCore for
+    // scheduled tasks and delivers results to DMs. Only the Router Lambda handles
+    // inter-agent governance (rate limiting, anti-loop) and needs interAgentTable.
     this.cronLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'CronLambdaRole', {
       functionName: 'psd-agent-cron',
       environment,
@@ -869,11 +873,16 @@ export class AgentPlatformStack extends cdk.Stack {
     // AgentCore reads these at session start. Policies can be updated by
     // re-uploading to S3 without redeploying the stack.
 
+    // IMPORTANT: prune=false avoids deleting other objects under policies/, but
+    // means renamed/deleted Cedar files persist in S3 indefinitely. If you rename
+    // a .cedar file, manually delete the old version from S3 to prevent AgentCore
+    // from loading stale policies:
+    //   aws s3 rm s3://<bucket>/policies/cedar/<old-filename>.cedar
     new s3deploy.BucketDeployment(this, 'CedarPolicyDeployment', {
       sources: [s3deploy.Source.asset(path.join(__dirname, '..', 'policies'))],
       destinationBucket: this.workspaceBucket,
       destinationKeyPrefix: 'policies/',
-      prune: false, // Don't delete other objects in the prefix
+      prune: false,
     });
 
     // =====================================================================
@@ -918,6 +927,9 @@ export class AgentPlatformStack extends cdk.Stack {
                 }
               },
             },
+            // Docker fallback uses npm because the standard Node.js bundling image
+            // does not include bun. The package.json uses only standard npm-compatible
+            // deps, so dependency trees are equivalent. Local bundling (above) uses bun.
             command: [
               'bash', '-c',
               [
@@ -932,10 +944,11 @@ export class AgentPlatformStack extends cdk.Stack {
       ),
       memorySize: config.compute.lambdaMemory,
       // Generous timeout: Cron Lambda processes users sequentially with 30s stagger.
-      // MAX_USERS_PER_RUN defaults to 10. At 10 users:
-      //   9 staggers × 30s + 10 × ~60s AgentCore invocation ≈ 14.5 minutes.
-      // 15 minutes is tight — if AgentCore latency increases, bump to 20 min or
-      // reduce MAX_USERS_PER_RUN. Long-term fix: SQS fan-out.
+      // MAX_USERS_PER_RUN defaults to 6. At 6 users:
+      //   5 staggers × 30s + 6 × ~60s AgentCore invocation ≈ 8.5 minutes.
+      // This leaves ~6.5 minutes of headroom within the 15-minute Lambda ceiling
+      // for slow AgentCore responses (observed up to 2-3 min under load).
+      // Scaling past ~15 users requires SQS fan-out (one Lambda per user).
       timeout: cdk.Duration.minutes(15),
       architecture: lambda.Architecture.ARM_64,
       role: this.cronLambdaRole,

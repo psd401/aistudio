@@ -112,9 +112,12 @@ const GOOGLE_CREDENTIALS_SECRET_ARN = process.env.GOOGLE_CREDENTIALS_SECRET_ARN 
 const STAGGER_DELAY_MS = parseInt(process.env.STAGGER_DELAY_MS || '30000', 10);
 
 // Hard cap on users per cron run to prevent Lambda timeout.
-// At 30s stagger + ~60s per invocation, 10 users ≈ 15 minutes.
+// At 30s stagger + ~60s per invocation, 6 users ≈ 8.5 minutes.
+// Lambda has a hard 15-minute ceiling. Default of 6 gives ~6.5 minutes of
+// headroom for slow AgentCore responses (which can take 2-3 min under load).
+// At 10 users the budget was 14.5 min — essentially no margin.
 // Increase only with architectural change (SQS fan-out).
-const MAX_USERS_PER_RUN = parseInt(process.env.MAX_USERS_PER_RUN || '10', 10);
+const MAX_USERS_PER_RUN = parseInt(process.env.MAX_USERS_PER_RUN || '6', 10);
 
 // ---------------------------------------------------------------------------
 // Types
@@ -323,9 +326,23 @@ async function invokeAgentCore(
   try {
     const region = process.env.AWS_REGION || 'us-east-1';
     const account = process.env.AWS_ACCOUNT_ID || '';
-    const runtimeArn = runtimeId.startsWith('arn:')
-      ? runtimeId
-      : `arn:aws:bedrock-agentcore:${region}:${account}:runtime/${runtimeId}`;
+    let runtimeArn: string;
+    if (runtimeId.startsWith('arn:')) {
+      runtimeArn = runtimeId;
+    } else {
+      if (!account) {
+        log.error('AWS_ACCOUNT_ID env var not set — cannot construct AgentCore ARN', {
+          runtimeId,
+        });
+        return {
+          response: 'Agent configuration error — missing AWS account ID.',
+          inputTokens: 0,
+          outputTokens: 0,
+          ok: false,
+        };
+      }
+      runtimeArn = `arn:aws:bedrock-agentcore:${region}:${account}:runtime/${runtimeId}`;
+    }
 
     const body = JSON.stringify({
       prompt: message,
@@ -441,20 +458,17 @@ async function getBotDmSpaces(
     let pageToken: string | undefined;
 
     do {
-      // Google Chat API spaces.list — pageToken and pageSize are valid params
       const response = await chatClient.spaces.list({
         pageToken,
         pageSize: 100,
-      } as Record<string, unknown>);
+      });
 
-      const data = (response as { data?: { spaces?: Array<{ name?: string; singleUserBotDm?: boolean }>; nextPageToken?: string } }).data;
-      const spaces = data?.spaces || [];
+      const spaces = response.data.spaces || [];
 
       // Batch member lookups: collect DM spaces first, then resolve members
       // concurrently to avoid N+1 sequential API calls.
       const dmSpacesToResolve = spaces.filter(
-        (s): s is { name: string; singleUserBotDm: boolean } =>
-          !!s.name && !!s.singleUserBotDm
+        (s) => !!s.name && !!s.singleUserBotDm
       );
 
       // Resolve members in parallel batches (cap at 10 concurrent to respect
@@ -465,19 +479,18 @@ async function getBotDmSpaces(
         const results = await Promise.allSettled(
           chunk.map(async (space) => {
             const membersResp = await chatClient.spaces.members.list({
-              parent: space.name,
+              parent: space.name!,
               pageSize: 10,
-            } as Record<string, unknown>);
-            const membersData = (membersResp as { data?: { memberships?: Array<{ member?: { type?: string; name?: string } }> } }).data;
-            return { spaceName: space.name, members: membersData?.memberships || [] };
+            });
+            return { spaceName: space.name!, members: membersResp.data.memberships || [] };
           })
         );
 
         for (const result of results) {
           if (result.status === 'fulfilled') {
-            for (const member of result.value.members) {
-              if (member.member?.type === 'HUMAN' && member.member?.name) {
-                dmMap.set(member.member.name, result.value.spaceName);
+            for (const membership of result.value.members) {
+              if (membership.member?.type === 'HUMAN' && membership.member?.name) {
+                dmMap.set(membership.member.name, result.value.spaceName);
               }
             }
           } else {
@@ -488,7 +501,7 @@ async function getBotDmSpaces(
         }
       }
 
-      pageToken = data?.nextPageToken || undefined;
+      pageToken = response.data.nextPageToken || undefined;
     } while (pageToken);
 
     log.info('Discovered bot DM spaces', { count: dmMap.size });
@@ -591,7 +604,8 @@ export async function handler(
         .update(`${scheduleType}-${new Date().toISOString().split('T')[0]}`)
         .digest('hex')
         .substring(0, 16);
-      const sessionId = `${user.workspacePrefix}-sched-${scheduleHash}-${buildTag}`;
+      const prefix = user.workspacePrefix || user.email.split('@')[0] || 'unknown';
+      const sessionId = `${prefix}-sched-${scheduleHash}-${buildTag}`;
 
       log.info('Invoking agent for scheduled task', {
         email: sanitizeEmail(user.email),
