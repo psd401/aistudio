@@ -1,0 +1,58 @@
+{
+  "models": {
+    "providers": {
+      "amazon-bedrock-mantle": {
+        "baseUrl": "http://127.0.0.1:18791/v1",
+        "api": "openai-completions",
+        "auth": "api-key",
+        "apiKey": "env:AWS_BEARER_TOKEN_BEDROCK",
+        "models": [
+          {
+            "id": "zai.glm-5",
+            "name": "GLM-5 (via Bedrock Mantle)",
+            "reasoning": false,
+            "input": ["text"],
+            "contextWindow": 203000,
+            "maxTokens": 32768,
+            "cost": { "input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0 }
+          }
+        ]
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "amazon-bedrock-mantle/zai.glm-5"
+      },
+      "workspace": "/home/node/.openclaw"
+    }
+  },
+  "tools": {
+    "profile": "full"
+  },
+  "plugins": {
+    "entries": {
+      "active-memory": {
+        "enabled": false
+      }
+    }
+  },
+  "gateway": {
+    "port": 3100,
+    "mode": "local",
+    "bind": "loopback",
+    "trustedProxies": ["127.0.0.1"],
+    "auth": {
+      "mode": "token",
+      "token": "psd-agent-internal-gateway-token"
+    },
+    "controlUi": {
+      "enabled": false,
+      "allowInsecureAuth": true,
+      "dangerouslyDisableDeviceAuth": true,
+      "dangerouslyAllowHostHeaderOriginFallback": true,
+      "allowedOrigins": ["*"]
+    }
+  }
+}

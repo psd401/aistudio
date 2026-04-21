@@ -6,7 +6,23 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as logs from 'aws-cdk-lib/aws-logs';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
+import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
+import * as cloudwatchActions from 'aws-cdk-lib/aws-cloudwatch-actions';
+import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
+import * as apigwv2 from 'aws-cdk-lib/aws-apigatewayv2';
+import * as apigwv2Authorizers from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
+import * as apigwv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations';
+import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
+import * as customResources from 'aws-cdk-lib/custom-resources';
+import * as path from 'path';
+import { execSync } from 'child_process';
 // ALPHA CDK CONSTRUCT: @aws-cdk/aws-bedrock-agentcore-alpha has no API stability
 // guarantee and may introduce breaking changes on any release. Version is pinned
 // (not caret) in infra/package.json. Review changelog before upgrading.
@@ -26,6 +42,18 @@ export interface AgentPlatformStackProps extends cdk.StackProps {
   databaseSecretArn: string;
   /** Bedrock Guardrail ARN from GuardrailsStack */
   guardrailArn: string;
+  /** Bedrock Guardrail ID from GuardrailsStack */
+  guardrailId: string;
+  /** Bedrock Guardrail version — use 'DRAFT' for dev, a published version number for prod */
+  guardrailVersion?: string;
+  /** Aurora cluster endpoint hostname for direct PostgreSQL connection */
+  databaseHost: string;
+  /** Aurora database name (default: 'aistudio') — sourced from CDK props for consistency */
+  databaseName?: string;
+  /** Email for alarm notifications (DLQ, Lambda errors). If omitted, alarms fire but don't notify. */
+  alertEmail?: string;
+  /** Comma-separated email domains allowed to send messages (default: 'psd401.net') */
+  allowedDomains?: string;
 }
 
 /**
@@ -54,6 +82,14 @@ export class AgentPlatformStack extends cdk.Stack {
   public readonly usersTable: dynamodb.Table;
   /** DynamoDB table for organizational signals (Nervous System) */
   public readonly signalsTable: dynamodb.Table;
+  /** DynamoDB table for Chat message idempotency (dedup of retries) */
+  public readonly messageDedupTable: dynamodb.Table;
+  /** IAM user that owns the Bedrock API key (service-specific credential) */
+  public readonly bedrockApiUser: iam.User;
+  /** Secrets Manager secret carrying the Bedrock API key for Mantle auth */
+  public readonly bedrockApiKeySecret: secretsmanager.Secret;
+  /** SNS topic for platform alarms (DLQ, API key expiry, etc.) */
+  public readonly agentAlarmTopic?: sns.Topic;
   /** AgentCore Runtime (undefined until an image is pushed to ECR) */
   public readonly runtime?: agentcore.Runtime;
   /** AgentCore execution IAM role */
@@ -62,6 +98,12 @@ export class AgentPlatformStack extends cdk.Stack {
   public readonly routerLambdaRole: iam.Role;
   /** Cron Lambda IAM role */
   public readonly cronLambdaRole: iam.Role;
+  /** Router Lambda function */
+  public readonly routerLambda: lambda.Function;
+  /** SQS queue for Google Chat Pub/Sub messages */
+  public readonly routerQueue: sqs.Queue;
+  /** Google service account credentials secret */
+  public readonly googleCredentialsSecret: secretsmanager.ISecret;
 
   constructor(scope: Construct, id: string, props: AgentPlatformStackProps) {
     super(scope, id, props);
@@ -91,6 +133,7 @@ export class AgentPlatformStack extends cdk.Stack {
     this.ecrRepository = new ecr.Repository(this, 'AgentBaseRepository', {
       repositoryName: `psd-agent-base-${environment}`,
       imageScanOnPush: true,
+      imageTagMutability: ecr.TagMutability.IMMUTABLE,
       removalPolicy: environment === 'prod'
         ? cdk.RemovalPolicy.RETAIN
         : cdk.RemovalPolicy.DESTROY,
@@ -185,6 +228,259 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(this.signalsTable).add('Environment', environment);
     cdk.Tags.of(this.signalsTable).add('ManagedBy', 'cdk');
 
+    // 4c. Message Dedup table — idempotency guard for Chat → AgentCore.
+    // Google Chat retries Pub/Sub deliveries when a bot is slow to ack, and
+    // SQS may also redeliver under load. Without dedup, two invocations land
+    // on the same OpenClaw session in parallel; OpenClaw rejects the second
+    // with an empty fallback in ~135ms (observed). Conditional write keyed on
+    // the immutable Chat message resource name (`spaces/X/messages/Y`)
+    // collapses retries into one real invocation.
+    //
+    // TTL of 1 hour is plenty: a duplicate that arrives an hour after the
+    // original is effectively a new request from the user's perspective.
+    this.messageDedupTable = new dynamodb.Table(this, 'AgentMessageDedupTable', {
+      tableName: `psd-agent-message-dedup-${environment}`,
+      partitionKey: { name: 'messageName', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      timeToLiveAttribute: 'expiresAt',
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(this.messageDedupTable).add('Environment', environment);
+    cdk.Tags.of(this.messageDedupTable).add('ManagedBy', 'cdk');
+
+    // =====================================================================
+    // 4c. Google Credentials Secret (CDK-managed, operator populates)
+    // =====================================================================
+    // CDK creates the secret with placeholder value. After deploy, populate
+    // it with the Google service account JSON:
+    //   aws secretsmanager put-secret-value \
+    //     --secret-id psd-agent-google-sa-<env> \
+    //     --secret-string file://service-account.json
+    //
+    // The Lambda reads this at runtime for Google Chat API authentication.
+    this.googleCredentialsSecret = new secretsmanager.Secret(this, 'GoogleCredentialsSecret', {
+      secretName: `psd-agent-google-sa-${environment}`,
+      description: 'Google service account JSON for Chat API authentication. Populate after deploy with: aws secretsmanager put-secret-value --secret-id psd-agent-google-sa-<env> --secret-string file://service-account.json',
+    });
+    cdk.Tags.of(this.googleCredentialsSecret).add('Environment', environment);
+    cdk.Tags.of(this.googleCredentialsSecret).add('ManagedBy', 'cdk');
+
+    // =====================================================================
+    // 4d. Bedrock API key — CDK-provisioned service-specific credential
+    // =====================================================================
+    // OpenClaw authenticates to Bedrock Mantle (the OpenAI-compatible
+    // endpoint) with a Bearer token, which is an IAM "service-specific
+    // credential" tied to a dedicated IAM user. The plumbing below makes
+    // the whole lifecycle self-sufficient — no operator CLI step per env:
+    //
+    //   - IAM user       `psd-agent-bedrock-<env>` (CDK-managed)
+    //   - Inline policy  scoped to bedrock:InvokeModel* on foundation models
+    //   - Secret         `psd-agent-bedrock-api-key-<env>` (placeholder)
+    //   - Lambda         bedrock-api-key-manager — provisions on CREATE,
+    //                    handles scheduled rotation + expiry watchdog
+    //   - Custom Resource fires the Lambda onCreate, which calls
+    //                    iam:CreateServiceSpecificCredential and stashes
+    //                    ServiceCredentialSecret into the Secret above
+    //                    (the secret is only returned by IAM at CREATE time,
+    //                    so this is the single atomic step that populates SM)
+    //   - EventBridge    weekly watchdog, monthly rotation
+    //
+    // Delete the stack → Custom Resource revokes the credential, CDK deletes
+    // user + secret. Nothing to clean up by hand.
+
+    this.bedrockApiUser = new iam.User(this, 'BedrockApiUser', {
+      userName: `psd-agent-bedrock-${environment}`,
+    });
+    // Mantle uses its own IAM namespace (`bedrock-mantle:*`) distinct from
+    // `bedrock:*`. `AmazonBedrockMantleInferenceAccess` grants Get*/List*/
+    // CreateInference/CallWithBearerToken — but we've observed OpenClaw
+    // hitting `/v1/models` at gateway startup (`resolving authentication`)
+    // and getting `access_denied: bedrock-mantle:ListModels` DESPITE the
+    // `List*` wildcard. If ListModels fails, OpenClaw marks the provider
+    // unauthorized for the rest of the session and every inference call
+    // returns "401 Invalid bearer token". Grant `bedrock-mantle:*` broadly
+    // on the default project — this user exists for nothing else.
+    this.bedrockApiUser.attachInlinePolicy(
+      new iam.Policy(this, 'BedrockApiUserMantlePolicy', {
+        statements: [
+          new iam.PolicyStatement({
+            sid: 'MantleFullAccessOnDefaultProject',
+            effect: iam.Effect.ALLOW,
+            actions: ['bedrock-mantle:*'],
+            resources: [
+              `arn:aws:bedrock-mantle:${this.region}:${this.account}:project/*`,
+              `arn:aws:bedrock-mantle:${this.region}:${this.account}:*`,
+              '*', // CallWithBearerToken uses "*" resource per the managed policy reference
+            ],
+          }),
+          // Also grant native Bedrock invoke in case a component bypasses
+          // Mantle. Scoped to foundation models + inference profiles in
+          // this region.
+          new iam.PolicyStatement({
+            sid: 'InvokeBedrockModels',
+            effect: iam.Effect.ALLOW,
+            actions: [
+              'bedrock:InvokeModel',
+              'bedrock:InvokeModelWithResponseStream',
+              'bedrock:Converse',
+              'bedrock:ConverseStream',
+            ],
+            resources: [
+              `arn:aws:bedrock:${this.region}::foundation-model/*`,
+              `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
+            ],
+          }),
+          new iam.PolicyStatement({
+            sid: 'ListModels',
+            effect: iam.Effect.ALLOW,
+            actions: ['bedrock:ListFoundationModels', 'bedrock:GetFoundationModel'],
+            resources: ['*'],
+          }),
+        ],
+      }),
+    );
+    cdk.Tags.of(this.bedrockApiUser).add('Environment', environment);
+    cdk.Tags.of(this.bedrockApiUser).add('ManagedBy', 'cdk');
+
+    this.bedrockApiKeySecret = new secretsmanager.Secret(this, 'BedrockApiKeySecret', {
+      secretName: `psd-agent-bedrock-api-key-${environment}`,
+      description: `Bedrock API key (long-term service-specific credential) for the agent platform. CDK-provisioned on stack create via BedrockApiKeyProvisioner custom resource. IAM user: psd-agent-bedrock-${environment}. Auto-rotated monthly.`,
+    });
+    cdk.Tags.of(this.bedrockApiKeySecret).add('Environment', environment);
+    cdk.Tags.of(this.bedrockApiKeySecret).add('ManagedBy', 'cdk');
+
+    // Alarm topic used by the watchdog — reuses the same alarm topic we
+    // create for Router DLQ alerts further down. But we need it early here,
+    // so we create it right now if alertEmail is configured; the DLQ block
+    // below will reuse it.
+    if (props.alertEmail) {
+      this.agentAlarmTopic = new sns.Topic(this, 'AgentAlarmTopic', {
+        topicName: `psd-agent-alarms-${environment}`,
+        displayName: `PSD Agent Platform Alarms (${environment})`,
+      });
+      this.agentAlarmTopic.addSubscription(
+        new snsSubscriptions.EmailSubscription(props.alertEmail),
+      );
+      cdk.Tags.of(this.agentAlarmTopic).add('Environment', environment);
+      cdk.Tags.of(this.agentAlarmTopic).add('ManagedBy', 'cdk');
+    }
+
+    const bedrockKeyManagerLogGroup = new logs.LogGroup(this, 'BedrockKeyManagerLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-bedrock-key-manager-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+
+    const bedrockKeyManager = new lambda.Function(this, 'BedrockKeyManagerLambda', {
+      functionName: `psd-agent-bedrock-key-manager-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'bedrock-api-key-manager'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'bedrock-api-key-manager');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: 256,
+      timeout: cdk.Duration.minutes(2),
+      architecture: lambda.Architecture.ARM_64,
+      logGroup: bedrockKeyManagerLogGroup,
+      environment: {
+        IAM_USER_NAME: this.bedrockApiUser.userName,
+        SECRET_ID: this.bedrockApiKeySecret.secretArn,
+        ALARM_TOPIC_ARN: this.agentAlarmTopic?.topicArn ?? '',
+        ENVIRONMENT: environment,
+      },
+    });
+
+    // Manager needs to manage the specific IAM user's credentials and write
+    // the provisioned secret.
+    bedrockKeyManager.addToRolePolicy(new iam.PolicyStatement({
+      sid: 'ManageBedrockUserCredentials',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'iam:CreateServiceSpecificCredential',
+        'iam:DeleteServiceSpecificCredential',
+        'iam:ListServiceSpecificCredentials',
+        'iam:UpdateServiceSpecificCredential',
+      ],
+      resources: [this.bedrockApiUser.userArn],
+    }));
+    this.bedrockApiKeySecret.grantWrite(bedrockKeyManager);
+    if (this.agentAlarmTopic) {
+      this.agentAlarmTopic.grantPublish(bedrockKeyManager);
+    }
+
+    // Custom Resource — fires bedrockKeyManager with {RequestType: Create|Update|Delete}
+    // on stack events. Provider wires up the two-step CloudFormation dance.
+    const bedrockKeyProvider = new customResources.Provider(this, 'BedrockKeyProvider', {
+      onEventHandler: bedrockKeyManager,
+    });
+    const bedrockKeyProvisioner = new cdk.CustomResource(this, 'BedrockKeyProvisioner', {
+      serviceToken: bedrockKeyProvider.serviceToken,
+    });
+    bedrockKeyProvisioner.node.addDependency(this.bedrockApiUser);
+    bedrockKeyProvisioner.node.addDependency(this.bedrockApiKeySecret);
+
+    // Scheduled rotation — monthly
+    new events.Rule(this, 'BedrockKeyRotationSchedule', {
+      description: 'Monthly rotation of the Bedrock API key',
+      schedule: events.Schedule.rate(cdk.Duration.days(30)),
+      targets: [new eventsTargets.LambdaFunction(bedrockKeyManager, {
+        event: events.RuleTargetInput.fromObject({
+          source: 'psd-agent-platform',
+          'detail-type': 'Scheduled Event',
+          detail: { action: 'rotate' },
+        }),
+      })],
+    });
+
+    // Scheduled watchdog — weekly
+    new events.Rule(this, 'BedrockKeyWatchdogSchedule', {
+      description: 'Weekly expiry check for the Bedrock API key',
+      schedule: events.Schedule.rate(cdk.Duration.days(7)),
+      targets: [new eventsTargets.LambdaFunction(bedrockKeyManager, {
+        event: events.RuleTargetInput.fromObject({
+          source: 'psd-agent-platform',
+          'detail-type': 'Scheduled Event',
+          detail: { action: 'watchdog' },
+        }),
+      })],
+    });
+
     // =====================================================================
     // 5. IAM Roles
     // =====================================================================
@@ -256,6 +552,10 @@ export class AgentPlatformStack extends cdk.Stack {
         `${this.workspaceBucket.bucketArn}/*`,
       ],
     }));
+
+    // Read the Bedrock API key secret at container startup so the wrapper
+    // can expose it to OpenClaw as AWS_BEARER_TOKEN_BEDROCK.
+    this.bedrockApiKeySecret.grantRead(this.agentCoreExecutionRole);
 
     // ECR pull for agent images
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
@@ -369,16 +669,24 @@ export class AgentPlatformStack extends cdk.Stack {
     // VPC access via managed policy (not vpcEnabled) to avoid policy validator
     // flagging ENI wildcard resources. AgentCore-specific policies passed as
     // additionalPolicies since ServiceRoleFactory doesn't have built-in props
-    // for bedrock-agentcore, guardrails, or rds-data.
+    // for bedrock-agentcore and guardrails.
     this.routerLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'RouterLambdaRole', {
       functionName: 'psd-agent-router',
       environment,
       region: this.region,
       account: this.account,
       vpcEnabled: false,
-      dynamodbTables: [this.usersTable.tableName, this.signalsTable.tableName],
+      dynamodbTables: [
+        this.usersTable.tableName,
+        this.signalsTable.tableName,
+        this.messageDedupTable.tableName,
+      ],
       s3Buckets: [this.workspaceBucket.bucketName],
-      secrets: [props.databaseSecretArn],
+      // WORKAROUND: ServiceRoleFactory checks startsWith("arn:") to detect full
+      // ARNs vs names. CDK cross-stack refs and new Secret() produce tokens that
+      // don't start with "arn:" at synth time, causing double-wrapped ARNs.
+      // Grant read access directly instead of going through the factory.
+      secrets: [],
       additionalPolicies: [
         // Guardrails invoke
         new iam.PolicyDocument({
@@ -389,22 +697,24 @@ export class AgentPlatformStack extends cdk.Stack {
             resources: [props.guardrailArn],
           })],
         }),
-        // Aurora rds-data for telemetry writes
-        new iam.PolicyDocument({
-          statements: [new iam.PolicyStatement({
-            sid: 'AuroraAccess',
-            effect: iam.Effect.ALLOW,
-            actions: ['rds-data:ExecuteStatement', 'rds-data:BatchExecuteStatement'],
-            resources: [props.databaseResourceArn],
-          })],
-        }),
         // AgentCore session invoke
         new iam.PolicyDocument({
           statements: [new iam.PolicyStatement({
             sid: 'AgentCoreInvoke',
             effect: iam.Effect.ALLOW,
-            actions: ['bedrock-agentcore:InvokeRuntime', 'bedrock-agentcore:InvokeRuntimeForUser'],
+            actions: ['bedrock-agentcore:InvokeAgentRuntime', 'bedrock-agentcore:InvokeAgentRuntimeForUser'],
             resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
+          })],
+        }),
+        // SSM Parameter Store — resolve AgentCore Runtime ID and config at runtime
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'SSMParameterAccess',
+            effect: iam.Effect.ALLOW,
+            actions: ['ssm:GetParameter', 'ssm:GetParameters'],
+            resources: [
+              `arn:aws:ssm:${this.region}:${this.account}:parameter/aistudio/${environment}/*`,
+            ],
           })],
         }),
       ],
@@ -415,6 +725,16 @@ export class AgentPlatformStack extends cdk.Stack {
     this.routerLambdaRole.addManagedPolicy(
       iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
     );
+
+    // Grant Secrets Manager read access directly (not through ServiceRoleFactory).
+    // CDK cross-stack refs and new Secret() produce tokens that don't start with
+    // "arn:" at synth time, causing ServiceRoleFactory to double-wrap the ARN.
+    this.googleCredentialsSecret.grantRead(this.routerLambdaRole);
+    // DB secret — construct the secret from the ARN prop
+    const dbSecret = secretsmanager.Secret.fromSecretCompleteArn(
+      this, 'ImportedDbSecret', props.databaseSecretArn
+    );
+    dbSecret.grantRead(this.routerLambdaRole);
 
     // 5c. Cron Lambda role — via ServiceRoleFactory
     // Note: ServiceRoleFactory grants full DynamoDB CRUD; cron only needs read.
@@ -434,7 +754,7 @@ export class AgentPlatformStack extends cdk.Stack {
           statements: [new iam.PolicyStatement({
             sid: 'AgentCoreInvoke',
             effect: iam.Effect.ALLOW,
-            actions: ['bedrock-agentcore:InvokeRuntime', 'bedrock-agentcore:InvokeRuntimeForUser'],
+            actions: ['bedrock-agentcore:InvokeAgentRuntime', 'bedrock-agentcore:InvokeAgentRuntimeForUser'],
             resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
           })],
         }),
@@ -449,19 +769,37 @@ export class AgentPlatformStack extends cdk.Stack {
     // Pass --context agentImageTag=<tag> to deploy. Without it, the stack
     // deploys all supporting resources (ECR, S3, DynamoDB, IAM, EventBridge)
     // and the Runtime is added on a subsequent deploy after pushing an image.
+    // Prefer digest pinning (immutable) over tag pinning (mutable). AgentCore
+    // resolves tags at deploy time but does not surface the resolved digest,
+    // and we have observed stale image serving when only a tag is supplied.
+    // Pass --context agentImageDigest=sha256:... for guaranteed identity.
     const imageTag = this.node.tryGetContext('agentImageTag') as string | undefined;
+    const imageDigest = this.node.tryGetContext('agentImageDigest') as string | undefined;
 
-    if (imageTag) {
+    const artifact = imageDigest
+      ? agentcore.AgentRuntimeArtifact.fromImageUri(
+          `${this.ecrRepository.repositoryUri}@${imageDigest}`,
+        )
+      : imageTag
+        ? agentcore.AgentRuntimeArtifact.fromEcrRepository(this.ecrRepository, imageTag)
+        : undefined;
+
+    if (artifact) {
       this.runtime = new agentcore.Runtime(this, 'AgentCoreRuntime', {
         runtimeName: `psd_agent_${environment}`,
-        agentRuntimeArtifact: agentcore.AgentRuntimeArtifact.fromEcrRepository(
-          this.ecrRepository,
-          imageTag,
-        ),
+        agentRuntimeArtifact: artifact,
         executionRole: this.agentCoreExecutionRole,
+        // AgentCore only supports specific AZ IDs: use1-az1, use1-az2, use1-az4.
+        // Our VPC includes us-east-1a (use1-az6) which is NOT supported.
+        // Filter to only us-east-1b (use1-az1) and us-east-1c (use1-az2).
+        // NOTE: AZ name-to-ID mapping varies per account. If deploying in a
+        // different account, verify AZ IDs with: aws ec2 describe-availability-zones
         networkConfiguration: agentcore.RuntimeNetworkConfiguration.usingVpc(this, {
           vpc,
-          vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+          vpcSubnets: {
+            subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS,
+            availabilityZones: ['us-east-1b', 'us-east-1c'],
+          },
         }),
         description: `PSD AI Agent Platform runtime (${environment})`,
         environmentVariables: {
@@ -472,6 +810,18 @@ export class AgentPlatformStack extends cdk.Stack {
           GUARDRAIL_ARN: props.guardrailArn,
           DATABASE_RESOURCE_ARN: props.databaseResourceArn,
           DATABASE_SECRET_ARN: props.databaseSecretArn,
+          // ARN of the Secrets Manager secret holding the Bedrock API key.
+          // `agentcore_wrapper.py` fetches this on startup and exports its
+          // value as AWS_BEARER_TOKEN_BEDROCK so OpenClaw can authenticate
+          // to Bedrock Mantle (the OpenAI-compatible endpoint). Using a
+          // reference rather than embedding the secret value keeps rotation
+          // seamless — new microVMs just re-read the latest version.
+          BEDROCK_API_KEY_SECRET_ARN: this.bedrockApiKeySecret.secretArn,
+          // Identity marker — surfaced in container startup log so we can
+          // verify the running code matches the deployed image manifest.
+          BUILD_MARKER: imageDigest
+            ? `${imageTag ?? 'no-tag'}@${imageDigest}`
+            : (imageTag ?? 'unset'),
         },
         lifecycleConfiguration: {
           idleRuntimeSessionTimeout: cdk.Duration.minutes(config.agent.microVmIdleTimeoutMinutes),
@@ -535,7 +885,360 @@ export class AgentPlatformStack extends cdk.Stack {
     }
 
     // =====================================================================
-    // 8. SSM Parameters — Cross-Stack References
+    // 8. SQS Queue — Google Chat Pub/Sub Inbound
+    // =====================================================================
+    // Messages flow: Google Chat → GCP Pub/Sub → (push subscription to SQS) → Lambda
+    // Dead-letter queue captures messages that fail processing after retries.
+    //
+    // PREREQUISITE: The GCP Pub/Sub → SQS bridge requires an SQS queue policy
+    // granting sqs:SendMessage to the GCP push subscription's IAM principal.
+    // This is configured outside CDK as part of the cross-cloud bridge setup.
+    // See PR #902 prerequisites in the README for setup instructions.
+
+    const routerDlq = new sqs.Queue(this, 'RouterDLQ', {
+      queueName: `psd-agent-router-dlq-${environment}`,
+      retentionPeriod: cdk.Duration.days(14),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+    });
+    cdk.Tags.of(routerDlq).add('Environment', environment);
+    cdk.Tags.of(routerDlq).add('ManagedBy', 'cdk');
+
+    this.routerQueue = new sqs.Queue(this, 'RouterQueue', {
+      queueName: `psd-agent-router-${environment}`,
+      // AWS recommends visibility timeout >= 6x Lambda timeout to prevent
+      // duplicate processing. Lambda timeout is 5 min, so 30 min minimum.
+      visibilityTimeout: cdk.Duration.minutes(30),
+      retentionPeriod: cdk.Duration.days(4),
+      encryption: sqs.QueueEncryption.SQS_MANAGED,
+      deadLetterQueue: {
+        queue: routerDlq,
+        maxReceiveCount: 3, // 3 retries before DLQ
+      },
+    });
+    cdk.Tags.of(this.routerQueue).add('Environment', environment);
+    cdk.Tags.of(this.routerQueue).add('ManagedBy', 'cdk');
+
+    // GCP Pub/Sub → SQS bridge is implemented as an HTTP API with a Google JWT
+    // authorizer and a small Lambda forwarder (see Section 9b below). The earlier
+    // Workload-Identity-Federation approach in agent-platform-setup.md is a
+    // dead-end: GCP Pub/Sub push only sends a Google OIDC JWT, it does not
+    // perform AWS SigV4 signing, so no IAM role swap can authorize it to call
+    // SQS directly.
+
+    // =====================================================================
+    // 9. Router Lambda Function
+    // =====================================================================
+
+    const routerLogGroup = new logs.LogGroup(this, 'RouterLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-router-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(routerLogGroup).add('Environment', environment);
+    cdk.Tags.of(routerLogGroup).add('ManagedBy', 'cdk');
+
+    // Pre-build the Router Lambda locally using bun (consistent with build-lambdas.sh).
+    // The bundling.local command runs first; Docker is the fallback. Since the project
+    // uses bun (not npm), and the Docker bundling image doesn't have bun, local bundling
+    // is the primary path. CI/CD should run build-lambdas.sh before cdk synth.
+    this.routerLambda = new lambda.Function(this, 'RouterLambda', {
+      functionName: `psd-agent-router-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-router'),
+        {
+          // Force asset hash from source files so CDK detects code changes.
+          // Without this, CDK caches the bundled output hash and may skip
+          // Lambda code updates when only TypeScript source changes.
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-router');
+                  // Build with all deps (including devDependencies for tsc)
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  // Copy compiled JS to output
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  // Copy package.json and install production-only deps in output
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // Log the error so build failures aren't silently swallowed.
+                  // Docker fallback may use a different TS version, producing
+                  // subtle bundle differences — surface the root cause here.
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                // Docker fallback: use npm since it's available in the bundling image
+                'npm install',
+                'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: config.compute.lambdaMemory,
+      // Agent responses can take time. Observed >120s for fresh microVM cold
+      // starts (S3 workspace pull + LLM cold path). 5 min gives headroom for
+      // legitimate slow runs without hiding genuine hangs. Bumping the SQS
+      // visibilityTimeout below would also need updating to stay >= 6x this
+      // value if we go higher.
+      timeout: cdk.Duration.minutes(5),
+      architecture: lambda.Architecture.ARM_64,
+      role: this.routerLambdaRole,
+      logGroup: routerLogGroup,
+      tracing: config.monitoring.tracingEnabled
+        ? lambda.Tracing.ACTIVE
+        : lambda.Tracing.DISABLED,
+      environment: {
+        ENVIRONMENT: environment,
+        USERS_TABLE: this.usersTable.tableName,
+        MESSAGE_DEDUP_TABLE: this.messageDedupTable.tableName,
+        GUARDRAIL_ID: props.guardrailId,
+        GUARDRAIL_VERSION: props.guardrailVersion || 'DRAFT',
+        DATABASE_HOST: props.databaseHost,
+        DATABASE_SECRET_ARN: props.databaseSecretArn,
+        DATABASE_NAME: props.databaseName || 'aistudio',
+        GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,
+        TOKEN_LIMIT_PER_INTERACTION: '100000',
+        // K-12 safety: fail closed when guardrails are unavailable
+        GUARDRAIL_FAIL_OPEN: 'false',
+        // Only allow messages from configured domain emails
+        ALLOWED_DOMAINS: props.allowedDomains || 'psd401.net',
+        // Account ID needed to construct AgentCore Runtime ARN from the runtime ID
+        AWS_ACCOUNT_ID: this.account,
+        NODE_ENV: 'production',
+        // AGENTCORE_RUNTIME_ID is intentionally NOT set here — it is resolved
+        // from SSM at runtime because the Runtime resource is conditionally
+        // created only when an image tag is provided via CDK context.
+        //
+        // AGENT_BUILD_TAG — short stable identifier for the deployed AgentCore
+        // image. Mixed into the AgentCore session ID so every deploy
+        // invalidates sticky-routed microVMs. Without this, AgentCore happily
+        // serves an existing user's session from a microVM running an OLD
+        // image until idleRuntimeSessionTimeout, which can be hours for an
+        // active user — a real correctness/security risk at scale. Empty
+        // string is fine; it just means we did not pin a digest this deploy.
+        AGENT_BUILD_TAG: imageDigest
+          ? imageDigest.replace('sha256:', '').substring(0, 12)
+          : (imageTag ?? ''),
+      },
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+    });
+
+    cdk.Tags.of(this.routerLambda).add('Environment', environment);
+    cdk.Tags.of(this.routerLambda).add('ManagedBy', 'cdk');
+
+    // Wire SQS → Lambda trigger
+    // NOTE on duplicate processing: With batchSize=1 and 18-min visibility timeout
+    // (6x Lambda timeout), duplicates are unlikely but possible if the Lambda times
+    // out after invoking AgentCore but before completing (e.g., Google Chat API slow).
+    // The blast radius is one duplicate response per affected message. If this occurs
+    // in production, add SQS messageId-keyed dedup (e.g., DynamoDB conditional write
+    // before calling Google Chat) as a follow-up optimization.
+    this.routerLambda.addEventSource(
+      new lambdaEventSources.SqsEventSource(this.routerQueue, {
+        batchSize: 1, // Process one message at a time for reliable error handling
+        maxBatchingWindow: cdk.Duration.seconds(0), // No batching delay — respond ASAP
+        // Enable partial batch failure reporting — Lambda returns which records
+        // failed so only those are retried. Prevents duplicate Google Chat messages
+        // for records that already succeeded. Safe at any batch size.
+        reportBatchItemFailures: true,
+      }),
+    );
+
+    // =====================================================================
+    // 9b. GCP Pub/Sub → SQS Bridge (HTTP API + JWT Authorizer + Lambda)
+    // =====================================================================
+    // GCP Pub/Sub push subscriptions deliver messages over HTTPS with a Google
+    // OIDC ID token in the Authorization header. They cannot SigV4-sign for
+    // SQS, so we expose a public HTTPS endpoint that:
+    //   1. Validates the JWT via API Gateway's built-in authorizer
+    //      (issuer = https://accounts.google.com, audience = the API URL)
+    //   2. Forwards the raw Pub/Sub envelope to the Router SQS queue via a
+    //      tiny Lambda (HTTP API has no native SQS service integration)
+    //
+    // To enable: pass --context gcpPubsubAudience=<url> (the URL the Pub/Sub
+    // push subscription is configured to call). Setting this to the API URL
+    // itself is the simplest correct value.
+
+    const gcpPubsubAudience = this.node.tryGetContext('gcpPubsubAudience') as string | undefined;
+
+    const bridgeLogGroup = new logs.LogGroup(this, 'ChatBridgeLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-chat-bridge-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+
+    const bridgeLambda = new lambda.Function(this, 'ChatBridgeLambda', {
+      functionName: `psd-agent-chat-bridge-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-chat-bridge'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-chat-bridge');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install',
+                'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: 256,
+      timeout: cdk.Duration.seconds(10),
+      architecture: lambda.Architecture.ARM_64,
+      logGroup: bridgeLogGroup,
+      environment: {
+        ROUTER_QUEUE_URL: this.routerQueue.queueUrl,
+      },
+    });
+    this.routerQueue.grantSendMessages(bridgeLambda);
+    cdk.Tags.of(bridgeLambda).add('Environment', environment);
+    cdk.Tags.of(bridgeLambda).add('ManagedBy', 'cdk');
+
+    const chatHttpApi = new apigwv2.HttpApi(this, 'ChatBridgeApi', {
+      apiName: `psd-agent-chat-bridge-${environment}`,
+      description: 'Receives Google Chat Pub/Sub push deliveries and forwards them to SQS',
+    });
+
+    // JWT authorizer — only valid Google-signed tokens whose audience matches
+    // the configured value are accepted. If audience is not yet configured,
+    // skip authorizer wiring; the route below will then 401 every request,
+    // which is the safe default (no anonymous access).
+    if (gcpPubsubAudience) {
+      // Google Pub/Sub signs the OIDC token's `aud` field with the push
+      // subscription's configured audience. Depending on how the
+      // subscription is set up, this may be either the API origin
+      // (https://<api-id>.execute-api.<region>.amazonaws.com) OR the full
+      // push endpoint URL (https://<api-id>...amazonaws.com/chat). We accept
+      // both so a redeploy cannot silently lock out Pub/Sub by narrowing the
+      // audience — real outage 2026-04-20, restored via live authorizer
+      // patch + this widened list.
+      const stripped = gcpPubsubAudience.replace(/\/chat\/*$/, '');
+      const withPath = stripped.endsWith('/chat')
+        ? stripped
+        : `${stripped.replace(/\/$/, '')}/chat`;
+      const acceptedAudiences = Array.from(new Set([
+        gcpPubsubAudience,
+        stripped,
+        withPath,
+      ]));
+
+      const jwtAuthorizer = new apigwv2Authorizers.HttpJwtAuthorizer(
+        'ChatBridgeJwtAuthorizer',
+        'https://accounts.google.com',
+        {
+          jwtAudience: acceptedAudiences,
+          identitySource: ['$request.header.Authorization'],
+        },
+      );
+
+      chatHttpApi.addRoutes({
+        path: '/chat',
+        methods: [apigwv2.HttpMethod.POST],
+        integration: new apigwv2Integrations.HttpLambdaIntegration(
+          'ChatBridgeIntegration',
+          bridgeLambda,
+        ),
+        authorizer: jwtAuthorizer,
+      });
+    }
+
+    new cdk.CfnOutput(this, 'ChatBridgeEndpoint', {
+      value: gcpPubsubAudience
+        ? `${chatHttpApi.apiEndpoint}/chat`
+        : 'NOT CONFIGURED — pass --context gcpPubsubAudience=<https-url> (set this to the API endpoint URL itself), then redeploy. Update Pub/Sub push subscription endpoint + audience to match.',
+      description: 'Google Chat Pub/Sub push endpoint URL',
+    });
+
+    // Alarm topic is created in section 4d (needed early for the Bedrock
+    // key manager's watchdog). Reuse it here for Router/DLQ alerts.
+    const alarmTopic = this.agentAlarmTopic;
+
+    // CloudWatch alarm on the DLQ — fires when any message lands in the dead-letter
+    // queue, meaning a user's message was silently dropped after 3 retries. In a K-12
+    // environment this warrants immediate investigation.
+    const dlqAlarm = new cloudwatch.Alarm(this, 'RouterDlqAlarm', {
+      alarmName: `psd-agent-router-dlq-${environment}`,
+      alarmDescription: 'Agent Router DLQ received messages — investigate dropped messages',
+      metric: routerDlq.metricApproximateNumberOfMessagesVisible({
+        period: cdk.Duration.minutes(1),
+        statistic: 'Sum',
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // Lambda error rate alarm — catches transient errors (e.g., Google Chat API 5xx)
+    // that succeed on retry and never reach the DLQ. Without this, invisible failures
+    // go undetected. Fires if ≥5 errors in a 5-minute window.
+    const errorAlarm = new cloudwatch.Alarm(this, 'RouterLambdaErrorAlarm', {
+      alarmName: `psd-agent-router-errors-${environment}`,
+      alarmDescription: 'Agent Router Lambda error rate elevated — investigate transient failures',
+      metric: this.routerLambda.metricErrors({
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 5,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
+    // Wire alarm notifications if SNS topic is configured
+    if (alarmTopic) {
+      const snsAction = new cloudwatchActions.SnsAction(alarmTopic);
+      dlqAlarm.addAlarmAction(snsAction);
+      errorAlarm.addAlarmAction(snsAction);
+    }
+
+    // =====================================================================
+    // 10. SSM Parameters — Cross-Stack References
     // =====================================================================
     // All SSM parameters tagged for IAM tag-based access control compliance.
 
@@ -585,6 +1288,21 @@ export class AgentPlatformStack extends cdk.Stack {
         stringValue: this.cronLambdaRole.roleArn,
         description: 'Cron Lambda role ARN',
       }),
+      new ssm.StringParameter(this, 'RouterQueueUrlParam', {
+        parameterName: `/aistudio/${environment}/agent-router-queue-url`,
+        stringValue: this.routerQueue.queueUrl,
+        description: 'SQS queue URL for Google Chat Pub/Sub messages',
+      }),
+      new ssm.StringParameter(this, 'RouterQueueArnParam', {
+        parameterName: `/aistudio/${environment}/agent-router-queue-arn`,
+        stringValue: this.routerQueue.queueArn,
+        description: 'SQS queue ARN for Google Chat Pub/Sub messages',
+      }),
+      new ssm.StringParameter(this, 'RouterLambdaArnParam', {
+        parameterName: `/aistudio/${environment}/agent-router-lambda-arn`,
+        stringValue: this.routerLambda.functionArn,
+        description: 'Router Lambda function ARN',
+      }),
     ];
 
     for (const param of ssmParams) {
@@ -593,7 +1311,7 @@ export class AgentPlatformStack extends cdk.Stack {
     }
 
     // =====================================================================
-    // 9. CloudFormation Outputs
+    // 11. CloudFormation Outputs
     // =====================================================================
 
     new cdk.CfnOutput(this, 'ECRRepositoryUri', {
@@ -641,6 +1359,21 @@ export class AgentPlatformStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'CronLambdaRoleArn', {
       value: this.cronLambdaRole.roleArn,
       description: 'Cron Lambda role ARN',
+    });
+
+    new cdk.CfnOutput(this, 'RouterLambdaArn', {
+      value: this.routerLambda.functionArn,
+      description: 'Router Lambda function ARN',
+    });
+
+    new cdk.CfnOutput(this, 'RouterQueueUrl', {
+      value: this.routerQueue.queueUrl,
+      description: 'SQS queue URL for Google Chat messages',
+    });
+
+    new cdk.CfnOutput(this, 'RouterQueueArn', {
+      value: this.routerQueue.queueArn,
+      description: 'SQS queue ARN for Google Chat messages',
     });
   }
 }
