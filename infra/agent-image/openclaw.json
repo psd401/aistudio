@@ -25,7 +25,10 @@
       "model": {
         "primary": "amazon-bedrock-mantle/zai.glm-5"
       },
-      "workspace": "/home/node/.openclaw"
+      "workspace": "/home/node/.openclaw",
+      "heartbeat": {
+        "every": "0m"
+      }
     }
   },
   "tools": {
@@ -37,18 +40,15 @@
       "watch": false
     }
   },
+  "cron": {
+    "enabled": false
+  },
   "plugins": {
     "entries": {
       "active-memory": {
         "enabled": false
       }
     }
-  },
-  "cron": {
-    "enabled": false
-  },
-  "heartbeat": {
-    "enabled": false
   },
   "gateway": {
     "port": 3100,

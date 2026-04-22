@@ -108,12 +108,12 @@ COPY MEMORY.md /home/node/.openclaw/MEMORY.md
 COPY skills /home/node/.openclaw/skills
 RUN cd /home/node/.openclaw/skills/psd-schedules && npm install --omit=dev --no-audit --no-fund
 
-# Defense-in-depth: keep OpenClaw's built-in cron/heartbeat subsystems off so
-# the agent cannot fall back to a scheduler we do not control. The psd-schedules
-# skill is the only scheduling surface in this deployment, backed by
-# EventBridge Scheduler + DynamoDB (see SKILL.md).
+# Defense-in-depth: disable OpenClaw's cron subsystem via both config
+# (cron.enabled: false in openclaw.json) and env var (OPENCLAW_SKIP_CRON=1)
+# per the official docs. Heartbeat is disabled via
+# agents.defaults.heartbeat.every: "0m" in openclaw.json (no env var exists).
+# The psd-schedules skill is the only scheduling surface in this deployment.
 ENV OPENCLAW_SKIP_CRON=1
-ENV OPENCLAW_SKIP_HEARTBEAT=1
 COPY harness_adapter.py /app/harness_adapter.py
 COPY agentcore_wrapper.py /app/agentcore_wrapper.py
 COPY workspace_sync.py /app/workspace_sync.py
