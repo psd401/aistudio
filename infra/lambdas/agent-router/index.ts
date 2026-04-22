@@ -601,13 +601,27 @@ async function resolveUserByEmailPrefix(
 // Guardrails
 // ---------------------------------------------------------------------------
 
+/**
+ * Apply Bedrock Guardrails for telemetry only.
+ *
+ * The guardrail runs in detect-and-log mode: we capture whether the
+ * service would have intervened and record it in agent_messages via
+ * the guardrailBlocked column, but we never refuse or rewrite the
+ * user's message. Product direction from the PSD owner is that
+ * guardrails must not block any user message — the K-12 filter stays
+ * armed as a diagnostic signal only.
+ *
+ * Service errors (timeouts, throttles, IAM failures) are logged and
+ * treated as "did not intervene" so a Bedrock hiccup cannot bounce
+ * a chat turn. GUARDRAIL_FAIL_OPEN env var is deprecated — this
+ * function always fails open regardless of its value.
+ */
 async function applyGuardrails(
   text: string,
   log: ReturnType<typeof createLogger>
-): Promise<{ allowed: boolean; blockedReason?: string }> {
+): Promise<{ allowed: boolean; wouldHaveBlocked: boolean; blockedReason?: string }> {
   if (!GUARDRAIL_ID) {
-    log.warn('Guardrail ID not configured, skipping content filtering');
-    return { allowed: true };
+    return { allowed: true, wouldHaveBlocked: false };
   }
 
   try {
@@ -620,37 +634,26 @@ async function applyGuardrails(
       })
     );
 
-    const action = result.action;
-    if (action === 'GUARDRAIL_INTERVENED') {
+    if (result.action === 'GUARDRAIL_INTERVENED') {
       const outputs = result.outputs?.map((o) => o.text).join(' ') || '';
-      log.warn('Guardrail blocked message', {
-        action,
+      log.warn('Guardrail would have blocked — passing through per policy', {
+        action: result.action,
         outputPreview: outputs.substring(0, 200),
       });
       return {
-        allowed: false,
-        blockedReason:
-          outputs ||
-          'Your message was filtered by our content safety system. Please rephrase.',
+        allowed: true,
+        wouldHaveBlocked: true,
+        blockedReason: outputs || 'guardrail intervened',
       };
     }
 
-    return { allowed: true };
+    return { allowed: true, wouldHaveBlocked: false };
   } catch (error) {
-    // K-12 safety: fail closed by default. Only allow through if explicitly
-    // configured via GUARDRAIL_FAIL_OPEN=true (not recommended for production).
-    log.error('Guardrail invocation failed', {
+    // Even a service error does not stop a message from going through.
+    log.error('Guardrail invocation failed — passing through per policy', {
       error: error instanceof Error ? error.message : String(error),
-      failOpen: GUARDRAIL_FAIL_OPEN,
     });
-    if (GUARDRAIL_FAIL_OPEN) {
-      return { allowed: true };
-    }
-    return {
-      allowed: false,
-      blockedReason:
-        'Our content safety system is temporarily unavailable. Please try again shortly.',
-    };
+    return { allowed: true, wouldHaveBlocked: false };
   }
 }
 
@@ -1368,39 +1371,10 @@ async function processRecord(
     log
   );
 
-  // Step 2: Guardrails check
+  // Step 2: Guardrails — telemetry only. Never refuse a user message.
+  // `wouldHaveBlocked` is recorded in agent_messages for later analysis
+  // but the conversation continues regardless of guardrail verdict.
   const guardrailResult = await applyGuardrails(messageText, log);
-  if (!guardrailResult.allowed) {
-    await sendGoogleChatResponse(
-      spaceName,
-      threadName,
-      guardrailResult.blockedReason ||
-        'Your message was filtered by our content safety system. Please rephrase.',
-      log
-    );
-
-    // Use the same stable session ID format as non-blocked messages so
-    // session-level blocking stats aggregate correctly. Build tag included
-    // for consistency with the AgentCore call path (see comment below).
-    const blockedSpaceHash = crypto.createHash('sha256').update(spaceName).digest('hex');
-    const blockedBuildTag = process.env.AGENT_BUILD_TAG || 'unset';
-    const blockedSessionId = `${user.workspacePrefix}-${blockedSpaceHash}-${blockedBuildTag}`;
-
-    await logTelemetry(
-      {
-        userId: senderEmail,
-        sessionId: blockedSessionId,
-        model: null,
-        inputTokens: 0,
-        outputTokens: 0,
-        latencyMs: Date.now() - startTime,
-        guardrailBlocked: true,
-        spaceName,
-      },
-      log
-    );
-    return;
-  }
 
   // Step 3: Check for cross-user agent invocation (@agent:username)
   // Only supported in shared spaces (ROOM) — in DMs the sender's own agent
@@ -1469,17 +1443,9 @@ async function processRecord(
 
       // H1 fix: Run guardrails on the stripped message (what AgentCore actually
       // receives), not the original text with the @agent:username prefix.
-      const crossGuardrailResult = await applyGuardrails(actualMessage, log);
-      if (!crossGuardrailResult.allowed) {
-        await sendGoogleChatResponse(
-          spaceName,
-          threadName,
-          crossGuardrailResult.blockedReason ||
-            'Your message was filtered by our content safety system. Please rephrase.',
-          log
-        );
-        return;
-      }
+      // Telemetry-only per policy: record the assessment but never refuse the
+      // message — cross-user invocations pass through just like direct DMs.
+      await applyGuardrails(actualMessage, log);
 
       // Thread context is empty in Phase 1 (no domain-wide delegation yet)
       const threadContext = '';
@@ -1648,7 +1614,10 @@ async function processRecord(
       inputTokens: agentResult.inputTokens,
       outputTokens: agentResult.outputTokens,
       latencyMs,
-      guardrailBlocked: false,
+      // Preserve the guardrail signal for telemetry — the message was not
+      // blocked, but we record whether it would have been under the old
+      // fail-closed policy for later analysis / tuning.
+      guardrailBlocked: guardrailResult.wouldHaveBlocked,
       spaceName,
     },
     log
