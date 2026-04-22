@@ -1,0 +1,17 @@
+{
+  "description": "Allowlisted MCP server endpoints that agents may connect to. Stored as a policy file in S3 under the policies/ prefix for runtime reads without redeployment.",
+  "version": "1.0.0",
+  "allowedEndpoints": [
+    {
+      "name": "PSD District MCP Server",
+      "url": "https://mcp.psd401.net",
+      "description": "Internal district MCP server for Google Workspace delegation and district APIs",
+      "enabled": true
+    }
+  ],
+  "blockedPatterns": [
+    "*powerschool*",
+    "*studentvue*",
+    "*synergysis*"
+  ]
+}

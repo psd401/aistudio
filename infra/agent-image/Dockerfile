@@ -42,7 +42,7 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
 # The exact Python version depends on the base image's distro packages.
 # Verify with: docker run --rm psd-agent-base:latest python3 --version
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip python3-venv && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv tzdata && \
     rm -rf /var/lib/apt/lists/*
 
 # Install the bedrock-agentcore SDK in a virtual environment (avoids --break-system-packages)
@@ -102,10 +102,28 @@ COPY SOUL.md /home/node/.openclaw/SOUL.md
 COPY IDENTITY.md /home/node/.openclaw/IDENTITY.md
 COPY USER.md /home/node/.openclaw/USER.md
 COPY MEMORY.md /home/node/.openclaw/MEMORY.md
+# Install OpenClaw skills — each skill is a directory under
+# /home/node/.openclaw/skills/ loaded via openclaw.json skills.load.extraDirs.
+# Install dependencies at build time so the agent container starts fast.
+COPY skills /home/node/.openclaw/skills
+RUN cd /home/node/.openclaw/skills/psd-schedules && npm install --omit=dev --no-audit --no-fund
+
+# Defense-in-depth: disable OpenClaw's cron subsystem via both config
+# (cron.enabled: false in openclaw.json) and env var (OPENCLAW_SKIP_CRON=1)
+# per the official docs. Heartbeat is disabled via
+# agents.defaults.heartbeat.every: "0m" in openclaw.json (no env var exists).
+# The psd-schedules skill is the only scheduling surface in this deployment.
+ENV OPENCLAW_SKIP_CRON=1
 COPY harness_adapter.py /app/harness_adapter.py
 COPY agentcore_wrapper.py /app/agentcore_wrapper.py
 COPY workspace_sync.py /app/workspace_sync.py
 COPY mantle_proxy.py /app/mantle_proxy.py
+
+# Container OS clock is UTC. The wrapper reads the user's local time via
+# zoneinfo (requires the tzdata package installed above). TZ env var is set
+# for any process that reads it directly — not used by agentcore_wrapper
+# which passes the IANA name explicitly to zoneinfo.
+ENV TZ=America/Los_Angeles
 
 # Set ownership for the node user (OpenClaw runs as node)
 RUN chown -R node:node /home/node/.openclaw /app

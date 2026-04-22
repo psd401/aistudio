@@ -25,11 +25,23 @@
       "model": {
         "primary": "amazon-bedrock-mantle/zai.glm-5"
       },
-      "workspace": "/home/node/.openclaw"
+      "workspace": "/home/node/.openclaw",
+      "heartbeat": {
+        "every": "0m"
+      }
     }
   },
   "tools": {
     "profile": "full"
+  },
+  "skills": {
+    "load": {
+      "extraDirs": ["/home/node/.openclaw/skills"],
+      "watch": false
+    }
+  },
+  "cron": {
+    "enabled": false
   },
   "plugins": {
     "entries": {

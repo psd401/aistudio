@@ -40,6 +40,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
   PutCommand,
+  QueryCommand,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import postgres from 'postgres';
@@ -142,6 +143,12 @@ const MAX_MESSAGE_LENGTH = parseInt(
   process.env.MAX_MESSAGE_LENGTH || '10000',
   10
 );
+// Inter-agent communication limits
+const MAX_INTERAGENT_MESSAGES_PER_HOUR = parseInt(
+  process.env.MAX_INTERAGENT_MESSAGES_PER_HOUR || '5',
+  10
+);
+const INTERAGENT_TABLE = process.env.INTERAGENT_TABLE || '';
 
 // Cold-start diagnostic: log if AGENTCORE_RUNTIME_ID is not set at module load.
 // When the env var is absent, every invocation pays an SSM GetParameter call.
@@ -800,6 +807,165 @@ async function logTelemetry(
 }
 
 // ---------------------------------------------------------------------------
+// Inter-agent communication
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if an inter-agent message is rate-limited.
+ * Counts messages from a sender bot in the last hour using DynamoDB.
+ * Returns true if the rate limit is exceeded.
+ */
+async function isInterAgentRateLimited(
+  senderBotId: string,
+  log: ReturnType<typeof createLogger>
+): Promise<boolean> {
+  if (!INTERAGENT_TABLE) {
+    log.warn('Inter-agent table not configured, allowing message');
+    return false;
+  }
+
+  try {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+    const { Count: count } = await dynamoClient.send(
+      new QueryCommand({
+        TableName: INTERAGENT_TABLE,
+        KeyConditionExpression: 'senderBotId = :sender AND sentAt > :since',
+        ExpressionAttributeValues: {
+          ':sender': senderBotId,
+          ':since': oneHourAgo,
+        },
+        Select: 'COUNT',
+      })
+    );
+
+    const messageCount = count || 0;
+    // With write-before-read ordering, the current message is already counted.
+    // Use > (not >=) to maintain the same effective limit: N messages allowed,
+    // the (N+1)th is blocked.
+    if (messageCount > MAX_INTERAGENT_MESSAGES_PER_HOUR) {
+      log.warn('Inter-agent rate limit exceeded', {
+        senderBotId,
+        messageCount,
+        limit: MAX_INTERAGENT_MESSAGES_PER_HOUR,
+      });
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    // Fail-open: if the check fails we prefer a delivered message over a
+    // dropped one. A CloudWatch alarm on this error should trigger ops review.
+    log.error('Inter-agent rate check failed; allowing message', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
+/**
+ * Record an inter-agent message for rate limiting and anti-loop tracking.
+ * TTL of 2 hours for automatic cleanup.
+ */
+async function recordInterAgentMessage(
+  senderBotId: string,
+  targetBotId: string,
+  spaceName: string,
+  threadName: string | undefined,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  if (!INTERAGENT_TABLE) return;
+
+  const expiresAt = Math.floor(Date.now() / 1000) + 7200; // 2 hour TTL
+  try {
+    await dynamoClient.send(
+      new PutCommand({
+        TableName: INTERAGENT_TABLE,
+        Item: {
+          senderBotId,
+          sentAt: new Date().toISOString(),
+          targetBotId,
+          spaceName,
+          // Thread key is already normalized at the call site (real thread name
+          // or space-stable `unthreaded-<spaceName>` for top-level messages) so
+          // record and anti-loop query agree on the same correlation key.
+          threadName: threadName || 'unknown',
+          expiresAt,
+        },
+      })
+    );
+  } catch (error) {
+    log.error('Failed to record inter-agent message', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
+ * Anti-loop detection: check if a bot has already sent too many messages
+ * in this thread within the last hour. With write-before-read ordering,
+ * the current message is already recorded, so the threshold is 3 (allows
+ * 2 actual exchanges before blocking the 3rd).
+ *
+ * This prevents the "ant death spiral" observed at Every.to where agents
+ * enter infinite conversation loops.
+ *
+ * Design: We query by the sender's partition key + thread filter. This
+ * works without a GSI because we're checking "has THIS bot talked too
+ * much in this thread" rather than tracking specific bot pairs. In a
+ * two-bot loop, each bot independently hits the threshold.
+ */
+async function isAntiLoopTriggered(
+  senderBotId: string,
+  threadName: string | undefined,
+  log: ReturnType<typeof createLogger>
+): Promise<boolean> {
+  if (!INTERAGENT_TABLE || !threadName) return false;
+
+  try {
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+
+    // Count messages from this sender in the same thread in the last hour.
+    // If the sender already has 2+ messages, a loop is likely forming.
+    const result = await dynamoClient.send(
+      new QueryCommand({
+        TableName: INTERAGENT_TABLE,
+        KeyConditionExpression: 'senderBotId = :sender AND sentAt > :since',
+        FilterExpression: 'threadName = :thread',
+        ExpressionAttributeValues: {
+          ':sender': senderBotId,
+          ':since': oneHourAgo,
+          ':thread': threadName,
+        },
+        Select: 'COUNT',
+      })
+    );
+
+    const senderMessageCount = result.Count || 0;
+
+    // Anti-loop: if this bot has sent 3+ messages in this thread (including
+    // the one just recorded via write-before-read), block further exchanges.
+    // The threshold of 3 allows 2 actual exchanges before blocking the 3rd.
+    if (senderMessageCount >= 3) {
+      log.warn('Anti-loop triggered — blocking agent-to-agent conversation', {
+        senderBotId,
+        threadName,
+        senderMessageCount,
+      });
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    // Fail-open: if the check fails we prefer a delivered message over a
+    // dropped one. A CloudWatch alarm on this error should trigger ops review.
+    log.error('Anti-loop check failed; allowing message', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main handler
 // ---------------------------------------------------------------------------
 
@@ -903,8 +1069,110 @@ async function processRecord(
     return;
   }
 
-  // Ignore messages from bots
-  if (message.sender.type === 'BOT') {
+  // Inter-agent communication: detect bot-to-bot messages in shared spaces.
+  // In DM spaces, bot messages are always ignored (no inter-agent routing).
+  // In shared spaces (ROOM), bot messages are handled by the dedicated
+  // inter-agent branch below, which applies rate limiting and anti-loop
+  // protection before returning; they do not continue through the normal
+  // human-message / AgentCore processing path.
+  const isBotSender = message.sender.type === 'BOT';
+  const isSharedSpace = chatEvent.space.type === 'ROOM';
+
+  if (isBotSender && !isSharedSpace) {
+    // Bot messages in DMs are self-responses — ignore
+    return;
+  }
+
+  if (isBotSender && isSharedSpace) {
+    // Inter-agent message in shared space
+    const senderBotId = message.sender.name;
+    const spaceName = chatEvent.space.name;
+    // Thread correlation: real threadName when present, otherwise bucket all
+    // unthreaded messages in this space under a space-stable key so anti-loop
+    // counts still correlate. Using a per-message UUID here (previous fix)
+    // scattered each top-level message into its own thread and defeated the
+    // anti-loop check entirely.
+    const threadName = message.thread?.name || `unthreaded-${spaceName}`;
+    const interAgentStartTime = Date.now();
+
+    log.info('Inter-agent message detected', {
+      senderBot: senderBotId,
+      senderDisplayName: message.sender.displayName,
+      space: spaceName,
+      thread: threadName,
+    });
+
+    // Record FIRST, then check counts. Write-before-read prevents the race
+    // condition where concurrent writers both pass the check before either
+    // writes — both would see stale counts and allow 2× the intended limit.
+    // By recording first, the count query always reflects the current message.
+    await recordInterAgentMessage(
+      senderBotId,
+      'broadcast',
+      spaceName,
+      threadName,
+      log
+    );
+
+    // Rate limit check (queries count AFTER this message was recorded)
+    const rateLimited = await isInterAgentRateLimited(senderBotId, log);
+    if (rateLimited) {
+      log.warn('Inter-agent message rate-limited', { senderBot: senderBotId });
+      await sendGoogleChatResponse(
+        spaceName,
+        threadName,
+        `⚠️ Rate limit reached: ${message.sender.displayName} has sent too many inter-agent messages this hour. Please wait before continuing this conversation.`,
+        log
+      );
+      return;
+    }
+
+    // Anti-loop detection: check if this bot has already sent 3+ messages
+    // in this thread within the last hour (including the one just recorded).
+    // Blocks further exchanges to prevent infinite agent-to-agent loops.
+    const antiLoopTriggered = await isAntiLoopTriggered(
+      senderBotId,
+      threadName,
+      log
+    );
+
+    if (antiLoopTriggered) {
+      await sendGoogleChatResponse(
+        spaceName,
+        threadName,
+        `🔄 Anti-loop protection: This agent conversation in this thread has been paused ` +
+        `(too many bot messages detected). A human can continue by replying in this thread — ` +
+        `the counter resets after 1 hour.`,
+        log
+      );
+      return;
+    }
+
+    // Log inter-agent telemetry separately.
+    // Note: latency measured from inter-agent branch entry, not processRecord
+    // start, so it excludes upstream deduplication/parsing overhead.
+    await logTelemetry(
+      {
+        userId: `bot:${senderBotId}`,
+        sessionId: `interagent-${spaceName}-${threadName || 'none'}`,
+        model: null,
+        inputTokens: 0,
+        outputTokens: 0,
+        latencyMs: Date.now() - interAgentStartTime,
+        guardrailBlocked: false,
+        spaceName,
+      },
+      log
+    );
+
+    // Inter-agent messages are logged but not routed through AgentCore —
+    // they flow through the shared Google Chat space where humans can observe.
+    // The agents' own Google Chat → AgentCore → response pipeline handles
+    // generating replies. This Lambda just tracks and governs the traffic.
+    log.info('Inter-agent message logged', {
+      senderBot: senderBotId,
+      space: spaceName,
+    });
     return;
   }
 

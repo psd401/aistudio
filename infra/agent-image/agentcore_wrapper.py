@@ -36,6 +36,8 @@ import signal
 import subprocess
 import sys
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 # Configure structured logging for CloudWatch
 logging.basicConfig(
@@ -292,16 +294,26 @@ def main():
             except Exception as exc:  # noqa: BLE001
                 logger.warning("workspace mount failed: %s", exc)
 
-        # Inject a brief identity preamble so the agent always knows who's
-        # speaking. The per-user USER.md / IDENTITY.md files do the heavier
-        # lifting; this is the per-request stamp.
+        # Inject per-turn context: the caller's identity AND the current
+        # Pacific local time. The LLM has no real clock — without this header
+        # it falls back to whatever timestamps it sees in system metadata
+        # (container clock is UTC) and confidently reports the wrong date.
+        # PSD is in Washington State so America/Los_Angeles applies to every
+        # caller. If we ever serve users outside this TZ, we'd switch to a
+        # per-user preference — for now, hard-coded is correct for everyone.
+        pacific_now = datetime.now(ZoneInfo("America/Los_Angeles"))
+        now_header = (
+            f"[now: {pacific_now.strftime('%A, %B %d, %Y %-I:%M %p')} "
+            f"Pacific ({pacific_now.strftime('%Y-%m-%dT%H:%M:%S%z')})]"
+        )
         if display_name or user_email != "unknown":
             framed = (
-                f"[caller: {display_name or user_email} <{user_email}>]\n\n"
+                f"[caller: {display_name or user_email} <{user_email}>]\n"
+                f"{now_header}\n\n"
                 f"{user_message}"
             )
         else:
-            framed = user_message
+            framed = f"{now_header}\n\n{user_message}"
 
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(

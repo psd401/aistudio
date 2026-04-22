@@ -3,8 +3,10 @@ import { Construct } from 'constructs';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as events from 'aws-cdk-lib/aws-events';
+import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as logs from 'aws-cdk-lib/aws-logs';
@@ -251,8 +253,46 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(this.messageDedupTable).add('Environment', environment);
     cdk.Tags.of(this.messageDedupTable).add('ManagedBy', 'cdk');
 
+    // 4d. Inter-Agent Communication table — tracks agent-to-agent messages
+    // for rate limiting and anti-loop detection. Uses TTL for automatic cleanup.
+    // PITR enabled: this is an audit trail for governance enforcement, so
+    // accidental table deletion should be recoverable even though TTL
+    // expires individual rows after 2 hours.
+    const interAgentTable = new dynamodb.Table(this, 'AgentInterAgentTable', {
+      tableName: `psd-agent-interagent-${environment}`,
+      partitionKey: { name: 'senderBotId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'sentAt', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      timeToLiveAttribute: 'expiresAt',
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(interAgentTable).add('Environment', environment);
+    cdk.Tags.of(interAgentTable).add('ManagedBy', 'cdk');
+
+    // 4e. Agent Schedules table — user-defined schedules, one row per schedule.
+    // The psd-schedules OpenClaw skill writes to this table AND to EventBridge
+    // Scheduler in the same transaction (with rollback on failure). No streams
+    // or sync Lambda — the agent owns both sides and keeps them consistent.
+    const schedulesTable = new dynamodb.Table(this, 'AgentSchedulesTable', {
+      tableName: `psd-agent-schedules-${environment}`,
+      partitionKey: { name: 'userId', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'scheduleId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(schedulesTable).add('Environment', environment);
+    cdk.Tags.of(schedulesTable).add('ManagedBy', 'cdk');
+
     // =====================================================================
-    // 4c. Google Credentials Secret (CDK-managed, operator populates)
+    // 4f. Google Credentials Secret (CDK-managed, operator populates)
     // =====================================================================
     // CDK creates the secret with placeholder value. After deploy, populate
     // it with the Google service account JSON:
@@ -639,6 +679,8 @@ export class AgentPlatformStack extends cdk.Stack {
         `${this.usersTable.tableArn}/index/*`,
         this.signalsTable.tableArn,
         `${this.signalsTable.tableArn}/index/*`,
+        schedulesTable.tableArn,
+        `${schedulesTable.tableArn}/index/*`,
       ],
     }));
 
@@ -680,6 +722,7 @@ export class AgentPlatformStack extends cdk.Stack {
         this.usersTable.tableName,
         this.signalsTable.tableName,
         this.messageDedupTable.tableName,
+        interAgentTable.tableName,
       ],
       s3Buckets: [this.workspaceBucket.bucketName],
       // WORKAROUND: ServiceRoleFactory checks startsWith("arn:") to detect full
@@ -741,6 +784,10 @@ export class AgentPlatformStack extends cdk.Stack {
     // Accepted tradeoff for consistency — table ARN scoping limits blast radius.
     // TODO(#887): Tighten to read-only DynamoDB when ServiceRoleFactory supports
     // granular permission levels (track as follow-up).
+    // NOTE: Cron Lambda role only has access to the users table — intentionally
+    // no access to the inter-agent table. The cron Lambda invokes AgentCore for
+    // scheduled tasks and delivers results to DMs. Only the Router Lambda handles
+    // inter-agent governance (rate limiting, anti-loop) and needs interAgentTable.
     this.cronLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'CronLambdaRole', {
       functionName: 'psd-agent-cron',
       environment,
@@ -756,6 +803,35 @@ export class AgentPlatformStack extends cdk.Stack {
             effect: iam.Effect.ALLOW,
             actions: ['bedrock-agentcore:InvokeAgentRuntime', 'bedrock-agentcore:InvokeAgentRuntimeForUser'],
             resources: [`arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`],
+          })],
+        }),
+        // SSM Parameter Store — resolve AgentCore Runtime ID at runtime
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'SSMParameterAccess',
+            effect: iam.Effect.ALLOW,
+            actions: ['ssm:GetParameter', 'ssm:GetParameters'],
+            resources: [
+              `arn:aws:ssm:${this.region}:${this.account}:parameter/aistudio/${environment}/*`,
+            ],
+          })],
+        }),
+        // Aurora via RDS Data API — writes run telemetry to agent_scheduled_runs.
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'AuroraDataAccess',
+            effect: iam.Effect.ALLOW,
+            actions: ['rds-data:ExecuteStatement', 'rds-data:BatchExecuteStatement'],
+            resources: [props.databaseResourceArn],
+          })],
+        }),
+        // Database secret read for RDS Data API.
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'DatabaseSecretRead',
+            effect: iam.Effect.ALLOW,
+            actions: ['secretsmanager:GetSecretValue'],
+            resources: [props.databaseSecretArn],
           })],
         }),
       ],
@@ -807,6 +883,15 @@ export class AgentPlatformStack extends cdk.Stack {
           WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
           USERS_TABLE: this.usersTable.tableName,
           SIGNALS_TABLE: this.signalsTable.tableName,
+          SCHEDULES_TABLE: schedulesTable.tableName,
+          // Inputs for the psd-schedules OpenClaw skill. The skill writes
+          // EventBridge Scheduler entries directly under the AgentCore role.
+          // Compute ARNs / names from stable identifiers so we don't need to
+          // reorder this block before the Scheduler constructs are declared;
+          // CDK dependency tracking still links them through the IAM grants.
+          EVENTBRIDGE_SCHEDULE_GROUP: `psd-agent-${environment}`,
+          CRON_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:psd-agent-cron-${environment}`,
+          EVENTBRIDGE_ROLE_ARN: `arn:aws:iam::${this.account}:role/psd-agent-scheduler-invoke-${environment}`,
           GUARDRAIL_ARN: props.guardrailArn,
           DATABASE_RESOURCE_ARN: props.databaseResourceArn,
           DATABASE_SECRET_ARN: props.databaseSecretArn,
@@ -834,55 +919,179 @@ export class AgentPlatformStack extends cdk.Stack {
     }
 
     // =====================================================================
-    // 7. EventBridge Rules — Agent Cron Jobs
+    // 6b. Cedar Policies — S3 Upload
     // =====================================================================
-    // All rules DISABLED by default until the Cron Lambda is created in a
-    // separate issue. The rules will target the Cron Lambda once it exists.
+    // Upload Cedar governance policies to the workspace bucket under policies/.
+    // AgentCore reads these at session start. Policies can be updated by
+    // re-uploading to S3 without redeploying the stack.
 
-    const cronSchedules = config.agent.cronSchedules;
+    // IMPORTANT: prune=false avoids deleting other objects under policies/, but
+    // means renamed/deleted Cedar files persist in S3 indefinitely. If you rename
+    // a .cedar file, manually delete the old version from S3 to prevent AgentCore
+    // from loading stale policies:
+    //   aws s3 rm s3://<bucket>/policies/cedar/<old-filename>.cedar
+    new s3deploy.BucketDeployment(this, 'CedarPolicyDeployment', {
+      sources: [s3deploy.Source.asset(path.join(__dirname, '..', 'policies'))],
+      destinationBucket: this.workspaceBucket,
+      destinationKeyPrefix: 'policies/',
+      prune: false,
+    });
 
-    // EventBridge rules for agent cron jobs. Disabled until Cron Lambda is created.
-    // CDK registers constructs in the construct tree by ID at construction time —
-    // no variable reference needed. Variables will be added when addTarget() is
-    // called after the Cron Lambda is implemented.
+    // =====================================================================
+    // 7. Cron Lambda — Per-User Scheduled Tasks
+    // =====================================================================
+    // Invoked by EventBridge Scheduler entries (one per user-defined schedule).
+    // The Scheduler Sync Lambda (below) creates/updates/deletes those entries
+    // based on DynamoDB Stream events from the schedules table.
+    // This Lambda processes exactly one schedule invocation at a time — no
+    // batch, no stagger, no hard cap. The agent-owner relationship is 1:1
+    // between a schedule row and an EventBridge Scheduler entry.
 
-    const ruleDefinitions = [
-      {
-        id: 'MorningBriefRule',
-        name: `psd-agent-morning-brief-${environment}`,
-        description: 'Morning briefing for PSD AI agents — 9 AM PDT / 16:00 UTC weekdays',
-        schedule: cronSchedules.morningBrief,
-      },
-      {
-        id: 'EveningWrapRule',
-        name: `psd-agent-evening-wrap-${environment}`,
-        description: 'Evening wrap-up for PSD AI agents — 6 PM PDT / 01:00 UTC weekdays',
-        schedule: cronSchedules.eveningWrap,
-      },
-      {
-        id: 'WeeklySummaryRule',
-        name: `psd-agent-weekly-summary-${environment}`,
-        description: 'Weekly summary for PSD AI agents — 3 PM PDT Friday / 22:00 UTC',
-        schedule: cronSchedules.weeklySummary,
-      },
-      {
-        id: 'KaizenScanRule',
-        name: `psd-agent-kaizen-scan-${environment}`,
-        description: 'Kaizen improvement scan for PSD AI agents — 8 PM PDT Sunday / 03:00 UTC Monday',
-        schedule: cronSchedules.kaizenScan,
-      },
-    ];
+    const cronLogGroup = new logs.LogGroup(this, 'CronLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-cron-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(cronLogGroup).add('Environment', environment);
+    cdk.Tags.of(cronLogGroup).add('ManagedBy', 'cdk');
 
-    for (const def of ruleDefinitions) {
-      const rule = new events.Rule(this, def.id, {
-        ruleName: def.name,
-        description: def.description,
-        schedule: events.Schedule.expression(def.schedule),
-        enabled: false,
-      });
-      cdk.Tags.of(rule).add('Environment', environment);
-      cdk.Tags.of(rule).add('ManagedBy', 'cdk');
-    }
+    const cronLambda = new lambda.Function(this, 'CronLambda', {
+      functionName: `psd-agent-cron-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-cron'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-cron');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            // Docker fallback uses npm because the standard Node.js bundling image
+            // does not include bun. The package.json uses only standard npm-compatible
+            // deps, so dependency trees are equivalent. Local bundling (above) uses bun.
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: config.compute.lambdaMemory,
+      // Single-user invocation: AgentCore response times observed up to 3 min
+      // under load. 5 min gives ~2x headroom for tail latency. No batching or
+      // stagger — one Scheduler event = one user = one Lambda invocation.
+      timeout: cdk.Duration.minutes(5),
+      architecture: lambda.Architecture.ARM_64,
+      role: this.cronLambdaRole,
+      logGroup: cronLogGroup,
+      environment: {
+        ENVIRONMENT: environment,
+        USERS_TABLE: this.usersTable.tableName,
+        SCHEDULES_TABLE: schedulesTable.tableName,
+        GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,
+        DATABASE_RESOURCE_ARN: props.databaseResourceArn,
+        DATABASE_SECRET_ARN: props.databaseSecretArn,
+        DATABASE_NAME: props.databaseName ?? 'aistudio',
+        AWS_ACCOUNT_ID: this.account,
+      },
+    });
+
+    cdk.Tags.of(cronLambda).add('Environment', environment);
+    cdk.Tags.of(cronLambda).add('ManagedBy', 'cdk');
+
+    // Cron Lambda backfills resolved DM space into the schedules row so
+    // subsequent invocations skip the Google Chat API scan.
+    schedulesTable.grantWriteData(this.cronLambdaRole);
+
+    // Grant Cron Lambda access to Google credentials secret
+    this.googleCredentialsSecret.grantRead(this.cronLambdaRole);
+
+    // CloudWatch Logs permissions are granted automatically by CDK when the
+    // function is constructed with a managed logGroup prop (see CronLambda
+    // below) — no managed policy needed, and scoping to the named group is
+    // tighter than AWSLambdaBasicExecutionRole's blanket logs:* on *.
+
+    // =====================================================================
+    // 7b. EventBridge Scheduler — per-user schedule entries
+    // =====================================================================
+    // EventBridge Scheduler (not Rules) hosts one schedule per user-defined
+    // row in the AgentSchedulesTable. Scheduler supports per-entry timezone,
+    // up to 1M schedules per account, and individual payloads per target —
+    // all required for user-owned, independently-timed schedules.
+    //
+    // The Scheduler service assumes `schedulerInvokeRole` to invoke the Cron
+    // Lambda. Entries are created/updated/deleted by the psd-schedules
+    // OpenClaw skill running inside the agent container (no sync Lambda).
+
+    const scheduleGroup = new scheduler.CfnScheduleGroup(this, 'AgentScheduleGroup', {
+      name: `psd-agent-${environment}`,
+    });
+    cdk.Tags.of(scheduleGroup).add('Environment', environment);
+    cdk.Tags.of(scheduleGroup).add('ManagedBy', 'cdk');
+
+    // Role that EventBridge Scheduler assumes to invoke the Cron Lambda.
+    const schedulerInvokeRole = new iam.Role(this, 'SchedulerInvokeRole', {
+      roleName: `psd-agent-scheduler-invoke-${environment}`,
+      assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com'),
+      description: 'Assumed by EventBridge Scheduler to invoke the agent cron Lambda',
+    });
+    cronLambda.grantInvoke(schedulerInvokeRole);
+
+    // =====================================================================
+    // 7c. Agent → EventBridge Scheduler authorization
+    // =====================================================================
+    // The psd-schedules OpenClaw skill runs inside the agent container and
+    // writes EventBridge Scheduler entries directly under the AgentCore
+    // execution role. Grant scheduler:* on the schedule group and iam:PassRole
+    // on the invoke role so the skill can Create/Update/Delete schedules.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SchedulerCrud',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'scheduler:CreateSchedule',
+        'scheduler:UpdateSchedule',
+        'scheduler:DeleteSchedule',
+        'scheduler:GetSchedule',
+        'scheduler:ListSchedules',
+      ],
+      resources: [
+        `arn:aws:scheduler:${this.region}:${this.account}:schedule/psd-agent-${environment}/*`,
+        `arn:aws:scheduler:${this.region}:${this.account}:schedule-group/psd-agent-${environment}`,
+      ],
+    }));
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SchedulerPassRole',
+      effect: iam.Effect.ALLOW,
+      actions: ['iam:PassRole'],
+      resources: [schedulerInvokeRole.roleArn],
+      conditions: {
+        StringEquals: {
+          'iam:PassedToService': 'scheduler.amazonaws.com',
+        },
+      },
+    }));
 
     // =====================================================================
     // 8. SQS Queue — Google Chat Pub/Sub Inbound
@@ -1009,6 +1218,8 @@ export class AgentPlatformStack extends cdk.Stack {
         ENVIRONMENT: environment,
         USERS_TABLE: this.usersTable.tableName,
         MESSAGE_DEDUP_TABLE: this.messageDedupTable.tableName,
+        INTERAGENT_TABLE: interAgentTable.tableName,
+        MAX_INTERAGENT_MESSAGES_PER_HOUR: '5',
         GUARDRAIL_ID: props.guardrailId,
         GUARDRAIL_VERSION: props.guardrailVersion || 'DRAFT',
         DATABASE_HOST: props.databaseHost,
@@ -1303,6 +1514,21 @@ export class AgentPlatformStack extends cdk.Stack {
         stringValue: this.routerLambda.functionArn,
         description: 'Router Lambda function ARN',
       }),
+      new ssm.StringParameter(this, 'CronLambdaArnParam', {
+        parameterName: `/aistudio/${environment}/agent-cron-lambda-arn`,
+        stringValue: cronLambda.functionArn,
+        description: 'Cron Lambda function ARN',
+      }),
+      new ssm.StringParameter(this, 'InterAgentTableNameParam', {
+        parameterName: `/aistudio/${environment}/agent-interagent-table-name`,
+        stringValue: interAgentTable.tableName,
+        description: 'DynamoDB table name for inter-agent communication tracking',
+      }),
+      new ssm.StringParameter(this, 'SchedulesTableNameParam', {
+        parameterName: `/aistudio/${environment}/agent-schedules-table-name`,
+        stringValue: schedulesTable.tableName,
+        description: 'DynamoDB table name for user-defined agent schedules',
+      }),
     ];
 
     for (const param of ssmParams) {
@@ -1374,6 +1600,16 @@ export class AgentPlatformStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'RouterQueueArn', {
       value: this.routerQueue.queueArn,
       description: 'SQS queue ARN for Google Chat messages',
+    });
+
+    new cdk.CfnOutput(this, 'CronLambdaArn', {
+      value: cronLambda.functionArn,
+      description: 'Cron Lambda function ARN',
+    });
+
+    new cdk.CfnOutput(this, 'InterAgentTableName', {
+      value: interAgentTable.tableName,
+      description: 'DynamoDB table for inter-agent communication tracking',
     });
   }
 }
