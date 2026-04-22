@@ -42,7 +42,7 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
 # The exact Python version depends on the base image's distro packages.
 # Verify with: docker run --rm psd-agent-base:latest python3 --version
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip python3-venv && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv tzdata && \
     rm -rf /var/lib/apt/lists/*
 
 # Install the bedrock-agentcore SDK in a virtual environment (avoids --break-system-packages)
@@ -118,6 +118,12 @@ COPY harness_adapter.py /app/harness_adapter.py
 COPY agentcore_wrapper.py /app/agentcore_wrapper.py
 COPY workspace_sync.py /app/workspace_sync.py
 COPY mantle_proxy.py /app/mantle_proxy.py
+
+# Container OS clock is UTC. The wrapper reads the user's local time via
+# zoneinfo (requires the tzdata package installed above). TZ env var is set
+# for any process that reads it directly — not used by agentcore_wrapper
+# which passes the IANA name explicitly to zoneinfo.
+ENV TZ=America/Los_Angeles
 
 # Set ownership for the node user (OpenClaw runs as node)
 RUN chown -R node:node /home/node/.openclaw /app
