@@ -149,13 +149,6 @@ const MAX_INTERAGENT_MESSAGES_PER_HOUR = parseInt(
   10
 );
 const INTERAGENT_TABLE = process.env.INTERAGENT_TABLE || '';
-// Cross-user agent invocation rate limit (#903) — max invocations per sender
-// per hour. Uses the message dedup table with a cross-user-specific key prefix
-// to avoid adding another DynamoDB table. Default: 10 per hour per sender.
-const MAX_CROSS_USER_INVOCATIONS_PER_HOUR = parseInt(
-  process.env.MAX_CROSS_USER_INVOCATIONS_PER_HOUR || '10',
-  10
-);
 // Cross-user agent invocation: thread context limits (Phase 2 — unused until
 // domain-wide delegation enables spaces.messages.list)
 // const CROSS_USER_THREAD_CONTEXT_LIMIT = parseInt(
@@ -612,65 +605,6 @@ async function fetchThreadContext(
     space: spaceName,
   });
   return '';
-}
-
-/**
- * Rate-limit cross-user invocations per sender.
- * Tracks invocations using a time-bucketed counter in the message dedup
- * DynamoDB table (shared infrastructure, cross-user-specific key prefix).
- *
- * Returns true if the sender has exceeded MAX_CROSS_USER_INVOCATIONS_PER_HOUR.
- * Fails open on errors — better to allow a message than drop it on a DDB blip.
- */
-async function isCrossUserRateLimited(
-  senderEmail: string,
-  log: ReturnType<typeof createLogger>
-): Promise<boolean> {
-  const tableName = process.env.MESSAGE_DEDUP_TABLE;
-  if (!tableName) {
-    return false; // Dedup table not configured (e.g., local tests) — pass through
-  }
-
-  // Use hour-bucketed keys so each hour starts fresh without needing a scan.
-  // Key format: cross-user:<sender>:<hour-bucket>
-  const hourBucket = new Date().toISOString().slice(0, 13); // YYYY-MM-DDTHH
-  const counterKey = `cross-user:${senderEmail}:${hourBucket}`;
-
-  try {
-    // Atomic increment via UpdateCommand — creates item on first call.
-    // TTL ensures automatic cleanup after 2 hours.
-    const result = await dynamoClient.send(
-      new UpdateCommand({
-        TableName: tableName,
-        Key: { messageName: counterKey },
-        UpdateExpression: 'SET invocationCount = if_not_exists(invocationCount, :zero) + :one, expiresAt = :ttl',
-        ExpressionAttributeValues: {
-          ':zero': 0,
-          ':one': 1,
-          ':ttl': Math.floor(Date.now() / 1000) + 7200, // 2 hour TTL
-        },
-        ReturnValues: 'ALL_NEW',
-      })
-    );
-
-    const count = (result.Attributes?.invocationCount as number) || 0;
-    if (count > MAX_CROSS_USER_INVOCATIONS_PER_HOUR) {
-      log.warn('Cross-user invocation rate limit exceeded', {
-        senderEmail,
-        invocationCount: count,
-        limit: MAX_CROSS_USER_INVOCATIONS_PER_HOUR,
-      });
-      return true;
-    }
-
-    return false;
-  } catch (error) {
-    // Fail open — prefer delivering a message over dropping it on a DDB error
-    log.error('Cross-user rate limit check failed; allowing message', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-    return false;
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1490,19 +1424,6 @@ async function processRecord(
       targetUsername: crossUserInvocation.targetUsername,
       space: spaceName,
     });
-
-    // C1 fix: Rate-limit cross-user invocations per sender to prevent abuse.
-    // Check early before resolving the target user to save DynamoDB reads.
-    const crossUserRateLimited = await isCrossUserRateLimited(senderEmail, log);
-    if (crossUserRateLimited) {
-      await sendGoogleChatResponse(
-        spaceName,
-        threadName,
-        'You\'ve sent too many agent consultations this hour. Please wait before trying again.',
-        log
-      );
-      return;
-    }
 
     // Resolve the target user
     const targetUser = await resolveUserByEmailPrefix(
