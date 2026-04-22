@@ -149,12 +149,6 @@ const MAX_INTERAGENT_MESSAGES_PER_HOUR = parseInt(
   10
 );
 const INTERAGENT_TABLE = process.env.INTERAGENT_TABLE || '';
-// Cross-user agent invocation: thread context limits (Phase 2 — unused until
-// domain-wide delegation enables spaces.messages.list)
-// const CROSS_USER_THREAD_CONTEXT_LIMIT = parseInt(
-//   process.env.CROSS_USER_THREAD_CONTEXT_LIMIT || '50', 10);
-// const CROSS_USER_THREAD_TOKEN_BUDGET = parseInt(
-//   process.env.CROSS_USER_THREAD_TOKEN_BUDGET || '8000', 10);
 
 // Cold-start diagnostic: log if AGENTCORE_RUNTIME_ID is not set at module load.
 // When the env var is absent, every invocation pays an SSM GetParameter call.
@@ -508,7 +502,7 @@ async function getOrCreateUser(
 }
 
 // ---------------------------------------------------------------------------
-// Cross-user agent invocation (#903)
+// Cross-user agent invocation
 // ---------------------------------------------------------------------------
 
 /**
@@ -521,10 +515,11 @@ async function getOrCreateUser(
  * DynamoDB. Returns null if no @agent: prefix is found.
  */
 function parseCrossUserInvocation(text: string): CrossUserInvocation | null {
+  // Trim leading whitespace — Google Chat formatting may add spaces.
   // Match @agent: followed by a username (alphanumeric, dots, hyphens, underscores).
   // Must start and end with alphanumeric, minimum 2 chars to reject edge cases
   // like @agent:. or @agent:--- which are not valid email local parts.
-  const match = text.match(/^@agent:([a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?)\s*([\s\S]*)/);
+  const match = text.trim().match(/^@agent:([a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?)\s*([\s\S]*)/);
   if (!match) return null;
 
   return {
@@ -544,10 +539,10 @@ async function resolveUserByEmailPrefix(
   username: string,
   log: ReturnType<typeof createLogger>
 ): Promise<AgentUser | null> {
-  // Try each allowed domain to find a match
-  for (const domain of ALLOWED_DOMAINS) {
-    const email = `${username}@${domain}`;
-    try {
+  // Query all allowed domains in parallel for faster resolution
+  const results = await Promise.allSettled(
+    ALLOWED_DOMAINS.map(async (domain) => {
+      const email = `${username}@${domain}`;
       const result = await dynamoClient.send(
         new QueryCommand({
           TableName: USERS_TABLE,
@@ -557,20 +552,39 @@ async function resolveUserByEmailPrefix(
           Limit: 1,
         })
       );
-
       if (result.Items && result.Items.length > 0) {
-        log.info('Resolved cross-user target', {
+        return { email, item: result.Items[0] };
+      }
+      return null;
+    })
+  );
+
+  for (const result of results) {
+    if (result.status === 'fulfilled' && result.value) {
+      const { email, item } = result.value;
+      // Validate required fields before casting — DynamoDB items are
+      // Record<string, AttributeValue>, not AgentUser
+      const user = item as Record<string, unknown>;
+      if (!user.email || !user.workspacePrefix) {
+        log.warn('User record missing required fields', {
           username,
           email,
-          targetGoogleIdentity: (result.Items[0] as AgentUser).googleIdentity,
+          hasEmail: !!user.email,
+          hasWorkspacePrefix: !!user.workspacePrefix,
         });
-        return result.Items[0] as AgentUser;
+        continue;
       }
-    } catch (error) {
-      log.error('Failed to query email-index GSI', {
+      log.info('Resolved cross-user target', {
         username,
         email,
-        error: error instanceof Error ? error.message : String(error),
+        targetGoogleIdentity: (item as AgentUser).googleIdentity,
+      });
+      return item as AgentUser;
+    }
+    if (result.status === 'rejected') {
+      log.error('Failed to query email-index GSI', {
+        username,
+        error: result.reason instanceof Error ? result.reason.message : String(result.reason),
       });
     }
   }
@@ -579,33 +593,9 @@ async function resolveUserByEmailPrefix(
   return null;
 }
 
-/**
- * Fetch recent messages from a Google Chat thread for context.
- * Used in cross-user invocations so the target agent has thread context
- * without it becoming part of its persistent memory.
- *
- * PHASE 1 LIMITATION: The Google Chat API `spaces.messages.list` endpoint
- * requires `chat.messages.readonly` scope with user auth or domain-wide
- * delegation. Our service account only has `chat.bot` scope, which does
- * not support listing messages. For Phase 1, we return empty string —
- * the invoker's message alone provides sufficient context for the target
- * agent to respond. Thread context fetching will be enabled in Phase 2
- * when domain-wide delegation is configured.
- *
- * Returns formatted thread messages up to the token budget.
- */
-async function fetchThreadContext(
-  spaceName: string,
-  log: ReturnType<typeof createLogger>
-): Promise<string> {
-  // Phase 1: thread context not available without domain-wide delegation.
-  // The cross-user invocation still works — the agent responds from its
-  // own memory + the invoker's question. See issue #903 for Phase 2 plan.
-  log.info('Thread context fetch skipped (Phase 1 — chat.bot scope insufficient)', {
-    space: spaceName,
-  });
-  return '';
-}
+// Thread context fetching is a Phase 2 feature — requires domain-wide
+// delegation for spaces.messages.list. For Phase 1, the invoker's message
+// alone provides sufficient context. See issue #903 for Phase 2 plan.
 
 // ---------------------------------------------------------------------------
 // Guardrails
@@ -741,7 +731,7 @@ async function invokeAgentCore(
       user_email: userId,
       user_display_name: userContext?.displayName ?? '',
       workspace_prefix: userContext?.workspacePrefix ?? '',
-      // Cross-user invocation fields (#903)
+      // Cross-user invocation fields
       ...(userContext?.invokedBy && {
         invoked_by_email: userContext.invokedBy.email,
         invoked_by_display_name: userContext.invokedBy.displayName,
@@ -894,9 +884,9 @@ async function logTelemetry(
     latencyMs: number;
     guardrailBlocked: boolean;
     spaceName: string;
-    /** Cross-user invocation: email of the person who invoked the agent (#903) */
+    /** Cross-user invocation: email of the person who invoked the agent */
     invokedBy?: string;
-    /** Cross-user invocation: email of the agent owner whose agent was consulted (#903) */
+    /** Cross-user invocation: email of the agent owner whose agent was consulted */
     agentOwnerId?: string;
   },
   log: ReturnType<typeof createLogger>
@@ -1437,7 +1427,7 @@ async function processRecord(
       await sendGoogleChatResponse(
         spaceName,
         threadName,
-        'That agent is not available. The user may not have an active agent yet.',
+        'Agent not found. If you believe this is an error, contact your workspace admin.',
         log
       );
       return;
@@ -1451,7 +1441,18 @@ async function processRecord(
       });
       // Fall through to normal processing with the stripped message.
       // Overwrite messageText so the @agent:username prefix isn't sent to AgentCore.
-      messageText = crossUserInvocation.strippedMessage || messageText;
+      // If the stripped message is empty (user typed just "@agent:self"), return
+      // a prompt rather than sending the raw prefix to AgentCore.
+      if (!crossUserInvocation.strippedMessage) {
+        await sendGoogleChatResponse(
+          spaceName,
+          threadName,
+          'Please include a message. You can talk to your agent normally without the @agent: prefix.',
+          log
+        );
+        return;
+      }
+      messageText = crossUserInvocation.strippedMessage;
     } else {
       // Cross-user path: invoke the TARGET user's agent with sender context
       const actualMessage = crossUserInvocation.strippedMessage;
@@ -1480,15 +1481,19 @@ async function processRecord(
         return;
       }
 
-      // Fetch thread context (best-effort — empty string on failure)
-      const threadContext = await fetchThreadContext(spaceName, log);
+      // Thread context is empty in Phase 1 (no domain-wide delegation yet)
+      const threadContext = '';
 
       // Session ID uses the TARGET user's workspace prefix so the invocation
       // hits the target's AgentCore session and has access to their memory.
+      // Include a hash of the invoker's email to isolate sessions per invoker —
+      // without this, two different users consulting the same agent in the same
+      // space would share conversational context and potentially leak information.
       // The build tag rotation still applies for deploy freshness.
       const spaceHash = crypto.createHash('sha256').update(spaceName).digest('hex');
+      const invokerHash = crypto.createHash('sha256').update(senderEmail).digest('hex').slice(0, 8);
       const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
-      const crossSessionId = `${targetUser.workspacePrefix}-${spaceHash}-${buildTag}`;
+      const crossSessionId = `xuser-${targetUser.workspacePrefix}-${spaceHash}-${invokerHash}-${buildTag}`;
 
       const agentResult = await invokeAgentCore(
         actualMessage,
@@ -1520,7 +1525,8 @@ async function processRecord(
       // Response — always prefixed with the target user's name in shared spaces
       const maxLength = 4096;
       const truncationSuffix = '\n\n_(Response truncated — ask me to continue)_';
-      const crossPrefix = `[${targetUser.displayName}'s Agent] `;
+      const ownerLabel = targetUser.displayName || targetUser.email;
+      const crossPrefix = `[${ownerLabel}'s Agent] `;
       const availableLength = maxLength - crossPrefix.length;
       const truncatedResponse =
         agentResult.response.length > availableLength
@@ -1547,7 +1553,7 @@ async function processRecord(
           inputTokens: agentResult.inputTokens,
           outputTokens: agentResult.outputTokens,
           latencyMs,
-          guardrailBlocked: false,
+          guardrailBlocked: false, // Always false here — blocked messages return early above
           spaceName,
           invokedBy: senderEmail,
           agentOwnerId: targetUser.email,

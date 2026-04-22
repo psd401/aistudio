@@ -209,7 +209,7 @@ export class AgentPlatformStack extends cdk.Stack {
     });
 
     // GSI on email for cross-user agent invocation (@agent:username resolution)
-    // Issue #903 — enables looking up a user by their email prefix
+    // and schedule identity self-heal (resolving googleIdentity from email)
     this.usersTable.addGlobalSecondaryIndex({
       indexName: 'email-index',
       partitionKey: { name: 'email', type: dynamodb.AttributeType.STRING },

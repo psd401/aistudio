@@ -483,7 +483,7 @@ async function backfillScheduleIdentity(
 }
 
 /**
- * Resolve a user record by email via the email-index GSI (added in #903).
+ * Resolve a user record by email via the email-index GSI.
  * Returns the googleIdentity-keyed item so the caller can follow up with
  * lookupUserByGoogleIdentity or use dmSpaceName directly.
  *
