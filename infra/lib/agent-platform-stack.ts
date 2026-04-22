@@ -1150,8 +1150,11 @@ export class AgentPlatformStack extends cdk.Stack {
     this.routerQueue = new sqs.Queue(this, 'RouterQueue', {
       queueName: `psd-agent-router-${environment}`,
       // AWS recommends visibility timeout >= 6x Lambda timeout to prevent
-      // duplicate processing. Lambda timeout is 5 min, so 30 min minimum.
-      visibilityTimeout: cdk.Duration.minutes(30),
+      // duplicate processing. Router Lambda timeout is 15 min, so 90 min
+      // minimum. If the agent genuinely takes longer than the Lambda max
+      // and SQS redelivers, the dedup table (psd-agent-message-dedup-{env})
+      // still blocks the duplicate from double-invoking AgentCore.
+      visibilityTimeout: cdk.Duration.minutes(90),
       retentionPeriod: cdk.Duration.days(4),
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       deadLetterQueue: {
@@ -1237,12 +1240,17 @@ export class AgentPlatformStack extends cdk.Stack {
         },
       ),
       memorySize: config.compute.lambdaMemory,
-      // Agent responses can take time. Observed >120s for fresh microVM cold
-      // starts (S3 workspace pull + LLM cold path). 5 min gives headroom for
-      // legitimate slow runs without hiding genuine hangs. Bumping the SQS
-      // visibilityTimeout below would also need updating to stay >= 6x this
-      // value if we go higher.
-      timeout: cdk.Duration.minutes(5),
+      // Agent responses can take time: AgentCore microVM cold starts run
+      // ~60s on their own; real research-heavy turns stream content for
+      // another 3-5 min. 5 min was cutting it razor-thin — observed a
+      // 848-char morning-brief reply arrive at the router 19s AFTER a
+      // 5-min timeout, with the answer orphaned in the agent's memory
+      // and Chat never seeing anything. 15 min is Lambda's hard ceiling
+      // and is not user-visible; it only governs how long the Lambda
+      // stays alive waiting on AgentCore. The agent still ends when it
+      // ends — we just stop killing the request prematurely.
+      // SQS visibilityTimeout below MUST stay >= 6x this value.
+      timeout: cdk.Duration.minutes(15),
       architecture: lambda.Architecture.ARM_64,
       role: this.routerLambdaRole,
       logGroup: routerLogGroup,
