@@ -33,7 +33,7 @@
   },
   "tools": {
     "profile": "full",
-    "deny": ["cron", "heartbeat", "nodes", "gateway"]
+    "deny": ["cron", "nodes", "gateway"]
   },
   "skills": {
     "load": {
