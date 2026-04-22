@@ -1033,6 +1033,18 @@ export class AgentPlatformStack extends cdk.Stack {
     // subsequent invocations skip the Google Chat API scan.
     schedulesTable.grantWriteData(this.cronLambdaRole);
 
+    // Cron Lambda self-heals missing googleIdentity on a schedule by looking
+    // the user up via email-index GSI when the event payload omits identity
+    // (common for schedules created before the skill populated it).
+    // ServiceRoleFactory's DynamoDB grant scopes to the base table ARN but
+    // not to GSIs — add the GSI Query permission explicitly.
+    this.cronLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'UsersEmailIndexQuery',
+      effect: iam.Effect.ALLOW,
+      actions: ['dynamodb:Query'],
+      resources: [`${this.usersTable.tableArn}/index/*`],
+    }));
+
     // Grant Cron Lambda access to Google credentials secret
     this.googleCredentialsSecret.grantRead(this.cronLambdaRole);
 

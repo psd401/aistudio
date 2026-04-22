@@ -30,6 +30,7 @@ const {
 
 const REGION = process.env.AWS_REGION;
 const SCHEDULES_TABLE = process.env.SCHEDULES_TABLE;
+const USERS_TABLE = process.env.USERS_TABLE || '';
 const SCHEDULE_GROUP = process.env.EVENTBRIDGE_SCHEDULE_GROUP;
 const CRON_LAMBDA_ARN = process.env.CRON_LAMBDA_ARN;
 const EVENTBRIDGE_ROLE_ARN = process.env.EVENTBRIDGE_ROLE_ARN;
@@ -203,6 +204,32 @@ function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
+/**
+ * Look up a user's googleIdentity + dmSpaceName from the users table via
+ * the email-index GSI. Returns null if the user isn't yet in the table
+ * (never DM'd the bot). Filters out test/debug records whose
+ * googleIdentity doesn't look like a real Google ID.
+ */
+async function lookupUserByEmail(email) {
+  if (!USERS_TABLE || !email) return null;
+  const res = await dynamoClient.send(new QueryCommand({
+    TableName: USERS_TABLE,
+    IndexName: 'email-index',
+    KeyConditionExpression: 'email = :e',
+    ExpressionAttributeValues: { ':e': email },
+  }));
+  const items = res.Items || [];
+  if (items.length === 0) return null;
+  const real = items.find((it) => typeof it.googleIdentity === 'string' && /^users\/\d+/.test(it.googleIdentity));
+  const pick = real || items[0];
+  return {
+    googleIdentity: pick.googleIdentity,
+    dmSpaceName: pick.dmSpaceName,
+    displayName: pick.displayName,
+    workspacePrefix: pick.workspacePrefix,
+  };
+}
+
 async function putSchedule(item) {
   await dynamoClient.send(new PutCommand({
     TableName: SCHEDULES_TABLE,
@@ -262,6 +289,7 @@ async function updateScheduleItem(userId, scheduleId, updates) {
 module.exports = {
   REGION,
   SCHEDULES_TABLE,
+  USERS_TABLE,
   SCHEDULE_GROUP,
   CRON_LAMBDA_ARN,
   EVENTBRIDGE_ROLE_ARN,
@@ -281,4 +309,5 @@ module.exports = {
   querySchedules,
   deleteScheduleItem,
   updateScheduleItem,
+  lookupUserByEmail,
 };
