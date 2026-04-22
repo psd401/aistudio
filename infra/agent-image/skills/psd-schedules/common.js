@@ -35,6 +35,14 @@ const CRON_LAMBDA_ARN = process.env.CRON_LAMBDA_ARN;
 const EVENTBRIDGE_ROLE_ARN = process.env.EVENTBRIDGE_ROLE_ARN;
 const DEFAULT_TIMEZONE = 'America/Los_Angeles';
 
+// Module-scope client — instantiated once per Node.js process. Each skill
+// invocation is its own process (OpenClaw spawns node per exec), but within
+// a single invocation all CRUD helpers share this client so multi-step
+// operations like "query then put" reuse one TCP connection.
+const dynamoClient = DynamoDBDocumentClient.from(
+  new DynamoDBClient({ region: REGION }),
+);
+
 function fail(message, code = 1) {
   console.error(`Error: ${message}`);
   process.exit(code);
@@ -195,19 +203,15 @@ function emit(obj) {
   process.stdout.write(JSON.stringify(obj) + '\n');
 }
 
-function ddb() {
-  return DynamoDBDocumentClient.from(new DynamoDBClient({ region: REGION }));
-}
-
 async function putSchedule(item) {
-  await ddb().send(new PutCommand({
+  await dynamoClient.send(new PutCommand({
     TableName: SCHEDULES_TABLE,
     Item: item,
   }));
 }
 
 async function getSchedule(userId, scheduleId) {
-  const res = await ddb().send(new GetCommand({
+  const res = await dynamoClient.send(new GetCommand({
     TableName: SCHEDULES_TABLE,
     Key: { userId, scheduleId },
   }));
@@ -215,7 +219,7 @@ async function getSchedule(userId, scheduleId) {
 }
 
 async function querySchedules(userId) {
-  const res = await ddb().send(new QueryCommand({
+  const res = await dynamoClient.send(new QueryCommand({
     TableName: SCHEDULES_TABLE,
     KeyConditionExpression: 'userId = :u',
     ExpressionAttributeValues: { ':u': userId },
@@ -224,7 +228,7 @@ async function querySchedules(userId) {
 }
 
 async function deleteScheduleItem(userId, scheduleId) {
-  await ddb().send(new DeleteCommand({
+  await dynamoClient.send(new DeleteCommand({
     TableName: SCHEDULES_TABLE,
     Key: { userId, scheduleId },
   }));
@@ -243,7 +247,7 @@ async function updateScheduleItem(userId, scheduleId, updates) {
     names[alias] = key;
   }
   if (sets.length === 1) return null;
-  const res = await ddb().send(new UpdateCommand({
+  const res = await dynamoClient.send(new UpdateCommand({
     TableName: SCHEDULES_TABLE,
     Key: { userId, scheduleId },
     UpdateExpression: 'SET ' + sets.join(', '),

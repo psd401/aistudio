@@ -65,6 +65,13 @@ async function main() {
   const expression = toSchedulerExpression(args.cron);
 
   // Idempotency + quota checks before allocating resources.
+  // NOTE: name-uniqueness is BEST-EFFORT. The schedules table is keyed by
+  // (userId, scheduleId), not name, so DynamoDB cannot enforce name
+  // uniqueness with a ConditionExpression. Two truly-concurrent creates with
+  // the same name can both pass the check before either writes. Accepted:
+  // skill invocations are single-threaded per Chat turn, and the human-in-
+  // the-loop (agent reads back the proposed schedule before creating) makes
+  // concurrent same-name creates extremely unlikely in practice.
   let existing;
   try {
     existing = await querySchedules(args.user);

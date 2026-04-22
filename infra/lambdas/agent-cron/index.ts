@@ -24,6 +24,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
   DynamoDBDocumentClient,
   GetCommand,
+  UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import {
   SecretsManagerClient,
@@ -112,6 +113,7 @@ const agentCoreSigner = new SignatureV4({
 
 const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
 const USERS_TABLE = process.env.USERS_TABLE || '';
+const SCHEDULES_TABLE = process.env.SCHEDULES_TABLE || '';
 const GOOGLE_CREDENTIALS_SECRET_ARN = process.env.GOOGLE_CREDENTIALS_SECRET_ARN || '';
 const DATABASE_RESOURCE_ARN = process.env.DATABASE_RESOURCE_ARN || '';
 const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || '';
@@ -434,6 +436,40 @@ async function recordRun(params: {
   }
 }
 
+/**
+ * Backfill a freshly resolved Google Chat DM space back into the schedule
+ * row so subsequent invocations skip the API scan (which is O(spaces) for
+ * the bot, paginated). Best-effort — failure just means the next run does
+ * another scan.
+ */
+async function backfillDmSpace(
+  userId: string,
+  scheduleId: string,
+  dmSpaceName: string,
+  log: Logger,
+): Promise<void> {
+  if (!SCHEDULES_TABLE) return;
+  try {
+    await dynamoClient.send(
+      new UpdateCommand({
+        TableName: SCHEDULES_TABLE,
+        Key: { userId, scheduleId },
+        UpdateExpression: 'SET dmSpaceName = :dm, updatedAt = :now',
+        ExpressionAttributeValues: {
+          ':dm': dmSpaceName,
+          ':now': new Date().toISOString(),
+        },
+        ConditionExpression: 'attribute_exists(scheduleId)',
+      }),
+    );
+    log.info('Backfilled DM space on schedule row', { scheduleId });
+  } catch (error) {
+    log.warn('DM space backfill failed (non-fatal)', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
 async function lookupUserByGoogleIdentity(
   googleIdentity: string,
   log: Logger,
@@ -539,8 +575,10 @@ export async function handler(
   // DynamoDB above — otherwise an attacker-supplied identity could resolve
   // someone else's DM space.
   let dmSpace = event.dmSpaceName || userContext.dmSpaceName || null;
+  let dmSpaceResolvedViaApi = false;
   if (!dmSpace && event.googleIdentity && googleIdentityTrusted) {
     dmSpace = await resolveDmSpace(event.googleIdentity, log);
+    dmSpaceResolvedViaApi = !!dmSpace;
   }
   if (!dmSpace) {
     log.warn('No DM space found — skipping (user has not DM\'d the bot yet)', {
@@ -598,6 +636,11 @@ export async function handler(
       `📋 **${scheduleName}**\n\n${result.response}`,
       log,
     );
+    // Delivery succeeded — if we discovered the DM space via the expensive
+    // API scan, cache it on the schedule row so the next fire skips scanning.
+    if (dmSpaceResolvedViaApi) {
+      await backfillDmSpace(event.userEmail, event.scheduleId, dmSpace, log);
+    }
   } catch (error) {
     log.error('Failed to deliver scheduled response', {
       error: error instanceof Error ? error.message : String(error),

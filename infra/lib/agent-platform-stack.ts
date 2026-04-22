@@ -255,12 +255,16 @@ export class AgentPlatformStack extends cdk.Stack {
 
     // 4d. Inter-Agent Communication table — tracks agent-to-agent messages
     // for rate limiting and anti-loop detection. Uses TTL for automatic cleanup.
+    // PITR enabled: this is an audit trail for governance enforcement, so
+    // accidental table deletion should be recoverable even though TTL
+    // expires individual rows after 2 hours.
     const interAgentTable = new dynamodb.Table(this, 'AgentInterAgentTable', {
       tableName: `psd-agent-interagent-${environment}`,
       partitionKey: { name: 'senderBotId', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'sentAt', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
       timeToLiveAttribute: 'expiresAt',
       removalPolicy: environment === 'prod'
         ? cdk.RemovalPolicy.RETAIN
@@ -1005,6 +1009,7 @@ export class AgentPlatformStack extends cdk.Stack {
       environment: {
         ENVIRONMENT: environment,
         USERS_TABLE: this.usersTable.tableName,
+        SCHEDULES_TABLE: schedulesTable.tableName,
         GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,
         DATABASE_RESOURCE_ARN: props.databaseResourceArn,
         DATABASE_SECRET_ARN: props.databaseSecretArn,
@@ -1015,6 +1020,10 @@ export class AgentPlatformStack extends cdk.Stack {
 
     cdk.Tags.of(cronLambda).add('Environment', environment);
     cdk.Tags.of(cronLambda).add('ManagedBy', 'cdk');
+
+    // Cron Lambda backfills resolved DM space into the schedules row so
+    // subsequent invocations skip the Google Chat API scan.
+    schedulesTable.grantWriteData(this.cronLambdaRole);
 
     // Grant Cron Lambda access to Google credentials secret
     this.googleCredentialsSecret.grantRead(this.cronLambdaRole);
