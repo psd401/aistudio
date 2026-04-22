@@ -102,6 +102,7 @@ COPY SOUL.md /home/node/.openclaw/SOUL.md
 COPY IDENTITY.md /home/node/.openclaw/IDENTITY.md
 COPY USER.md /home/node/.openclaw/USER.md
 COPY MEMORY.md /home/node/.openclaw/MEMORY.md
+COPY TOOLS.md /home/node/.openclaw/TOOLS.md
 COPY harness_adapter.py /app/harness_adapter.py
 COPY agentcore_wrapper.py /app/agentcore_wrapper.py
 COPY workspace_sync.py /app/workspace_sync.py
