@@ -30,6 +30,7 @@
         "ecs:*",
         "bedrock:InvokeModel",
         "bedrock:InvokeModelWithResponseStream",
+        "bedrock:CallWithBearerToken",
         "bedrock:ApplyGuardrail",
         "bedrock:GetGuardrail",
         "bedrock-agentcore:InvokeAgentRuntime",

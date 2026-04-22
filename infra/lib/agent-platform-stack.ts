@@ -387,6 +387,21 @@ export class AgentPlatformStack extends cdk.Stack {
             actions: ['bedrock:ListFoundationModels', 'bedrock:GetFoundationModel'],
             resources: ['*'],
           }),
+          // memory_search in OpenClaw >= 2026.4 uses bedrock:CallWithBearerToken
+          // to generate embeddings for semantic search over the agent's local
+          // ~/.openclaw/memory/ files. Without this action the tool returns
+          // "embedding/provider error" and memories become unsearchable.
+          // Per-user scoping note: this is a single shared service credential,
+          // but memory files are per-user by construction (workspace_sync.py
+          // syncs only the caller's S3 workspace prefix into the container).
+          // No cross-user leakage via this grant — embeddings are generated
+          // from text the agent has already loaded from its own workspace.
+          new iam.PolicyStatement({
+            sid: 'BedrockEmbeddingsViaBearerToken',
+            effect: iam.Effect.ALLOW,
+            actions: ['bedrock:CallWithBearerToken'],
+            resources: ['*'],
+          }),
         ],
       }),
     );
