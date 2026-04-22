@@ -36,7 +36,14 @@
         "bedrock-agentcore:InvokeAgentRuntimeForUser",
         "ssm:GetParameter",
         "ssm:GetParameters",
-        "ssm:GetParametersByPath"
+        "ssm:GetParametersByPath",
+        "scheduler:CreateSchedule",
+        "scheduler:UpdateSchedule",
+        "scheduler:DeleteSchedule",
+        "scheduler:GetSchedule",
+        "scheduler:ListSchedules",
+        "scheduler:ListScheduleGroups",
+        "iam:PassRole"
       ],
       "Resource": "*"
     },

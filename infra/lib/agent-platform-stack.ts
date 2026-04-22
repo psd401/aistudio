@@ -1098,6 +1098,14 @@ export class AgentPlatformStack extends cdk.Stack {
       ],
     });
 
+    // ServiceRoleFactory scopes CloudWatch Logs perms to a resource ARN based
+    // on functionName (without env suffix), but the real log group includes
+    // the env suffix ("-dev"). Attach the basic execution managed policy so
+    // Lambda can always write to its own log group regardless of naming.
+    schedulerSyncRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+    );
+
     const schedulerSyncLambda = new lambda.Function(this, 'SchedulerSyncLambda', {
       functionName: `psd-agent-scheduler-sync-${environment}`,
       runtime: lambda.Runtime.NODEJS_20_X,
