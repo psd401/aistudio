@@ -83,12 +83,16 @@ function scheduleNameFor(scheduleId: string): string {
 
 /**
  * Normalize a cron expression into EventBridge Scheduler syntax.
- * EventBridge Scheduler requires 6-field cron: minute hour day month day-of-week year
- * Accepts either 5-field (adds '*' year) or 6-field unchanged.
+ * EventBridge Scheduler cron: `minute hour day-of-month month day-of-week year`
+ * and requires exactly one of day-of-month / day-of-week to be `?`
+ * (they cannot both be `*` or both be specified).
+ *
  * Examples:
- *   "0 9 * * MON-FRI"       → "cron(0 9 * * MON-FRI *)"
- *   "0 9 * * MON-FRI *"     → "cron(0 9 * * MON-FRI *)"
- *   "cron(0 9 * * MON-FRI *)" → pass-through
+ *   "0 9 * * MON-FRI"        → "cron(0 9 ? * MON-FRI *)"   (weekday cron)
+ *   "0 9 * * *"              → "cron(0 9 * * ? *)"          (daily cron)
+ *   "0 9 15 * *"             → "cron(0 9 15 * ? *)"         (day-of-month cron)
+ *   "0 9 ? * MON-FRI *"      → "cron(0 9 ? * MON-FRI *)"    (already 6-field)
+ *   "cron(0 9 ? * MON-FRI *)" → pass-through
  */
 function toSchedulerExpression(cron: string): string {
   const trimmed = cron.trim();
@@ -96,13 +100,37 @@ function toSchedulerExpression(cron: string): string {
     return trimmed;
   }
   const parts = trimmed.split(/\s+/);
-  if (parts.length === 5) {
-    return `cron(${parts.join(' ')} *)`;
+  if (parts.length !== 5 && parts.length !== 6) {
+    throw new Error(`Invalid cron expression: "${cron}" (expected 5 or 6 fields, got ${parts.length})`);
   }
-  if (parts.length === 6) {
-    return `cron(${parts.join(' ')})`;
+
+  // Normalize to 6 fields.
+  const [minute, hour, dom, month, dow, year] = parts.length === 6
+    ? parts
+    : [...parts, '*'];
+
+  // EventBridge rule: exactly one of DoM / DoW must be `?`.
+  let dayOfMonth = dom;
+  let dayOfWeek = dow;
+  const domSpecified = dom !== '*' && dom !== '?';
+  const dowSpecified = dow !== '*' && dow !== '?';
+
+  if (domSpecified && dowSpecified) {
+    throw new Error(
+      `Invalid cron "${cron}": cannot specify both day-of-month and day-of-week. ` +
+        `Use "?" in one of them.`,
+    );
   }
-  throw new Error(`Invalid cron expression: "${cron}" (expected 5 or 6 fields, got ${parts.length})`);
+  if (dowSpecified) {
+    dayOfMonth = '?';
+  } else if (domSpecified) {
+    dayOfWeek = '?';
+  } else {
+    // Neither specified — default DoW to "?" so DoM="*" fires every day.
+    dayOfWeek = '?';
+  }
+
+  return `cron(${minute} ${hour} ${dayOfMonth} ${month} ${dayOfWeek} ${year})`;
 }
 
 function buildTargetPayload(item: ScheduleItem): string {
