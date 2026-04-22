@@ -272,6 +272,12 @@ class OpenClawAdapter(HarnessAdapter):
                 last_state: Optional[str] = None
                 last_payload_sample: str = ""
                 raw_event_samples: list = []
+                # Accumulator for streaming assistant deltas that arrive via
+                # the agent event channel (OpenClaw >= 2026.4 routes streaming
+                # content through `event:agent` with stream="assistant"; the
+                # final `event:chat` state=final arrives with an empty message
+                # and is now just a completion signal).
+                agent_assistant_accum: str = ""
                 while time.time() < deadline:
                     raw = ws.recv()
                     msg = json.loads(raw)
@@ -284,7 +290,27 @@ class OpenClawAdapter(HarnessAdapter):
                     if len(raw_event_samples) < 3:
                         raw_event_samples.append(raw[:600] if isinstance(raw, str) else str(raw)[:600])
 
-                    if mtype == "event" and mevent == "chat":
+                    if mtype == "event" and mevent == "agent":
+                        # Agent events carry streaming content per OpenClaw's
+                        # AgentEventSchema: {runId, seq, stream, ts, data}.
+                        # stream="assistant" holds model output; stream=
+                        # "thinking" is reasoning which we intentionally drop
+                        # from user-facing replies. Tool events are ignored
+                        # here — they surface via their own channel.
+                        agent_payload = msg.get("payload", {})
+                        stream = agent_payload.get("stream")
+                        data = agent_payload.get("data", {})
+                        if stream == "assistant" and isinstance(data, dict):
+                            delta = (
+                                data.get("delta")
+                                or data.get("text")
+                                or self._extract_text(data.get("content"))
+                                or self._extract_text(data.get("message"))
+                            )
+                            if isinstance(delta, str) and delta:
+                                agent_assistant_accum += delta
+
+                    elif mtype == "event" and mevent == "chat":
                         payload = msg.get("payload", {})
                         state = payload.get("state")
                         last_state = state
@@ -301,6 +327,13 @@ class OpenClawAdapter(HarnessAdapter):
                         elif state == "final":
                             if text:
                                 response_text = text
+                            # If chat-channel final arrived empty but we
+                            # accumulated content via event:agent, fall back
+                            # to the accumulator. Preserves content with
+                            # newer OpenClaw builds without regressing older
+                            # ones.
+                            if not response_text and agent_assistant_accum:
+                                response_text = agent_assistant_accum
                             got_final = True
                             break
 
@@ -325,6 +358,8 @@ class OpenClawAdapter(HarnessAdapter):
                         if status in {"started", "accepted"}:
                             continue
                         if status in {"final", "done"}:
+                            if not response_text and agent_assistant_accum:
+                                response_text = agent_assistant_accum
                             got_final = True
                             break
 
@@ -336,16 +371,25 @@ class OpenClawAdapter(HarnessAdapter):
             return "I'm temporarily unable to respond. The agent process may be restarting."
 
         if not got_final:
+            # Deadline hit but the agent may have already streamed a full
+            # response via event:agent. Prefer partial content over the
+            # "stalled" apology when we have something to show.
+            if not response_text and agent_assistant_accum:
+                response_text = agent_assistant_accum
             logger.error(
-                "chat deadline expired: partial_len=%d last_state=%s "
-                "event_counts=%s first_events=%s text_head=%r raw_sample=%r",
+                "chat deadline expired: partial_len=%d accum_len=%d "
+                "last_state=%s event_counts=%s first_events=%s "
+                "text_head=%r raw_sample=%r",
                 len(response_text),
+                len(agent_assistant_accum),
                 last_state,
                 json.dumps(event_counts),
                 first_event_types,
                 response_text[:400],
                 raw_event_samples[0] if raw_event_samples else "",
             )
+            if response_text:
+                return response_text.strip()
             return (
                 "I wasn't able to finish responding in time — the agent "
                 "stalled. Please try again in a moment."

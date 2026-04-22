@@ -179,6 +179,14 @@ interface GoogleChatEvent {
   message?: {
     name: string;
     text: string;
+    /**
+     * Message text with bot @mentions stripped. Populated by Google Chat
+     * for messages sent into a Space where the bot is mentioned. In a DM
+     * this matches `text`. Prefer this over `text` in router logic so bot
+     * mention chips don't pollute downstream parsing (e.g., cross-user
+     * invocation regex).
+     */
+    argumentText?: string;
     sender: {
       name: string; // users/{userId}
       displayName: string;
@@ -276,6 +284,17 @@ interface AgentUser {
   createdAt: string;
   lastActiveAt: string;
   sessionCount: number;
+}
+
+/**
+ * Result of parsing an @agent:username invocation from the message text.
+ * Returns null if no cross-user invocation is detected.
+ */
+interface CrossUserInvocation {
+  /** The username portion from @agent:username (email local part) */
+  targetUsername: string;
+  /** The message text with the @agent:username prefix stripped */
+  strippedMessage: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -491,16 +510,126 @@ async function getOrCreateUser(
 }
 
 // ---------------------------------------------------------------------------
+// Cross-user agent invocation
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse @agent:username from the beginning of a message.
+ * Supports formats:
+ *   @agent:ashley what's the budget?
+ *   @agent:ashley.jones what's the budget?
+ *
+ * The username is matched against the email local part (before @) of users in
+ * DynamoDB. Returns null if no @agent: prefix is found.
+ */
+function parseCrossUserInvocation(text: string): CrossUserInvocation | null {
+  // Trim leading whitespace — Google Chat formatting may add spaces.
+  // Match @agent: followed by a username (alphanumeric, dots, hyphens, underscores).
+  // Must start and end with alphanumeric, minimum 2 chars to reject edge cases
+  // like @agent:. or @agent:--- which are not valid email local parts.
+  const match = text.trim().match(/^@agent:([a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?)\s*([\s\S]*)/);
+  if (!match) return null;
+
+  return {
+    targetUsername: match[1].toLowerCase(),
+    strippedMessage: match[2].trim(),
+  };
+}
+
+/**
+ * Look up a user by their email local part (the portion before @).
+ * Uses the email-index GSI to query by full email address, constructed
+ * by appending each allowed domain to the username.
+ *
+ * Returns the first matching user or null if no match is found.
+ */
+async function resolveUserByEmailPrefix(
+  username: string,
+  log: ReturnType<typeof createLogger>
+): Promise<AgentUser | null> {
+  // Query all allowed domains in parallel for faster resolution
+  const results = await Promise.allSettled(
+    ALLOWED_DOMAINS.map(async (domain) => {
+      const email = `${username}@${domain}`;
+      const result = await dynamoClient.send(
+        new QueryCommand({
+          TableName: USERS_TABLE,
+          IndexName: 'email-index',
+          KeyConditionExpression: 'email = :email',
+          ExpressionAttributeValues: { ':email': email },
+          Limit: 1,
+        })
+      );
+      if (result.Items && result.Items.length > 0) {
+        return { email, item: result.Items[0] };
+      }
+      return null;
+    })
+  );
+
+  for (const result of results) {
+    if (result.status === 'fulfilled' && result.value) {
+      const { email, item } = result.value;
+      // Validate required fields before casting — DynamoDB items are
+      // Record<string, AttributeValue>, not AgentUser
+      const user = item as Record<string, unknown>;
+      if (!user.email || !user.workspacePrefix) {
+        log.warn('User record missing required fields', {
+          username,
+          email,
+          hasEmail: !!user.email,
+          hasWorkspacePrefix: !!user.workspacePrefix,
+        });
+        continue;
+      }
+      log.info('Resolved cross-user target', {
+        username,
+        email,
+        targetGoogleIdentity: (item as AgentUser).googleIdentity,
+      });
+      return item as AgentUser;
+    }
+    if (result.status === 'rejected') {
+      log.error('Failed to query email-index GSI', {
+        username,
+        error: result.reason instanceof Error ? result.reason.message : String(result.reason),
+      });
+    }
+  }
+
+  log.warn('Cross-user target not found', { username });
+  return null;
+}
+
+// Thread context fetching is a Phase 2 feature — requires domain-wide
+// delegation for spaces.messages.list. For Phase 1, the invoker's message
+// alone provides sufficient context. See issue #903 for Phase 2 plan.
+
+// ---------------------------------------------------------------------------
 // Guardrails
 // ---------------------------------------------------------------------------
 
+/**
+ * Apply Bedrock Guardrails for telemetry only.
+ *
+ * The guardrail runs in detect-and-log mode: we capture whether the
+ * service would have intervened and record it in agent_messages via
+ * the guardrailBlocked column, but we never refuse or rewrite the
+ * user's message. Product direction from the PSD owner is that
+ * guardrails must not block any user message — the K-12 filter stays
+ * armed as a diagnostic signal only.
+ *
+ * Service errors (timeouts, throttles, IAM failures) are logged and
+ * treated as "did not intervene" so a Bedrock hiccup cannot bounce
+ * a chat turn. GUARDRAIL_FAIL_OPEN env var is deprecated — this
+ * function always fails open regardless of its value.
+ */
 async function applyGuardrails(
   text: string,
   log: ReturnType<typeof createLogger>
-): Promise<{ allowed: boolean; blockedReason?: string }> {
+): Promise<{ allowed: boolean; wouldHaveBlocked: boolean; blockedReason?: string }> {
   if (!GUARDRAIL_ID) {
-    log.warn('Guardrail ID not configured, skipping content filtering');
-    return { allowed: true };
+    return { allowed: true, wouldHaveBlocked: false };
   }
 
   try {
@@ -513,37 +642,26 @@ async function applyGuardrails(
       })
     );
 
-    const action = result.action;
-    if (action === 'GUARDRAIL_INTERVENED') {
+    if (result.action === 'GUARDRAIL_INTERVENED') {
       const outputs = result.outputs?.map((o) => o.text).join(' ') || '';
-      log.warn('Guardrail blocked message', {
-        action,
+      log.warn('Guardrail would have blocked — passing through per policy', {
+        action: result.action,
         outputPreview: outputs.substring(0, 200),
       });
       return {
-        allowed: false,
-        blockedReason:
-          outputs ||
-          'Your message was filtered by our content safety system. Please rephrase.',
+        allowed: true,
+        wouldHaveBlocked: true,
+        blockedReason: outputs || 'guardrail intervened',
       };
     }
 
-    return { allowed: true };
+    return { allowed: true, wouldHaveBlocked: false };
   } catch (error) {
-    // K-12 safety: fail closed by default. Only allow through if explicitly
-    // configured via GUARDRAIL_FAIL_OPEN=true (not recommended for production).
-    log.error('Guardrail invocation failed', {
+    // Even a service error does not stop a message from going through.
+    log.error('Guardrail invocation failed — passing through per policy', {
       error: error instanceof Error ? error.message : String(error),
-      failOpen: GUARDRAIL_FAIL_OPEN,
     });
-    if (GUARDRAIL_FAIL_OPEN) {
-      return { allowed: true };
-    }
-    return {
-      allowed: false,
-      blockedReason:
-        'Our content safety system is temporarily unavailable. Please try again shortly.',
-    };
+    return { allowed: true, wouldHaveBlocked: false };
   }
 }
 
@@ -556,7 +674,14 @@ async function invokeAgentCore(
   userId: string,
   sessionId: string,
   log: ReturnType<typeof createLogger>,
-  userContext?: { displayName?: string; workspacePrefix?: string }
+  userContext?: {
+    displayName?: string;
+    workspacePrefix?: string;
+    /** Present when someone other than the agent owner invokes the agent */
+    invokedBy?: { email: string; displayName: string };
+    /** Ephemeral thread context for cross-user invocations */
+    threadContext?: string;
+  }
 ): Promise<{ response: string; inputTokens: number; outputTokens: number; model: string | null }> {
   // Resolve the AgentCore Runtime ID — check env var, then module-level cache,
   // then SSM. Cached at module scope with TTL to avoid redundant SSM API calls
@@ -617,6 +742,14 @@ async function invokeAgentCore(
       user_email: userId,
       user_display_name: userContext?.displayName ?? '',
       workspace_prefix: userContext?.workspacePrefix ?? '',
+      // Cross-user invocation fields
+      ...(userContext?.invokedBy && {
+        invoked_by_email: userContext.invokedBy.email,
+        invoked_by_display_name: userContext.invokedBy.displayName,
+      }),
+      ...(userContext?.threadContext && {
+        thread_context: userContext.threadContext,
+      }),
     });
 
     const request = new HttpRequest({
@@ -762,6 +895,10 @@ async function logTelemetry(
     latencyMs: number;
     guardrailBlocked: boolean;
     spaceName: string;
+    /** Cross-user invocation: email of the person who invoked the agent */
+    invokedBy?: string;
+    /** Cross-user invocation: email of the agent owner whose agent was consulted */
+    agentOwnerId?: string;
   },
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
@@ -773,19 +910,22 @@ async function logTelemetry(
   try {
     const sql = await getDbClient();
     const totalTokens = params.inputTokens + params.outputTokens;
+    const invokedBy = params.invokedBy ?? null;
+    const agentOwnerId = params.agentOwnerId ?? null;
 
     // Run both telemetry writes in parallel — they're independent.
     // Uses direct PostgreSQL (postgres.js) consistent with the rest of the app,
     // instead of RDS Data API which adds ~100-300ms latency per call.
     await Promise.all([
       // Insert message-level telemetry
+      // invoked_by and agent_owner_id are NULL for normal (owner) invocations
       sql`INSERT INTO agent_messages
           (user_id, session_id, model, input_tokens, output_tokens,
-           latency_ms, guardrail_blocked, space_name, created_at)
+           latency_ms, guardrail_blocked, space_name, invoked_by, agent_owner_id, created_at)
           VALUES (${params.userId}, ${params.sessionId}, ${params.model},
                   ${params.inputTokens}, ${params.outputTokens},
                   ${params.latencyMs}, ${params.guardrailBlocked},
-                  ${params.spaceName}, NOW())`,
+                  ${params.spaceName}, ${invokedBy}, ${agentOwnerId}, NOW())`,
 
       // Upsert session-level aggregates — creates the session row on first message,
       // increments counters on subsequent messages. Uses ON CONFLICT on session_id
@@ -1064,7 +1204,18 @@ async function processRecord(
   }
 
   const message = chatEvent.message;
-  if (!message || !message.text || !message.sender) {
+  // Google Chat provides two text fields on a message:
+  //   * message.text — full raw text including bot @mention chips rendered
+  //     as "@<Bot Name>" literal. In a ROOM/space that leading bot mention
+  //     is part of the string, which broke the cross-user parser
+  //     (/^@agent:/) because the text started with "@PSD AI Agent " instead.
+  //   * message.argumentText — same text with bot @mention chips stripped.
+  //     Google's documented field for bot consumers. In a DM it matches
+  //     message.text exactly (no bot mention to strip).
+  // Prefer argumentText; fall back to text when absent (older API versions,
+  // edge cases where only one field is populated).
+  const rawText = (message?.argumentText ?? message?.text ?? '').trim();
+  if (!message || !rawText || !message.sender) {
     log.warn('Message event missing required fields');
     return;
   }
@@ -1179,7 +1330,7 @@ async function processRecord(
   const senderName = message.sender.name;
   const senderEmail = message.sender.email;
   const senderDisplayName = message.sender.displayName;
-  const messageText = message.text;
+  let messageText = rawText;
   const spaceName = chatEvent.space.name;
   const threadName = message.thread?.name;
 
@@ -1239,41 +1390,173 @@ async function processRecord(
     log
   );
 
-  // Step 2: Guardrails check
+  // Step 2: Guardrails — telemetry only. Never refuse a user message.
+  // `wouldHaveBlocked` is recorded in agent_messages for later analysis
+  // but the conversation continues regardless of guardrail verdict.
   const guardrailResult = await applyGuardrails(messageText, log);
-  if (!guardrailResult.allowed) {
-    await sendGoogleChatResponse(
-      spaceName,
-      threadName,
-      guardrailResult.blockedReason ||
-        'Your message was filtered by our content safety system. Please rephrase.',
+
+  // Step 3: Check for cross-user agent invocation (@agent:username)
+  // Only supported in shared spaces (ROOM) — in DMs the sender's own agent
+  // always responds. The cross-user path invokes the target user's AgentCore
+  // session with the sender's identity passed as `invokedBy`.
+  const crossUserInvocation = isSharedSpace ? parseCrossUserInvocation(messageText) : null;
+
+  if (crossUserInvocation) {
+    log.info('Cross-user invocation detected', {
+      sender: senderEmail,
+      targetUsername: crossUserInvocation.targetUsername,
+      space: spaceName,
+    });
+
+    // Resolve the target user
+    const targetUser = await resolveUserByEmailPrefix(
+      crossUserInvocation.targetUsername,
       log
     );
 
-    // Use the same stable session ID format as non-blocked messages so
-    // session-level blocking stats aggregate correctly. Build tag included
-    // for consistency with the AgentCore call path (see comment below).
-    const blockedSpaceHash = crypto.createHash('sha256').update(spaceName).digest('hex');
-    const blockedBuildTag = process.env.AGENT_BUILD_TAG || 'unset';
-    const blockedSessionId = `${user.workspacePrefix}-${blockedSpaceHash}-${blockedBuildTag}`;
-
-    await logTelemetry(
-      {
-        userId: senderEmail,
-        sessionId: blockedSessionId,
-        model: null,
-        inputTokens: 0,
-        outputTokens: 0,
-        latencyMs: Date.now() - startTime,
-        guardrailBlocked: true,
+    if (!targetUser) {
+      // H2 fix: Generic error to prevent user enumeration — don't echo the
+      // username or confirm/deny whether it exists in the system.
+      await sendGoogleChatResponse(
         spaceName,
-      },
-      log
-    );
-    return;
+        threadName,
+        'Agent not found. If you believe this is an error, contact your workspace admin.',
+        log
+      );
+      return;
+    }
+
+    // Don't allow invoking your own agent via @agent: — use normal messaging.
+    // H3 fix: Use the stripped message (without @agent:prefix) for normal processing.
+    if (targetUser.email.toLowerCase() === senderEmail.toLowerCase()) {
+      log.info('Self-invocation detected, treating as normal message', {
+        sender: senderEmail,
+      });
+      // Fall through to normal processing with the stripped message.
+      // Overwrite messageText so the @agent:username prefix isn't sent to AgentCore.
+      // If the stripped message is empty (user typed just "@agent:self"), return
+      // a prompt rather than sending the raw prefix to AgentCore.
+      if (!crossUserInvocation.strippedMessage) {
+        await sendGoogleChatResponse(
+          spaceName,
+          threadName,
+          'Please include a message. You can talk to your agent normally without the @agent: prefix.',
+          log
+        );
+        return;
+      }
+      messageText = crossUserInvocation.strippedMessage;
+    } else {
+      // Cross-user path: invoke the TARGET user's agent with sender context
+      const actualMessage = crossUserInvocation.strippedMessage;
+      if (!actualMessage) {
+        await sendGoogleChatResponse(
+          spaceName,
+          threadName,
+          `Please include a question after @agent:${crossUserInvocation.targetUsername}. ` +
+            `Example: @agent:${crossUserInvocation.targetUsername} what's the budget status?`,
+          log
+        );
+        return;
+      }
+
+      // H1 fix: Run guardrails on the stripped message (what AgentCore actually
+      // receives), not the original text with the @agent:username prefix.
+      // Telemetry-only per policy: record the assessment but never refuse the
+      // message — cross-user invocations pass through just like direct DMs.
+      await applyGuardrails(actualMessage, log);
+
+      // Thread context is empty in Phase 1 (no domain-wide delegation yet)
+      const threadContext = '';
+
+      // Session ID uses the TARGET user's workspace prefix so the invocation
+      // hits the target's AgentCore session and has access to their memory.
+      // Include a hash of the invoker's email to isolate sessions per invoker —
+      // without this, two different users consulting the same agent in the same
+      // space would share conversational context and potentially leak information.
+      // The build tag rotation still applies for deploy freshness.
+      const spaceHash = crypto.createHash('sha256').update(spaceName).digest('hex');
+      const invokerHash = crypto.createHash('sha256').update(senderEmail).digest('hex').slice(0, 8);
+      const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
+      const crossSessionId = `xuser-${targetUser.workspacePrefix}-${spaceHash}-${invokerHash}-${buildTag}`;
+
+      const agentResult = await invokeAgentCore(
+        actualMessage,
+        targetUser.email,
+        crossSessionId,
+        log,
+        {
+          displayName: targetUser.displayName,
+          workspacePrefix: targetUser.workspacePrefix,
+          invokedBy: {
+            email: senderEmail,
+            displayName: senderDisplayName,
+          },
+          threadContext,
+        }
+      );
+
+      // Token alerting
+      const totalTokens = agentResult.inputTokens + agentResult.outputTokens;
+      if (totalTokens > TOKEN_LIMIT) {
+        log.warn('Token usage exceeds alerting threshold (cross-user)', {
+          invoker: senderEmail,
+          agentOwner: targetUser.email,
+          totalTokens,
+          threshold: TOKEN_LIMIT,
+        });
+      }
+
+      // Response — always prefixed with the target user's name in shared spaces
+      const maxLength = 4096;
+      const truncationSuffix = '\n\n_(Response truncated — ask me to continue)_';
+      const ownerLabel = targetUser.displayName || targetUser.email;
+      const crossPrefix = `[${ownerLabel}'s Agent] `;
+      const availableLength = maxLength - crossPrefix.length;
+      const truncatedResponse =
+        agentResult.response.length > availableLength
+          ? agentResult.response.substring(0, availableLength - truncationSuffix.length) +
+            truncationSuffix
+          : agentResult.response;
+      const finalResponse = `${crossPrefix}${truncatedResponse}`;
+
+      await sendGoogleChatResponse(spaceName, threadName, finalResponse, log);
+
+      // Telemetry — record both the invoker and the agent owner.
+      // Semantics for cross-user invocations:
+      //   userId      = invoker (who triggered the cross-user call)
+      //   invokedBy   = same as userId for cross-user (confirms it's a cross-user call)
+      //   agentOwnerId = whose agent was consulted (resource consumption attribution)
+      // This means "messages by userId" includes both self-sent and cross-user-initiated.
+      // To query "messages consuming X's agent resources", filter by agentOwnerId.
+      const latencyMs = Date.now() - startTime;
+      await logTelemetry(
+        {
+          userId: senderEmail,
+          sessionId: crossSessionId,
+          model: agentResult.model,
+          inputTokens: agentResult.inputTokens,
+          outputTokens: agentResult.outputTokens,
+          latencyMs,
+          guardrailBlocked: false, // Always false here — blocked messages return early above
+          spaceName,
+          invokedBy: senderEmail,
+          agentOwnerId: targetUser.email,
+        },
+        log
+      );
+
+      log.info('Cross-user invocation processed', {
+        invoker: senderEmail,
+        agentOwner: targetUser.email,
+        model: agentResult.model,
+        latencyMs,
+      });
+      return;
+    }
   }
 
-  // Step 3: Invoke AgentCore
+  // Step 4: Invoke AgentCore (normal path — owner's own agent)
   // Session ID = workspace prefix + SHA-256 hash of space name + build tag.
   //
   // Using a hash (not truncation) prevents two spaces with a long common
@@ -1300,7 +1583,7 @@ async function processRecord(
     }
   );
 
-  // Step 4: Token usage alerting threshold (warn-only, not enforcement)
+  // Step 5: Token usage alerting threshold (warn-only, not enforcement)
   // The response is still delivered — this is for monitoring/alerting.
   // Hard enforcement requires pre-invocation token estimation via session
   // tracking in DynamoDB, which is planned for Phase 2.
@@ -1321,7 +1604,7 @@ async function processRecord(
   // before sendGoogleChatResponse(). The Bedrock ApplyGuardrail API supports
   // this in the same call. Deferred to Phase 2 to avoid doubling latency.
 
-  // Step 5: Send response
+  // Step 6: Send response
   // Prefix with [User's Agent] in shared spaces for clarity.
   // Truncate the raw response BEFORE adding the prefix so truncation
   // behavior is consistent between DMs and shared spaces (the prefix
@@ -1340,7 +1623,7 @@ async function processRecord(
 
   await sendGoogleChatResponse(spaceName, threadName, finalResponse, log);
 
-  // Step 6: Log telemetry
+  // Step 7: Log telemetry
   const latencyMs = Date.now() - startTime;
   await logTelemetry(
     {
@@ -1350,7 +1633,10 @@ async function processRecord(
       inputTokens: agentResult.inputTokens,
       outputTokens: agentResult.outputTokens,
       latencyMs,
-      guardrailBlocked: false,
+      // Preserve the guardrail signal for telemetry — the message was not
+      // blocked, but we record whether it would have been under the old
+      // fail-closed policy for later analysis / tuning.
+      guardrailBlocked: guardrailResult.wouldHaveBlocked,
       spaceName,
     },
     log

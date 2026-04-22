@@ -40,6 +40,7 @@ const {
   emit,
   putSchedule,
   querySchedules,
+  lookupUserByEmail,
 } = require('./common');
 
 // Per-user ceiling. Prevents one user from exhausting EventBridge
@@ -96,6 +97,31 @@ async function main() {
   const ebName = buildScheduleName(scheduleId);
   const state = args.disabled ? 'DISABLED' : 'ENABLED';
 
+  // Resolve identity fields from the users table if the agent didn't pass
+  // them explicitly. The per-turn preamble gives the agent the caller's
+  // email; the googleIdentity / dmSpaceName live in the users table. Doing
+  // this lookup here means the Cron Lambda never has to self-heal at fire
+  // time — every new schedule row carries the delivery metadata from day
+  // one. Silent pass-through if the lookup fails: Cron Lambda has its own
+  // email-index fallback as a safety net.
+  let resolvedGoogleIdentity = args['google-identity'];
+  let resolvedDmSpaceName = args['dm-space-name'];
+  if (!resolvedGoogleIdentity || !resolvedDmSpaceName) {
+    try {
+      const user = await lookupUserByEmail(args.user);
+      if (user) {
+        if (!resolvedGoogleIdentity && user.googleIdentity) {
+          resolvedGoogleIdentity = user.googleIdentity;
+        }
+        if (!resolvedDmSpaceName && user.dmSpaceName) {
+          resolvedDmSpaceName = user.dmSpaceName;
+        }
+      }
+    } catch (_err) {
+      // Non-fatal. The Cron Lambda has the same lookup as a fallback.
+    }
+  }
+
   const now = nowIso();
   const record = {
     userId: args.user,
@@ -108,8 +134,8 @@ async function main() {
     createdAt: now,
     updatedAt: now,
   };
-  if (args['google-identity']) record.googleIdentity = args['google-identity'];
-  if (args['dm-space-name']) record.dmSpaceName = args['dm-space-name'];
+  if (resolvedGoogleIdentity) record.googleIdentity = resolvedGoogleIdentity;
+  if (resolvedDmSpaceName) record.dmSpaceName = resolvedDmSpaceName;
 
   const lambdaInput = JSON.stringify({
     scheduleId,

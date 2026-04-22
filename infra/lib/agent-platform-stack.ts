@@ -208,6 +208,14 @@ export class AgentPlatformStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // GSI on email for cross-user agent invocation (@agent:username resolution)
+    // and schedule identity self-heal (resolving googleIdentity from email)
+    this.usersTable.addGlobalSecondaryIndex({
+      indexName: 'email-index',
+      partitionKey: { name: 'email', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     cdk.Tags.of(this.usersTable).add('Environment', environment);
     cdk.Tags.of(this.usersTable).add('ManagedBy', 'cdk');
 
@@ -377,6 +385,21 @@ export class AgentPlatformStack extends cdk.Stack {
             sid: 'ListModels',
             effect: iam.Effect.ALLOW,
             actions: ['bedrock:ListFoundationModels', 'bedrock:GetFoundationModel'],
+            resources: ['*'],
+          }),
+          // memory_search in OpenClaw >= 2026.4 uses bedrock:CallWithBearerToken
+          // to generate embeddings for semantic search over the agent's local
+          // ~/.openclaw/memory/ files. Without this action the tool returns
+          // "embedding/provider error" and memories become unsearchable.
+          // Per-user scoping note: this is a single shared service credential,
+          // but memory files are per-user by construction (workspace_sync.py
+          // syncs only the caller's S3 workspace prefix into the container).
+          // No cross-user leakage via this grant — embeddings are generated
+          // from text the agent has already loaded from its own workspace.
+          new iam.PolicyStatement({
+            sid: 'BedrockEmbeddingsViaBearerToken',
+            effect: iam.Effect.ALLOW,
+            actions: ['bedrock:CallWithBearerToken'],
             resources: ['*'],
           }),
         ],
@@ -1025,6 +1048,18 @@ export class AgentPlatformStack extends cdk.Stack {
     // subsequent invocations skip the Google Chat API scan.
     schedulesTable.grantWriteData(this.cronLambdaRole);
 
+    // Cron Lambda self-heals missing googleIdentity on a schedule by looking
+    // the user up via email-index GSI when the event payload omits identity
+    // (common for schedules created before the skill populated it).
+    // ServiceRoleFactory's DynamoDB grant scopes to the base table ARN but
+    // not to GSIs — add the GSI Query permission explicitly.
+    this.cronLambdaRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'UsersEmailIndexQuery',
+      effect: iam.Effect.ALLOW,
+      actions: ['dynamodb:Query'],
+      resources: [`${this.usersTable.tableArn}/index/*`],
+    }));
+
     // Grant Cron Lambda access to Google credentials secret
     this.googleCredentialsSecret.grantRead(this.cronLambdaRole);
 
@@ -1115,8 +1150,11 @@ export class AgentPlatformStack extends cdk.Stack {
     this.routerQueue = new sqs.Queue(this, 'RouterQueue', {
       queueName: `psd-agent-router-${environment}`,
       // AWS recommends visibility timeout >= 6x Lambda timeout to prevent
-      // duplicate processing. Lambda timeout is 5 min, so 30 min minimum.
-      visibilityTimeout: cdk.Duration.minutes(30),
+      // duplicate processing. Router Lambda timeout is 15 min, so 90 min
+      // minimum. If the agent genuinely takes longer than the Lambda max
+      // and SQS redelivers, the dedup table (psd-agent-message-dedup-{env})
+      // still blocks the duplicate from double-invoking AgentCore.
+      visibilityTimeout: cdk.Duration.minutes(90),
       retentionPeriod: cdk.Duration.days(4),
       encryption: sqs.QueueEncryption.SQS_MANAGED,
       deadLetterQueue: {
@@ -1202,12 +1240,17 @@ export class AgentPlatformStack extends cdk.Stack {
         },
       ),
       memorySize: config.compute.lambdaMemory,
-      // Agent responses can take time. Observed >120s for fresh microVM cold
-      // starts (S3 workspace pull + LLM cold path). 5 min gives headroom for
-      // legitimate slow runs without hiding genuine hangs. Bumping the SQS
-      // visibilityTimeout below would also need updating to stay >= 6x this
-      // value if we go higher.
-      timeout: cdk.Duration.minutes(5),
+      // Agent responses can take time: AgentCore microVM cold starts run
+      // ~60s on their own; real research-heavy turns stream content for
+      // another 3-5 min. 5 min was cutting it razor-thin — observed a
+      // 848-char morning-brief reply arrive at the router 19s AFTER a
+      // 5-min timeout, with the answer orphaned in the agent's memory
+      // and Chat never seeing anything. 15 min is Lambda's hard ceiling
+      // and is not user-visible; it only governs how long the Lambda
+      // stays alive waiting on AgentCore. The agent still ends when it
+      // ends — we just stop killing the request prematurely.
+      // SQS visibilityTimeout below MUST stay >= 6x this value.
+      timeout: cdk.Duration.minutes(15),
       architecture: lambda.Architecture.ARM_64,
       role: this.routerLambdaRole,
       logGroup: routerLogGroup,

@@ -25,6 +25,7 @@ import {
   DynamoDBDocumentClient,
   GetCommand,
   UpdateCommand,
+  QueryCommand,
 } from '@aws-sdk/lib-dynamodb';
 import {
   SecretsManagerClient,
@@ -442,31 +443,94 @@ async function recordRun(params: {
  * the bot, paginated). Best-effort — failure just means the next run does
  * another scan.
  */
-async function backfillDmSpace(
+async function backfillScheduleIdentity(
   userId: string,
   scheduleId: string,
-  dmSpaceName: string,
+  updates: { dmSpaceName?: string; googleIdentity?: string },
   log: Logger,
 ): Promise<void> {
   if (!SCHEDULES_TABLE) return;
+  const sets: string[] = ['updatedAt = :now'];
+  const values: Record<string, unknown> = { ':now': new Date().toISOString() };
+  if (updates.dmSpaceName) {
+    sets.push('dmSpaceName = :dm');
+    values[':dm'] = updates.dmSpaceName;
+  }
+  if (updates.googleIdentity) {
+    sets.push('googleIdentity = :gid');
+    values[':gid'] = updates.googleIdentity;
+  }
+  if (sets.length === 1) return;
   try {
     await dynamoClient.send(
       new UpdateCommand({
         TableName: SCHEDULES_TABLE,
         Key: { userId, scheduleId },
-        UpdateExpression: 'SET dmSpaceName = :dm, updatedAt = :now',
-        ExpressionAttributeValues: {
-          ':dm': dmSpaceName,
-          ':now': new Date().toISOString(),
-        },
+        UpdateExpression: 'SET ' + sets.join(', '),
+        ExpressionAttributeValues: values,
         ConditionExpression: 'attribute_exists(scheduleId)',
       }),
     );
-    log.info('Backfilled DM space on schedule row', { scheduleId });
+    log.info('Backfilled identity fields on schedule row', {
+      scheduleId,
+      fields: Object.keys(updates).filter((k) => (updates as Record<string, unknown>)[k]),
+    });
   } catch (error) {
-    log.warn('DM space backfill failed (non-fatal)', {
+    log.warn('Schedule identity backfill failed (non-fatal)', {
       error: error instanceof Error ? error.message : String(error),
     });
+  }
+}
+
+/**
+ * Resolve a user record by email via the email-index GSI.
+ * Returns the googleIdentity-keyed item so the caller can follow up with
+ * lookupUserByGoogleIdentity or use dmSpaceName directly.
+ *
+ * Handles the real-world case where a single email has multiple user rows
+ * (test records, force-new-user debugging). Picks the item whose
+ * googleIdentity looks like a real Google ID (starts with "users/" and
+ * contains digits), falling back to the first result if nothing matches.
+ */
+async function lookupUserByEmail(
+  email: string,
+  log: Logger,
+): Promise<{
+  googleIdentity?: string;
+  displayName?: string;
+  workspacePrefix?: string;
+  dmSpaceName?: string;
+  email?: string;
+} | null> {
+  if (!USERS_TABLE || !email) return null;
+  try {
+    const resp = await dynamoClient.send(
+      new QueryCommand({
+        TableName: USERS_TABLE,
+        IndexName: 'email-index',
+        KeyConditionExpression: 'email = :e',
+        ExpressionAttributeValues: { ':e': email },
+      }),
+    );
+    const items = (resp.Items ?? []) as Array<Record<string, unknown>>;
+    if (items.length === 0) return null;
+    const real = items.find((item) => {
+      const gid = item.googleIdentity;
+      return typeof gid === 'string' && /^users\/\d+/.test(gid);
+    });
+    const pick = real ?? items[0];
+    return {
+      googleIdentity: pick.googleIdentity as string | undefined,
+      displayName: pick.displayName as string | undefined,
+      workspacePrefix: pick.workspacePrefix as string | undefined,
+      dmSpaceName: pick.dmSpaceName as string | undefined,
+      email: pick.email as string | undefined,
+    };
+  } catch (error) {
+    log.error('User lookup by email failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return null;
   }
 }
 
@@ -537,16 +601,21 @@ export async function handler(
     email: sanitizeEmail(event.userEmail),
   });
 
-  // Resolve user metadata from DynamoDB if googleIdentity provided.
-  // Cross-check: googleIdentity must belong to the payload's userEmail, else
-  // a spoofed schedule entry could direct a prompt at another user's DM.
+  // Resolve user metadata. Two paths:
+  //   1. googleIdentity in the event payload — cross-checked against the
+  //      users table to prevent a spoofed schedule from spraying to someone
+  //      else's DM. If mismatch, reject the run outright.
+  //   2. googleIdentity missing — self-heal by looking up the user by email
+  //      via the email-index GSI. This is the common case for schedules
+  //      created before identity population landed, and for future schedules
+  //      where the agent did not capture googleIdentity at create time.
   let userContext: { displayName?: string; workspacePrefix?: string; dmSpaceName?: string } = {};
-  let googleIdentityTrusted = false;
+  let trustedGoogleIdentity: string | undefined;
   if (event.googleIdentity) {
     const lookup = await lookupUserByGoogleIdentity(event.googleIdentity, log);
     if (lookup && lookup.email && lookup.email.toLowerCase() === event.userEmail.toLowerCase()) {
       userContext = lookup;
-      googleIdentityTrusted = true;
+      trustedGoogleIdentity = event.googleIdentity;
     } else if (lookup) {
       log.error('googleIdentity / userEmail mismatch — refusing to deliver', {
         email: sanitizeEmail(event.userEmail),
@@ -568,16 +637,27 @@ export async function handler(
       );
       return { status: 'error', scheduleId: event.scheduleId };
     }
+  } else {
+    const lookup = await lookupUserByEmail(event.userEmail, log);
+    if (lookup) {
+      userContext = lookup;
+      if (lookup.googleIdentity) {
+        trustedGoogleIdentity = lookup.googleIdentity;
+        log.info('Self-healed googleIdentity from email', {
+          email: sanitizeEmail(event.userEmail),
+          scheduleId: event.scheduleId,
+        });
+      }
+    }
   }
 
   // Resolve DM space: payload > user record > Google Chat API scan.
-  // The API scan is only allowed when googleIdentity was verified against
-  // DynamoDB above — otherwise an attacker-supplied identity could resolve
-  // someone else's DM space.
+  // The API scan only runs against a googleIdentity that we trust — either
+  // provided in the event and validated, or resolved from the email lookup.
   let dmSpace = event.dmSpaceName || userContext.dmSpaceName || null;
   let dmSpaceResolvedViaApi = false;
-  if (!dmSpace && event.googleIdentity && googleIdentityTrusted) {
-    dmSpace = await resolveDmSpace(event.googleIdentity, log);
+  if (!dmSpace && trustedGoogleIdentity) {
+    dmSpace = await resolveDmSpace(trustedGoogleIdentity, log);
     dmSpaceResolvedViaApi = !!dmSpace;
   }
   if (!dmSpace) {
@@ -636,11 +716,22 @@ export async function handler(
       `📋 **${scheduleName}**\n\n${result.response}`,
       log,
     );
-    // Delivery succeeded — if we discovered the DM space via the expensive
-    // API scan, cache it on the schedule row so the next fire skips scanning.
-    if (dmSpaceResolvedViaApi) {
-      await backfillDmSpace(event.userEmail, event.scheduleId, dmSpace, log);
+    // Delivery succeeded — backfill whatever identity we had to resolve at
+    // runtime so the next fire skips those lookups. This covers three cases:
+    //  * DM space resolved via the Google Chat API scan (expensive)
+    //  * googleIdentity resolved via email-index GSI when the event was
+    //    missing it (schedule created before identity population)
+    const identityBackfill: { dmSpaceName?: string; googleIdentity?: string } = {};
+    if (dmSpaceResolvedViaApi) identityBackfill.dmSpaceName = dmSpace;
+    if (!event.googleIdentity && trustedGoogleIdentity) {
+      identityBackfill.googleIdentity = trustedGoogleIdentity;
     }
+    await backfillScheduleIdentity(
+      event.userEmail,
+      event.scheduleId,
+      identityBackfill,
+      log,
+    );
   } catch (error) {
     log.error('Failed to deliver scheduled response', {
       error: error instanceof Error ? error.message : String(error),

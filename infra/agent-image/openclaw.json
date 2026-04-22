@@ -32,7 +32,8 @@
     }
   },
   "tools": {
-    "profile": "full"
+    "profile": "full",
+    "deny": ["cron", "nodes", "gateway"]
   },
   "skills": {
     "load": {
