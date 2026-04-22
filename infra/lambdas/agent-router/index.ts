@@ -149,6 +149,13 @@ const MAX_INTERAGENT_MESSAGES_PER_HOUR = parseInt(
   10
 );
 const INTERAGENT_TABLE = process.env.INTERAGENT_TABLE || '';
+// Cross-user agent invocation rate limit (#903) — max invocations per sender
+// per hour. Uses the message dedup table with a cross-user-specific key prefix
+// to avoid adding another DynamoDB table. Default: 10 per hour per sender.
+const MAX_CROSS_USER_INVOCATIONS_PER_HOUR = parseInt(
+  process.env.MAX_CROSS_USER_INVOCATIONS_PER_HOUR || '10',
+  10
+);
 // Cross-user agent invocation: thread context limits (Phase 2 — unused until
 // domain-wide delegation enables spaces.messages.list)
 // const CROSS_USER_THREAD_CONTEXT_LIMIT = parseInt(
@@ -521,9 +528,10 @@ async function getOrCreateUser(
  * DynamoDB. Returns null if no @agent: prefix is found.
  */
 function parseCrossUserInvocation(text: string): CrossUserInvocation | null {
-  // Match @agent: followed by a username (alphanumeric, dots, hyphens, underscores)
-  // at the start of the message or after whitespace.
-  const match = text.match(/^@agent:([a-zA-Z0-9._-]+)\s*([\s\S]*)/);
+  // Match @agent: followed by a username (alphanumeric, dots, hyphens, underscores).
+  // Must start and end with alphanumeric, minimum 2 chars to reject edge cases
+  // like @agent:. or @agent:--- which are not valid email local parts.
+  const match = text.match(/^@agent:([a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?)\s*([\s\S]*)/);
   if (!match) return null;
 
   return {
@@ -604,6 +612,65 @@ async function fetchThreadContext(
     space: spaceName,
   });
   return '';
+}
+
+/**
+ * Rate-limit cross-user invocations per sender.
+ * Tracks invocations using a time-bucketed counter in the message dedup
+ * DynamoDB table (shared infrastructure, cross-user-specific key prefix).
+ *
+ * Returns true if the sender has exceeded MAX_CROSS_USER_INVOCATIONS_PER_HOUR.
+ * Fails open on errors — better to allow a message than drop it on a DDB blip.
+ */
+async function isCrossUserRateLimited(
+  senderEmail: string,
+  log: ReturnType<typeof createLogger>
+): Promise<boolean> {
+  const tableName = process.env.MESSAGE_DEDUP_TABLE;
+  if (!tableName) {
+    return false; // Dedup table not configured (e.g., local tests) — pass through
+  }
+
+  // Use hour-bucketed keys so each hour starts fresh without needing a scan.
+  // Key format: cross-user:<sender>:<hour-bucket>
+  const hourBucket = new Date().toISOString().slice(0, 13); // YYYY-MM-DDTHH
+  const counterKey = `cross-user:${senderEmail}:${hourBucket}`;
+
+  try {
+    // Atomic increment via UpdateCommand — creates item on first call.
+    // TTL ensures automatic cleanup after 2 hours.
+    const result = await dynamoClient.send(
+      new UpdateCommand({
+        TableName: tableName,
+        Key: { messageName: counterKey },
+        UpdateExpression: 'SET invocationCount = if_not_exists(invocationCount, :zero) + :one, expiresAt = :ttl',
+        ExpressionAttributeValues: {
+          ':zero': 0,
+          ':one': 1,
+          ':ttl': Math.floor(Date.now() / 1000) + 7200, // 2 hour TTL
+        },
+        ReturnValues: 'ALL_NEW',
+      })
+    );
+
+    const count = (result.Attributes?.invocationCount as number) || 0;
+    if (count > MAX_CROSS_USER_INVOCATIONS_PER_HOUR) {
+      log.warn('Cross-user invocation rate limit exceeded', {
+        senderEmail,
+        invocationCount: count,
+        limit: MAX_CROSS_USER_INVOCATIONS_PER_HOUR,
+      });
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    // Fail open — prefer delivering a message over dropping it on a DDB error
+    log.error('Cross-user rate limit check failed; allowing message', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return false;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1317,7 +1384,7 @@ async function processRecord(
   const senderName = message.sender.name;
   const senderEmail = message.sender.email;
   const senderDisplayName = message.sender.displayName;
-  const messageText = message.text;
+  let messageText = message.text;
   const spaceName = chatEvent.space.name;
   const threadName = message.thread?.name;
 
@@ -1424,6 +1491,19 @@ async function processRecord(
       space: spaceName,
     });
 
+    // C1 fix: Rate-limit cross-user invocations per sender to prevent abuse.
+    // Check early before resolving the target user to save DynamoDB reads.
+    const crossUserRateLimited = await isCrossUserRateLimited(senderEmail, log);
+    if (crossUserRateLimited) {
+      await sendGoogleChatResponse(
+        spaceName,
+        threadName,
+        'You\'ve sent too many agent consultations this hour. Please wait before trying again.',
+        log
+      );
+      return;
+    }
+
     // Resolve the target user
     const targetUser = await resolveUserByEmailPrefix(
       crossUserInvocation.targetUsername,
@@ -1431,22 +1511,26 @@ async function processRecord(
     );
 
     if (!targetUser) {
+      // H2 fix: Generic error to prevent user enumeration — don't echo the
+      // username or confirm/deny whether it exists in the system.
       await sendGoogleChatResponse(
         spaceName,
         threadName,
-        `I couldn't find a user matching "${crossUserInvocation.targetUsername}". ` +
-          `Make sure they have an active agent (they need to have messaged the bot at least once).`,
+        'That agent is not available. The user may not have an active agent yet.',
         log
       );
       return;
     }
 
-    // Don't allow invoking your own agent via @agent: — use normal messaging
+    // Don't allow invoking your own agent via @agent: — use normal messaging.
+    // H3 fix: Use the stripped message (without @agent:prefix) for normal processing.
     if (targetUser.email.toLowerCase() === senderEmail.toLowerCase()) {
       log.info('Self-invocation detected, treating as normal message', {
         sender: senderEmail,
       });
-      // Fall through to normal processing with the stripped message
+      // Fall through to normal processing with the stripped message.
+      // Overwrite messageText so the @agent:username prefix isn't sent to AgentCore.
+      messageText = crossUserInvocation.strippedMessage || messageText;
     } else {
       // Cross-user path: invoke the TARGET user's agent with sender context
       const actualMessage = crossUserInvocation.strippedMessage;
@@ -1456,6 +1540,20 @@ async function processRecord(
           threadName,
           `Please include a question after @agent:${crossUserInvocation.targetUsername}. ` +
             `Example: @agent:${crossUserInvocation.targetUsername} what's the budget status?`,
+          log
+        );
+        return;
+      }
+
+      // H1 fix: Run guardrails on the stripped message (what AgentCore actually
+      // receives), not the original text with the @agent:username prefix.
+      const crossGuardrailResult = await applyGuardrails(actualMessage, log);
+      if (!crossGuardrailResult.allowed) {
+        await sendGoogleChatResponse(
+          spaceName,
+          threadName,
+          crossGuardrailResult.blockedReason ||
+            'Your message was filtered by our content safety system. Please rephrase.',
           log
         );
         return;
@@ -1512,7 +1610,13 @@ async function processRecord(
 
       await sendGoogleChatResponse(spaceName, threadName, finalResponse, log);
 
-      // Telemetry — record both the invoker and the agent owner
+      // Telemetry — record both the invoker and the agent owner.
+      // Semantics for cross-user invocations:
+      //   userId      = invoker (who triggered the cross-user call)
+      //   invokedBy   = same as userId for cross-user (confirms it's a cross-user call)
+      //   agentOwnerId = whose agent was consulted (resource consumption attribution)
+      // This means "messages by userId" includes both self-sent and cross-user-initiated.
+      // To query "messages consuming X's agent resources", filter by agentOwnerId.
       const latencyMs = Date.now() - startTime;
       await logTelemetry(
         {
