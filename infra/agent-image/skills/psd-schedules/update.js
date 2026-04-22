@@ -107,7 +107,21 @@ async function main() {
       Description: `PSD agent schedule "${updated.name}" for ${updated.userId}`,
     }));
   } catch (err) {
-    fail(`DynamoDB updated but EventBridge UpdateSchedule failed: ${err.message}`);
+    // DDB is now ahead of EventBridge. Surface this explicitly in stdout so
+    // the agent sees the drift and can report "schedule looks updated but
+    // the scheduler is still running the old config — retry".
+    emit({
+      ebSyncFailed: true,
+      updated,
+      eventbridgeName: ebName,
+      expression,
+      state,
+      error: err.message,
+      remediation:
+        'Retry the same update command. DDB reflects the intended state; ' +
+        'EventBridge is still on the previous configuration.',
+    });
+    process.exit(1);
   }
 
   emit({ updated, eventbridgeName: ebName, expression, state });

@@ -885,11 +885,10 @@ async function recordInterAgentMessage(
           sentAt: new Date().toISOString(),
           targetBotId,
           spaceName,
-          // Use a UUID for unthreaded messages to avoid false-positive anti-loop
-          // triggers. A shared sentinel like 'none' would group unrelated top-level
-          // messages into one "thread", causing a bot that sends 2 separate
-          // unthreaded messages to trip the anti-loop check erroneously.
-          threadName: threadName || `unthreaded-${crypto.randomUUID()}`,
+          // Thread key is already normalized at the call site (real thread name
+          // or space-stable `unthreaded-<spaceName>` for top-level messages) so
+          // record and anti-loop query agree on the same correlation key.
+          threadName: threadName || 'unknown',
           expiresAt,
         },
       })
@@ -1087,8 +1086,13 @@ async function processRecord(
   if (isBotSender && isSharedSpace) {
     // Inter-agent message in shared space
     const senderBotId = message.sender.name;
-    const threadName = message.thread?.name;
     const spaceName = chatEvent.space.name;
+    // Thread correlation: real threadName when present, otherwise bucket all
+    // unthreaded messages in this space under a space-stable key so anti-loop
+    // counts still correlate. Using a per-message UUID here (previous fix)
+    // scattered each top-level message into its own thread and defeated the
+    // anti-loop check entirely.
+    const threadName = message.thread?.name || `unthreaded-${spaceName}`;
     const interAgentStartTime = Date.now();
 
     log.info('Inter-agent message detected', {

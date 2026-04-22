@@ -39,7 +39,13 @@ const {
   nowIso,
   emit,
   putSchedule,
+  querySchedules,
 } = require('./common');
+
+// Per-user ceiling. Prevents one user from exhausting EventBridge
+// Scheduler's account-level quota (soft: 1,000 / hard: 10,000 per account).
+// Bumpable via env for a power user if ever needed.
+const MAX_SCHEDULES_PER_USER = parseInt(process.env.MAX_SCHEDULES_PER_USER || '50', 10);
 
 async function main() {
   const args = parseArgs(process.argv);
@@ -57,6 +63,27 @@ async function main() {
   const timezone = args.timezone || DEFAULT_TIMEZONE;
   validateTimezone(timezone);
   const expression = toSchedulerExpression(args.cron);
+
+  // Idempotency + quota checks before allocating resources.
+  let existing;
+  try {
+    existing = await querySchedules(args.user);
+  } catch (err) {
+    fail(`DynamoDB Query failed (pre-create check): ${err.message}`);
+  }
+  if (existing.length >= MAX_SCHEDULES_PER_USER) {
+    fail(
+      `Schedule quota exceeded: ${args.user} already has ${existing.length} ` +
+        `schedules (max ${MAX_SCHEDULES_PER_USER}). Delete unused schedules first.`,
+    );
+  }
+  const nameCollision = existing.find((s) => s.name === args.name);
+  if (nameCollision) {
+    fail(
+      `A schedule named "${args.name}" already exists for ${args.user} ` +
+        `(id ${nameCollision.scheduleId}). Use a different name or update the existing schedule.`,
+    );
+  }
 
   const scheduleId = generateScheduleId();
   const ebName = buildScheduleName(scheduleId);

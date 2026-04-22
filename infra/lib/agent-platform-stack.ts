@@ -1019,12 +1019,10 @@ export class AgentPlatformStack extends cdk.Stack {
     // Grant Cron Lambda access to Google credentials secret
     this.googleCredentialsSecret.grantRead(this.cronLambdaRole);
 
-    // Grant Cron Lambda basic CloudWatch Logs permissions.
-    // Note: SSM access for AgentCore Runtime ID lookup is provided via
-    // additionalPolicies in the ServiceRoleFactory role above (SSMParameterAccess).
-    this.cronLambdaRole.addManagedPolicy(
-      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
-    );
+    // CloudWatch Logs permissions are granted automatically by CDK when the
+    // function is constructed with a managed logGroup prop (see CronLambda
+    // below) — no managed policy needed, and scoping to the named group is
+    // tighter than AWSLambdaBasicExecutionRole's blanket logs:* on *.
 
     // =====================================================================
     // 7b. EventBridge Scheduler — per-user schedule entries

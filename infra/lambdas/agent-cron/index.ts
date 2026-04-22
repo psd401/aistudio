@@ -329,15 +329,24 @@ async function invokeAgentCore(
       };
     }
 
-    const responseBody = (await response.json()) as Record<string, unknown>;
-    const result = (responseBody.result as string) || 'No response from agent.';
-    const metadata = (responseBody.metadata as Record<string, unknown>) || {};
-    return {
-      response: result,
-      inputTokens: (metadata.input_tokens as number) || 0,
-      outputTokens: (metadata.output_tokens as number) || 0,
-      ok: true,
-    };
+    const parsed: unknown = await response.json();
+    if (!parsed || typeof parsed !== 'object') {
+      log.error('AgentCore returned non-object body', { kind: typeof parsed });
+      return { response: 'Agent returned an unexpected response shape.', inputTokens: 0, outputTokens: 0, ok: false };
+    }
+    const responseBody = parsed as Record<string, unknown>;
+    const rawResult = responseBody.result;
+    const result = typeof rawResult === 'string' && rawResult.length > 0
+      ? rawResult
+      : 'No response from agent.';
+    const ok = typeof rawResult === 'string' && rawResult.length > 0;
+    const metadata =
+      responseBody.metadata && typeof responseBody.metadata === 'object'
+        ? (responseBody.metadata as Record<string, unknown>)
+        : {};
+    const inputTokens = typeof metadata.input_tokens === 'number' ? metadata.input_tokens : 0;
+    const outputTokens = typeof metadata.output_tokens === 'number' ? metadata.output_tokens : 0;
+    return { response: result, inputTokens, outputTokens, ok };
   } catch (error) {
     log.error('AgentCore invocation error', {
       error: error instanceof Error ? error.message : String(error),
@@ -432,6 +441,7 @@ async function lookupUserByGoogleIdentity(
   displayName?: string;
   workspacePrefix?: string;
   dmSpaceName?: string;
+  email?: string;
 } | null> {
   if (!USERS_TABLE) return null;
   try {
@@ -447,6 +457,7 @@ async function lookupUserByGoogleIdentity(
       displayName: item.displayName as string | undefined,
       workspacePrefix: item.workspacePrefix as string | undefined,
       dmSpaceName: item.dmSpaceName as string | undefined,
+      email: item.email as string | undefined,
     };
   } catch (error) {
     log.error('User lookup failed', {
@@ -491,15 +502,44 @@ export async function handler(
   });
 
   // Resolve user metadata from DynamoDB if googleIdentity provided.
+  // Cross-check: googleIdentity must belong to the payload's userEmail, else
+  // a spoofed schedule entry could direct a prompt at another user's DM.
   let userContext: { displayName?: string; workspacePrefix?: string; dmSpaceName?: string } = {};
+  let googleIdentityTrusted = false;
   if (event.googleIdentity) {
     const lookup = await lookupUserByGoogleIdentity(event.googleIdentity, log);
-    if (lookup) userContext = lookup;
+    if (lookup && lookup.email && lookup.email.toLowerCase() === event.userEmail.toLowerCase()) {
+      userContext = lookup;
+      googleIdentityTrusted = true;
+    } else if (lookup) {
+      log.error('googleIdentity / userEmail mismatch — refusing to deliver', {
+        email: sanitizeEmail(event.userEmail),
+        identityEmail: lookup.email ? sanitizeEmail(lookup.email) : null,
+      });
+      await recordRun(
+        {
+          userEmail: event.userEmail,
+          scheduleId: event.scheduleId,
+          scheduleName,
+          sessionId: 'rejected',
+          inputTokens: 0,
+          outputTokens: 0,
+          latencyMs: Date.now() - startTime,
+          status: 'error',
+          errorMessage: 'googleIdentity does not match userEmail',
+        },
+        log,
+      );
+      return { status: 'error', scheduleId: event.scheduleId };
+    }
   }
 
   // Resolve DM space: payload > user record > Google Chat API scan.
+  // The API scan is only allowed when googleIdentity was verified against
+  // DynamoDB above — otherwise an attacker-supplied identity could resolve
+  // someone else's DM space.
   let dmSpace = event.dmSpaceName || userContext.dmSpaceName || null;
-  if (!dmSpace && event.googleIdentity) {
+  if (!dmSpace && event.googleIdentity && googleIdentityTrusted) {
     dmSpace = await resolveDmSpace(event.googleIdentity, log);
   }
   if (!dmSpace) {
@@ -525,10 +565,12 @@ export async function handler(
   }
 
   // Session ID — unique per schedule invocation, not shared with interactive
-  // sessions. Keeps scheduled context isolated.
+  // sessions. Keeps scheduled context isolated. Bound the length so a long
+  // workspace prefix can't push us past AgentCore's session-id limits.
   const dateKey = new Date().toISOString().split('T')[0];
-  const prefix =
+  const rawPrefix =
     userContext.workspacePrefix || event.userEmail.split('@')[0] || 'unknown';
+  const prefix = rawPrefix.substring(0, 40);
   const sessionId = `${prefix}-sched-${event.scheduleId.substring(0, 12)}-${dateKey}`;
 
   // Invoke AgentCore.
