@@ -179,6 +179,14 @@ interface GoogleChatEvent {
   message?: {
     name: string;
     text: string;
+    /**
+     * Message text with bot @mentions stripped. Populated by Google Chat
+     * for messages sent into a Space where the bot is mentioned. In a DM
+     * this matches `text`. Prefer this over `text` in router logic so bot
+     * mention chips don't pollute downstream parsing (e.g., cross-user
+     * invocation regex).
+     */
+    argumentText?: string;
     sender: {
       name: string; // users/{userId}
       displayName: string;
@@ -1196,7 +1204,18 @@ async function processRecord(
   }
 
   const message = chatEvent.message;
-  if (!message || !message.text || !message.sender) {
+  // Google Chat provides two text fields on a message:
+  //   * message.text — full raw text including bot @mention chips rendered
+  //     as "@<Bot Name>" literal. In a ROOM/space that leading bot mention
+  //     is part of the string, which broke the cross-user parser
+  //     (/^@agent:/) because the text started with "@PSD AI Agent " instead.
+  //   * message.argumentText — same text with bot @mention chips stripped.
+  //     Google's documented field for bot consumers. In a DM it matches
+  //     message.text exactly (no bot mention to strip).
+  // Prefer argumentText; fall back to text when absent (older API versions,
+  // edge cases where only one field is populated).
+  const rawText = (message?.argumentText ?? message?.text ?? '').trim();
+  if (!message || !rawText || !message.sender) {
     log.warn('Message event missing required fields');
     return;
   }
@@ -1311,7 +1330,7 @@ async function processRecord(
   const senderName = message.sender.name;
   const senderEmail = message.sender.email;
   const senderDisplayName = message.sender.displayName;
-  let messageText = message.text;
+  let messageText = rawText;
   const spaceName = chatEvent.space.name;
   const threadName = message.thread?.name;
 
