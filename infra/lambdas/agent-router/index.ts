@@ -149,16 +149,12 @@ const MAX_INTERAGENT_MESSAGES_PER_HOUR = parseInt(
   10
 );
 const INTERAGENT_TABLE = process.env.INTERAGENT_TABLE || '';
-// Cross-user agent invocation: max thread messages to fetch for context
-const CROSS_USER_THREAD_CONTEXT_LIMIT = parseInt(
-  process.env.CROSS_USER_THREAD_CONTEXT_LIMIT || '50',
-  10
-);
-// Max token budget for thread context (rough estimate: ~4 chars per token)
-const CROSS_USER_THREAD_TOKEN_BUDGET = parseInt(
-  process.env.CROSS_USER_THREAD_TOKEN_BUDGET || '8000',
-  10
-);
+// Cross-user agent invocation: thread context limits (Phase 2 — unused until
+// domain-wide delegation enables spaces.messages.list)
+// const CROSS_USER_THREAD_CONTEXT_LIMIT = parseInt(
+//   process.env.CROSS_USER_THREAD_CONTEXT_LIMIT || '50', 10);
+// const CROSS_USER_THREAD_TOKEN_BUDGET = parseInt(
+//   process.env.CROSS_USER_THREAD_TOKEN_BUDGET || '8000', 10);
 
 // Cold-start diagnostic: log if AGENTCORE_RUNTIME_ID is not set at module load.
 // When the env var is absent, every invocation pays an SSM GetParameter call.
