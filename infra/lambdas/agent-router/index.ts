@@ -149,6 +149,16 @@ const MAX_INTERAGENT_MESSAGES_PER_HOUR = parseInt(
   10
 );
 const INTERAGENT_TABLE = process.env.INTERAGENT_TABLE || '';
+// Cross-user agent invocation: max thread messages to fetch for context
+const CROSS_USER_THREAD_CONTEXT_LIMIT = parseInt(
+  process.env.CROSS_USER_THREAD_CONTEXT_LIMIT || '50',
+  10
+);
+// Max token budget for thread context (rough estimate: ~4 chars per token)
+const CROSS_USER_THREAD_TOKEN_BUDGET = parseInt(
+  process.env.CROSS_USER_THREAD_TOKEN_BUDGET || '8000',
+  10
+);
 
 // Cold-start diagnostic: log if AGENTCORE_RUNTIME_ID is not set at module load.
 // When the env var is absent, every invocation pays an SSM GetParameter call.
@@ -276,6 +286,17 @@ interface AgentUser {
   createdAt: string;
   lastActiveAt: string;
   sessionCount: number;
+}
+
+/**
+ * Result of parsing an @agent:username invocation from the message text.
+ * Returns null if no cross-user invocation is detected.
+ */
+interface CrossUserInvocation {
+  /** The username portion from @agent:username (email local part) */
+  targetUsername: string;
+  /** The message text with the @agent:username prefix stripped */
+  strippedMessage: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -491,6 +512,105 @@ async function getOrCreateUser(
 }
 
 // ---------------------------------------------------------------------------
+// Cross-user agent invocation (#903)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse @agent:username from the beginning of a message.
+ * Supports formats:
+ *   @agent:ashley what's the budget?
+ *   @agent:ashley.jones what's the budget?
+ *
+ * The username is matched against the email local part (before @) of users in
+ * DynamoDB. Returns null if no @agent: prefix is found.
+ */
+function parseCrossUserInvocation(text: string): CrossUserInvocation | null {
+  // Match @agent: followed by a username (alphanumeric, dots, hyphens, underscores)
+  // at the start of the message or after whitespace.
+  const match = text.match(/^@agent:([a-zA-Z0-9._-]+)\s*([\s\S]*)/);
+  if (!match) return null;
+
+  return {
+    targetUsername: match[1].toLowerCase(),
+    strippedMessage: match[2].trim(),
+  };
+}
+
+/**
+ * Look up a user by their email local part (the portion before @).
+ * Uses the email-index GSI to query by full email address, constructed
+ * by appending each allowed domain to the username.
+ *
+ * Returns the first matching user or null if no match is found.
+ */
+async function resolveUserByEmailPrefix(
+  username: string,
+  log: ReturnType<typeof createLogger>
+): Promise<AgentUser | null> {
+  // Try each allowed domain to find a match
+  for (const domain of ALLOWED_DOMAINS) {
+    const email = `${username}@${domain}`;
+    try {
+      const result = await dynamoClient.send(
+        new QueryCommand({
+          TableName: USERS_TABLE,
+          IndexName: 'email-index',
+          KeyConditionExpression: 'email = :email',
+          ExpressionAttributeValues: { ':email': email },
+          Limit: 1,
+        })
+      );
+
+      if (result.Items && result.Items.length > 0) {
+        log.info('Resolved cross-user target', {
+          username,
+          email,
+          targetGoogleIdentity: (result.Items[0] as AgentUser).googleIdentity,
+        });
+        return result.Items[0] as AgentUser;
+      }
+    } catch (error) {
+      log.error('Failed to query email-index GSI', {
+        username,
+        email,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  log.warn('Cross-user target not found', { username });
+  return null;
+}
+
+/**
+ * Fetch recent messages from a Google Chat thread for context.
+ * Used in cross-user invocations so the target agent has thread context
+ * without it becoming part of its persistent memory.
+ *
+ * PHASE 1 LIMITATION: The Google Chat API `spaces.messages.list` endpoint
+ * requires `chat.messages.readonly` scope with user auth or domain-wide
+ * delegation. Our service account only has `chat.bot` scope, which does
+ * not support listing messages. For Phase 1, we return empty string —
+ * the invoker's message alone provides sufficient context for the target
+ * agent to respond. Thread context fetching will be enabled in Phase 2
+ * when domain-wide delegation is configured.
+ *
+ * Returns formatted thread messages up to the token budget.
+ */
+async function fetchThreadContext(
+  spaceName: string,
+  log: ReturnType<typeof createLogger>
+): Promise<string> {
+  // Phase 1: thread context not available without domain-wide delegation.
+  // The cross-user invocation still works — the agent responds from its
+  // own memory + the invoker's question. See issue #903 for Phase 2 plan.
+  log.info('Thread context fetch skipped (Phase 1 — chat.bot scope insufficient)', {
+    space: spaceName,
+  });
+  return '';
+}
+
+// ---------------------------------------------------------------------------
 // Guardrails
 // ---------------------------------------------------------------------------
 
@@ -556,7 +676,14 @@ async function invokeAgentCore(
   userId: string,
   sessionId: string,
   log: ReturnType<typeof createLogger>,
-  userContext?: { displayName?: string; workspacePrefix?: string }
+  userContext?: {
+    displayName?: string;
+    workspacePrefix?: string;
+    /** Present when someone other than the agent owner invokes the agent */
+    invokedBy?: { email: string; displayName: string };
+    /** Ephemeral thread context for cross-user invocations */
+    threadContext?: string;
+  }
 ): Promise<{ response: string; inputTokens: number; outputTokens: number; model: string | null }> {
   // Resolve the AgentCore Runtime ID — check env var, then module-level cache,
   // then SSM. Cached at module scope with TTL to avoid redundant SSM API calls
@@ -617,6 +744,14 @@ async function invokeAgentCore(
       user_email: userId,
       user_display_name: userContext?.displayName ?? '',
       workspace_prefix: userContext?.workspacePrefix ?? '',
+      // Cross-user invocation fields (#903)
+      ...(userContext?.invokedBy && {
+        invoked_by_email: userContext.invokedBy.email,
+        invoked_by_display_name: userContext.invokedBy.displayName,
+      }),
+      ...(userContext?.threadContext && {
+        thread_context: userContext.threadContext,
+      }),
     });
 
     const request = new HttpRequest({
@@ -762,6 +897,10 @@ async function logTelemetry(
     latencyMs: number;
     guardrailBlocked: boolean;
     spaceName: string;
+    /** Cross-user invocation: email of the person who invoked the agent (#903) */
+    invokedBy?: string;
+    /** Cross-user invocation: email of the agent owner whose agent was consulted (#903) */
+    agentOwnerId?: string;
   },
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
@@ -773,19 +912,22 @@ async function logTelemetry(
   try {
     const sql = await getDbClient();
     const totalTokens = params.inputTokens + params.outputTokens;
+    const invokedBy = params.invokedBy ?? null;
+    const agentOwnerId = params.agentOwnerId ?? null;
 
     // Run both telemetry writes in parallel — they're independent.
     // Uses direct PostgreSQL (postgres.js) consistent with the rest of the app,
     // instead of RDS Data API which adds ~100-300ms latency per call.
     await Promise.all([
       // Insert message-level telemetry
+      // invoked_by and agent_owner_id are NULL for normal (owner) invocations
       sql`INSERT INTO agent_messages
           (user_id, session_id, model, input_tokens, output_tokens,
-           latency_ms, guardrail_blocked, space_name, created_at)
+           latency_ms, guardrail_blocked, space_name, invoked_by, agent_owner_id, created_at)
           VALUES (${params.userId}, ${params.sessionId}, ${params.model},
                   ${params.inputTokens}, ${params.outputTokens},
                   ${params.latencyMs}, ${params.guardrailBlocked},
-                  ${params.spaceName}, NOW())`,
+                  ${params.spaceName}, ${invokedBy}, ${agentOwnerId}, NOW())`,
 
       // Upsert session-level aggregates — creates the session row on first message,
       // increments counters on subsequent messages. Uses ON CONFLICT on session_id
@@ -1273,7 +1415,136 @@ async function processRecord(
     return;
   }
 
-  // Step 3: Invoke AgentCore
+  // Step 3: Check for cross-user agent invocation (@agent:username)
+  // Only supported in shared spaces (ROOM) — in DMs the sender's own agent
+  // always responds. The cross-user path invokes the target user's AgentCore
+  // session with the sender's identity passed as `invokedBy`.
+  const crossUserInvocation = isSharedSpace ? parseCrossUserInvocation(messageText) : null;
+
+  if (crossUserInvocation) {
+    log.info('Cross-user invocation detected', {
+      sender: senderEmail,
+      targetUsername: crossUserInvocation.targetUsername,
+      space: spaceName,
+    });
+
+    // Resolve the target user
+    const targetUser = await resolveUserByEmailPrefix(
+      crossUserInvocation.targetUsername,
+      log
+    );
+
+    if (!targetUser) {
+      await sendGoogleChatResponse(
+        spaceName,
+        threadName,
+        `I couldn't find a user matching "${crossUserInvocation.targetUsername}". ` +
+          `Make sure they have an active agent (they need to have messaged the bot at least once).`,
+        log
+      );
+      return;
+    }
+
+    // Don't allow invoking your own agent via @agent: — use normal messaging
+    if (targetUser.email.toLowerCase() === senderEmail.toLowerCase()) {
+      log.info('Self-invocation detected, treating as normal message', {
+        sender: senderEmail,
+      });
+      // Fall through to normal processing with the stripped message
+    } else {
+      // Cross-user path: invoke the TARGET user's agent with sender context
+      const actualMessage = crossUserInvocation.strippedMessage;
+      if (!actualMessage) {
+        await sendGoogleChatResponse(
+          spaceName,
+          threadName,
+          `Please include a question after @agent:${crossUserInvocation.targetUsername}. ` +
+            `Example: @agent:${crossUserInvocation.targetUsername} what's the budget status?`,
+          log
+        );
+        return;
+      }
+
+      // Fetch thread context (best-effort — empty string on failure)
+      const threadContext = await fetchThreadContext(spaceName, log);
+
+      // Session ID uses the TARGET user's workspace prefix so the invocation
+      // hits the target's AgentCore session and has access to their memory.
+      // The build tag rotation still applies for deploy freshness.
+      const spaceHash = crypto.createHash('sha256').update(spaceName).digest('hex');
+      const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
+      const crossSessionId = `${targetUser.workspacePrefix}-${spaceHash}-${buildTag}`;
+
+      const agentResult = await invokeAgentCore(
+        actualMessage,
+        targetUser.email,
+        crossSessionId,
+        log,
+        {
+          displayName: targetUser.displayName,
+          workspacePrefix: targetUser.workspacePrefix,
+          invokedBy: {
+            email: senderEmail,
+            displayName: senderDisplayName,
+          },
+          threadContext,
+        }
+      );
+
+      // Token alerting
+      const totalTokens = agentResult.inputTokens + agentResult.outputTokens;
+      if (totalTokens > TOKEN_LIMIT) {
+        log.warn('Token usage exceeds alerting threshold (cross-user)', {
+          invoker: senderEmail,
+          agentOwner: targetUser.email,
+          totalTokens,
+          threshold: TOKEN_LIMIT,
+        });
+      }
+
+      // Response — always prefixed with the target user's name in shared spaces
+      const maxLength = 4096;
+      const truncationSuffix = '\n\n_(Response truncated — ask me to continue)_';
+      const crossPrefix = `[${targetUser.displayName}'s Agent] `;
+      const availableLength = maxLength - crossPrefix.length;
+      const truncatedResponse =
+        agentResult.response.length > availableLength
+          ? agentResult.response.substring(0, availableLength - truncationSuffix.length) +
+            truncationSuffix
+          : agentResult.response;
+      const finalResponse = `${crossPrefix}${truncatedResponse}`;
+
+      await sendGoogleChatResponse(spaceName, threadName, finalResponse, log);
+
+      // Telemetry — record both the invoker and the agent owner
+      const latencyMs = Date.now() - startTime;
+      await logTelemetry(
+        {
+          userId: senderEmail,
+          sessionId: crossSessionId,
+          model: agentResult.model,
+          inputTokens: agentResult.inputTokens,
+          outputTokens: agentResult.outputTokens,
+          latencyMs,
+          guardrailBlocked: false,
+          spaceName,
+          invokedBy: senderEmail,
+          agentOwnerId: targetUser.email,
+        },
+        log
+      );
+
+      log.info('Cross-user invocation processed', {
+        invoker: senderEmail,
+        agentOwner: targetUser.email,
+        model: agentResult.model,
+        latencyMs,
+      });
+      return;
+    }
+  }
+
+  // Step 4: Invoke AgentCore (normal path — owner's own agent)
   // Session ID = workspace prefix + SHA-256 hash of space name + build tag.
   //
   // Using a hash (not truncation) prevents two spaces with a long common
@@ -1300,7 +1571,7 @@ async function processRecord(
     }
   );
 
-  // Step 4: Token usage alerting threshold (warn-only, not enforcement)
+  // Step 5: Token usage alerting threshold (warn-only, not enforcement)
   // The response is still delivered — this is for monitoring/alerting.
   // Hard enforcement requires pre-invocation token estimation via session
   // tracking in DynamoDB, which is planned for Phase 2.
@@ -1321,7 +1592,7 @@ async function processRecord(
   // before sendGoogleChatResponse(). The Bedrock ApplyGuardrail API supports
   // this in the same call. Deferred to Phase 2 to avoid doubling latency.
 
-  // Step 5: Send response
+  // Step 6: Send response
   // Prefix with [User's Agent] in shared spaces for clarity.
   // Truncate the raw response BEFORE adding the prefix so truncation
   // behavior is consistent between DMs and shared spaces (the prefix
@@ -1340,7 +1611,7 @@ async function processRecord(
 
   await sendGoogleChatResponse(spaceName, threadName, finalResponse, log);
 
-  // Step 6: Log telemetry
+  // Step 7: Log telemetry
   const latencyMs = Date.now() - startTime;
   await logTelemetry(
     {

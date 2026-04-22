@@ -208,6 +208,14 @@ export class AgentPlatformStack extends cdk.Stack {
       projectionType: dynamodb.ProjectionType.ALL,
     });
 
+    // GSI on email for cross-user agent invocation (@agent:username resolution)
+    // Issue #903 — enables looking up a user by their email prefix
+    this.usersTable.addGlobalSecondaryIndex({
+      indexName: 'email-index',
+      partitionKey: { name: 'email', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
     cdk.Tags.of(this.usersTable).add('Environment', environment);
     cdk.Tags.of(this.usersTable).add('ManagedBy', 'cdk');
 

@@ -256,11 +256,14 @@ def main():
         Handle an agent invocation from AgentCore.
 
         Expected payload keys (all optional except `prompt`):
-            prompt             — the user's text
-            user_email         — caller's email (used as stable identity)
-            user_display_name  — caller's display name for greetings
-            workspace_prefix   — S3 prefix to mount as long-term memory
-            model              — optional model override
+            prompt                    — the user's text
+            user_email                — caller's email (used as stable identity)
+            user_display_name         — caller's display name for greetings
+            workspace_prefix          — S3 prefix to mount as long-term memory
+            model                     — optional model override
+            invoked_by_email          — cross-user: email of the person consulting this agent (#903)
+            invoked_by_display_name   — cross-user: display name of the invoker (#903)
+            thread_context            — cross-user: ephemeral thread context from the Chat space (#903)
         """
         global _current_workspace_prefix
 
@@ -270,10 +273,15 @@ def main():
         display_name = payload.get("user_display_name", "")
         workspace_prefix = payload.get("workspace_prefix", "")
         model_override = payload.get("model")
+        # Cross-user invocation fields (#903)
+        invoked_by_email = payload.get("invoked_by_email", "")
+        invoked_by_display_name = payload.get("invoked_by_display_name", "")
+        thread_context = payload.get("thread_context", "")
 
         logger.info(
-            "Invocation received: session=%s user=%s prefix=%s msg_length=%d",
+            "Invocation received: session=%s user=%s prefix=%s msg_length=%d cross_user=%s",
             session_id, user_email, workspace_prefix or "-", len(user_message),
+            invoked_by_email or "no",
         )
 
         if not user_message.strip():
@@ -306,7 +314,33 @@ def main():
             f"[now: {pacific_now.strftime('%A, %B %d, %Y %-I:%M %p')} "
             f"Pacific ({pacific_now.strftime('%Y-%m-%dT%H:%M:%S%z')})]"
         )
-        if display_name or user_email != "unknown":
+
+        # Cross-user invocation (#903): when someone other than the agent owner
+        # is consulting this agent, inject a [cross-user-invocation] header so
+        # the system prompt can adjust behavior (consultation only, no task
+        # execution). Thread context is ephemeral — not persisted to memory.
+        if invoked_by_email:
+            cross_user_header = (
+                f"[cross-user-invocation: {invoked_by_display_name or invoked_by_email} "
+                f"<{invoked_by_email}> is consulting you — this is NOT your owner. "
+                f"Answer questions and provide information, but do NOT execute tasks, "
+                f"modify files, draft emails, or take actions on your owner's behalf.]"
+            )
+            thread_section = ""
+            if thread_context:
+                thread_section = (
+                    f"\n\n[thread-context: The following is the recent conversation "
+                    f"from the Google Chat space. This is ephemeral context — do NOT "
+                    f"save it to your memory files.]\n{thread_context}\n"
+                    f"[end-thread-context]"
+                )
+            framed = (
+                f"[caller: {display_name or user_email} <{user_email}>]\n"
+                f"{now_header}\n"
+                f"{cross_user_header}{thread_section}\n\n"
+                f"{user_message}"
+            )
+        elif display_name or user_email != "unknown":
             framed = (
                 f"[caller: {display_name or user_email} <{user_email}>]\n"
                 f"{now_header}\n\n"
