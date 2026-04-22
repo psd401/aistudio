@@ -269,11 +269,10 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(interAgentTable).add('Environment', environment);
     cdk.Tags.of(interAgentTable).add('ManagedBy', 'cdk');
 
-    // 4e. Agent Schedules table — user-defined schedules.
-    // PK: userId (email), SK: scheduleId (UUID). DynamoDB Streams emit every
-    // change to the Scheduler Sync Lambda, which reconciles the corresponding
-    // EventBridge Scheduler schedule. One row = one schedule, fully owned by
-    // the user. Agents write this table via the AgentCore execution role.
+    // 4e. Agent Schedules table — user-defined schedules, one row per schedule.
+    // The psd-schedules OpenClaw skill writes to this table AND to EventBridge
+    // Scheduler in the same transaction (with rollback on failure). No streams
+    // or sync Lambda — the agent owns both sides and keeps them consistent.
     const schedulesTable = new dynamodb.Table(this, 'AgentSchedulesTable', {
       tableName: `psd-agent-schedules-${environment}`,
       partitionKey: { name: 'userId', type: dynamodb.AttributeType.STRING },
@@ -281,7 +280,6 @@ export class AgentPlatformStack extends cdk.Stack {
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       encryption: dynamodb.TableEncryption.AWS_MANAGED,
       pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
-      stream: dynamodb.StreamViewType.NEW_AND_OLD_IMAGES,
       removalPolicy: environment === 'prod'
         ? cdk.RemovalPolicy.RETAIN
         : cdk.RemovalPolicy.DESTROY,
@@ -882,6 +880,14 @@ export class AgentPlatformStack extends cdk.Stack {
           USERS_TABLE: this.usersTable.tableName,
           SIGNALS_TABLE: this.signalsTable.tableName,
           SCHEDULES_TABLE: schedulesTable.tableName,
+          // Inputs for the psd-schedules OpenClaw skill. The skill writes
+          // EventBridge Scheduler entries directly under the AgentCore role.
+          // Compute ARNs / names from stable identifiers so we don't need to
+          // reorder this block before the Scheduler constructs are declared;
+          // CDK dependency tracking still links them through the IAM grants.
+          EVENTBRIDGE_SCHEDULE_GROUP: `psd-agent-${environment}`,
+          CRON_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:psd-agent-cron-${environment}`,
+          EVENTBRIDGE_ROLE_ARN: `arn:aws:iam::${this.account}:role/psd-agent-scheduler-invoke-${environment}`,
           GUARDRAIL_ARN: props.guardrailArn,
           DATABASE_RESOURCE_ARN: props.databaseResourceArn,
           DATABASE_SECRET_ARN: props.databaseSecretArn,
@@ -1029,9 +1035,8 @@ export class AgentPlatformStack extends cdk.Stack {
     // all required for user-owned, independently-timed schedules.
     //
     // The Scheduler service assumes `schedulerInvokeRole` to invoke the Cron
-    // Lambda. Entries are created/updated/deleted by the Scheduler Sync
-    // Lambda (below) in response to DynamoDB Stream events from the schedules
-    // table.
+    // Lambda. Entries are created/updated/deleted by the psd-schedules
+    // OpenClaw skill running inside the agent container (no sync Lambda).
 
     const scheduleGroup = new scheduler.CfnScheduleGroup(this, 'AgentScheduleGroup', {
       name: `psd-agent-${environment}`,
@@ -1048,129 +1053,38 @@ export class AgentPlatformStack extends cdk.Stack {
     cronLambda.grantInvoke(schedulerInvokeRole);
 
     // =====================================================================
-    // 7c. Scheduler Sync Lambda — DDB Stream → EventBridge Scheduler CRUD
+    // 7c. Agent → EventBridge Scheduler authorization
     // =====================================================================
-    const schedulerSyncLogGroup = new logs.LogGroup(this, 'SchedulerSyncLogGroup', {
-      logGroupName: `/aws/lambda/psd-agent-scheduler-sync-${environment}`,
-      retention: config.monitoring.logRetention,
-      removalPolicy: environment === 'prod'
-        ? cdk.RemovalPolicy.RETAIN
-        : cdk.RemovalPolicy.DESTROY,
-    });
-    cdk.Tags.of(schedulerSyncLogGroup).add('Environment', environment);
-    cdk.Tags.of(schedulerSyncLogGroup).add('ManagedBy', 'cdk');
-
-    const schedulerSyncRole = ServiceRoleFactory.createLambdaRole(this, 'SchedulerSyncRole', {
-      functionName: 'psd-agent-scheduler-sync',
-      environment,
-      region: this.region,
-      account: this.account,
-      vpcEnabled: false,
-      additionalPolicies: [
-        new iam.PolicyDocument({
-          statements: [
-            new iam.PolicyStatement({
-              sid: 'SchedulerCrud',
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'scheduler:CreateSchedule',
-                'scheduler:UpdateSchedule',
-                'scheduler:DeleteSchedule',
-                'scheduler:GetSchedule',
-              ],
-              resources: [
-                `arn:aws:scheduler:${this.region}:${this.account}:schedule/psd-agent-${environment}/*`,
-              ],
-            }),
-            new iam.PolicyStatement({
-              sid: 'SchedulerPassRole',
-              effect: iam.Effect.ALLOW,
-              actions: ['iam:PassRole'],
-              resources: [schedulerInvokeRole.roleArn],
-              conditions: {
-                StringEquals: {
-                  'iam:PassedToService': 'scheduler.amazonaws.com',
-                },
-              },
-            }),
-          ],
-        }),
+    // The psd-schedules OpenClaw skill runs inside the agent container and
+    // writes EventBridge Scheduler entries directly under the AgentCore
+    // execution role. Grant scheduler:* on the schedule group and iam:PassRole
+    // on the invoke role so the skill can Create/Update/Delete schedules.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SchedulerCrud',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'scheduler:CreateSchedule',
+        'scheduler:UpdateSchedule',
+        'scheduler:DeleteSchedule',
+        'scheduler:GetSchedule',
+        'scheduler:ListSchedules',
       ],
-    });
-
-    // ServiceRoleFactory scopes CloudWatch Logs perms to a resource ARN based
-    // on functionName (without env suffix), but the real log group includes
-    // the env suffix ("-dev"). Attach the basic execution managed policy so
-    // Lambda can always write to its own log group regardless of naming.
-    schedulerSyncRole.addManagedPolicy(
-      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
-    );
-
-    const schedulerSyncLambda = new lambda.Function(this, 'SchedulerSyncLambda', {
-      functionName: `psd-agent-scheduler-sync-${environment}`,
-      runtime: lambda.Runtime.NODEJS_20_X,
-      handler: 'index.handler',
-      code: lambda.Code.fromAsset(
-        path.join(__dirname, '..', 'lambdas', 'agent-scheduler-sync'),
-        {
-          assetHashType: cdk.AssetHashType.SOURCE,
-          bundling: {
-            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
-            local: {
-              tryBundle(outputDir: string): boolean {
-                try {
-                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-scheduler-sync');
-                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
-                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
-                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
-                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
-                  return true;
-                } catch (e) {
-                  // eslint-disable-next-line no-console
-                  console.error('Local bundling failed, falling back to Docker:', e);
-                  return false;
-                }
-              },
-            },
-            command: [
-              'bash', '-c',
-              [
-                'npm install', 'npm run build',
-                'cp -r dist/* /asset-output/',
-                'cp package.json /asset-output/',
-                'cd /asset-output && npm install --production',
-              ].join(' && '),
-            ],
-          },
+      resources: [
+        `arn:aws:scheduler:${this.region}:${this.account}:schedule/psd-agent-${environment}/*`,
+        `arn:aws:scheduler:${this.region}:${this.account}:schedule-group/psd-agent-${environment}`,
+      ],
+    }));
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SchedulerPassRole',
+      effect: iam.Effect.ALLOW,
+      actions: ['iam:PassRole'],
+      resources: [schedulerInvokeRole.roleArn],
+      conditions: {
+        StringEquals: {
+          'iam:PassedToService': 'scheduler.amazonaws.com',
         },
-      ),
-      memorySize: 512,
-      timeout: cdk.Duration.minutes(1),
-      architecture: lambda.Architecture.ARM_64,
-      role: schedulerSyncRole,
-      logGroup: schedulerSyncLogGroup,
-      environment: {
-        ENVIRONMENT: environment,
-        SCHEDULE_GROUP_NAME: scheduleGroup.name!,
-        CRON_LAMBDA_ARN: cronLambda.functionArn,
-        SCHEDULER_ROLE_ARN: schedulerInvokeRole.roleArn,
-        DEFAULT_TIMEZONE: 'America/Los_Angeles',
       },
-    });
-    schedulerSyncLambda.node.addDependency(scheduleGroup);
-    cdk.Tags.of(schedulerSyncLambda).add('Environment', environment);
-    cdk.Tags.of(schedulerSyncLambda).add('ManagedBy', 'cdk');
-
-    // Stream event source: DDB schedules table → Sync Lambda.
-    schedulerSyncLambda.addEventSource(
-      new lambdaEventSources.DynamoEventSource(schedulesTable, {
-        startingPosition: lambda.StartingPosition.TRIM_HORIZON,
-        batchSize: 10,
-        bisectBatchOnError: true,
-        retryAttempts: 3,
-        maxBatchingWindow: cdk.Duration.seconds(5),
-      }),
-    );
+    }));
 
     // =====================================================================
     // 8. SQS Queue — Google Chat Pub/Sub Inbound
@@ -1607,11 +1521,6 @@ export class AgentPlatformStack extends cdk.Stack {
         parameterName: `/aistudio/${environment}/agent-schedules-table-name`,
         stringValue: schedulesTable.tableName,
         description: 'DynamoDB table name for user-defined agent schedules',
-      }),
-      new ssm.StringParameter(this, 'SchedulerSyncArnParam', {
-        parameterName: `/aistudio/${environment}/agent-scheduler-sync-arn`,
-        stringValue: schedulerSyncLambda.functionArn,
-        description: 'Scheduler Sync Lambda ARN (reconciles schedules table → EventBridge Scheduler)',
       }),
     ];
 

@@ -31,12 +31,24 @@
   "tools": {
     "profile": "full"
   },
+  "skills": {
+    "load": {
+      "extraDirs": ["/home/node/.openclaw/skills"],
+      "watch": false
+    }
+  },
   "plugins": {
     "entries": {
       "active-memory": {
         "enabled": false
       }
     }
+  },
+  "cron": {
+    "enabled": false
+  },
+  "heartbeat": {
+    "enabled": false
   },
   "gateway": {
     "port": 3100,

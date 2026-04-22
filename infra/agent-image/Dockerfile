@@ -102,12 +102,22 @@ COPY SOUL.md /home/node/.openclaw/SOUL.md
 COPY IDENTITY.md /home/node/.openclaw/IDENTITY.md
 COPY USER.md /home/node/.openclaw/USER.md
 COPY MEMORY.md /home/node/.openclaw/MEMORY.md
-COPY TOOLS.md /home/node/.openclaw/TOOLS.md
+# Install OpenClaw skills — each skill is a directory under
+# /home/node/.openclaw/skills/ loaded via openclaw.json skills.load.extraDirs.
+# Install dependencies at build time so the agent container starts fast.
+COPY skills /home/node/.openclaw/skills
+RUN cd /home/node/.openclaw/skills/psd-schedules && npm install --omit=dev --no-audit --no-fund
+
+# Defense-in-depth: keep OpenClaw's built-in cron/heartbeat subsystems off so
+# the agent cannot fall back to a scheduler we do not control. The psd-schedules
+# skill is the only scheduling surface in this deployment, backed by
+# EventBridge Scheduler + DynamoDB (see SKILL.md).
+ENV OPENCLAW_SKIP_CRON=1
+ENV OPENCLAW_SKIP_HEARTBEAT=1
 COPY harness_adapter.py /app/harness_adapter.py
 COPY agentcore_wrapper.py /app/agentcore_wrapper.py
 COPY workspace_sync.py /app/workspace_sync.py
 COPY mantle_proxy.py /app/mantle_proxy.py
-COPY agent_schedules.py /app/agent_schedules.py
 
 # Set ownership for the node user (OpenClaw runs as node)
 RUN chown -R node:node /home/node/.openclaw /app
