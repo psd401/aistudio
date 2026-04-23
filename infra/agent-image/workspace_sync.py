@@ -47,6 +47,17 @@ WORKSPACE_DIR = Path("/home/node/.openclaw")
 # workspace. Only user-generated content (notes, sessions, embeddings,
 # canvases) should round-trip through S3.
 #
+# The SOUL.md entry was added after the same bug manifested for the system
+# prompt (2026-04-22): an old SOUL.md in each user's S3 workspace was being
+# pulled on cold-start, silently overwriting the image's fresh SOUL.md and
+# reverting the agent to an older ruleset that lacked the "think silently"
+# and "no empty promises" directives. The symptom was that new SOUL rules
+# never seemed to "take" — because they were being overlaid to death on
+# every pull. Same class of bug as openclaw.json — skip it in both
+# directions. User-specific memory files (IDENTITY/USER/MEMORY) are
+# intentionally NOT on this list — those are agent-written, user-owned,
+# and must round-trip.
+#
 # Match is: "skip if the relative path equals or starts with any entry".
 _SKIP_RELATIVE_PREFIXES = (
     "openclaw.json",                  # gateway config
@@ -55,6 +66,7 @@ _SKIP_RELATIVE_PREFIXES = (
     "logs/",                           # gateway telemetry, not memory
     "update-check.json",               # gateway version probe state
     ".openclaw/",                      # nested OpenClaw internal state
+    "SOUL.md",                         # system prompt — image-owned
 )
 
 # Filename suffixes that are always runtime cruft (socket files, pid files).
