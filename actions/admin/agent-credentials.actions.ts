@@ -171,6 +171,7 @@ export async function resolveCredentialRequest(
             status,
             resolvedBy: adminUserId,
             resolvedAt: new Date(),
+            updatedAt: new Date(),
           })
           .where(eq(psdAgentCredentialRequests.id, requestId)),
       "agentCredentials.resolveRequest"

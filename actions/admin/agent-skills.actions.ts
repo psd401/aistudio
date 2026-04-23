@@ -232,6 +232,7 @@ export async function approveSkillToShared(
             approvedBy: adminUserId,
             approvedAt: new Date(),
             scanStatus: "clean",
+            updatedAt: new Date(),
           })
           .where(eq(psdAgentSkills.id, skillId))
 
@@ -283,7 +284,7 @@ export async function rejectSkill(
       async (tx) => {
         await tx
           .update(psdAgentSkills)
-          .set({ scope: "rejected" })
+          .set({ scope: "rejected", updatedAt: new Date() })
           .where(eq(psdAgentSkills.id, skillId))
 
         await tx.insert(psdAgentSkillAudit).values({

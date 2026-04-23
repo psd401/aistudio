@@ -57,8 +57,9 @@ export const psdAgentSkills = pgTable("psd_agent_skills", {
   approvedBy: integer("approved_by").references(() => users.id, { onDelete: "set null" }),
   approvedAt: timestamp("approved_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  // updated_at is auto-maintained by a PostgreSQL BEFORE UPDATE trigger
-  // (see migration 070). Do not set it explicitly in application code.
+  // updated_at is NOT auto-maintained — the db-init Lambda's SQL splitter
+  // mangles CREATE FUNCTION / CREATE TRIGGER blocks, so migration 070 omits
+  // the trigger. Application code MUST set updatedAt on every update.
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("idx_agent_skills_scope").on(table.scope),
