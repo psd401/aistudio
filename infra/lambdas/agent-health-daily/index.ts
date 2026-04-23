@@ -83,6 +83,17 @@ interface UserRecord {
   googleIdentity?: string;
 }
 
+/**
+ * List all users from the DynamoDB users table.
+ *
+ * Uses ScanCommand because we need every user (no partition key filter applies).
+ * Paginated via LastEvaluatedKey to handle tables larger than 1 MB per page.
+ * ProjectionExpression limits returned attributes to minimize RCU cost.
+ *
+ * Scale note: at current district size (~200 users) this is a single page.
+ * If the table grows past ~10k users, consider a parallel segmented scan
+ * or switching to a GSI-backed query if a suitable key is available.
+ */
 async function listUsers(): Promise<UserRecord[]> {
   const users: UserRecord[] = [];
   let lastKey: Record<string, unknown> | undefined;

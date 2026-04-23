@@ -5,6 +5,7 @@ import { handleError, createSuccess } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery } from "@/lib/db/drizzle-client"
+import { stripJsonQuotes, pgTimestampAsText } from "@/lib/db/drizzle-helpers"
 import { sql, desc, eq } from "drizzle-orm"
 import { agentHealthSnapshots } from "@/lib/db/schema/tables/agent-health-snapshots"
 import { agentPatterns } from "@/lib/db/schema/tables/agent-patterns"
@@ -44,7 +45,10 @@ export async function getAgentHealthSummary(
   try {
     await requireRole("administrator")
 
-    // Clamp limit to prevent unbounded result sets (CWE-400)
+    // Clamp limit to prevent unbounded result sets (CWE-400).
+    // Cap at 500: the UI renders a paginated table, 500 rows is the practical
+    // maximum before client-side rendering degrades; the Lambda scans ~200
+    // users today and this cap leaves headroom for 2.5x growth.
     const safeLim = Math.min(Math.max(1, limit), 500)
 
     // Use the latest snapshot_date that exists. If the Lambda hasn't run yet
@@ -86,7 +90,7 @@ export async function getAgentHealthSummary(
               objectCount: agentHealthSnapshots.objectCount,
               skillCount: agentHealthSnapshots.skillCount,
               memoryFileCount: agentHealthSnapshots.memoryFileCount,
-              lastActivityAt: sql<string>`to_json(${agentHealthSnapshots.lastActivityAt})::text`,
+              lastActivityAt: pgTimestampAsText(agentHealthSnapshots.lastActivityAt),
               daysInactive: agentHealthSnapshots.daysInactive,
               abandoned: agentHealthSnapshots.abandoned,
               snapshotDate: sql<string>`${agentHealthSnapshots.snapshotDate}::text`,
@@ -119,8 +123,7 @@ export async function getAgentHealthSummary(
       objectCount: Number(r.objectCount),
       skillCount: Number(r.skillCount),
       memoryFileCount: Number(r.memoryFileCount),
-      // to_json()::text wraps the ISO string in quotes — strip them
-      lastActivityAt: r.lastActivityAt ? String(r.lastActivityAt).replace(/^"|"$/g, "") : null,
+      lastActivityAt: stripJsonQuotes(r.lastActivityAt),
       daysInactive: r.daysInactive !== null ? Number(r.daysInactive) : null,
       abandoned: Boolean(r.abandoned),
       snapshotDate: String(r.snapshotDate),
@@ -196,7 +199,7 @@ export async function getAgentPatterns(
             spikeRatio: agentPatterns.spikeRatio,
             isEmerging: agentPatterns.isEmerging,
             buildings: agentPatterns.buildings,
-            detectedAt: sql<string>`to_json(${agentPatterns.detectedAt})::text`,
+            detectedAt: pgTimestampAsText(agentPatterns.detectedAt),
           })
           .from(agentPatterns)
           .orderBy(desc(agentPatterns.week), desc(agentPatterns.signalCount))
@@ -213,8 +216,7 @@ export async function getAgentPatterns(
       spikeRatio: Number(r.spikeRatio),
       isEmerging: Boolean(r.isEmerging),
       buildings: String(r.buildings),
-      // to_json()::text wraps the ISO string in quotes — strip them
-      detectedAt: String(r.detectedAt).replace(/^"|"$/g, ""),
+      detectedAt: stripJsonQuotes(r.detectedAt) ?? "",
     }))
 
     timer({ status: "success" })

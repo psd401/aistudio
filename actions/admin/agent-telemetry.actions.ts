@@ -12,6 +12,7 @@ import {
 import type { ActionState } from "@/types"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery } from "@/lib/db/drizzle-client"
+import { stripJsonQuotes, pgTimestampAsText } from "@/lib/db/drizzle-helpers"
 import { sql, desc, count, gte, and, eq } from "drizzle-orm"
 import { agentMessages } from "@/lib/db/schema/tables/agent-messages"
 import { agentSessions } from "@/lib/db/schema/tables/agent-sessions"
@@ -102,6 +103,17 @@ function getDateRangeThreshold(range: TelemetryDateRange): Date | null {
     case "all":
       return null
   }
+}
+
+/**
+ * Cap "all time" daily-usage queries to 365 days to prevent unbounded
+ * result sets. Stats/aggregate queries can safely use "all" (they return
+ * a single row), but daily-usage returns one row per day — uncapped that
+ * grows linearly with deployment age.
+ */
+function getDailyUsageThreshold(range: TelemetryDateRange): Date | null {
+  if (range === "all") return getDateThreshold(365)
+  return getDateRangeThreshold(range)
 }
 
 // ============================================
@@ -285,7 +297,8 @@ export async function getAgentDailyUsage(
     await requireRole("administrator")
 
     const safeRange = sanitizeRange(range)
-    const threshold = getDateRangeThreshold(safeRange)
+    // Use capped threshold — "all" is limited to 365 days for daily queries
+    const threshold = getDailyUsageThreshold(safeRange)
 
     const rows = await executeQuery(
       (db) =>
@@ -415,8 +428,7 @@ export async function getAgentUserUsage(
               sql<number>`COALESCE(SUM(${agentMessages.inputTokens} + ${agentMessages.outputTokens}), 0)`,
             sessionCount:
               sql<number>`COUNT(DISTINCT ${agentMessages.sessionId})`,
-            lastActive:
-              sql<string>`to_json(MAX(${agentMessages.createdAt}))::text`,
+            lastActive: pgTimestampAsText(sql`MAX(${agentMessages.createdAt})`),
           })
           .from(agentMessages)
           .where(
@@ -433,8 +445,7 @@ export async function getAgentUserUsage(
       messageCount: Number(r.messageCount),
       totalTokens: Number(r.totalTokens),
       sessionCount: Number(r.sessionCount),
-      // to_json()::text wraps the ISO string in quotes — strip them
-      lastActive: r.lastActive ? String(r.lastActive).replace(/^"|"$/g, "") : null,
+      lastActive: stripJsonQuotes(r.lastActive),
     }))
 
     timer({ status: "success" })
@@ -476,7 +487,7 @@ export async function getAgentGuardrailEvents(
             userId: agentMessages.userId,
             model: agentMessages.model,
             spaceName: agentMessages.spaceName,
-            createdAt: sql<string>`to_json(${agentMessages.createdAt})::text`,
+            createdAt: pgTimestampAsText(agentMessages.createdAt),
           })
           .from(agentMessages)
           .where(
@@ -497,8 +508,7 @@ export async function getAgentGuardrailEvents(
       userId: String(r.userId),
       model: r.model ?? null,
       spaceName: r.spaceName ?? null,
-      // to_json()::text wraps the ISO string in quotes — strip them
-      createdAt: String(r.createdAt).replace(/^"|"$/g, ""),
+      createdAt: stripJsonQuotes(r.createdAt) ?? "",
     }))
 
     timer({ status: "success" })
@@ -543,7 +553,7 @@ export async function getAgentFeedbackList(
             userId: agentFeedback.userId,
             messageId: agentFeedback.messageId,
             thumbsUp: agentFeedback.thumbsUp,
-            createdAt: sql<string>`to_json(${agentFeedback.createdAt})::text`,
+            createdAt: pgTimestampAsText(agentFeedback.createdAt),
           })
           .from(agentFeedback)
           .where(
@@ -561,8 +571,7 @@ export async function getAgentFeedbackList(
       userId: String(r.userId),
       messageId: Number(r.messageId),
       thumbsUp: Boolean(r.thumbsUp),
-      // to_json()::text wraps the ISO string in quotes — strip them
-      createdAt: String(r.createdAt).replace(/^"|"$/g, ""),
+      createdAt: stripJsonQuotes(r.createdAt) ?? "",
     }))
 
     timer({ status: "success" })

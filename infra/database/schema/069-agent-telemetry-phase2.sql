@@ -9,8 +9,9 @@
 -- Privacy guarantee on agent_patterns: stores topic + building + counts only.
 -- No user identity, no message content. Matches the DynamoDB signal store contract.
 
-UPDATE migration_log SET status = 'completed'
-WHERE description = '069-agent-telemetry-phase2.sql' AND status = 'failed';
+-- Note: no migration_log reset guard here. The IF NOT EXISTS / ADD COLUMN
+-- IF NOT EXISTS guards below make this migration idempotent on its own.
+-- A prior failure should surface, not be silently cleared.
 
 -- 1. Topic column on agent_messages
 ALTER TABLE agent_messages

@@ -86,8 +86,10 @@ test.describe('Agent Dashboard — Admin', () => {
   })
 
   test('clicking a tab switches content', async ({ page }) => {
-    // Wait for initial load
-    await page.waitForTimeout(2000)
+    // Wait for the default tab to be selected before switching
+    await page.waitForSelector('[role="tab"][aria-selected="true"]', {
+      timeout: 10000,
+    })
 
     // Click the Safety tab
     const safetyTab = page

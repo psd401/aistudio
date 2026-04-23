@@ -44,7 +44,7 @@ export function AgentPatternsTable({ data, loading = false }: Props) {
       <CardContent>
         {data.length === 0 ? (
           <div className="h-32 flex items-center justify-center text-muted-foreground text-sm">
-            No patterns detected yet. The weekly scanner runs Sunday at 23:00 UTC.
+            No patterns detected yet. The weekly scanner runs on a recurring schedule.
           </div>
         ) : (
           <Table>

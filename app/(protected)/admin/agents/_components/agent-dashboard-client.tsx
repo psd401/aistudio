@@ -84,39 +84,84 @@ interface LoaderContext extends LoaderSetters {
   showError: (tab: string, message: string) => void
 }
 
-function buildLoaders(ctx: LoaderContext): Record<DashboardTab, (range: TelemetryDateRange) => Promise<void>> {
+function buildLoaders(
+  ctx: LoaderContext
+): Record<DashboardTab, (range: TelemetryDateRange) => Promise<void>> {
   return {
     usage: async (range) => {
-      const [u, m] = await Promise.all([getAgentDailyUsage(range), getAgentModelBreakdown(range)])
-      if (u.isSuccess && u.data) { ctx.setDailyUsage(u.data) } else if (!u.isSuccess) { ctx.showError("usage", u.message) }
-      if (m.isSuccess && m.data) { ctx.setModelBreakdown(m.data) } else if (!m.isSuccess) { ctx.showError("usage", m.message) }
+      const [u, m] = await Promise.all([
+        getAgentDailyUsage(range),
+        getAgentModelBreakdown(range),
+      ])
+      if (u.isSuccess && u.data) {
+        ctx.setDailyUsage(u.data)
+      } else if (!u.isSuccess) {
+        ctx.showError("usage", u.message)
+      }
+      if (m.isSuccess && m.data) {
+        ctx.setModelBreakdown(m.data)
+      } else if (!m.isSuccess) {
+        ctx.showError("usage", m.message)
+      }
     },
     adoption: async (range) => {
       const r = await getAgentUserUsage(range)
-      if (r.isSuccess && r.data) { ctx.setUserUsage(r.data) } else { ctx.showError("adoption", r.message) }
+      if (r.isSuccess && r.data) {
+        ctx.setUserUsage(r.data)
+      } else {
+        ctx.showError("adoption", r.message)
+      }
     },
     safety: async (range) => {
       const r = await getAgentGuardrailEvents(range)
-      if (r.isSuccess && r.data) { ctx.setGuardrailEvents(r.data) } else { ctx.showError("safety", r.message) }
+      if (r.isSuccess && r.data) {
+        ctx.setGuardrailEvents(r.data)
+      } else {
+        ctx.showError("safety", r.message)
+      }
     },
     feedback: async (range) => {
       const r = await getAgentFeedbackList(range)
-      if (r.isSuccess && r.data) { ctx.setFeedbackList(r.data) } else { ctx.showError("feedback", r.message) }
+      if (r.isSuccess && r.data) {
+        ctx.setFeedbackList(r.data)
+      } else {
+        ctx.showError("feedback", r.message)
+      }
     },
     health: async () => {
       const r = await getAgentHealthSummary()
-      if (r.isSuccess && r.data) { ctx.setHealthSummary(r.data) } else { ctx.showError("health", r.message) }
+      if (r.isSuccess && r.data) {
+        ctx.setHealthSummary(r.data)
+      } else {
+        ctx.showError("health", r.message)
+      }
     },
     cost: async (range) => {
       const r = await getAgentCostSummary(telemetryToCostRange(range))
-      if (r.isSuccess && r.data) { ctx.setCostSummary(r.data) } else { ctx.setCostSummary(null); ctx.showError("cost", r.message) }
+      if (r.isSuccess && r.data) {
+        ctx.setCostSummary(r.data)
+      } else {
+        ctx.setCostSummary(null)
+        ctx.showError("cost", r.message)
+      }
     },
     patterns: async () => {
       const r = await getAgentPatterns()
-      if (r.isSuccess && r.data) { ctx.setPatterns(r.data) } else { ctx.showError("patterns", r.message) }
+      if (r.isSuccess && r.data) {
+        ctx.setPatterns(r.data)
+      } else {
+        ctx.showError("patterns", r.message)
+      }
     },
   }
 }
+
+const DATE_RANGE_OPTIONS: { value: TelemetryDateRange; label: string }[] = [
+  { value: "7d", label: "Last 7 days" },
+  { value: "30d", label: "Last 30 days" },
+  { value: "90d", label: "Last 90 days" },
+  { value: "all", label: "All time" },
+]
 
 function DashboardHeader({
   dateRange,
@@ -167,13 +212,6 @@ function DashboardHeader({
     </div>
   )
 }
-
-const DATE_RANGE_OPTIONS: { value: TelemetryDateRange; label: string }[] = [
-  { value: "7d", label: "Last 7 days" },
-  { value: "30d", label: "Last 30 days" },
-  { value: "90d", label: "Last 90 days" },
-  { value: "all", label: "All time" },
-]
 
 function DashboardTabs({
   activeTab,
