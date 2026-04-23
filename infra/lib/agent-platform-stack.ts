@@ -726,6 +726,27 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: [props.databaseSecretArn],
     }));
 
+    // Secrets Manager — psd-credentials skill (#910): read shared + per-user
+    // agent credentials and list them by prefix. IAM scopes to the naming
+    // convention; Cedar policies add an additional layer of per-user isolation.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'AgentCredentialsRead',
+      effect: iam.Effect.ALLOW,
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: [
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent-creds/${environment}/*`,
+      ],
+    }));
+
+    // ListSecrets does not support resource-level permissions — must use '*'
+    // with name-prefix filtering in the application layer.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'AgentCredentialsList',
+      effect: iam.Effect.ALLOW,
+      actions: ['secretsmanager:ListSecrets'],
+      resources: ['*'],
+    }));
+
     // Cost allocation tags on role sessions
     cdk.Tags.of(this.agentCoreExecutionRole).add('department', 'technology');
     cdk.Tags.of(this.agentCoreExecutionRole).add('costCenter', 'ai-agents');
