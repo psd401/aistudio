@@ -11,19 +11,16 @@
 -- Enums:
 --   agent_skill_scope           — shared, user, draft, rejected
 --   agent_skill_scan_status     — clean, flagged, pending
+--
+-- NOTE: This migration uses plain DDL statements (no DO $$ blocks) because the
+-- db-init Lambda's statement splitter prematurely terminates DO blocks that
+-- contain inner statements ending in `);`. Idempotency is guaranteed by the
+-- migration tracker, which only marks a migration complete on full success.
 
 -- 1. Enums
-DO $$ BEGIN
-    CREATE TYPE agent_skill_scope AS ENUM ('shared', 'user', 'draft', 'rejected');
-EXCEPTION
-    WHEN duplicate_object THEN NULL;
-END $$;
+CREATE TYPE agent_skill_scope AS ENUM ('shared', 'user', 'draft', 'rejected');
 
-DO $$ BEGIN
-    CREATE TYPE agent_skill_scan_status AS ENUM ('clean', 'flagged', 'pending');
-EXCEPTION
-    WHEN duplicate_object THEN NULL;
-END $$;
+CREATE TYPE agent_skill_scan_status AS ENUM ('clean', 'flagged', 'pending');
 
 -- 2. psd_agent_skills — skill registry
 CREATE TABLE IF NOT EXISTS psd_agent_skills (
@@ -78,17 +75,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_skills_draft_name_owner
     WHERE scope = 'draft';
 
 -- updated_at trigger for psd_agent_skills
-DO $$ BEGIN
-    CREATE OR REPLACE FUNCTION update_psd_agent_skills_updated_at()
-    RETURNS TRIGGER AS $func$
-    BEGIN
-        NEW.updated_at = NOW();
-        RETURN NEW;
-    END;
-    $func$ LANGUAGE plpgsql;
-END $$;
+CREATE OR REPLACE FUNCTION update_psd_agent_skills_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
 
 DROP TRIGGER IF EXISTS trg_psd_agent_skills_updated_at ON psd_agent_skills;
+
 CREATE TRIGGER trg_psd_agent_skills_updated_at
     BEFORE UPDATE ON psd_agent_skills
     FOR EACH ROW EXECUTE FUNCTION update_psd_agent_skills_updated_at();
@@ -161,17 +157,16 @@ CREATE INDEX IF NOT EXISTS idx_agent_cred_requests_status
     WHERE status = 'pending';
 
 -- updated_at trigger for psd_agent_credential_requests
-DO $$ BEGIN
-    CREATE OR REPLACE FUNCTION update_psd_agent_credential_requests_updated_at()
-    RETURNS TRIGGER AS $func$
-    BEGIN
-        NEW.updated_at = NOW();
-        RETURN NEW;
-    END;
-    $func$ LANGUAGE plpgsql;
-END $$;
+CREATE OR REPLACE FUNCTION update_psd_agent_credential_requests_updated_at()
+RETURNS TRIGGER AS $$
+BEGIN
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
+$$ language 'plpgsql';
 
 DROP TRIGGER IF EXISTS trg_psd_agent_credential_requests_updated_at ON psd_agent_credential_requests;
+
 CREATE TRIGGER trg_psd_agent_credential_requests_updated_at
     BEFORE UPDATE ON psd_agent_credential_requests
     FOR EACH ROW EXECUTE FUNCTION update_psd_agent_credential_requests_updated_at();
