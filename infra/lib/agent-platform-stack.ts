@@ -1260,6 +1260,7 @@ export class AgentPlatformStack extends cdk.Stack {
       environment: {
         ENVIRONMENT: environment,
         USERS_TABLE: this.usersTable.tableName,
+        SIGNALS_TABLE: this.signalsTable.tableName,
         MESSAGE_DEDUP_TABLE: this.messageDedupTable.tableName,
         INTERAGENT_TABLE: interAgentTable.tableName,
         MAX_INTERAGENT_MESSAGES_PER_HOUR: '5',
@@ -1490,6 +1491,218 @@ export class AgentPlatformStack extends cdk.Stack {
       dlqAlarm.addAlarmAction(snsAction);
       errorAlarm.addAlarmAction(snsAction);
     }
+
+    // =====================================================================
+    // 9c. Agent Health Daily Lambda (issue #890)
+    // =====================================================================
+    // Scans S3 workspaces once per day and writes per-user health snapshots
+    // into Aurora agent_health_snapshots. Surfaces abandoned agents
+    // (no activity in 7+ days) and workspace growth trends in the admin
+    // dashboard Health tab.
+
+    const healthLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'AgentHealthDailyRole', {
+      functionName: 'psd-agent-health-daily',
+      environment,
+      region: this.region,
+      account: this.account,
+      // vpcEnabled: false — VPC access added manually via managed policy below
+      // to avoid ServiceRoleFactory's policy validator flagging ENI wildcard resources.
+      vpcEnabled: false,
+      dynamodbTables: [this.usersTable.tableName],
+      s3Buckets: [this.workspaceBucket.bucketName],
+      additionalPolicies: [
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'AuroraConnect',
+            effect: iam.Effect.ALLOW,
+            actions: ['secretsmanager:GetSecretValue'],
+            resources: [props.databaseSecretArn],
+          })],
+        }),
+      ],
+    });
+    // Aurora via VPC — same managed policy as the Router.
+    healthLambdaRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+    );
+
+    const healthLogGroup = new logs.LogGroup(this, 'AgentHealthDailyLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-health-daily-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+
+    const healthLambda = new lambda.Function(this, 'AgentHealthDailyLambda', {
+      functionName: `psd-agent-health-daily-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-health-daily'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-health-daily');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: 512,
+      timeout: cdk.Duration.minutes(10),
+      architecture: lambda.Architecture.ARM_64,
+      role: healthLambdaRole,
+      logGroup: healthLogGroup,
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      environment: {
+        ENVIRONMENT: environment,
+        WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
+        USERS_TABLE: this.usersTable.tableName,
+        DATABASE_HOST: props.databaseHost,
+        DATABASE_SECRET_ARN: props.databaseSecretArn,
+        DATABASE_NAME: props.databaseName ?? 'aistudio',
+        ABANDONED_DAYS: '7',
+      },
+    });
+    cdk.Tags.of(healthLambda).add('Environment', environment);
+    cdk.Tags.of(healthLambda).add('ManagedBy', 'cdk');
+
+    new events.Rule(this, 'AgentHealthDailySchedule', {
+      description: 'Daily S3 workspace scan → agent_health_snapshots',
+      schedule: events.Schedule.rate(cdk.Duration.days(1)),
+      targets: [new eventsTargets.LambdaFunction(healthLambda)],
+    });
+
+    // =====================================================================
+    // 9d. Agent Pattern Scanner Weekly Lambda (issue #890, Component 3)
+    // =====================================================================
+    // Scans the DynamoDB signal store and writes cross-building topic
+    // convergence patterns into Aurora agent_patterns. Suppressed below
+    // 3-signal / 2-building threshold. See pattern-scanner index.ts.
+
+    const patternLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'AgentPatternScannerRole', {
+      functionName: 'psd-agent-pattern-scanner',
+      environment,
+      region: this.region,
+      account: this.account,
+      // vpcEnabled: false — VPC access added manually via managed policy below
+      // to avoid ServiceRoleFactory's policy validator flagging ENI wildcard resources.
+      vpcEnabled: false,
+      dynamodbTables: [this.signalsTable.tableName],
+      additionalPolicies: [
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'AuroraConnect',
+            effect: iam.Effect.ALLOW,
+            actions: ['secretsmanager:GetSecretValue'],
+            resources: [props.databaseSecretArn],
+          })],
+        }),
+      ],
+    });
+    patternLambdaRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+    );
+
+    const patternLogGroup = new logs.LogGroup(this, 'AgentPatternScannerLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-pattern-scanner-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+
+    const patternLambda = new lambda.Function(this, 'AgentPatternScannerLambda', {
+      functionName: `psd-agent-pattern-scanner-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-pattern-scanner'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-pattern-scanner');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: 512,
+      timeout: cdk.Duration.minutes(5),
+      architecture: lambda.Architecture.ARM_64,
+      role: patternLambdaRole,
+      logGroup: patternLogGroup,
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      environment: {
+        ENVIRONMENT: environment,
+        SIGNALS_TABLE: this.signalsTable.tableName,
+        DATABASE_HOST: props.databaseHost,
+        DATABASE_SECRET_ARN: props.databaseSecretArn,
+        DATABASE_NAME: props.databaseName ?? 'aistudio',
+        MIN_SIGNALS: '3',
+        MIN_BUILDINGS: '2',
+        SPIKE_RATIO: '2.0',
+        ROLLING_WEEKS: '4',
+      },
+    });
+    cdk.Tags.of(patternLambda).add('Environment', environment);
+    cdk.Tags.of(patternLambda).add('ManagedBy', 'cdk');
+
+    // Weekly — Sunday 23:00 UTC (evening after Kaizen scan, per issue #890).
+    new events.Rule(this, 'AgentPatternScannerSchedule', {
+      description: 'Weekly cross-building topic convergence scan',
+      schedule: events.Schedule.cron({ minute: '0', hour: '23', weekDay: 'SUN' }),
+      targets: [new eventsTargets.LambdaFunction(patternLambda)],
+    });
 
     // =====================================================================
     // 10. SSM Parameters — Cross-Stack References

@@ -18,7 +18,8 @@
     "@smithy/protocol-http": "^4.0.0",
     "@smithy/signature-v4": "^4.0.0",
     "@googleapis/chat": "^5.0.0",
-    "postgres": "^3.4.0"
+    "postgres": "^3.4.0",
+    "undici": "^6.0.0"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.145",

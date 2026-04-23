@@ -59,6 +59,7 @@
     "@aws-sdk/client-cloudwatch-logs": "^3.982.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.982.0",
     "@aws-sdk/client-comprehend": "^3.982.0",
+    "@aws-sdk/client-cost-explorer": "^3.1035.0",
     "@aws-sdk/client-dynamodb": "^3.982.0",
     "@aws-sdk/client-kms": "^3.982.0",
     "@aws-sdk/client-lambda": "^3.982.0",
