@@ -37,11 +37,7 @@
   },
   "skills": {
     "load": {
-      "extraDirs": [
-        "/home/node/.openclaw/skills",
-        "/home/node/.openclaw/skills-shared",
-        "/home/node/.openclaw/skills-user"
-      ],
+      "extraDirs": ["/home/node/.openclaw/skills"],
       "watch": false
     }
   },
