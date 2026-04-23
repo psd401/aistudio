@@ -46,7 +46,9 @@ async function main() {
     }
 
     // Log the read to telemetry (best-effort, never blocks)
-    await logCredentialRead(args.name, args.user, process.env.SESSION_ID || '').catch(() => {});
+    await logCredentialRead(args.name, args.user, process.env.SESSION_ID || '').catch((err) => {
+      console.error(`Telemetry log failed (non-fatal): ${err.message}`);
+    });
 
     emit({ name: result.name, value: result.value, scope: result.scope });
   } catch (err) {

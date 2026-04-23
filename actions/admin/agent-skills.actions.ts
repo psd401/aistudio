@@ -81,10 +81,26 @@ export async function getAgentSkills(
       ? eq(psdAgentSkills.scope, validatedScope)
       : undefined
 
-    const skills = await executeQuery(
+    // Single query with window function to avoid a second round-trip for count
+    const skillsWithCount = await executeQuery(
       (db) =>
         db
-          .select()
+          .select({
+            id: psdAgentSkills.id,
+            name: psdAgentSkills.name,
+            scope: psdAgentSkills.scope,
+            ownerUserId: psdAgentSkills.ownerUserId,
+            s3Key: psdAgentSkills.s3Key,
+            version: psdAgentSkills.version,
+            summary: psdAgentSkills.summary,
+            scanStatus: psdAgentSkills.scanStatus,
+            scanFindings: psdAgentSkills.scanFindings,
+            approvedBy: psdAgentSkills.approvedBy,
+            approvedAt: psdAgentSkills.approvedAt,
+            createdAt: psdAgentSkills.createdAt,
+            updatedAt: psdAgentSkills.updatedAt,
+            totalCount: sql<number>`COUNT(*) OVER()`.as("total_count"),
+          })
           .from(psdAgentSkills)
           .where(conditions)
           .orderBy(desc(psdAgentSkills.createdAt))
@@ -92,20 +108,13 @@ export async function getAgentSkills(
       "agentSkills.list"
     )
 
-    const countResult = await executeQuery(
-      (db) =>
-        db
-          .select({ count: sql<number>`COUNT(*)::int` })
-          .from(psdAgentSkills)
-          .where(conditions),
-      "agentSkills.count"
-    )
+    const total = skillsWithCount[0]?.totalCount ?? 0
 
     timer({ status: "success" })
-    log.info("Listed skills", { scope, count: skills.length })
+    log.info("Listed skills", { scope, count: skillsWithCount.length })
 
     return createSuccess<SkillListResult>({
-      skills: skills.map((s) => ({
+      skills: skillsWithCount.map((s) => ({
         id: s.id,
         name: s.name,
         scope: s.scope,
@@ -120,7 +129,7 @@ export async function getAgentSkills(
         createdAt: s.createdAt.toISOString(),
         updatedAt: s.updatedAt.toISOString(),
       })),
-      total: countResult[0]?.count ?? 0,
+      total,
     })
   } catch (error) {
     timer({ status: "error" })
