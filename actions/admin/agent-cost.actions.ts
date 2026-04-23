@@ -109,7 +109,7 @@ export async function getAgentCostSummary(
 
     const dailyPoints = (daily.ResultsByTime ?? []).map((p) => ({
       date: String(p.TimePeriod?.Start ?? ""),
-      usd: Number(p.Total?.UnblendedCost?.Amount ?? 0),
+      usd: Number.parseFloat(p.Total?.UnblendedCost?.Amount ?? "0") || 0,
     }))
 
     const totalUsd = dailyPoints.reduce((sum, p) => sum + p.usd, 0)
@@ -118,7 +118,7 @@ export async function getAgentCostSummary(
     for (const bucket of byModel.ResultsByTime ?? []) {
       for (const group of bucket.Groups ?? []) {
         const key = group.Keys?.[0] ?? "unknown"
-        const amount = Number(group.Metrics?.UnblendedCost?.Amount ?? 0)
+        const amount = Number.parseFloat(group.Metrics?.UnblendedCost?.Amount ?? "0") || 0
         modelMap.set(key, (modelMap.get(key) ?? 0) + amount)
       }
     }

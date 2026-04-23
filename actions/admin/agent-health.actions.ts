@@ -72,26 +72,46 @@ export async function getAgentHealthSummary(
       })
     }
 
-    const rows = await executeQuery(
-      (db) =>
-        db
-          .select({
-            userEmail: agentHealthSnapshots.userEmail,
-            workspaceBytes: agentHealthSnapshots.workspaceBytes,
-            objectCount: agentHealthSnapshots.objectCount,
-            skillCount: agentHealthSnapshots.skillCount,
-            memoryFileCount: agentHealthSnapshots.memoryFileCount,
-            lastActivityAt: sql<string>`${agentHealthSnapshots.lastActivityAt}::text`,
-            daysInactive: agentHealthSnapshots.daysInactive,
-            abandoned: agentHealthSnapshots.abandoned,
-            snapshotDate: sql<string>`${agentHealthSnapshots.snapshotDate}::text`,
-          })
-          .from(agentHealthSnapshots)
-          .where(eq(agentHealthSnapshots.snapshotDate, sql`${snapshotDate}::date`))
-          .orderBy(desc(agentHealthSnapshots.workspaceBytes))
-          .limit(safeLim),
-      "agentHealth.rows"
-    )
+    // Fetch aggregate stats separately so they are not capped by the
+    // per-page limit. The totalUsers stat is used on the dashboard card
+    // and would silently under-count when there are more users than the
+    // result set size.
+    const [rows, aggregates] = await Promise.all([
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              userEmail: agentHealthSnapshots.userEmail,
+              workspaceBytes: agentHealthSnapshots.workspaceBytes,
+              objectCount: agentHealthSnapshots.objectCount,
+              skillCount: agentHealthSnapshots.skillCount,
+              memoryFileCount: agentHealthSnapshots.memoryFileCount,
+              lastActivityAt: sql<string>`to_json(${agentHealthSnapshots.lastActivityAt})::text`,
+              daysInactive: agentHealthSnapshots.daysInactive,
+              abandoned: agentHealthSnapshots.abandoned,
+              snapshotDate: sql<string>`${agentHealthSnapshots.snapshotDate}::text`,
+            })
+            .from(agentHealthSnapshots)
+            .where(eq(agentHealthSnapshots.snapshotDate, sql`${snapshotDate}::date`))
+            .orderBy(desc(agentHealthSnapshots.workspaceBytes))
+            .limit(safeLim),
+        "agentHealth.rows"
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              totalUsers: sql<number>`COUNT(*)`,
+              abandonedCount: sql<number>`COUNT(*) FILTER (WHERE ${agentHealthSnapshots.abandoned} = true)`,
+              totalWorkspaceBytes: sql<number>`COALESCE(SUM(${agentHealthSnapshots.workspaceBytes}), 0)`,
+              totalSkills: sql<number>`COALESCE(SUM(${agentHealthSnapshots.skillCount}), 0)`,
+              totalMemoryFiles: sql<number>`COALESCE(SUM(${agentHealthSnapshots.memoryFileCount}), 0)`,
+            })
+            .from(agentHealthSnapshots)
+            .where(eq(agentHealthSnapshots.snapshotDate, sql`${snapshotDate}::date`)),
+        "agentHealth.aggregates"
+      ),
+    ])
 
     const data: AgentHealthRow[] = rows.map((r) => ({
       userEmail: String(r.userEmail),
@@ -99,18 +119,20 @@ export async function getAgentHealthSummary(
       objectCount: Number(r.objectCount),
       skillCount: Number(r.skillCount),
       memoryFileCount: Number(r.memoryFileCount),
-      lastActivityAt: r.lastActivityAt ?? null,
+      // to_json()::text wraps the ISO string in quotes — strip them
+      lastActivityAt: r.lastActivityAt ? String(r.lastActivityAt).replace(/^"|"$/g, "") : null,
       daysInactive: r.daysInactive !== null ? Number(r.daysInactive) : null,
       abandoned: Boolean(r.abandoned),
       snapshotDate: String(r.snapshotDate),
     }))
 
+    const agg = aggregates[0]
     const summary: AgentHealthSummary = {
-      totalUsers: data.length,
-      abandonedCount: data.filter((r) => r.abandoned).length,
-      totalWorkspaceBytes: data.reduce((s, r) => s + r.workspaceBytes, 0),
-      totalSkills: data.reduce((s, r) => s + r.skillCount, 0),
-      totalMemoryFiles: data.reduce((s, r) => s + r.memoryFileCount, 0),
+      totalUsers: Number(agg?.totalUsers ?? 0),
+      abandonedCount: Number(agg?.abandonedCount ?? 0),
+      totalWorkspaceBytes: Number(agg?.totalWorkspaceBytes ?? 0),
+      totalSkills: Number(agg?.totalSkills ?? 0),
+      totalMemoryFiles: Number(agg?.totalMemoryFiles ?? 0),
       snapshotDate,
       rows: data,
     }
@@ -174,7 +196,7 @@ export async function getAgentPatterns(
             spikeRatio: agentPatterns.spikeRatio,
             isEmerging: agentPatterns.isEmerging,
             buildings: agentPatterns.buildings,
-            detectedAt: sql<string>`${agentPatterns.detectedAt}::text`,
+            detectedAt: sql<string>`to_json(${agentPatterns.detectedAt})::text`,
           })
           .from(agentPatterns)
           .orderBy(desc(agentPatterns.week), desc(agentPatterns.signalCount))
@@ -191,7 +213,8 @@ export async function getAgentPatterns(
       spikeRatio: Number(r.spikeRatio),
       isEmerging: Boolean(r.isEmerging),
       buildings: String(r.buildings),
-      detectedAt: String(r.detectedAt),
+      // to_json()::text wraps the ISO string in quotes — strip them
+      detectedAt: String(r.detectedAt).replace(/^"|"$/g, ""),
     }))
 
     timer({ status: "success" })

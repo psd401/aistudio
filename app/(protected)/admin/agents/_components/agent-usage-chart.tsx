@@ -6,33 +6,52 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { Skeleton } from "@/components/ui/skeleton"
 import type { DailyUsagePoint } from "@/actions/admin/agent-telemetry.actions"
 
-// Lazy-load Recharts to reduce initial bundle size
-const LazyResponsiveContainer = dynamic(
-  () => import("recharts").then((mod) => ({ default: mod.ResponsiveContainer })),
-  { ssr: false }
-)
-const LazyAreaChart = dynamic(
-  () => import("recharts").then((mod) => ({ default: mod.AreaChart })),
-  { ssr: false }
-)
-const LazyArea = dynamic(
-  () => import("recharts").then((mod) => ({ default: mod.Area })),
-  { ssr: false }
-)
-const LazyXAxis = dynamic(
-  () => import("recharts").then((mod) => ({ default: mod.XAxis })),
-  { ssr: false }
-)
-const LazyYAxis = dynamic(
-  () => import("recharts").then((mod) => ({ default: mod.YAxis })),
-  { ssr: false }
-)
-const LazyCartesianGrid = dynamic(
-  () => import("recharts").then((mod) => ({ default: mod.CartesianGrid })),
-  { ssr: false }
-)
-const LazyTooltip = dynamic(
-  () => import("recharts").then((mod) => ({ default: mod.Tooltip })),
+// Lazy-load Recharts in a single dynamic import to avoid 7 separate chunk boundaries
+const LazyChart = dynamic(
+  () =>
+    import("recharts").then((mod) => ({
+      default: ({
+        data,
+      }: {
+        data: Array<DailyUsagePoint & { label: string }>
+      }) => (
+        <mod.ResponsiveContainer width="100%" height="100%">
+          <mod.AreaChart data={data}>
+            <mod.CartesianGrid strokeDasharray="3 3" />
+            <mod.XAxis
+              dataKey="label"
+              tick={{ fontSize: 12 }}
+              interval="preserveStartEnd"
+            />
+            <mod.YAxis tick={{ fontSize: 12 }} />
+            <mod.Tooltip
+              contentStyle={{
+                backgroundColor: "hsl(var(--background))",
+                border: "1px solid hsl(var(--border))",
+                borderRadius: "6px",
+                fontSize: "12px",
+              }}
+            />
+            <mod.Area
+              type="monotone"
+              dataKey="messages"
+              stroke="#3b82f6"
+              fill="#93c5fd"
+              fillOpacity={0.3}
+              name="Messages"
+            />
+            <mod.Area
+              type="monotone"
+              dataKey="sessions"
+              stroke="#10b981"
+              fill="#6ee7b7"
+              fillOpacity={0.2}
+              name="Sessions"
+            />
+          </mod.AreaChart>
+        </mod.ResponsiveContainer>
+      ),
+    })),
   { ssr: false }
 )
 
@@ -89,41 +108,7 @@ export function AgentUsageChart({ data, loading = false }: AgentUsageChartProps)
       </CardHeader>
       <CardContent>
         <div className="h-64">
-          <LazyResponsiveContainer width="100%" height="100%">
-            <LazyAreaChart data={formattedData}>
-              <LazyCartesianGrid strokeDasharray="3 3" />
-              <LazyXAxis
-                dataKey="label"
-                tick={{ fontSize: 12 }}
-                interval="preserveStartEnd"
-              />
-              <LazyYAxis tick={{ fontSize: 12 }} />
-              <LazyTooltip
-                contentStyle={{
-                  backgroundColor: "white",
-                  border: "1px solid #e5e7eb",
-                  borderRadius: "6px",
-                  fontSize: "12px",
-                }}
-              />
-              <LazyArea
-                type="monotone"
-                dataKey="messages"
-                stroke="#3b82f6"
-                fill="#93c5fd"
-                fillOpacity={0.3}
-                name="Messages"
-              />
-              <LazyArea
-                type="monotone"
-                dataKey="sessions"
-                stroke="#10b981"
-                fill="#6ee7b7"
-                fillOpacity={0.2}
-                name="Sessions"
-              />
-            </LazyAreaChart>
-          </LazyResponsiveContainer>
+          <LazyChart data={formattedData} />
         </div>
       </CardContent>
     </Card>

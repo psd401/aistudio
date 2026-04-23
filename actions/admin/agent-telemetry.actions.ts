@@ -291,7 +291,7 @@ export async function getAgentDailyUsage(
       (db) =>
         db
           .select({
-            date: sql<string>`TO_CHAR(${agentMessages.createdAt}, 'YYYY-MM-DD')`,
+            date: sql<string>`TO_CHAR(DATE_TRUNC('day', ${agentMessages.createdAt} AT TIME ZONE 'UTC'), 'YYYY-MM-DD')`,
             messages: count(agentMessages.id),
             tokens:
               sql<number>`COALESCE(SUM(${agentMessages.inputTokens} + ${agentMessages.outputTokens}), 0)`,
@@ -303,10 +303,10 @@ export async function getAgentDailyUsage(
             threshold ? gte(agentMessages.createdAt, threshold) : undefined
           )
           .groupBy(
-            sql`TO_CHAR(${agentMessages.createdAt}, 'YYYY-MM-DD')`
+            sql`DATE_TRUNC('day', ${agentMessages.createdAt} AT TIME ZONE 'UTC')`
           )
           .orderBy(
-            sql`TO_CHAR(${agentMessages.createdAt}, 'YYYY-MM-DD')`
+            sql`DATE_TRUNC('day', ${agentMessages.createdAt} AT TIME ZONE 'UTC')`
           ),
       "agentTelemetry.dailyUsage"
     )
@@ -416,7 +416,7 @@ export async function getAgentUserUsage(
             sessionCount:
               sql<number>`COUNT(DISTINCT ${agentMessages.sessionId})`,
             lastActive:
-              sql<string>`MAX(${agentMessages.createdAt})::text`,
+              sql<string>`to_json(MAX(${agentMessages.createdAt}))::text`,
           })
           .from(agentMessages)
           .where(
@@ -433,7 +433,8 @@ export async function getAgentUserUsage(
       messageCount: Number(r.messageCount),
       totalTokens: Number(r.totalTokens),
       sessionCount: Number(r.sessionCount),
-      lastActive: r.lastActive ?? null,
+      // to_json()::text wraps the ISO string in quotes — strip them
+      lastActive: r.lastActive ? String(r.lastActive).replace(/^"|"$/g, "") : null,
     }))
 
     timer({ status: "success" })
@@ -475,7 +476,7 @@ export async function getAgentGuardrailEvents(
             userId: agentMessages.userId,
             model: agentMessages.model,
             spaceName: agentMessages.spaceName,
-            createdAt: sql<string>`${agentMessages.createdAt}::text`,
+            createdAt: sql<string>`to_json(${agentMessages.createdAt})::text`,
           })
           .from(agentMessages)
           .where(
@@ -496,7 +497,8 @@ export async function getAgentGuardrailEvents(
       userId: String(r.userId),
       model: r.model ?? null,
       spaceName: r.spaceName ?? null,
-      createdAt: String(r.createdAt),
+      // to_json()::text wraps the ISO string in quotes — strip them
+      createdAt: String(r.createdAt).replace(/^"|"$/g, ""),
     }))
 
     timer({ status: "success" })
@@ -541,7 +543,7 @@ export async function getAgentFeedbackList(
             userId: agentFeedback.userId,
             messageId: agentFeedback.messageId,
             thumbsUp: agentFeedback.thumbsUp,
-            createdAt: sql<string>`${agentFeedback.createdAt}::text`,
+            createdAt: sql<string>`to_json(${agentFeedback.createdAt})::text`,
           })
           .from(agentFeedback)
           .where(
@@ -559,7 +561,8 @@ export async function getAgentFeedbackList(
       userId: String(r.userId),
       messageId: Number(r.messageId),
       thumbsUp: Boolean(r.thumbsUp),
-      createdAt: String(r.createdAt),
+      // to_json()::text wraps the ISO string in quotes — strip them
+      createdAt: String(r.createdAt).replace(/^"|"$/g, ""),
     }))
 
     timer({ status: "success" })

@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect, useCallback, useMemo } from "react"
+import { useState, useEffect, useCallback, useMemo, useRef } from "react"
 import { useToast } from "@/components/ui/use-toast"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
@@ -60,8 +60,12 @@ type DashboardTab =
   | "cost"
   | "patterns"
 
+/**
+ * Map telemetry date range to Cost Explorer range.
+ * Cost Explorer supports 7/30/90d buckets only. "All time" maps to 30d —
+ * the Cost tab shows a note when this mapping occurs.
+ */
 function telemetryToCostRange(r: TelemetryDateRange): CostDateRange {
-  // Cost Explorer supports 7/30/90d buckets only.
   return r === "7d" ? "7d" : r === "90d" ? "90d" : "30d"
 }
 
@@ -76,36 +80,40 @@ interface LoaderSetters {
   setPatterns: (v: AgentPatternRow[]) => void
 }
 
-function buildLoaders(s: LoaderSetters): Record<DashboardTab, (range: TelemetryDateRange) => Promise<void>> {
+interface LoaderContext extends LoaderSetters {
+  showError: (tab: string, message: string) => void
+}
+
+function buildLoaders(ctx: LoaderContext): Record<DashboardTab, (range: TelemetryDateRange) => Promise<void>> {
   return {
     usage: async (range) => {
       const [u, m] = await Promise.all([getAgentDailyUsage(range), getAgentModelBreakdown(range)])
-      if (u.isSuccess && u.data) s.setDailyUsage(u.data)
-      if (m.isSuccess && m.data) s.setModelBreakdown(m.data)
+      if (u.isSuccess && u.data) { ctx.setDailyUsage(u.data) } else if (!u.isSuccess) { ctx.showError("usage", u.message) }
+      if (m.isSuccess && m.data) { ctx.setModelBreakdown(m.data) } else if (!m.isSuccess) { ctx.showError("usage", m.message) }
     },
     adoption: async (range) => {
       const r = await getAgentUserUsage(range)
-      if (r.isSuccess && r.data) s.setUserUsage(r.data)
+      if (r.isSuccess && r.data) { ctx.setUserUsage(r.data) } else { ctx.showError("adoption", r.message) }
     },
     safety: async (range) => {
       const r = await getAgentGuardrailEvents(range)
-      if (r.isSuccess && r.data) s.setGuardrailEvents(r.data)
+      if (r.isSuccess && r.data) { ctx.setGuardrailEvents(r.data) } else { ctx.showError("safety", r.message) }
     },
     feedback: async (range) => {
       const r = await getAgentFeedbackList(range)
-      if (r.isSuccess && r.data) s.setFeedbackList(r.data)
+      if (r.isSuccess && r.data) { ctx.setFeedbackList(r.data) } else { ctx.showError("feedback", r.message) }
     },
     health: async () => {
       const r = await getAgentHealthSummary()
-      if (r.isSuccess && r.data) s.setHealthSummary(r.data)
+      if (r.isSuccess && r.data) { ctx.setHealthSummary(r.data) } else { ctx.showError("health", r.message) }
     },
     cost: async (range) => {
       const r = await getAgentCostSummary(telemetryToCostRange(range))
-      s.setCostSummary(r.isSuccess && r.data ? r.data : null)
+      if (r.isSuccess && r.data) { ctx.setCostSummary(r.data) } else { ctx.setCostSummary(null); ctx.showError("cost", r.message) }
     },
     patterns: async () => {
       const r = await getAgentPatterns()
-      if (r.isSuccess && r.data) s.setPatterns(r.data)
+      if (r.isSuccess && r.data) { ctx.setPatterns(r.data) } else { ctx.showError("patterns", r.message) }
     },
   }
 }
@@ -167,6 +175,82 @@ const DATE_RANGE_OPTIONS: { value: TelemetryDateRange; label: string }[] = [
   { value: "all", label: "All time" },
 ]
 
+function DashboardTabs({
+  activeTab,
+  onTabChange,
+  dateRange,
+  tabLoading,
+  dailyUsage,
+  modelBreakdown,
+  userUsage,
+  guardrailEvents,
+  feedbackList,
+  healthSummary,
+  costSummary,
+  patterns,
+}: {
+  activeTab: DashboardTab
+  onTabChange: (tab: string) => void
+  dateRange: TelemetryDateRange
+  tabLoading: boolean
+  dailyUsage: DailyUsagePoint[]
+  modelBreakdown: ModelBreakdownItem[]
+  userUsage: UserUsageItem[]
+  guardrailEvents: GuardrailEvent[]
+  feedbackList: FeedbackItem[]
+  healthSummary: AgentHealthSummary | null
+  costSummary: AgentCostSummary | null
+  patterns: AgentPatternRow[]
+}) {
+  return (
+    <Tabs value={activeTab} onValueChange={onTabChange}>
+      <TabsList>
+        <TabsTrigger value="usage">Usage</TabsTrigger>
+        <TabsTrigger value="cost">Cost</TabsTrigger>
+        <TabsTrigger value="adoption">Adoption</TabsTrigger>
+        <TabsTrigger value="health">Health</TabsTrigger>
+        <TabsTrigger value="safety">Safety</TabsTrigger>
+        <TabsTrigger value="patterns">Patterns</TabsTrigger>
+        <TabsTrigger value="feedback">Feedback</TabsTrigger>
+      </TabsList>
+
+      <TabsContent value="usage" className="mt-4 space-y-6">
+        <AgentUsageChart data={dailyUsage} loading={tabLoading} />
+        <AgentModelBreakdown data={modelBreakdown} loading={tabLoading} />
+      </TabsContent>
+
+      <TabsContent value="adoption" className="mt-4">
+        <AgentUserTable data={userUsage} loading={tabLoading} />
+      </TabsContent>
+
+      <TabsContent value="safety" className="mt-4">
+        <AgentSafetyTable data={guardrailEvents} loading={tabLoading} />
+      </TabsContent>
+
+      <TabsContent value="feedback" className="mt-4">
+        <AgentFeedbackTable data={feedbackList} loading={tabLoading} />
+      </TabsContent>
+
+      <TabsContent value="health" className="mt-4">
+        <AgentHealthTable data={healthSummary} loading={tabLoading} />
+      </TabsContent>
+
+      <TabsContent value="cost" className="mt-4">
+        {dateRange === "all" && (
+          <p className="text-sm text-muted-foreground mb-2">
+            Cost Explorer does not support &quot;All time&quot; — showing last 30 days instead.
+          </p>
+        )}
+        <AgentCostView data={costSummary} loading={tabLoading} />
+      </TabsContent>
+
+      <TabsContent value="patterns" className="mt-4">
+        <AgentPatternsTable data={patterns} loading={tabLoading} />
+      </TabsContent>
+    </Tabs>
+  )
+}
+
 export function AgentDashboardClient() {
   const { toast } = useToast()
   const [activeTab, setActiveTab] = useState<DashboardTab>("usage")
@@ -182,6 +266,21 @@ export function AgentDashboardClient() {
   const [costSummary, setCostSummary] = useState<AgentCostSummary | null>(null)
   const [patterns, setPatterns] = useState<AgentPatternRow[]>([])
   const [tabLoading, setTabLoading] = useState(false)
+
+  // Request version counter — prevents stale responses from overwriting
+  // newer data when rapid tab/range changes cause overlapping async calls.
+  const requestVersion = useRef(0)
+
+  const showError = useCallback(
+    (tab: string, message: string) => {
+      toast({
+        variant: "destructive",
+        title: `Error loading ${tab} data`,
+        description: message,
+      })
+    },
+    [toast]
+  )
 
   const loadStats = useCallback(
     async (range: TelemetryDateRange) => {
@@ -199,51 +298,63 @@ export function AgentDashboardClient() {
     [toast]
   )
 
-  // useState setters are stable so `[]` deps is safe.
+  // useState setters are stable so `[showError]` is the only real dep.
   const loaders = useMemo(
     () => buildLoaders({
       setDailyUsage, setModelBreakdown, setUserUsage, setGuardrailEvents,
       setFeedbackList, setHealthSummary, setCostSummary, setPatterns,
+      showError,
     }),
-    []
+    [showError]
   )
 
   const loadTabData = useCallback(
     async (tab: DashboardTab, range: TelemetryDateRange) => {
+      const version = ++requestVersion.current
       setTabLoading(true)
 
       try {
         await loaders[tab](range)
       } catch {
-        toast({
-          variant: "destructive",
-          title: "Error loading data",
-          description: "Failed to load tab data",
-        })
+        // Only show error if this is still the latest request
+        if (version === requestVersion.current) {
+          toast({
+            variant: "destructive",
+            title: `Error loading ${tab} data`,
+            description: `Failed to load ${tab} data`,
+          })
+        }
+      } finally {
+        // Only clear loading if this is still the latest request
+        if (version === requestVersion.current) {
+          setTabLoading(false)
+        }
       }
-
-      setTabLoading(false)
     },
     [toast, loaders]
   )
 
   useEffect(() => {
-    const init = async () => {
+    async function init() {
       setLoading(true)
-      await Promise.all([loadStats(dateRange), loadTabData(activeTab, dateRange)])
-      setLoading(false)
+      try {
+        await Promise.all([loadStats("30d"), loadTabData("usage", "30d")])
+      } finally {
+        setLoading(false)
+      }
     }
     init()
-    // Only run on mount
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [loadStats, loadTabData])
 
   const handleDateRangeChange = useCallback(
     async (range: TelemetryDateRange) => {
       setDateRange(range)
       setLoading(true)
-      await Promise.all([loadStats(range), loadTabData(activeTab, range)])
-      setLoading(false)
+      try {
+        await Promise.all([loadStats(range), loadTabData(activeTab, range)])
+      } finally {
+        setLoading(false)
+      }
     },
     [activeTab, loadStats, loadTabData]
   )
@@ -259,8 +370,11 @@ export function AgentDashboardClient() {
 
   const handleRefresh = useCallback(async () => {
     setLoading(true)
-    await Promise.all([loadStats(dateRange), loadTabData(activeTab, dateRange)])
-    setLoading(false)
+    try {
+      await Promise.all([loadStats(dateRange), loadTabData(activeTab, dateRange)])
+    } finally {
+      setLoading(false)
+    }
   }, [activeTab, dateRange, loadStats, loadTabData])
 
   return (
@@ -272,46 +386,20 @@ export function AgentDashboardClient() {
       />
 
       <AgentStatsCards stats={stats} loading={loading} />
-      <Tabs value={activeTab} onValueChange={handleTabChange}>
-        <TabsList>
-          <TabsTrigger value="usage">Usage</TabsTrigger>
-          <TabsTrigger value="cost">Cost</TabsTrigger>
-          <TabsTrigger value="adoption">Adoption</TabsTrigger>
-          <TabsTrigger value="health">Health</TabsTrigger>
-          <TabsTrigger value="safety">Safety</TabsTrigger>
-          <TabsTrigger value="patterns">Patterns</TabsTrigger>
-          <TabsTrigger value="feedback">Feedback</TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="usage" className="mt-4 space-y-6">
-          <AgentUsageChart data={dailyUsage} loading={tabLoading} />
-          <AgentModelBreakdown data={modelBreakdown} loading={tabLoading} />
-        </TabsContent>
-
-        <TabsContent value="adoption" className="mt-4">
-          <AgentUserTable data={userUsage} loading={tabLoading} />
-        </TabsContent>
-
-        <TabsContent value="safety" className="mt-4">
-          <AgentSafetyTable data={guardrailEvents} loading={tabLoading} />
-        </TabsContent>
-
-        <TabsContent value="feedback" className="mt-4">
-          <AgentFeedbackTable data={feedbackList} loading={tabLoading} />
-        </TabsContent>
-
-        <TabsContent value="health" className="mt-4">
-          <AgentHealthTable data={healthSummary} loading={tabLoading} />
-        </TabsContent>
-
-        <TabsContent value="cost" className="mt-4">
-          <AgentCostView data={costSummary} loading={tabLoading} />
-        </TabsContent>
-
-        <TabsContent value="patterns" className="mt-4">
-          <AgentPatternsTable data={patterns} loading={tabLoading} />
-        </TabsContent>
-      </Tabs>
+      <DashboardTabs
+        activeTab={activeTab}
+        onTabChange={handleTabChange}
+        dateRange={dateRange}
+        tabLoading={tabLoading}
+        dailyUsage={dailyUsage}
+        modelBreakdown={modelBreakdown}
+        userUsage={userUsage}
+        guardrailEvents={guardrailEvents}
+        feedbackList={feedbackList}
+        healthSummary={healthSummary}
+        costSummary={costSummary}
+        patterns={patterns}
+      />
     </div>
   )
 }

@@ -34,6 +34,40 @@ import {
 } from '@aws-sdk/client-secrets-manager';
 import postgres from 'postgres';
 
+/**
+ * ISO 8601 week utilities.
+ *
+ * NOTE: These implementations are duplicated in agent-router/topic-classifier.ts
+ * and shared/iso-week.ts. Each Lambda has an isolated Docker build context that
+ * prevents cross-directory imports. The canonical source of truth is
+ * infra/lambdas/shared/iso-week.ts — keep all copies in sync.
+ */
+function isoWeek(date: Date = new Date()): string {
+  const target = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+  const dayNr = (target.getUTCDay() + 6) % 7;
+  target.setUTCDate(target.getUTCDate() - dayNr + 3);
+  const firstThursday = new Date(Date.UTC(target.getUTCFullYear(), 0, 4));
+  const weekNr =
+    1 +
+    Math.round(
+      ((target.getTime() - firstThursday.getTime()) / 86400000 -
+        3 +
+        ((firstThursday.getUTCDay() + 6) % 7)) /
+        7
+    );
+  return `${target.getUTCFullYear()}-W${String(weekNr).padStart(2, '0')}`;
+}
+
+function priorWeek(week: string, stepsBack: number): string {
+  const [y, w] = week.split('-W').map(Number);
+  const base = new Date(Date.UTC(y, 0, 4));
+  const baseDayNr = (base.getUTCDay() + 6) % 7;
+  const weekStart = new Date(base);
+  weekStart.setUTCDate(base.getUTCDate() - baseDayNr + (w - 1) * 7);
+  weekStart.setUTCDate(weekStart.getUTCDate() - stepsBack * 7);
+  return isoWeek(weekStart);
+}
+
 const dynamo = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const secrets = new SecretsManagerClient({});
 
@@ -60,33 +94,6 @@ interface SignalItem {
   week: string;
   topic: string;
   count: number;
-}
-
-function isoWeek(date: Date): string {
-  const target = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
-  const dayNr = (target.getUTCDay() + 6) % 7;
-  target.setUTCDate(target.getUTCDate() - dayNr + 3);
-  const firstThursday = new Date(Date.UTC(target.getUTCFullYear(), 0, 4));
-  const weekNr =
-    1 +
-    Math.round(
-      ((target.getTime() - firstThursday.getTime()) / 86400000 -
-        3 +
-        ((firstThursday.getUTCDay() + 6) % 7)) /
-        7
-    );
-  return `${target.getUTCFullYear()}-W${String(weekNr).padStart(2, '0')}`;
-}
-
-function priorWeek(week: string, stepsBack: number): string {
-  const [y, w] = week.split('-W').map(Number);
-  // Approximate: 7 days * stepsBack backwards from a Thursday in the source week.
-  const base = new Date(Date.UTC(y, 0, 4));
-  const baseDayNr = (base.getUTCDay() + 6) % 7;
-  const weekStart = new Date(base);
-  weekStart.setUTCDate(base.getUTCDate() - baseDayNr + (w - 1) * 7);
-  weekStart.setUTCDate(weekStart.getUTCDate() - stepsBack * 7);
-  return isoWeek(weekStart);
 }
 
 async function scanAllSignals(): Promise<SignalItem[]> {

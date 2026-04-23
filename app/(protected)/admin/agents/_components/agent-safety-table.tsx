@@ -26,7 +26,7 @@ export function AgentSafetyTable({ data, loading = false }: AgentSafetyTableProp
         <CardHeader>
           <CardTitle className="text-base">Guardrail Flags</CardTitle>
           <CardDescription>
-            Telemetry-only flags -- no messages were blocked
+            Telemetry-only detections -- no messages were actually blocked
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -42,7 +42,7 @@ export function AgentSafetyTable({ data, loading = false }: AgentSafetyTableProp
         <CardHeader>
           <CardTitle className="text-base">Guardrail Flags</CardTitle>
           <CardDescription>
-            Telemetry-only flags -- no messages were blocked
+            Telemetry-only detections -- no messages were actually blocked
           </CardDescription>
         </CardHeader>
         <CardContent>
@@ -59,7 +59,8 @@ export function AgentSafetyTable({ data, loading = false }: AgentSafetyTableProp
       <CardHeader>
         <CardTitle className="text-base">Guardrail Flags</CardTitle>
         <CardDescription>
-          Telemetry-only flags -- no messages were blocked. These indicate messages
+          Telemetry-only detections (guardrail_blocked=true). No messages were
+          actually blocked -- guardrails run in detect-only mode. These indicate messages
           that <em>would have</em> been flagged by Bedrock Guardrails.
         </CardDescription>
       </CardHeader>

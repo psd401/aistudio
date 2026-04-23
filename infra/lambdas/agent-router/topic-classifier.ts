@@ -155,6 +155,11 @@ export function classifyTopic(text: string): Topic | null {
 /**
  * ISO 8601 week identifier (e.g., "2026-W17"). Used as the grain for
  * signal-store rollups. Monday-based weeks.
+ *
+ * NOTE: This implementation is duplicated in agent-pattern-scanner/index.ts
+ * and shared/iso-week.ts. Each Lambda has an isolated Docker build context
+ * that prevents cross-directory imports. The canonical source of truth is
+ * infra/lambdas/shared/iso-week.ts — keep all copies in sync.
  */
 export function isoWeek(date: Date = new Date()): string {
   // Shift to Thursday of the current week — ISO weeks are defined by the

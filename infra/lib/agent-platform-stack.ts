@@ -1505,6 +1505,8 @@ export class AgentPlatformStack extends cdk.Stack {
       environment,
       region: this.region,
       account: this.account,
+      // vpcEnabled: false — VPC access added manually via managed policy below
+      // to avoid ServiceRoleFactory's policy validator flagging ENI wildcard resources.
       vpcEnabled: false,
       dynamodbTables: [this.usersTable.tableName],
       s3Buckets: [this.workspaceBucket.bucketName],
@@ -1608,6 +1610,8 @@ export class AgentPlatformStack extends cdk.Stack {
       environment,
       region: this.region,
       account: this.account,
+      // vpcEnabled: false — VPC access added manually via managed policy below
+      // to avoid ServiceRoleFactory's policy validator flagging ENI wildcard resources.
       vpcEnabled: false,
       dynamodbTables: [this.signalsTable.tableName],
       additionalPolicies: [
