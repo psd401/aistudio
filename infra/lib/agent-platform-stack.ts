@@ -982,6 +982,114 @@ export class AgentPlatformStack extends cdk.Stack {
     });
 
     // =====================================================================
+    // 6c. Skill Builder Lambda — per-promotion scan + npm install (#910)
+    // =====================================================================
+    // Invoked per skill promotion. Downloads draft from S3, scans for secrets/
+    // PII/npm vulnerabilities, runs npm install in /tmp, uploads built skill to
+    // the destination prefix, and updates the skill registry in Aurora.
+    // No network route to microVMs — IAM scoped to skills bucket + Aurora only.
+
+    const skillBuilderRole = ServiceRoleFactory.createLambdaRole(this, 'SkillBuilderLambdaRole', {
+      functionName: 'psd-agent-skill-builder',
+      environment,
+      region: this.region,
+      account: this.account,
+      vpcEnabled: false,
+      s3Buckets: [this.workspaceBucket.bucketName],
+      additionalPolicies: [
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'AuroraDataAccess',
+            effect: iam.Effect.ALLOW,
+            actions: ['rds-data:ExecuteStatement', 'rds-data:BatchExecuteStatement'],
+            resources: [props.databaseResourceArn],
+          })],
+        }),
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'DatabaseSecretRead',
+            effect: iam.Effect.ALLOW,
+            actions: ['secretsmanager:GetSecretValue'],
+            resources: [props.databaseSecretArn],
+          })],
+        }),
+      ],
+    });
+
+    const skillBuilderLogGroup = new logs.LogGroup(this, 'SkillBuilderLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-skill-builder-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(skillBuilderLogGroup).add('Environment', environment);
+    cdk.Tags.of(skillBuilderLogGroup).add('ManagedBy', 'cdk');
+
+    const skillBuilderLambda = new lambda.Function(this, 'SkillBuilderLambda', {
+      functionName: `psd-agent-skill-builder-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-skill-builder'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-skill-builder');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: 2048, // Memory-intensive: npm install + file scanning
+      timeout: cdk.Duration.minutes(5),
+      architecture: lambda.Architecture.ARM_64,
+      role: skillBuilderRole,
+      logGroup: skillBuilderLogGroup,
+      environment: {
+        ENVIRONMENT: environment,
+        SKILLS_BUCKET: this.workspaceBucket.bucketName,
+        DATABASE_RESOURCE_ARN: props.databaseResourceArn,
+        DATABASE_SECRET_ARN: props.databaseSecretArn,
+        DATABASE_NAME: props.databaseName ?? 'aistudio',
+      },
+    });
+    cdk.Tags.of(skillBuilderLambda).add('Environment', environment);
+    cdk.Tags.of(skillBuilderLambda).add('ManagedBy', 'cdk');
+
+    // SSM parameter for cross-stack reference
+    const skillBuilderParam = new ssm.StringParameter(this, 'SkillBuilderLambdaArnParam', {
+      parameterName: `/aistudio/${environment}/agent-skill-builder-lambda-arn`,
+      stringValue: skillBuilderLambda.functionArn,
+      description: 'Skill Builder Lambda function ARN',
+    });
+    cdk.Tags.of(skillBuilderParam).add('Environment', environment);
+    cdk.Tags.of(skillBuilderParam).add('ManagedBy', 'cdk');
+
+    // =====================================================================
     // 7. Cron Lambda — Per-User Scheduled Tasks
     // =====================================================================
     // Invoked by EventBridge Scheduler entries (one per user-defined schedule).
