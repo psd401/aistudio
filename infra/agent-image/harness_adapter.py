@@ -265,7 +265,32 @@ class OpenClawAdapter(HarnessAdapter):
                 # Instrumented to log every event type we see so we can
                 # understand what OpenClaw is actually emitting when a turn
                 # hangs (CloudWatch only — no secrets leak).
-                deadline = time.time() + 120
+                #
+                # Deadline sizing: the enclosing budget stack is
+                #   Router Lambda (15 min) > undici fetch (14 min) > us.
+                # We leave a 1-minute margin under undici so we always
+                # surface a real "stalled" log line rather than getting
+                # killed mid-recv by an upstream timeout. Long research
+                # turns legitimately take 5-10 minutes (web_fetch heavy
+                # investigation), and the prior 120s ceiling was dumping
+                # the model's scratchpad as the final reply while the
+                # real answer continued to generate in the microVM after
+                # the entrypoint had already returned. See #890 incident
+                # logs 2026-04-22.
+                #
+                # OPENCLAW_CHAT_DEADLINE_S env override for escape hatch,
+                # clamped to [60, 840] so a misconfig can't either starve
+                # the turn or exceed the undici/Lambda ceilings.
+                default_deadline_s = 780  # 13 min — 1 min under undici
+                try:
+                    deadline_s = int(os.environ.get(
+                        "OPENCLAW_CHAT_DEADLINE_S",
+                        str(default_deadline_s),
+                    ))
+                except ValueError:
+                    deadline_s = default_deadline_s
+                deadline_s = max(60, min(840, deadline_s))
+                deadline = time.time() + deadline_s
                 got_final = False
                 event_counts: dict = {}
                 first_event_types: list = []
@@ -278,8 +303,22 @@ class OpenClawAdapter(HarnessAdapter):
                 # final `event:chat` state=final arrives with an empty message
                 # and is now just a completion signal).
                 agent_assistant_accum: str = ""
+                # Allow recv() to sit idle for up to 60s between events
+                # without raising — long tool calls (web_fetch, model
+                # inference on a big prompt) produce gaps with no stream
+                # traffic. Was inheriting the 120s connect timeout from
+                # create_connection which, combined with the old 120s
+                # outer deadline, meant any idle >120s killed the turn
+                # with the scratchpad as the final reply.
+                ws.settimeout(60)
                 while time.time() < deadline:
-                    raw = ws.recv()
+                    try:
+                        raw = ws.recv()
+                    except websocket.WebSocketTimeoutException:
+                        # Idle gap, not a failure — outer deadline still
+                        # governs. Fall through and let the while loop
+                        # re-check time.time().
+                        continue
                     msg = json.loads(raw)
                     mtype = msg.get("type")
                     mevent = msg.get("event") if mtype == "event" else None
