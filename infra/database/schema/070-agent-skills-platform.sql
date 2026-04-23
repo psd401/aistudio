@@ -54,8 +54,21 @@ CREATE INDEX IF NOT EXISTS idx_agent_skills_scan_status
     ON psd_agent_skills (scan_status)
     WHERE scan_status != 'clean';
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_skills_name_owner
-    ON psd_agent_skills (name, owner_user_id, scope);
+-- Partial unique indexes per scope to prevent duplicate names.
+-- The composite (name, owner_user_id, scope) index doesn't enforce uniqueness
+-- for shared skills because owner_user_id is NULL and PostgreSQL unique indexes
+-- allow multiple NULLs. Use partial indexes instead.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_skills_shared_name
+    ON psd_agent_skills (name)
+    WHERE scope = 'shared';
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_skills_user_name_owner
+    ON psd_agent_skills (name, owner_user_id)
+    WHERE scope = 'user';
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_skills_draft_name_owner
+    ON psd_agent_skills (name, owner_user_id)
+    WHERE scope = 'draft';
 
 -- updated_at trigger for psd_agent_skills
 DO $$ BEGIN
@@ -74,9 +87,11 @@ CREATE TRIGGER trg_psd_agent_skills_updated_at
     FOR EACH ROW EXECUTE FUNCTION update_psd_agent_skills_updated_at();
 
 -- 3. psd_agent_skill_audit — append-only lifecycle log
+-- skill_id uses ON DELETE SET NULL to preserve audit history when a skill is deleted.
+-- An audit trail must survive the deletion of the entity it tracks.
 CREATE TABLE IF NOT EXISTS psd_agent_skill_audit (
     id              BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    skill_id        UUID NOT NULL REFERENCES psd_agent_skills(id) ON DELETE CASCADE,
+    skill_id        UUID REFERENCES psd_agent_skills(id) ON DELETE SET NULL,
     action          VARCHAR(64) NOT NULL,
     actor_user_id   INTEGER REFERENCES users(id) ON DELETE SET NULL,
     details         JSONB,
@@ -126,7 +141,8 @@ CREATE TABLE IF NOT EXISTS psd_agent_credential_requests (
     skill_context   TEXT,
     requested_by    VARCHAR(255) NOT NULL,
     freshservice_ticket_id VARCHAR(64),
-    status          VARCHAR(32) NOT NULL DEFAULT 'pending',
+    status          VARCHAR(32) NOT NULL DEFAULT 'pending'
+                    CHECK (status IN ('pending', 'fulfilled', 'rejected')),
     resolved_by     INTEGER REFERENCES users(id) ON DELETE SET NULL,
     resolved_at     TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),

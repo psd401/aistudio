@@ -8,7 +8,6 @@ import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
 import { desc, eq, sql } from "drizzle-orm"
 import { psdAgentSkills } from "@/lib/db/schema/tables/agent-skills"
 import { psdAgentSkillAudit } from "@/lib/db/schema/tables/agent-skill-audit"
-import { psdAgentCredentialsAudit } from "@/lib/db/schema/tables/agent-credentials-audit"
 import type { SkillScanFindings } from "@/lib/db/schema/tables/agent-skills"
 
 export interface SkillRow {
@@ -29,7 +28,7 @@ export interface SkillRow {
 
 export interface SkillAuditRow {
   id: number
-  skillId: string
+  skillId: string | null
   action: string
   actorUserId: number | null
   details: Record<string, unknown> | null
@@ -195,6 +194,14 @@ export async function getSkillReviewQueue(): Promise<ActionState<SkillReviewItem
 /**
  * Approve a skill to shared scope (admin action).
  * Admin identity is resolved from the authenticated session (C1 fix).
+ *
+ * NOTE: This currently only updates the DB (scope, approvedBy, scanStatus).
+ * The skill's S3 artifacts remain at the user's approved prefix (s3_key is
+ * unchanged). Other agents can load the shared skill via the DB-stored s3_key.
+ * A future enhancement should invoke the Skill Builder Lambda to copy artifacts
+ * to a shared S3 prefix (`skills/shared/{name}/`) for durability if the
+ * original author is deleted. That requires adding Lambda invoke permission
+ * to the ECS task role.
  */
 export async function approveSkillToShared(
   skillId: string,
@@ -330,7 +337,7 @@ export async function getSkillAuditLog(
         skillId: e.skillId,
         action: e.action,
         actorUserId: e.actorUserId,
-        details: e.details as Record<string, unknown> | null,
+        details: e.details ?? null,
         createdAt: e.createdAt.toISOString(),
       }))
     )
@@ -347,10 +354,9 @@ export async function getSkillAuditLog(
 /**
  * Delete a skill (admin action).
  * Admin identity is resolved from the authenticated session (C1 fix).
- * Audit log is written to psd_agent_credentials_audit instead of the
- * skill-specific audit table because ON DELETE CASCADE would destroy the
- * audit entry alongside the skill row (C3 fix). The credential audit table
- * has no FK to psd_agent_skills, so the deletion record persists.
+ * Audit log is written BEFORE the delete. With ON DELETE SET NULL on the
+ * FK (C3 fix), the audit entry survives — its skill_id is set to NULL
+ * when the skill row is removed, preserving the deletion record.
  */
 export async function deleteSkill(
   skillId: string,
@@ -363,9 +369,7 @@ export async function deleteSkill(
     const currentUser = await requireRole("administrator")
     const adminUserId = currentUser.user.id
 
-    // C3 fix: Capture skill metadata before deletion for the audit trail,
-    // then delete the skill. The audit entry goes to the credentials audit
-    // table (no FK cascade) so the deletion record persists.
+    // Capture skill metadata before deletion for the audit trail
     const [skill] = await executeQuery(
       (db) =>
         db
@@ -376,32 +380,29 @@ export async function deleteSkill(
       "deleteSkill.lookup"
     )
 
+    // Write audit entry BEFORE deletion — ON DELETE SET NULL preserves
+    // the row (skill_id becomes NULL after the cascade).
     await executeQuery(
       (db) =>
-        db
-          .delete(psdAgentSkills)
-          .where(eq(psdAgentSkills.id, skillId)),
-      "deleteSkill.delete"
-    )
-
-    // Write audit entry to the credentials audit table (no cascade FK).
-    // This is a cross-domain audit entry — the scope field distinguishes
-    // credential vs skill entries (scope = "skill-deletion").
-    await executeQuery(
-      (db) =>
-        db.insert(psdAgentCredentialsAudit).values({
-          credentialName: `skill:${skill?.name ?? skillId}`,
-          scope: "skill-deletion",
+        db.insert(psdAgentSkillAudit).values({
+          skillId,
           action: "deleted",
           actorUserId: adminUserId,
           details: {
-            skillId,
             skillName: skill?.name ?? "unknown",
             skillScope: skill?.scope ?? "unknown",
             deletedAt: new Date().toISOString(),
           },
         }),
       "deleteSkill.audit"
+    )
+
+    await executeQuery(
+      (db) =>
+        db
+          .delete(psdAgentSkills)
+          .where(eq(psdAgentSkills.id, skillId)),
+      "deleteSkill.delete"
     )
 
     timer({ status: "success" })

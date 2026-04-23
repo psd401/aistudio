@@ -26,7 +26,7 @@ export const psdAgentCredentialsAudit = pgTable("psd_agent_credentials_audit", {
   scope: varchar("scope", { length: 32 }).notNull(),
   action: varchar("action", { length: 64 }).notNull(),
   actorUserId: integer("actor_user_id").references(() => users.id, { onDelete: "set null" }),
-  details: jsonb("details"),
+  details: jsonb("details").$type<Record<string, unknown> | null>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("idx_agent_creds_audit_name").on(table.credentialName, table.createdAt),

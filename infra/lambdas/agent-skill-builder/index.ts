@@ -35,6 +35,7 @@ const rds = new RDSDataClient({ region: REGION });
 // Patterns that indicate secrets in code files
 const SECRET_PATTERNS = [
   /(?:api[_-]?key|apikey|secret|password|passwd|token|credential|auth)[\s]*[=:]\s*['"][^'"]{8,}/gi,
+  /(?:api[_-]?key|apikey|secret|password|passwd|token|credential|auth)[\s]*[=:]\s*(?!['"])[^\s]{8,}/gi, // Unquoted values (e.g. .env files)
   /(?:AKIA|ASIA)[A-Z0-9]{16}/g, // AWS access key
   /-----BEGIN (?:RSA |EC |DSA )?PRIVATE KEY-----/g,
   /ghp_[A-Za-z0-9_]{36}/g, // GitHub personal access token
@@ -44,7 +45,7 @@ const SECRET_PATTERNS = [
 // PII patterns
 const PII_PATTERNS = [
   /\b\d{3}-\d{2}-\d{4}\b/g, // SSN
-  /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g, // Email
+  /\b[A-Za-z0-9._%+-]+@(?!example\.com\b|test\.com\b|localhost\b)[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/g, // Email (excludes placeholder domains)
   /\b\d{3}[-.]?\d{3}[-.]?\d{4}\b/g, // Phone number
 ];
 
@@ -165,7 +166,11 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
 
     await writeAuditLog(event.skillId, 'build_error', event.actorUserId, {
       error: message.substring(0, 1000),
-    }).catch(() => {}); // Best-effort
+    }).catch((auditErr: unknown) => {
+      const auditMsg = auditErr instanceof Error ? auditErr.message : String(auditErr);
+      // eslint-disable-next-line no-console
+      console.error(`Audit log failed (non-fatal): ${auditMsg}`);
+    });
 
     throw err;
   } finally {
@@ -234,16 +239,24 @@ async function uploadSkillToS3(srcDir: string, destPrefix: string): Promise<void
   }
 
   const files = walkDir(srcDir);
-  for (const filePath of files) {
-    const relativePath = path.relative(srcDir, filePath);
-    const key = `${prefix}${relativePath}`;
 
-    await s3.send(new PutObjectCommand({
-      Bucket: BUCKET,
-      Key: key,
-      Body: fs.readFileSync(filePath),
-      Tagging: `Environment=${ENVIRONMENT}&ManagedBy=cdk&Scope=skill`,
-    }));
+  // Bounded concurrency upload (10 concurrent PutObject calls) to avoid
+  // Lambda timeout on skills with many files (e.g. node_modules)
+  const CONCURRENCY = 10;
+  for (let i = 0; i < files.length; i += CONCURRENCY) {
+    const batch = files.slice(i, i + CONCURRENCY);
+    await Promise.all(
+      batch.map((filePath) => {
+        const relativePath = path.relative(srcDir, filePath);
+        const key = `${prefix}${relativePath}`;
+        return s3.send(new PutObjectCommand({
+          Bucket: BUCKET,
+          Key: key,
+          Body: fs.readFileSync(filePath),
+          Tagging: `Environment=${ENVIRONMENT}&ManagedBy=cdk&Scope=skill`,
+        }));
+      }),
+    );
   }
 }
 
@@ -270,10 +283,22 @@ async function scanSkill(skillDir: string): Promise<ScanFindings> {
             const content = fs.readFileSync(fullPath, 'utf-8');
             const relativePath = path.relative(skillDir, fullPath);
 
-            // Secret detection
+            // Secret detection — skip comment lines to avoid false positives
+            // on documentation examples like `// secret = 'example'`
+            const nonCommentLines = content
+              .split('\n')
+              .filter(line => {
+                const trimmed = line.trim();
+                return !trimmed.startsWith('//') &&
+                       !trimmed.startsWith('#') &&
+                       !trimmed.startsWith('*') &&
+                       !trimmed.startsWith('/*');
+              })
+              .join('\n');
+
             for (const pattern of SECRET_PATTERNS) {
               pattern.lastIndex = 0;
-              if (pattern.test(content)) {
+              if (pattern.test(nonCommentLines)) {
                 findings.secrets.push(`Potential secret in ${relativePath}`);
               }
             }

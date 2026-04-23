@@ -51,7 +51,9 @@ Credentials are stored in AWS Secrets Manager with this path structure:
 | Scope | Path | Who can read |
 |-------|------|-------------|
 | Shared (district-wide) | `psd-agent-creds/{env}/shared/{name}` | Any agent |
-| Per-user | `psd-agent-creds/{env}/user/{userId}/{name}` | Only the owning agent |
+| Per-user | `psd-agent-creds/{env}/user/{email}/{name}` | Only the owning agent |
+
+For per-user credentials, `{email}` is the caller email passed via `--user`, used verbatim as the path component.
 
 When calling `get`, use just the `name` portion. The skill resolves the full path based on scope priority: user-specific first, then shared.
 

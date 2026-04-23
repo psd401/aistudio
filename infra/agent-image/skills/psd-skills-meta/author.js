@@ -73,13 +73,19 @@ async function main() {
   }
 
   // Validate file entries
+  const path = require('path');
+  const fakeRoot = '/safe-skill-root';
   for (const file of files) {
     if (!file.path || !file.content_base64) {
       fail('Each file entry must have "path" and "content_base64" fields');
     }
-    // Security: prevent path traversal
+    // Security: prevent path traversal via .., absolute paths, and symlink-resolved paths
     if (file.path.includes('..') || file.path.startsWith('/')) {
       fail(`Invalid file path: "${file.path}" — no traversal or absolute paths allowed`);
+    }
+    const resolved = path.resolve(fakeRoot, file.path);
+    if (!resolved.startsWith(fakeRoot + path.sep) && resolved !== fakeRoot) {
+      fail(`Invalid file path: "${file.path}" — resolves outside skill directory`);
     }
   }
 

@@ -231,10 +231,12 @@ when { resource.name like "psd-agent-creds/*/shared/*" };
 
 // Allow reading user's own per-user credentials.
 // Note: Cedar's `like` operator does not support variable interpolation
-// for principal.userId. The IAM layer (tag-scoped GetSecretValue) provides
-// the hard enforcement. This Cedar permit is a documentation marker —
-// the application-layer psd-credentials skill resolves the user's email
-// to the correct Secrets Manager path.
+// for principal attributes. Per-user isolation is enforced at the application
+// layer: the psd-credentials skill resolves the caller's email (injected by
+// AgentCore) to the correct Secrets Manager path. IAM tag-based conditions
+// will provide hard enforcement once secret provisioning supports tagging
+// (see agent-platform-stack.ts SECURITY NOTE). This Cedar permit serves as
+// a documentation marker and coarse-grained authorization.
 permit(
   principal,
   action == Action::"secret.read",

@@ -16,7 +16,6 @@ const {
   S3Client,
   PutObjectCommand,
   GetObjectCommand,
-  ListObjectsV2Command,
 } = require('@aws-sdk/client-s3');
 
 const {
@@ -238,7 +237,7 @@ async function authorSkill(skillName, summary, skillMdContent, files, userEmail)
     database: 'aistudio',
     sql: `INSERT INTO psd_agent_skills (name, scope, owner_user_id, s3_key, summary, scan_status)
           VALUES (:name, 'draft', (SELECT id FROM users WHERE email = :email LIMIT 1), :s3key, :summary, 'pending')
-          ON CONFLICT (name, owner_user_id, scope)
+          ON CONFLICT (name, owner_user_id) WHERE scope = 'draft'
           DO UPDATE SET s3_key = :s3key, summary = :summary, scan_status = 'pending',
                        version = psd_agent_skills.version + 1, updated_at = NOW()
           RETURNING id::text`,

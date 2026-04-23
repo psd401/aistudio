@@ -727,8 +727,19 @@ export class AgentPlatformStack extends cdk.Stack {
     }));
 
     // Secrets Manager — psd-credentials skill (#910): read shared + per-user
-    // agent credentials and list them by prefix. IAM scopes to the naming
-    // convention; Cedar policies add an additional layer of per-user isolation.
+    // agent credentials and list them by prefix.
+    //
+    // SECURITY NOTE: Per-user isolation is currently enforced at the application
+    // layer (psd-credentials skill resolves the user's email from the --user arg
+    // injected by the AgentCore runtime). The IAM policy below is scoped to the
+    // psd-agent-creds namespace but does not enforce per-user boundaries via tags.
+    //
+    // Future hardening: Add tag-based conditions (CredentialScope + Owner tags)
+    // once the secret provisioning workflow supports tagging at creation time
+    // and ECS task sessions carry per-user principal tags. This requires:
+    //   1. Secrets tagged with CredentialScope=shared|user and Owner=<email>
+    //   2. ECS task role sessions tagged with Owner=<authenticated-email>
+    //   3. IAM conditions: aws:ResourceTag/Owner = ${aws:PrincipalTag/Owner}
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'AgentCredentialsRead',
       effect: iam.Effect.ALLOW,

@@ -19,6 +19,7 @@ import {
   uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 import { users } from "./users";
 
@@ -61,5 +62,16 @@ export const psdAgentSkills = pgTable("psd_agent_skills", {
   index("idx_agent_skills_scope").on(table.scope),
   index("idx_agent_skills_owner").on(table.ownerUserId),
   index("idx_agent_skills_scan_status").on(table.scanStatus),
-  uniqueIndex("idx_agent_skills_name_owner").on(table.name, table.ownerUserId, table.scope),
+  // Partial unique indexes per scope — the composite (name, owner_user_id, scope) index
+  // doesn't enforce uniqueness for shared skills because owner_user_id is NULL and
+  // PostgreSQL unique indexes allow multiple NULLs.
+  uniqueIndex("idx_agent_skills_shared_name")
+    .on(table.name)
+    .where(sql`scope = 'shared'`),
+  uniqueIndex("idx_agent_skills_user_name_owner")
+    .on(table.name, table.ownerUserId)
+    .where(sql`scope = 'user'`),
+  uniqueIndex("idx_agent_skills_draft_name_owner")
+    .on(table.name, table.ownerUserId)
+    .where(sql`scope = 'draft'`),
 ]);

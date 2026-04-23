@@ -4,7 +4,7 @@
  * Reads environment variables injected by the AgentCore runtime.
  * Resolves credential names to Secrets Manager ARNs using the
  * naming convention: psd-agent-creds/{env}/shared/{name} and
- * psd-agent-creds/{env}/user/{userId}/{name}.
+ * psd-agent-creds/{env}/user/{userEmail}/{name}.
  *
  * Environment contract (set in agent-platform-stack.ts):
  *   AWS_REGION                    — e.g. us-east-1
@@ -39,8 +39,10 @@ const rdsClient = DATABASE_RESOURCE_ARN
   ? new RDSDataClient({ region: REGION })
   : null;
 
-// In-memory cache for the session. Keys: credential name, values: secret string.
+// In-memory cache for the session. Keys: credential name, values: { data, cachedAt }.
+// TTL of 30 minutes prevents stale credentials in long-lived agent sessions.
 const _cache = Object.create(null);
+const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
 
 function fail(message, code = 1) {
   console.error(`Error: ${message}`);
@@ -119,7 +121,12 @@ async function getCredential(name, userEmail) {
 
   const cacheKey = `${userEmail}:${name}`;
   if (cacheKey in _cache) {
-    return _cache[cacheKey];
+    const cached = _cache[cacheKey];
+    if (Date.now() - cached.cachedAt < CACHE_TTL_MS) {
+      return cached.data;
+    }
+    // TTL expired — re-fetch
+    delete _cache[cacheKey];
   }
 
   const { userPath, sharedPath } = resolveSecretId(name, userEmail);
@@ -139,7 +146,7 @@ async function getCredential(name, userEmail) {
   }
 
   const result = { name, value, scope };
-  _cache[cacheKey] = result;
+  _cache[cacheKey] = { data: result, cachedAt: Date.now() };
   return result;
 }
 

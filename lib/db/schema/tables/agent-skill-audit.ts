@@ -24,10 +24,10 @@ import { psdAgentSkills } from "./agent-skills";
 
 export const psdAgentSkillAudit = pgTable("psd_agent_skill_audit", {
   id: bigint("id", { mode: "number" }).generatedAlwaysAsIdentity().primaryKey(),
-  skillId: uuid("skill_id").notNull().references(() => psdAgentSkills.id, { onDelete: "cascade" }),
+  skillId: uuid("skill_id").references(() => psdAgentSkills.id, { onDelete: "set null" }),
   action: varchar("action", { length: 64 }).notNull(),
   actorUserId: integer("actor_user_id").references(() => users.id, { onDelete: "set null" }),
-  details: jsonb("details"),
+  details: jsonb("details").$type<Record<string, unknown> | null>(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("idx_agent_skill_audit_skill").on(table.skillId, table.createdAt),

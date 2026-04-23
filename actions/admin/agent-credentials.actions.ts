@@ -225,7 +225,7 @@ export async function getCredentialAuditLog(
         scope: e.scope,
         action: e.action,
         actorUserId: e.actorUserId,
-        details: e.details as Record<string, unknown> | null,
+        details: e.details ?? null,
         createdAt: e.createdAt.toISOString(),
       }))
     )

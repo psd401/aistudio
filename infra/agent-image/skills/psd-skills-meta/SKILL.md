@@ -48,9 +48,10 @@ node /home/node/.openclaw/skills/psd-skills-meta/author.js \
   --files "<JSON array of {path, content_base64} entries>"
 ```
 
-Creates a skill draft in `skills/user/{userId}/drafts/{skill-name}/` in S3.
+Creates a skill draft in `skills/user/{caller-email}/drafts/{skill-name}/` in S3,
+using the same caller email passed via `--user`.
 The draft is then scanned by the Skill Builder Lambda. If the scan is clean,
-the skill is auto-promoted to `skills/user/{userId}/approved/` and becomes
+the skill is auto-promoted to `skills/user/{caller-email}/approved/` and becomes
 available in your next session. If flagged, it goes to the admin review queue.
 
 **Requirements for SKILL.md:**
