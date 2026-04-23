@@ -85,12 +85,34 @@ function emit(obj) {
 }
 
 /**
+ * Validate that a name is safe for use in S3 keys and Secrets Manager paths.
+ * Allows alphanumeric, hyphens, underscores, and dots only.
+ */
+const SAFE_NAME_RE = /^[a-zA-Z0-9_.-]+$/;
+function validateSafeName(name, label) {
+  if (!name || !SAFE_NAME_RE.test(name)) {
+    fail(`Invalid ${label}: "${name}". Only alphanumeric, hyphens, underscores, and dots allowed.`);
+  }
+}
+
+/**
+ * Escape SQL ILIKE wildcard characters (%, _) in a search string
+ * so user input is matched literally.
+ */
+function escapeIlikeWildcards(str) {
+  return str.replace(/[%_\\]/g, (ch) => '\\' + ch);
+}
+
+/**
  * Search the skill catalog (name + summary only).
  */
 async function searchSkills(query, userEmail) {
   if (!rds) {
     fail('Database not configured — cannot search skills');
   }
+
+  // C2 fix: Escape ILIKE wildcards (%, _) so user input is matched literally
+  const escapedQuery = escapeIlikeWildcards(query);
 
   const resp = await rds.send(new ExecuteStatementCommand({
     resourceArn: DATABASE_RESOURCE_ARN,
@@ -101,13 +123,13 @@ async function searchSkills(query, userEmail) {
           WHERE (scope = 'shared' OR (scope = 'user' AND owner_user_id IN (
             SELECT id FROM users WHERE email = :email
           )))
-          AND (name ILIKE '%' || :q || '%' OR summary ILIKE '%' || :q || '%')
+          AND (name ILIKE '%' || :q || '%' ESCAPE '\\' OR summary ILIKE '%' || :q || '%' ESCAPE '\\')
           AND scan_status = 'clean'
           ORDER BY name
           LIMIT 20`,
     parameters: [
       { name: 'email', value: { stringValue: userEmail } },
-      { name: 'q', value: { stringValue: query } },
+      { name: 'q', value: { stringValue: escapedQuery } },
     ],
   }));
 
@@ -185,6 +207,9 @@ async function authorSkill(skillName, summary, skillMdContent, files, userEmail)
     fail('Database not configured — cannot author skill');
   }
 
+  // H2 fix: Validate skillName to prevent S3 path traversal
+  validateSafeName(skillName, 'skill name');
+
   const draftPrefix = `skills/user/${userEmail}/drafts/${skillName}`;
 
   // Write SKILL.md to S3
@@ -258,6 +283,7 @@ module.exports = {
   fail,
   validateEnv,
   validateUserEmail,
+  validateSafeName,
   parseArgs,
   emit,
   searchSkills,

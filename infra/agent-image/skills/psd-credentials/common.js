@@ -87,6 +87,18 @@ function emit(obj) {
 }
 
 /**
+ * Validate that a credential name is safe for use in Secrets Manager paths.
+ * Allows alphanumeric, hyphens, underscores, and dots only.
+ * Prevents path traversal via / or .. in the name.
+ */
+const SAFE_CRED_NAME_RE = /^[a-zA-Z0-9_.-]+$/;
+function validateCredentialName(name) {
+  if (!name || !SAFE_CRED_NAME_RE.test(name)) {
+    fail(`Invalid credential name: "${name}". Only alphanumeric, hyphens, underscores, and dots allowed.`);
+  }
+}
+
+/**
  * Resolve a credential name to Secrets Manager secret ID.
  * Priority: user-specific first, then shared.
  */
@@ -102,6 +114,9 @@ function resolveSecretId(name, userEmail) {
  * then falling back to shared scope. Uses in-memory cache.
  */
 async function getCredential(name, userEmail) {
+  // H1 fix: Validate credential name to prevent path traversal in SM paths
+  validateCredentialName(name);
+
   const cacheKey = `${userEmail}:${name}`;
   if (cacheKey in _cache) {
     return _cache[cacheKey];
@@ -138,10 +153,14 @@ async function tryGetSecret(secretId) {
     }));
     return resp.SecretString || null;
   } catch (err) {
-    if (
-      err.name === 'ResourceNotFoundException' ||
-      err.name === 'AccessDeniedException'
-    ) {
+    if (err.name === 'ResourceNotFoundException') {
+      return null;
+    }
+    // H3 fix: Log AccessDeniedException to stderr for telemetry visibility
+    // instead of silently swallowing — helps detect IAM misconfigurations
+    // and potential probing. Never log the secret value (only the path).
+    if (err.name === 'AccessDeniedException') {
+      console.error(`AccessDenied for secret "${secretId}" (non-fatal, treated as not found)`);
       return null;
     }
     throw err;
@@ -229,6 +248,9 @@ async function logCredentialRead(credentialName, userEmail, sessionId) {
  * Insert a credential request into the database.
  */
 async function insertCredentialRequest(credentialName, reason, skillContext, userEmail) {
+  // H1 fix: Validate credential name to prevent path traversal
+  validateCredentialName(credentialName);
+
   if (!rdsClient || !DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) {
     fail('Database not configured — cannot file credential requests');
   }
@@ -261,6 +283,7 @@ module.exports = {
   fail,
   validateEnv,
   validateUserEmail,
+  validateCredentialName,
   parseArgs,
   emit,
   getCredential,

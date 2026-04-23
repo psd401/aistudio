@@ -181,31 +181,40 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
 async function downloadSkillFromS3(prefix: string, destDir: string): Promise<void> {
   fs.mkdirSync(destDir, { recursive: true });
 
-  const listResp = await s3.send(new ListObjectsV2Command({
-    Bucket: BUCKET,
-    Prefix: prefix.endsWith('/') ? prefix : `${prefix}/`,
-  }));
+  // H5 fix: Paginate ListObjectsV2 to handle skills with >1000 files
+  const normalizedPrefix = prefix.endsWith('/') ? prefix : `${prefix}/`;
+  let continuationToken: string | undefined;
 
-  for (const obj of listResp.Contents || []) {
-    if (!obj.Key || obj.Key.endsWith('/')) continue;
-
-    const relativePath = obj.Key.slice(prefix.length).replace(/^\//, '');
-    const destPath = path.join(destDir, relativePath);
-    fs.mkdirSync(path.dirname(destPath), { recursive: true });
-
-    const getResp = await s3.send(new GetObjectCommand({
+  do {
+    const listResp = await s3.send(new ListObjectsV2Command({
       Bucket: BUCKET,
-      Key: obj.Key,
+      Prefix: normalizedPrefix,
+      ContinuationToken: continuationToken,
     }));
 
-    if (getResp.Body) {
-      const chunks: Buffer[] = [];
-      for await (const chunk of getResp.Body as AsyncIterable<Buffer>) {
-        chunks.push(chunk);
+    for (const obj of listResp.Contents || []) {
+      if (!obj.Key || obj.Key.endsWith('/')) continue;
+
+      const relativePath = obj.Key.slice(prefix.length).replace(/^\//, '');
+      const destPath = path.join(destDir, relativePath);
+      fs.mkdirSync(path.dirname(destPath), { recursive: true });
+
+      const getResp = await s3.send(new GetObjectCommand({
+        Bucket: BUCKET,
+        Key: obj.Key,
+      }));
+
+      if (getResp.Body) {
+        const chunks: Buffer[] = [];
+        for await (const chunk of getResp.Body as AsyncIterable<Buffer>) {
+          chunks.push(chunk);
+        }
+        fs.writeFileSync(destPath, Buffer.concat(chunks));
       }
-      fs.writeFileSync(destPath, Buffer.concat(chunks));
     }
-  }
+
+    continuationToken = listResp.NextContinuationToken;
+  } while (continuationToken);
 }
 
 async function uploadSkillToS3(srcDir: string, destPrefix: string): Promise<void> {

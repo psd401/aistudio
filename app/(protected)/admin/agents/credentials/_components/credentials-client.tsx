@@ -55,7 +55,7 @@ export function CredentialsClient() {
   }, [loadAll])
 
   const handleResolve = async (id: number, status: "fulfilled" | "rejected") => {
-    const result = await resolveCredentialRequest(id, 0, status)
+    const result = await resolveCredentialRequest(id, status)
     if (result.isSuccess) {
       toast({ title: `Request ${status}` })
       loadAll()

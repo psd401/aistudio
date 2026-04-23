@@ -48,7 +48,7 @@ export function SkillReviewClient() {
   }, [loadQueue])
 
   const handleApprove = async (skillId: string) => {
-    const result = await approveSkillToShared(skillId, 0) // adminUserId resolved server-side
+    const result = await approveSkillToShared(skillId)
     if (result.isSuccess) {
       toast({ title: "Skill approved to shared" })
       loadQueue()
@@ -65,7 +65,7 @@ export function SkillReviewClient() {
     const reason = window.prompt("Rejection reason:")
     if (!reason) return
 
-    const result = await rejectSkill(skillId, 0, reason)
+    const result = await rejectSkill(skillId, reason)
     if (result.isSuccess) {
       toast({ title: "Skill rejected" })
       loadQueue()

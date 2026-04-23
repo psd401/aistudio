@@ -101,9 +101,13 @@ export async function getCredentialRequests(
   try {
     await requireRole("administrator")
 
-    const conditions = statusFilter === "all"
+    // L1: Validate statusFilter against allowed values
+    const validStatuses = ["pending", "fulfilled", "rejected", "all"]
+    const safeFilter = validStatuses.includes(statusFilter) ? statusFilter : "pending"
+
+    const conditions = safeFilter === "all"
       ? undefined
-      : eq(psdAgentCredentialRequests.status, statusFilter)
+      : eq(psdAgentCredentialRequests.status, safeFilter)
 
     const requests = await executeQuery(
       (db) =>
@@ -145,10 +149,10 @@ export async function getCredentialRequests(
 
 /**
  * Resolve a credential request (mark as fulfilled or rejected).
+ * Admin identity is resolved from the authenticated session (C1 fix).
  */
 export async function resolveCredentialRequest(
   requestId: number,
-  adminUserId: number,
   status: "fulfilled" | "rejected"
 ): Promise<ActionState<{ success: boolean }>> {
   const rid = generateRequestId()
@@ -156,7 +160,8 @@ export async function resolveCredentialRequest(
   const log = createLogger({ requestId: rid, action: "resolveCredentialRequest" })
 
   try {
-    await requireRole("administrator")
+    const currentUser = await requireRole("administrator")
+    const adminUserId = currentUser.user.id
 
     await executeQuery(
       (db) =>
@@ -237,12 +242,12 @@ export async function getCredentialAuditLog(
 /**
  * Write a credential provisioning audit entry (when admin creates/updates/deletes
  * a secret via the dashboard).
+ * Admin identity is resolved from the authenticated session (C1 fix).
  */
 export async function logCredentialProvisioningAction(
   credentialName: string,
   scope: string,
   action: string,
-  adminUserId: number,
   details?: Record<string, unknown>
 ): Promise<ActionState<{ success: boolean }>> {
   const requestId = generateRequestId()
@@ -250,7 +255,8 @@ export async function logCredentialProvisioningAction(
   const log = createLogger({ requestId, action: "logCredentialProvisioningAction" })
 
   try {
-    await requireRole("administrator")
+    const currentUser = await requireRole("administrator")
+    const adminUserId = currentUser.user.id
 
     await executeQuery(
       (db) =>

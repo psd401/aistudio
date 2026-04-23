@@ -95,7 +95,7 @@ export function SkillsListClient() {
   }, [loadSkills])
 
   const handleDelete = async (skillId: string) => {
-    const result = await deleteSkill(skillId, 0) // adminUserId resolved server-side
+    const result = await deleteSkill(skillId)
     if (result.isSuccess) {
       toast({ title: "Skill deleted" })
       loadSkills()

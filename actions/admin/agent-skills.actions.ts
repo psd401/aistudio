@@ -8,6 +8,7 @@ import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
 import { desc, eq, sql } from "drizzle-orm"
 import { psdAgentSkills } from "@/lib/db/schema/tables/agent-skills"
 import { psdAgentSkillAudit } from "@/lib/db/schema/tables/agent-skill-audit"
+import { psdAgentCredentialsAudit } from "@/lib/db/schema/tables/agent-credentials-audit"
 import type { SkillScanFindings } from "@/lib/db/schema/tables/agent-skills"
 
 export interface SkillRow {
@@ -51,6 +52,13 @@ export interface SkillReviewItem {
   createdAt: string
 }
 
+const VALID_SKILL_SCOPES = ["shared", "user", "draft", "rejected"] as const
+type ValidSkillScope = (typeof VALID_SKILL_SCOPES)[number]
+
+function isValidScope(scope: string): scope is ValidSkillScope {
+  return (VALID_SKILL_SCOPES as readonly string[]).includes(scope)
+}
+
 /**
  * List all skills with optional scope filter.
  */
@@ -67,8 +75,11 @@ export async function getAgentSkills(
 
     const safeLim = Math.min(Math.max(1, limit), 500)
 
-    const conditions = scope
-      ? eq(psdAgentSkills.scope, scope as "shared" | "user" | "draft" | "rejected")
+    // L2: Validate scope against enum values at runtime
+    const validatedScope = scope && isValidScope(scope) ? scope : undefined
+
+    const conditions = validatedScope
+      ? eq(psdAgentSkills.scope, validatedScope)
       : undefined
 
     const skills = await executeQuery(
@@ -183,17 +194,18 @@ export async function getSkillReviewQueue(): Promise<ActionState<SkillReviewItem
 
 /**
  * Approve a skill to shared scope (admin action).
+ * Admin identity is resolved from the authenticated session (C1 fix).
  */
 export async function approveSkillToShared(
   skillId: string,
-  adminUserId: number
 ): Promise<ActionState<{ success: boolean }>> {
   const requestId = generateRequestId()
   const timer = startTimer("approveSkillToShared")
   const log = createLogger({ requestId, action: "approveSkillToShared" })
 
   try {
-    await requireRole("administrator")
+    const currentUser = await requireRole("administrator")
+    const adminUserId = currentUser.user.id
 
     await executeTransaction(
       async (tx) => {
@@ -233,10 +245,11 @@ export async function approveSkillToShared(
 
 /**
  * Reject a skill with reason (admin action).
+ * Admin identity is resolved from the authenticated session (C1 fix).
+ * Reason is truncated to 1000 chars (H4 fix).
  */
 export async function rejectSkill(
   skillId: string,
-  adminUserId: number,
   reason: string
 ): Promise<ActionState<{ success: boolean }>> {
   const requestId = generateRequestId()
@@ -244,7 +257,11 @@ export async function rejectSkill(
   const log = createLogger({ requestId, action: "rejectSkill" })
 
   try {
-    await requireRole("administrator")
+    const currentUser = await requireRole("administrator")
+    const adminUserId = currentUser.user.id
+
+    // H4: Truncate reason to prevent oversized JSONB payloads
+    const sanitizedReason = reason.slice(0, 1000)
 
     await executeTransaction(
       async (tx) => {
@@ -257,14 +274,14 @@ export async function rejectSkill(
           skillId,
           action: "rejected",
           actorUserId: adminUserId,
-          details: { reason },
+          details: { reason: sanitizedReason },
         })
       },
       "rejectSkill"
     )
 
     timer({ status: "success" })
-    log.info("Skill rejected", { skillId, adminUserId, reason })
+    log.info("Skill rejected", { skillId, adminUserId })
 
     return createSuccess({ success: true }, "Skill rejected")
   } catch (error) {
@@ -329,34 +346,62 @@ export async function getSkillAuditLog(
 
 /**
  * Delete a skill (admin action).
+ * Admin identity is resolved from the authenticated session (C1 fix).
+ * Audit log is written to psd_agent_credentials_audit instead of the
+ * skill-specific audit table because ON DELETE CASCADE would destroy the
+ * audit entry alongside the skill row (C3 fix). The credential audit table
+ * has no FK to psd_agent_skills, so the deletion record persists.
  */
 export async function deleteSkill(
   skillId: string,
-  adminUserId: number
 ): Promise<ActionState<{ success: boolean }>> {
   const requestId = generateRequestId()
   const timer = startTimer("deleteSkill")
   const log = createLogger({ requestId, action: "deleteSkill" })
 
   try {
-    await requireRole("administrator")
+    const currentUser = await requireRole("administrator")
+    const adminUserId = currentUser.user.id
 
-    // Audit log entry is cascade-deleted with the skill. Write it first
-    // so the log captures the deletion before the row is gone.
-    await executeTransaction(
-      async (tx) => {
-        await tx.insert(psdAgentSkillAudit).values({
-          skillId,
+    // C3 fix: Capture skill metadata before deletion for the audit trail,
+    // then delete the skill. The audit entry goes to the credentials audit
+    // table (no FK cascade) so the deletion record persists.
+    const [skill] = await executeQuery(
+      (db) =>
+        db
+          .select({ name: psdAgentSkills.name, scope: psdAgentSkills.scope })
+          .from(psdAgentSkills)
+          .where(eq(psdAgentSkills.id, skillId))
+          .limit(1),
+      "deleteSkill.lookup"
+    )
+
+    await executeQuery(
+      (db) =>
+        db
+          .delete(psdAgentSkills)
+          .where(eq(psdAgentSkills.id, skillId)),
+      "deleteSkill.delete"
+    )
+
+    // Write audit entry to the credentials audit table (no cascade FK).
+    // This is a cross-domain audit entry — the scope field distinguishes
+    // credential vs skill entries (scope = "skill-deletion").
+    await executeQuery(
+      (db) =>
+        db.insert(psdAgentCredentialsAudit).values({
+          credentialName: `skill:${skill?.name ?? skillId}`,
+          scope: "skill-deletion",
           action: "deleted",
           actorUserId: adminUserId,
-          details: { deletedAt: new Date().toISOString() },
-        })
-
-        await tx
-          .delete(psdAgentSkills)
-          .where(eq(psdAgentSkills.id, skillId))
-      },
-      "deleteSkill"
+          details: {
+            skillId,
+            skillName: skill?.name ?? "unknown",
+            skillScope: skill?.scope ?? "unknown",
+            deletedAt: new Date().toISOString(),
+          },
+        }),
+      "deleteSkill.audit"
     )
 
     timer({ status: "success" })
