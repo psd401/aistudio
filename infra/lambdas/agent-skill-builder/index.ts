@@ -32,6 +32,47 @@ const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
 const s3 = new S3Client({ region: REGION });
 const rds = new RDSDataClient({ region: REGION });
 
+// Structured logger — emits JSON to stdout/stderr (matches other Lambdas in
+// the repo: agent-cron, agent-router). CloudWatch parses these lines and
+// integrates with our observability stack.
+type LambdaLogger = {
+  info: (msg: string, meta?: Record<string, unknown>) => void;
+  warn: (msg: string, meta?: Record<string, unknown>) => void;
+  error: (msg: string, meta?: Record<string, unknown>) => void;
+};
+
+function createLogger(context: Record<string, unknown> = {}): LambdaLogger {
+  const base = { service: 'agent-skill-builder', ...context };
+  const emit = (
+    level: 'INFO' | 'WARN' | 'ERROR',
+    stream: NodeJS.WritableStream,
+    msg: string,
+    meta: Record<string, unknown> = {},
+  ) => {
+    stream.write(
+      JSON.stringify({
+        level,
+        message: msg,
+        timestamp: new Date().toISOString(),
+        ...base,
+        ...meta,
+      }) + '\n',
+    );
+  };
+  return {
+    info: (m, meta) => emit('INFO', process.stdout, m, meta),
+    warn: (m, meta) => emit('WARN', process.stdout, m, meta),
+    error: (m, meta) => emit('ERROR', process.stderr, m, meta),
+  };
+}
+
+const VALID_SCOPES = ['user', 'shared'] as const;
+type ValidScope = (typeof VALID_SCOPES)[number];
+
+function isValidScope(s: unknown): s is ValidScope {
+  return typeof s === 'string' && (VALID_SCOPES as readonly string[]).includes(s);
+}
+
 // Patterns that indicate secrets in code files
 const SECRET_PATTERNS = [
   /(?:api[_-]?key|apikey|secret|password|passwd|token|credential|auth)[\s]*[=:]\s*['"][^'"]{8,}/gi,
@@ -67,12 +108,20 @@ interface ScanFindings {
 }
 
 export const handler: Handler<SkillBuildEvent> = async (event) => {
-  // eslint-disable-next-line no-console
-  console.log('Skill build event:', JSON.stringify({
-    skillId: event.skillId,
+  const log = createLogger({ skillId: event.skillId });
+
+  // Validate scope at the entry point so a bad value fails fast with a
+  // clear error rather than surfacing as a CAST failure inside the RDS Data
+  // API call. The DB enum is the source of truth for allowed values.
+  if (!isValidScope(event.scope)) {
+    log.error('Invalid scope in SkillBuildEvent', { scope: event.scope });
+    throw new Error(`Invalid scope: ${event.scope}. Must be one of: ${VALID_SCOPES.join(', ')}`);
+  }
+
+  log.info('Skill build event received', {
     s3Key: event.s3Key,
     scope: event.scope,
-  }));
+  });
 
   const workDir = path.join('/tmp', `skill-${event.skillId}-${Date.now()}`);
 
@@ -161,15 +210,13 @@ export const handler: Handler<SkillBuildEvent> = async (event) => {
     };
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    // eslint-disable-next-line no-console
-    console.error('Skill build failed:', message);
+    log.error('Skill build failed', { error: message });
 
     await writeAuditLog(event.skillId, 'build_error', event.actorUserId, {
       error: message.substring(0, 1000),
     }).catch((auditErr: unknown) => {
       const auditMsg = auditErr instanceof Error ? auditErr.message : String(auditErr);
-      // eslint-disable-next-line no-console
-      console.error(`Audit log failed (non-fatal): ${auditMsg}`);
+      log.error('Audit log failed (non-fatal)', { error: auditMsg });
     });
 
     throw err;

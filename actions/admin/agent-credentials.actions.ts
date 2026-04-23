@@ -1,6 +1,6 @@
 "use server"
 
-import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
+import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, createSuccess } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
 import { requireRole } from "@/lib/auth/role-helpers"
@@ -177,7 +177,7 @@ export async function resolveCredentialRequest(
     )
 
     timer({ status: "success" })
-    log.info("Credential request resolved", { requestId, adminUserId, status })
+    log.info("Credential request resolved", sanitizeForLogging({ requestId, adminUserId, status }))
 
     return createSuccess({ success: true }, `Request ${status}`)
   } catch (error) {
@@ -271,7 +271,7 @@ export async function logCredentialProvisioningAction(
     )
 
     timer({ status: "success" })
-    log.info("Credential provisioning logged", { credentialName, action })
+    log.info("Credential provisioning logged", sanitizeForLogging({ credentialName, action }))
 
     return createSuccess({ success: true })
   } catch (error) {

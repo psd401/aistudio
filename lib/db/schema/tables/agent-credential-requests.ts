@@ -32,6 +32,8 @@ export const psdAgentCredentialRequests = pgTable("psd_agent_credential_requests
   resolvedBy: integer("resolved_by").references(() => users.id, { onDelete: "set null" }),
   resolvedAt: timestamp("resolved_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  // updated_at is auto-maintained by a PostgreSQL BEFORE UPDATE trigger
+  // (see migration 070). Do not set it explicitly in application code.
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("idx_agent_cred_requests_status").on(table.status),

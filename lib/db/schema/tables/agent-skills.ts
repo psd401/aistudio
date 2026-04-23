@@ -57,11 +57,15 @@ export const psdAgentSkills = pgTable("psd_agent_skills", {
   approvedBy: integer("approved_by").references(() => users.id, { onDelete: "set null" }),
   approvedAt: timestamp("approved_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+  // updated_at is auto-maintained by a PostgreSQL BEFORE UPDATE trigger
+  // (see migration 070). Do not set it explicitly in application code.
   updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [
   index("idx_agent_skills_scope").on(table.scope),
   index("idx_agent_skills_owner").on(table.ownerUserId),
   index("idx_agent_skills_scan_status").on(table.scanStatus),
+  // Hot-path: agent-side search filters on scope + scan_status='clean'
+  index("idx_agent_skills_scope_clean").on(table.scope, table.name),
   // Partial unique indexes per scope — the composite (name, owner_user_id, scope) index
   // doesn't enforce uniqueness for shared skills because owner_user_id is NULL and
   // PostgreSQL unique indexes allow multiple NULLs.

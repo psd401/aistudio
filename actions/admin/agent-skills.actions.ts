@@ -1,6 +1,6 @@
 "use server"
 
-import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
+import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, createSuccess } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
 import { requireRole } from "@/lib/auth/role-helpers"
@@ -246,7 +246,7 @@ export async function approveSkillToShared(
     )
 
     timer({ status: "success" })
-    log.info("Skill approved to shared", { skillId, adminUserId })
+    log.info("Skill approved to shared", sanitizeForLogging({ skillId, adminUserId }))
 
     return createSuccess({ success: true }, "Skill approved to shared scope")
   } catch (error) {
@@ -297,7 +297,7 @@ export async function rejectSkill(
     )
 
     timer({ status: "success" })
-    log.info("Skill rejected", { skillId, adminUserId })
+    log.info("Skill rejected", sanitizeForLogging({ skillId, adminUserId }))
 
     return createSuccess({ success: true }, "Skill rejected")
   } catch (error) {
@@ -378,22 +378,20 @@ export async function deleteSkill(
     const currentUser = await requireRole("administrator")
     const adminUserId = currentUser.user.id
 
-    // Capture skill metadata before deletion for the audit trail
-    const [skill] = await executeQuery(
-      (db) =>
-        db
+    // Single atomic transaction: lookup → audit → delete. Wrapping these
+    // together ensures the audit row is never written without the delete
+    // (and vice versa) if the process crashes between statements.
+    await executeTransaction(
+      async (tx) => {
+        const [skill] = await tx
           .select({ name: psdAgentSkills.name, scope: psdAgentSkills.scope })
           .from(psdAgentSkills)
           .where(eq(psdAgentSkills.id, skillId))
-          .limit(1),
-      "deleteSkill.lookup"
-    )
+          .limit(1)
 
-    // Write audit entry BEFORE deletion — ON DELETE SET NULL preserves
-    // the row (skill_id becomes NULL after the cascade).
-    await executeQuery(
-      (db) =>
-        db.insert(psdAgentSkillAudit).values({
+        // Write audit entry BEFORE deletion — ON DELETE SET NULL preserves
+        // the row (skill_id becomes NULL after the delete).
+        await tx.insert(psdAgentSkillAudit).values({
           skillId,
           action: "deleted",
           actorUserId: adminUserId,
@@ -402,20 +400,15 @@ export async function deleteSkill(
             skillScope: skill?.scope ?? "unknown",
             deletedAt: new Date().toISOString(),
           },
-        }),
-      "deleteSkill.audit"
-    )
+        })
 
-    await executeQuery(
-      (db) =>
-        db
-          .delete(psdAgentSkills)
-          .where(eq(psdAgentSkills.id, skillId)),
-      "deleteSkill.delete"
+        await tx.delete(psdAgentSkills).where(eq(psdAgentSkills.id, skillId))
+      },
+      "deleteSkill"
     )
 
     timer({ status: "success" })
-    log.info("Skill deleted", { skillId, adminUserId })
+    log.info("Skill deleted", sanitizeForLogging({ skillId, adminUserId }))
 
     return createSuccess({ success: true }, "Skill deleted")
   } catch (error) {

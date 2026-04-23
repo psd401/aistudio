@@ -119,7 +119,9 @@ async function getCredential(name, userEmail) {
   // H1 fix: Validate credential name to prevent path traversal in SM paths
   validateCredentialName(name);
 
-  const cacheKey = `${userEmail}:${name}`;
+  // Use a null byte as delimiter — cannot appear in an email or a
+  // SAFE_CRED_NAME_RE-validated name, so (user, name) pairs are unambiguous.
+  const cacheKey = `${userEmail}\x00${name}`;
   if (cacheKey in _cache) {
     const cached = _cache[cacheKey];
     if (Date.now() - cached.cachedAt < CACHE_TTL_MS) {
@@ -163,11 +165,14 @@ async function tryGetSecret(secretId) {
     if (err.name === 'ResourceNotFoundException') {
       return null;
     }
-    // H3 fix: Log AccessDeniedException to stderr for telemetry visibility
-    // instead of silently swallowing — helps detect IAM misconfigurations
-    // and potential probing. Never log the secret value (only the path).
+    // Log AccessDeniedException without the full secret path. The path
+    // contains the user's email and credential name — logging it to
+    // CloudWatch would leak PII and the secret-naming convention.
+    // We log only the scope ('user' or 'shared') to distinguish IAM
+    // misconfigurations from genuinely missing credentials during triage.
     if (err.name === 'AccessDeniedException') {
-      console.error(`AccessDenied for secret "${secretId}" (non-fatal, treated as not found)`);
+      const scope = secretId.includes('/user/') ? 'user' : 'shared';
+      console.error(`AccessDenied on secret (scope=${scope}, non-fatal, treated as not found)`);
       return null;
     }
     throw err;
@@ -206,9 +211,16 @@ async function listCredentials(userEmail) {
 /**
  * List secrets by name prefix from Secrets Manager.
  */
+// Defensive cap: a single user listing >5,000 credentials is not a realistic
+// product scenario. Exceeding this likely indicates a runaway iterator or a
+// misconfigured prefix. Stopping early keeps memory bounded.
+const MAX_SECRETS_PER_LIST = 5000;
+const MAX_LIST_PAGES = Math.ceil(MAX_SECRETS_PER_LIST / 100);
+
 async function listSecretsByPrefix(prefix) {
   const secrets = [];
   let nextToken;
+  let pages = 0;
 
   do {
     const resp = await smClient.send(new ListSecretsCommand({
@@ -218,6 +230,13 @@ async function listSecretsByPrefix(prefix) {
     }));
     secrets.push(...(resp.SecretList || []));
     nextToken = resp.NextToken;
+    pages += 1;
+    if (pages >= MAX_LIST_PAGES || secrets.length >= MAX_SECRETS_PER_LIST) {
+      if (nextToken) {
+        console.error(`listSecretsByPrefix: hit cap at ${secrets.length} secrets (${pages} pages); truncating`);
+      }
+      break;
+    }
   } while (nextToken);
 
   return secrets;

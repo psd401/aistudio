@@ -54,6 +54,13 @@ CREATE INDEX IF NOT EXISTS idx_agent_skills_scan_status
     ON psd_agent_skills (scan_status)
     WHERE scan_status != 'clean';
 
+-- Hot-path index: psd-skills-meta search queries filter on scan_status='clean'
+-- plus scope. The partial index above only covers the admin review queue;
+-- this covers the far more frequent agent-side lookups.
+CREATE INDEX IF NOT EXISTS idx_agent_skills_scope_clean
+    ON psd_agent_skills (scope, name)
+    WHERE scan_status = 'clean';
+
 -- Partial unique indexes per scope to prevent duplicate names.
 -- The composite (name, owner_user_id, scope) index doesn't enforce uniqueness
 -- for shared skills because owner_user_id is NULL and PostgreSQL unique indexes
