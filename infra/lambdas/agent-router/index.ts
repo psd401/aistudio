@@ -228,26 +228,12 @@ interface GoogleChatEvent {
     };
     /**
      * Populated when the user invokes a registered slash command (e.g., /ask).
-     * Contains only the commandId. The full metadata (commandName, triggersDialog)
-     * lives in message.annotations[].slashCommand.
+     * Contains only the commandId — the command name is mapped locally via
+     * SLASH_COMMAND_NAMES for usage help text.
      */
     slashCommand?: {
       commandId: string;
     };
-    /**
-     * Annotations on the message, including SLASH_COMMAND entries. Used to
-     * identify which slash command was invoked when multiple are registered.
-     */
-    annotations?: Array<{
-      type: 'SLASH_COMMAND' | 'USER_MENTION' | 'RICH_LINK';
-      startIndex?: number;
-      length?: number;
-      slashCommand?: {
-        commandName: string;
-        commandId: string;
-        triggersDialog?: boolean;
-      };
-    }>;
     createTime: string;
   };
 }
@@ -349,6 +335,8 @@ interface CrossUserInvocation {
   strippedMessage: string;
   /** Which invocation method was used — drives deprecation notices */
   source: 'slash-command' | 'text-prefix';
+  /** The slash command name that was invoked (e.g., "/ask", "/consult"). Only set for slash-command source. */
+  commandName?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -356,19 +344,22 @@ interface CrossUserInvocation {
 // ---------------------------------------------------------------------------
 
 /**
- * Registered slash command IDs from Google Chat API configuration.
- * These must match the command IDs configured in the Google Cloud Console
- * under Chat API → Configuration → Slash commands.
+ * Recognized slash command IDs for cross-user invocation. These must match
+ * the command IDs configured in the Google Cloud Console under
+ * Chat API -> Configuration -> Slash commands.
  *
  * Command registration (manual in Cloud Console):
- *   /ask     → commandId "1"  → "Ask another PSD staff member's agent a question"
- *   /consult → commandId "2"  → "Consult another PSD staff member's agent"
+ *   /ask     -> commandId "1"  -> "Ask another PSD staff member's agent a question"
+ *   /consult -> commandId "2"  -> "Consult another PSD staff member's agent"
  *
  * Both commands behave identically — /consult is a synonym for /ask.
  */
-const SLASH_COMMAND_IDS: Record<string, 'ask'> = {
-  '1': 'ask',
-  '2': 'ask', // /consult is a synonym
+const CROSS_USER_SLASH_COMMAND_IDS = new Set(['1', '2']);
+
+/** Maps commandId to the human-readable command name for usage help text. */
+const SLASH_COMMAND_NAMES: Record<string, string> = {
+  '1': '/ask',
+  '2': '/consult',
 };
 
 // ---------------------------------------------------------------------------
@@ -590,8 +581,8 @@ async function getOrCreateUser(
 /**
  * Validate that a string is a plausible email local part (username).
  * Allows alphanumeric characters, dots, hyphens, and underscores.
- * Must start and end with alphanumeric, minimum 2 chars to reject edge cases
- * like "." or "---" which are not valid email local parts.
+ * Must start and end with alphanumeric (single-char usernames like "a" are
+ * accepted; punctuation-only inputs like "." or "---" are rejected).
  *
  * Shared between parseCrossUserInvocation() and parseSlashCommandInvocation()
  * to ensure consistent input validation regardless of invocation method.
@@ -616,8 +607,8 @@ function isValidUsername(value: string): boolean {
 function parseCrossUserInvocation(text: string): CrossUserInvocation | null {
   // Trim leading whitespace — Google Chat formatting may add spaces.
   // Match @agent: followed by a username (alphanumeric, dots, hyphens, underscores).
-  // Must start and end with alphanumeric, minimum 2 chars to reject edge cases
-  // like @agent:. or @agent:--- which are not valid email local parts.
+  // Must start and end with alphanumeric; rejects punctuation-only inputs like
+  // @agent:. or @agent:--- which are not valid email local parts.
   const match = text.trim().match(/^@agent:([a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?)\s*([\s\S]*)/);
   if (!match) return null;
 
@@ -638,45 +629,54 @@ function parseCrossUserInvocation(text: string): CrossUserInvocation | null {
  *
  * The first token of argumentText is the target username; the remainder is the
  * question. Returns null if the message doesn't contain a recognized slash command.
+ *
+ * Fallback: if `argumentText` is absent (older API versions / edge cases),
+ * derives arguments from `message.text` by stripping the leading slash command
+ * token (e.g., "/ask reese question" -> "reese question").
  */
 function parseSlashCommandInvocation(
   message: NonNullable<GoogleChatEvent['message']>,
 ): CrossUserInvocation | null {
   const commandId = message.slashCommand?.commandId;
-  if (!commandId || !SLASH_COMMAND_IDS[commandId]) {
+  if (!commandId || !CROSS_USER_SLASH_COMMAND_IDS.has(commandId)) {
     return null;
   }
 
+  const cmdName = SLASH_COMMAND_NAMES[commandId] ?? '/ask';
+
   // argumentText contains everything after the slash command itself.
-  // For "/ask reese what's up?" → argumentText = "reese what's up?"
+  // For "/ask reese what's up?" -> argumentText = "reese what's up?"
   // Google Chat strips bot @mentions from argumentText, so we don't need
   // to worry about mention chips polluting the parse.
-  const argText = (message.argumentText ?? '').trim();
+  //
+  // Fallback: when argumentText is absent (older API versions or edge cases
+  // where only message.text is populated), derive arguments from message.text
+  // by stripping the leading slash command token.
+  let argText = (message.argumentText ?? '').trim();
+  if (!argText && message.text) {
+    // message.text includes the slash command: "/ask reese question"
+    // Strip the first whitespace-delimited token (the command itself).
+    const textTrimmed = message.text.trim();
+    const firstSpace = textTrimmed.search(/\s/);
+    argText = firstSpace === -1 ? '' : textTrimmed.substring(firstSpace).trim();
+  }
+
   if (!argText) {
     // No arguments — caller should prompt with usage help or a dialog
     return {
       targetUsername: '',
       strippedMessage: '',
       source: 'slash-command',
+      commandName: cmdName,
     };
   }
 
-  // First token = target username, remainder = question
-  const spaceIdx = argText.search(/\s/);
-  if (spaceIdx === -1) {
-    // Only a username, no question — validate before accepting
-    if (!isValidUsername(argText)) {
-      return null; // Invalid username format; caller treats as non-slash-command
-    }
-    return {
-      targetUsername: argText.toLowerCase(),
-      strippedMessage: '',
-      source: 'slash-command',
-    };
-  }
-
-  const username = argText.substring(0, spaceIdx);
-  const question = argText.substring(spaceIdx).trim();
+  // Split on whitespace: first token = target username, remainder = question.
+  // Using split(/\s+/) handles multiple spaces between username and question
+  // without leaving residual whitespace in the question text.
+  const parts = argText.split(/\s+/);
+  const username = parts[0];
+  const question = parts.slice(1).join(' ');
 
   // Validate the extracted username against the same rules used by the
   // @agent:username parser — prevents arbitrary input reaching DynamoDB queries.
@@ -688,6 +688,7 @@ function parseSlashCommandInvocation(
     targetUsername: username.toLowerCase(),
     strippedMessage: question,
     source: 'slash-command',
+    commandName: cmdName,
   };
 }
 
@@ -1456,9 +1457,18 @@ async function processRecord(
   const rawText = (message?.argumentText ?? message?.text ?? '').trim();
   // Slash commands with no arguments (e.g., bare "/ask") have empty argumentText
   // but are still valid — the handler will show usage help. Only bail on truly
-  // empty messages when there's no slash command present.
-  const hasSlashCommand = !!message?.slashCommand?.commandId;
-  if (!message || (!rawText && !hasSlashCommand) || !message.sender) {
+  // empty messages when there's no recognized slash command present.
+  //
+  // Unrecognized slash commands (commandId not in CROSS_USER_SLASH_COMMAND_IDS)
+  // are rejected early to prevent them from falling through to the normal
+  // AgentCore path with an empty prompt.
+  const slashCommandId = message?.slashCommand?.commandId;
+  const hasRecognizedSlashCommand = !!slashCommandId && CROSS_USER_SLASH_COMMAND_IDS.has(slashCommandId);
+  if (slashCommandId && !hasRecognizedSlashCommand) {
+    log.warn('Ignoring unrecognized slash command', { commandId: slashCommandId });
+    return;
+  }
+  if (!message || (!rawText && !hasRecognizedSlashCommand) || !message.sender) {
     log.warn('Message event missing required fields');
     return;
   }
@@ -1676,23 +1686,30 @@ async function processRecord(
   const crossUserInvocation = slashInvocation ?? textInvocation;
 
   if (crossUserInvocation) {
-    log.info('Cross-user invocation detected', {
-      sender: senderEmail,
-      targetUsername: crossUserInvocation.targetUsername,
-      source: crossUserInvocation.source,
-      space: spaceName,
-    });
+    // The command name used in the invocation ("/ask", "/consult", or "@agent:").
+    // Used to generate context-appropriate usage help text.
+    const cmdLabel = crossUserInvocation.commandName ?? '/ask';
 
     // Handle empty invocation — user typed just "/ask" with no arguments.
     // Respond with usage help. A future Phase 2 enhancement could open a
     // dialog card with a dropdown of agent owners (issue #907 open question).
     if (!crossUserInvocation.targetUsername) {
       const usageHelp = crossUserInvocation.source === 'slash-command'
-        ? 'Usage: `/ask <username> <question>`\n\nExample: `/ask reese what\'s on the calendar for today?`'
+        ? `Usage: \`${cmdLabel} <username> <question>\`\n\nExample: \`${cmdLabel} reese what's on the calendar for today?\``
         : 'Usage: `@agent:<username> <question>`\n\nExample: `@agent:reese what\'s on the calendar for today?`';
       await sendGoogleChatResponse(spaceName, threadName, usageHelp, log);
       return;
     }
+
+    // Log after the empty-username fast path but with a validated username
+    // (isValidUsername already ran inside the parser; only validated usernames
+    // reach here). Avoids logging arbitrary raw input at INFO level.
+    log.info('Cross-user invocation detected', {
+      sender: senderEmail,
+      targetUsername: crossUserInvocation.targetUsername,
+      source: crossUserInvocation.source,
+      space: spaceName,
+    });
 
     // Resolve the target user
     const targetUser = await resolveUserByEmailPrefix(
@@ -1723,7 +1740,7 @@ async function processRecord(
       // sending an empty string to AgentCore.
       if (!crossUserInvocation.strippedMessage) {
         const selfHelp = crossUserInvocation.source === 'slash-command'
-          ? 'You can talk to your own agent by sending a message directly — no need for `/ask`.'
+          ? `You can talk to your own agent by sending a message directly -- no need for \`${cmdLabel}\`.`
           : 'Please include a message. You can talk to your agent normally without the @agent: prefix.';
         await sendGoogleChatResponse(spaceName, threadName, selfHelp, log);
         return;
@@ -1734,7 +1751,7 @@ async function processRecord(
       const actualMessage = crossUserInvocation.strippedMessage;
       if (!actualMessage) {
         const emptyHelp = crossUserInvocation.source === 'slash-command'
-          ? `Please include a question. Example: \`/ask ${crossUserInvocation.targetUsername} what's the budget status?\``
+          ? `Please include a question. Example: \`${cmdLabel} ${crossUserInvocation.targetUsername} what's the budget status?\``
           : `Please include a question after @agent:${crossUserInvocation.targetUsername}. ` +
             `Example: @agent:${crossUserInvocation.targetUsername} what's the budget status?`;
         await sendGoogleChatResponse(spaceName, threadName, emptyHelp, log);
@@ -1788,14 +1805,15 @@ async function processRecord(
         });
       }
 
-      // Response — always prefixed with the target user's name in shared spaces.
+      // Response — cross-user replies are always prefixed with the target user's
+      // agent label (in both shared spaces and DMs via slash commands).
       // When invoked via the deprecated @agent: prefix, append a deprecation
       // notice nudging users toward the /ask slash command (issue #907).
       const deprecationNotice = crossUserInvocation.source === 'text-prefix'
-        ? `\n\n_💡 Tip: \`/ask ${crossUserInvocation.targetUsername} …\` works too (and is faster)_`
+        ? `\n\n_Tip: \`/ask ${crossUserInvocation.targetUsername} ...\` works too (and is faster)_`
         : '';
       const maxLength = 4096;
-      const truncationSuffix = '\n\n_(Response truncated — ask me to continue)_';
+      const truncationSuffix = '\n\n_(Response truncated -- ask me to continue)_';
       const ownerLabel = targetUser.displayName || targetUser.email;
       const crossPrefix = `[${ownerLabel}'s Agent] `;
       const reservedLength = crossPrefix.length + deprecationNotice.length;
@@ -1803,6 +1821,13 @@ async function processRecord(
       // the prefix + deprecation notice are unusually long (e.g., very long
       // display name). In that edge case the response body is fully truncated.
       const availableLength = Math.max(maxLength - reservedLength, 0);
+      if (availableLength === 0) {
+        log.warn('Cross-user response body fully truncated due to long prefix/notice', {
+          reservedLength,
+          maxLength,
+          ownerLabel,
+        });
+      }
       const truncatedResponse =
         agentResult.response.length > availableLength
           ? agentResult.response.substring(0, Math.max(availableLength - truncationSuffix.length, 0)) +
