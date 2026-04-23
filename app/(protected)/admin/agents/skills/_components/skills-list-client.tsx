@@ -110,10 +110,11 @@ export function SkillsListClient() {
 
   return (
     <div className="space-y-6 p-6">
-      <PageBranding
-        title="Agent Skills"
-        description="Manage agent skills across all scopes"
-      />
+      <div>
+        <PageBranding />
+        <h1 className="text-2xl font-bold">Agent Skills</h1>
+        <p className="text-muted-foreground text-sm">Manage agent skills across all scopes</p>
+      </div>
 
       <div className="flex items-center gap-4">
         <Select value={scopeFilter} onValueChange={setScopeFilter}>

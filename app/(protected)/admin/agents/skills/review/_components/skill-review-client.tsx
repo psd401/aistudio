@@ -3,14 +3,6 @@
 import { useState, useEffect, useCallback } from "react"
 import { useToast } from "@/components/ui/use-toast"
 import { Button } from "@/components/ui/button"
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
 import {
   Card,
@@ -88,10 +80,11 @@ export function SkillReviewClient() {
 
   return (
     <div className="space-y-6 p-6">
-      <PageBranding
-        title="Skill Review Queue"
-        description="Review flagged and submitted skills"
-      />
+      <div>
+        <PageBranding />
+        <h1 className="text-2xl font-bold">Skill Review Queue</h1>
+        <p className="text-muted-foreground text-sm">Review flagged and submitted skills</p>
+      </div>
 
       <div className="flex items-center gap-4">
         <Button variant="outline" size="sm" onClick={loadQueue} disabled={loading}>

@@ -72,10 +72,11 @@ export function CredentialsClient() {
 
   return (
     <div className="space-y-6 p-6">
-      <PageBranding
-        title="Agent Credentials"
-        description="Manage agent credential access, requests, and audit trail"
-      />
+      <div>
+        <PageBranding />
+        <h1 className="text-2xl font-bold">Agent Credentials</h1>
+        <p className="text-muted-foreground text-sm">Manage agent credential access, requests, and audit trail</p>
+      </div>
 
       <div className="flex items-center gap-4">
         <Button variant="outline" size="sm" onClick={loadAll} disabled={loading}>
