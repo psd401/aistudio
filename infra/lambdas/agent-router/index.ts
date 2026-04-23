@@ -588,6 +588,19 @@ async function getOrCreateUser(
 // ---------------------------------------------------------------------------
 
 /**
+ * Validate that a string is a plausible email local part (username).
+ * Allows alphanumeric characters, dots, hyphens, and underscores.
+ * Must start and end with alphanumeric, minimum 2 chars to reject edge cases
+ * like "." or "---" which are not valid email local parts.
+ *
+ * Shared between parseCrossUserInvocation() and parseSlashCommandInvocation()
+ * to ensure consistent input validation regardless of invocation method.
+ */
+function isValidUsername(value: string): boolean {
+  return /^[a-zA-Z0-9](?:[a-zA-Z0-9._-]*[a-zA-Z0-9])?$/.test(value);
+}
+
+/**
  * Parse @agent:username from the beginning of a message (DEPRECATED).
  * Supports formats:
  *   @agent:ashley what's the budget?
@@ -651,7 +664,10 @@ function parseSlashCommandInvocation(
   // First token = target username, remainder = question
   const spaceIdx = argText.search(/\s/);
   if (spaceIdx === -1) {
-    // Only a username, no question
+    // Only a username, no question — validate before accepting
+    if (!isValidUsername(argText)) {
+      return null; // Invalid username format; caller treats as non-slash-command
+    }
     return {
       targetUsername: argText.toLowerCase(),
       strippedMessage: '',
@@ -661,6 +677,12 @@ function parseSlashCommandInvocation(
 
   const username = argText.substring(0, spaceIdx);
   const question = argText.substring(spaceIdx).trim();
+
+  // Validate the extracted username against the same rules used by the
+  // @agent:username parser — prevents arbitrary input reaching DynamoDB queries.
+  if (!isValidUsername(username)) {
+    return null;
+  }
 
   return {
     targetUsername: username.toLowerCase(),
@@ -1777,10 +1799,13 @@ async function processRecord(
       const ownerLabel = targetUser.displayName || targetUser.email;
       const crossPrefix = `[${ownerLabel}'s Agent] `;
       const reservedLength = crossPrefix.length + deprecationNotice.length;
-      const availableLength = maxLength - reservedLength;
+      // Clamp to a minimum of 0 to prevent negative substring lengths when
+      // the prefix + deprecation notice are unusually long (e.g., very long
+      // display name). In that edge case the response body is fully truncated.
+      const availableLength = Math.max(maxLength - reservedLength, 0);
       const truncatedResponse =
         agentResult.response.length > availableLength
-          ? agentResult.response.substring(0, availableLength - truncationSuffix.length) +
+          ? agentResult.response.substring(0, Math.max(availableLength - truncationSuffix.length, 0)) +
             truncationSuffix
           : agentResult.response;
       const finalResponse = `${crossPrefix}${truncatedResponse}${deprecationNotice}`;
