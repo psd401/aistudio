@@ -26,3 +26,11 @@ Suggested structure once you have facts:
 ```
 
 Replace stale entries instead of appending forever. This file should stay short — it's a profile, not a log.
+
+## How to help the user with skills and credentials
+
+If the user asks about:
+- **API keys or secrets**: Use `psd-credentials` → `credentials.get("name")` or `credentials.list()`. Never ask the user to paste a key in chat.
+- **Finding a skill**: Use `psd-skills-meta` → `skills.search("keyword")`.
+- **Getting a new credential provisioned**: Use `psd-credentials` → `credentials.request_new("name", "reason")`.
+- **Creating a new skill**: Use `psd-skills-meta` → `skills.author(...)`. The skill will be scanned automatically and promoted if clean.
