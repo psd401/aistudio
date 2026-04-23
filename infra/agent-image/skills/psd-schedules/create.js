@@ -146,6 +146,12 @@ async function main() {
     prompt: args.prompt,
   });
 
+  // One-shot (at(...)) schedules should delete themselves after firing so we
+  // don't accumulate completed schedule entries against the 1,000-per-account
+  // soft quota. Recurring (cron/rate) schedules keep NONE (the default) so
+  // they keep firing. ActionAfterCompletion is documented at:
+  //   https://docs.aws.amazon.com/scheduler/latest/APIReference/API_CreateSchedule.html
+  const isOneShot = expression.startsWith('at(');
   const scheduler = new SchedulerClient({ region: REGION });
   try {
     await scheduler.send(new CreateScheduleCommand({
@@ -155,6 +161,7 @@ async function main() {
       ScheduleExpressionTimezone: timezone,
       FlexibleTimeWindow: { Mode: 'OFF' },
       State: state,
+      ActionAfterCompletion: isOneShot ? 'DELETE' : 'NONE',
       Target: {
         Arn: CRON_LAMBDA_ARN,
         RoleArn: EVENTBRIDGE_ROLE_ARN,
