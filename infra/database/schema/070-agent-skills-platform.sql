@@ -4,6 +4,25 @@
 -- Adds 5 tables + 2 enums. No triggers (the db-init Lambda splitter mangles
 -- CREATE FUNCTION / CREATE TRIGGER blocks when they precede other DDL).
 -- Application code sets updated_at explicitly on every update.
+--
+-- DROPs at the top make this migration idempotent against the partial
+-- leftover state from earlier failed runs (enums + psd_agent_skills +
+-- indexes were created before the trigger split broke). The tables have
+-- no user data yet — this is the first successful deploy of the feature.
+
+DROP TABLE IF EXISTS psd_agent_credential_requests CASCADE;
+
+DROP TABLE IF EXISTS psd_agent_credential_reads CASCADE;
+
+DROP TABLE IF EXISTS psd_agent_credentials_audit CASCADE;
+
+DROP TABLE IF EXISTS psd_agent_skill_audit CASCADE;
+
+DROP TABLE IF EXISTS psd_agent_skills CASCADE;
+
+DROP TYPE IF EXISTS agent_skill_scan_status CASCADE;
+
+DROP TYPE IF EXISTS agent_skill_scope CASCADE;
 
 CREATE TYPE agent_skill_scope AS ENUM ('shared', 'user', 'draft', 'rejected');
 
