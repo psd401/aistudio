@@ -393,6 +393,20 @@ export class EcsServiceConstruct extends Construct {
                 },
               },
             })] : []),
+            // Cost Explorer — read-only queries for the admin agent dashboard.
+            // ce:* APIs do not support resource-level permissions; scope via
+            // AWS API-level (dev ECS can only query the dev account's cost data,
+            // cross-account isolation is enforced by account boundary).
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'ce:GetCostAndUsage',
+                'ce:GetCostAndUsageWithResources',
+                'ce:GetDimensionValues',
+                'ce:GetTags',
+              ],
+              resources: ['*'],
+            }),
             // K-12 Content Safety: SNS for violation notifications
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,

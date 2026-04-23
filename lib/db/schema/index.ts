@@ -140,6 +140,8 @@ export * from "./tables/graph-edges";
 export * from "./tables/agent-messages";
 export * from "./tables/agent-sessions";
 export * from "./tables/agent-feedback";
+export * from "./tables/agent-health-snapshots";
+export * from "./tables/agent-patterns";
 
 // ============================================
 // API Keys (External API Platform)

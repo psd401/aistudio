@@ -56,6 +56,7 @@ import { HttpRequest } from '@smithy/protocol-http';
 import { Context as LambdaContext, SQSBatchResponse, SQSEvent, SQSRecord } from 'aws-lambda';
 import * as crypto from 'crypto';
 import * as chatPkg from '@googleapis/chat';
+import { classifyTopic, isPrivateMessage, isoWeek, type Topic } from './topic-classifier';
 
 // ---------------------------------------------------------------------------
 // Structured logging (Lambda-compatible, no console.* per CLAUDE.md exception)
@@ -149,6 +150,11 @@ const MAX_INTERAGENT_MESSAGES_PER_HOUR = parseInt(
   10
 );
 const INTERAGENT_TABLE = process.env.INTERAGENT_TABLE || '';
+// Organizational Nervous System signal store — see topic-classifier.ts
+const SIGNALS_TABLE = process.env.SIGNALS_TABLE || '';
+// TTL on signals: 90 days is long enough for the weekly pattern scanner's
+// rolling 4-week comparison plus headroom for backfills / investigations.
+const SIGNAL_TTL_DAYS = 90;
 
 // Cold-start diagnostic: log if AGENTCORE_RUNTIME_ID is not set at module load.
 // When the env var is absent, every invocation pays an SSM GetParameter call.
@@ -899,6 +905,8 @@ async function logTelemetry(
     invokedBy?: string;
     /** Cross-user invocation: email of the agent owner whose agent was consulted */
     agentOwnerId?: string;
+    /** Fixed-taxonomy topic label from the classifier; null when [private], unclassified, or classifier disabled */
+    topic?: Topic | null;
   },
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
@@ -912,6 +920,7 @@ async function logTelemetry(
     const totalTokens = params.inputTokens + params.outputTokens;
     const invokedBy = params.invokedBy ?? null;
     const agentOwnerId = params.agentOwnerId ?? null;
+    const topic = params.topic ?? null;
 
     // Run both telemetry writes in parallel — they're independent.
     // Uses direct PostgreSQL (postgres.js) consistent with the rest of the app,
@@ -921,11 +930,11 @@ async function logTelemetry(
       // invoked_by and agent_owner_id are NULL for normal (owner) invocations
       sql`INSERT INTO agent_messages
           (user_id, session_id, model, input_tokens, output_tokens,
-           latency_ms, guardrail_blocked, space_name, invoked_by, agent_owner_id, created_at)
+           latency_ms, guardrail_blocked, space_name, invoked_by, agent_owner_id, topic, created_at)
           VALUES (${params.userId}, ${params.sessionId}, ${params.model},
                   ${params.inputTokens}, ${params.outputTokens},
                   ${params.latencyMs}, ${params.guardrailBlocked},
-                  ${params.spaceName}, ${invokedBy}, ${agentOwnerId}, NOW())`,
+                  ${params.spaceName}, ${invokedBy}, ${agentOwnerId}, ${topic}, NOW())`,
 
       // Upsert session-level aggregates — creates the session row on first message,
       // increments counters on subsequent messages. Uses ON CONFLICT on session_id
@@ -942,6 +951,81 @@ async function logTelemetry(
     // Telemetry failure should not affect user experience
     log.error('Failed to write telemetry', {
       error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Organizational Nervous System — signal store
+// ---------------------------------------------------------------------------
+
+/**
+ * Record a topic signal in DynamoDB for the Pattern Scanner to analyze.
+ *
+ * Privacy contract (CRITICAL — see issue #890):
+ *   - Writes ONLY: {building, weekTopic, topic, week, count, expiresAt}
+ *   - Writes NEVER: user id, email, workspace prefix, message content, model
+ *   - Count is increment-only via ADD; no upsert of user-derived fields.
+ *
+ * The building column uses `department` from the users table as the rollup
+ * unit. For K-12 PSD the taxonomy is "building" (physical school); we store
+ * whatever aggregation unit is currently populated. When department is
+ * missing/unknown we skip the write entirely — a null aggregation key would
+ * degenerate into a global bucket that proxies individuals in low-traffic
+ * weeks.
+ */
+async function recordSignal(
+  params: {
+    building: string;
+    topic: Topic;
+  },
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  if (!SIGNALS_TABLE) {
+    // Not configured — no-op. The admin dashboard will show an empty
+    // Patterns tab until the stack is deployed with SIGNALS_TABLE set.
+    return;
+  }
+  if (!params.building || params.building === 'unknown') {
+    // Skip rollup when the user's department isn't populated yet.
+    return;
+  }
+
+  const week = isoWeek();
+  const weekTopic = `${week}#${params.topic}`;
+  const expiresAt = Math.floor(Date.now() / 1000) + SIGNAL_TTL_DAYS * 86400;
+
+  try {
+    await dynamoClient.send(
+      new UpdateCommand({
+        TableName: SIGNALS_TABLE,
+        Key: {
+          building: params.building,
+          weekTopic,
+        },
+        UpdateExpression:
+          'ADD #count :one SET #topic = if_not_exists(#topic, :topic), #week = if_not_exists(#week, :week), #exp = :exp',
+        ExpressionAttributeNames: {
+          '#count': 'count',
+          '#topic': 'topic',
+          '#week': 'week',
+          '#exp': 'expiresAt',
+        },
+        ExpressionAttributeValues: {
+          ':one': 1,
+          ':topic': params.topic,
+          ':week': week,
+          ':exp': expiresAt,
+        },
+      })
+    );
+  } catch (error) {
+    // Signal failure must not affect the user's message — this is pure
+    // observability. Log and continue.
+    log.error('Failed to record signal', {
+      error: error instanceof Error ? error.message : String(error),
+      topic: params.topic,
+      building: params.building,
     });
   }
 }
@@ -1395,6 +1479,26 @@ async function processRecord(
   // but the conversation continues regardless of guardrail verdict.
   const guardrailResult = await applyGuardrails(messageText, log);
 
+  // Step 2b: Topic classification for the Organizational Nervous System.
+  // Runs AFTER guardrails so blocked-content analysis is not polluted, and
+  // BEFORE cross-user parsing so we classify the user's intent, not the
+  // routing prefix. The `[private]` opt-out bypasses the classifier entirely
+  // — no topic label is produced and no signal is written.
+  //
+  // Privacy: the classifier is a pure function of text. The recordSignal
+  // call below stores ONLY {building, weekTopic, topic, count}; no user
+  // identifier, no message content. See topic-classifier.ts and issue #890
+  // for the full privacy contract.
+  const classifierSkipped = isPrivateMessage(messageText);
+  const topic: Topic | null = classifierSkipped
+    ? null
+    : classifyTopic(messageText);
+  if (topic) {
+    // Fire-and-forget — signal write must not block message delivery.
+    // Using `department` as the aggregation unit; see recordSignal docblock.
+    void recordSignal({ building: user.department, topic }, log);
+  }
+
   // Step 3: Check for cross-user agent invocation (@agent:username)
   // Only supported in shared spaces (ROOM) — in DMs the sender's own agent
   // always responds. The cross-user path invokes the target user's AgentCore
@@ -1542,6 +1646,7 @@ async function processRecord(
           spaceName,
           invokedBy: senderEmail,
           agentOwnerId: targetUser.email,
+          topic,
         },
         log
       );
@@ -1638,6 +1743,7 @@ async function processRecord(
       // fail-closed policy for later analysis / tuning.
       guardrailBlocked: guardrailResult.wouldHaveBlocked,
       spaceName,
+      topic,
     },
     log
   );
