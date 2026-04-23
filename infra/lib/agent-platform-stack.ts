@@ -747,6 +747,17 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: ['*'],
     }));
 
+    // Lambda invoke — psd-skills-meta skill triggers the Skill Builder
+    // Lambda asynchronously (InvocationType: Event) for draft scanning.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'SkillBuilderLambdaInvoke',
+      effect: iam.Effect.ALLOW,
+      actions: ['lambda:InvokeFunction'],
+      resources: [
+        `arn:aws:lambda:${this.region}:${this.account}:function:psd-agent-skill-builder-${environment}`,
+      ],
+    }));
+
     // Cost allocation tags on role sessions
     cdk.Tags.of(this.agentCoreExecutionRole).add('department', 'technology');
     cdk.Tags.of(this.agentCoreExecutionRole).add('costCenter', 'ai-agents');
@@ -946,6 +957,9 @@ export class AgentPlatformStack extends cdk.Stack {
           // reference rather than embedding the secret value keeps rotation
           // seamless — new microVMs just re-read the latest version.
           BEDROCK_API_KEY_SECRET_ARN: this.bedrockApiKeySecret.secretArn,
+          // Skill Builder Lambda ARN — used by the psd-skills-meta skill
+          // to trigger async scan + promotion of agent-authored drafts.
+          SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:psd-agent-skill-builder-${environment}`,
           // Identity marker — surfaced in container startup log so we can
           // verify the running code matches the deployed image manifest.
           BUILD_MARKER: imageDigest

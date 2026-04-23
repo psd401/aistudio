@@ -1,0 +1,11 @@
+{
+  "name": "psd-skills-meta",
+  "version": "1.0.0",
+  "description": "OpenClaw meta-skill: skill catalog search, on-demand loading, and agent-authored skill drafting for PSD agent platform",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/client-rds-data": "^3.0.0",
+    "@aws-sdk/client-lambda": "^3.0.0"
+  }
+}
