@@ -56,6 +56,7 @@ import { HttpRequest } from '@smithy/protocol-http';
 import { Context as LambdaContext, SQSBatchResponse, SQSEvent, SQSRecord } from 'aws-lambda';
 import * as crypto from 'crypto';
 import * as chatPkg from '@googleapis/chat';
+import { Agent as UndiciAgent, fetch as undiciFetch } from 'undici';
 import { classifyTopic, isPrivateMessage, isoWeek, type Topic } from './topic-classifier';
 
 // ---------------------------------------------------------------------------
@@ -112,6 +113,29 @@ const agentCoreSigner = new SignatureV4({
   region: process.env.AWS_REGION || 'us-east-1',
   credentials: agentCoreCredentials,
   sha256: Sha256,
+});
+
+// Custom undici dispatcher for AgentCore invocations.
+//
+// Node's global `fetch()` is backed by undici with DEFAULT headersTimeout
+// and bodyTimeout of 300_000 ms (5 min). We observed 5-min `fetch failed`
+// errors after deploys: the Lambda timeout is 15 min, but undici was
+// bailing at 5 min while the agent microVM was still streaming tokens
+// (logs show GLM-5 still producing output >1 min after the Lambda
+// already gave up). The Lambda timeout bump in #888 / commit 5a10b361
+// was necessary but not sufficient.
+//
+// Set both knobs to 14 minutes so undici never fires before the Lambda
+// timeout, and the Lambda's own 15-min ceiling is the only upper bound.
+// `connectTimeout` stays at 10s because establishing the TLS handshake
+// should always be fast; if it isn't, that's a real networking problem.
+const AGENTCORE_TIMEOUT_MS = 14 * 60 * 1000;
+const agentCoreDispatcher = new UndiciAgent({
+  headersTimeout: AGENTCORE_TIMEOUT_MS,
+  bodyTimeout: AGENTCORE_TIMEOUT_MS,
+  connectTimeout: 10_000,
+  keepAliveTimeout: 30_000,
+  keepAliveMaxTimeout: 60_000,
 });
 
 // ---------------------------------------------------------------------------
@@ -774,12 +798,18 @@ async function invokeAgentCore(
 
     const signed = await agentCoreSigner.sign(request);
 
-    const response = await fetch(
+    // Use undici fetch with a custom dispatcher so the 14-min timeout takes
+    // effect. The global `fetch()` ignores per-call dispatcher options in
+    // some Node versions and has defaulted headers/bodyTimeout = 5 min,
+    // which caused deploy-time 5-min `fetch failed` observed in prod logs
+    // even though the Lambda timeout is 15 min.
+    const response = await undiciFetch(
       `https://${signed.hostname}${signed.path}`,
       {
         method: signed.method,
         headers: signed.headers as Record<string, string>,
         body: signed.body as string,
+        dispatcher: agentCoreDispatcher,
       }
     );
 
