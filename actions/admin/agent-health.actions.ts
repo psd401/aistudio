@@ -44,6 +44,9 @@ export async function getAgentHealthSummary(
   try {
     await requireRole("administrator")
 
+    // Clamp limit to prevent unbounded result sets (CWE-400)
+    const safeLim = Math.min(Math.max(1, limit), 500)
+
     // Use the latest snapshot_date that exists. If the Lambda hasn't run yet
     // the table is empty and the response is zeros.
     const latest = await executeQuery(
@@ -86,7 +89,7 @@ export async function getAgentHealthSummary(
           .from(agentHealthSnapshots)
           .where(eq(agentHealthSnapshots.snapshotDate, sql`${snapshotDate}::date`))
           .orderBy(desc(agentHealthSnapshots.workspaceBytes))
-          .limit(limit),
+          .limit(safeLim),
       "agentHealth.rows"
     )
 
@@ -156,6 +159,9 @@ export async function getAgentPatterns(
   try {
     await requireRole("administrator")
 
+    // Clamp weeks to prevent unbounded result sets (CWE-400)
+    const safeWeeks = Math.min(Math.max(1, weeks), 52)
+
     const rows = await executeQuery(
       (db) =>
         db
@@ -172,7 +178,7 @@ export async function getAgentPatterns(
           })
           .from(agentPatterns)
           .orderBy(desc(agentPatterns.week), desc(agentPatterns.signalCount))
-          .limit(weeks * 20),
+          .limit(safeWeeks * 20),
       "agentPatterns.list"
     )
 

@@ -79,6 +79,18 @@ export interface FeedbackItem {
 // Helpers
 // ============================================
 
+const VALID_RANGES: TelemetryDateRange[] = ["7d", "30d", "90d", "all"]
+
+/** Validate range parameter at runtime — server actions receive untyped JSON (CWE-20) */
+function sanitizeRange(range: TelemetryDateRange): TelemetryDateRange {
+  return VALID_RANGES.includes(range) ? range : "30d"
+}
+
+/** Clamp a numeric limit to prevent unbounded result sets (CWE-400) */
+function clampLimit(limit: number, max: number): number {
+  return Math.min(Math.max(1, limit), max)
+}
+
 function getDateRangeThreshold(range: TelemetryDateRange): Date | null {
   switch (range) {
     case "7d":
@@ -109,7 +121,8 @@ export async function getAgentTelemetryStats(
   try {
     await requireRole("administrator")
 
-    const threshold = getDateRangeThreshold(range)
+    const safeRange = sanitizeRange(range)
+    const threshold = getDateRangeThreshold(safeRange)
     const threshold24h = getDateThreshold(1)
     const threshold7d = getDateThreshold(7)
 
@@ -246,7 +259,7 @@ export async function getAgentTelemetryStats(
     }
 
     timer({ status: "success" })
-    log.info("Agent telemetry stats loaded", { range })
+    log.info("Agent telemetry stats loaded", { range: safeRange })
     return createSuccess(stats)
   } catch (error) {
     timer({ status: "error" })
@@ -271,7 +284,8 @@ export async function getAgentDailyUsage(
   try {
     await requireRole("administrator")
 
-    const threshold = getDateRangeThreshold(range)
+    const safeRange = sanitizeRange(range)
+    const threshold = getDateRangeThreshold(safeRange)
 
     const rows = await executeQuery(
       (db) =>
@@ -305,7 +319,7 @@ export async function getAgentDailyUsage(
     }))
 
     timer({ status: "success" })
-    log.info("Agent daily usage loaded", { range, points: data.length })
+    log.info("Agent daily usage loaded", { range: safeRange, points: data.length })
     return createSuccess(data)
   } catch (error) {
     timer({ status: "error" })
@@ -330,7 +344,8 @@ export async function getAgentModelBreakdown(
   try {
     await requireRole("administrator")
 
-    const threshold = getDateRangeThreshold(range)
+    const safeRange = sanitizeRange(range)
+    const threshold = getDateRangeThreshold(safeRange)
 
     const rows = await executeQuery(
       (db) =>
@@ -360,7 +375,7 @@ export async function getAgentModelBreakdown(
     }))
 
     timer({ status: "success" })
-    log.info("Agent model breakdown loaded", { range, models: data.length })
+    log.info("Agent model breakdown loaded", { range: safeRange, models: data.length })
     return createSuccess(data)
   } catch (error) {
     timer({ status: "error" })
@@ -386,7 +401,9 @@ export async function getAgentUserUsage(
   try {
     await requireRole("administrator")
 
-    const threshold = getDateRangeThreshold(range)
+    const safeRange = sanitizeRange(range)
+    const safeLim = clampLimit(limit, 200)
+    const threshold = getDateRangeThreshold(safeRange)
 
     const rows = await executeQuery(
       (db) =>
@@ -407,7 +424,7 @@ export async function getAgentUserUsage(
           )
           .groupBy(agentMessages.userId)
           .orderBy(desc(count(agentMessages.id)))
-          .limit(limit),
+          .limit(safeLim),
       "agentTelemetry.userUsage"
     )
 
@@ -420,7 +437,7 @@ export async function getAgentUserUsage(
     }))
 
     timer({ status: "success" })
-    log.info("Agent user usage loaded", { range, users: data.length })
+    log.info("Agent user usage loaded", { range: safeRange, users: data.length })
     return createSuccess(data)
   } catch (error) {
     timer({ status: "error" })
@@ -446,7 +463,9 @@ export async function getAgentGuardrailEvents(
   try {
     await requireRole("administrator")
 
-    const threshold = getDateRangeThreshold(range)
+    const safeRange = sanitizeRange(range)
+    const safeLim = clampLimit(limit, 200)
+    const threshold = getDateRangeThreshold(safeRange)
 
     const rows = await executeQuery(
       (db) =>
@@ -468,7 +487,7 @@ export async function getAgentGuardrailEvents(
               : eq(agentMessages.guardrailBlocked, true)
           )
           .orderBy(desc(agentMessages.createdAt))
-          .limit(limit),
+          .limit(safeLim),
       "agentTelemetry.guardrailEvents"
     )
 
@@ -482,7 +501,7 @@ export async function getAgentGuardrailEvents(
 
     timer({ status: "success" })
     log.info("Agent guardrail events loaded", {
-      range,
+      range: safeRange,
       events: data.length,
     })
     return createSuccess(data)
@@ -510,7 +529,9 @@ export async function getAgentFeedbackList(
   try {
     await requireRole("administrator")
 
-    const threshold = getDateRangeThreshold(range)
+    const safeRange = sanitizeRange(range)
+    const safeLim = clampLimit(limit, 200)
+    const threshold = getDateRangeThreshold(safeRange)
 
     const rows = await executeQuery(
       (db) =>
@@ -529,7 +550,7 @@ export async function getAgentFeedbackList(
               : undefined
           )
           .orderBy(desc(agentFeedback.createdAt))
-          .limit(limit),
+          .limit(safeLim),
       "agentTelemetry.feedbackList"
     )
 
@@ -543,7 +564,7 @@ export async function getAgentFeedbackList(
 
     timer({ status: "success" })
     log.info("Agent feedback list loaded", {
-      range,
+      range: safeRange,
       items: data.length,
     })
     return createSuccess(data)

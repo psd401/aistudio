@@ -39,6 +39,13 @@ function isoDate(d: Date): string {
   return d.toISOString().slice(0, 10)
 }
 
+const VALID_COST_RANGES: CostDateRange[] = ["7d", "30d", "90d"]
+
+/** Validate range parameter at runtime — server actions receive untyped JSON (CWE-20) */
+function sanitizeCostRange(range: CostDateRange): CostDateRange {
+  return VALID_COST_RANGES.includes(range) ? range : "30d"
+}
+
 function rangeToDays(range: CostDateRange): number {
   return range === "7d" ? 7 : range === "30d" ? 30 : 90
 }
@@ -81,7 +88,8 @@ export async function getAgentCostSummary(
   try {
     await requireRole("administrator")
 
-    const days = rangeToDays(range)
+    const safeRange = sanitizeCostRange(range)
+    const days = rangeToDays(safeRange)
     const end = new Date()
     const start = new Date(end.getTime() - days * 86400000)
 
@@ -129,7 +137,7 @@ export async function getAgentCostSummary(
     }
 
     timer({ status: "success" })
-    log.info("Agent cost summary loaded", { range, totalUsd, days })
+    log.info("Agent cost summary loaded", { range: safeRange, totalUsd, days })
     return createSuccess(summary)
   } catch (error) {
     timer({ status: "error" })
