@@ -87,12 +87,12 @@ export const toolStatusEnum = pgEnum("tool_status", [
   "disabled",
 ]);
 
-/**
- * Agent skill scope for the skills platform
- * Used in: psd_agent_skills.scope
- * Part of Epic #910
- *
- * Note: Canonical enum definition lives in agent-skills.ts (pgEnum in table file).
- * This re-export is for the barrel pattern only.
- */
-export { agentSkillScopeEnum, agentSkillScanStatusEnum } from "./tables/agent-skills";
+// Agent skill scope/scan_status are NOT PostgreSQL enums — they are
+// VARCHAR + CHECK constraints (see migration 070). Re-exported constants
+// for runtime validation.
+export {
+  AGENT_SKILL_SCOPES,
+  AGENT_SKILL_SCAN_STATUSES,
+  type AgentSkillScope,
+  type AgentSkillScanStatus,
+} from "./tables/agent-skills";
