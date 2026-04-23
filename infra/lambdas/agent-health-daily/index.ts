@@ -165,20 +165,26 @@ async function scanWorkspace(prefix: string): Promise<WorkspaceStats> {
 }
 
 /**
- * Build a map of email → last activity date by joining agent_messages.user_id
- * back to users.email. In the agent platform, user_id is the Cognito sub
- * (UUID), not an email — the join through the users table resolves this.
+ * Build a map of email → last activity date.
+ *
+ * In the agent platform specifically, `agent_messages.user_id` is the
+ * user's email address (varchar), NOT a foreign-key id. This is the same
+ * convention the Router Lambda uses in logTelemetry() — see
+ * infra/lambdas/agent-router/index.ts (`userId: senderEmail`). A previous
+ * revision of this function joined through `users.id`, which failed at
+ * runtime with "operator does not exist: integer = character varying"
+ * because `users.id` is INTEGER.
  */
 async function lastActivityByEmail(sql: postgres.Sql): Promise<Map<string, Date>> {
   const rows = (await sql`
-    SELECT u.email, MAX(m.created_at) AS last_at
-    FROM agent_messages m
-    INNER JOIN users u ON u.id = m.user_id
-    GROUP BY u.email
-  `) as unknown as Array<{ email: string; last_at: Date | string }>;
+    SELECT user_id, MAX(created_at) AS last_at
+    FROM agent_messages
+    GROUP BY user_id
+  `) as unknown as Array<{ user_id: string; last_at: Date | string }>;
   const map = new Map<string, Date>();
   for (const row of rows) {
-    map.set(row.email.toLowerCase(), new Date(row.last_at));
+    if (!row.user_id) continue;
+    map.set(row.user_id.toLowerCase(), new Date(row.last_at));
   }
   return map;
 }
