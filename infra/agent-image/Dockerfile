@@ -9,11 +9,28 @@
 #   docker tag psd-agent-base:latest <ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com/psd-agent-base-dev:<TAG>
 #   docker push <ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com/psd-agent-base-dev:<TAG>
 
-# Pin base image version for reproducible builds. Update tag periodically.
-# BLOCKER(prod): Pin to digest (@sha256:...) before deploying to production.
-# :latest is a supply-chain risk — any upstream change is pulled silently.
-# Track: Once OpenClaw publishes a stable semver release, pin to that tag+digest.
-FROM ghcr.io/openclaw/openclaw:latest
+# Pin base image to a known-good immutable digest.
+#
+# Pinned to OpenClaw 2026.4.20 — the release that introduced kimi-k2.6 defaults
+# and the last upstream we've verified end-to-end with the Morning Brief flow.
+#
+# Why pinned: `:latest` floated forward through 2026.4.21–2026.4.23 and broke
+# our agent runtime on 2026-04-22 and again 2026-04-24. Failure modes seen:
+#   - Morning Brief cron: harness adapter "chat deadline expired" (no final event)
+#   - Today (4/24): ENOENT on rename to '/home/node/.openclaw/.openclaw/workspace-state.json'
+#     — matches OpenClaw upstream regression tracked in issues #44783, #45765 and
+#     unmerged fix PRs #53326, #44806. Nested `.openclaw/.openclaw/` path is the
+#     same bug the PR author cites verbatim.
+#
+# Multi-arch index digest (Docker picks arm64 at build time via --platform):
+#   ghcr.io/openclaw/openclaw:2026.4.20
+#   index: sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
+#   arm64: sha256:437aed68f7ef7abce04dd17e5e1d80f92378111ea5db72ce54fdd517843cca79
+#
+# DO NOT revert to `:latest` or bump without a clean end-to-end test that
+# includes the Morning Brief payload — a trivial "respond OK" prompt can mask
+# session-completion regressions. Track upstream PRs before moving forward.
+FROM ghcr.io/openclaw/openclaw@sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
 
 # Switch to root for installations
 USER root
