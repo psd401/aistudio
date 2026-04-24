@@ -20,7 +20,6 @@ import {
 import { Badge } from "@/components/ui/badge"
 import {
   getAgentWorkspaceTokens,
-  type WorkspaceTokenRow,
   type WorkspaceTokenListResult,
 } from "@/actions/admin/agent-workspace.actions"
 

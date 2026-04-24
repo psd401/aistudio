@@ -16,35 +16,35 @@ export function OAuthCallbackClient() {
   const processedRef = useRef<string | null>(null)
 
   useEffect(() => {
-    // Handle Google OAuth error responses
-    if (errorParam) {
-      setResult({
-        success: false,
-        error: `Google denied the authorization request: ${errorParam}`,
-      })
-      setLoading(false)
-      return
-    }
-
-    if (!code || !state) {
-      setResult({
-        success: false,
-        error: "Missing authorization code or state parameter.",
-      })
-      setLoading(false)
-      return
-    }
-
-    // Prevent double-processing (parameterized route guard)
-    const key = `${code}:${state}`
-    if (processedRef.current === key) {
-      return
-    }
-    processedRef.current = key
-
     async function processCallback() {
+      // Handle Google OAuth error responses
+      if (errorParam) {
+        setResult({
+          success: false,
+          error: `Google denied the authorization request: ${errorParam}`,
+        })
+        setLoading(false)
+        return
+      }
+
+      if (!code || !state) {
+        setResult({
+          success: false,
+          error: "Missing authorization code or state parameter.",
+        })
+        setLoading(false)
+        return
+      }
+
+      // Prevent double-processing (parameterized route guard)
+      const key = `${code}:${state}`
+      if (processedRef.current === key) {
+        return
+      }
+      processedRef.current = key
+
       setLoading(true)
-      const response = await handleOAuthCallback(code!, state!)
+      const response = await handleOAuthCallback(code, state)
       if (response.isSuccess && response.data) {
         setResult(response.data)
       } else {

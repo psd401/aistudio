@@ -17,7 +17,7 @@ import { executeQuery } from "@/lib/db/drizzle-client"
 import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-workspace-consent-nonces"
 import { sql } from "drizzle-orm"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
-import { randomBytes } from "crypto"
+import { randomBytes } from "node:crypto"
 
 const log = createLogger({ module: "agent-consent-link" })
 

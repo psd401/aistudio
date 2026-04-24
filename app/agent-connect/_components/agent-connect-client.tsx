@@ -14,21 +14,21 @@ export function AgentConnectClient() {
   const verifiedTokenRef = useRef<string | null>(null)
 
   useEffect(() => {
-    if (!token) {
-      setResult({ valid: false, error: "No consent token provided." })
-      setLoading(false)
-      return
-    }
-
-    // Prevent double-verification on the same token (parameterized route guard)
-    if (verifiedTokenRef.current === token) {
-      return
-    }
-    verifiedTokenRef.current = token
-
     async function verify() {
+      if (!token) {
+        setResult({ valid: false, error: "No consent token provided." })
+        setLoading(false)
+        return
+      }
+
+      // Prevent double-verification on the same token (parameterized route guard)
+      if (verifiedTokenRef.current === token) {
+        return
+      }
+      verifiedTokenRef.current = token
+
       setLoading(true)
-      const response = await verifyConsentAndGetOAuthUrl(token!)
+      const response = await verifyConsentAndGetOAuthUrl(token)
       if (response.isSuccess && response.data) {
         setResult(response.data)
       } else {
