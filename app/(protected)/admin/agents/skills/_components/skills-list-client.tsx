@@ -19,7 +19,6 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
-import { PageBranding } from "@/components/ui/page-branding"
 import { IconRefresh, IconTrash } from "@tabler/icons-react"
 import {
   getAgentSkills,
@@ -109,13 +108,7 @@ export function SkillsListClient() {
   }
 
   return (
-    <div className="space-y-6 p-6">
-      <div>
-        <PageBranding />
-        <h1 className="text-2xl font-bold">Agent Skills</h1>
-        <p className="text-muted-foreground text-sm">Manage agent skills across all scopes</p>
-      </div>
-
+    <div className="space-y-4">
       <div className="flex items-center gap-4">
         <Select value={scopeFilter} onValueChange={setScopeFilter}>
           <SelectTrigger className="w-[180px]">

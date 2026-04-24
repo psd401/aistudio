@@ -23,6 +23,8 @@ import { AgentFeedbackTable } from "./agent-feedback-table"
 import { AgentHealthTable } from "./agent-health-table"
 import { AgentCostView } from "./agent-cost-view"
 import { AgentPatternsTable } from "./agent-patterns-table"
+import { SkillsListClient } from "../skills/_components/skills-list-client"
+import { CredentialsClient } from "../credentials/_components/credentials-client"
 
 import {
   getAgentTelemetryStats,
@@ -59,6 +61,8 @@ type DashboardTab =
   | "health"
   | "cost"
   | "patterns"
+  | "skills"
+  | "credentials"
 
 /**
  * Map telemetry date range to Cost Explorer range.
@@ -153,6 +157,10 @@ function buildLoaders(
         ctx.showError("patterns", r.message)
       }
     },
+    // Skills and credentials tabs are self-contained — their client components
+    // handle their own loading. No work needed from the dashboard loader.
+    skills: async () => {},
+    credentials: async () => {},
   }
 }
 
@@ -250,6 +258,8 @@ function DashboardTabs({
         <TabsTrigger value="safety">Safety</TabsTrigger>
         <TabsTrigger value="patterns">Patterns</TabsTrigger>
         <TabsTrigger value="feedback">Feedback</TabsTrigger>
+        <TabsTrigger value="skills">Skills</TabsTrigger>
+        <TabsTrigger value="credentials">Credentials</TabsTrigger>
       </TabsList>
 
       <TabsContent value="usage" className="mt-4 space-y-6">
@@ -284,6 +294,14 @@ function DashboardTabs({
 
       <TabsContent value="patterns" className="mt-4">
         <AgentPatternsTable data={patterns} loading={tabLoading} />
+      </TabsContent>
+
+      <TabsContent value="skills" className="mt-4">
+        <SkillsListClient />
+      </TabsContent>
+
+      <TabsContent value="credentials" className="mt-4">
+        <CredentialsClient />
       </TabsContent>
     </Tabs>
   )
