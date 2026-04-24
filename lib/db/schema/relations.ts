@@ -95,6 +95,9 @@ import { graphEdges } from "./tables/graph-edges";
 import { apiKeys } from "./tables/api-keys";
 import { apiKeyUsage } from "./tables/api-key-usage";
 
+// Agent Workspace Integration
+import { psdAgentWorkspaceTokens } from "./tables/agent-workspace-tokens";
+
 // ============================================
 // User Relations
 // ============================================
@@ -132,6 +135,11 @@ export const usersRelations = relations(users, ({ one, many }) => ({
   preferences: one(nexusUserPreferences, {
     fields: [users.id],
     references: [nexusUserPreferences.userId],
+  }),
+  // One-to-one with workspace tokens (#912)
+  workspaceToken: one(psdAgentWorkspaceTokens, {
+    fields: [users.id],
+    references: [psdAgentWorkspaceTokens.ownerUserId],
   }),
 }));
 
@@ -813,5 +821,16 @@ export const apiKeyUsageRelations = relations(apiKeyUsage, ({ one }) => ({
   apiKey: one(apiKeys, {
     fields: [apiKeyUsage.apiKeyId],
     references: [apiKeys.id],
+  }),
+}));
+
+// ============================================
+// Agent Workspace Integration (#912)
+// ============================================
+
+export const agentWorkspaceTokensRelations = relations(psdAgentWorkspaceTokens, ({ one }) => ({
+  owner: one(users, {
+    fields: [psdAgentWorkspaceTokens.ownerUserId],
+    references: [users.id],
   }),
 }));
