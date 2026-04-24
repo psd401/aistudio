@@ -11,6 +11,12 @@ import { createLogger } from "@/lib/logger"
 
 const log = createLogger({ module: "agent-workspace-secrets" })
 
+/**
+ * Strict email validation — prevents path traversal when email is interpolated
+ * into Secrets Manager paths (e.g. psd-agent-creds/{env}/user/{email}/...).
+ */
+const SAFE_EMAIL_RE = /^[\w%+.-]+@[\d.A-Za-z-]+\.[A-Za-z]{2,}$/
+
 export interface WorkspaceTokenData {
   refresh_token: string
   granted_scopes: string[]
@@ -26,6 +32,10 @@ export async function storeRefreshToken(
   ownerEmail: string,
   tokenData: WorkspaceTokenData
 ): Promise<void> {
+  if (!SAFE_EMAIL_RE.test(ownerEmail)) {
+    throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)
+  }
+
   const environment = process.env.DEPLOY_ENVIRONMENT ?? "dev"
   const secretId = `psd-agent-creds/${environment}/user/${ownerEmail}/google-workspace`
 

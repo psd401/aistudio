@@ -246,14 +246,18 @@ when { resource.name like "psd-agent-creds/*/user/*" };
 
 // Allow reading shared Google Workspace OAuth client credentials and the
 // internal API key used by the psd-workspace skill to call the consent-link
-// endpoint. Scoped to the psd-agent/{env}/ namespace (distinct from
-// psd-agent-creds/, which holds per-user refresh tokens). Issue #912.
+// endpoint. Scoped to specific secret name patterns under psd-agent/{env}/
+// (distinct from psd-agent-creds/, which holds per-user refresh tokens).
+// Issue #912.
 permit(
   principal,
   action == Action::"secret.read",
   resource
 )
-when { resource.name like "psd-agent/*" };
+when {
+  resource.name like "psd-agent/*/google-oauth-client" ||
+  resource.name like "psd-agent/*/internal-api-key"
+};
 
 // Block agents from writing secrets — provisioning is admin-only
 forbid(

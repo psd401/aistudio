@@ -17,9 +17,15 @@ import { executeQuery } from "@/lib/db/drizzle-client"
 import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-workspace-consent-nonces"
 import { sql } from "drizzle-orm"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
-import { randomBytes } from "node:crypto"
+import { randomBytes, timingSafeEqual } from "node:crypto"
 
 const log = createLogger({ module: "agent-consent-link" })
+
+/**
+ * Strict email validation — prevents path traversal in Secrets Manager paths
+ * where ownerEmail is interpolated (e.g. psd-agent-creds/{env}/user/{email}/...).
+ */
+const SAFE_EMAIL_RE = /^[\w%+.-]+@[\d.A-Za-z-]+\.[A-Za-z]{2,}$/
 
 /**
  * Validate the shared secret from the Authorization header.
@@ -40,7 +46,10 @@ function validateSharedSecret(request: NextRequest): boolean {
     return false
   }
 
-  return token === expectedSecret
+  const a = Buffer.from(token)
+  const b = Buffer.from(expectedSecret)
+  if (a.length !== b.length) return false
+  return timingSafeEqual(a, b)
 }
 
 /**
@@ -89,7 +98,7 @@ export async function POST(request: NextRequest) {
   }
 
   const { ownerEmail } = body
-  if (!ownerEmail || typeof ownerEmail !== "string" || !ownerEmail.includes("@")) {
+  if (!ownerEmail || typeof ownerEmail !== "string" || !SAFE_EMAIL_RE.test(ownerEmail)) {
     return NextResponse.json(
       { error: "ownerEmail is required and must be a valid email" },
       { status: 400 }

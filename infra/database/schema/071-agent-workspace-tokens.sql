@@ -49,6 +49,9 @@ CREATE INDEX IF NOT EXISTS idx_agent_workspace_tokens_status
 
 -- psd_agent_workspace_consent_nonces: one-time-use nonces for consent links.
 -- Each nonce is consumed when the OAuth callback completes, preventing replay.
+-- CLEANUP: Nonces accumulate indefinitely. A scheduled job should periodically
+-- run: DELETE FROM psd_agent_workspace_consent_nonces WHERE created_at < now() - interval '7 days';
+-- The idx_agent_workspace_nonces_cleanup index exists to make that efficient.
 CREATE TABLE IF NOT EXISTS psd_agent_workspace_consent_nonces (
     nonce       VARCHAR(64) PRIMARY KEY,
     owner_email VARCHAR(255) NOT NULL,

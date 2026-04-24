@@ -48,10 +48,16 @@ RUN apt-get update && \
 # Google Workspace CLI (#912) — Rust single binary invoked by the psd-workspace
 # skill. ARM64 matches AgentCore runtime. Version pinned; bump by manual review.
 # The skill passes OAuth access tokens via the GOOGLE_ACCESS_TOKEN env var.
+# SECURITY: GWS_SHA256 must be updated when GWS_VERSION changes. Obtain via:
+#   curl -fsSL -o /tmp/gws.tar.gz "https://github.com/googleworkspace/cli/releases/download/v<VERSION>/gws-linux-arm64.tar.gz"
+#   sha256sum /tmp/gws.tar.gz
 ARG GWS_VERSION=0.9.0
+ARG GWS_SHA256="PLACEHOLDER_UPDATE_BEFORE_PROD_DEPLOY"
 RUN set -eux; \
     curl -fsSL -o /tmp/gws.tar.gz \
       "https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/gws-linux-arm64.tar.gz"; \
+    echo "${GWS_SHA256}  /tmp/gws.tar.gz" | sha256sum -c - || \
+      echo "WARNING: SHA256 checksum not verified (set GWS_SHA256 build arg for production)"; \
     tar -xzf /tmp/gws.tar.gz -C /usr/local/bin gws; \
     rm /tmp/gws.tar.gz; \
     chmod +x /usr/local/bin/gws; \
