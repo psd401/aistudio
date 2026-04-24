@@ -119,7 +119,7 @@ export async function POST(request: NextRequest) {
     log.warn("Consent link rate limit exceeded", { ownerEmail, requestId })
     return NextResponse.json(
       { error: "Rate limit exceeded — max 5 links per hour per user" },
-      { status: 429 }
+      { status: 429, headers: { "Retry-After": "3600" } }
     )
   }
 

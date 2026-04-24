@@ -31,7 +31,10 @@ const WORKSPACE_SECRET_PATH = (email) =>
 
 const smClient = new SecretsManagerClient({ region: REGION });
 
-const SAFE_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Strict email regex — must stay in sync with lib/agent-workspace/validation.ts.
+// The email is interpolated into a Secrets Manager path, so we reject anything
+// beyond alphanumeric + common email chars to prevent path manipulation.
+const SAFE_EMAIL_RE = /^[\w%+.-]+@[\d.A-Za-z-]+\.[A-Za-z]{2,}$/;
 
 function fail(message, code = 1) {
   process.stderr.write(`psd-workspace: ${message}\n`);

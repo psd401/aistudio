@@ -57,6 +57,11 @@ RUN set -eux; \
     curl -fsSL -o /tmp/gws.tar.gz \
       "https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/gws-linux-arm64.tar.gz"; \
     if [ "${GWS_SHA256}" = "PLACEHOLDER_UPDATE_BEFORE_PROD_DEPLOY" ]; then \
+      if [ "${ENVIRONMENT:-dev}" != "dev" ]; then \
+        echo "ERROR: GWS_SHA256 is still a placeholder — refusing to build for ${ENVIRONMENT}"; \
+        echo "Compute the real hash: sha256sum /tmp/gws.tar.gz"; \
+        exit 1; \
+      fi; \
       echo "WARNING: GWS_SHA256 is a placeholder — skipping checksum verification (dev only)"; \
       echo "For production, compute the hash: sha256sum /tmp/gws.tar.gz"; \
     else \

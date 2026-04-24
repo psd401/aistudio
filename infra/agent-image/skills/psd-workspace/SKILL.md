@@ -35,6 +35,11 @@ node /home/node/.openclaw/skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
   --command "calendar.create-event --title 'Standup' --start '2026-05-01T09:00' --duration 30"
 
+# Double quotes work too — useful when the argument contains apostrophes
+node /home/node/.openclaw/skills/psd-workspace/run.js \
+  --user hagelk@psd401.net \
+  --command 'gmail.send --to principal@psd401.net --subject "Tomorrow\'s meeting" --body "See you there"'
+
 # The full gws command surface
 node /home/node/.openclaw/skills/psd-workspace/run.js --user hagelk@psd401.net --command "--help"
 ```

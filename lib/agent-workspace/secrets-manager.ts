@@ -47,10 +47,8 @@ export async function storeRefreshToken(
   const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
   const secretId = `psd-agent-creds/${environment}/user/${ownerEmail}/google-workspace`
 
-  // Skip Secrets Manager in local development. NODE_ENV check is the primary
-  // gate; the localhost check is a belt-and-suspenders fallback for edge cases
-  // where NODE_ENV may not be set.
-  if (process.env.NODE_ENV === "development" || process.env.DATABASE_URL?.includes("localhost")) {
+  // Skip Secrets Manager in local development.
+  if (process.env.NODE_ENV === "development") {
     log.info("Local dev mode — skipping Secrets Manager write", { secretId })
     return
   }

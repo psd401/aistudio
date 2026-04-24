@@ -118,7 +118,11 @@ export async function getAgentWorkspaceTokens(): Promise<ActionState<WorkspaceTo
     })
 
     const totalStaff = staffCountResult?.count ?? 0
-    statusCounts.notConnected = Math.max(0, totalStaff - tokens.length)
+    // "Not connected" = staff who have no active or pending token.
+    // Using tokens.length would include revoked entries, undercounting
+    // the actual number of staff without a working connection.
+    const connectedOrPending = statusCounts.active + statusCounts.pending
+    statusCounts.notConnected = Math.max(0, totalStaff - connectedOrPending)
 
     timer({ status: "success" })
     log.info("Workspace tokens listed", { count: tokens.length, staffTotal: totalStaff })

@@ -60,6 +60,11 @@ export async function verifyConsentAndGetOAuthUrl(
       })
     }
 
+    // This unconsumed check is a UX guard, not a security gate. Actual replay
+    // prevention happens in handleOAuthCallback where the nonce is atomically
+    // consumed via UPDATE … WHERE consumed_at IS NULL. Between this read and
+    // that atomic write, concurrent tabs could both see the nonce as valid and
+    // redirect to Google — but only one callback will successfully consume it.
     const [nonceRow] = await executeQuery(
       (db) =>
         db
@@ -185,6 +190,15 @@ async function exchangeAndStore(
   }
 
   const grantedScopes = tokenData.scope?.split(" ") ?? []
+
+  // Guard: reject if Google returned an empty scope list (misconfigured OAuth client)
+  if (grantedScopes.length === 0) {
+    log.error("Google returned an empty scope list", sanitizeForLogging({ ownerEmail: payload.sub }))
+    return {
+      success: false,
+      error: "Google returned no permissions. The OAuth client may be misconfigured. Contact IT.",
+    }
+  }
 
   // Validate that Google granted the minimum required scopes
   const REQUIRED_SCOPES = [
