@@ -95,11 +95,13 @@ function validateSafeName(name, label) {
 }
 
 /**
- * Escape SQL ILIKE wildcard characters (%, _) in a search string
- * so user input is matched literally.
+ * Escape SQL ILIKE wildcard characters (%, _) in a search string so user
+ * input is matched literally. Uses `!` as the escape character (chosen
+ * because PostgreSQL's ESCAPE clause requires exactly one character and
+ * `'\\'` is two chars under standard_conforming_strings).
  */
 function escapeIlikeWildcards(str) {
-  return str.replace(/[%_\\]/g, (ch) => '\\' + ch);
+  return str.replace(/[%_!]/g, (ch) => '!' + ch);
 }
 
 /**
@@ -122,7 +124,7 @@ async function searchSkills(query, userEmail) {
           WHERE (scope = 'shared' OR (scope = 'user' AND owner_user_id IN (
             SELECT id FROM users WHERE email = :email
           )))
-          AND (name ILIKE '%' || :q || '%' ESCAPE '\\' OR summary ILIKE '%' || :q || '%' ESCAPE '\\')
+          AND (name ILIKE '%' || :q || '%' ESCAPE '!' OR summary ILIKE '%' || :q || '%' ESCAPE '!')
           AND scan_status = 'clean'
           ORDER BY name
           LIMIT 20`,
