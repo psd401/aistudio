@@ -144,6 +144,15 @@ export * from "./tables/agent-health-snapshots";
 export * from "./tables/agent-patterns";
 
 // ============================================
+// Agent Skills Platform (#910)
+// ============================================
+export * from "./tables/agent-skills";
+export * from "./tables/agent-skill-audit";
+export * from "./tables/agent-credentials-audit";
+export * from "./tables/agent-credential-reads";
+export * from "./tables/agent-credential-requests";
+
+// ============================================
 // API Keys (External API Platform)
 // ============================================
 export * from "./tables/api-keys";

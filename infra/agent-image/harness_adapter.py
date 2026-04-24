@@ -100,26 +100,40 @@ class OpenClawAdapter(HarnessAdapter):
                         "OPENCLAW_NO_RESPAWN": "1",
                     },
                 )
-                self._wait_for_ready(timeout=30)
+                self._wait_for_ready(timeout=60)
                 # Give the gateway time to fully initialize WebSocket handling
                 time.sleep(3)
 
-    def _wait_for_ready(self, timeout: int = 30) -> None:
-        """Poll the gateway health endpoint until ready."""
-        import urllib.request
-        import urllib.error
+    def _wait_for_ready(self, timeout: int = 60) -> None:
+        """Poll the gateway health endpoint until ready.
 
-        url = f"http://127.0.0.1:{self._gateway_port}/health"
+        Accept ANY HTTP response (including 401/403) as "ready" — newer
+        OpenClaw builds protect /health behind the gateway auth token,
+        returning 401 unauthenticated. Since we only need to know the
+        server is up and answering, any HTTP status is sufficient proof.
+        A connection error (ECONNREFUSED) still means the gateway isn't
+        listening yet and we keep polling.
+        """
+        import http.client
+        import socket
+
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                req = urllib.request.Request(url)
-                with urllib.request.urlopen(req, timeout=2) as resp:
-                    if resp.status == 200:
-                        self._ready = True
-                        logger.info("OpenClaw gateway is ready")
-                        return
-            except (urllib.error.URLError, OSError):
+                conn = http.client.HTTPConnection(
+                    "127.0.0.1", self._gateway_port, timeout=2,
+                )
+                conn.request("GET", "/health")
+                resp = conn.getresponse()
+                _ = resp.read()  # drain
+                conn.close()
+                # Any HTTP response means the gateway is accepting connections.
+                self._ready = True
+                logger.info(
+                    "OpenClaw gateway is ready (health status=%d)", resp.status,
+                )
+                return
+            except (ConnectionRefusedError, socket.timeout, OSError):
                 pass
             time.sleep(1)
 

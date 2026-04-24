@@ -64,6 +64,7 @@
     "066-agent-operations-tables.sql",
     "067-agent-schedules-columns.sql",
     "068-agent-cross-user-invocation.sql",
-    "069-agent-telemetry-phase2.sql"
+    "069-agent-telemetry-phase2.sql",
+    "070-agent-skills-platform.sql"
   ]
 }

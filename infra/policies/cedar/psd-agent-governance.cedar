@@ -181,6 +181,76 @@ forbid(
 )
 when { resource.url like "*synergy*" };
 
+// =========================================================================
+// SKILLS PLATFORM — scope-based execution policies (#910)
+// =========================================================================
+
+// Allow execution of core image skills (baked into container)
+permit(
+  principal,
+  action == Action::"skill.execute",
+  resource
+)
+when { resource.path like "/home/node/.openclaw/skills/*" };
+
+// Allow execution of shared skills (district-wide, admin-reviewed)
+permit(
+  principal,
+  action == Action::"skill.execute",
+  resource
+)
+when { resource.path like "/home/node/.openclaw/skills-shared/*" };
+
+// Allow execution of user's own approved skills
+permit(
+  principal,
+  action == Action::"skill.execute",
+  resource
+)
+when { resource.path like "/home/node/.openclaw/skills-user/*" };
+
+// Block execution of draft skills unless explicitly permitted
+forbid(
+  principal,
+  action == Action::"skill.execute",
+  resource
+)
+when { resource.path like "/home/node/.openclaw/skills-drafts/*" };
+
+// =========================================================================
+// CREDENTIALS — scope-based access policies (#910)
+// =========================================================================
+
+// Allow reading shared (district-wide) credentials
+permit(
+  principal,
+  action == Action::"secret.read",
+  resource
+)
+when { resource.name like "psd-agent-creds/*/shared/*" };
+
+// Allow reading user's own per-user credentials.
+// Note: Cedar's `like` operator does not support variable interpolation
+// for principal attributes. Per-user isolation is enforced at the application
+// layer: the psd-credentials skill resolves the caller's email (injected by
+// AgentCore) to the correct Secrets Manager path. IAM tag-based conditions
+// will provide hard enforcement once secret provisioning supports tagging
+// (see agent-platform-stack.ts SECURITY NOTE). This Cedar permit serves as
+// a documentation marker and coarse-grained authorization.
+permit(
+  principal,
+  action == Action::"secret.read",
+  resource
+)
+when { resource.name like "psd-agent-creds/*/user/*" };
+
+// Block agents from writing secrets — provisioning is admin-only
+forbid(
+  principal,
+  action == Action::"secret.write",
+  resource
+);
+
 // Block installing external skills from non-approved sources.
 // The bucket naming convention is psd-agents-{env}-{accountId}.
 // Restrict to that pattern — a bare "psd-agents-*" would match attacker-created

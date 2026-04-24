@@ -342,6 +342,7 @@ export class ServiceRoleFactory {
             "s3:GetObject",
             "s3:GetObjectVersion",
             "s3:PutObject",
+            "s3:PutObjectTagging",
             "s3:DeleteObject",
           ],
           resources: bucketArns.map((arn) => `${arn}/*`),

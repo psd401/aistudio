@@ -1,0 +1,10 @@
+{
+  "name": "psd-credentials",
+  "version": "1.0.0",
+  "description": "OpenClaw skill: safe credential access via AWS Secrets Manager for PSD agent platform",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.0.0",
+    "@aws-sdk/client-rds-data": "^3.0.0"
+  }
+}

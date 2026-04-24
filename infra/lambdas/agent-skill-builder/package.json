@@ -1,0 +1,19 @@
+{
+  "name": "agent-skill-builder",
+  "version": "1.0.0",
+  "description": "Agent Skill Builder Lambda — scans drafted skills for secrets/PII/npm vulnerabilities, runs npm install in sandbox, and promotes to approved S3 prefix. Part of #910 Agent Skills Platform.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "prebuild": "rm -rf dist"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.0.0",
+    "@aws-sdk/client-rds-data": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}
