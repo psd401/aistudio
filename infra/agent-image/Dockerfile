@@ -147,6 +147,22 @@ RUN cd /home/node/.openclaw/skills/psd-credentials && npm install --omit=dev --n
 RUN cd /home/node/.openclaw/skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund
 RUN cd /home/node/.openclaw/skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
 
+# Upstream gws-* skills (#912) — per-API SKILL.md guidance for Gmail, Drive,
+# Docs, Sheets, Slides, Forms, Tasks, Calendar, Chat, Meet, Contacts, etc.
+# Pinned to the same tag as the gws binary above so skill instructions never
+# drift from the CLI surface actually installed.
+#
+# git is required for the shallow clone. apt-get already added
+# ca-certificates+curl above; git is not in the base image.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/* && \
+    git clone --depth 1 --branch "v${GWS_VERSION}" \
+      https://github.com/googleworkspace/cli /tmp/gws-repo && \
+    cp -r /tmp/gws-repo/skills/gws-* /home/node/.openclaw/skills/ && \
+    rm -rf /tmp/gws-repo && \
+    apt-get purge -y git && apt-get autoremove -y
+
 # Defense-in-depth: disable OpenClaw's cron subsystem via both config
 # (cron.enabled: false in openclaw.json) and env var (OPENCLAW_SKIP_CRON=1)
 # per the official docs. Heartbeat is disabled via
