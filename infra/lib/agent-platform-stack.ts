@@ -1236,10 +1236,17 @@ export class AgentPlatformStack extends cdk.Stack {
         },
       ),
       memorySize: config.compute.lambdaMemory,
-      // Single-user invocation: AgentCore response times observed up to 3 min
-      // under load. 5 min gives ~2x headroom for tail latency. No batching or
-      // stagger — one Scheduler event = one user = one Lambda invocation.
-      timeout: cdk.Duration.minutes(5),
+      // Single-user invocation: AgentCore response times for a cron fire
+      // combine (a) per-deploy cold-start which includes an S3 workspace
+      // restore — post-parallelization typically 30–90s for a 10k-file
+      // workspace; (b) OpenClaw gateway startup ~5s; (c) model + tool
+      // time for the actual scheduled task (research briefs run 2–5 min).
+      // Previous 5-minute timeout hit ceiling on every cold fire and
+      // silently prevented scheduled delivery. 14 min is just under
+      // Lambda's hard 15-min ceiling and 1 min under the harness
+      // adapter's internal 13-min chat deadline, so if the Lambda is
+      // about to time out the adapter has already returned something.
+      timeout: cdk.Duration.minutes(14),
       architecture: lambda.Architecture.ARM_64,
       role: this.cronLambdaRole,
       logGroup: cronLogGroup,
