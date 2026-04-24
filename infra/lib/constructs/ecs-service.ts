@@ -296,6 +296,31 @@ export class EcsServiceConstruct extends Construct {
                 props.internalApiSecretArn, // Include internal API secret
               ],
             }),
+            // Agent Workspace OAuth secrets — read+write for refresh tokens (#912),
+            // read for OAuth client credentials and internal API key.
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'secretsmanager:GetSecretValue',
+                'secretsmanager:DescribeSecret',
+                'secretsmanager:PutSecretValue',
+                'secretsmanager:CreateSecret',
+                'secretsmanager:TagResource',
+              ],
+              resources: [
+                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent-creds/${environment}/*`,
+              ],
+            }),
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'secretsmanager:GetSecretValue',
+                'secretsmanager:DescribeSecret',
+              ],
+              resources: [
+                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent/${environment}/*`,
+              ],
+            }),
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
               actions: [
