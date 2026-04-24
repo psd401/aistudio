@@ -310,6 +310,9 @@ const prodAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatfo
   // Dev uses 'DRAFT' (default) for rapid iteration.
   guardrailVersion: '1',
   alertEmail,
+  // Next.js app URL — used by the psd-workspace skill (#912) to call the
+  // consent-link API. Prod ECS lives at the root baseDomain (no subdomain).
+  appBaseUrl: baseDomain ? `https://${baseDomain}` : undefined,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 prodAgentPlatformStack.addDependency(prodDbStack);

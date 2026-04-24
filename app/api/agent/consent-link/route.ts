@@ -18,7 +18,7 @@ import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-wor
 import { sql } from "drizzle-orm"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto"
+import { randomBytes, timingSafeEqual } from "node:crypto"
 
 const log = createLogger({ module: "agent-consent-link" })
 
@@ -41,13 +41,18 @@ function validateSharedSecret(request: NextRequest): boolean {
     return false
   }
 
-  // Compare fixed-size HMAC digests instead of raw values to avoid
-  // leaking the expected secret's length via the buffer-length check
-  // that timingSafeEqual requires.
-  const hmacKey = "consent-link-auth"
-  const a = createHmac("sha256", hmacKey).update(token).digest()
-  const b = createHmac("sha256", hmacKey).update(expectedSecret).digest()
-  return timingSafeEqual(a, b)
+  // Constant-time comparison. The expected secret is a CDK-generated
+  // 48-char token with fixed length per environment, so a length mismatch
+  // does not leak anything an attacker couldn't already derive from the
+  // deploy manifest. On mismatch we still run timingSafeEqual against
+  // itself so the code path has stable wall-clock regardless of outcome.
+  const tokenBuf = Buffer.from(token)
+  const expectedBuf = Buffer.from(expectedSecret)
+  if (tokenBuf.length !== expectedBuf.length) {
+    timingSafeEqual(expectedBuf, expectedBuf)
+    return false
+  }
+  return timingSafeEqual(tokenBuf, expectedBuf)
 }
 
 /**

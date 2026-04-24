@@ -205,13 +205,10 @@ async function exchangeAndStore(
     }
   }
 
-  await storeRefreshToken(payload.sub, {
-    refresh_token: tokenData.refresh_token,
-    granted_scopes: grantedScopes,
-    obtained_at: new Date().toISOString(),
-  })
-
-  // Upsert workspace token manifest
+  // Look up the user BEFORE writing the refresh token to Secrets Manager.
+  // Writing the secret first would leave the agent able to use Workspace
+  // access (the skill reads Secrets Manager directly) while the admin
+  // manifest row is missing — a silent split-brain.
   const [user] = await executeQuery(
     (db) => db.select({ id: users.id }).from(users).where(eq(users.email, payload.sub)).limit(1),
     "findUserByEmail"
@@ -224,6 +221,12 @@ async function exchangeAndStore(
       error: "Your account was not found in the system. Contact IT for assistance.",
     }
   }
+
+  await storeRefreshToken(payload.sub, {
+    refresh_token: tokenData.refresh_token,
+    granted_scopes: grantedScopes,
+    obtained_at: new Date().toISOString(),
+  })
 
   // Construct the Secrets Manager ARN for the token manifest.
   // This mirrors the path used by storeRefreshToken in secrets-manager.ts.

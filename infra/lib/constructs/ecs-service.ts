@@ -520,6 +520,10 @@ export class EcsServiceConstruct extends Construct {
         NEXT_PUBLIC_AWS_REGION: cdk.Stack.of(this).region,
         PORT: '3000',
         ENVIRONMENT: environment,
+        // Used by server actions to build Secrets Manager ARNs for the
+        // workspace token manifest (#912). Without this the manifest
+        // secrets_manager_arn column is stored as null.
+        AWS_ACCOUNT_ID: cdk.Stack.of(this).account,
         // Memory optimization - 70% of container memory
         NODE_OPTIONS: `--max-old-space-size=${Math.floor(memory * 0.7)}`,
         // Application configuration
@@ -591,6 +595,34 @@ export class EcsServiceConstruct extends Construct {
         DB_PASSWORD: ecs.Secret.fromSecretsManager(
           secretsmanager.Secret.fromSecretCompleteArn(this, 'DbSecretPassword', props.rdsSecretArn),
           'password'
+        ),
+        // Agent Workspace OAuth (#912) — consent-link shared secret and
+        // Google OAuth client credentials. Secret names are stable across
+        // deploys (owned by AgentPlatformStack); look them up by name to
+        // avoid a cross-stack import cycle. IAM read access to
+        // psd-agent/${env}/* is already granted above.
+        AGENT_INTERNAL_API_KEY: ecs.Secret.fromSecretsManager(
+          secretsmanager.Secret.fromSecretNameV2(
+            this,
+            'AgentInternalApiKeySecretRef',
+            `psd-agent/${environment}/internal-api-key`
+          )
+        ),
+        GOOGLE_WORKSPACE_CLIENT_ID: ecs.Secret.fromSecretsManager(
+          secretsmanager.Secret.fromSecretNameV2(
+            this,
+            'GoogleWorkspaceClientSecretRef',
+            `psd-agent/${environment}/google-oauth-client`
+          ),
+          'client_id'
+        ),
+        GOOGLE_WORKSPACE_CLIENT_SECRET: ecs.Secret.fromSecretsManager(
+          secretsmanager.Secret.fromSecretNameV2(
+            this,
+            'GoogleWorkspaceClientSecretRef2',
+            `psd-agent/${environment}/google-oauth-client`
+          ),
+          'client_secret'
         ),
       },
       // Security: Read-only root filesystem with tmpfs mounts for writable directories
