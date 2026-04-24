@@ -63,28 +63,20 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 # Google Workspace CLI (#912) — Rust single binary invoked by the psd-workspace
-# skill. ARM64 matches AgentCore runtime. Version pinned; bump by manual review.
-# The skill passes OAuth access tokens via the GOOGLE_ACCESS_TOKEN env var.
-# SECURITY: GWS_SHA256 must be updated when GWS_VERSION changes. Obtain via:
-#   curl -fsSL -o /tmp/gws.tar.gz "https://github.com/googleworkspace/cli/releases/download/v<VERSION>/gws-linux-arm64.tar.gz"
-#   sha256sum /tmp/gws.tar.gz
-ARG GWS_VERSION=0.9.0
-ARG GWS_SHA256="PLACEHOLDER_UPDATE_BEFORE_PROD_DEPLOY"
+# skill. ARM64 matches AgentCore runtime. The skill passes OAuth access tokens
+# via the GOOGLE_ACCESS_TOKEN env var.
+#
+# Pinned version + SHA256 come from the official release's .sha256 sidecar.
+# When bumping, run:
+#   curl -sL "https://github.com/googleworkspace/cli/releases/download/v<VER>/google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz.sha256"
+# and paste the hex digest into GWS_SHA256 below.
+ARG GWS_VERSION=0.22.5
+ARG GWS_SHA256=94490295d9580e1e88574e715a0a162991747d12d62f8c7b8dcc8268b6c1cea0
 RUN set -eux; \
     curl -fsSL -o /tmp/gws.tar.gz \
-      "https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/gws-linux-arm64.tar.gz"; \
-    if [ "${GWS_SHA256}" = "PLACEHOLDER_UPDATE_BEFORE_PROD_DEPLOY" ]; then \
-      if [ "${ENVIRONMENT:-dev}" != "dev" ]; then \
-        echo "ERROR: GWS_SHA256 is still a placeholder — refusing to build for ${ENVIRONMENT}"; \
-        echo "Compute the real hash: sha256sum /tmp/gws.tar.gz"; \
-        exit 1; \
-      fi; \
-      echo "WARNING: GWS_SHA256 is a placeholder — skipping checksum verification (dev only)"; \
-      echo "For production, compute the hash: sha256sum /tmp/gws.tar.gz"; \
-    else \
-      echo "${GWS_SHA256}  /tmp/gws.tar.gz" | sha256sum -c -; \
-    fi; \
-    tar -xzf /tmp/gws.tar.gz -C /usr/local/bin gws; \
+      "https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz"; \
+    echo "${GWS_SHA256}  /tmp/gws.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/gws.tar.gz -C /usr/local/bin --strip-components=0 ./gws; \
     rm /tmp/gws.tar.gz; \
     chmod +x /usr/local/bin/gws; \
     gws --version
