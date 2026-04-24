@@ -42,8 +42,20 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
 # The exact Python version depends on the base image's distro packages.
 # Verify with: docker run --rm psd-agent-base:latest python3 --version
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip python3-venv tzdata && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv tzdata ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
+
+# Google Workspace CLI (#912) — Rust single binary invoked by the psd-workspace
+# skill. ARM64 matches AgentCore runtime. Version pinned; bump by manual review.
+# The skill passes OAuth access tokens via the GOOGLE_ACCESS_TOKEN env var.
+ARG GWS_VERSION=0.9.0
+RUN set -eux; \
+    curl -fsSL -o /tmp/gws.tar.gz \
+      "https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/gws-linux-arm64.tar.gz"; \
+    tar -xzf /tmp/gws.tar.gz -C /usr/local/bin gws; \
+    rm /tmp/gws.tar.gz; \
+    chmod +x /usr/local/bin/gws; \
+    gws --version
 
 # Install the bedrock-agentcore SDK in a virtual environment (avoids --break-system-packages)
 # BLOCKER(prod): Verify the "bedrock-agentcore" PyPI package is the official AWS SDK
@@ -109,6 +121,7 @@ COPY skills /home/node/.openclaw/skills
 RUN cd /home/node/.openclaw/skills/psd-schedules && npm install --omit=dev --no-audit --no-fund
 RUN cd /home/node/.openclaw/skills/psd-credentials && npm install --omit=dev --no-audit --no-fund
 RUN cd /home/node/.openclaw/skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund
+RUN cd /home/node/.openclaw/skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
 
 # Defense-in-depth: disable OpenClaw's cron subsystem via both config
 # (cron.enabled: false in openclaw.json) and env var (OPENCLAW_SKIP_CRON=1)

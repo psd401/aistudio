@@ -56,6 +56,13 @@ export interface AgentPlatformStackProps extends cdk.StackProps {
   alertEmail?: string;
   /** Comma-separated email domains allowed to send messages (default: 'psd401.net') */
   allowedDomains?: string;
+  /**
+   * Base URL of the Next.js app (e.g. `https://dev.aistudio.psd401.ai`).
+   * Used by the psd-workspace skill (#912) to call /api/agent/consent-link.
+   * Optional for backwards-compat; the skill fails closed with a clear error
+   * if the caller tries to mint a consent URL without this set.
+   */
+  appBaseUrl?: string;
 }
 
 /**
@@ -1020,6 +1027,10 @@ export class AgentPlatformStack extends cdk.Stack {
           // Google Workspace OAuth secrets — used by psd-workspace skill (#912)
           GOOGLE_OAUTH_CLIENT_SECRET_ID: googleOAuthClientSecret.secretName,
           AGENT_INTERNAL_API_KEY_SECRET_ID: agentInternalApiKeySecret.secretName,
+          // Base URL the psd-workspace skill uses to reach /api/agent/consent-link.
+          // Empty string is harmless at runtime — the skill fails with an
+          // explicit error message if a consent URL is ever actually required.
+          APP_BASE_URL: props.appBaseUrl ?? '',
           // Identity marker — surfaced in container startup log so we can
           // verify the running code matches the deployed image manifest.
           BUILD_MARKER: imageDigest

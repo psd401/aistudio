@@ -166,6 +166,9 @@ const devAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatfor
   guardrailArn: devGuardrailsStack.guardrail.attrGuardrailArn,
   guardrailId: devGuardrailsStack.guardrail.attrGuardrailId,
   alertEmail,
+  // Next.js app URL — used by the psd-workspace skill (#912) to call the
+  // consent-link API. Dev lives at dev.<baseDomain> (e.g. dev.aistudio.psd401.ai).
+  appBaseUrl: baseDomain ? `https://dev.${baseDomain}` : undefined,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 devAgentPlatformStack.addDependency(devDbStack);
