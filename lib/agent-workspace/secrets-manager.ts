@@ -18,6 +18,17 @@ export interface WorkspaceTokenData {
   obtained_at: string
 }
 
+// Module-scoped client — reuses the HTTP connection pool across calls.
+// Lazily initialized on first non-dev invocation.
+let _smClient: InstanceType<typeof import("@aws-sdk/client-secrets-manager").SecretsManagerClient> | null = null
+
+async function getSecretsManagerClient() {
+  if (_smClient) return _smClient
+  const { SecretsManagerClient } = await import("@aws-sdk/client-secrets-manager")
+  _smClient = new SecretsManagerClient({})
+  return _smClient
+}
+
 /**
  * Store the refresh token in AWS Secrets Manager.
  * In production, this writes to psd-agent-creds/{env}/user/{email}/google-workspace.
@@ -45,12 +56,11 @@ export async function storeRefreshToken(
   }
 
   const {
-    SecretsManagerClient,
     PutSecretValueCommand,
     CreateSecretCommand,
     ResourceNotFoundException,
   } = await import("@aws-sdk/client-secrets-manager")
-  const client = new SecretsManagerClient({})
+  const client = await getSecretsManagerClient()
   const secretString = JSON.stringify(tokenData)
 
   try {

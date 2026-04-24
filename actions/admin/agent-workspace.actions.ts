@@ -6,15 +6,17 @@ import type { ActionState } from "@/types"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { desc, eq, sql } from "drizzle-orm"
-import { psdAgentWorkspaceTokens } from "@/lib/db/schema/tables/agent-workspace-tokens"
+import { psdAgentWorkspaceTokens, type WorkspaceTokenStatus } from "@/lib/db/schema/tables/agent-workspace-tokens"
 import { users } from "@/lib/db/schema/tables/users"
+import { userRoles } from "@/lib/db/schema/tables/user-roles"
+import { roles } from "@/lib/db/schema/tables/roles"
 
 export interface WorkspaceTokenRow {
   id: number
   ownerUserId: number
   ownerEmail: string
   agentEmail: string
-  status: string
+  status: WorkspaceTokenStatus
   grantedScopes: string[]
   createdAt: string
   lastVerifiedAt: string | null
@@ -47,28 +49,42 @@ export async function getAgentWorkspaceTokens(): Promise<ActionState<WorkspaceTo
   try {
     await requireRole("administrator")
 
-    const rows = await executeQuery(
-      (db) =>
-        db
-          .select({
-            id: psdAgentWorkspaceTokens.id,
-            ownerUserId: psdAgentWorkspaceTokens.ownerUserId,
-            ownerEmail: psdAgentWorkspaceTokens.ownerEmail,
-            agentEmail: psdAgentWorkspaceTokens.agentEmail,
-            status: psdAgentWorkspaceTokens.status,
-            grantedScopes: psdAgentWorkspaceTokens.grantedScopes,
-            createdAt: psdAgentWorkspaceTokens.createdAt,
-            lastVerifiedAt: psdAgentWorkspaceTokens.lastVerifiedAt,
-            revokedAt: psdAgentWorkspaceTokens.revokedAt,
-            updatedAt: psdAgentWorkspaceTokens.updatedAt,
-            ownerFirstName: users.firstName,
-            ownerLastName: users.lastName,
-          })
-          .from(psdAgentWorkspaceTokens)
-          .leftJoin(users, eq(psdAgentWorkspaceTokens.ownerUserId, users.id))
-          .orderBy(desc(psdAgentWorkspaceTokens.updatedAt)),
-      "getAgentWorkspaceTokens"
-    )
+    // Fetch tokens and staff user count in a single round trip.
+    // "Not connected" is scoped to staff-role users only — students never
+    // have agent accounts, so including them inflates the denominator.
+    const [rows, [staffCountResult]] = await Promise.all([
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              id: psdAgentWorkspaceTokens.id,
+              ownerUserId: psdAgentWorkspaceTokens.ownerUserId,
+              ownerEmail: psdAgentWorkspaceTokens.ownerEmail,
+              agentEmail: psdAgentWorkspaceTokens.agentEmail,
+              status: psdAgentWorkspaceTokens.status,
+              grantedScopes: psdAgentWorkspaceTokens.grantedScopes,
+              createdAt: psdAgentWorkspaceTokens.createdAt,
+              lastVerifiedAt: psdAgentWorkspaceTokens.lastVerifiedAt,
+              revokedAt: psdAgentWorkspaceTokens.revokedAt,
+              updatedAt: psdAgentWorkspaceTokens.updatedAt,
+              ownerFirstName: users.firstName,
+              ownerLastName: users.lastName,
+            })
+            .from(psdAgentWorkspaceTokens)
+            .leftJoin(users, eq(psdAgentWorkspaceTokens.ownerUserId, users.id))
+            .orderBy(desc(psdAgentWorkspaceTokens.updatedAt)),
+        "getAgentWorkspaceTokens"
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .select({ count: sql<number>`count(DISTINCT ${userRoles.userId})::int` })
+            .from(userRoles)
+            .innerJoin(roles, eq(userRoles.roleId, roles.id))
+            .where(sql`${roles.name} IN ('administrator', 'staff')`),
+        "countStaffUsers"
+      ),
+    ])
 
     // Count statuses
     const statusCounts = {
@@ -80,7 +96,7 @@ export async function getAgentWorkspaceTokens(): Promise<ActionState<WorkspaceTo
     }
 
     const tokens: WorkspaceTokenRow[] = rows.map((row) => {
-      const status = row.status ?? "pending"
+      const status: WorkspaceTokenStatus = row.status ?? "pending"
       if (status in statusCounts) {
         statusCounts[status as keyof typeof statusCounts]++
       }
@@ -101,19 +117,11 @@ export async function getAgentWorkspaceTokens(): Promise<ActionState<WorkspaceTo
       }
     })
 
-    // Count total users to calculate "not connected"
-    const [userCountResult] = await executeQuery(
-      (db) =>
-        db
-          .select({ count: sql<number>`count(*)::int` })
-          .from(users),
-      "countTotalUsers"
-    )
-    const totalUsers = userCountResult?.count ?? 0
-    statusCounts.notConnected = Math.max(0, totalUsers - tokens.length)
+    const totalStaff = staffCountResult?.count ?? 0
+    statusCounts.notConnected = Math.max(0, totalStaff - tokens.length)
 
     timer({ status: "success" })
-    log.info("Workspace tokens listed", { count: tokens.length })
+    log.info("Workspace tokens listed", { count: tokens.length, staffTotal: totalStaff })
 
     return createSuccess({
       tokens,

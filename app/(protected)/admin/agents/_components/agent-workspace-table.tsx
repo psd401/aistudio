@@ -22,8 +22,9 @@ import {
   getAgentWorkspaceTokens,
   type WorkspaceTokenListResult,
 } from "@/actions/admin/agent-workspace.actions"
+import type { WorkspaceTokenStatus } from "@/lib/db/schema/tables/agent-workspace-tokens"
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status }: { status: WorkspaceTokenStatus }) {
   const variants: Record<string, "default" | "secondary" | "destructive" | "outline"> = {
     active: "default",
     pending: "secondary",

@@ -1,6 +1,6 @@
 "use server"
 
-import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
+import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, createSuccess } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
 import { executeQuery } from "@/lib/db/drizzle-client"
@@ -108,10 +108,10 @@ export async function verifyConsentAndGetOAuthUrl(
     })
 
     timer({ status: "success" })
-    log.info("Consent token verified, OAuth URL generated", {
+    log.info("Consent token verified, OAuth URL generated", sanitizeForLogging({
       ownerEmail: payload.sub,
       agentEmail: payload.agent,
-    })
+    }))
 
     return createSuccess({
       valid: true,
@@ -168,7 +168,7 @@ async function exchangeAndStore(
   if (!tokenResponse.ok) {
     const errorBody = await tokenResponse.text()
     log.error("Google token exchange failed", { status: tokenResponse.status, body: errorBody })
-    return { success: false, error: "Failed to exchange authorization code with Google. Try again or contact IT." }
+    return { success: false, error: "Failed to exchange authorization code with Google. Please request a new consent link from your agent and try again." }
   }
 
   const tokenData = (await tokenResponse.json()) as {
@@ -180,7 +180,7 @@ async function exchangeAndStore(
   }
 
   if (!tokenData.refresh_token) {
-    log.error("Google did not return a refresh token", { ownerEmail: payload.sub })
+    log.error("Google did not return a refresh token", sanitizeForLogging({ ownerEmail: payload.sub }))
     return { success: false, error: "Google did not return a refresh token. Ensure the OAuth client is configured as Internal + In Production." }
   }
 
@@ -194,11 +194,11 @@ async function exchangeAndStore(
   ]
   const missingScopes = REQUIRED_SCOPES.filter((s) => !grantedScopes.includes(s))
   if (missingScopes.length > 0) {
-    log.error("Google granted insufficient scopes", {
+    log.error("Google granted insufficient scopes", sanitizeForLogging({
       ownerEmail: payload.sub,
       missing: missingScopes,
       granted: grantedScopes,
-    })
+    }))
     return {
       success: false,
       error: `Google did not grant all required permissions. Missing: ${missingScopes.join(", ")}. Please try again and accept all requested permissions.`,
@@ -218,12 +218,22 @@ async function exchangeAndStore(
   )
 
   if (!user) {
-    log.error("User not found in database — cannot store workspace token manifest", { ownerEmail: payload.sub })
+    log.error("User not found in database — cannot store workspace token manifest", sanitizeForLogging({ ownerEmail: payload.sub }))
     return {
       success: false,
       error: "Your account was not found in the system. Contact IT for assistance.",
     }
   }
+
+  // Construct the Secrets Manager ARN for the token manifest.
+  // This mirrors the path used by storeRefreshToken in secrets-manager.ts.
+  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+  const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-west-2"
+  const accountId = process.env.AWS_ACCOUNT_ID ?? ""
+  const secretName = `psd-agent-creds/${environment}/user/${payload.sub}/google-workspace`
+  const secretsManagerArn = accountId
+    ? `arn:aws:secretsmanager:${region}:${accountId}:secret:${secretName}`
+    : null
 
   await executeQuery(
     (db) =>
@@ -235,6 +245,7 @@ async function exchangeAndStore(
           agentEmail: payload.agent,
           status: "active",
           grantedScopes,
+          secretsManagerArn,
           lastVerifiedAt: new Date(),
           updatedAt: new Date(),
         })
@@ -244,6 +255,7 @@ async function exchangeAndStore(
             agentEmail: payload.agent,
             status: "active",
             grantedScopes,
+            secretsManagerArn,
             lastVerifiedAt: new Date(),
             revokedAt: null,
             updatedAt: new Date(),
@@ -297,7 +309,7 @@ export async function handleOAuthCallback(
 
     timer({ status: result.success ? "success" : "error" })
     if (result.success) {
-      log.info("OAuth callback completed", { ownerEmail: payload.sub, agentEmail: payload.agent })
+      log.info("OAuth callback completed", sanitizeForLogging({ ownerEmail: payload.sub, agentEmail: payload.agent }))
     }
     return createSuccess(result)
   } catch (error) {

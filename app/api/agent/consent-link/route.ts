@@ -18,7 +18,7 @@ import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-wor
 import { sql } from "drizzle-orm"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
-import { randomBytes, timingSafeEqual } from "node:crypto"
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto"
 
 const log = createLogger({ module: "agent-consent-link" })
 
@@ -41,9 +41,12 @@ function validateSharedSecret(request: NextRequest): boolean {
     return false
   }
 
-  const a = Buffer.from(token)
-  const b = Buffer.from(expectedSecret)
-  if (a.length !== b.length) return false
+  // Compare fixed-size HMAC digests instead of raw values to avoid
+  // leaking the expected secret's length via the buffer-length check
+  // that timingSafeEqual requires.
+  const hmacKey = "consent-link-auth"
+  const a = createHmac("sha256", hmacKey).update(token).digest()
+  const b = createHmac("sha256", hmacKey).update(expectedSecret).digest()
   return timingSafeEqual(a, b)
 }
 
