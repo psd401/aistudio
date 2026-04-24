@@ -19,6 +19,12 @@ const PUBLIC_PATHS = [
   "/api/oauth", // OAuth2/OIDC endpoints handle their own auth (#686)
   "/.well-known", // OIDC discovery document (#686)
   "/auth/error",
+  // Agent Workspace OAuth bootstrap (#912) — all three endpoints authenticate
+  // via signed tokens in the URL or a Bearer shared-secret from the agent
+  // runtime. A PSD session is not required (and would be impossible on the
+  // first visit, since consent happens outside the PSD web session).
+  "/api/agent", // Agent-to-Next.js endpoints use Bearer shared-secret auth
+  "/agent-connect", // Consent page and OAuth callback — signed JWT in URL
 ];
 
 export default authMiddleware((req) => {
