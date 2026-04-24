@@ -17,15 +17,10 @@ import { executeQuery } from "@/lib/db/drizzle-client"
 import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-workspace-consent-nonces"
 import { sql } from "drizzle-orm"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
+import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
 import { randomBytes, timingSafeEqual } from "node:crypto"
 
 const log = createLogger({ module: "agent-consent-link" })
-
-/**
- * Strict email validation — prevents path traversal in Secrets Manager paths
- * where ownerEmail is interpolated (e.g. psd-agent-creds/{env}/user/{email}/...).
- */
-const SAFE_EMAIL_RE = /^[\w%+.-]+@[\d.A-Za-z-]+\.[A-Za-z]{2,}$/
 
 /**
  * Validate the shared secret from the Authorization header.
@@ -55,6 +50,11 @@ function validateSharedSecret(request: NextRequest): boolean {
 /**
  * Rate-limit check: max 5 consent links per ownerEmail per hour.
  * Returns true if under the limit.
+ *
+ * NOTE: This check is not atomic — two concurrent requests could both read
+ * count=4, pass the check, and both insert (yielding 6 links). This is
+ * acceptable for a low-traffic agent consent endpoint. For strict enforcement,
+ * consider a SELECT ... FOR UPDATE lock or a Redis counter.
  */
 async function checkRateLimit(ownerEmail: string): Promise<boolean> {
   const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000)

@@ -10,6 +10,7 @@ import { psdAgentWorkspaceTokens } from "@/lib/db/schema/tables/agent-workspace-
 import { users } from "@/lib/db/schema/tables/users"
 import { verifyConsentToken } from "@/lib/agent-workspace/consent-token"
 import { storeRefreshToken } from "@/lib/agent-workspace/secrets-manager"
+import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 
 /**
  * Google OAuth scopes requested at bootstrap. All scopes are requested
@@ -93,7 +94,7 @@ export async function verifyConsentAndGetOAuthUrl(
       })
     }
 
-    const baseUrl = process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"
+    const baseUrl = getIssuerUrl()
     const redirectUri = `${baseUrl}/agent-connect/callback`
     const params = new URLSearchParams({
       client_id: clientId,
@@ -150,7 +151,7 @@ async function exchangeAndStore(
     return { success: false, error: "Google Workspace OAuth is not configured. Contact IT." }
   }
 
-  const baseUrl = process.env.AUTH_URL ?? process.env.NEXTAUTH_URL ?? process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"
+  const baseUrl = getIssuerUrl()
   const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
@@ -161,6 +162,7 @@ async function exchangeAndStore(
       redirect_uri: `${baseUrl}/agent-connect/callback`,
       grant_type: "authorization_code",
     }),
+    signal: AbortSignal.timeout(10_000),
   })
 
   if (!tokenResponse.ok) {
@@ -184,6 +186,25 @@ async function exchangeAndStore(
 
   const grantedScopes = tokenData.scope?.split(" ") ?? []
 
+  // Validate that Google granted the minimum required scopes
+  const REQUIRED_SCOPES = [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/drive",
+  ]
+  const missingScopes = REQUIRED_SCOPES.filter((s) => !grantedScopes.includes(s))
+  if (missingScopes.length > 0) {
+    log.error("Google granted insufficient scopes", {
+      ownerEmail: payload.sub,
+      missing: missingScopes,
+      granted: grantedScopes,
+    })
+    return {
+      success: false,
+      error: `Google did not grant all required permissions. Missing: ${missingScopes.join(", ")}. Please try again and accept all requested permissions.`,
+    }
+  }
+
   await storeRefreshToken(payload.sub, {
     refresh_token: tokenData.refresh_token,
     granted_scopes: grantedScopes,
@@ -196,36 +217,40 @@ async function exchangeAndStore(
     "findUserByEmail"
   )
 
-  if (user) {
-    await executeQuery(
-      (db) =>
-        db
-          .insert(psdAgentWorkspaceTokens)
-          .values({
-            ownerUserId: user.id,
-            ownerEmail: payload.sub,
+  if (!user) {
+    log.error("User not found in database — cannot store workspace token manifest", { ownerEmail: payload.sub })
+    return {
+      success: false,
+      error: "Your account was not found in the system. Contact IT for assistance.",
+    }
+  }
+
+  await executeQuery(
+    (db) =>
+      db
+        .insert(psdAgentWorkspaceTokens)
+        .values({
+          ownerUserId: user.id,
+          ownerEmail: payload.sub,
+          agentEmail: payload.agent,
+          status: "active",
+          grantedScopes,
+          lastVerifiedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .onConflictDoUpdate({
+          target: psdAgentWorkspaceTokens.ownerUserId,
+          set: {
             agentEmail: payload.agent,
             status: "active",
             grantedScopes,
             lastVerifiedAt: new Date(),
+            revokedAt: null,
             updatedAt: new Date(),
-          })
-          .onConflictDoUpdate({
-            target: psdAgentWorkspaceTokens.ownerUserId,
-            set: {
-              agentEmail: payload.agent,
-              status: "active",
-              grantedScopes,
-              lastVerifiedAt: new Date(),
-              revokedAt: null,
-              updatedAt: new Date(),
-            },
-          }),
-      "upsertWorkspaceToken"
-    )
-  } else {
-    log.warn("User not found in database for workspace token upsert", { ownerEmail: payload.sub })
-  }
+          },
+        }),
+    "upsertWorkspaceToken"
+  )
 
   return { success: true, ownerEmail: payload.sub, agentEmail: payload.agent }
 }

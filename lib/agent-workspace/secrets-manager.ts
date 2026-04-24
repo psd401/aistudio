@@ -8,14 +8,9 @@
  */
 
 import { createLogger } from "@/lib/logger"
+import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
 
 const log = createLogger({ module: "agent-workspace-secrets" })
-
-/**
- * Strict email validation — prevents path traversal when email is interpolated
- * into Secrets Manager paths (e.g. psd-agent-creds/{env}/user/{email}/...).
- */
-const SAFE_EMAIL_RE = /^[\w%+.-]+@[\d.A-Za-z-]+\.[A-Za-z]{2,}$/
 
 export interface WorkspaceTokenData {
   refresh_token: string
@@ -36,43 +31,77 @@ export async function storeRefreshToken(
     throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)
   }
 
-  const environment = process.env.DEPLOY_ENVIRONMENT ?? "dev"
+  // ENVIRONMENT is the canonical env var set by the ECS task definition;
+  // DEPLOY_ENVIRONMENT is a legacy fallback.
+  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
   const secretId = `psd-agent-creds/${environment}/user/${ownerEmail}/google-workspace`
 
-  // Skip Secrets Manager in local development
-  if (process.env.DATABASE_URL?.includes("localhost")) {
+  // Skip Secrets Manager in local development. NODE_ENV check is the primary
+  // gate; the localhost check is a belt-and-suspenders fallback for edge cases
+  // where NODE_ENV may not be set.
+  if (process.env.NODE_ENV === "development" || process.env.DATABASE_URL?.includes("localhost")) {
     log.info("Local dev mode — skipping Secrets Manager write", { secretId })
     return
   }
 
-  const { SecretsManagerClient, PutSecretValueCommand, CreateSecretCommand, ResourceNotFoundException } =
-    await import("@aws-sdk/client-secrets-manager")
+  const {
+    SecretsManagerClient,
+    PutSecretValueCommand,
+    CreateSecretCommand,
+    ResourceNotFoundException,
+  } = await import("@aws-sdk/client-secrets-manager")
   const client = new SecretsManagerClient({})
+  const secretString = JSON.stringify(tokenData)
 
   try {
     await client.send(
       new PutSecretValueCommand({
         SecretId: secretId,
-        SecretString: JSON.stringify(tokenData),
+        SecretString: secretString,
       })
     )
     log.info("Refresh token stored in Secrets Manager", { secretId })
   } catch (error) {
-    // If the secret doesn't exist yet, create it
+    // If the secret doesn't exist yet, create it. Handle the race condition
+    // where two concurrent callbacks both see "not found" and both try to
+    // create — the loser gets ResourceExistsException and retries with Put.
     if (error instanceof ResourceNotFoundException) {
-      await client.send(
-        new CreateSecretCommand({
-          Name: secretId,
-          SecretString: JSON.stringify(tokenData),
-          Description: `Google Workspace refresh token for agent of ${ownerEmail}`,
-          Tags: [
-            { Key: "Environment", Value: environment },
-            { Key: "ManagedBy", Value: "aistudio" },
-            { Key: "OwnerEmail", Value: ownerEmail },
-          ],
-        })
-      )
-      log.info("Refresh token secret created in Secrets Manager", { secretId })
+      try {
+        await client.send(
+          new CreateSecretCommand({
+            Name: secretId,
+            SecretString: secretString,
+            Description: `Google Workspace refresh token for agent of ${ownerEmail}`,
+            Tags: [
+              { Key: "Environment", Value: environment },
+              { Key: "ManagedBy", Value: "aistudio" },
+              { Key: "OwnerEmail", Value: ownerEmail },
+            ],
+          })
+        )
+        log.info("Refresh token secret created in Secrets Manager", { secretId })
+      } catch (createError) {
+        // Concurrent first-write race: another request created the secret
+        // between our "not found" and our "create". Retry with PutSecretValue.
+        if (
+          createError instanceof Error &&
+          createError.name === "ResourceExistsException"
+        ) {
+          await client.send(
+            new PutSecretValueCommand({
+              SecretId: secretId,
+              SecretString: secretString,
+            })
+          )
+          log.info("Refresh token stored after concurrent secret creation", { secretId })
+        } else {
+          log.error("Failed to create refresh token secret in Secrets Manager", {
+            secretId,
+            error: createError instanceof Error ? createError.message : String(createError),
+          })
+          throw createError
+        }
+      }
     } else {
       log.error("Failed to store refresh token in Secrets Manager", {
         secretId,

@@ -29,13 +29,15 @@ export interface ConsentTokenPayload {
 const TOKEN_EXPIRY = "24h"
 
 /**
- * Derive the HMAC secret from NEXTAUTH_SECRET. Throws if the env var is
- * missing (which would also break NextAuth, so this is a hard requirement).
+ * Derive the HMAC secret from AUTH_SECRET or NEXTAUTH_SECRET. Throws if
+ * neither env var is set (which would also break NextAuth/Auth.js, so this is
+ * a hard requirement). AUTH_SECRET is the NextAuth v5 canonical name and takes
+ * precedence; NEXTAUTH_SECRET is the legacy v4 fallback.
  */
 function getSigningSecret(): Uint8Array {
-  const secret = process.env.NEXTAUTH_SECRET
+  const secret = process.env.AUTH_SECRET ?? process.env.NEXTAUTH_SECRET
   if (!secret) {
-    throw new Error("NEXTAUTH_SECRET is not set — cannot sign consent tokens")
+    throw new Error("AUTH_SECRET or NEXTAUTH_SECRET is not set — cannot sign consent tokens")
   }
   return new TextEncoder().encode(secret)
 }
@@ -66,18 +68,24 @@ export async function verifyConsentToken(token: string): Promise<ConsentTokenPay
   try {
     const { payload } = await jwtVerify(token, getSigningSecret())
 
-    // Validate required fields
-    const sub = payload.sub as string | undefined
-    const agent = (payload as Record<string, unknown>).agent as string | undefined
-    const purpose = (payload as Record<string, unknown>).purpose as string | undefined
-    const nonce = (payload as Record<string, unknown>).nonce as string | undefined
+    // Validate required fields with proper type guards
+    const raw = payload as Record<string, unknown>
+    const sub = raw.sub
+    const agent = raw.agent
+    const purpose = raw.purpose
+    const nonce = raw.nonce
 
-    if (!sub || !agent || purpose !== "workspace-consent" || !nonce) {
+    if (
+      typeof sub !== "string" ||
+      typeof agent !== "string" ||
+      typeof nonce !== "string" ||
+      purpose !== "workspace-consent"
+    ) {
       log.warn("Consent token missing required fields", {
-        hasSub: !!sub,
-        hasAgent: !!agent,
+        hasSub: typeof sub === "string",
+        hasAgent: typeof agent === "string",
         purpose,
-        hasNonce: !!nonce,
+        hasNonce: typeof nonce === "string",
       })
       return null
     }

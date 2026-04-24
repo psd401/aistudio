@@ -248,6 +248,9 @@ when { resource.name like "psd-agent-creds/*/user/*" };
 // internal API key used by the psd-workspace skill to call the consent-link
 // endpoint. Scoped to specific secret name patterns under psd-agent/{env}/
 // (distinct from psd-agent-creds/, which holds per-user refresh tokens).
+// NOTE: Cedar uses `*` for the environment segment because the policy file is
+// shared across environments. Cross-environment isolation is enforced at the
+// IAM layer (scoped to psd-agent/${environment}/* in ecs-service.ts).
 // Issue #912.
 permit(
   principal,
