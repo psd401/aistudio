@@ -18,26 +18,44 @@ import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-wor
 import { sql } from "drizzle-orm"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 import { SAFE_EMAIL_RE } from "@/lib/agent-workspace/validation"
+import { getSecretString } from "@/lib/agent-workspace/secrets-manager"
 import { randomBytes, timingSafeEqual } from "node:crypto"
 
 const log = createLogger({ module: "agent-consent-link" })
 
 /**
- * Validate the shared secret from the Authorization header.
- * In production, this secret is stored in Secrets Manager at
- * psd-agent/{env}/internal-api-key. For local dev, use the
- * AGENT_INTERNAL_API_KEY env var.
+ * Resolve the shared secret. Prefers AGENT_INTERNAL_API_KEY env var (local
+ * dev) and falls back to Secrets Manager at AGENT_INTERNAL_API_KEY_SECRET_ARN
+ * (ECS). The SM read is cached for 5 minutes, so repeated calls are cheap.
+ * Returns null if the secret isn't configured yet — caller treats that as
+ * unauthorized so the endpoint fails closed.
  */
-function validateSharedSecret(request: NextRequest): boolean {
+async function getExpectedSecret(): Promise<string | null> {
+  const envVal = process.env.AGENT_INTERNAL_API_KEY
+  if (envVal) return envVal
+
+  const arn = process.env.AGENT_INTERNAL_API_KEY_SECRET_ARN
+  if (!arn) return null
+
+  return getSecretString(arn)
+}
+
+/**
+ * Validate the shared secret from the Authorization header.
+ * In production, this secret lives in Secrets Manager at
+ * psd-agent/{env}/internal-api-key and is fetched lazily. For local dev,
+ * set AGENT_INTERNAL_API_KEY directly.
+ */
+async function validateSharedSecret(request: NextRequest): Promise<boolean> {
   const authHeader = request.headers.get("authorization")
   if (!authHeader?.startsWith("Bearer ")) {
     return false
   }
 
   const token = authHeader.slice(7)
-  const expectedSecret = process.env.AGENT_INTERNAL_API_KEY
+  const expectedSecret = await getExpectedSecret()
   if (!expectedSecret) {
-    log.error("AGENT_INTERNAL_API_KEY is not configured — rejecting request")
+    log.error("consent-link internal secret is not configured — rejecting request")
     return false
   }
 
@@ -86,7 +104,7 @@ export async function POST(request: NextRequest) {
   const requestId = generateRequestId()
 
   // Auth
-  if (!validateSharedSecret(request)) {
+  if (!(await validateSharedSecret(request))) {
     log.warn("Unauthorized consent-link request", { requestId })
     return NextResponse.json(
       { error: "Unauthorized" },

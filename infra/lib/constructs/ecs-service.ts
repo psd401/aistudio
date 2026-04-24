@@ -524,6 +524,11 @@ export class EcsServiceConstruct extends Construct {
         // workspace token manifest (#912). Without this the manifest
         // secrets_manager_arn column is stored as null.
         AWS_ACCOUNT_ID: cdk.Stack.of(this).account,
+        // Secrets Manager IDs for lazy-loaded workspace config (#912).
+        // Consumed at request time — not at task start — so the ECS service
+        // deploys cleanly before IT populates real GCP OAuth values.
+        GOOGLE_WORKSPACE_OAUTH_SECRET_ARN: `psd-agent/${environment}/google-oauth-client`,
+        AGENT_INTERNAL_API_KEY_SECRET_ARN: `psd-agent/${environment}/internal-api-key`,
         // Memory optimization - 70% of container memory
         NODE_OPTIONS: `--max-old-space-size=${Math.floor(memory * 0.7)}`,
         // Application configuration
@@ -596,34 +601,23 @@ export class EcsServiceConstruct extends Construct {
           secretsmanager.Secret.fromSecretCompleteArn(this, 'DbSecretPassword', props.rdsSecretArn),
           'password'
         ),
-        // Agent Workspace OAuth (#912) — consent-link shared secret and
-        // Google OAuth client credentials. Secret names are stable across
-        // deploys (owned by AgentPlatformStack); look them up by name to
-        // avoid a cross-stack import cycle. IAM read access to
-        // psd-agent/${env}/* is already granted above.
-        AGENT_INTERNAL_API_KEY: ecs.Secret.fromSecretsManager(
-          secretsmanager.Secret.fromSecretNameV2(
-            this,
-            'AgentInternalApiKeySecretRef',
-            `psd-agent/${environment}/internal-api-key`
-          )
-        ),
-        GOOGLE_WORKSPACE_CLIENT_ID: ecs.Secret.fromSecretsManager(
-          secretsmanager.Secret.fromSecretNameV2(
-            this,
-            'GoogleWorkspaceClientSecretRef',
-            `psd-agent/${environment}/google-oauth-client`
-          ),
-          'client_id'
-        ),
-        GOOGLE_WORKSPACE_CLIENT_SECRET: ecs.Secret.fromSecretsManager(
-          secretsmanager.Secret.fromSecretNameV2(
-            this,
-            'GoogleWorkspaceClientSecretRef2',
-            `psd-agent/${environment}/google-oauth-client`
-          ),
-          'client_secret'
-        ),
+        // Agent Workspace OAuth secrets (#912) are NOT injected as task
+        // secrets. Injecting jsonField-resolved secrets gates task start on
+        // the Secrets Manager payload being valid JSON with specific fields
+        // — if IT hasn't yet populated the GCP OAuth client credentials (the
+        // default state on first deploy), every task fails to start and ECS
+        // hits the deployment circuit breaker.
+        //
+        // Instead, the app code in lib/agent-workspace/secrets-manager.ts
+        // reads these at request time (low-traffic paths: consent-link API
+        // and OAuth callback only). If the secret is unset or still holds a
+        // PLACEHOLDER value, the app surfaces a clean "not configured" error
+        // to the operator instead of crash-looping the entire ECS service.
+        //
+        // IAM read access to psd-agent/${environment}/* is granted above on
+        // the task role. The ARNs are exposed via env vars (see envVars
+        // block — GOOGLE_WORKSPACE_OAUTH_SECRET_ARN and
+        // AGENT_INTERNAL_API_KEY_SECRET_ARN).
       },
       // Security: Read-only root filesystem with tmpfs mounts for writable directories
       readonlyRootFilesystem: true,

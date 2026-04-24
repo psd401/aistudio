@@ -9,7 +9,7 @@ import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-wor
 import { psdAgentWorkspaceTokens } from "@/lib/db/schema/tables/agent-workspace-tokens"
 import { users } from "@/lib/db/schema/tables/users"
 import { verifyConsentToken } from "@/lib/agent-workspace/consent-token"
-import { storeRefreshToken } from "@/lib/agent-workspace/secrets-manager"
+import { storeRefreshToken, getSecretJson } from "@/lib/agent-workspace/secrets-manager"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 
 /**
@@ -28,6 +28,41 @@ const GOOGLE_WORKSPACE_SCOPES = [
   "email",
   "profile",
 ]
+
+interface GoogleOAuthClientCreds {
+  client_id: string
+  client_secret: string
+}
+
+/**
+ * Load Google OAuth client credentials. Prefers env vars (local dev) and
+ * falls back to Secrets Manager at GOOGLE_WORKSPACE_OAUTH_SECRET_ARN in
+ * ECS. The SM read is cached for 5 minutes in secrets-manager.ts.
+ *
+ * Returns null if neither source has valid credentials — callers surface
+ * a "not configured" error to the operator, which is the correct behavior
+ * before IT has set up the GCP OAuth client.
+ */
+async function getOAuthClientCredentials(): Promise<GoogleOAuthClientCreds | null> {
+  const envId = process.env.GOOGLE_WORKSPACE_CLIENT_ID
+  const envSecret = process.env.GOOGLE_WORKSPACE_CLIENT_SECRET
+  if (envId && envSecret) {
+    return { client_id: envId, client_secret: envSecret }
+  }
+
+  const arn = process.env.GOOGLE_WORKSPACE_OAUTH_SECRET_ARN
+  if (!arn) return null
+
+  const json = await getSecretJson<Partial<GoogleOAuthClientCreds>>(arn)
+  if (!json?.client_id || !json?.client_secret) return null
+  if (
+    json.client_id.startsWith("PLACEHOLDER") ||
+    json.client_secret.startsWith("PLACEHOLDER")
+  ) {
+    return null
+  }
+  return { client_id: json.client_id, client_secret: json.client_secret }
+}
 
 export interface VerifyConsentResult {
   valid: boolean
@@ -89,9 +124,9 @@ export async function verifyConsentAndGetOAuthUrl(
       })
     }
 
-    const clientId = process.env.GOOGLE_WORKSPACE_CLIENT_ID
-    if (!clientId) {
-      log.error("GOOGLE_WORKSPACE_CLIENT_ID is not configured")
+    const oauthClient = await getOAuthClientCredentials()
+    if (!oauthClient) {
+      log.error("Google Workspace OAuth client is not configured")
       timer({ status: "error" })
       return createSuccess({
         valid: false,
@@ -102,7 +137,7 @@ export async function verifyConsentAndGetOAuthUrl(
     const baseUrl = getIssuerUrl()
     const redirectUri = `${baseUrl}/agent-connect/callback`
     const params = new URLSearchParams({
-      client_id: clientId,
+      client_id: oauthClient.client_id,
       redirect_uri: redirectUri,
       response_type: "code",
       scope: GOOGLE_WORKSPACE_SCOPES.join(" "),
@@ -149,12 +184,12 @@ async function exchangeAndStore(
   payload: { sub: string; agent: string },
   log: ReturnType<typeof createLogger>
 ): Promise<OAuthCallbackResult> {
-  const clientId = process.env.GOOGLE_WORKSPACE_CLIENT_ID
-  const clientSecret = process.env.GOOGLE_WORKSPACE_CLIENT_SECRET
-  if (!clientId || !clientSecret) {
+  const oauthClient = await getOAuthClientCredentials()
+  if (!oauthClient) {
     log.error("Google Workspace OAuth credentials not configured")
     return { success: false, error: "Google Workspace OAuth is not configured. Contact IT." }
   }
+  const { client_id: clientId, client_secret: clientSecret } = oauthClient
 
   const baseUrl = getIssuerUrl()
   const tokenResponse = await fetch("https://oauth2.googleapis.com/token", {

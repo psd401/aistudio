@@ -29,6 +29,65 @@ async function getSecretsManagerClient() {
   return _smClient
 }
 
+// Runtime cache for low-traffic secrets fetched at request time.
+// Keyed by secretId, value = { json, cachedAt }. TTL short enough that a
+// real rotation surfaces within a few minutes without hammering SM.
+const _secretCache = new Map<string, { value: string; cachedAt: number }>()
+const SECRET_TTL_MS = 5 * 60 * 1000
+
+/**
+ * Fetch a secret string at request time. Caches for 5 minutes.
+ * Used for workspace OAuth config and internal API key — both are low
+ * traffic and should not gate ECS task start.
+ *
+ * Returns null if the secret does not exist or is empty. Caller is
+ * responsible for surfacing a user-friendly "not configured" message.
+ */
+export async function getSecretString(secretId: string): Promise<string | null> {
+  const cached = _secretCache.get(secretId)
+  if (cached && Date.now() - cached.cachedAt < SECRET_TTL_MS) {
+    return cached.value
+  }
+
+  const { GetSecretValueCommand, ResourceNotFoundException } = await import(
+    "@aws-sdk/client-secrets-manager"
+  )
+  const client = await getSecretsManagerClient()
+
+  try {
+    const resp = await client.send(new GetSecretValueCommand({ SecretId: secretId }))
+    const value = resp.SecretString ?? null
+    if (value) {
+      _secretCache.set(secretId, { value, cachedAt: Date.now() })
+    }
+    return value
+  } catch (err) {
+    if (err instanceof ResourceNotFoundException) return null
+    log.error("Failed to read secret", {
+      secretId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    throw err
+  }
+}
+
+/**
+ * Fetch + parse a JSON secret at request time. Returns null if missing or
+ * unparseable. Cached via getSecretString.
+ */
+export async function getSecretJson<T = Record<string, unknown>>(
+  secretId: string
+): Promise<T | null> {
+  const raw = await getSecretString(secretId)
+  if (!raw) return null
+  try {
+    return JSON.parse(raw) as T
+  } catch {
+    log.warn("Secret is not valid JSON — treating as unconfigured", { secretId })
+    return null
+  }
+}
+
 /**
  * Store the refresh token in AWS Secrets Manager.
  * In production, this writes to psd-agent-creds/{env}/user/{email}/google-workspace.
