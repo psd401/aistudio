@@ -30,17 +30,9 @@ function StatusBadge({ status }: { status: string }) {
     stale: "destructive",
     revoked: "outline",
   }
-
-  const labels: Record<string, string> = {
-    active: "Connected",
-    pending: "Pending",
-    stale: "Stale",
-    revoked: "Revoked",
-  }
-
   return (
     <Badge variant={variants[status] ?? "secondary"}>
-      {labels[status] ?? status}
+      {status === "active" ? "Connected" : status.charAt(0).toUpperCase() + status.slice(1)}
     </Badge>
   )
 }
@@ -48,12 +40,30 @@ function StatusBadge({ status }: { status: string }) {
 function formatDate(iso: string | null): string {
   if (!iso) return "-"
   return new Date(iso).toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
+    month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit",
   })
+}
+
+function StatusCards({ counts }: { counts: WorkspaceTokenListResult["statusCounts"] }) {
+  const items = [
+    { label: "Connected", value: counts.active, color: "text-green-600" },
+    { label: "Pending", value: counts.pending, color: "text-yellow-600" },
+    { label: "Stale", value: counts.stale, color: "text-red-600" },
+    { label: "Revoked", value: counts.revoked, color: "text-gray-600" },
+    { label: "Not Connected", value: counts.notConnected, color: "text-gray-400" },
+  ]
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+      {items.map((item) => (
+        <Card key={item.label}>
+          <CardHeader className="pb-2">
+            <CardDescription>{item.label}</CardDescription>
+            <CardTitle className={`text-2xl ${item.color}`}>{item.value}</CardTitle>
+          </CardHeader>
+        </Card>
+      ))}
+    </div>
+  )
 }
 
 export function AgentWorkspaceTable() {
@@ -69,11 +79,7 @@ export function AgentWorkspaceTable() {
       if (result.isSuccess && result.data) {
         setData(result.data)
       } else {
-        toast({
-          variant: "destructive",
-          title: "Error loading workspace tokens",
-          description: result.message,
-        })
+        toast({ variant: "destructive", title: "Error loading workspace tokens", description: result.message })
       }
     } finally {
       setLoading(false)
@@ -89,9 +95,7 @@ export function AgentWorkspaceTable() {
   if (loading) {
     return (
       <Card>
-        <CardContent className="pt-6 text-center text-muted-foreground">
-          Loading workspace connection status...
-        </CardContent>
+        <CardContent className="pt-6 text-center text-muted-foreground">Loading workspace connection status...</CardContent>
       </Card>
     )
   }
@@ -99,74 +103,23 @@ export function AgentWorkspaceTable() {
   if (!data) {
     return (
       <Card>
-        <CardContent className="pt-6 text-center text-muted-foreground">
-          No data available.
-        </CardContent>
+        <CardContent className="pt-6 text-center text-muted-foreground">No data available.</CardContent>
       </Card>
     )
   }
 
-  const { tokens, statusCounts } = data
-
   return (
     <div className="space-y-4">
-      {/* Status summary cards */}
-      <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>Connected</CardDescription>
-            <CardTitle className="text-2xl text-green-600">
-              {statusCounts.active}
-            </CardTitle>
-          </CardHeader>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>Pending</CardDescription>
-            <CardTitle className="text-2xl text-yellow-600">
-              {statusCounts.pending}
-            </CardTitle>
-          </CardHeader>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>Stale</CardDescription>
-            <CardTitle className="text-2xl text-red-600">
-              {statusCounts.stale}
-            </CardTitle>
-          </CardHeader>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>Revoked</CardDescription>
-            <CardTitle className="text-2xl text-gray-600">
-              {statusCounts.revoked}
-            </CardTitle>
-          </CardHeader>
-        </Card>
-        <Card>
-          <CardHeader className="pb-2">
-            <CardDescription>Not Connected</CardDescription>
-            <CardTitle className="text-2xl text-gray-400">
-              {statusCounts.notConnected}
-            </CardTitle>
-          </CardHeader>
-        </Card>
-      </div>
-
-      {/* Token table */}
+      <StatusCards counts={data.statusCounts} />
       <Card>
         <CardHeader>
           <CardTitle>Workspace Connections</CardTitle>
-          <CardDescription>
-            Google Workspace OAuth token status per user
-          </CardDescription>
+          <CardDescription>Google Workspace OAuth token status per user</CardDescription>
         </CardHeader>
         <CardContent>
-          {tokens.length === 0 ? (
+          {data.tokens.length === 0 ? (
             <p className="text-sm text-muted-foreground text-center py-6">
-              No workspace connections yet. Connections are created when users
-              authorize their agent accounts.
+              No workspace connections yet. Connections are created when users authorize their agent accounts.
             </p>
           ) : (
             <Table>
@@ -181,36 +134,19 @@ export function AgentWorkspaceTable() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {tokens.map((token) => (
+                {data.tokens.map((token) => (
                   <TableRow key={token.id}>
                     <TableCell>
                       <div>
-                        <p className="font-medium">
-                          {token.ownerName ?? token.ownerEmail}
-                        </p>
-                        {token.ownerName && (
-                          <p className="text-xs text-muted-foreground">
-                            {token.ownerEmail}
-                          </p>
-                        )}
+                        <p className="font-medium">{token.ownerName ?? token.ownerEmail}</p>
+                        {token.ownerName && <p className="text-xs text-muted-foreground">{token.ownerEmail}</p>}
                       </div>
                     </TableCell>
-                    <TableCell className="text-sm font-mono">
-                      {token.agentEmail}
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge status={token.status} />
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      {token.grantedScopes.length} scope
-                      {token.grantedScopes.length !== 1 ? "s" : ""}
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      {formatDate(token.lastVerifiedAt)}
-                    </TableCell>
-                    <TableCell className="text-sm">
-                      {formatDate(token.createdAt)}
-                    </TableCell>
+                    <TableCell className="text-sm font-mono">{token.agentEmail}</TableCell>
+                    <TableCell><StatusBadge status={token.status} /></TableCell>
+                    <TableCell className="text-sm">{token.grantedScopes.length} scope{token.grantedScopes.length !== 1 ? "s" : ""}</TableCell>
+                    <TableCell className="text-sm">{formatDate(token.lastVerifiedAt)}</TableCell>
+                    <TableCell className="text-sm">{formatDate(token.createdAt)}</TableCell>
                   </TableRow>
                 ))}
               </TableBody>

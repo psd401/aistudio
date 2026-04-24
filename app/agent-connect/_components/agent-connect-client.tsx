@@ -21,7 +21,9 @@ export function AgentConnectClient() {
         return
       }
 
-      // Prevent double-verification on the same token (parameterized route guard)
+      // Prevent double-verification on the same token (parameterized route guard).
+      // Not a security comparison — just a UI dedup guard.
+      // eslint-disable-next-line security/detect-possible-timing-attacks
       if (verifiedTokenRef.current === token) {
         return
       }
