@@ -16,6 +16,9 @@ tokens from AWS Secrets Manager.
 | Admin | "Workspace" tab in `/admin/agents` | Per-user status dashboard |
 | Skill | `infra/agent-image/skills/psd-workspace/` | Agent-side `gws` wrapper |
 | Binary | `gws` (pinned in `Dockerfile`) | Google Workspace CLI |
+| Upstream skills | `gws-gmail`, `gws-calendar`, `gws-sheets`, … (cloned at image build, same tag as the binary) | Per-API guidance for the agent |
+| Rules | `infra/agent-image/skills/psd-rules/SKILL.md` | Tier 1 progressive-disclosure rules (think silently, never fabricate URLs/memory, no empty promises, Chat formatting) |
+| Formatter | `infra/agent-image/chat_format.py` | Markdown → Google Chat transform applied at the harness boundary |
 | Secrets | `psd-agent/{env}/google-oauth-client`, `psd-agent/{env}/internal-api-key`, `psd-agent-creds/{env}/user/{email}/google-workspace` | OAuth client, PSK, per-user refresh tokens |
 | Cedar | `psd-agent-governance.cedar` | Allowlists for oauth2.googleapis.com + consent-link, secret.read on `psd-agent/*` |
 
