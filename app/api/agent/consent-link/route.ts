@@ -83,7 +83,10 @@ async function validateSharedSecret(request: NextRequest): Promise<boolean> {
  * consider a SELECT ... FOR UPDATE lock or a Redis counter.
  */
 async function checkRateLimit(ownerEmail: string): Promise<boolean> {
-  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000)
+  // postgres.js doesn't auto-serialize Date inside raw sql templates (Drizzle
+  // only converts when it knows the column type via the column ref). Pass an
+  // ISO string and let Postgres cast to timestamp.
+  const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
 
   const [result] = await executeQuery(
     (db) =>
@@ -92,7 +95,7 @@ async function checkRateLimit(ownerEmail: string): Promise<boolean> {
         .from(psdAgentWorkspaceConsentNonces)
         .where(
           sql`${psdAgentWorkspaceConsentNonces.ownerEmail} = ${ownerEmail}
-              AND ${psdAgentWorkspaceConsentNonces.createdAt} > ${oneHourAgo}`
+              AND ${psdAgentWorkspaceConsentNonces.createdAt} > ${oneHourAgo}::timestamptz`
         ),
     "checkConsentLinkRateLimit"
   )
