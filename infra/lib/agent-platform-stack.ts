@@ -1820,6 +1820,106 @@ export class AgentPlatformStack extends cdk.Stack {
     });
 
     // =====================================================================
+    // 9c-bis. Agent Workspace Nonce Cleanup Lambda (#912)
+    // =====================================================================
+    // Daily DELETE of consent nonces older than RETENTION_DAYS. Without
+    // this, psd_agent_workspace_consent_nonces grows unbounded — every
+    // consent link burns one row, and abandoned consent attempts (clicked
+    // link, never finished OAuth) never get cleaned. The cleanup index
+    // makes the range delete efficient.
+
+    const nonceCleanupRole = ServiceRoleFactory.createLambdaRole(this, 'AgentWorkspaceNonceCleanupRole', {
+      functionName: 'psd-agent-workspace-nonce-cleanup',
+      environment,
+      region: this.region,
+      account: this.account,
+      vpcEnabled: false,
+      additionalPolicies: [
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'AuroraConnect',
+            effect: iam.Effect.ALLOW,
+            actions: ['secretsmanager:GetSecretValue'],
+            resources: [props.databaseSecretArn],
+          })],
+        }),
+      ],
+    });
+    nonceCleanupRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+    );
+
+    const nonceCleanupLogGroup = new logs.LogGroup(this, 'AgentWorkspaceNonceCleanupLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-workspace-nonce-cleanup-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+
+    const nonceCleanupLambda = new lambda.Function(this, 'AgentWorkspaceNonceCleanupLambda', {
+      functionName: `psd-agent-workspace-nonce-cleanup-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-workspace-nonce-cleanup'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-workspace-nonce-cleanup');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: 256,
+      timeout: cdk.Duration.minutes(5),
+      architecture: lambda.Architecture.ARM_64,
+      role: nonceCleanupRole,
+      logGroup: nonceCleanupLogGroup,
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      environment: {
+        ENVIRONMENT: environment,
+        DATABASE_HOST: props.databaseHost,
+        DATABASE_SECRET_ARN: props.databaseSecretArn,
+        DATABASE_NAME: props.databaseName ?? 'aistudio',
+        RETENTION_DAYS: '7',
+      },
+    });
+    cdk.Tags.of(nonceCleanupLambda).add('Environment', environment);
+    cdk.Tags.of(nonceCleanupLambda).add('ManagedBy', 'cdk');
+
+    new events.Rule(this, 'AgentWorkspaceNonceCleanupSchedule', {
+      description: 'Daily DELETE of expired consent nonces (#912)',
+      schedule: events.Schedule.rate(cdk.Duration.days(1)),
+      targets: [new eventsTargets.LambdaFunction(nonceCleanupLambda)],
+    });
+
+    // =====================================================================
     // 9d. Agent Pattern Scanner Weekly Lambda (issue #890, Component 3)
     // =====================================================================
     // Scans the DynamoDB signal store and writes cross-building topic
