@@ -299,18 +299,11 @@ async function exchangeAndStore(
     }
   }
 
-  // Construct the Secrets Manager ARN now (no I/O — used as a value on
-  // the manifest row regardless of whether the secret write succeeds).
-  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
-  const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-west-2"
-  const accountId = process.env.AWS_ACCOUNT_ID ?? ""
-  const secretName = `psd-agent-creds/${environment}/user/${payload.sub}/google-workspace`
-  const secretsManagerArn = accountId
-    ? `arn:aws:secretsmanager:${region}:${accountId}:secret:${secretName}`
-    : null
-
   // Step 1: pending manifest row. If we crash before the secret write, the
   // operator dashboard shows pending — not "active" with no token to back it.
+  // The ARN column is left null until step 3 because we don't know the real
+  // ARN until Secrets Manager returns it (ARNs always end in a 6-char random
+  // suffix that isn't part of the path).
   await executeQuery(
     (db) =>
       db
@@ -321,7 +314,7 @@ async function exchangeAndStore(
           agentEmail: payload.agent,
           status: "pending",
           grantedScopes,
-          secretsManagerArn,
+          secretsManagerArn: null,
           updatedAt: new Date(),
         })
         .onConflictDoUpdate({
@@ -330,7 +323,7 @@ async function exchangeAndStore(
             agentEmail: payload.agent,
             status: "pending",
             grantedScopes,
-            secretsManagerArn,
+            secretsManagerArn: null,
             revokedAt: null,
             updatedAt: new Date(),
           },
@@ -338,8 +331,11 @@ async function exchangeAndStore(
     "upsertWorkspaceTokenPending"
   )
 
-  // Step 2: write the refresh token to Secrets Manager.
-  await storeRefreshToken(payload.sub, {
+  // Step 2: write the refresh token to Secrets Manager. Returns the *real*
+  // ARN (with the 6-char suffix AWS appends), not a hand-built one. Stored
+  // on the manifest below so operators clicking through from the dashboard
+  // get a working AWS Console link.
+  const realSecretArn = await storeRefreshToken(payload.sub, {
     refresh_token: tokenData.refresh_token,
     granted_scopes: grantedScopes,
     obtained_at: new Date().toISOString(),
@@ -347,12 +343,23 @@ async function exchangeAndStore(
 
   // Step 3: promote to active. Only here is the connection considered live
   // by both halves of the system (manifest + secret).
+  //
+  // NOTE on dual-write semantics for the psd-workspace agent skill:
+  //   The skill (infra/agent-image/skills/psd-workspace/common.js) reads the
+  //   refresh token directly from Secrets Manager — it never consults this
+  //   manifest row. As soon as step 2 above completes, the agent can use
+  //   Workspace access. The `pending` → `active` transition gates only the
+  //   admin dashboard / operator visibility, not the runtime. This is why a
+  //   crash between step 2 and step 3 doesn't break agent functionality —
+  //   the user retains a working connection; the dashboard just shows
+  //   `pending` until reconciled.
   await executeQuery(
     (db) =>
       db
         .update(psdAgentWorkspaceTokens)
         .set({
           status: "active",
+          secretsManagerArn: realSecretArn,
           lastVerifiedAt: new Date(),
           updatedAt: new Date(),
         })

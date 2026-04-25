@@ -310,6 +310,10 @@ export class EcsServiceConstruct extends Construct {
                 'secretsmanager:GetSecretValue',
                 'secretsmanager:DescribeSecret',
                 'secretsmanager:PutSecretValue',
+                // DeleteSecret with ForceDeleteWithoutRecovery is invoked
+                // by the user-deletion path to avoid orphan refresh-token
+                // secrets when an account is removed (#912 review).
+                'secretsmanager:DeleteSecret',
               ],
               resources: [
                 `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent-creds/${environment}/*`,

@@ -90,13 +90,22 @@ export async function getSecretJson<T = Record<string, unknown>>(
 
 /**
  * Store the refresh token in AWS Secrets Manager.
- * In production, this writes to psd-agent-creds/{env}/user/{email}/google-workspace.
- * For local dev, this is a no-op (refresh tokens are not stored locally).
+ *
+ * In production, writes to psd-agent-creds/{env}/user/{email}/google-workspace.
+ * In local dev, this is a no-op (refresh tokens are not stored locally).
+ *
+ * Returns the **real** Secrets Manager ARN as reported by AWS. ARNs always
+ * end in a 6-char random suffix (e.g. `…:secret:name-AbCdEf`); we used to
+ * construct one from `arn:aws:secretsmanager:<region>:<account>:secret:<name>`
+ * which never resolved correctly in the AWS Console. Always use the value
+ * returned from this function rather than building one yourself.
+ *
+ * Returns null only when running in local dev (no SM call made).
  */
 export async function storeRefreshToken(
   ownerEmail: string,
   tokenData: WorkspaceTokenData
-): Promise<void> {
+): Promise<string | null> {
   if (!SAFE_EMAIL_RE.test(ownerEmail)) {
     throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)
   }
@@ -109,32 +118,36 @@ export async function storeRefreshToken(
   // Skip Secrets Manager in local development.
   if (process.env.NODE_ENV === "development") {
     log.info("Local dev mode — skipping Secrets Manager write", { secretId })
-    return
+    return null
   }
 
   const {
     PutSecretValueCommand,
     CreateSecretCommand,
+    DescribeSecretCommand,
     ResourceNotFoundException,
   } = await import("@aws-sdk/client-secrets-manager")
   const client = await getSecretsManagerClient()
   const secretString = JSON.stringify(tokenData)
 
   try {
-    await client.send(
+    const putResp = await client.send(
       new PutSecretValueCommand({
         SecretId: secretId,
         SecretString: secretString,
       })
     )
     log.info("Refresh token stored in Secrets Manager", { secretId })
+    // PutSecretValue returns ARN. Falls back to DescribeSecret if (per
+    // SDK v3 docs) the field is unexpectedly absent.
+    return putResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
   } catch (error) {
     // If the secret doesn't exist yet, create it. Handle the race condition
     // where two concurrent callbacks both see "not found" and both try to
     // create — the loser gets ResourceExistsException and retries with Put.
     if (error instanceof ResourceNotFoundException) {
       try {
-        await client.send(
+        const createResp = await client.send(
           new CreateSecretCommand({
             Name: secretId,
             SecretString: secretString,
@@ -147,6 +160,7 @@ export async function storeRefreshToken(
           })
         )
         log.info("Refresh token secret created in Secrets Manager", { secretId })
+        return createResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
       } catch (createError) {
         // Concurrent first-write race: another request created the secret
         // between our "not found" and our "create". Retry with PutSecretValue.
@@ -154,13 +168,14 @@ export async function storeRefreshToken(
           createError instanceof Error &&
           createError.name === "ResourceExistsException"
         ) {
-          await client.send(
+          const putResp = await client.send(
             new PutSecretValueCommand({
               SecretId: secretId,
               SecretString: secretString,
             })
           )
           log.info("Refresh token stored after concurrent secret creation", { secretId })
+          return putResp.ARN ?? (await describeArn(secretId, DescribeSecretCommand))
         } else {
           log.error("Failed to create refresh token secret in Secrets Manager", {
             secretId,
@@ -176,5 +191,74 @@ export async function storeRefreshToken(
       })
       throw error
     }
+  }
+}
+
+/**
+ * Defensive ARN lookup: falls back to DescribeSecret when the AWS SDK's
+ * Put/Create response unexpectedly omits ARN. Empirically this hasn't
+ * happened, but the SDK types mark ARN optional, so handle it.
+ */
+async function describeArn(
+  secretId: string,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  DescribeSecretCommand: any
+): Promise<string | null> {
+  const client = await getSecretsManagerClient()
+  const resp = (await client.send(new DescribeSecretCommand({ SecretId: secretId }))) as {
+    ARN?: string
+  }
+  return resp.ARN ?? null
+}
+
+/**
+ * Delete the per-user Google Workspace refresh token secret. Called when a
+ * user is removed from the system so AWS Secrets Manager doesn't accumulate
+ * orphan entries containing stale OAuth refresh tokens.
+ *
+ * We use ForceDeleteWithoutRecovery: there is no scenario where we want a
+ * deleted user's refresh token to remain recoverable for the standard 7-day
+ * recovery window — the deletion is intentional and the token authorizes
+ * access to a real Google account.
+ *
+ * Returns true if the secret was deleted, false if it didn't exist.
+ * In local dev this is a no-op and always returns false.
+ */
+export async function deleteWorkspaceSecret(ownerEmail: string): Promise<boolean> {
+  if (!SAFE_EMAIL_RE.test(ownerEmail)) {
+    throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)
+  }
+
+  if (process.env.NODE_ENV === "development") {
+    return false
+  }
+
+  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+  const secretId = `psd-agent-creds/${environment}/user/${ownerEmail}/google-workspace`
+
+  const { DeleteSecretCommand, ResourceNotFoundException } = await import(
+    "@aws-sdk/client-secrets-manager"
+  )
+  const client = await getSecretsManagerClient()
+
+  try {
+    await client.send(
+      new DeleteSecretCommand({
+        SecretId: secretId,
+        ForceDeleteWithoutRecovery: true,
+      })
+    )
+    log.info("Workspace refresh token secret deleted", { secretId })
+    return true
+  } catch (err) {
+    if (err instanceof ResourceNotFoundException) {
+      // No secret to delete — user never connected workspace. Not an error.
+      return false
+    }
+    log.error("Failed to delete workspace refresh token secret", {
+      secretId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    throw err
   }
 }

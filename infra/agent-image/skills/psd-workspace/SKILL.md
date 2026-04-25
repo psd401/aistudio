@@ -44,6 +44,19 @@ node /home/node/.openclaw/skills/psd-workspace/run.js \
 node /home/node/.openclaw/skills/psd-workspace/run.js --user hagelk@psd401.net --command "--help"
 ```
 
+## Where the token comes from
+
+The skill reads the user's refresh token directly from AWS Secrets Manager at
+`psd-agent-creds/{env}/user/{email}/google-workspace`. **It does not read the
+`psd_agent_workspace_tokens` DB manifest.** That manifest exists for the
+admin dashboard — its `pending` / `active` / `stale` states indicate
+operator-visible connection health, not runtime availability.
+
+This separation matters during the consent callback: the manifest goes
+`pending` → SM write → manifest `active`. If the deploy crashes between SM
+write and manifest promotion, the agent still works (token is in SM) but
+the dashboard shows `pending` until reconciled.
+
 ## Output contract
 
 - **Success (exit 0):** stdout is whatever `gws` produced (usually JSON). Pass through.
