@@ -19,6 +19,10 @@ import {
 export const psdAgentWorkspaceConsentNonces = pgTable("psd_agent_workspace_consent_nonces", {
   nonce: varchar("nonce", { length: 64 }).primaryKey(),
   ownerEmail: varchar("owner_email", { length: 255 }).notNull(),
+  // Stored alongside the nonce so the OAuth callback can recover both
+  // identities from just the nonce (the OAuth `state` parameter no longer
+  // carries the full consent JWT — the nonce alone is sufficient).
+  agentEmail: varchar("agent_email", { length: 255 }).notNull(),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   consumedAt: timestamp("consumed_at", { withTimezone: true }),
 }, (table) => [

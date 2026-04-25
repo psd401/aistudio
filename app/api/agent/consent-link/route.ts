@@ -11,7 +11,7 @@
  */
 
 import { NextRequest, NextResponse } from "next/server"
-import { createLogger, generateRequestId } from "@/lib/logger"
+import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 import { signConsentToken } from "@/lib/agent-workspace/consent-token"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-workspace-consent-nonces"
@@ -25,7 +25,7 @@ const log = createLogger({ module: "agent-consent-link" })
 
 /**
  * Resolve the shared secret. Prefers AGENT_INTERNAL_API_KEY env var (local
- * dev) and falls back to Secrets Manager at AGENT_INTERNAL_API_KEY_SECRET_ARN
+ * dev) and falls back to Secrets Manager at AGENT_INTERNAL_API_KEY_SECRET_ID
  * (ECS). The SM read is cached for 5 minutes, so repeated calls are cheap.
  * Returns null if the secret isn't configured yet — caller treats that as
  * unauthorized so the endpoint fails closed.
@@ -34,10 +34,13 @@ async function getExpectedSecret(): Promise<string | null> {
   const envVal = process.env.AGENT_INTERNAL_API_KEY
   if (envVal) return envVal
 
-  const arn = process.env.AGENT_INTERNAL_API_KEY_SECRET_ARN
-  if (!arn) return null
+  // Env var name is `_SECRET_ID` (not `_ARN`) — Secrets Manager accepts a
+  // bare secret name *or* a full ARN; we use the name. Misnaming as `_ARN`
+  // led to operator confusion during rollout.
+  const id = process.env.AGENT_INTERNAL_API_KEY_SECRET_ID
+  if (!id) return null
 
-  return getSecretString(arn)
+  return getSecretString(id)
 }
 
 /**
@@ -137,7 +140,7 @@ export async function POST(request: NextRequest) {
   // Rate limit
   const withinLimit = await checkRateLimit(ownerEmail)
   if (!withinLimit) {
-    log.warn("Consent link rate limit exceeded", { ownerEmail, requestId })
+    log.warn("Consent link rate limit exceeded", sanitizeForLogging({ ownerEmail, requestId }))
     return NextResponse.json(
       { error: "Rate limit exceeded — max 5 links per hour per user" },
       { status: 429, headers: { "Retry-After": "3600" } }
@@ -148,7 +151,9 @@ export async function POST(request: NextRequest) {
   const [localPart, domain] = ownerEmail.split("@")
   const agentEmail = `agnt_${localPart}@${domain}`
 
-  // Generate nonce and persist it
+  // Generate nonce and persist it. agent_email is stored on the row so the
+  // OAuth callback can recover identity from the nonce alone (the OAuth
+  // state parameter no longer carries the full JWT — see migration 072).
   const nonce = randomBytes(32).toString("hex")
 
   await executeQuery(
@@ -158,11 +163,14 @@ export async function POST(request: NextRequest) {
         .values({
           nonce,
           ownerEmail,
+          agentEmail,
         }),
     "insertConsentNonce"
   )
 
-  // Sign the consent token
+  // Sign the consent token. The JWT is the URL token (carried in chat) so a
+  // forged URL can't redirect to Google for the wrong user. The OAuth state,
+  // however, is just `nonce` — see verifyConsentAndGetOAuthUrl.
   const token = await signConsentToken({
     sub: ownerEmail,
     agent: agentEmail,
@@ -174,7 +182,7 @@ export async function POST(request: NextRequest) {
   const baseUrl = getIssuerUrl()
   const url = `${baseUrl}/agent-connect?token=${encodeURIComponent(token)}`
 
-  log.info("Consent link generated", { ownerEmail, agentEmail, requestId })
+  log.info("Consent link generated", sanitizeForLogging({ ownerEmail, agentEmail, requestId }))
 
   return NextResponse.json({ url })
 }

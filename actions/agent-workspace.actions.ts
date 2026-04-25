@@ -4,7 +4,7 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { handleError, createSuccess } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
 import { executeQuery } from "@/lib/db/drizzle-client"
-import { eq, and, isNull } from "drizzle-orm"
+import { eq, and, isNull, sql } from "drizzle-orm"
 import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-workspace-consent-nonces"
 import { psdAgentWorkspaceTokens } from "@/lib/db/schema/tables/agent-workspace-tokens"
 import { users } from "@/lib/db/schema/tables/users"
@@ -36,7 +36,7 @@ interface GoogleOAuthClientCreds {
 
 /**
  * Load Google OAuth client credentials. Prefers env vars (local dev) and
- * falls back to Secrets Manager at GOOGLE_WORKSPACE_OAUTH_SECRET_ARN in
+ * falls back to Secrets Manager at GOOGLE_WORKSPACE_OAUTH_SECRET_ID in
  * ECS. The SM read is cached for 5 minutes in secrets-manager.ts.
  *
  * Returns null if neither source has valid credentials — callers surface
@@ -50,10 +50,12 @@ async function getOAuthClientCredentials(): Promise<GoogleOAuthClientCreds | nul
     return { client_id: envId, client_secret: envSecret }
   }
 
-  const arn = process.env.GOOGLE_WORKSPACE_OAUTH_SECRET_ARN
-  if (!arn) return null
+  // Env var is `_SECRET_ID` (Secrets Manager accepts a bare name); the
+  // legacy `_ARN` name was misleading because we stored a name not an ARN.
+  const id = process.env.GOOGLE_WORKSPACE_OAUTH_SECRET_ID
+  if (!id) return null
 
-  const json = await getSecretJson<Partial<GoogleOAuthClientCreds>>(arn)
+  const json = await getSecretJson<Partial<GoogleOAuthClientCreds>>(id)
   if (!json?.client_id || !json?.client_secret) return null
   if (
     json.client_id.startsWith("PLACEHOLDER") ||
@@ -136,6 +138,13 @@ export async function verifyConsentAndGetOAuthUrl(
 
     const baseUrl = getIssuerUrl()
     const redirectUri = `${baseUrl}/agent-connect/callback`
+    // OAuth `state` is only the nonce. We previously embedded the full JWT
+    // (sub/agent/purpose/nonce/sig) which leaks via Google's logs, our
+    // access logs, browser history, and HTTP Referer. The nonce alone is
+    // sufficient: the callback recovers owner_email and agent_email from
+    // the nonce row in psd_agent_workspace_consent_nonces (migration 072),
+    // and the table validates one-time-use + age via UPDATE ... WHERE
+    // consumed_at IS NULL plus a 24h window.
     const params = new URLSearchParams({
       client_id: oauthClient.client_id,
       redirect_uri: redirectUri,
@@ -143,7 +152,7 @@ export async function verifyConsentAndGetOAuthUrl(
       scope: GOOGLE_WORKSPACE_SCOPES.join(" "),
       access_type: "offline",
       prompt: "consent",
-      state: token,
+      state: payload.nonce,
       login_hint: payload.agent,
     })
 
@@ -177,7 +186,21 @@ export interface OAuthCallbackResult {
 }
 
 /**
- * Exchange Google auth code for tokens and upsert the workspace manifest.
+ * Exchange Google auth code for tokens and persist the workspace manifest.
+ *
+ * Order of writes is deliberate:
+ *   1. Verify identity from DB (user lookup by email).
+ *   2. Upsert the manifest row in `pending` state (no token yet, but the
+ *      operator dashboard now reflects an in-flight connection).
+ *   3. Write the refresh token to Secrets Manager.
+ *   4. Mark the manifest row `active` with granted_scopes / verified_at.
+ *
+ * Why: a failure at step 3 leaves a `pending` row visible to operators
+ * (so they know to retry) but no orphan secret. A failure at step 4 leaves
+ * a token in Secrets Manager and a `pending` row — the operator can see
+ * something is half-done and reconcile. Either way, the agent never sees
+ * "secret present but no manifest" (which would let it use Workspace
+ * access against an account the admin dashboard says isn't connected).
  */
 async function exchangeAndStore(
   code: string,
@@ -206,8 +229,17 @@ async function exchangeAndStore(
   })
 
   if (!tokenResponse.ok) {
+    // Google's error body can include the auth code (which is now spent
+    // anyway) and the client_id; sanitize before logging.
     const errorBody = await tokenResponse.text()
-    log.error("Google token exchange failed", { status: tokenResponse.status, body: errorBody })
+    log.error(
+      "Google token exchange failed",
+      sanitizeForLogging({
+        status: tokenResponse.status,
+        ownerEmail: payload.sub,
+        body: errorBody,
+      })
+    )
     return { success: false, error: "Failed to exchange authorization code with Google. Please request a new consent link from your agent and try again." }
   }
 
@@ -254,10 +286,6 @@ async function exchangeAndStore(
     }
   }
 
-  // Look up the user BEFORE writing the refresh token to Secrets Manager.
-  // Writing the secret first would leave the agent able to use Workspace
-  // access (the skill reads Secrets Manager directly) while the admin
-  // manifest row is missing — a silent split-brain.
   const [user] = await executeQuery(
     (db) => db.select({ id: users.id }).from(users).where(eq(users.email, payload.sub)).limit(1),
     "findUserByEmail"
@@ -271,14 +299,8 @@ async function exchangeAndStore(
     }
   }
 
-  await storeRefreshToken(payload.sub, {
-    refresh_token: tokenData.refresh_token,
-    granted_scopes: grantedScopes,
-    obtained_at: new Date().toISOString(),
-  })
-
-  // Construct the Secrets Manager ARN for the token manifest.
-  // This mirrors the path used by storeRefreshToken in secrets-manager.ts.
+  // Construct the Secrets Manager ARN now (no I/O — used as a value on
+  // the manifest row regardless of whether the secret write succeeds).
   const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
   const region = process.env.AWS_REGION ?? process.env.AWS_DEFAULT_REGION ?? "us-west-2"
   const accountId = process.env.AWS_ACCOUNT_ID ?? ""
@@ -287,6 +309,8 @@ async function exchangeAndStore(
     ? `arn:aws:secretsmanager:${region}:${accountId}:secret:${secretName}`
     : null
 
+  // Step 1: pending manifest row. If we crash before the secret write, the
+  // operator dashboard shows pending — not "active" with no token to back it.
   await executeQuery(
     (db) =>
       db
@@ -295,35 +319,60 @@ async function exchangeAndStore(
           ownerUserId: user.id,
           ownerEmail: payload.sub,
           agentEmail: payload.agent,
-          status: "active",
+          status: "pending",
           grantedScopes,
           secretsManagerArn,
-          lastVerifiedAt: new Date(),
           updatedAt: new Date(),
         })
         .onConflictDoUpdate({
           target: psdAgentWorkspaceTokens.ownerUserId,
           set: {
             agentEmail: payload.agent,
-            status: "active",
+            status: "pending",
             grantedScopes,
             secretsManagerArn,
-            lastVerifiedAt: new Date(),
             revokedAt: null,
             updatedAt: new Date(),
           },
         }),
-    "upsertWorkspaceToken"
+    "upsertWorkspaceTokenPending"
+  )
+
+  // Step 2: write the refresh token to Secrets Manager.
+  await storeRefreshToken(payload.sub, {
+    refresh_token: tokenData.refresh_token,
+    granted_scopes: grantedScopes,
+    obtained_at: new Date().toISOString(),
+  })
+
+  // Step 3: promote to active. Only here is the connection considered live
+  // by both halves of the system (manifest + secret).
+  await executeQuery(
+    (db) =>
+      db
+        .update(psdAgentWorkspaceTokens)
+        .set({
+          status: "active",
+          lastVerifiedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(psdAgentWorkspaceTokens.ownerUserId, user.id)),
+    "promoteWorkspaceTokenActive"
   )
 
   return { success: true, ownerEmail: payload.sub, agentEmail: payload.agent }
 }
 
 /**
- * Handle the OAuth callback: verify state, exchange code for tokens,
- * store refresh token in Secrets Manager, upsert workspace token manifest.
+ * Handle the OAuth callback. The `state` parameter is the bare nonce (not a
+ * JWT — see verifyConsentAndGetOAuthUrl). We look up owner_email and
+ * agent_email from the nonce row, run the token exchange, and *only then*
+ * mark the nonce consumed. This means a transient failure in the token
+ * exchange (Google 5xx, network blip) leaves the nonce alive so the user
+ * can retry without requesting a new consent link.
  *
- * This is a public action (no auth required) — the signed state token IS the auth.
+ * This is a public action (no auth required) — the unconsumed, fresh nonce
+ * IS the auth.
  */
 export async function handleOAuthCallback(
   code: string,
@@ -334,35 +383,85 @@ export async function handleOAuthCallback(
   const log = createLogger({ requestId, action: "handleOAuthCallback" })
 
   try {
-    const payload = await verifyConsentToken(state)
-    if (!payload) {
+    // Validate state shape before hitting the DB. The nonce is a 64-char
+    // hex string per consent-link route. Anything else is an attack or a
+    // truncated URL.
+    if (!/^[0-9a-f]{64}$/.test(state)) {
+      log.warn("OAuth callback received malformed state", { stateLength: state.length })
       timer({ status: "error" })
-      return createSuccess({ success: false, error: "Invalid or expired consent link. Ask your agent for a new one." })
+      return createSuccess({
+        success: false,
+        error: "Invalid consent state. Ask your agent for a new consent link.",
+      })
     }
 
-    // Atomically consume the nonce
-    const consumeResult = await executeQuery(
+    // Look up the nonce row — must exist, be unconsumed, and within 1h of
+    // creation. The age window is the actual replay-protection horizon
+    // (older nonces, even unconsumed, are no longer valid).
+    const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
+    const [nonceRow] = await executeQuery(
+      (db) =>
+        db
+          .select({
+            ownerEmail: psdAgentWorkspaceConsentNonces.ownerEmail,
+            agentEmail: psdAgentWorkspaceConsentNonces.agentEmail,
+          })
+          .from(psdAgentWorkspaceConsentNonces)
+          .where(
+            sql`${psdAgentWorkspaceConsentNonces.nonce} = ${state}
+                AND ${psdAgentWorkspaceConsentNonces.consumedAt} IS NULL
+                AND ${psdAgentWorkspaceConsentNonces.createdAt} > ${oneHourAgo}::timestamptz`
+          )
+          .limit(1),
+      "lookupConsentNonce"
+    )
+
+    if (!nonceRow) {
+      timer({ status: "error" })
+      log.warn("Consent nonce not found, already consumed, or expired", {
+        nonce: state.slice(0, 8) + "…",
+      })
+      return createSuccess({
+        success: false,
+        error: "This consent link has already been used or has expired. Ask your agent for a new one.",
+      })
+    }
+
+    const payload = { sub: nonceRow.ownerEmail, agent: nonceRow.agentEmail }
+    const result = await exchangeAndStore(code, payload, log)
+
+    if (!result.success) {
+      // Token exchange failed. Leave the nonce unconsumed so the user can
+      // re-click the same link (Google may have transiently 5xx'd, or the
+      // user closed the tab mid-flow). The rate limit (5/hour) prevents
+      // abuse of this retry surface.
+      timer({ status: "error" })
+      return createSuccess(result)
+    }
+
+    // Success: now mark the nonce consumed. Atomic UPDATE protects against
+    // a race where two concurrent callbacks both succeed at exchange — only
+    // one will actually consume here, but both attempted writes are safe
+    // because the manifest upsert is idempotent.
+    await executeQuery(
       (db) =>
         db
           .update(psdAgentWorkspaceConsentNonces)
           .set({ consumedAt: new Date() })
-          .where(and(eq(psdAgentWorkspaceConsentNonces.nonce, payload.nonce), isNull(psdAgentWorkspaceConsentNonces.consumedAt)))
-          .returning({ nonce: psdAgentWorkspaceConsentNonces.nonce }),
+          .where(
+            and(
+              eq(psdAgentWorkspaceConsentNonces.nonce, state),
+              isNull(psdAgentWorkspaceConsentNonces.consumedAt)
+            )
+          ),
       "consumeConsentNonce"
     )
 
-    if (consumeResult.length === 0) {
-      timer({ status: "error" })
-      log.warn("Consent nonce already consumed during callback", { nonce: payload.nonce })
-      return createSuccess({ success: false, error: "This consent link has already been used. Ask your agent for a new one." })
-    }
-
-    const result = await exchangeAndStore(code, payload, log)
-
-    timer({ status: result.success ? "success" : "error" })
-    if (result.success) {
-      log.info("OAuth callback completed", sanitizeForLogging({ ownerEmail: payload.sub, agentEmail: payload.agent }))
-    }
+    timer({ status: "success" })
+    log.info("OAuth callback completed", sanitizeForLogging({
+      ownerEmail: payload.sub,
+      agentEmail: payload.agent,
+    }))
     return createSuccess(result)
   } catch (error) {
     timer({ status: "error" })

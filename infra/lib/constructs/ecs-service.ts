@@ -296,20 +296,50 @@ export class EcsServiceConstruct extends Construct {
                 props.internalApiSecretArn, // Include internal API secret
               ],
             }),
-            // Agent Workspace OAuth secrets — read+write for refresh tokens (#912),
-            // read for OAuth client credentials and internal API key.
+            // Agent Workspace OAuth secrets — read+update for refresh tokens (#912).
+            // Split into two statements: a normal read+write statement that
+            // does NOT include CreateSecret, plus a tightly-conditioned
+            // CreateSecret statement that only succeeds when the request
+            // carries the correct Environment + ManagedBy tags. This blocks
+            // an attacker who compromises the ECS task from creating
+            // arbitrary tagged secrets that could subvert tag-based access
+            // controls in OTHER policies elsewhere in the account.
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
               actions: [
                 'secretsmanager:GetSecretValue',
                 'secretsmanager:DescribeSecret',
                 'secretsmanager:PutSecretValue',
+              ],
+              resources: [
+                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent-creds/${environment}/*`,
+              ],
+            }),
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
                 'secretsmanager:CreateSecret',
                 'secretsmanager:TagResource',
               ],
               resources: [
                 `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent-creds/${environment}/*`,
               ],
+              conditions: {
+                // The app code in lib/agent-workspace/secrets-manager.ts
+                // sets exactly these tags on every CreateSecret call. An
+                // attacker who tries to create a secret with different
+                // tag values to influence other tag-based policies will
+                // fail closed.
+                StringEquals: {
+                  'aws:RequestTag/Environment': environment,
+                  'aws:RequestTag/ManagedBy': 'aistudio',
+                },
+                // Lock down which tag keys can be set on these secrets so
+                // the attacker can't add arbitrary tags either.
+                'ForAllValues:StringEquals': {
+                  'aws:TagKeys': ['Environment', 'ManagedBy', 'OwnerEmail'],
+                },
+              },
             }),
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
@@ -527,8 +557,11 @@ export class EcsServiceConstruct extends Construct {
         // Secrets Manager IDs for lazy-loaded workspace config (#912).
         // Consumed at request time — not at task start — so the ECS service
         // deploys cleanly before IT populates real GCP OAuth values.
-        GOOGLE_WORKSPACE_OAUTH_SECRET_ARN: `psd-agent/${environment}/google-oauth-client`,
-        AGENT_INTERNAL_API_KEY_SECRET_ARN: `psd-agent/${environment}/internal-api-key`,
+        // Names not ARNs — Secrets Manager APIs accept either, but the
+        // value here is a bare secret name. Suffix is `_SECRET_ID` so the
+        // shape is honest.
+        GOOGLE_WORKSPACE_OAUTH_SECRET_ID: `psd-agent/${environment}/google-oauth-client`,
+        AGENT_INTERNAL_API_KEY_SECRET_ID: `psd-agent/${environment}/internal-api-key`,
         // Memory optimization - 70% of container memory
         NODE_OPTIONS: `--max-old-space-size=${Math.floor(memory * 0.7)}`,
         // Application configuration
@@ -615,9 +648,9 @@ export class EcsServiceConstruct extends Construct {
         // to the operator instead of crash-looping the entire ECS service.
         //
         // IAM read access to psd-agent/${environment}/* is granted above on
-        // the task role. The ARNs are exposed via env vars (see envVars
-        // block — GOOGLE_WORKSPACE_OAUTH_SECRET_ARN and
-        // AGENT_INTERNAL_API_KEY_SECRET_ARN).
+        // the task role. The IDs are exposed via env vars (see envVars
+        // block — GOOGLE_WORKSPACE_OAUTH_SECRET_ID and
+        // AGENT_INTERNAL_API_KEY_SECRET_ID).
       },
       // Security: Read-only root filesystem with tmpfs mounts for writable directories
       readonlyRootFilesystem: true,

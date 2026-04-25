@@ -11,7 +11,7 @@
  * Part of Epic #912 — Agent-Owned Google Workspace Integration
  */
 
-import { createLogger } from "@/lib/logger"
+import { createLogger, sanitizeForLogging } from "@/lib/logger"
 
 const log = createLogger({ module: "consent-token" })
 
@@ -54,7 +54,7 @@ export async function signConsentToken(payload: ConsentTokenPayload): Promise<st
     .setExpirationTime(TOKEN_EXPIRY)
     .sign(getSigningSecret())
 
-  log.info("Consent token signed", { sub: payload.sub, nonce: payload.nonce })
+  log.info("Consent token signed", sanitizeForLogging({ sub: payload.sub, nonce: payload.nonce }))
   return jwt
 }
 
