@@ -173,6 +173,10 @@ COPY harness_adapter.py /app/harness_adapter.py
 COPY agentcore_wrapper.py /app/agentcore_wrapper.py
 COPY workspace_sync.py /app/workspace_sync.py
 COPY mantle_proxy.py /app/mantle_proxy.py
+# Markdown→Google Chat formatter. harness_adapter imports this on every
+# outbound message so the user sees clean Chat-rendered text instead of
+# literal **bold** / ## headers / [label](url) syntax.
+COPY chat_format.py /app/chat_format.py
 
 # Container OS clock is UTC. The wrapper reads the user's local time via
 # zoneinfo (requires the tzdata package installed above). TZ env var is set
