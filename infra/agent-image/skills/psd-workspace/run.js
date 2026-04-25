@@ -11,7 +11,7 @@
  *   2. Load shared OAuth client credentials
  *   3. Exchange refresh token for access token
  *      - invalid_grant → mint consent URL, emit token-revoked (exit 11)
- *   4. Exec `gws <command>` with GOOGLE_ACCESS_TOKEN env var
+ *   4. Exec `gws <command>` with GOOGLE_WORKSPACE_CLI_TOKEN env var
  *   5. Pass through stdout/stderr and exit code
  *
  * Exit codes:

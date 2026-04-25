@@ -191,7 +191,9 @@ function splitCommand(cmd) {
 }
 
 /**
- * Exec gws with GOOGLE_ACCESS_TOKEN set. Streams stdout; returns exit code.
+ * Exec gws with GOOGLE_WORKSPACE_CLI_TOKEN set. Streams stdout; returns exit
+ * code. gws ignores GOOGLE_ACCESS_TOKEN — must be GOOGLE_WORKSPACE_CLI_TOKEN
+ * per the gws README "Pre-obtained Access Token" section.
  */
 function execGws(commandString, accessToken) {
   const tokens = splitCommand(commandString);
@@ -199,7 +201,7 @@ function execGws(commandString, accessToken) {
     fail('--command is empty');
   }
   const result = spawnSync('gws', tokens, {
-    env: { ...process.env, GOOGLE_ACCESS_TOKEN: accessToken },
+    env: { ...process.env, GOOGLE_WORKSPACE_CLI_TOKEN: accessToken },
     stdio: ['ignore', 'inherit', 'inherit'],
   });
   if (result.error) {
