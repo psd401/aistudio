@@ -1,18 +1,38 @@
 #!/usr/bin/env node
 /**
- * run.js — psd-workspace skill entrypoint (#912)
+ * run.js — psd-workspace skill entrypoint (#912 + Phase 1)
  *
  * Usage:
- *   node run.js --user <email> --command "<gws subcommand + args>"
+ *   node run.js --user <email> --command "<gws subcommand + args>" [--scope user|agent]
+ *
+ * The --scope flag (added 2026-04-26 for Phase 1) selects which OAuth slot
+ * the skill uses to authenticate the gws call:
+ *
+ *   --scope user (default for Phase 1) →
+ *     OAuth on the human user's identity (hagelk@psd401.net), narrow scopes
+ *     (gmail.readonly, gmail.compose, calendar, tasks, drive.file). Use for
+ *     reading/writing the human's own data.
+ *
+ *   --scope agent →
+ *     OAuth on the agent account (agnt_hagelk@psd401.net), broad scopes.
+ *     Use for actions taken AS the agent (drafts the agent owns, agent's own
+ *     calendar/drive, future agent-as-itself sends).
+ *
+ * Phase 1 hard gates: Send mail, delete operations, and modification of
+ * user-created content are blocked at the skill layer regardless of scope —
+ * the model cannot bypass these by phrasing the gws command differently.
  *
  * Flow:
- *   1. Fetch per-user refresh-token record from Secrets Manager
+ *   1. Phase 1 gate check on --command (forbidden ops → exit 13)
+ *   2. Marker injection on --command (calendar create, draft create, task
+ *      create, drive create get markers automatically)
+ *   3. Fetch per-user refresh-token record for the requested slot
  *      - Not found → mint consent URL, emit needs-auth (exit 10)
- *   2. Load shared OAuth client credentials
- *   3. Exchange refresh token for access token
+ *   4. Load shared OAuth client credentials
+ *   5. Exchange refresh token for access token
  *      - invalid_grant → mint consent URL, emit token-revoked (exit 11)
- *   4. Exec `gws <command>` with GOOGLE_WORKSPACE_CLI_TOKEN env var
- *   5. Pass through stdout/stderr and exit code
+ *   6. Exec `gws <command>` with GOOGLE_WORKSPACE_CLI_TOKEN env var
+ *   7. Pass through stdout/stderr and exit code
  *
  * Exit codes:
  *   0  success
@@ -20,8 +40,8 @@
  *   2  gws exec failure
  *   10 needs-auth (no token)
  *   11 token-revoked (invalid_grant from Google)
- *   12 missing-scope (reserved; gws does not currently surface this — left
- *      here so the SKILL.md contract is honored when it starts)
+ *   12 missing-scope (reserved)
+ *   13 phase1-forbidden (Phase 1 hard gate refused the command)
  */
 
 'use strict';
@@ -36,6 +56,8 @@ const {
   refreshAccessToken,
   mintConsentUrl,
   execGws,
+  enforcePhase1Gates,
+  injectMarkers,
 } = require('./common');
 
 async function main() {
@@ -52,22 +74,51 @@ async function main() {
     fail('--command is required (e.g. --command "gmail.list --query is:unread")');
   }
 
-  const ownerEmail = args.user;
+  // Resolve scope. Default for Phase 1 is 'user' — the agent acts on the
+  // human user's own data. Pass --scope agent to act as the agent identity
+  // (mostly for sending/owning artifacts the agent itself creates).
+  const scope = args.scope === 'agent' ? 'agent_account'
+    : args.scope === 'user' || args.scope === undefined ? 'user_account'
+    : (() => { fail('--scope must be "user" or "agent"'); return null })();
 
-  // 1. Per-user refresh-token record
-  const tokenRecord = await getUserWorkspaceToken(ownerEmail);
+  const ownerEmail = args.user;
+  let command = args.command;
+
+  // 1. Phase 1 hard gates — refused at the skill layer regardless of scope
+  // or how the model phrases the request.
+  const gateCheck = enforcePhase1Gates(command);
+  if (!gateCheck.allowed) {
+    emit({
+      status: 'phase1-forbidden',
+      reason: gateCheck.reason,
+      message:
+        `Phase 1 forbids this operation: ${gateCheck.reason}. ` +
+        `If the user explicitly approved, route via the appropriate ` +
+        `confirmation flow rather than calling this skill directly.`,
+    });
+    process.exit(13);
+  }
+
+  // 2. Marker injection — calendar/drafts/tasks/drive get auto-markers so
+  // every artifact the agent touches is auditable as agent-touched.
+  command = injectMarkers(command);
+
+  // 3. Per-user refresh-token record for the requested slot
+  const tokenRecord = await getUserWorkspaceToken(ownerEmail, scope);
   if (!tokenRecord || !tokenRecord.refresh_token) {
     let consentUrl;
     try {
-      consentUrl = await mintConsentUrl(ownerEmail);
+      consentUrl = await mintConsentUrl(ownerEmail, scope);
     } catch (err) {
       fail(`Unable to mint consent URL: ${err.message}`);
     }
     emit({
       status: 'needs-auth',
       consent_url: consentUrl,
-      message:
-        'Workspace not connected yet. Click the link above to authorize your agent account.',
+      kind: scope,
+      message: scope === 'user_account'
+        ? 'Your agent doesn\'t have permission to see your inbox/tasks yet. Click the link above to grant access.'
+        : 'Workspace not connected yet. Click the link above to authorize your agent account.',
     });
     process.exit(10);
   }
@@ -99,13 +150,14 @@ async function main() {
     if (err.code === 'invalid_grant') {
       let consentUrl;
       try {
-        consentUrl = await mintConsentUrl(ownerEmail);
+        consentUrl = await mintConsentUrl(ownerEmail, scope);
       } catch (e) {
         fail(`Token revoked but consent-link mint failed: ${e.message}`);
       }
       emit({
         status: 'token-revoked',
         consent_url: consentUrl,
+        kind: scope,
         message:
           'Your agent lost Workspace access (likely revoked in Google). Click the link above to re-authorize.',
       });
@@ -118,8 +170,8 @@ async function main() {
     fail('Token refresh returned no access_token');
   }
 
-  // 4. Exec gws
-  const code = execGws(args.command, access.access_token);
+  // Exec gws with the (possibly marker-injected) command
+  const code = execGws(command, access.access_token);
   process.exit(code);
 }
 

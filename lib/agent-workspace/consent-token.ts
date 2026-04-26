@@ -15,6 +15,8 @@ import { createLogger, sanitizeForLogging } from "@/lib/logger"
 
 const log = createLogger({ module: "consent-token" })
 
+export type ConsentTokenKind = "agent_account" | "user_account"
+
 export interface ConsentTokenPayload {
   /** Human user email (e.g. hagelk@psd401.net) */
   sub: string
@@ -24,6 +26,15 @@ export interface ConsentTokenPayload {
   purpose: "workspace-consent"
   /** One-time nonce (stored in psd_agent_workspace_consent_nonces) */
   nonce: string
+  /**
+   * Which OAuth identity is being consented (#912 Phase 1):
+   *   'agent_account' — user signs in as agnt_<uniqname> (broad scopes)
+   *   'user_account'  — user signs in as themselves (narrow scopes for
+   *                     reading their own Gmail/Tasks/Drive)
+   * Optional for backwards compatibility with tokens issued before Phase 1.
+   * When absent, treated as 'agent_account'.
+   */
+  kind?: ConsentTokenKind
 }
 
 const TOKEN_EXPIRY = "24h"
@@ -74,6 +85,7 @@ export async function verifyConsentToken(token: string): Promise<ConsentTokenPay
     const agent = raw.agent
     const purpose = raw.purpose
     const nonce = raw.nonce
+    const kind = raw.kind
 
     if (
       typeof sub !== "string" ||
@@ -90,7 +102,16 @@ export async function verifyConsentToken(token: string): Promise<ConsentTokenPay
       return null
     }
 
-    return { sub, agent, purpose: "workspace-consent", nonce }
+    // Validate kind if present. Absent = legacy token, treat as agent_account.
+    let resolvedKind: ConsentTokenKind | undefined
+    if (kind === "agent_account" || kind === "user_account") {
+      resolvedKind = kind
+    } else if (kind !== undefined) {
+      log.warn("Consent token has unknown kind", { kind })
+      return null
+    }
+
+    return { sub, agent, purpose: "workspace-consent", nonce, kind: resolvedKind }
   } catch (error) {
     log.warn("Consent token verification failed", {
       error: error instanceof Error ? error.message : String(error),

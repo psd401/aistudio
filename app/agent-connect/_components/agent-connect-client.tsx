@@ -76,31 +76,67 @@ export function AgentConnectClient() {
     )
   }
 
+  // The consent UI shows different copy depending on which slot the user is
+  // connecting (#912 Phase 1). Default to agent_account semantics for legacy
+  // tokens that predate the kind field.
+  const kind = result.kind ?? "agent_account"
+  const isUserAccount = kind === "user_account"
+
   return (
     <div className="flex min-h-screen items-center justify-center bg-gray-50">
       <Card className="w-full max-w-md">
         <CardHeader>
           <CardTitle className="text-center">
-            Connect Your Agent to Google Workspace
+            {isUserAccount
+              ? "Let Your Agent See Your Inbox and To-Dos"
+              : "Connect Your Agent to Google Workspace"}
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
           <div className="text-sm text-muted-foreground space-y-2">
-            <p>
-              You are authorizing <strong>{result.agentEmail}</strong> to access
-              Google Workspace on your behalf.
-            </p>
-            <p>
-              This will grant your agent access to Gmail, Calendar, Drive, Docs,
-              Meet, and Chat through the agent account.
-            </p>
+            {isUserAccount ? (
+              <>
+                <p>
+                  You are granting <strong>your agent</strong> permission to
+                  read your <strong>own</strong> Gmail and Tasks
+                  (<strong>{result.ownerEmail}</strong>) and to create drafts,
+                  events, tasks, and Drive files on your behalf.
+                </p>
+                <p>
+                  Phase 1 limits: <strong>read-only mail (no sending), drafts
+                  only, no deletes.</strong> The agent always marks artifacts
+                  it creates so you can audit them. You can revoke access any
+                  time at <code>myaccount.google.com/permissions</code>.
+                </p>
+              </>
+            ) : (
+              <>
+                <p>
+                  You are authorizing <strong>{result.agentEmail}</strong> to
+                  access Google Workspace on your behalf.
+                </p>
+                <p>
+                  This will grant your agent access to Gmail, Calendar, Drive,
+                  Docs, Meet, and Chat through the agent account.
+                </p>
+              </>
+            )}
           </div>
           <div className="bg-blue-50 border border-blue-200 rounded-md p-3">
-            <p className="text-sm text-blue-800">
-              <strong>Important:</strong> You will be asked to sign in as the
-              agent account (<strong>{result.agentEmail}</strong>), not your
-              personal account. Use the temporary password provided by IT.
-            </p>
+            {isUserAccount ? (
+              <p className="text-sm text-blue-800">
+                <strong>Important:</strong> You will be asked to sign in as
+                yourself (<strong>{result.ownerEmail}</strong>) — your normal
+                Google account.
+              </p>
+            ) : (
+              <p className="text-sm text-blue-800">
+                <strong>Important:</strong> You will be asked to sign in as
+                the agent account (<strong>{result.agentEmail}</strong>),
+                not your personal account. Use the temporary password
+                provided by IT.
+              </p>
+            )}
           </div>
           <Button
             className="w-full"
@@ -111,7 +147,9 @@ export function AgentConnectClient() {
               }
             }}
           >
-            Authorize Google Workspace Access
+            {isUserAccount
+              ? "Grant Inbox and To-Do Access"
+              : "Authorize Google Workspace Access"}
           </Button>
         </CardContent>
       </Card>

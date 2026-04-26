@@ -13,21 +13,49 @@ import { storeRefreshToken, getSecretJson } from "@/lib/agent-workspace/secrets-
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
 
 /**
- * Google OAuth scopes requested at bootstrap. All scopes are requested
- * at once (progressive consent is deferred to a future issue).
+ * OAuth scopes requested per token kind (#912 Phase 1).
+ *
+ * agent_account: the agnt_<uniqname>@psd401.net identity. Broad scopes
+ * because the agent owns its own Calendar/Drive/Chat presence and may need
+ * write access to shared resources.
+ *
+ * user_account: the human's own identity. NARROW Phase 1 scopes only —
+ * read mail + create drafts, manage tasks, scoped Drive files. No send,
+ * no destructive operations. Calendar scope included so the agent can
+ * write events directly to the user's calendar (Calendar via sharing
+ * already worked, but the user wants the agent to be able to make
+ * changes from the user-account side as well).
  */
-const GOOGLE_WORKSPACE_SCOPES = [
-  "https://www.googleapis.com/auth/gmail.modify",
-  "https://www.googleapis.com/auth/calendar",
-  "https://www.googleapis.com/auth/drive",
-  "https://www.googleapis.com/auth/documents",
-  "https://www.googleapis.com/auth/meetings.space.created",
-  "https://www.googleapis.com/auth/chat.messages",
-  "https://www.googleapis.com/auth/chat.spaces",
-  "openid",
-  "email",
-  "profile",
-]
+const SCOPES_BY_KIND: Record<"agent_account" | "user_account", string[]> = {
+  agent_account: [
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/drive",
+    "https://www.googleapis.com/auth/documents",
+    "https://www.googleapis.com/auth/meetings.space.created",
+    "https://www.googleapis.com/auth/chat.messages",
+    "https://www.googleapis.com/auth/chat.spaces",
+    "openid",
+    "email",
+    "profile",
+  ],
+  user_account: [
+    // Phase 1: read mail and create drafts only. No send.
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.compose",
+    // Full calendar so the agent can write events with markers (per user
+    // direction 2026-04-26: "the way it is working right now is fine").
+    "https://www.googleapis.com/auth/calendar",
+    // Tasks for to-do management.
+    "https://www.googleapis.com/auth/tasks",
+    // Drive scoped to files the app creates or the user explicitly opens
+    // with the app — narrowest possible Drive grant.
+    "https://www.googleapis.com/auth/drive.file",
+    "openid",
+    "email",
+    "profile",
+  ],
+}
 
 interface GoogleOAuthClientCreds {
   client_id: string
@@ -70,6 +98,13 @@ export interface VerifyConsentResult {
   valid: boolean
   ownerEmail?: string
   agentEmail?: string
+  /**
+   * Which OAuth slot this consent is for (#912 Phase 1):
+   *   'agent_account' — user logs in as agnt_<uniqname>, broad scopes
+   *   'user_account'  — user logs in as themself, narrow Phase 1 scopes
+   * The consent UI renders different copy based on this field.
+   */
+  kind?: "agent_account" | "user_account"
   googleOAuthUrl?: string
   error?: string
 }
@@ -145,15 +180,22 @@ export async function verifyConsentAndGetOAuthUrl(
     // the nonce row in psd_agent_workspace_consent_nonces (migration 072),
     // and the table validates one-time-use + age via UPDATE ... WHERE
     // consumed_at IS NULL plus a 24h window.
+    //
+    // Scopes and login_hint are kind-dependent:
+    //   agent_account → log in as agnt_<uniqname>, broad agent scopes
+    //   user_account  → log in as the user themself, narrow Phase 1 scopes
+    const kind = payload.kind ?? "agent_account"
+    const scopes = SCOPES_BY_KIND[kind]
+    const loginHint = kind === "user_account" ? payload.sub : payload.agent
     const params = new URLSearchParams({
       client_id: oauthClient.client_id,
       redirect_uri: redirectUri,
       response_type: "code",
-      scope: GOOGLE_WORKSPACE_SCOPES.join(" "),
+      scope: scopes.join(" "),
       access_type: "offline",
       prompt: "consent",
       state: payload.nonce,
-      login_hint: payload.agent,
+      login_hint: loginHint,
     })
 
     timer({ status: "success" })
@@ -166,6 +208,7 @@ export async function verifyConsentAndGetOAuthUrl(
       valid: true,
       ownerEmail: payload.sub,
       agentEmail: payload.agent,
+      kind,
       googleOAuthUrl: `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`,
     })
   } catch (error) {
@@ -204,7 +247,7 @@ export interface OAuthCallbackResult {
  */
 async function exchangeAndStore(
   code: string,
-  payload: { sub: string; agent: string },
+  payload: { sub: string; agent: string; kind: "agent_account" | "user_account" },
   log: ReturnType<typeof createLogger>
 ): Promise<OAuthCallbackResult> {
   const oauthClient = await getOAuthClientCredentials()
@@ -267,12 +310,22 @@ async function exchangeAndStore(
     }
   }
 
-  // Validate that Google granted the minimum required scopes
-  const REQUIRED_SCOPES = [
-    "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/calendar",
-    "https://www.googleapis.com/auth/drive",
-  ]
+  // Validate that Google granted the minimum required scopes for this kind.
+  // Per-kind required set is the subset of SCOPES_BY_KIND that's truly
+  // load-bearing — openid/email/profile are nice-to-have, not required.
+  const REQUIRED_BY_KIND: Record<"agent_account" | "user_account", string[]> = {
+    agent_account: [
+      "https://www.googleapis.com/auth/gmail.modify",
+      "https://www.googleapis.com/auth/calendar",
+      "https://www.googleapis.com/auth/drive",
+    ],
+    user_account: [
+      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/calendar",
+      "https://www.googleapis.com/auth/tasks",
+    ],
+  }
+  const REQUIRED_SCOPES = REQUIRED_BY_KIND[payload.kind]
   const missingScopes = REQUIRED_SCOPES.filter((s) => !grantedScopes.includes(s))
   if (missingScopes.length > 0) {
     log.error("Google granted insufficient scopes", sanitizeForLogging({
@@ -304,6 +357,9 @@ async function exchangeAndStore(
   // The ARN column is left null until step 3 because we don't know the real
   // ARN until Secrets Manager returns it (ARNs always end in a 6-char random
   // suffix that isn't part of the path).
+  //
+  // Conflict target is composite (owner_user_id, token_kind) so the agent_account
+  // and user_account rows coexist for the same user (#912 Phase 1).
   await executeQuery(
     (db) =>
       db
@@ -312,13 +368,14 @@ async function exchangeAndStore(
           ownerUserId: user.id,
           ownerEmail: payload.sub,
           agentEmail: payload.agent,
+          tokenKind: payload.kind,
           status: "pending",
           grantedScopes,
           secretsManagerArn: null,
           updatedAt: new Date(),
         })
         .onConflictDoUpdate({
-          target: psdAgentWorkspaceTokens.ownerUserId,
+          target: [psdAgentWorkspaceTokens.ownerUserId, psdAgentWorkspaceTokens.tokenKind],
           set: {
             agentEmail: payload.agent,
             status: "pending",
@@ -331,15 +388,19 @@ async function exchangeAndStore(
     "upsertWorkspaceTokenPending"
   )
 
-  // Step 2: write the refresh token to Secrets Manager. Returns the *real*
-  // ARN (with the 6-char suffix AWS appends), not a hand-built one. Stored
-  // on the manifest below so operators clicking through from the dashboard
-  // get a working AWS Console link.
-  const realSecretArn = await storeRefreshToken(payload.sub, {
-    refresh_token: tokenData.refresh_token,
-    granted_scopes: grantedScopes,
-    obtained_at: new Date().toISOString(),
-  })
+  // Step 2: write the refresh token to the kind-specific Secrets Manager
+  // slot. Returns the *real* ARN (with the 6-char suffix AWS appends), not
+  // a hand-built one. Stored on the manifest below so operators clicking
+  // through from the dashboard get a working AWS Console link.
+  const realSecretArn = await storeRefreshToken(
+    payload.sub,
+    {
+      refresh_token: tokenData.refresh_token,
+      granted_scopes: grantedScopes,
+      obtained_at: new Date().toISOString(),
+    },
+    payload.kind
+  )
 
   // Step 3: promote to active. Only here is the connection considered live
   // by both halves of the system (manifest + secret).
@@ -353,6 +414,9 @@ async function exchangeAndStore(
   //   crash between step 2 and step 3 doesn't break agent functionality —
   //   the user retains a working connection; the dashboard just shows
   //   `pending` until reconciled.
+  //
+  // Update WHERE clause is composite — only the row matching this kind is
+  // promoted, leaving the other slot (if any) unchanged.
   await executeQuery(
     (db) =>
       db
@@ -363,7 +427,12 @@ async function exchangeAndStore(
           lastVerifiedAt: new Date(),
           updatedAt: new Date(),
         })
-        .where(eq(psdAgentWorkspaceTokens.ownerUserId, user.id)),
+        .where(
+          and(
+            eq(psdAgentWorkspaceTokens.ownerUserId, user.id),
+            eq(psdAgentWorkspaceTokens.tokenKind, payload.kind)
+          )
+        ),
     "promoteWorkspaceTokenActive"
   )
 
@@ -405,6 +474,10 @@ export async function handleOAuthCallback(
     // Look up the nonce row — must exist, be unconsumed, and within 1h of
     // creation. The age window is the actual replay-protection horizon
     // (older nonces, even unconsumed, are no longer valid).
+    //
+    // token_kind is read from the row so the callback writes to the correct
+    // slot (agent_account vs user_account) without trusting the OAuth state
+    // for that information (state is just the bare nonce — see migration 072).
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000).toISOString()
     const [nonceRow] = await executeQuery(
       (db) =>
@@ -412,6 +485,7 @@ export async function handleOAuthCallback(
           .select({
             ownerEmail: psdAgentWorkspaceConsentNonces.ownerEmail,
             agentEmail: psdAgentWorkspaceConsentNonces.agentEmail,
+            tokenKind: psdAgentWorkspaceConsentNonces.tokenKind,
           })
           .from(psdAgentWorkspaceConsentNonces)
           .where(
@@ -434,7 +508,11 @@ export async function handleOAuthCallback(
       })
     }
 
-    const payload = { sub: nonceRow.ownerEmail, agent: nonceRow.agentEmail }
+    const payload = {
+      sub: nonceRow.ownerEmail,
+      agent: nonceRow.agentEmail,
+      kind: nonceRow.tokenKind,
+    }
     const result = await exchangeAndStore(code, payload, log)
 
     if (!result.success) {

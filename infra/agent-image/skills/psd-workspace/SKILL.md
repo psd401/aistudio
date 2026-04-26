@@ -7,42 +7,78 @@ allowed-tools: Bash(node:*)
 
 # psd-workspace
 
-Google Workspace access for your dedicated agent account. All commands require `--user <caller-email>` (from the `[caller: Name <email>]` header at the top of each user turn).
+Google Workspace access for the user's data, gated by Phase 1 boundaries (#912). All commands require `--user <caller-email>` (from the `[caller: Name <email>]` header at the top of each user turn).
+
+## Two OAuth slots — `--scope` flag
+
+Phase 1 introduces two parallel OAuth identities per user. The `--scope` flag selects which:
+
+- `--scope user` (**default**) — OAuth on the human user (e.g. `hagelk@psd401.net`). Narrow scopes: `gmail.readonly`, `gmail.compose`, `calendar`, `tasks`, `drive.file`. Use this for reading the user's mail, managing their tasks, writing to their calendar, creating new Drive files for them.
+- `--scope agent` — OAuth on the agent identity (e.g. `agnt_hagelk@psd401.net`). Broad scopes. Use this for actions the agent takes *as itself* (the agent's own calendar, drafts owned by the agent, agent-owned Drive folder).
+
+If you omit `--scope`, the skill defaults to `user`. Phase 1 work is overwhelmingly on user data.
 
 ## Invocation
 
 ```bash
 node /home/node/.openclaw/skills/psd-workspace/run.js \
   --user <caller-email> \
-  --command "<gws-subcommand-with-args>"
+  --command "<gws-subcommand-with-args>" \
+  [--scope user|agent]
 ```
 
 Examples:
 
 ```bash
-# List unread mail in the agent's own inbox
+# Read user's unread mail (Phase 1 default scope = user)
 node /home/node/.openclaw/skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
-  --command "gmail.list --query 'is:unread'"
+  --command "gmail users messages list --params '{\"userId\":\"me\",\"q\":\"is:unread\",\"maxResults\":20}'"
 
-# Send an email from the agent's account
+# Create a draft on the user's account (lands in their Drafts folder, marker
+# is auto-appended to the body — they review and send themselves)
 node /home/node/.openclaw/skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
-  --command "gmail.send --to principal@psd401.net --subject 'Test' --body 'hi'"
+  --command "gmail +draft --to principal@psd401.net --subject 'Follow up' --body 'Hi Bill,...'"
 
-# Create a calendar event
+# Create a task on the user's tasks (in the 'Your Agent' tasklist)
 node /home/node/.openclaw/skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
-  --command "calendar.create-event --title 'Standup' --start '2026-05-01T09:00' --duration 30"
+  --command "tasks tasks insert --params '{\"tasklist\":\"@default\"}' --json '{\"title\":\"Review budget\",\"due\":\"2026-04-29T17:00:00Z\"}'"
 
-# Double quotes work too — useful when the argument contains apostrophes
+# Create a calendar event on the user's calendar (marker auto-prepended to description)
 node /home/node/.openclaw/skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
-  --command 'gmail.send --to principal@psd401.net --subject "Tomorrow\'s meeting" --body "See you there"'
+  --command "calendar events insert --params '{\"calendarId\":\"primary\"}' --json '{\"summary\":\"Standup\",\"start\":{\"dateTime\":\"2026-05-01T09:00:00-07:00\"},\"end\":{\"dateTime\":\"2026-05-01T09:30:00-07:00\"}}'"
+
+# Schedule something on the AGENT's own calendar (e.g. internal reminders)
+node /home/node/.openclaw/skills/psd-workspace/run.js \
+  --user hagelk@psd401.net --scope agent \
+  --command "calendar events insert --params '{\"calendarId\":\"primary\"}' --json '{\"summary\":\"agent self-reminder\"}'"
 
 # The full gws command surface
 node /home/node/.openclaw/skills/psd-workspace/run.js --user hagelk@psd401.net --command "--help"
 ```
+
+## Phase 1 boundaries (hard gates — refused at the skill layer)
+
+These cannot be bypassed by phrasing. The skill returns exit code 13 with `status: phase1-forbidden`:
+
+- **No sending mail.** `gmail.users.messages.send`, `gmail.users.drafts.send`, `+send`, `+reply`, `+reply-all`, `+forward` — all blocked. Drafts only.
+- **No deletes.** Mail (delete/trash/batchDelete), events, calendars, Drive files, drive trash, tasks, tasklists.
+- **No permission changes.** `drive.permissions.create/update/delete`.
+
+If a user explicitly asks the agent to send something, post the draft + a clear "I drafted it; reply 'send' if it's right" in Chat instead. The user clicks send themselves.
+
+## Marker conventions (auto-injected on writes)
+
+The skill silently adds these to every write:
+
+- **Calendar event create/update/patch** → description prepended with `🤖 Created by your agent on YYYY-MM-DD.`
+- **Drive file create** → filename prefixed `[Agent] `, `appProperties.psdAgentCreated=true`
+- **Gmail draft create** (when body is in the `.message.body` field) → footer `— Drafted by your agent. Review before sending.`
+
+You don't need to remember to add markers — the skill does it. **Do not** strip them or instruct the user to strip them; they're the audit substrate.
 
 ## Where the token comes from
 
@@ -60,9 +96,10 @@ the dashboard shows `pending` until reconciled.
 ## Output contract
 
 - **Success (exit 0):** stdout is whatever `gws` produced (usually JSON). Pass through.
-- **Needs auth (exit 10):** stdout is a single JSON line `{"status":"needs-auth","consent_url":"https://...","message":"..."}`. Paste `consent_url` verbatim in your Chat reply. Do not retry.
-- **Token revoked (exit 11):** stdout is `{"status":"token-revoked","consent_url":"https://...","message":"..."}`. Same response: paste the URL and ask the user to re-authorize.
+- **Needs auth (exit 10):** stdout is a single JSON line `{"status":"needs-auth","consent_url":"https://...","kind":"user_account|agent_account","message":"..."}`. Paste `consent_url` verbatim in your Chat reply. Do not retry. The `kind` field tells you which slot needs consent — surface that to the user (e.g. "I need permission to read your inbox" vs "I need to connect my agent account").
+- **Token revoked (exit 11):** stdout is `{"status":"token-revoked","consent_url":"https://...","kind":"...","message":"..."}`. Same response: paste the URL and ask the user to re-authorize.
 - **Missing scope (exit 12):** stdout is `{"status":"missing-scope","scope":"<scope>","consent_url":"https://...","message":"..."}`. Paste the URL and note that additional access is needed.
+- **Phase 1 forbidden (exit 13):** stdout is `{"status":"phase1-forbidden","reason":"<short>","message":"<longer>"}`. The user asked you to do something Phase 1 disallows (send mail, delete, etc.). Tell them what you can do instead — usually "I'll draft it; reply 'send' if it's right." Do **not** retry with a workaround.
 - **gws failure (exit 2+):** `gws` stderr is surfaced. Report the error to the user; do not invent workarounds.
 
 ## My inbox vs your inbox

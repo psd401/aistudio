@@ -6,7 +6,7 @@ import type { ActionState } from "@/types"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { desc, eq, sql } from "drizzle-orm"
-import { psdAgentWorkspaceTokens, type WorkspaceTokenStatus } from "@/lib/db/schema/tables/agent-workspace-tokens"
+import { psdAgentWorkspaceTokens, type WorkspaceTokenStatus, type WorkspaceTokenKind } from "@/lib/db/schema/tables/agent-workspace-tokens"
 import { users } from "@/lib/db/schema/tables/users"
 import { userRoles } from "@/lib/db/schema/tables/user-roles"
 import { roles } from "@/lib/db/schema/tables/roles"
@@ -16,6 +16,14 @@ export interface WorkspaceTokenRow {
   ownerUserId: number
   ownerEmail: string
   agentEmail: string
+  /**
+   * Which OAuth slot (#912 Phase 1):
+   *   'agent_account' — agnt_<uniqname> identity, broad scopes
+   *   'user_account'  — user's own identity, narrow Phase 1 scopes
+   * Each user can have one row per kind. The dashboard groups by user
+   * and shows both connection states side-by-side.
+   */
+  tokenKind: WorkspaceTokenKind
   status: WorkspaceTokenStatus
   grantedScopes: string[]
   createdAt: string
@@ -61,6 +69,7 @@ export async function getAgentWorkspaceTokens(): Promise<ActionState<WorkspaceTo
               ownerUserId: psdAgentWorkspaceTokens.ownerUserId,
               ownerEmail: psdAgentWorkspaceTokens.ownerEmail,
               agentEmail: psdAgentWorkspaceTokens.agentEmail,
+              tokenKind: psdAgentWorkspaceTokens.tokenKind,
               status: psdAgentWorkspaceTokens.status,
               grantedScopes: psdAgentWorkspaceTokens.grantedScopes,
               createdAt: psdAgentWorkspaceTokens.createdAt,
@@ -105,6 +114,7 @@ export async function getAgentWorkspaceTokens(): Promise<ActionState<WorkspaceTo
         ownerUserId: row.ownerUserId,
         ownerEmail: row.ownerEmail,
         agentEmail: row.agentEmail,
+        tokenKind: row.tokenKind,
         status,
         grantedScopes: (row.grantedScopes ?? []) as string[],
         createdAt: row.createdAt?.toISOString() ?? "",

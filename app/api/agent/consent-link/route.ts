@@ -119,7 +119,7 @@ export async function POST(request: NextRequest) {
   }
 
   // Parse body
-  let body: { ownerEmail?: string }
+  let body: { ownerEmail?: string; kind?: string }
   try {
     body = await request.json()
   } catch {
@@ -137,10 +137,24 @@ export async function POST(request: NextRequest) {
     )
   }
 
+  // Validate kind. Default to 'agent_account' for backwards compatibility
+  // with skills that haven't been updated to pass kind explicitly.
+  const kind: "agent_account" | "user_account" = body.kind === "user_account"
+    ? "user_account"
+    : body.kind === "agent_account" || body.kind === undefined
+      ? "agent_account"
+      : (() => { return "invalid" as never })()
+  if (body.kind !== undefined && body.kind !== "agent_account" && body.kind !== "user_account") {
+    return NextResponse.json(
+      { error: "kind must be 'agent_account' or 'user_account' if provided" },
+      { status: 400 }
+    )
+  }
+
   // Rate limit
   const withinLimit = await checkRateLimit(ownerEmail)
   if (!withinLimit) {
-    log.warn("Consent link rate limit exceeded", sanitizeForLogging({ ownerEmail, requestId }))
+    log.warn("Consent link rate limit exceeded", sanitizeForLogging({ ownerEmail, requestId, kind }))
     return NextResponse.json(
       { error: "Rate limit exceeded — max 5 links per hour per user" },
       { status: 429, headers: { "Retry-After": "3600" } }
@@ -151,9 +165,10 @@ export async function POST(request: NextRequest) {
   const [localPart, domain] = ownerEmail.split("@")
   const agentEmail = `agnt_${localPart}@${domain}`
 
-  // Generate nonce and persist it. agent_email is stored on the row so the
-  // OAuth callback can recover identity from the nonce alone (the OAuth
-  // state parameter no longer carries the full JWT — see migration 072).
+  // Generate nonce and persist it. agent_email + token_kind are stored on the
+  // row so the OAuth callback can recover identity AND target slot from the
+  // nonce alone (the OAuth state parameter no longer carries the full JWT —
+  // see migration 072).
   const nonce = randomBytes(32).toString("hex")
 
   await executeQuery(
@@ -164,6 +179,7 @@ export async function POST(request: NextRequest) {
           nonce,
           ownerEmail,
           agentEmail,
+          tokenKind: kind,
         }),
     "insertConsentNonce"
   )
@@ -176,13 +192,14 @@ export async function POST(request: NextRequest) {
     agent: agentEmail,
     purpose: "workspace-consent",
     nonce,
+    kind,
   })
 
   // Build the consent URL
   const baseUrl = getIssuerUrl()
   const url = `${baseUrl}/agent-connect?token=${encodeURIComponent(token)}`
 
-  log.info("Consent link generated", sanitizeForLogging({ ownerEmail, agentEmail, requestId }))
+  log.info("Consent link generated", sanitizeForLogging({ ownerEmail, agentEmail, kind, requestId }))
 
   return NextResponse.json({ url })
 }

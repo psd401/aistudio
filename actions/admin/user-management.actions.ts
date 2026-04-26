@@ -20,7 +20,7 @@ import { users, userRoles, roles } from "@/lib/db/schema"
 import { nexusConversations } from "@/lib/db/schema/tables/nexus-conversations"
 import { promptUsageEvents } from "@/lib/db/schema/tables/prompt-usage-events"
 import { getDateThreshold } from "@/lib/date-utils"
-import { deleteWorkspaceSecret } from "@/lib/agent-workspace/secrets-manager"
+import { deleteAllWorkspaceSecrets } from "@/lib/agent-workspace/secrets-manager"
 
 // Constants
 const ACTIVE_USER_THRESHOLD_DAYS = 30 // Users who signed in within this many days are considered "active"
@@ -675,7 +675,7 @@ export async function deleteUser(userId: number): Promise<ActionState<void>> {
     // (caught later by ops review) but does not undo the user deletion.
     if (userToDeleteEmail?.email) {
       try {
-        const removed = await deleteWorkspaceSecret(userToDeleteEmail.email)
+        const removed = await deleteAllWorkspaceSecrets(userToDeleteEmail.email)
         log.info("Workspace secret cleanup after user deletion", {
           userId,
           removed,

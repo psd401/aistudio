@@ -23,6 +23,12 @@ export const psdAgentWorkspaceConsentNonces = pgTable("psd_agent_workspace_conse
   // identities from just the nonce (the OAuth `state` parameter no longer
   // carries the full consent JWT — the nonce alone is sufficient).
   agentEmail: varchar("agent_email", { length: 255 }).notNull(),
+  // Which OAuth identity is being consented (#912 Phase 1, migration 073).
+  // 'agent_account' = agnt_<uniqname>; 'user_account' = the user themself.
+  tokenKind: varchar("token_kind", { length: 16 })
+    .$type<"agent_account" | "user_account">()
+    .notNull()
+    .default("agent_account"),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   consumedAt: timestamp("consumed_at", { withTimezone: true }),
 }, (table) => [

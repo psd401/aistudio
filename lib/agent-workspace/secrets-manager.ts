@@ -18,6 +18,31 @@ export interface WorkspaceTokenData {
   obtained_at: string
 }
 
+/**
+ * Two distinct OAuth identities can be stored per user (#912 Phase 1):
+ *   'agent_account' — refresh token for agnt_<uniqname>@psd401.net.
+ *                     Path: psd-agent-creds/{env}/user/{email}/google-workspace
+ *   'user_account'  — refresh token for the user's own identity, narrow
+ *                     scopes for the agent to read their Gmail/Tasks/Drive.
+ *                     Path: psd-agent-creds/{env}/user/{email}/google-workspace-user
+ *
+ * The 'user_account' path is suffixed (-user) so revocation tools that
+ * iterate by prefix can clearly distinguish the two slots.
+ */
+export type WorkspaceTokenKind = "agent_account" | "user_account"
+
+export function workspaceSecretId(
+  ownerEmail: string,
+  kind: WorkspaceTokenKind = "agent_account"
+): string {
+  if (!SAFE_EMAIL_RE.test(ownerEmail)) {
+    throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)
+  }
+  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+  const suffix = kind === "user_account" ? "-user" : ""
+  return `psd-agent-creds/${environment}/user/${ownerEmail}/google-workspace${suffix}`
+}
+
 // Module-scoped client — reuses the HTTP connection pool across calls.
 // Lazily initialized on first non-dev invocation.
 let _smClient: InstanceType<typeof import("@aws-sdk/client-secrets-manager").SecretsManagerClient> | null = null
@@ -104,16 +129,11 @@ export async function getSecretJson<T = Record<string, unknown>>(
  */
 export async function storeRefreshToken(
   ownerEmail: string,
-  tokenData: WorkspaceTokenData
+  tokenData: WorkspaceTokenData,
+  kind: WorkspaceTokenKind = "agent_account"
 ): Promise<string | null> {
-  if (!SAFE_EMAIL_RE.test(ownerEmail)) {
-    throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)
-  }
-
-  // ENVIRONMENT is the canonical env var set by the ECS task definition;
-  // DEPLOY_ENVIRONMENT is a legacy fallback.
+  const secretId = workspaceSecretId(ownerEmail, kind)
   const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
-  const secretId = `psd-agent-creds/${environment}/user/${ownerEmail}/google-workspace`
 
   // Skip Secrets Manager in local development.
   if (process.env.NODE_ENV === "development") {
@@ -151,7 +171,9 @@ export async function storeRefreshToken(
           new CreateSecretCommand({
             Name: secretId,
             SecretString: secretString,
-            Description: `Google Workspace refresh token for agent of ${ownerEmail}`,
+            Description: kind === "user_account"
+              ? `Google Workspace refresh token (user account) for ${ownerEmail}`
+              : `Google Workspace refresh token (agent account) for agent of ${ownerEmail}`,
             Tags: [
               { Key: "Environment", Value: environment },
               { Key: "ManagedBy", Value: "aistudio" },
@@ -224,17 +246,15 @@ async function describeArn(
  * Returns true if the secret was deleted, false if it didn't exist.
  * In local dev this is a no-op and always returns false.
  */
-export async function deleteWorkspaceSecret(ownerEmail: string): Promise<boolean> {
-  if (!SAFE_EMAIL_RE.test(ownerEmail)) {
-    throw new Error(`Invalid ownerEmail for Secrets Manager path: ${ownerEmail}`)
-  }
+export async function deleteWorkspaceSecret(
+  ownerEmail: string,
+  kind: WorkspaceTokenKind = "agent_account"
+): Promise<boolean> {
+  const secretId = workspaceSecretId(ownerEmail, kind)
 
   if (process.env.NODE_ENV === "development") {
     return false
   }
-
-  const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
-  const secretId = `psd-agent-creds/${environment}/user/${ownerEmail}/google-workspace`
 
   const { DeleteSecretCommand, ResourceNotFoundException } = await import(
     "@aws-sdk/client-secrets-manager"
@@ -248,17 +268,38 @@ export async function deleteWorkspaceSecret(ownerEmail: string): Promise<boolean
         ForceDeleteWithoutRecovery: true,
       })
     )
-    log.info("Workspace refresh token secret deleted", { secretId })
+    log.info("Workspace refresh token secret deleted", { secretId, kind })
     return true
   } catch (err) {
     if (err instanceof ResourceNotFoundException) {
-      // No secret to delete — user never connected workspace. Not an error.
+      // No secret to delete — user never connected this slot. Not an error.
       return false
     }
     log.error("Failed to delete workspace refresh token secret", {
       secretId,
+      kind,
       error: err instanceof Error ? err.message : String(err),
     })
     throw err
+  }
+}
+
+/**
+ * Delete BOTH refresh-token slots for a user — both the agent-account and the
+ * user-account refresh tokens. Used by the user-deletion path so neither
+ * slot lingers as an orphan secret. Each slot is deleted independently;
+ * a failure on one doesn't block the other.
+ */
+export async function deleteAllWorkspaceSecrets(ownerEmail: string): Promise<{
+  agent_account: boolean
+  user_account: boolean
+}> {
+  const results = await Promise.allSettled([
+    deleteWorkspaceSecret(ownerEmail, "agent_account"),
+    deleteWorkspaceSecret(ownerEmail, "user_account"),
+  ])
+  return {
+    agent_account: results[0].status === "fulfilled" ? results[0].value : false,
+    user_account: results[1].status === "fulfilled" ? results[1].value : false,
   }
 }

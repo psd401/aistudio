@@ -38,6 +38,14 @@ function StatusBadge({ status }: { status: WorkspaceTokenStatus }) {
   )
 }
 
+function KindBadge({ kind }: { kind: "agent_account" | "user_account" }) {
+  return kind === "user_account" ? (
+    <Badge variant="outline" className="text-xs">User mailbox</Badge>
+  ) : (
+    <Badge variant="outline" className="text-xs">Agent account</Badge>
+  )
+}
+
 function formatDate(iso: string | null): string {
   if (!iso) return "-"
   return new Date(iso).toLocaleString("en-US", {
@@ -127,7 +135,8 @@ export function AgentWorkspaceTable() {
               <TableHeader>
                 <TableRow>
                   <TableHead>User</TableHead>
-                  <TableHead>Agent Account</TableHead>
+                  <TableHead>Connection</TableHead>
+                  <TableHead>Account</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Scopes</TableHead>
                   <TableHead>Last Verified</TableHead>
@@ -143,7 +152,10 @@ export function AgentWorkspaceTable() {
                         {token.ownerName && <p className="text-xs text-muted-foreground">{token.ownerEmail}</p>}
                       </div>
                     </TableCell>
-                    <TableCell className="text-sm font-mono">{token.agentEmail}</TableCell>
+                    <TableCell><KindBadge kind={token.tokenKind} /></TableCell>
+                    <TableCell className="text-sm font-mono">
+                      {token.tokenKind === "user_account" ? token.ownerEmail : token.agentEmail}
+                    </TableCell>
                     <TableCell><StatusBadge status={token.status} /></TableCell>
                     <TableCell className="text-sm">{token.grantedScopes.length} scope{token.grantedScopes.length !== 1 ? "s" : ""}</TableCell>
                     <TableCell className="text-sm">{formatDate(token.lastVerifiedAt)}</TableCell>
