@@ -67,6 +67,22 @@ _SKIP_RELATIVE_PREFIXES = (
     "update-check.json",               # gateway version probe state
     ".openclaw/",                      # nested OpenClaw internal state
     "SOUL.md",                         # system prompt — image-owned
+    # Image-bundled skills — every file under these prefixes is shipped by
+    # the container deploy and must never be overlaid by S3 state. Same
+    # class of bug as SOUL.md (2026-04-26): stale skill files in each
+    # user's S3 prefix (debug-*.js, old SKILL.md, old common.js) were
+    # pulled on cold-start and overwriting the new image's psd-workspace
+    # skill, so Phase 1 user_account scope handling never took effect
+    # after the image was rebuilt and redeployed.
+    #
+    # IMPORTANT: skills/user/ is the agent's own authoring scratchpad —
+    # NOT image-owned, must round-trip. Don't blanket-skip skills/.
+    "skills/gws-",
+    "skills/psd-credentials/",
+    "skills/psd-rules/",
+    "skills/psd-schedules/",
+    "skills/psd-skills-meta/",
+    "skills/psd-workspace/",
 )
 
 # Filename suffixes that are always runtime cruft (socket files, pid files).
