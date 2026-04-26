@@ -9,11 +9,28 @@
 #   docker tag psd-agent-base:latest <ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com/psd-agent-base-dev:<TAG>
 #   docker push <ACCOUNT>.dkr.ecr.us-east-1.amazonaws.com/psd-agent-base-dev:<TAG>
 
-# Pin base image version for reproducible builds. Update tag periodically.
-# BLOCKER(prod): Pin to digest (@sha256:...) before deploying to production.
-# :latest is a supply-chain risk — any upstream change is pulled silently.
-# Track: Once OpenClaw publishes a stable semver release, pin to that tag+digest.
-FROM ghcr.io/openclaw/openclaw:latest
+# Pin base image to a known-good immutable digest.
+#
+# Pinned to OpenClaw 2026.4.20 — the release that introduced kimi-k2.6 defaults
+# and the last upstream we've verified end-to-end with the Morning Brief flow.
+#
+# Why pinned: `:latest` floated forward through 2026.4.21–2026.4.23 and broke
+# our agent runtime on 2026-04-22 and again 2026-04-24. Failure modes seen:
+#   - Morning Brief cron: harness adapter "chat deadline expired" (no final event)
+#   - Today (4/24): ENOENT on rename to '/home/node/.openclaw/.openclaw/workspace-state.json'
+#     — matches OpenClaw upstream regression tracked in issues #44783, #45765 and
+#     unmerged fix PRs #53326, #44806. Nested `.openclaw/.openclaw/` path is the
+#     same bug the PR author cites verbatim.
+#
+# Multi-arch index digest (Docker picks arm64 at build time via --platform):
+#   ghcr.io/openclaw/openclaw:2026.4.20
+#   index: sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
+#   arm64: sha256:437aed68f7ef7abce04dd17e5e1d80f92378111ea5db72ce54fdd517843cca79
+#
+# DO NOT revert to `:latest` or bump without a clean end-to-end test that
+# includes the Morning Brief payload — a trivial "respond OK" prompt can mask
+# session-completion regressions. Track upstream PRs before moving forward.
+FROM ghcr.io/openclaw/openclaw@sha256:5db497263e85f266142ed6206644de4e401c5906cce835865981113c11486d64
 
 # Switch to root for installations
 USER root
@@ -42,8 +59,27 @@ RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" && \
 # The exact Python version depends on the base image's distro packages.
 # Verify with: docker run --rm psd-agent-base:latest python3 --version
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends python3 python3-pip python3-venv tzdata && \
+    apt-get install -y --no-install-recommends python3 python3-pip python3-venv tzdata ca-certificates curl && \
     rm -rf /var/lib/apt/lists/*
+
+# Google Workspace CLI (#912) — Rust single binary invoked by the psd-workspace
+# skill. ARM64 matches AgentCore runtime. The skill passes OAuth access tokens
+# via the GOOGLE_ACCESS_TOKEN env var.
+#
+# Pinned version + SHA256 come from the official release's .sha256 sidecar.
+# When bumping, run:
+#   curl -sL "https://github.com/googleworkspace/cli/releases/download/v<VER>/google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz.sha256"
+# and paste the hex digest into GWS_SHA256 below.
+ARG GWS_VERSION=0.22.5
+ARG GWS_SHA256=94490295d9580e1e88574e715a0a162991747d12d62f8c7b8dcc8268b6c1cea0
+RUN set -eux; \
+    curl -fsSL -o /tmp/gws.tar.gz \
+      "https://github.com/googleworkspace/cli/releases/download/v${GWS_VERSION}/google-workspace-cli-aarch64-unknown-linux-gnu.tar.gz"; \
+    echo "${GWS_SHA256}  /tmp/gws.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/gws.tar.gz -C /usr/local/bin --strip-components=0 ./gws; \
+    rm /tmp/gws.tar.gz; \
+    chmod +x /usr/local/bin/gws; \
+    gws --version
 
 # Install the bedrock-agentcore SDK in a virtual environment (avoids --break-system-packages)
 # BLOCKER(prod): Verify the "bedrock-agentcore" PyPI package is the official AWS SDK
@@ -109,6 +145,23 @@ COPY skills /home/node/.openclaw/skills
 RUN cd /home/node/.openclaw/skills/psd-schedules && npm install --omit=dev --no-audit --no-fund
 RUN cd /home/node/.openclaw/skills/psd-credentials && npm install --omit=dev --no-audit --no-fund
 RUN cd /home/node/.openclaw/skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund
+RUN cd /home/node/.openclaw/skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
+
+# Upstream gws-* skills (#912) — per-API SKILL.md guidance for Gmail, Drive,
+# Docs, Sheets, Slides, Forms, Tasks, Calendar, Chat, Meet, Contacts, etc.
+# Pinned to the same tag as the gws binary above so skill instructions never
+# drift from the CLI surface actually installed.
+#
+# git is required for the shallow clone. apt-get already added
+# ca-certificates+curl above; git is not in the base image.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends git && \
+    rm -rf /var/lib/apt/lists/* && \
+    git clone --depth 1 --branch "v${GWS_VERSION}" \
+      https://github.com/googleworkspace/cli /tmp/gws-repo && \
+    cp -r /tmp/gws-repo/skills/gws-* /home/node/.openclaw/skills/ && \
+    rm -rf /tmp/gws-repo && \
+    apt-get purge -y git && apt-get autoremove -y
 
 # Defense-in-depth: disable OpenClaw's cron subsystem via both config
 # (cron.enabled: false in openclaw.json) and env var (OPENCLAW_SKIP_CRON=1)
@@ -120,6 +173,10 @@ COPY harness_adapter.py /app/harness_adapter.py
 COPY agentcore_wrapper.py /app/agentcore_wrapper.py
 COPY workspace_sync.py /app/workspace_sync.py
 COPY mantle_proxy.py /app/mantle_proxy.py
+# Markdown→Google Chat formatter. harness_adapter imports this on every
+# outbound message so the user sees clean Chat-rendered text instead of
+# literal **bold** / ## headers / [label](url) syntax.
+COPY chat_format.py /app/chat_format.py
 
 # Container OS clock is UTC. The wrapper reads the user's local time via
 # zoneinfo (requires the tzdata package installed above). TZ env var is set

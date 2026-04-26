@@ -153,6 +153,12 @@ export * from "./tables/agent-credential-reads";
 export * from "./tables/agent-credential-requests";
 
 // ============================================
+// Agent Workspace Integration (#912)
+// ============================================
+export * from "./tables/agent-workspace-tokens";
+export * from "./tables/agent-workspace-consent-nonces";
+
+// ============================================
 // API Keys (External API Platform)
 // ============================================
 export * from "./tables/api-keys";

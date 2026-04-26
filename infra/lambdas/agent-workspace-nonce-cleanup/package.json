@@ -1,0 +1,19 @@
+{
+  "name": "agent-workspace-nonce-cleanup",
+  "version": "1.0.0",
+  "description": "Daily DELETE of expired psd_agent_workspace_consent_nonces rows (#912)",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "prebuild": "rm -rf dist"
+  },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.0.0",
+    "postgres": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

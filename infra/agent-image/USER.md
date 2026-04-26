@@ -34,3 +34,4 @@ If the user asks about:
 - **Finding a skill**: Use `psd-skills-meta` → `skills.search("keyword")`.
 - **Getting a new credential provisioned**: Use `psd-credentials` → `credentials.request_new("name", "reason")`.
 - **Creating a new skill**: Use `psd-skills-meta` → `skills.author(...)`. The skill will be scanned automatically and promoted if clean.
+- **Google Workspace (Gmail, Calendar, Drive, Docs, Meet, Chat)**: Use `psd-workspace`. First-time use prompts the user with a one-time consent link — paste the returned `consent_url` verbatim in your Chat reply. After they authorize, remind them to delegate their *personal* Gmail and Calendar to your agent account via Google's standard settings UI if they want you to see their inbox/calendar (vs. just your own).

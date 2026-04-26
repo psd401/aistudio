@@ -296,6 +296,65 @@ export class EcsServiceConstruct extends Construct {
                 props.internalApiSecretArn, // Include internal API secret
               ],
             }),
+            // Agent Workspace OAuth secrets — read+update for refresh tokens (#912).
+            // Split into two statements: a normal read+write statement that
+            // does NOT include CreateSecret, plus a tightly-conditioned
+            // CreateSecret statement that only succeeds when the request
+            // carries the correct Environment + ManagedBy tags. This blocks
+            // an attacker who compromises the ECS task from creating
+            // arbitrary tagged secrets that could subvert tag-based access
+            // controls in OTHER policies elsewhere in the account.
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'secretsmanager:GetSecretValue',
+                'secretsmanager:DescribeSecret',
+                'secretsmanager:PutSecretValue',
+                // DeleteSecret with ForceDeleteWithoutRecovery is invoked
+                // by the user-deletion path to avoid orphan refresh-token
+                // secrets when an account is removed (#912 review).
+                'secretsmanager:DeleteSecret',
+              ],
+              resources: [
+                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent-creds/${environment}/*`,
+              ],
+            }),
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'secretsmanager:CreateSecret',
+                'secretsmanager:TagResource',
+              ],
+              resources: [
+                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent-creds/${environment}/*`,
+              ],
+              conditions: {
+                // The app code in lib/agent-workspace/secrets-manager.ts
+                // sets exactly these tags on every CreateSecret call. An
+                // attacker who tries to create a secret with different
+                // tag values to influence other tag-based policies will
+                // fail closed.
+                StringEquals: {
+                  'aws:RequestTag/Environment': environment,
+                  'aws:RequestTag/ManagedBy': 'aistudio',
+                },
+                // Lock down which tag keys can be set on these secrets so
+                // the attacker can't add arbitrary tags either.
+                'ForAllValues:StringEquals': {
+                  'aws:TagKeys': ['Environment', 'ManagedBy', 'OwnerEmail'],
+                },
+              },
+            }),
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'secretsmanager:GetSecretValue',
+                'secretsmanager:DescribeSecret',
+              ],
+              resources: [
+                `arn:aws:secretsmanager:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:secret:psd-agent/${environment}/*`,
+              ],
+            }),
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
               actions: [
@@ -495,6 +554,18 @@ export class EcsServiceConstruct extends Construct {
         NEXT_PUBLIC_AWS_REGION: cdk.Stack.of(this).region,
         PORT: '3000',
         ENVIRONMENT: environment,
+        // Used by server actions to build Secrets Manager ARNs for the
+        // workspace token manifest (#912). Without this the manifest
+        // secrets_manager_arn column is stored as null.
+        AWS_ACCOUNT_ID: cdk.Stack.of(this).account,
+        // Secrets Manager IDs for lazy-loaded workspace config (#912).
+        // Consumed at request time — not at task start — so the ECS service
+        // deploys cleanly before IT populates real GCP OAuth values.
+        // Names not ARNs — Secrets Manager APIs accept either, but the
+        // value here is a bare secret name. Suffix is `_SECRET_ID` so the
+        // shape is honest.
+        GOOGLE_WORKSPACE_OAUTH_SECRET_ID: `psd-agent/${environment}/google-oauth-client`,
+        AGENT_INTERNAL_API_KEY_SECRET_ID: `psd-agent/${environment}/internal-api-key`,
         // Memory optimization - 70% of container memory
         NODE_OPTIONS: `--max-old-space-size=${Math.floor(memory * 0.7)}`,
         // Application configuration
@@ -567,6 +638,23 @@ export class EcsServiceConstruct extends Construct {
           secretsmanager.Secret.fromSecretCompleteArn(this, 'DbSecretPassword', props.rdsSecretArn),
           'password'
         ),
+        // Agent Workspace OAuth secrets (#912) are NOT injected as task
+        // secrets. Injecting jsonField-resolved secrets gates task start on
+        // the Secrets Manager payload being valid JSON with specific fields
+        // — if IT hasn't yet populated the GCP OAuth client credentials (the
+        // default state on first deploy), every task fails to start and ECS
+        // hits the deployment circuit breaker.
+        //
+        // Instead, the app code in lib/agent-workspace/secrets-manager.ts
+        // reads these at request time (low-traffic paths: consent-link API
+        // and OAuth callback only). If the secret is unset or still holds a
+        // PLACEHOLDER value, the app surfaces a clean "not configured" error
+        // to the operator instead of crash-looping the entire ECS service.
+        //
+        // IAM read access to psd-agent/${environment}/* is granted above on
+        // the task role. The IDs are exposed via env vars (see envVars
+        // block — GOOGLE_WORKSPACE_OAUTH_SECRET_ID and
+        // AGENT_INTERNAL_API_KEY_SECRET_ID).
       },
       // Security: Read-only root filesystem with tmpfs mounts for writable directories
       readonlyRootFilesystem: true,

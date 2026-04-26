@@ -15,7 +15,28 @@ import time
 import uuid
 from typing import Optional
 
+from chat_format import markdown_to_chat
+
 logger = logging.getLogger("harness_adapter")
+
+
+def _format_for_chat(text: str) -> str:
+    """Final transform applied to every outbound message before it leaves
+    the adapter. Converts model-emitted Markdown into Google Chat's
+    rendering subset so the user sees clean output instead of literal
+    `**bold**` / `## headers` / `[label](url)` syntax.
+
+    Wrapped to swallow transformer errors — a malformed input must not
+    block the reply. If the transform raises, return the original text
+    so the user gets *something*.
+    """
+    if not text:
+        return text
+    try:
+        return markdown_to_chat(text)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("chat_format transform failed: %s", str(exc)[:200])
+        return text
 
 
 class HarnessAdapter(abc.ABC):
@@ -396,7 +417,7 @@ class OpenClawAdapter(HarnessAdapter):
                                 payload.get("errorMessage", "unknown"),
                                 json.dumps(payload)[:800],
                             )
-                            return response_text or "I encountered an error processing your message."
+                            return _format_for_chat(response_text) if response_text else "I encountered an error processing your message."
 
                         elif state == "aborted":
                             logger.warning("chat aborted: payload=%s", json.dumps(payload)[:500])
@@ -442,7 +463,7 @@ class OpenClawAdapter(HarnessAdapter):
                 raw_event_samples[0] if raw_event_samples else "",
             )
             if response_text:
-                return response_text.strip()
+                return _format_for_chat(response_text.strip())
             return (
                 "I wasn't able to finish responding in time — the agent "
                 "stalled. Please try again in a moment."
@@ -457,7 +478,7 @@ class OpenClawAdapter(HarnessAdapter):
             json.dumps(event_counts),
         )
 
-        return response_text.strip() or "I processed your message but had no response."
+        return _format_for_chat(response_text.strip()) if response_text.strip() else "I processed your message but had no response."
 
     @staticmethod
     def _extract_text(content) -> str:

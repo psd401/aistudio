@@ -20,6 +20,7 @@ import { users, userRoles, roles } from "@/lib/db/schema"
 import { nexusConversations } from "@/lib/db/schema/tables/nexus-conversations"
 import { promptUsageEvents } from "@/lib/db/schema/tables/prompt-usage-events"
 import { getDateThreshold } from "@/lib/date-utils"
+import { deleteAllWorkspaceSecrets } from "@/lib/agent-workspace/secrets-manager"
 
 // Constants
 const ACTIVE_USER_THRESHOLD_DAYS = 30 // Users who signed in within this many days are considered "active"
@@ -614,6 +615,16 @@ export async function deleteUser(userId: number): Promise<ActionState<void>> {
       )
     }
 
+    // Capture the user's email *before* the delete so we can purge their
+    // Workspace refresh token from Secrets Manager after the row is gone.
+    // psd_agent_workspace_tokens has ON DELETE CASCADE so the manifest row
+    // is removed by the transaction below; the SM secret is external and
+    // requires an explicit delete or it'll outlive the user (#912 review).
+    const [userToDeleteEmail] = await executeQuery(
+      (db) => db.select({ email: users.email }).from(users).where(eq(users.id, userId)).limit(1),
+      "deleteUser-lookupEmail"
+    )
+
     // Delete user and role assignments in a transaction
     // Admin check inside transaction prevents TOCTOU race condition
     await executeTransaction(
@@ -656,6 +667,26 @@ export async function deleteUser(userId: number): Promise<ActionState<void>> {
       },
       "deleteUser-transaction"
     )
+
+    // Best-effort: purge the user's Workspace refresh token from Secrets
+    // Manager. Done *after* the DB transaction commits so a user who
+    // failed deletion (e.g. last-admin guard) doesn't lose their token.
+    // We swallow errors here — a failed SM delete leaves an orphan secret
+    // (caught later by ops review) but does not undo the user deletion.
+    if (userToDeleteEmail?.email) {
+      try {
+        const removed = await deleteAllWorkspaceSecrets(userToDeleteEmail.email)
+        log.info("Workspace secret cleanup after user deletion", {
+          userId,
+          removed,
+        })
+      } catch (err) {
+        log.warn("Workspace secret cleanup failed (orphan secret may remain)", {
+          userId,
+          error: err instanceof Error ? err.message : String(err),
+        })
+      }
+    }
 
     timer({ status: "success" })
     log.info("User deleted successfully", { userId })

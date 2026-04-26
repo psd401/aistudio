@@ -25,6 +25,7 @@ import { AgentCostView } from "./agent-cost-view"
 import { AgentPatternsTable } from "./agent-patterns-table"
 import { SkillsListClient } from "../skills/_components/skills-list-client"
 import { CredentialsClient } from "../credentials/_components/credentials-client"
+import { AgentWorkspaceTable } from "./agent-workspace-table"
 
 import {
   getAgentTelemetryStats,
@@ -63,6 +64,7 @@ type DashboardTab =
   | "patterns"
   | "skills"
   | "credentials"
+  | "workspace"
 
 /**
  * Map telemetry date range to Cost Explorer range.
@@ -157,10 +159,11 @@ function buildLoaders(
         ctx.showError("patterns", r.message)
       }
     },
-    // Skills and credentials tabs are self-contained — their client components
-    // handle their own loading. No work needed from the dashboard loader.
+    // Skills, credentials, and workspace tabs are self-contained — their client
+    // components handle their own loading. No work needed from the dashboard loader.
     skills: async () => {},
     credentials: async () => {},
+    workspace: async () => {},
   }
 }
 
@@ -260,6 +263,7 @@ function DashboardTabs({
         <TabsTrigger value="feedback">Feedback</TabsTrigger>
         <TabsTrigger value="skills">Skills</TabsTrigger>
         <TabsTrigger value="credentials">Credentials</TabsTrigger>
+        <TabsTrigger value="workspace">Workspace</TabsTrigger>
       </TabsList>
 
       <TabsContent value="usage" className="mt-4 space-y-6">
@@ -302,6 +306,10 @@ function DashboardTabs({
 
       <TabsContent value="credentials" className="mt-4">
         <CredentialsClient />
+      </TabsContent>
+
+      <TabsContent value="workspace" className="mt-4">
+        <AgentWorkspaceTable />
       </TabsContent>
     </Tabs>
   )

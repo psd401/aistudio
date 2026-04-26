@@ -244,12 +244,55 @@ permit(
 )
 when { resource.name like "psd-agent-creds/*/user/*" };
 
+// Allow reading shared Google Workspace OAuth client credentials and the
+// internal API key used by the psd-workspace skill to call the consent-link
+// endpoint. Scoped to specific secret name patterns under psd-agent/{env}/
+// (distinct from psd-agent-creds/, which holds per-user refresh tokens).
+// NOTE: Cedar uses `*` for the environment segment because the policy file is
+// shared across environments. Cross-environment isolation is enforced at the
+// IAM layer (scoped to psd-agent/${environment}/* in ecs-service.ts).
+// Issue #912.
+permit(
+  principal,
+  action == Action::"secret.read",
+  resource
+)
+when {
+  resource.name like "psd-agent/*/google-oauth-client" ||
+  resource.name like "psd-agent/*/internal-api-key"
+};
+
 // Block agents from writing secrets — provisioning is admin-only
 forbid(
   principal,
   action == Action::"secret.write",
   resource
 );
+
+// =========================================================================
+// GOOGLE WORKSPACE — psd-workspace skill (#912)
+// =========================================================================
+
+// Allow the consent-link endpoint on the Next.js app. The agent calls this
+// with a shared-secret Bearer token to mint a one-time signed URL when a
+// user has not yet connected (or has revoked) their agent's Workspace access.
+permit(
+  principal,
+  action == Action::"http.request",
+  resource
+)
+when {
+  resource.url like "https://*.psd401.ai/api/agent/consent-link" ||
+  resource.url like "https://psd401.ai/api/agent/consent-link"
+};
+
+// Allow the Google OAuth token endpoint (refresh_token → access_token).
+permit(
+  principal,
+  action == Action::"http.request",
+  resource
+)
+when { resource.url like "https://oauth2.googleapis.com/*" };
 
 // Block installing external skills from non-approved sources.
 // The bucket naming convention is psd-agents-{env}-{accountId}.
@@ -276,5 +319,8 @@ forbid(
 unless {
   resource.url like "https://api.psd401.net/*" ||
   resource.url like "https://*.googleapis.com/*" ||
-  resource.url like "https://*.google.com/*"
+  resource.url like "https://*.google.com/*" ||
+  // psd-workspace skill (#912): consent-link endpoint on the Next.js app
+  resource.url like "https://*.psd401.ai/api/agent/consent-link" ||
+  resource.url like "https://psd401.ai/api/agent/consent-link"
 };
