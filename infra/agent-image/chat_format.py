@@ -50,6 +50,22 @@ _LINK_RE = re.compile(r"(?<!!)\[([^\]]+?)\]\(([^)\s]+)\)")
 # Fenced code block delimiter (``` or ~~~), with optional language tag.
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 
+# A "URL-only" line: optional surrounding asterisks, then either a Chat
+# hyperlink <url|label> or a bare http(s) URL, then optional surrounding
+# asterisks and trailing punctuation. Captured groups isolate the link content
+# so we can strip the asterisks the LLM sometimes wraps around it. Used to
+# defuse fragile cases like `**<url|label>**` or `**https://…token=…**`,
+# which can confuse Google Chat's auto-link / bold heuristics and corrupt
+# JWT signature characters in transit (incident 2026-04-27).
+_URL_LINE_RE = re.compile(
+    r"^\s*"
+    r"\*{1,3}?"                              # leading * or **
+    r"(<https?://[^>\s]+\|[^>]+>|https?://\S+?)"  # the link itself
+    r"\*{1,3}?"                              # trailing * or **
+    r"[.,;:!?]?"                             # optional trailing punctuation
+    r"\s*$"
+)
+
 
 def markdown_to_chat(text: str) -> str:
     """Transform Markdown into Google Chat rendering format.
@@ -73,6 +89,17 @@ def markdown_to_chat(text: str) -> str:
             continue
         if in_fence:
             out.append(line)
+            continue
+
+        # URL-only lines: emit just the link, no surrounding asterisks. This
+        # is critical for the workspace consent flow — a JWT in the query
+        # string can contain `_` runs that pair into Chat-italic, or sit
+        # adjacent to `**` markers that confuse Chat's URL auto-detection.
+        # Stripping the wrappers and emitting `<url|label>` (preferred) or
+        # the bare URL on its own line gives Chat a single unambiguous token.
+        url_match = _URL_LINE_RE.match(line)
+        if url_match:
+            out.append(url_match.group(1))
             continue
 
         # Horizontal rules: drop entirely (would render as literal dashes).

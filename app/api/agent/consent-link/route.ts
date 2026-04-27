@@ -77,13 +77,16 @@ async function validateSharedSecret(request: NextRequest): Promise<boolean> {
 }
 
 /**
- * Rate-limit check: max 5 consent links per ownerEmail per hour.
- * Returns true if under the limit.
+ * Rate-limit check: max 20 consent links per ownerEmail per hour.
+ *
+ * Sized for "user clicks broken link → asks agent for a fresh link → repeat"
+ * during rollout. The original 5/hour cap punished legitimate retries when a
+ * URL was mangled in Chat (see incident 2026-04-27). Keep the cap — the
+ * endpoint is open with a shared secret — but make it generous enough that
+ * recovery is not blocked.
  *
  * NOTE: This check is not atomic — two concurrent requests could both read
- * count=4, pass the check, and both insert (yielding 6 links). This is
- * acceptable for a low-traffic agent consent endpoint. For strict enforcement,
- * consider a SELECT ... FOR UPDATE lock or a Redis counter.
+ * count=N, pass the check, and both insert. Acceptable for low traffic.
  */
 async function checkRateLimit(ownerEmail: string): Promise<boolean> {
   // postgres.js doesn't auto-serialize Date inside raw sql templates (Drizzle
@@ -103,7 +106,7 @@ async function checkRateLimit(ownerEmail: string): Promise<boolean> {
     "checkConsentLinkRateLimit"
   )
 
-  return (result?.count ?? 0) < 5
+  return (result?.count ?? 0) < 20
 }
 
 export async function POST(request: NextRequest) {
@@ -156,7 +159,7 @@ export async function POST(request: NextRequest) {
   if (!withinLimit) {
     log.warn("Consent link rate limit exceeded", sanitizeForLogging({ ownerEmail, requestId, kind }))
     return NextResponse.json(
-      { error: "Rate limit exceeded — max 5 links per hour per user" },
+      { error: "Rate limit exceeded — max 20 links per hour per user" },
       { status: 429, headers: { "Retry-After": "3600" } }
     )
   }

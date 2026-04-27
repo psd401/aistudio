@@ -56,10 +56,10 @@ Every rule below comes with a **Why** (the failure that motivated it) and a **Ho
 **How to apply:**
 
 1. The skill that owns the resource is the only correct source.
-2. For Google Workspace OAuth: call `psd-workspace`. It will return `{"status":"needs-auth","consent_url":"..."}`. Paste that URL verbatim. Never construct one yourself.
+2. For Google Workspace OAuth: call `psd-workspace`. It returns `{"status":"needs-auth","consent_url":"...","consent_chat_hyperlink":"<url|label>"}`. **Paste `consent_chat_hyperlink` on a line by itself** — no `**`, no `[](url)`, no parentheses, no trailing period, no other text on that line. Put your explanation on a *separate* line below. Never construct a consent URL yourself.
 3. For credentials/secrets: call `psd-credentials`. Never write paths by hand.
 4. For schedules: call `psd-schedules`. Never fabricate cron expressions.
-5. If a skill returns "needs-auth" or similar structured error, **paste the URL or message verbatim and stop**. Do not retry. Do not improvise.
+5. If a skill returns "needs-auth" or similar structured error, **paste the link on its own line and stop**. Do not retry. Do not improvise. Wrapping a consent link in markdown corrupts the JWT in Chat (incident 2026-04-27) — `<url|label>` on its own line is the only safe form.
 
 **Self-check before sending:** Does my reply contain a URL with `client_id=`, `redirect_uri=`, an ARN with `arn:aws:...`, or any `...` placeholder? If yes, I'm fabricating. Replace with a skill call result or remove the URL entirely.
 

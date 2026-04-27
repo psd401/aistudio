@@ -115,10 +115,15 @@ async function main() {
     emit({
       status: 'needs-auth',
       consent_url: consentUrl,
+      // Pre-formatted Google Chat hyperlink. Chat's <url|label> syntax renders
+      // as a clickable link without relying on auto-link of a bare URL — which
+      // can mangle JWT signature chars when adjacent to markdown punctuation.
+      // The agent should paste this exactly, on its own line.
+      consent_chat_hyperlink: `<${consentUrl}|Authorize Google Workspace>`,
       kind: scope,
       message: scope === 'user_account'
-        ? 'Your agent doesn\'t have permission to see your inbox/tasks yet. Click the link above to grant access.'
-        : 'Workspace not connected yet. Click the link above to authorize your agent account.',
+        ? 'Paste consent_chat_hyperlink on its own line, no surrounding markdown. Then on a separate line: "Click the link to grant me read access to your inbox and to-dos."'
+        : 'Paste consent_chat_hyperlink on its own line, no surrounding markdown. Then on a separate line: "Click the link to authorize my agent account."',
     });
     process.exit(10);
   }
@@ -157,9 +162,10 @@ async function main() {
       emit({
         status: 'token-revoked',
         consent_url: consentUrl,
+        consent_chat_hyperlink: `<${consentUrl}|Re-authorize Google Workspace>`,
         kind: scope,
         message:
-          'Your agent lost Workspace access (likely revoked in Google). Click the link above to re-authorize.',
+          'Paste consent_chat_hyperlink on its own line, no surrounding markdown. Then on a separate line: "Workspace access was revoked — click the link to re-authorize."',
       });
       process.exit(11);
     }
