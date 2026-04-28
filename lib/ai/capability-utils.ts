@@ -22,6 +22,7 @@
  * - "computer_use" -> computerUse
  * - "workspace_tools" -> workspaceTools
  * - "image_generation" -> imageGeneration
+ * - "deep_research" -> deepResearch
  *
  * @example
  * ```typescript

@@ -36,8 +36,11 @@ import {
   saveAssistantMessage,
 } from './chat-helpers';
 
-// Allow streaming responses up to 5 minutes for long-running conversations
-export const maxDuration = 300;
+// Allow streaming responses up to 30 minutes. Deep Research runs take 5–25
+// minutes; standard chat and image-gen finish well within this window.
+// Platforms that enforce maxDuration (e.g. Vercel) will terminate the request
+// if it exceeds this value, so it must cover the worst-case Deep Research run.
+export const maxDuration = 1800;
 
 /**
  * Build the onFinish callback for streaming
@@ -348,6 +351,25 @@ async function handleImageGeneration(params: {
 }
 
 /**
+ * Format the Deep Research report body with optional citations.
+ * Used for both the streamed message and the persisted DB content, keeping
+ * the two representations in sync from a single source of truth.
+ */
+function formatDeepResearchReport(
+  report: string,
+  citations: Array<{ url: string; title?: string }>
+): string {
+  let body = report.trim();
+  if (citations.length > 0) {
+    body += '\n\n**Sources:**\n';
+    body += citations
+      .map((c, i) => `${i + 1}. [${c.title?.trim() || c.url}](${c.url})`)
+      .join('\n');
+  }
+  return body;
+}
+
+/**
  * Handle Gemini Deep Research models (e.g. deep-research-preview-04-2026).
  *
  * These run via Google's Interactions API, not generateContent. Lifecycle is
@@ -383,6 +405,17 @@ async function handleDeepResearch(params: {
     modelId: modelConfig.model_id,
   });
 
+  // Validate prompt BEFORE creating a conversation to avoid orphaned DB state.
+  // extractImagePrompt extracts the last user message text — the name is
+  // image-specific but the logic is generic ("get the last user message text").
+  const prompt = extractImagePrompt(messages);
+  if (!prompt) {
+    return new Response(
+      JSON.stringify({ error: 'Deep Research requires a text prompt', requestId }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
   // Lazy imports keep the cold start of the standard chat path unchanged.
   const [
     { runDeepResearch },
@@ -406,17 +439,6 @@ async function handleDeepResearch(params: {
   });
   if ('error' in convSetup) return convSetup.error;
   const { conversationId, conversationTitle } = convSetup;
-
-  // Extract the user's research question. We re-use extractImagePrompt's
-  // logic because the shape ("get the last user message text") is identical;
-  // it doesn't actually do anything image-specific.
-  const prompt = extractImagePrompt(messages);
-  if (!prompt) {
-    return new Response(
-      JSON.stringify({ error: 'Deep Research requires a text prompt', requestId }),
-      { status: 400, headers: { 'Content-Type': 'application/json' } }
-    );
-  }
 
   const messageId = `dr-${Date.now()}`;
   const isNewConversation = !existingConversationId;
@@ -451,6 +473,9 @@ async function handleDeepResearch(params: {
         // 'in_progress' for the whole run.
         let lastStatusEmitted = '';
 
+        // Track whether we've ended the stream to avoid double text-end.
+        let streamEnded = false;
+
         try {
           const result = await runDeepResearch({
             prompt,
@@ -469,39 +494,37 @@ async function handleDeepResearch(params: {
             },
           });
 
-          // Final report. Emit citations as an appended Sources section so
-          // the user can click through. We deliberately keep the report and
-          // sources in the same text part — markdown renderer handles both.
-          let finalDelta = `\n---\n\n${result.report.trim()}\n`;
-          if (result.citations.length > 0) {
-            finalDelta += '\n\n**Sources:**\n';
-            for (const [i, c] of result.citations.entries()) {
-              const label = c.title?.trim() || c.url;
-              finalDelta += `${i + 1}. [${label}](${c.url})\n`;
-            }
-          }
+          // Build the report + citations once, reuse for both stream and DB.
+          const reportBody = formatDeepResearchReport(
+            result.report, result.citations
+          );
+
+          // Final report delta for the stream.
+          const finalDelta = `\n---\n\n${reportBody}\n`;
           writer.write({ type: 'text-delta', id: messageId, delta: finalDelta });
+
+          // Persist BEFORE ending the stream — if persistence fails, we still
+          // have the stream open and can surface the error to the user rather
+          // than ending the message and leaving the DB inconsistent.
+          const persisted = `🔍 **Deep Research Report**\n\n${reportBody}`;
+          try {
+            await persistAssistantMessage({
+              conversationId,
+              text: persisted,
+              finishReason: 'stop',
+              dbModelId,
+            });
+          } catch (persistErr) {
+            log.error('Failed to persist Deep Research message', {
+              conversationId,
+              error: persistErr instanceof Error ? persistErr.message : String(persistErr),
+            });
+            // Don't throw — the user already has the report in-stream.
+            // History won't show it, but that's better than crashing the SSE.
+          }
+
           writer.write({ type: 'text-end', id: messageId });
-
-          // Persist the assistant message so refresh / history works.
-          // We store the joined heads-up + final report so the history view
-          // matches what the user saw streamed.
-          const persisted =
-            '🔍 **Deep Research Report**\n\n'
-            + result.report.trim()
-            + (result.citations.length > 0
-              ? '\n\n**Sources:**\n'
-                + result.citations
-                  .map((c, i) => `${i + 1}. [${c.title?.trim() || c.url}](${c.url})`)
-                  .join('\n')
-              : '');
-          await persistAssistantMessage({
-            conversationId,
-            text: persisted,
-            finishReason: 'stop',
-            dbModelId,
-          });
-
+          streamEnded = true;
           timer({ status: 'success', conversationId, durationMs: result.durationMs });
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
@@ -510,14 +533,15 @@ async function handleDeepResearch(params: {
             : 'UNKNOWN';
           log.error('Deep Research failed', { conversationId, errType, message });
 
-          // Surface a clean error inside the streamed message so the user sees
-          // something useful rather than a dead spinner.
-          writer.write({
-            type: 'text-delta',
-            id: messageId,
-            delta: `\n\n**Research failed:** ${message}`,
-          });
-          writer.write({ type: 'text-end', id: messageId });
+          // Only write error + text-end if we haven't already ended the stream.
+          if (!streamEnded) {
+            writer.write({
+              type: 'text-delta',
+              id: messageId,
+              delta: `\n\n**Research failed:** ${message}`,
+            });
+            writer.write({ type: 'text-end', id: messageId });
+          }
           timer({ status: 'error', conversationId, errType });
         }
       },
@@ -548,6 +572,10 @@ async function routeSpecialModel(params: {
   abortSignal: AbortSignal;
 }): Promise<Response | null> {
   if (params.isImageGenerationModel) {
+    // Note: abortSignal is intentionally not forwarded to handleImageGeneration.
+    // Image generation is a fast single-shot API call (seconds, not minutes),
+    // so cancellation support is not needed. Deep Research is the only path
+    // that requires abort propagation due to its 5–25 minute polling lifecycle.
     return handleImageGeneration({
       messages: params.messages,
       modelConfig: params.modelConfig,

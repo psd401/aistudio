@@ -119,19 +119,48 @@ function createError(
  * Friendly progress text for the user. We surface Google's actual status
  * string when it's informative, and fall back to a wall-clock timer for
  * the long quiet stretches in the middle of a run.
+ *
+ * Terminal statuses (completed, failed, cancelled) return null — the caller
+ * should not emit a progress line for these since the final report or error
+ * message is about to follow immediately.
  */
-function buildProgressMessage(status: Interaction['status'], elapsedSec: number): string {
+function buildProgressMessage(status: Interaction['status'], elapsedSec: number): string | null {
   const minutes = Math.floor(elapsedSec / 60);
-  const minutesText = minutes === 0 ? 'starting up' : `${minutes} min`;
+  const seconds = elapsedSec % 60;
+  // Include seconds so the message changes every poll (~10s), keeping the SSE
+  // connection alive through ALB/proxy idle timeouts (typically 60s).
+  const timeText = minutes === 0
+    ? `${seconds}s`
+    : `${minutes}m ${seconds}s`;
   switch (status) {
     case 'in_progress':
-      return `Researching… (${minutesText})`;
+      return `Researching… (${timeText})`;
     case 'requires_action':
-      return `Awaiting action from the agent (${minutesText})`;
+      return `Awaiting action from the agent (${timeText})`;
     case 'incomplete':
       return `Research run ended early — partial results below.`;
+    // Terminal statuses — no progress message; the final report/error follows.
+    case 'completed':
+    case 'failed':
+    case 'cancelled':
+      return null;
     default:
-      return `Status: ${status} (${minutesText})`;
+      return `Status: ${status} (${timeText})`;
+  }
+}
+
+/**
+ * Validate that a URL uses a safe protocol (http/https only).
+ * Blocks javascript:, data:, and other potentially dangerous URI schemes
+ * that could be injected via Google's API response into markdown links.
+ */
+function isSafeUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
+  } catch {
+    // Malformed URLs are not safe
+    return false;
   }
 }
 
@@ -139,12 +168,19 @@ function buildProgressMessage(status: Interaction['status'], elapsedSec: number)
  * Type guard for url_citation annotations on a Google text block. We don't
  * use a real schema here — the SDK already types the upstream surface, but
  * we narrow defensively because `outputs` is a union of many block kinds.
+ *
+ * URLs are validated to only allow http/https protocols — this prevents
+ * javascript: or data: URIs from being rendered as live markdown links.
  */
 function asUrlCitation(value: unknown): DeepResearchCitation | null {
   if (!value || typeof value !== 'object' || !('type' in value)) return null;
   if ((value as { type: string }).type !== 'url_citation') return null;
   const url = (value as { url?: string }).url;
   if (typeof url !== 'string' || url.length === 0) return null;
+  if (!isSafeUrl(url)) {
+    log.warn('Skipping citation with unsafe URL scheme', { url: url.slice(0, 100) });
+    return null;
+  }
   return {
     url,
     title: (value as { title?: string }).title,
@@ -213,21 +249,30 @@ function mapInteractionError(err: unknown): DeepResearchError {
   return createError('AGENT_FAILURE', `Deep Research failed: ${msg.slice(0, 300)}`);
 }
 
+/**
+ * Abortable sleep. Cleans up the abort listener on normal resolution so that
+ * long polling loops (150+ iterations over 25 minutes) don't accumulate
+ * leaked listeners on the shared AbortSignal.
+ */
 function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new Error('aborted'));
       return;
     }
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener(
-      'abort',
-      () => {
-        clearTimeout(t);
-        reject(new Error('aborted'));
-      },
-      { once: true }
-    );
+
+    const onAbort = () => {
+      clearTimeout(t);
+      signal?.removeEventListener('abort', onAbort);
+      reject(new Error('aborted'));
+    };
+
+    const t = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+
+    signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
 
@@ -237,6 +282,9 @@ const TERMINAL_STATUSES: ReadonlyArray<Interaction['status']> = [
   'cancelled',
   'incomplete',
 ];
+
+/** Max consecutive transient poll failures before we give up. */
+const MAX_POLL_RETRIES = 3;
 
 /**
  * Tight polling loop. Returns the terminal Interaction or throws a
@@ -250,6 +298,8 @@ async function pollUntilTerminal(
   request: DeepResearchRequest
 ): Promise<Interaction> {
   let last: Interaction = initial;
+  let consecutiveErrors = 0;
+
   while (true) {
     const elapsedMs = Date.now() - startMs;
     if (elapsedMs > MAX_RUN_DURATION_MS) {
@@ -260,17 +310,24 @@ async function pollUntilTerminal(
       );
     }
 
-    try {
-      await request.onStatus?.({
-        status: last.status,
-        elapsedSec: Math.floor(elapsedMs / 1_000),
-        message: buildProgressMessage(last.status, Math.floor(elapsedMs / 1_000)),
-      });
-    } catch (err) {
-      // Status callback errors must never interrupt the run.
-      log.warn('onStatus callback threw — continuing', {
-        error: err instanceof Error ? err.message : String(err),
-      });
+    // Only emit progress for non-terminal statuses — terminal statuses
+    // are handled by the caller (final report or error message).
+    if (!TERMINAL_STATUSES.includes(last.status)) {
+      const progressMsg = buildProgressMessage(last.status, Math.floor(elapsedMs / 1_000));
+      if (progressMsg) {
+        try {
+          await request.onStatus?.({
+            status: last.status,
+            elapsedSec: Math.floor(elapsedMs / 1_000),
+            message: progressMsg,
+          });
+        } catch (err) {
+          // Status callback errors must never interrupt the run.
+          log.warn('onStatus callback threw — continuing', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
     }
 
     if (TERMINAL_STATUSES.includes(last.status)) return last;
@@ -281,7 +338,29 @@ async function pollUntilTerminal(
       throw createError('AGENT_FAILURE', 'Deep Research cancelled by client.');
     }
 
-    last = await client.interactions.get(last.id);
+    // Retry transient poll failures — a 25-minute run is highly susceptible
+    // to momentary network blips. We retry up to MAX_POLL_RETRIES consecutive
+    // failures before giving up.
+    try {
+      last = await client.interactions.get(last.id);
+      consecutiveErrors = 0; // reset on success
+    } catch (pollErr) {
+      consecutiveErrors++;
+      log.warn('Transient poll error', {
+        interactionId: last.id,
+        attempt: consecutiveErrors,
+        maxRetries: MAX_POLL_RETRIES,
+        error: pollErr instanceof Error ? pollErr.message : String(pollErr),
+      });
+      if (consecutiveErrors >= MAX_POLL_RETRIES) {
+        throw createError(
+          'AGENT_FAILURE',
+          `Deep Research polling failed after ${MAX_POLL_RETRIES} consecutive errors: ${pollErr instanceof Error ? pollErr.message : String(pollErr)}`
+        );
+      }
+      // On retry, we don't update `last` — the loop re-sleeps and retries
+      // the same interaction.get() call on the next iteration.
+    }
   }
 }
 
