@@ -47,6 +47,7 @@ export interface NexusCapabilities {
   workspaceTools: boolean;
   codeInterpreter: boolean;
   imageGeneration?: boolean;
+  deepResearch?: boolean;
   /** Allow string indexing for dynamic access */
   [key: string]: boolean | undefined;
 }
