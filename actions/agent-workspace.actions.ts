@@ -3,7 +3,7 @@
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, createSuccess } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
-import { executeQuery } from "@/lib/db/drizzle-client"
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
 import { eq, and, isNull, sql } from "drizzle-orm"
 import { psdAgentWorkspaceConsentNonces } from "@/lib/db/schema/tables/agent-workspace-consent-nonces"
 import { psdAgentWorkspaceTokens } from "@/lib/db/schema/tables/agent-workspace-tokens"
@@ -11,6 +11,7 @@ import { users } from "@/lib/db/schema/tables/users"
 import { verifyConsentToken } from "@/lib/agent-workspace/consent-token"
 import { storeRefreshToken, getSecretJson } from "@/lib/agent-workspace/secrets-manager"
 import { getIssuerUrl } from "@/lib/oauth/issuer-config"
+import { addUserRole } from "@/lib/db/drizzle/user-roles"
 
 /**
  * OAuth scopes requested per token kind (#912 Phase 1).
@@ -245,6 +246,91 @@ export interface OAuthCallbackResult {
  * "secret present but no manifest" (which would let it use Workspace
  * access against an account the admin dashboard says isn't connected).
  */
+
+/**
+ * Auto-provision a PSD staff user during the agent OAuth callback when they
+ * have no row in the `users` table yet. Called only after we've already
+ * exchanged the auth code with Google, so we can fetch their name from
+ * Google userinfo using the access_token.
+ *
+ * Returns `{ id }` on success, `null` if provisioning fails (caller surfaces
+ * the generic "account not found" error to the user). Numeric-prefix emails
+ * (student IDs) are NOT auto-provisioned — the agent platform is staff-only
+ * for now, so a numeric prefix is treated as a misrouted request.
+ */
+async function provisionAgentUser(
+  email: string,
+  accessToken: string,
+  log: ReturnType<typeof createLogger>
+): Promise<{ id: number } | null> {
+  const username = email.split("@")[0] ?? ""
+  const isNumeric = /^\d+$/.test(username)
+  if (isNumeric) {
+    log.error("Refusing to auto-provision numeric-prefix email via agent OAuth", sanitizeForLogging({ email }))
+    return null
+  }
+
+  // Fetch first/last name from Google userinfo. The agent OAuth scope set
+  // includes `profile`, so this endpoint is authorized. Fall back to deriving
+  // a placeholder name from the email local-part if userinfo is unavailable
+  // — provisioning must not fail just because Google's profile API is slow.
+  let firstName: string | null = null
+  let lastName: string | null = null
+  try {
+    const res = await fetch("https://openidconnect.googleapis.com/v1/userinfo", {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(5_000),
+    })
+    if (res.ok) {
+      const info = (await res.json()) as { given_name?: string; family_name?: string; name?: string }
+      firstName = info.given_name ?? null
+      lastName = info.family_name ?? null
+    } else {
+      log.warn("Google userinfo returned non-OK; using email-derived name", { status: res.status })
+    }
+  } catch (err) {
+    log.warn("Google userinfo fetch failed; using email-derived name", {
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+  if (!firstName) firstName = username || "User"
+
+  // SELECT-then-INSERT inside a transaction to avoid a duplicate row if the
+  // user double-clicks the consent flow. Email is indexed but not unique, so
+  // we serialize within the transaction by re-checking under the lock window.
+  const userId = await executeTransaction(async (tx) => {
+    const [again] = await tx
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1)
+    if (again) return again.id
+
+    const [created] = await tx
+      .insert(users)
+      .values({ email, firstName, lastName })
+      .returning({ id: users.id })
+    return created.id
+  }, "provisionAgentUser")
+
+  // Role assignment is a side-effect — keep it OUT of the transaction so a
+  // role-table miss doesn't roll back the user creation. Mirrors
+  // resolve-user.ts:130-158 behavior: log and continue if role assignment
+  // fails. The user can still complete OAuth; their next web sign-in will
+  // re-run role assignment via getCurrentUserAction.
+  try {
+    await addUserRole(userId, "staff")
+    log.info("Agent OAuth auto-provisioned staff user", sanitizeForLogging({ email, userId }))
+  } catch (err) {
+    log.warn("Auto-provisioned user but role assignment failed — will retry on web sign-in", {
+      userId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+
+  return { id: userId }
+}
+
 async function exchangeAndStore(
   code: string,
   payload: { sub: string; agent: string; kind: "agent_account" | "user_account" },
@@ -339,13 +425,19 @@ async function exchangeAndStore(
     }
   }
 
-  const [user] = await executeQuery(
+  const [existing] = await executeQuery(
     (db) => db.select({ id: users.id }).from(users).where(eq(users.email, payload.sub)).limit(1),
     "findUserByEmail"
   )
 
+  // Auto-provision PSD staff who haven't logged into the AI Studio web UI yet
+  // — they're meeting the agent in Google Chat first. The cognito_sub stays
+  // null and gets linked on their first web sign-in via lib/auth/resolve-user.ts
+  // (the email-based migration path). Default role is `staff`; numeric-prefix
+  // emails (student IDs) keep the strict-lookup behavior since the agent
+  // platform is not aimed at students.
+  const user = existing ?? (await provisionAgentUser(payload.sub, tokenData.access_token, log))
   if (!user) {
-    log.error("User not found in database — cannot store workspace token manifest", sanitizeForLogging({ ownerEmail: payload.sub }))
     return {
       success: false,
       error: "Your account was not found in the system. Contact IT for assistance.",
@@ -462,7 +554,7 @@ export async function handleOAuthCallback(
     // Validate state shape before hitting the DB. The nonce is a 64-char
     // hex string per consent-link route. Anything else is an attack or a
     // truncated URL.
-    if (!/^[0-9a-f]{64}$/.test(state)) {
+    if (!/^[\da-f]{64}$/.test(state)) {
       log.warn("OAuth callback received malformed state", { stateLength: state.length })
       timer({ status: "error" })
       return createSuccess({
