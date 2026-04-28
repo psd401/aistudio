@@ -61,9 +61,13 @@ describe('validateImagePrompt', () => {
     expect(result.valid).toBe(false);
   });
 
-  it('returns invalid for prompt with forbidden patterns', () => {
-    const result = validateImagePrompt('create an explicit image');
-    expect(result.valid).toBe(false);
+  it('does not block on substring keywords (provider/guardrails handle moderation)', () => {
+    // Educational prompts that the old naive blocklist falsely rejected.
+    // Content moderation belongs to the upstream provider + Bedrock guardrails,
+    // not a local substring filter.
+    expect(validateImagePrompt('a Civil War weapon on display').valid).toBe(true);
+    expect(validateImagePrompt('diagram of red blood cells').valid).toBe(true);
+    expect(validateImagePrompt('a memorial honoring the deaths of soldiers').valid).toBe(true);
   });
 });
 

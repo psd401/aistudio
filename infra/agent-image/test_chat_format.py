@@ -134,6 +134,36 @@ class TestMarkdownToChat(unittest.TestCase):
         chat_native = "*bold* and _italic_ and ~strike~ and `code`"
         self.assertEqual(markdown_to_chat(chat_native), chat_native)
 
+    def test_url_only_line_strips_surrounding_asterisks(self):
+        # Incident 2026-04-27: LLM wrapped consent URLs in `**...**`, which
+        # collided with Google Chat's auto-link parsing and corrupted the JWT
+        # signature. URL-only lines must be emitted bare.
+        self.assertEqual(
+            markdown_to_chat("**https://aistudio.psd401.ai/agent-connect?token=eyJ.eyJ.sig**"),
+            "https://aistudio.psd401.ai/agent-connect?token=eyJ.eyJ.sig",
+        )
+        self.assertEqual(
+            markdown_to_chat("*https://example.com/x*"),
+            "https://example.com/x",
+        )
+
+    def test_url_only_line_preserves_chat_hyperlink(self):
+        # Pre-formatted <url|label> from psd-workspace must survive untouched
+        # even if the LLM wraps it in bold.
+        self.assertEqual(
+            markdown_to_chat("**<https://aistudio.psd401.ai/agent-connect?token=abc|Authorize>**"),
+            "<https://aistudio.psd401.ai/agent-connect?token=abc|Authorize>",
+        )
+
+    def test_url_inline_left_alone(self):
+        # When the URL is mid-sentence (not on its own line), the URL-line
+        # rule must not fire — bold around inline URLs is still converted to
+        # single-asterisk italic.
+        self.assertEqual(
+            markdown_to_chat("Click **https://example.com** to continue"),
+            "Click *https://example.com* to continue",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

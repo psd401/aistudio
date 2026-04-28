@@ -73,7 +73,14 @@ export function extractImagePrompt(messages: ImageGenerationParams['messages']):
 }
 
 /**
- * Validate image prompt for length and content policy
+ * Validate image prompt length only.
+ *
+ * Content moderation is the upstream provider's job (and Bedrock guardrails
+ * for Bedrock-routed providers). The previous naive substring blocklist
+ * blocked legitimate educational prompts — a history teacher asking for
+ * "a Civil War weapon", a science teacher asking for "blood cells", a
+ * health curriculum asking about "death" or "harm reduction" — and produced
+ * the "Image prompt violates content policy" surfaced to users.
  */
 export function validateImagePrompt(prompt: string): { valid: boolean; error?: Response } {
   if (prompt.length === 0) {
@@ -94,30 +101,6 @@ export function validateImagePrompt(prompt: string): { valid: boolean; error?: R
           error: 'Image prompt is too long. Maximum 4000 characters allowed.',
           maxLength: 4000,
           currentLength: prompt.length
-        }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      )
-    };
-  }
-
-  const lowercasePrompt = prompt.toLowerCase();
-  const forbiddenPatterns = [
-    'nude', 'naked', 'nsfw', 'explicit', 'sexual', 'porn', 'erotic',
-    'violence', 'blood', 'gore', 'weapon', 'harm', 'kill', 'death',
-    'hate', 'racist', 'discriminatory', 'offensive'
-  ];
-
-  const matchedPattern = forbiddenPatterns.find(pattern => lowercasePrompt.includes(pattern));
-  if (matchedPattern) {
-    log.warn('Image prompt blocked by local content policy filter', {
-      matchedPattern,
-      promptLength: prompt.length
-    });
-    return {
-      valid: false,
-      error: new Response(
-        JSON.stringify({
-          error: 'Image prompt violates content policy. Please revise your request.'
         }),
         { status: 400, headers: { 'Content-Type': 'application/json' } }
       )

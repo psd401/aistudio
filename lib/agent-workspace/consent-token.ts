@@ -65,7 +65,19 @@ export async function signConsentToken(payload: ConsentTokenPayload): Promise<st
     .setExpirationTime(TOKEN_EXPIRY)
     .sign(getSigningSecret())
 
-  log.info("Consent token signed", sanitizeForLogging({ sub: payload.sub, nonce: payload.nonce }))
+  log.info(
+    "Consent token signed",
+    sanitizeForLogging({
+      sub: payload.sub,
+      nonce: payload.nonce,
+      tokenLen: jwt.length,
+      // Last 8 chars of the signature segment. The signature is a public hash
+      // artifact (not a secret); logging the tail lets us correlate a sign
+      // event with a later verify failure to see exactly which characters
+      // were lost in transit through Google Chat.
+      sigTail: jwt.split(".").pop()?.slice(-8) ?? "",
+    })
+  )
   return jwt
 }
 
@@ -113,9 +125,22 @@ export async function verifyConsentToken(token: string): Promise<ConsentTokenPay
 
     return { sub, agent, purpose: "workspace-consent", nonce, kind: resolvedKind }
   } catch (error) {
-    log.warn("Consent token verification failed", {
-      error: error instanceof Error ? error.message : String(error),
-    })
+    logVerifyFailure(token, error)
     return null
   }
+}
+
+/**
+ * Log the token's shape (never its content) so we can diagnose mangling
+ * in transit. tokenLen + segments + sigTail uniquely identify a token
+ * class without exposing the payload.
+ */
+function logVerifyFailure(token: string, error: unknown): void {
+  const segments = token?.split(".") ?? []
+  log.warn("Consent token verification failed", {
+    error: error instanceof Error ? error.message : String(error),
+    tokenLen: token?.length ?? 0,
+    segments: segments.length,
+    sigTail: segments[segments.length - 1]?.slice(-8) ?? "",
+  })
 }

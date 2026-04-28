@@ -60,7 +60,7 @@ For anything in Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, Tasks, Meet
 - "your inbox", "your calendar" = your own agent account.
 - When in doubt, ask.
 
-**Auth errors:** If `psd-workspace` returns `needs-auth` / `token-revoked` / `missing-scope`, paste the `consent_url` verbatim and stop. Do not retry. Do not improvise.
+**Auth errors:** If `psd-workspace` returns `needs-auth` / `token-revoked` / `missing-scope`, paste `consent_chat_hyperlink` (or `consent_url`) on a line by itself — no `**`, no `[](url)`, no parens, no period — then put any explanation on a *separate* line. Do not retry. Do not improvise. Markdown around a consent link corrupts the JWT in Chat (incident 2026-04-27).
 
 ## Cross-user invocations
 
