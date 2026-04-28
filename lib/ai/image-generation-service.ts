@@ -164,6 +164,145 @@ export async function generateImageForNexus(
 }
 
 /**
+ * Returns true for gpt-image models the AI SDK doesn't yet recognize as
+ * "no-response_format" — i.e. anything matching `gpt-image-N` for N >= 2.
+ * These models reject the SDK's auto-injected `response_format: b64_json`
+ * with HTTP 400. Match is a strict prefix on the major version digit so
+ * gpt-image-1 / gpt-image-1.5 / gpt-image-1-mini are NOT affected.
+ */
+function isUnsupportedGptImageModel(modelId: string): boolean {
+  // Match: gpt-image-2, gpt-image-3, ..., gpt-image-2-mini, gpt-image-2.0
+  // Reject: gpt-image-1, gpt-image-1.5, gpt-image-1-mini, dall-e-*, etc.
+  return /^gpt-image-(?!1\b|1[.-])\d/.test(modelId);
+}
+
+/**
+ * Direct OpenAI HTTP call for gpt-image models the AI SDK doesn't support.
+ * Uses /v1/images/generations (JSON) for plain prompts and /v1/images/edits
+ * (multipart) when reference images are supplied. Mirrors the response shape
+ * generateWithOpenAI returns so callers don't need to special-case.
+ */
+async function generateWithOpenAIDirect(
+  request: ImageGenerationRequest,
+  imageModelId: string,
+  apiKey: string,
+  requestId: string
+): Promise<ImageGenerationResult> {
+  // eslint-disable-next-line unicorn/explicit-length-check -- false positive: request.size is a string, not a Map/Set
+  const sizeStr = request.size && request.size.length > 0 ? request.size : '1024x1024';
+  const quality = request.quality === 'hd' ? 'high' : 'medium';
+  const hasReferenceImages = (request.referenceImages?.length ?? 0) > 0;
+
+  log.info('OpenAI image direct HTTP path', {
+    requestId,
+    modelId: imageModelId,
+    hasReferenceImages,
+  });
+
+  let imageBuffer: Buffer;
+
+  if (hasReferenceImages) {
+    // /v1/images/edits — multipart form data. We only attach the first
+    // reference image; gpt-image-2's edits endpoint accepts a single image.
+    const form = new FormData();
+    form.append('model', imageModelId);
+    form.append('prompt', request.prompt);
+    form.append('size', sizeStr);
+    form.append('n', '1');
+    form.append('quality', quality);
+
+    const ref = request.referenceImages![0];
+    let blob: Blob;
+    if (ref.base64) {
+      const cleaned = ref.base64.replace(/^data:image\/[a-z]+;base64,/, '');
+      blob = new Blob([Buffer.from(cleaned, 'base64')], {
+        type: ref.mimeType || 'image/png',
+      });
+    } else if (ref.url) {
+      const fetched = await fetch(ref.url);
+      if (!fetched.ok) {
+        throw createImageError('NO_IMAGE', 'Failed to fetch reference image');
+      }
+      blob = await fetched.blob();
+    } else {
+      throw createImageError('NO_IMAGE', 'Reference image has no base64 or url');
+    }
+    form.append('image', blob, 'reference.png');
+
+    const res = await fetch('https://api.openai.com/v1/images/edits', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      body: form,
+    });
+    imageBuffer = await readOpenAIImageResponse(res);
+  } else {
+    const body = {
+      model: imageModelId,
+      prompt: request.prompt,
+      n: 1,
+      size: sizeStr,
+      quality,
+      // NOTE: no `response_format` — gpt-image-2 returns b64 by default and
+      // rejects the parameter. This is the entire reason we bypass the SDK.
+    };
+    const res = await fetch('https://api.openai.com/v1/images/generations', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(body),
+    });
+    imageBuffer = await readOpenAIImageResponse(res);
+  }
+
+  const s3Result = await storeImageInS3({
+    imageBuffer,
+    conversationId: request.conversationId,
+    userId: request.userId,
+    provider: 'openai',
+    modelId: request.modelId,
+    contentType: 'image/png',
+  });
+
+  const estimatedCost = getOpenAICost(request.modelId, request.size, request.quality);
+
+  return {
+    imageUrl: s3Result.presignedUrl,
+    s3Key: s3Result.s3Key,
+    provider: 'openai',
+    model: request.modelId,
+    dimensions: parseDimensions(sizeStr),
+    estimatedCost,
+  };
+}
+
+async function readOpenAIImageResponse(res: Response): Promise<Buffer> {
+  if (!res.ok) {
+    const errText = await res.text().catch(() => '');
+    // Map OpenAI error shapes onto our existing error taxonomy so the
+    // upstream handler renders the right user-facing message.
+    if (res.status === 429) {
+      const retryAfter = Number.parseInt(res.headers.get('retry-after') || '60', 10);
+      throw createImageError('RATE_LIMIT', 'Rate limit exceeded', retryAfter);
+    }
+    if (res.status === 401 || res.status === 403) {
+      throw createImageError('AUTHENTICATION', 'OpenAI authentication failed');
+    }
+    if (errText.includes('content_policy') || errText.includes('safety')) {
+      throw createImageError('CONTENT_POLICY', 'Your image prompt was rejected by content policy');
+    }
+    throw new Error(`OpenAI image API error ${res.status}: ${errText.slice(0, 500)}`);
+  }
+  const data = (await res.json()) as { data?: Array<{ b64_json?: string }> };
+  const b64 = data.data?.[0]?.b64_json;
+  if (!b64) {
+    throw createImageError('NO_IMAGE', 'OpenAI returned no image data');
+  }
+  return Buffer.from(b64, 'base64');
+}
+
+/**
  * Generate image using OpenAI's gpt-image-1.5 or similar models
  * Uses AI SDK's experimental_generateImage function
  * Supports reference images for editing/compositing (gpt-image-1.5)
@@ -191,6 +330,20 @@ async function generateWithOpenAI(
       ? request.modelId
       : 'gpt-image-1'; // Default to gpt-image-1 if modelId doesn't specify
 
+    // SDK incompatibility shim: @ai-sdk/openai 3.0.30 (and as of 4.0.0-beta.38)
+    // hardcodes the list of models that don't accept `response_format` to:
+    //   chatgpt-image-, gpt-image-1, gpt-image-1-mini, gpt-image-1.5
+    // For any newer gpt-image-* (e.g. gpt-image-2 — added to ai_models id=125
+    // 2026-04), the SDK still injects `response_format: "b64_json"`, which the
+    // newer models reject with HTTP 400 "Unknown parameter: 'response_format'."
+    //
+    // Until the SDK ships an update covering these models, route gpt-image-2+
+    // through OpenAI's HTTP API directly. gpt-image-1 / gpt-image-1.5 / DALL-E
+    // continue using the AI SDK path unchanged.
+    if (isUnsupportedGptImageModel(imageModelId)) {
+      return await generateWithOpenAIDirect(request, imageModelId, apiKey, requestId);
+    }
+
     const imageModel = openai.image(imageModelId);
 
     // Check if this is a GPT image model (gpt-image-1, gpt-image-1.5) vs DALL-E
@@ -212,9 +365,11 @@ async function generateWithOpenAI(
       '1024x1792': '1024x1792'
     };
 
+    // eslint-disable-next-line unicorn/explicit-length-check -- false positive: request.size is a string, not a Map/Set
+    const requestedSize = request.size && request.size.length > 0 ? request.size : '1024x1024';
     const imageSize = isGptImageModel
-      ? (gptSizeMap[request.size || '1024x1024'] || '1024x1024')
-      : (dalleSizeMap[request.size || '1024x1024'] || '1024x1024');
+      ? (gptSizeMap[requestedSize] || '1024x1024')
+      : (dalleSizeMap[requestedSize] || '1024x1024');
 
     // Build provider options based on model type
     // GPT image models use output_format, quality (low/medium/high)
@@ -311,7 +466,8 @@ async function generateWithOpenAI(
       s3Key: s3Result.s3Key,
       provider: 'openai',
       model: request.modelId,
-      dimensions: parseDimensions(request.size || '1024x1024'),
+      // eslint-disable-next-line unicorn/explicit-length-check -- false positive: request.size is a string, not a Map/Set
+      dimensions: parseDimensions(request.size && request.size.length > 0 ? request.size : '1024x1024'),
       estimatedCost
     };
 
