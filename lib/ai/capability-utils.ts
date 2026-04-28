@@ -60,7 +60,8 @@ export type CapabilityKey =
   | "contextCaching"
   | "computerUse"
   | "workspaceTools"
-  | "imageGeneration";
+  | "imageGeneration"
+  | "deepResearch";
 
 /**
  * Database capability values (snake_case as stored in capabilities field)
@@ -79,7 +80,8 @@ export type DatabaseCapability =
   | "context_caching"
   | "computer_use"
   | "workspace_tools"
-  | "image_generation";
+  | "image_generation"
+  | "deep_research";
 
 /**
  * Mapping from database snake_case to runtime camelCase
@@ -99,6 +101,7 @@ const DB_TO_RUNTIME_MAP: Record<DatabaseCapability, CapabilityKey> = {
   computer_use: "computerUse",
   workspace_tools: "workspaceTools",
   image_generation: "imageGeneration",
+  deep_research: "deepResearch",
 };
 
 /**
@@ -370,6 +373,7 @@ const DEFAULT_NEXUS_CAPABILITIES: NexusCapabilities = {
   workspaceTools: false,
   codeInterpreter: false,
   imageGeneration: false,
+  deepResearch: false,
 } as const;
 
 /**
@@ -409,5 +413,6 @@ export function capabilitiesToNexusCapabilities(
     workspaceTools: parsed.has("workspaceTools"),
     codeInterpreter: parsed.has("codeInterpreter"),
     imageGeneration: parsed.has("imageGeneration"),
+    deepResearch: parsed.has("deepResearch"),
   };
 }

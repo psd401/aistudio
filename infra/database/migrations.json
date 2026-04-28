@@ -68,6 +68,7 @@
     "070-agent-skills-platform.sql",
     "071-agent-workspace-tokens.sql",
     "072-agent-workspace-nonce-agent-email.sql",
-    "073-agent-workspace-token-kind.sql"
+    "073-agent-workspace-token-kind.sql",
+    "074-deep-research-capability.sql"
   ]
 }

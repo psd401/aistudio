@@ -347,6 +347,236 @@ async function handleImageGeneration(params: {
   }
 }
 
+/**
+ * Handle Gemini Deep Research models (e.g. deep-research-preview-04-2026).
+ *
+ * These run via Google's Interactions API, not generateContent. Lifecycle is
+ * minutes-long polling, so the response shape is:
+ *   1. Immediately stream a heads-up message so the user knows we're working.
+ *   2. Internally poll Google every 10 s; surface periodic progress as
+ *      additional streamed lines (one per minute, kept terse to avoid noise).
+ *   3. When the agent completes, stream the full markdown report + cited
+ *      sources, then close.
+ *   4. On failure, stream a user-readable error and close cleanly.
+ *
+ * The heavy lifting lives in lib/ai/gemini-deep-research-service.ts; this
+ * function is just the SSE writer + DB persistence shim.
+ */
+async function handleDeepResearch(params: {
+  messages: z.infer<typeof ChatRequestSchema>['messages'];
+  modelConfig: { provider: string; model_id: string };
+  modelId: string;
+  dbModelId: number;
+  userId: number;
+  existingConversationId?: string;
+  requestId: string;
+  timer: (data: Record<string, unknown>) => void;
+  log: ReturnType<typeof createLogger>;
+  abortSignal: AbortSignal;
+}): Promise<Response> {
+  const {
+    messages, modelConfig, modelId, dbModelId, userId,
+    existingConversationId, requestId, timer, log, abortSignal,
+  } = params;
+
+  log.info('Deep Research model detected — using Interactions API', {
+    modelId: modelConfig.model_id,
+  });
+
+  // Lazy imports keep the cold start of the standard chat path unchanged.
+  const [
+    { runDeepResearch },
+    { saveAssistantMessage: persistAssistantMessage },
+    { createUIMessageStream, createUIMessageStreamResponse },
+  ] = await Promise.all([
+    import('@/lib/ai/gemini-deep-research-service'),
+    import('./chat-helpers'),
+    import('ai'),
+  ]);
+
+  // Conversation setup — same shape the standard flow uses, so the
+  // conversation list, history, and resume work without special-casing.
+  const convSetup = await setupConversation({
+    conversationIdValue: existingConversationId,
+    messages,
+    userId,
+    provider: modelConfig.provider,
+    modelId,
+    dbModelId,
+  });
+  if ('error' in convSetup) return convSetup.error;
+  const { conversationId, conversationTitle } = convSetup;
+
+  // Extract the user's research question. We re-use extractImagePrompt's
+  // logic because the shape ("get the last user message text") is identical;
+  // it doesn't actually do anything image-specific.
+  const prompt = extractImagePrompt(messages);
+  if (!prompt) {
+    return new Response(
+      JSON.stringify({ error: 'Deep Research requires a text prompt', requestId }),
+      { status: 400, headers: { 'Content-Type': 'application/json' } }
+    );
+  }
+
+  const messageId = `dr-${Date.now()}`;
+  const isNewConversation = !existingConversationId;
+
+  const responseHeaders: Record<string, string> = {
+    'X-Request-Id': requestId,
+    'X-Conversation-Id': conversationId,
+    'X-Deep-Research': 'true',
+  };
+  if (isNewConversation) {
+    responseHeaders['X-Conversation-Title'] = encodeURIComponent(conversationTitle);
+  }
+
+  return createUIMessageStreamResponse({
+    status: 200,
+    headers: responseHeaders,
+    stream: createUIMessageStream({
+      async execute({ writer }) {
+        writer.write({ type: 'text-start', id: messageId });
+
+        // Heads-up so the user sees activity before the first poll comes back.
+        writer.write({
+          type: 'text-delta',
+          id: messageId,
+          delta:
+            '🔍 **Deep Research in progress** — this typically takes 5–15 minutes. '
+            + 'The full report will appear below when ready.\n\n',
+        });
+
+        // Track the last status we surfaced so we don't spam the stream with
+        // identical "Researching… (1m)" lines while Google's status sits on
+        // 'in_progress' for the whole run.
+        let lastStatusEmitted = '';
+
+        try {
+          const result = await runDeepResearch({
+            prompt,
+            modelId: modelConfig.model_id,
+            abortSignal,
+            onStatus: ({ message }) => {
+              if (message === lastStatusEmitted) return;
+              lastStatusEmitted = message;
+              // Italic progress line on its own paragraph. Cheap, readable,
+              // and clearly distinct from the final report content below.
+              writer.write({
+                type: 'text-delta',
+                id: messageId,
+                delta: `_${message}_\n\n`,
+              });
+            },
+          });
+
+          // Final report. Emit citations as an appended Sources section so
+          // the user can click through. We deliberately keep the report and
+          // sources in the same text part — markdown renderer handles both.
+          let finalDelta = `\n---\n\n${result.report.trim()}\n`;
+          if (result.citations.length > 0) {
+            finalDelta += '\n\n**Sources:**\n';
+            for (const [i, c] of result.citations.entries()) {
+              const label = c.title?.trim() || c.url;
+              finalDelta += `${i + 1}. [${label}](${c.url})\n`;
+            }
+          }
+          writer.write({ type: 'text-delta', id: messageId, delta: finalDelta });
+          writer.write({ type: 'text-end', id: messageId });
+
+          // Persist the assistant message so refresh / history works.
+          // We store the joined heads-up + final report so the history view
+          // matches what the user saw streamed.
+          const persisted =
+            '🔍 **Deep Research Report**\n\n'
+            + result.report.trim()
+            + (result.citations.length > 0
+              ? '\n\n**Sources:**\n'
+                + result.citations
+                  .map((c, i) => `${i + 1}. [${c.title?.trim() || c.url}](${c.url})`)
+                  .join('\n')
+              : '');
+          await persistAssistantMessage({
+            conversationId,
+            text: persisted,
+            finishReason: 'stop',
+            dbModelId,
+          });
+
+          timer({ status: 'success', conversationId, durationMs: result.durationMs });
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          const errType = err && typeof err === 'object' && 'type' in err
+            ? (err as { type: string }).type
+            : 'UNKNOWN';
+          log.error('Deep Research failed', { conversationId, errType, message });
+
+          // Surface a clean error inside the streamed message so the user sees
+          // something useful rather than a dead spinner.
+          writer.write({
+            type: 'text-delta',
+            id: messageId,
+            delta: `\n\n**Research failed:** ${message}`,
+          });
+          writer.write({ type: 'text-end', id: messageId });
+          timer({ status: 'error', conversationId, errType });
+        }
+      },
+    }),
+  });
+}
+
+/**
+ * Capability-based dispatch for non-streaming model paths. Returns the
+ * Response when one of these handlers owns the request, or null when the
+ * caller should continue down the standard streaming path.
+ *
+ * Extracted to keep POST() under the cyclomatic-complexity threshold and
+ * to centralize the place where new "special" model classes get added.
+ */
+async function routeSpecialModel(params: {
+  isImageGenerationModel: boolean;
+  isDeepResearchModel: boolean;
+  messages: z.infer<typeof ChatRequestSchema>['messages'];
+  modelConfig: { provider: string; model_id: string };
+  modelId: string;
+  dbModelId: number;
+  userId: number;
+  existingConversationId?: string;
+  requestId: string;
+  timer: (data: Record<string, unknown>) => void;
+  log: ReturnType<typeof createLogger>;
+  abortSignal: AbortSignal;
+}): Promise<Response | null> {
+  if (params.isImageGenerationModel) {
+    return handleImageGeneration({
+      messages: params.messages,
+      modelConfig: params.modelConfig,
+      modelId: params.modelId,
+      dbModelId: params.dbModelId,
+      userId: params.userId,
+      existingConversationId: params.existingConversationId,
+      requestId: params.requestId,
+      timer: params.timer,
+      log: params.log,
+    });
+  }
+  if (params.isDeepResearchModel) {
+    return handleDeepResearch({
+      messages: params.messages,
+      modelConfig: params.modelConfig,
+      modelId: params.modelId,
+      dbModelId: params.dbModelId,
+      userId: params.userId,
+      existingConversationId: params.existingConversationId,
+      requestId: params.requestId,
+      timer: params.timer,
+      log: params.log,
+      abortSignal: params.abortSignal,
+    });
+  }
+  return null;
+}
+
 type ValidationResult = {
   valid: true;
   data: z.infer<typeof ChatRequestSchema>;
@@ -429,6 +659,7 @@ async function getValidatedModelConfig(
   modelConfig: NonNullable<Awaited<ReturnType<typeof getModelConfig>>>;
   dbModelId: number;
   isImageGenerationModel: boolean;
+  isDeepResearchModel: boolean;
 } | { error: Response }> {
   const modelConfig = await getModelConfig(modelId);
   if (!modelConfig) {
@@ -444,8 +675,9 @@ async function getValidatedModelConfig(
   const dbModelId = modelConfig.id;
   const modelWithCapabilities = await getAIModelById(dbModelId);
   const isImageGenerationModel = hasCapability(modelWithCapabilities?.capabilities, 'imageGeneration');
+  const isDeepResearchModel = hasCapability(modelWithCapabilities?.capabilities, 'deepResearch');
 
-  return { modelConfig, dbModelId, isImageGenerationModel };
+  return { modelConfig, dbModelId, isImageGenerationModel, isDeepResearchModel };
 }
 
 /**
@@ -528,17 +760,26 @@ export async function POST(req: Request) {
     // 4. Get model configuration
     const modelResult = await getValidatedModelConfig(modelId, log);
     if ('error' in modelResult) return modelResult.error;
-    const { modelConfig, dbModelId, isImageGenerationModel } = modelResult;
+    const { modelConfig, dbModelId, isImageGenerationModel, isDeepResearchModel } = modelResult;
 
-    log.info('Model configured', sanitizeForLogging({ provider: modelConfig.provider, modelId: modelConfig.model_id, dbId: dbModelId, isImageGeneration: isImageGenerationModel }));
+    log.info('Model configured', sanitizeForLogging({
+      provider: modelConfig.provider,
+      modelId: modelConfig.model_id,
+      dbId: dbModelId,
+      isImageGeneration: isImageGenerationModel,
+      isDeepResearch: isDeepResearchModel,
+    }));
 
-    // 5. Handle image generation models separately
-    if (isImageGenerationModel) {
-      return handleImageGeneration({
-        messages, modelConfig, modelId, dbModelId, userId,
-        existingConversationId: conversationIdValue, requestId, timer, log
-      });
-    }
+    // 5. Capability-based routing — image gen and Deep Research bypass
+    // the standard streaming pipeline.
+    const specialRoute = await routeSpecialModel({
+      isImageGenerationModel, isDeepResearchModel,
+      messages, modelConfig, modelId, dbModelId, userId,
+      existingConversationId: conversationIdValue,
+      requestId, timer, log,
+      abortSignal: req.signal,
+    });
+    if (specialRoute) return specialRoute;
 
     // 6. Setup conversation and save user message
     const convSetup = await setupConversation({
