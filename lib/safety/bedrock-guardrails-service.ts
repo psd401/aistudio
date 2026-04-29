@@ -49,34 +49,51 @@ export class BedrockGuardrailsService {
     // In production (ECS/Lambda), AWS_REGION is always set
     if (!region) {
       this.log.warn('AWS_REGION not configured - BedrockGuardrailsService disabled (local development mode)');
-      // Initialize with dummy region for client instantiation (won't be used)
       this.bedrockClient = new BedrockRuntimeClient({ region: 'us-east-1' });
       this.snsClient = new SNSClient({ region: 'us-east-1' });
-      this.config = {
-        region: '',
-        guardrailId: '', // Empty guardrailId disables the service
-        guardrailVersion: 'DRAFT',
-        enableViolationNotifications: false,
-        enablePiiTokenization: false,
-        tokenTtlSeconds: 3600,
-      };
+      this.config = BedrockGuardrailsService.buildDisabledConfig();
       return;
     }
 
     this.bedrockClient = new BedrockRuntimeClient({ region });
     this.snsClient = new SNSClient({ region });
+    this.config = BedrockGuardrailsService.buildConfig(region, config);
+    this.logConfigurationWarnings(config);
+  }
 
-    this.config = {
+  /**
+   * Build a disabled configuration for local development (no AWS region)
+   */
+  private static buildDisabledConfig(): GuardrailsConfig {
+    return {
+      region: '',
+      guardrailId: '',
+      guardrailVersion: 'DRAFT',
+      enableViolationNotifications: false,
+      enablePiiTokenization: false,
+      tokenTtlSeconds: 3600,
+    };
+  }
+
+  /**
+   * Build configuration from provided config and environment variables
+   */
+  private static buildConfig(region: string, config?: Partial<GuardrailsConfig>): GuardrailsConfig {
+    return {
       region,
       guardrailId: config?.guardrailId || process.env.BEDROCK_GUARDRAIL_ID || '',
       guardrailVersion: config?.guardrailVersion || process.env.BEDROCK_GUARDRAIL_VERSION || 'DRAFT',
       violationTopicArn: config?.violationTopicArn || process.env.GUARDRAIL_VIOLATION_TOPIC_ARN,
       enableViolationNotifications: config?.enableViolationNotifications ?? true,
       enablePiiTokenization: config?.enablePiiTokenization ?? true,
-      tokenTtlSeconds: config?.tokenTtlSeconds ?? 3600, // 1 hour default
+      tokenTtlSeconds: config?.tokenTtlSeconds ?? 3600,
     };
+  }
 
-    // Validate required configuration
+  /**
+   * Log warnings about missing configuration
+   */
+  private logConfigurationWarnings(config?: Partial<GuardrailsConfig>): void {
     if (!this.config.guardrailId) {
       this.log.warn('Bedrock Guardrail ID not configured - content safety filtering disabled');
     }
@@ -161,35 +178,13 @@ export class BedrockGuardrailsService {
         };
       }
 
-      // Issue #742: Send detection notification for topics in detect-only mode
-      if (result.detectedTopics && result.detectedTopics.length > 0) {
-        await this.sendViolationNotification({
-          violationId: requestId,
-          userIdHash: this.hashValue(sessionId || 'anonymous'),
-          timestamp: new Date().toISOString(),
-          source: 'input',
-          categories: result.detectedTopics,
-          modelId: 'pre-check',
-          provider: 'user-input',
-          action: 'detected',
-          sessionId,
-        });
-      }
-
-      // Issue #761: Send detection notification for content filters in detect-only mode
-      if (result.detectedFilters && result.detectedFilters.length > 0) {
-        await this.sendViolationNotification({
-          violationId: requestId,
-          userIdHash: this.hashValue(sessionId || 'anonymous'),
-          timestamp: new Date().toISOString(),
-          source: 'input',
-          categories: result.detectedFilters,
-          modelId: 'pre-check',
-          provider: 'user-input',
-          action: 'detected',
-          sessionId,
-        });
-      }
+      // Issue #929: Detect-only SNS notifications removed. Detection data is already
+      // logged to CloudWatch (see evaluateContent → extractDetectedTopics/extractDetectedFilters).
+      // SNS email is for actionable alerts (actual blocks), not high-volume telemetry.
+      // Previously, up to 4 SNS publishes per message (detected topics + detected filters
+      // on both input and output) created an email flood that made the notification channel
+      // unusable. CloudWatch Logs Insights queries in docs/operations/guardrail-tuning-analysis.md
+      // provide the appropriate monitoring channel for detect-only data.
 
       this.log.info('Input content passed safety check', {
         requestId,
@@ -276,35 +271,8 @@ export class BedrockGuardrailsService {
         };
       }
 
-      // Issue #742: Send detection notification for topics in detect-only mode
-      if (result.detectedTopics && result.detectedTopics.length > 0) {
-        await this.sendViolationNotification({
-          violationId: requestId,
-          userIdHash: this.hashValue(sessionId || 'anonymous'),
-          timestamp: new Date().toISOString(),
-          source: 'output',
-          categories: result.detectedTopics,
-          modelId,
-          provider,
-          action: 'detected',
-          sessionId,
-        });
-      }
-
-      // Issue #761: Send detection notification for content filters in detect-only mode
-      if (result.detectedFilters && result.detectedFilters.length > 0) {
-        await this.sendViolationNotification({
-          violationId: requestId,
-          userIdHash: this.hashValue(sessionId || 'anonymous'),
-          timestamp: new Date().toISOString(),
-          source: 'output',
-          categories: result.detectedFilters,
-          modelId,
-          provider,
-          action: 'detected',
-          sessionId,
-        });
-      }
+      // Issue #929: Detect-only SNS notifications removed (same as evaluateInput).
+      // Detection data is logged to CloudWatch via evaluateContent; SNS reserved for blocks.
 
       this.log.info('Output content passed safety check', {
         requestId,
@@ -390,38 +358,7 @@ export class BedrockGuardrailsService {
     }
 
     if (response.action === 'GUARDRAIL_INTERVENED') {
-      const blockedCategories = this.extractBlockedCategories(assessment);
-      const blockedMessage = response.outputs?.[0]?.text;
-
-      // Issue #763: Log detailed assessment data for blocked content to support
-      // analysis of false positive patterns and tuning strategy development.
-      // Includes word policy matches (count/type only — never raw words), filter
-      // confidence levels, and topic triggers.
-      // Note: raw matched words are NOT logged — they come from user/AI content
-      // and could contain profane or offensive terms. Log type and count instead.
-      const wordMatches = [
-        ...(assessment?.wordPolicy?.customWords?.filter(w => w.action === 'BLOCKED').map(w => ({ type: 'custom', matchLength: w.match?.length })) || []),
-        ...(assessment?.wordPolicy?.managedWordLists?.filter(w => w.action === 'BLOCKED').map(w => ({ type: w.type, matchLength: w.match?.length })) || []),
-      ];
-      const filterDetails = assessment?.contentPolicy?.filters
-        ?.filter(f => f.action === 'BLOCKED')
-        .map(f => ({ type: f.type, confidence: f.confidence })) || [];
-
-      this.log.warn('Guardrail intervened', {
-        source,
-        blockedCategories,
-        hasBlockedMessage: !!blockedMessage,
-        wordPolicyMatches: wordMatches.length > 0 ? wordMatches : undefined,
-        contentFilterDetails: filterDetails.length > 0 ? filterDetails : undefined,
-        contentLength: content.length,
-      });
-
-      return {
-        blocked: true,
-        reason: blockedCategories.join(', ') || 'Content policy violation',
-        blockedMessage,
-        blockedCategories,
-      };
+      return this.buildBlockedResult(assessment, response, source, content.length);
     }
 
     return {
@@ -432,51 +369,113 @@ export class BedrockGuardrailsService {
   }
 
   /**
+   * Build a blocked result with detailed assessment logging
+   *
+   * Issue #763: Logs word policy matches (count/type only — never raw words),
+   * filter confidence levels, and topic triggers to support false positive analysis.
+   */
+  private buildBlockedResult(
+    assessment: SDKGuardrailAssessment | undefined,
+    response: { outputs?: Array<{ text?: string }> },
+    source: 'INPUT' | 'OUTPUT',
+    contentLength: number
+  ): GuardrailCheckResult {
+    const blockedCategories = this.extractBlockedCategories(assessment);
+    const blockedMessage = response.outputs?.[0]?.text;
+
+    const wordMatches = this.extractBlockedWordMatches(assessment);
+    const filterDetails = this.extractBlockedFilterDetails(assessment);
+
+    this.log.warn('Guardrail intervened', {
+      source,
+      blockedCategories,
+      hasBlockedMessage: !!blockedMessage,
+      wordPolicyMatches: wordMatches.length > 0 ? wordMatches : undefined,
+      contentFilterDetails: filterDetails.length > 0 ? filterDetails : undefined,
+      contentLength,
+    });
+
+    return {
+      blocked: true,
+      reason: blockedCategories.join(', ') || 'Content policy violation',
+      blockedMessage,
+      blockedCategories,
+    };
+  }
+
+  /**
+   * Extract word policy match metadata (type/count only — never raw matched words)
+   */
+  private extractBlockedWordMatches(assessment?: SDKGuardrailAssessment): Array<{ type: string; matchLength?: number }> {
+    const customWordMatches = assessment?.wordPolicy?.customWords
+      ?.filter(w => w.action === 'BLOCKED')
+      .map(w => ({ type: 'custom', matchLength: w.match?.length })) ?? [];
+
+    const managedWordMatches = assessment?.wordPolicy?.managedWordLists
+      ?.filter(w => w.action === 'BLOCKED')
+      .map(w => ({ type: w.type ?? 'unknown', matchLength: w.match?.length })) ?? [];
+
+    return [...customWordMatches, ...managedWordMatches];
+  }
+
+  /**
+   * Extract blocked content filter details (type and confidence)
+   */
+  private extractBlockedFilterDetails(assessment?: SDKGuardrailAssessment): Array<{ type?: string; confidence?: string }> {
+    return assessment?.contentPolicy?.filters
+      ?.filter(f => f.action === 'BLOCKED')
+      .map(f => ({ type: f.type, confidence: f.confidence })) ?? [];
+  }
+
+  /**
    * Extract blocked category names from guardrail assessment
    */
   private extractBlockedCategories(assessment?: SDKGuardrailAssessment): string[] {
+    return [
+      ...this.extractBlockedContentFilterCategories(assessment),
+      ...this.extractBlockedTopicCategories(assessment),
+      ...this.extractBlockedWordCategories(assessment),
+    ];
+  }
+
+  /**
+   * Extract content filter categories that triggered blocking (hate, violence, etc.)
+   */
+  private extractBlockedContentFilterCategories(assessment?: SDKGuardrailAssessment): string[] {
+    return assessment?.contentPolicy?.filters
+      ?.filter(f => f.action === 'BLOCKED' && f.type)
+      .map(f => this.formatCategoryName(f.type as ContentFilterType)) ?? [];
+  }
+
+  /**
+   * Extract topic policy categories that triggered blocking
+   */
+  private extractBlockedTopicCategories(assessment?: SDKGuardrailAssessment): string[] {
+    return assessment?.topicPolicy?.topics
+      ?.filter(t => t.action === 'BLOCKED' && t.name)
+      .map(t => t.name!) ?? [];
+  }
+
+  /**
+   * Extract word policy categories that triggered blocking (custom words + managed word lists)
+   *
+   * Issue #763: Includes managedWordLists (PROFANITY filter) which was previously missing.
+   * Note: word.match (the raw blocked word) is intentionally NOT included — it flows into
+   * SNS email subjects which appear in plaintext on lock screens.
+   */
+  private extractBlockedWordCategories(assessment?: SDKGuardrailAssessment): string[] {
     const categories: string[] = [];
 
-    // Content policy filters (hate, violence, etc.)
-    if (assessment?.contentPolicy?.filters) {
-      for (const filter of assessment.contentPolicy.filters) {
-        if (filter.action === 'BLOCKED' && filter.type) {
-          categories.push(this.formatCategoryName(filter.type as ContentFilterType));
-        }
-      }
+    const hasBlockedCustomWord = assessment?.wordPolicy?.customWords
+      ?.some(w => w.action === 'BLOCKED') ?? false;
+    if (hasBlockedCustomWord) {
+      categories.push('Blocked word detected');
     }
 
-    // Topic policy
-    if (assessment?.topicPolicy?.topics) {
-      for (const topic of assessment.topicPolicy.topics) {
-        if (topic.action === 'BLOCKED' && topic.name) {
-          categories.push(topic.name);
-        }
-      }
-    }
-
-    // Word policy - custom words
-    if (assessment?.wordPolicy?.customWords) {
-      for (const word of assessment.wordPolicy.customWords) {
-        if (word.action === 'BLOCKED') {
-          categories.push('Blocked word detected');
-          break; // Only add once
-        }
-      }
-    }
-
-    // Issue #763: Word policy - managed word lists (PROFANITY filter)
-    // Previously missing — PROFANITY blocks were not categorized in logs/notifications,
-    // making it impossible to identify them as the source of increased blocking.
-    // Note: word.match (the raw blocked word) is intentionally NOT included in the
-    // category string — it flows into SNS email subjects which appear in plaintext
-    // on lock screens and email previews.
-    if (assessment?.wordPolicy?.managedWordLists) {
-      for (const word of assessment.wordPolicy.managedWordLists) {
-        if (word.action === 'BLOCKED') {
-          categories.push(`Profanity filter (${word.type ?? 'managed word list'})`);
-        }
-      }
+    const blockedManagedWords = assessment?.wordPolicy?.managedWordLists
+      ?.filter(w => w.action === 'BLOCKED') ?? [];
+    for (const word of blockedManagedWords) {
+      categories.push(`Profanity filter (${word.type ?? 'managed word list'})`);
     }
 
     return categories;
@@ -540,54 +539,65 @@ export class BedrockGuardrailsService {
    * @returns Array of detected pattern types (empty if none found)
    */
   private detectSuspiciousPatterns(content: string): string[] {
-    const patterns: string[] = [];
     const lowerContent = content.toLowerCase();
 
-    // System instruction override attempts
-    if (lowerContent.includes('system instruction') ||
-        lowerContent.includes('system prompt') ||
-        lowerContent.includes('system message') ||
-        lowerContent.includes('ignore previous') ||
-        lowerContent.includes('ignore all previous') ||
-        lowerContent.includes('disregard previous') ||
-        lowerContent.includes('forget everything')) {
-      patterns.push('system_override_attempt');
-    }
+    return [
+      this.detectSystemOverride(lowerContent),
+      this.detectRoleManipulation(content),
+      this.detectDataExtraction(lowerContent),
+      this.detectDelimiterBypass(content),
+      this.detectJailbreak(content),
+    ].filter((pattern): pattern is string => pattern !== null);
+  }
 
-    // Role manipulation attempts
-    const roleManipulationPatterns = [
+  /** System instruction override attempts */
+  private detectSystemOverride(lowerContent: string): string | null {
+    const overridePhrases = [
+      'system instruction', 'system prompt', 'system message',
+      'ignore previous', 'ignore all previous',
+      'disregard previous', 'forget everything',
+    ];
+    return overridePhrases.some(phrase => lowerContent.includes(phrase))
+      ? 'system_override_attempt' : null;
+  }
+
+  /** Role manipulation attempts (excludes legitimate educational role-playing) */
+  private detectRoleManipulation(content: string): string | null {
+    const isLegitimateRolePlaying = /principal|teacher|administrator|superintendent|danielson|evaluation|observation/iu.test(content);
+    if (isLegitimateRolePlaying) return null;
+
+    const rolePatterns = [
       /you\s+are\s+now\s+(?:a|an|the)/iu,
       /act\s+as\s+(?:if|though)\s+you\s+(?:are|were)/iu,
       /pretend\s+(?:to\s+be|you\s+are)/iu,
       /simulate\s+(?:being|a)/iu,
     ];
-    // Exclude legitimate educational role-playing (context: Danielson observations, teacher evaluation)
-    const isLegitimateRolePlaying = /principal|teacher|administrator|superintendent|danielson|evaluation|observation/iu.test(content);
-    if (!isLegitimateRolePlaying && roleManipulationPatterns.some(pattern => pattern.test(content))) {
-      patterns.push('role_manipulation');
-    }
+    return rolePatterns.some(pattern => pattern.test(content))
+      ? 'role_manipulation' : null;
+  }
 
-    // Data extraction attempts
-    if (lowerContent.includes('show me your prompt') ||
-        lowerContent.includes('what are your instructions') ||
-        lowerContent.includes('reveal your system prompt') ||
-        lowerContent.includes('output your configuration')) {
-      patterns.push('data_extraction_attempt');
-    }
+  /** Data extraction attempts (probing for system prompts / instructions) */
+  private detectDataExtraction(lowerContent: string): string | null {
+    const extractionPhrases = [
+      'show me your prompt', 'what are your instructions',
+      'reveal your system prompt', 'output your configuration',
+    ];
+    return extractionPhrases.some(phrase => lowerContent.includes(phrase))
+      ? 'data_extraction_attempt' : null;
+  }
 
-    // Delimiter/encoding bypass attempts
-    if ((/[<>]{3,}/u.test(content) && /<\/?system>/iu.test(content)) ||
-        content.includes('[INST]') ||
-        /\{\{\{\s*system/iu.test(content)) {
-      patterns.push('delimiter_bypass');
-    }
+  /** Delimiter/encoding bypass attempts */
+  private detectDelimiterBypass(content: string): string | null {
+    if (/[<>]{3,}/u.test(content) && /<\/?system>/iu.test(content)) return 'delimiter_bypass';
+    if (content.includes('[INST]')) return 'delimiter_bypass';
+    if (/\{\{\{\s*system/iu.test(content)) return 'delimiter_bypass';
+    return null;
+  }
 
-    // Jailbreak/DAN patterns
-    if (/do\s+anything\s+now|dan\s+mode|developer\s+mode/iu.test(content)) {
-      patterns.push('jailbreak_attempt');
-    }
-
-    return patterns;
+  /** Jailbreak/DAN pattern attempts */
+  private detectJailbreak(content: string): string | null {
+    return /do\s+anything\s+now|dan\s+mode|developer\s+mode/iu.test(content)
+      ? 'jailbreak_attempt' : null;
   }
 
   /**

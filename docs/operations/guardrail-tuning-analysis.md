@@ -6,12 +6,14 @@
 
 ### Active Blocking Policies
 
-Only two policies actively block content:
+**No policies actively block content.** As of Issue #929, all content filters have been disabled and `contentPolicyConfig` has been removed from the guardrail entirely. The guardrail operates exclusively as a detection/logging layer.
 
 | Policy | Type | Status | Notes |
 |--------|------|--------|-------|
-| **HATE** | Content Filter | Input: `LOW`, Output: `NONE` | Issue #860 — asymmetric. Bedrock requires at least one non-NONE filter; input LOW satisfies this. Output NONE eliminates AI response FPs. |
-| **PROFANITY** | Managed Word List | OFF (disabled) | Issue #763 — 97% of blocks, 24x rate spike. Binary on/off. |
+| ~~HATE~~ | Content Filter | **REMOVED** | Issue #929 — `contentPolicyConfig` removed. 100% FP rate (3/3 blocks: 2 on large docs Issue #860, 1 on chemistry mnemonics Issue #929). Topic policies satisfy Bedrock's "at least one filter" requirement. |
+| ~~PROFANITY~~ | Managed Word List | OFF (disabled) | Issue #763 — 97% of blocks, 24x rate spike. Binary on/off. |
+
+All content safety blocking is now delegated to LLM provider built-in safety training (OpenAI, Anthropic, Google).
 
 ### Detect-Only Policies (logging, not blocking)
 
@@ -256,6 +258,14 @@ AWS does not publish changelogs for Bedrock Guardrails classifier model updates.
 
 There is no way to pin a specific classifier version. The only mitigation is detect-only mode for policies prone to false positives, which is the current configuration.
 
+## SNS Notification Policy
+
+**Issue #929**: Detect-only detections no longer trigger SNS email notifications. Previously, each detect-only topic and content filter detection generated an individual SNS publish call on both input and output evaluation — up to 4 emails per user message. This flooded the notification channel with non-actionable telemetry.
+
+- **Actual blocks**: Still trigger SNS notification (if blocking is re-enabled in the future)
+- **Detect-only detections**: Logged to CloudWatch only — use Logs Insights queries above for monitoring
+- **CloudWatch is the correct channel** for high-volume detection telemetry; SNS email is for actionable alerts
+
 ## Related Issues
 
 - #639 — INSULTS/MISCONDUCT lowered from MEDIUM to LOW
@@ -264,3 +274,5 @@ There is no way to pin a specific classifier version. The only mitigation is det
 - #742 — Topic policies switched to detect-only mode
 - #761 — Content filters switched to detect-only mode
 - #763 — This analysis and tuning strategy
+- #860 — HATE output set to NONE (100% FP rate on output)
+- #929 — HATE input set to NONE, contentPolicyConfig removed, detect-only SNS flood fixed

@@ -52,81 +52,30 @@ export class GuardrailsStack extends cdk.Stack {
       blockedInputMessaging: 'This content is not appropriate for educational use. Please rephrase your question.',
       blockedOutputsMessaging: 'The AI response contained inappropriate content and has been blocked for your safety.',
 
-      // Content filtering policies
+      // Content filtering policies — ALL DISABLED
       //
-      // Issue #761: Content filters switched to detect-only mode where possible.
-      // Following the same strategy as topic policies (Issue #742), content filters
-      // were blocking legitimate K-12 educational content:
-      // - SEXUAL: Blocking health education discussions
-      // - INSULTS: Blocking teacher observations about student behavior
-      // - VIOLENCE: Blocking history lessons (wars, civil rights struggles)
-      // - HATE: Blocking Holocaust education, civil rights content
+      // Issue #929: contentPolicyConfig removed entirely. The Bedrock CreateGuardrail
+      // API requires "at least one filter" but this can be satisfied by topicPolicyConfig
+      // alone (we have 4 topic policies in detect-only mode). The previous assumption
+      // that at least one content filter must be non-NONE was incorrect.
       //
-      // AWS Bedrock requires at least ONE content filter at non-NONE strength.
-      // HATE at LOW is kept as the minimum required filter — LOW threshold has
-      // the fewest false positives for K-12 educational content.
-      //
-      // Issue #763 analysis (2026-03-12): HATE at LOW produced only 2 blocks in
-      // 30 days, both false positives on large educational documents (28KB, 52KB
-      // inputs that simultaneously triggered Bullying/Weapons topic detections).
-      // Keeping at LOW as Bedrock minimum requirement; FP rate is tolerable.
-      //
-      // Safety net: LLM providers (OpenAI, Anthropic, Google) have built-in safety
-      // training that provides baseline content filtering even without Bedrock.
-      //
-      // History:
+      // History of progressive disablement due to false positives on K-12 educational content:
       // - Issue #639: INSULTS/MISCONDUCT lowered from MEDIUM to LOW
       // - Issue #727: PROMPT_ATTACK disabled (75% false positive rate)
-      // - Issue #761: All filters to NONE except HATE at LOW (Bedrock minimum requirement)
+      // - Issue #761: All filters to NONE except HATE at LOW (assumed Bedrock minimum)
       // - Issue #763: PROFANITY word policy disabled (97% of all blocks, 24x rate spike)
-      // - Issue #860: HATE asymmetric (input LOW, output NONE) — 100% FP rate on output
-      contentPolicyConfig: {
-        filtersConfig: [
-          {
-            // Issue #860: Asymmetric — input at LOW (Bedrock minimum), output at NONE.
-            // 30-day analysis (#763) found HATE at LOW had 100% false positive rate
-            // (2/2 blocks were on large educational documents: 28KB, 52KB).
-            // Asymmetric config eliminates output false positives (the most disruptive —
-            // blocks AI responses users already waited for) while satisfying Bedrock's
-            // requirement of at least one non-NONE content filter.
-            // inputStrength: 'LOW' still catches genuinely hateful user input.
-            type: 'HATE',
-            inputStrength: 'LOW',
-            outputStrength: 'NONE',
-          },
-          {
-            type: 'VIOLENCE',
-            inputStrength: 'NONE',  // Issue #761: Detect only, don't block
-            outputStrength: 'NONE',
-          },
-          {
-            type: 'SEXUAL',
-            inputStrength: 'NONE',  // Issue #761: Detect only, don't block
-            outputStrength: 'NONE',
-          },
-          {
-            type: 'INSULTS',
-            inputStrength: 'NONE',  // Issue #761: Detect only, don't block
-            outputStrength: 'NONE',
-          },
-          {
-            type: 'MISCONDUCT',
-            inputStrength: 'NONE',  // Issue #761: Detect only, don't block
-            outputStrength: 'NONE',
-          },
-          {
-            type: 'PROMPT_ATTACK',
-            inputStrength: 'NONE',  // Issue #727: Already disabled
-            outputStrength: 'NONE',
-          },
-        ],
-      },
+      // - Issue #860: HATE output set to NONE (100% FP rate on output, 2/2 blocks)
+      // - Issue #929: HATE input set to NONE (100% FP rate cumulative, 3/3 blocks)
+      //              Chemistry mnemonics ("guillotine", "gangs", "marriage") blocked.
+      //              contentPolicyConfig removed — topic policies satisfy "at least one filter".
+      //
+      // After 8 issues (#639, #727, #731, #742, #761, #763, #860, #929), zero content
+      // filters actively block. The guardrail serves as a detection/logging layer via
+      // topic policies. All blocking is delegated to LLM provider built-in safety training
+      // (OpenAI, Anthropic, Google all have robust content safety).
 
-      // Note: sensitiveInformationPolicyConfig is intentionally NOT configured here
-      // because we handle PII detection and tokenization using Amazon Comprehend,
-      // which gives us more flexibility for educational use cases. Bedrock's PII
-      // blocking would reject legitimate educational content before our tokenization
-      // service has a chance to protect it.
+      // Note: sensitiveInformationPolicyConfig not configured — we use Amazon Comprehend
+      // for PII detection/tokenization, which gives more flexibility for K-12 use cases.
 
       // Topic-based filtering for K-12 inappropriate topics
       //
@@ -141,7 +90,8 @@ export class GuardrailsStack extends cdk.Stack {
       // each topic. Once we understand the false positive patterns, we can selectively
       // re-enable blocking on topics that don't affect educational use cases.
       //
-      // Content filters (HATE, VIOLENCE, SEXUAL, etc.) remain active as a safety net.
+      // Issue #929: Content filters (contentPolicyConfig) have been removed entirely.
+      // LLM provider built-in safety training serves as the safety net for content filtering.
       topicPolicyConfig: {
         topicsConfig: [
           {
@@ -221,31 +171,11 @@ export class GuardrailsStack extends cdk.Stack {
         ],
       },
 
-      // Word policy - PROFANITY managed word list
-      //
-      // Issue #763: DISABLED after 30-day analysis (2026-03-12). Data showed:
-      // - 66 of 68 blocks (97%) were from PROFANITY — the remaining 2 were HATE FPs
-      // - 48 of 66 PROFANITY blocks were on OUTPUT (AI-generated educational responses)
-      // - Block rate increased 24x starting March 6 (AWS likely updated the word list)
-      // - The extraction bug (missing managedWordLists) made these blocks invisible
-      //
-      // PROFANITY is binary on/off with no strength tuning. AWS controls the list
-      // and does not publish changes. With 97% of blocks being PROFANITY and the
-      // majority blocking AI educational OUTPUT, the cost exceeds the benefit.
-      //
-      // Compensating controls:
-      // - LLM safety training prevents actual profanity generation
-      // - HATE at LOW still catches hate speech (Bedrock minimum)
-      // - Content filters in detect-only mode provide visibility
-      //
-      // To re-enable: uncomment the wordPolicyConfig below.
-      // wordPolicyConfig: {
-      //   managedWordListsConfig: [
-      //     {
-      //       type: 'PROFANITY',
-      //     },
-      //   ],
-      // },
+      // Word policy - PROFANITY managed word list (DISABLED — Issue #763)
+      // 97% of blocks were PROFANITY, 24x rate spike. AWS controls word list
+      // with no tuning and no published changelogs. See guardrail-tuning-analysis.md.
+      // To re-enable: uncomment wordPolicyConfig below.
+      // wordPolicyConfig: { managedWordListsConfig: [{ type: 'PROFANITY' }] },
 
       // Resource tags
       tags: [
@@ -300,74 +230,72 @@ export class GuardrailsStack extends cdk.Stack {
       );
     }
 
-    // =====================================================================
-    // 4. SSM Parameters for Service Configuration
-    // =====================================================================
+    // SSM Parameters and CloudFormation Outputs
+    this.createSsmParametersAndOutputs(props.environment);
+  }
 
-    // Store guardrail ID in SSM for runtime lookup
+  /**
+   * Create SSM parameters for runtime config lookup and CloudFormation outputs
+   */
+  private createSsmParametersAndOutputs(environment: string): void {
+    // SSM Parameters
     new ssm.StringParameter(this, 'GuardrailIdParam', {
-      parameterName: `/aistudio/${props.environment}/guardrail-id`,
+      parameterName: `/aistudio/${environment}/guardrail-id`,
       stringValue: this.guardrail.attrGuardrailId,
       description: 'Bedrock Guardrail ID for K-12 content safety',
       tier: ssm.ParameterTier.STANDARD,
     });
 
-    // Store guardrail version (always use DRAFT in dev, numbered in prod)
     new ssm.StringParameter(this, 'GuardrailVersionParam', {
-      parameterName: `/aistudio/${props.environment}/guardrail-version`,
-      stringValue: 'DRAFT', // Use DRAFT for now, update to versioned when ready
+      parameterName: `/aistudio/${environment}/guardrail-version`,
+      stringValue: 'DRAFT',
       description: 'Bedrock Guardrail version',
       tier: ssm.ParameterTier.STANDARD,
     });
 
-    // Store PII token table name
     new ssm.StringParameter(this, 'PIITokenTableParam', {
-      parameterName: `/aistudio/${props.environment}/pii-token-table-name`,
+      parameterName: `/aistudio/${environment}/pii-token-table-name`,
       stringValue: this.piiTokenTable.tableName,
       description: 'DynamoDB table name for PII token storage',
       tier: ssm.ParameterTier.STANDARD,
     });
 
-    // Store violation topic ARN
     new ssm.StringParameter(this, 'ViolationTopicArnParam', {
-      parameterName: `/aistudio/${props.environment}/guardrail-violation-topic-arn`,
+      parameterName: `/aistudio/${environment}/guardrail-violation-topic-arn`,
       stringValue: this.violationTopic.topicArn,
       description: 'SNS topic ARN for guardrail violations',
       tier: ssm.ParameterTier.STANDARD,
     });
 
-    // =====================================================================
-    // 5. Outputs
-    // =====================================================================
-
+    // CloudFormation Outputs
     new cdk.CfnOutput(this, 'GuardrailId', {
       value: this.guardrail.attrGuardrailId,
       description: 'Bedrock Guardrail ID',
-      exportName: `${props.environment}-GuardrailId`,
+      exportName: `${environment}-GuardrailId`,
     });
 
     new cdk.CfnOutput(this, 'GuardrailArn', {
       value: this.guardrail.attrGuardrailArn,
       description: 'Bedrock Guardrail ARN',
-      exportName: `${props.environment}-GuardrailArn`,
+      exportName: `${environment}-GuardrailArn`,
     });
 
     new cdk.CfnOutput(this, 'PIITokenTableName', {
       value: this.piiTokenTable.tableName,
       description: 'DynamoDB table for PII tokens',
-      exportName: `${props.environment}-PIITokenTableName`,
+      exportName: `${environment}-PIITokenTableName`,
     });
 
     new cdk.CfnOutput(this, 'PIITokenTableArn', {
       value: this.piiTokenTable.tableArn,
       description: 'DynamoDB table ARN for PII tokens',
-      exportName: `${props.environment}-PIITokenTableArn`,
+      exportName: `${environment}-PIITokenTableArn`,
     });
 
     new cdk.CfnOutput(this, 'ViolationTopicArn', {
       value: this.violationTopic.topicArn,
       description: 'SNS topic for violations',
-      exportName: `${props.environment}-ViolationTopicArn`,
+      exportName: `${environment}-ViolationTopicArn`,
     });
   }
 
