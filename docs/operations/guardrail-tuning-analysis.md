@@ -19,15 +19,9 @@ All content safety blocking is now delegated to LLM provider built-in safety tra
 
 | Policy | Type | Notes |
 |--------|------|-------|
-| VIOLENCE | Content Filter | NONE since Issue #761 |
-| SEXUAL | Content Filter | NONE since Issue #761 |
-| INSULTS | Content Filter | NONE since Issue #761 |
-| MISCONDUCT | Content Filter | NONE since Issue #761 |
-| PROMPT_ATTACK | Content Filter | NONE since Issue #727 |
-| Weapons | Topic Policy | Detect-only since Issue #742 |
-| Drugs | Topic Policy | Detect-only since Issue #742 |
-| Self-Harm | Topic Policy | Detect-only since Issue #742 |
-| Bullying | Topic Policy | Detect-only since Issue #742 |
+| HarmInstruction | Topic Policy (STANDARD tier) | Consolidated from 4 topics (Weapons, Drugs, Self-Harm, Bullying) in Issue #929 — 86% co-fire rate proved they were not independent signals |
+
+**Note**: Content filters (`contentPolicyConfig`) have been removed entirely as of Issue #929. The previous detect-only content filters (VIOLENCE, SEXUAL, INSULTS, MISCONDUCT, PROMPT_ATTACK) no longer appear in the guardrail configuration.
 
 ### Key Finding: PROFANITY Filter is Prime Suspect
 
@@ -265,6 +259,14 @@ There is no way to pin a specific classifier version. The only mitigation is det
 - **Actual blocks**: Still trigger SNS notification (if blocking is re-enabled in the future)
 - **Detect-only detections**: Logged to CloudWatch only — use Logs Insights queries above for monitoring
 - **CloudWatch is the correct channel** for high-volume detection telemetry; SNS email is for actionable alerts
+
+### Detection Fingerprinting (Issue #929)
+
+Detection events include an HMAC-SHA256 content hash (16 hex chars) for clustering duplicate triggers across requests. For deeper inspection during time-boxed tuning sprints:
+
+- Set `GUARDRAIL_LOG_SNIPPET=true` to log the first/last 30 chars of detected content
+- **Warning**: Snippets bypass PII tokenization — disable immediately after tuning
+- In production (`NODE_ENV=production`), an error-level log is emitted on startup when snippet logging is active
 
 ## Related Issues
 

@@ -4,7 +4,7 @@
  * Focuses on core functionality and error handling.
  */
 
-import { BedrockGuardrailsService } from '../bedrock-guardrails-service';
+import { BedrockGuardrailsService, LOG_MESSAGES } from '../bedrock-guardrails-service';
 import { BedrockRuntimeClient } from '@aws-sdk/client-bedrock-runtime';
 import { SNSClient } from '@aws-sdk/client-sns';
 
@@ -601,7 +601,7 @@ describe('BedrockGuardrailsService - detection fingerprint (Issue #929)', () => 
 
   const findDetectionCall = () =>
     mockLogger.info.mock.calls.find(
-      (c: unknown[]) => c[0] === 'Topics detected in detect-only mode (not blocked)'
+      (c: unknown[]) => c[0] === LOG_MESSAGES.TOPICS_DETECTED
     );
 
   it('should attach contentHash to topic detection log lines', async () => {
@@ -626,5 +626,19 @@ describe('BedrockGuardrailsService - detection fingerprint (Issue #929)', () => 
     const meta = detectionCall![1] as { contentSnippet?: unknown };
     expect(typeof meta.contentSnippet).toBe('string');
     expect(meta.contentSnippet as string).toContain('…');
+  });
+
+  it('should use head-only snippet for short content (<=60 chars)', async () => {
+    process.env.GUARDRAIL_LOG_SNIPPET = 'true';
+    const service = createTestService();
+    await service.evaluateInput('short content');
+
+    const detectionCall = findDetectionCall();
+    expect(detectionCall).toBeDefined();
+    const meta = detectionCall![1] as { contentSnippet?: unknown };
+    expect(typeof meta.contentSnippet).toBe('string');
+    // Short content should not contain the ellipsis separator
+    expect(meta.contentSnippet as string).not.toContain('…');
+    expect(meta.contentSnippet as string).toBe('short content');
   });
 });

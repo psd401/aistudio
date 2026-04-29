@@ -173,6 +173,9 @@ export class GuardrailsStack extends cdk.Stack {
     // 3. SNS Topic for Violation Notifications
     // =====================================================================
 
+    // Currently no active blocking policies — all topics are detect-only. SNS fires
+    // only when any topic/filter action is set to BLOCK. Retained for when blocking is
+    // re-enabled after tuning confirms acceptable false-positive rates.
     this.violationTopic = new sns.Topic(this, 'GuardrailViolationsTopic', {
       topicName: `aistudio-${props.environment}-guardrail-violations`,
       displayName: 'AI Studio Guardrail Violations',

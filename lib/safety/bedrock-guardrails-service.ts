@@ -28,6 +28,12 @@ import type {
   ContentFilterType,
 } from './types';
 
+/** Log message constants — shared with test assertions to prevent fragile string coupling */
+export const LOG_MESSAGES = {
+  TOPICS_DETECTED: 'Topics detected in detect-only mode (not blocked)',
+  FILTERS_DETECTED: 'Content filters detected in detect-only mode (not blocked)',
+} as const;
+
 /**
  * BedrockGuardrailsService - Content safety filtering for K-12 environments
  *
@@ -87,6 +93,7 @@ export class BedrockGuardrailsService {
       enableViolationNotifications: config?.enableViolationNotifications ?? true,
       enablePiiTokenization: config?.enablePiiTokenization ?? true,
       tokenTtlSeconds: config?.tokenTtlSeconds ?? 3600,
+      hashSecret: config?.hashSecret,
     };
   }
 
@@ -98,6 +105,10 @@ export class BedrockGuardrailsService {
       this.log.warn('Bedrock Guardrail ID not configured - content safety filtering disabled');
     }
 
+    if (this.config.enableViolationNotifications && !this.config.violationTopicArn) {
+      this.log.warn('Violation notifications enabled but GUARDRAIL_VIOLATION_TOPIC_ARN not set — violations will not notify');
+    }
+
     // Issue #727: Validate GUARDRAIL_HASH_SECRET is set for privacy protection
     if (!process.env.GUARDRAIL_HASH_SECRET && !config?.hashSecret) {
       this.log.warn('GUARDRAIL_HASH_SECRET not configured - using default secret for session ID hashing (weakens privacy protection)');
@@ -107,7 +118,11 @@ export class BedrockGuardrailsService {
     // first/last 30 chars of user content and bypass PII tokenization. This should
     // only be enabled during time-boxed tuning sprints, never left on in production.
     if (process.env.GUARDRAIL_LOG_SNIPPET === 'true') {
-      this.log.warn('GUARDRAIL_LOG_SNIPPET is enabled — detection logs will include content head/tail snippets. Disable after tuning sprint to minimize PII surface in K-12 logs.');
+      const isProduction = process.env.NODE_ENV === 'production';
+      const level = isProduction ? 'error' : 'warn';
+      this.log[level](
+        `GUARDRAIL_LOG_SNIPPET is enabled${isProduction ? ' IN PRODUCTION' : ''} — detection logs will include content head/tail snippets. Disable after tuning sprint to minimize PII surface in K-12 logs.`
+      );
     }
   }
 
@@ -185,13 +200,7 @@ export class BedrockGuardrailsService {
         };
       }
 
-      // Issue #929: Detect-only SNS notifications removed. Detection data is already
-      // logged to CloudWatch (see evaluateContent → extractDetectedTopics/extractDetectedFilters).
-      // SNS email is for actionable alerts (actual blocks), not high-volume telemetry.
-      // Previously, up to 4 SNS publishes per message (detected topics + detected filters
-      // on both input and output) created an email flood that made the notification channel
-      // unusable. CloudWatch Logs Insights queries in docs/operations/guardrail-tuning-analysis.md
-      // provide the appropriate monitoring channel for detect-only data.
+      // Issue #929: Detect-only detections logged to CloudWatch only; SNS reserved for blocks.
 
       this.log.info('Input content passed safety check', {
         requestId,
@@ -278,8 +287,7 @@ export class BedrockGuardrailsService {
         };
       }
 
-      // Issue #929: Detect-only SNS notifications removed (same as evaluateInput).
-      // Detection data is logged to CloudWatch via evaluateContent; SNS reserved for blocks.
+      // Issue #929: Detect-only detections logged to CloudWatch only; SNS reserved for blocks.
 
       this.log.info('Output content passed safety check', {
         requestId,
@@ -356,7 +364,7 @@ export class BedrockGuardrailsService {
       : undefined;
 
     if (detectedTopics.length > 0) {
-      this.log.info('Topics detected in detect-only mode (not blocked)', {
+      this.log.info(LOG_MESSAGES.TOPICS_DETECTED, {
         source,
         detectedTopics,
         contentLength: content.length,
@@ -369,7 +377,7 @@ export class BedrockGuardrailsService {
     // the overall response.action will NOT be 'GUARDRAIL_INTERVENED' for those
     // filters, but the assessment trace still contains detection information.
     if (detectedFilters.length > 0) {
-      this.log.info('Content filters detected in detect-only mode (not blocked)', {
+      this.log.info(LOG_MESSAGES.FILTERS_DETECTED, {
         source,
         detectedFilters,
         contentLength: content.length,
@@ -473,7 +481,7 @@ export class BedrockGuardrailsService {
   private extractBlockedTopicCategories(assessment?: SDKGuardrailAssessment): string[] {
     return assessment?.topicPolicy?.topics
       ?.filter(t => t.action === 'BLOCKED' && t.name)
-      .map(t => t.name!) ?? [];
+      .map(t => t.name ?? '') ?? [];
   }
 
   /**
