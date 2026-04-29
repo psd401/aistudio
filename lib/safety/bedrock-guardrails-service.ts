@@ -336,11 +336,24 @@ export class BedrockGuardrailsService {
     // topics, but the assessment trace still contains detection information.
     const assessment = response.assessments?.[0];
     const detectedTopics = this.extractDetectedTopics(assessment);
+    const detectedFilters = this.extractDetectedFilters(assessment);
+
+    // Issue #929: Build a privacy-preserving fingerprint to enable detection
+    // clustering without writing raw content to logs. `contentHash` (HMAC-SHA256,
+    // 16-hex-char prefix) lets us identify duplicate triggers across requests.
+    // `contentSnippet` is opt-in via GUARDRAIL_LOG_SNIPPET=true and exposes only
+    // the first/last 30 chars — enough to reverse-engineer trigger phrases during
+    // a tuning sprint, but defaults OFF to minimize PII surface.
+    const detectionFingerprint = (detectedTopics.length > 0 || detectedFilters.length > 0)
+      ? this.buildDetectionFingerprint(content)
+      : undefined;
+
     if (detectedTopics.length > 0) {
       this.log.info('Topics detected in detect-only mode (not blocked)', {
         source,
         detectedTopics,
         contentLength: content.length,
+        ...detectionFingerprint,
       });
     }
 
@@ -348,12 +361,12 @@ export class BedrockGuardrailsService {
     // When content filters use inputStrength/outputStrength: 'NONE' (detect-only mode),
     // the overall response.action will NOT be 'GUARDRAIL_INTERVENED' for those
     // filters, but the assessment trace still contains detection information.
-    const detectedFilters = this.extractDetectedFilters(assessment);
     if (detectedFilters.length > 0) {
       this.log.info('Content filters detected in detect-only mode (not blocked)', {
         source,
         detectedFilters,
         contentLength: content.length,
+        ...detectionFingerprint,
       });
     }
 
@@ -686,6 +699,27 @@ export class BedrockGuardrailsService {
     const secret = process.env.GUARDRAIL_HASH_SECRET || this.config.hashSecret || 'aistudio-guardrail-default-secret';
     return createHmac('sha256', secret).update(value).digest('hex').substring(0, 16);
   }
+
+  /**
+   * Build a privacy-preserving fingerprint for a detection event (Issue #929).
+   *
+   * Returns the HMAC-SHA256 hash of the content (clustering key) and, when the
+   * `GUARDRAIL_LOG_SNIPPET` env var is set to "true", a short head/tail snippet
+   * for human review during tuning. Snippet is OFF by default to minimize PII
+   * surface in K-12 logs.
+   */
+  private buildDetectionFingerprint(content: string): { contentHash: string; contentSnippet?: string } {
+    const fp: { contentHash: string; contentSnippet?: string } = {
+      contentHash: this.hashValue(content),
+    };
+    if (process.env.GUARDRAIL_LOG_SNIPPET === 'true') {
+      const head = content.slice(0, 30).replace(/\s+/g, ' ').trim();
+      const tail = content.length > 60 ? content.slice(-30).replace(/\s+/g, ' ').trim() : '';
+      fp.contentSnippet = tail ? `${head} … ${tail}` : head;
+    }
+    return fp;
+  }
+
 
   /**
    * Get current configuration (for diagnostics)

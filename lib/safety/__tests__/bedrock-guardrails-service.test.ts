@@ -557,3 +557,74 @@ describe('BedrockGuardrailsService - chemistry education content (Issue #929)', 
     expect(result.processedContent).toBe(chemistryContent);
   });
 });
+
+/**
+ * Issue #929: Detection fingerprint logging — privacy-preserving sample data
+ * for guardrail tuning. Hash is always emitted on detection; snippet is
+ * opt-in via GUARDRAIL_LOG_SNIPPET=true.
+ */
+describe('BedrockGuardrailsService - detection fingerprint (Issue #929)', () => {
+  const originalSnippetEnv = process.env.GUARDRAIL_LOG_SNIPPET;
+  let mockLogger: { info: jest.Mock; warn: jest.Mock; error: jest.Mock; debug: jest.Mock };
+  let createLoggerSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    mockBedrockResponse({
+      action: 'NONE',
+      assessments: [{
+        topicPolicy: {
+          topics: [
+            { name: 'HarmInstruction', type: 'DENY', action: 'NONE' },
+          ],
+        },
+      }],
+    });
+    mockSnsClient();
+    mockLogger = {
+      info: jest.fn(),
+      warn: jest.fn(),
+      error: jest.fn(),
+      debug: jest.fn(),
+    };
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    createLoggerSpy = jest.spyOn(require('@/lib/logger'), 'createLogger').mockReturnValue(mockLogger);
+  });
+
+  afterEach(() => {
+    createLoggerSpy.mockRestore();
+    if (originalSnippetEnv === undefined) {
+      delete process.env.GUARDRAIL_LOG_SNIPPET;
+    } else {
+      process.env.GUARDRAIL_LOG_SNIPPET = originalSnippetEnv;
+    }
+  });
+
+  const findDetectionCall = () =>
+    mockLogger.info.mock.calls.find(
+      (c: unknown[]) => c[0] === 'Topics detected in detect-only mode (not blocked)'
+    );
+
+  it('should attach contentHash to topic detection log lines', async () => {
+    const service = createTestService();
+    await service.evaluateInput('any content that triggers a detection');
+
+    const detectionCall = findDetectionCall();
+    expect(detectionCall).toBeDefined();
+    const meta = detectionCall![1] as { contentHash?: unknown; contentSnippet?: unknown };
+    expect(typeof meta.contentHash).toBe('string');
+    expect(meta.contentHash as string).toMatch(/^[a-f0-9]{16}$/);
+    expect(meta.contentSnippet).toBeUndefined();
+  });
+
+  it('should include contentSnippet only when GUARDRAIL_LOG_SNIPPET=true', async () => {
+    process.env.GUARDRAIL_LOG_SNIPPET = 'true';
+    const service = createTestService();
+    await service.evaluateInput('a fairly long content string for snippet head and tail testing purposes');
+
+    const detectionCall = findDetectionCall();
+    expect(detectionCall).toBeDefined();
+    const meta = detectionCall![1] as { contentSnippet?: unknown };
+    expect(typeof meta.contentSnippet).toBe('string');
+    expect(meta.contentSnippet as string).toContain('…');
+  });
+});
