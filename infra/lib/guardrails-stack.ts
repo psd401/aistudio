@@ -122,12 +122,13 @@ export class GuardrailsStack extends cdk.Stack {
 
       // Cross-region inference — mandatory when STANDARD tier is enabled.
       // System-defined US guardrail profile routes inference across US regions
-      // for resilience. Account-less ARN (system profile, not user-owned).
+      // for resilience. ARN must include the deploying account ID per the
+      // CFN regex: arn:aws:bedrock:<region>:<account>:guardrail-profile/us.guardrail.v1:0
       // NOTE: The `us.` prefix is intentional — all deployments target US regions.
       // If deploying to a non-US region, this ARN must be updated to the appropriate
       // regional guardrail profile (e.g., `eu.guardrail.v1:0`).
       crossRegionConfig: {
-        guardrailProfileArn: `arn:aws:bedrock:${cdk.Stack.of(this).region}::guardrail-profile/us.guardrail.v1:0`,
+        guardrailProfileArn: `arn:aws:bedrock:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:guardrail-profile/us.guardrail.v1:0`,
       },
 
       // Word policy - PROFANITY managed word list (DISABLED — Issue #763)
