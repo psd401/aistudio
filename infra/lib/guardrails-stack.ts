@@ -62,7 +62,7 @@ export class GuardrailsStack extends cdk.Stack {
       //
       // Issue #929: contentPolicyConfig removed entirely. The Bedrock CreateGuardrail
       // API requires "at least one filter" but this can be satisfied by topicPolicyConfig
-      // alone (we have 4 topic policies in detect-only mode). The previous assumption
+      // alone (we have 1 topic policy in detect-only mode). The previous assumption
       // that at least one content filter must be non-NONE was incorrect.
       //
       // History of progressive disablement due to false positives on K-12 educational content:
@@ -123,6 +123,9 @@ export class GuardrailsStack extends cdk.Stack {
       // Cross-region inference — mandatory when STANDARD tier is enabled.
       // System-defined US guardrail profile routes inference across US regions
       // for resilience. Account-less ARN (system profile, not user-owned).
+      // NOTE: The `us.` prefix is intentional — all deployments target US regions.
+      // If deploying to a non-US region, this ARN must be updated to the appropriate
+      // regional guardrail profile (e.g., `eu.guardrail.v1:0`).
       crossRegionConfig: {
         guardrailProfileArn: `arn:aws:bedrock:${cdk.Stack.of(this).region}::guardrail-profile/us.guardrail.v1:0`,
       },

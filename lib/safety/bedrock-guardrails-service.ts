@@ -102,6 +102,13 @@ export class BedrockGuardrailsService {
     if (!process.env.GUARDRAIL_HASH_SECRET && !config?.hashSecret) {
       this.log.warn('GUARDRAIL_HASH_SECRET not configured - using default secret for session ID hashing (weakens privacy protection)');
     }
+
+    // Issue #929: Warn when content snippet logging is active — snippets contain the
+    // first/last 30 chars of user content and bypass PII tokenization. This should
+    // only be enabled during time-boxed tuning sprints, never left on in production.
+    if (process.env.GUARDRAIL_LOG_SNIPPET === 'true') {
+      this.log.warn('GUARDRAIL_LOG_SNIPPET is enabled — detection logs will include content head/tail snippets. Disable after tuning sprint to minimize PII surface in K-12 logs.');
+    }
   }
 
   /**
@@ -719,7 +726,6 @@ export class BedrockGuardrailsService {
     }
     return fp;
   }
-
 
   /**
    * Get current configuration (for diagnostics)
