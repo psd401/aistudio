@@ -13,6 +13,10 @@
  * @see https://github.com/psd401/aistudio/issues/366
  */
 
+// Note: This file is imported by both server routes (API) and client components.
+// Do NOT import from @/lib/client-logger (has 'use client') or @/lib/logger (uses winston).
+// Either would poison the opposite bundle. Use console.warn for the single diagnostic call.
+
 /**
  * Base interface for all SSE events
  * Every event must have a type discriminator for runtime type checking
@@ -139,6 +143,32 @@ export interface ToolInputStartEvent extends BaseSSEEvent {
   toolCallId: string;
   /** Name of the tool */
   toolName: string;
+}
+
+/**
+ * Tool input delta event - incremental tool input updates
+ * Emitted by AI SDK v6 during streaming tool argument construction
+ */
+export interface ToolInputDeltaEvent extends BaseSSEEvent {
+  type: 'tool-input-delta';
+  /** Unique identifier for this tool call */
+  toolCallId: string;
+  /** Incremental input data */
+  delta?: string;
+}
+
+/**
+ * Tool input available event
+ * Indicates complete tool input is available for processing
+ */
+export interface ToolInputAvailableEvent extends BaseSSEEvent {
+  type: 'tool-input-available';
+  /** Unique identifier for this tool call */
+  toolCallId: string;
+  /** Tool name */
+  toolName?: string;
+  /** Complete tool input arguments */
+  args?: Record<string, unknown>;
 }
 
 /**
@@ -330,6 +360,8 @@ export type SSEEvent =
   | ToolCallEvent
   | ToolCallDeltaEvent
   | ToolInputStartEvent
+  | ToolInputDeltaEvent
+  | ToolInputAvailableEvent
   | ToolInputErrorEvent
   | ToolOutputErrorEvent
   | ToolOutputAvailableEvent
@@ -436,6 +468,32 @@ export function isToolInputStartEvent(event: SSEEvent): event is ToolInputStartE
          typeof event.toolCallId === 'string' &&
          'toolName' in event &&
          typeof event.toolName === 'string';
+}
+
+/**
+ * Type guard for tool-input-delta events
+ * Validates both type and required fields with strict runtime checks
+ */
+export function isToolInputDeltaEvent(event: SSEEvent): event is ToolInputDeltaEvent {
+  return event.type === 'tool-input-delta' &&
+         'toolCallId' in event &&
+         typeof event.toolCallId === 'string' &&
+         (!('delta' in event) || typeof event.delta === 'string');
+}
+
+/**
+ * Type guard for tool-input-available events
+ * Validates both type and required fields with strict runtime checks
+ */
+export function isToolInputAvailableEvent(event: SSEEvent): event is ToolInputAvailableEvent {
+  return event.type === 'tool-input-available' &&
+         'toolCallId' in event &&
+         typeof event.toolCallId === 'string' &&
+         (!('toolName' in event) || typeof event.toolName === 'string') &&
+         (!('args' in event) ||
+           (event.args !== null &&
+            typeof event.args === 'object' &&
+            !Array.isArray(event.args)));
 }
 
 /**
@@ -554,7 +612,8 @@ export function isErrorEvent(event: SSEEvent): event is ErrorEvent {
 // ============================================================================
 
 // Valid SSE event types for runtime validation
-const VALID_SSE_EVENT_TYPES = new Set([
+// Exported for sync tests — must match SSEEventSchema discriminated union options
+export const VALID_SSE_EVENT_TYPES = new Set([
   'text-start',
   'text-delta',
   'text-end',
@@ -564,6 +623,8 @@ const VALID_SSE_EVENT_TYPES = new Set([
   'tool-call',
   'tool-call-delta',
   'tool-input-start',
+  'tool-input-delta',
+  'tool-input-available',
   'tool-input-error',
   'tool-output-error',
   'tool-output-available',
@@ -603,12 +664,8 @@ export function parseSSEEvent(data: string): SSEEvent {
 
     // Warn about unrecognized event types (but don't throw - allow extensibility)
     if (!VALID_SSE_EVENT_TYPES.has(parsed.type)) {
-      // In development, log a warning. In production, this could be sent to monitoring.
-      // eslint-disable-next-line no-console
-      if (typeof console !== 'undefined' && console.warn) {
-        // eslint-disable-next-line no-console
-        console.warn(`[SSE] Unrecognized event type: "${parsed.type}". This may indicate a new event type from the SDK or a malformed event.`);
-      }
+      // eslint-disable-next-line no-console -- shared client/server file, can't use either logger
+      console.warn('[sse-event-types] Unrecognized SSE event type', { type: parsed.type, hint: 'This may indicate a new event type from the SDK or a malformed event' });
     }
 
     return parsed as unknown as SSEEvent;

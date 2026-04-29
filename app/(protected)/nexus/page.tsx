@@ -1,6 +1,6 @@
 'use client'
 
-import { AssistantRuntimeProvider, type AttachmentAdapter, WebSpeechSynthesisAdapter } from '@assistant-ui/react'
+import { AssistantRuntimeProvider, type AttachmentAdapter, type RealtimeVoiceAdapter, WebSpeechSynthesisAdapter } from '@assistant-ui/react'
 import { useChatRuntime, AssistantChatTransport } from '@assistant-ui/react-ai-sdk'
 import { type UIMessage } from '@ai-sdk/react'
 import { Thread } from '@/components/assistant-ui/thread'
@@ -13,7 +13,7 @@ import { ErrorBoundary } from './_components/error-boundary'
 import { PromptAutoLoader } from './_components/prompt-auto-loader'
 import { ConversationInitializer } from './_components/conversation-initializer'
 import { z } from 'zod'
-import { useConversationContext, createNexusHistoryAdapter } from '@/lib/nexus/history-adapter'
+import { createNexusHistoryAdapter } from '@/lib/nexus/history-adapter'
 import { MultiProviderToolUIs } from './_components/tools/multi-provider-tools'
 import { ConnectorToolProvider, useConnectorTools } from './_components/tools/connector-tool-context'
 import { ConnectorReconnectPrompt, ConnectorToolFallback } from './_components/tools/connector-tool-ui'
@@ -23,8 +23,13 @@ import { validateConversationId } from '@/lib/nexus/conversation-navigation'
 import type { SelectAiModel } from '@/types'
 import { createLogger } from '@/lib/client-logger'
 import { toast } from 'sonner'
+import { handleContentBlockedResponse } from '@/lib/nexus/content-blocked-handler'
 import { getPromptSettings } from '@/actions/prompt-library.actions'
 import { ModelFallbackBanner } from './_components/model-fallback-banner'
+import { VoiceModeOverlay } from './_components/voice-mode/voice-mode-overlay'
+import { VoiceButton, DisabledVoiceButton } from './_components/voice-mode/voice-button'
+import { useVoiceAvailability } from './_components/voice-mode/use-voice-availability'
+import { useVoiceSession } from './_components/voice-mode/use-voice-session'
 
 const log = createLogger({ moduleName: 'nexus-page' })
 const uuidSchema = z.string().uuid()
@@ -59,6 +64,7 @@ interface ConversationRuntimeProviderProps {
   enabledTools: string[]
   enabledConnectors: string[]
   attachmentAdapter: AttachmentAdapter
+  voiceAdapter?: RealtimeVoiceAdapter
   initialMessages?: UIMessage[]
   onConversationIdChange?: (conversationId: string) => void
   onConnectorReconnect?: (failedServerIds: string[]) => void
@@ -66,6 +72,7 @@ interface ConversationRuntimeProviderProps {
 }
 
 /** UUID format for validating X-Connector-Reconnect header values */
+// eslint-disable-next-line unicorn/better-regex -- expanded form avoids security/detect-unsafe-regex on grouped quantifier
 const UUID_RE = /^[\da-f]{8}-[\da-f]{4}-[\da-f]{4}-[\da-f]{4}-[\da-f]{12}$/i
 const MAX_RECONNECT_IDS = 10
 
@@ -76,14 +83,23 @@ function ConversationRuntimeProvider({
   enabledTools,
   enabledConnectors,
   attachmentAdapter,
+  voiceAdapter,
   initialMessages = [],
   onConversationIdChange,
   onConnectorReconnect,
   onConnectorToolsReceived
 }: ConversationRuntimeProviderProps) {
+  // Use a ref so the adapter instance stays stable when conversationId transitions
+  // from null → UUID during a new conversation. Without this, the runtime re-calls
+  // load() on the recreated adapter and fetches already-displayed messages,
+  // causing duplicate message rendering. (Issue #868)
+  const conversationIdRef = useRef(conversationId)
+  conversationIdRef.current = conversationId
+
   const historyAdapter = useMemo(
-    () => createNexusHistoryAdapter(conversationId),
-    [conversationId]
+    () => createNexusHistoryAdapter(() => conversationIdRef.current),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally stable; conversationId accessed via ref
+    []
   )
 
   // Custom fetch to intercept X-Conversation-Id header for conversation continuity
@@ -113,36 +129,24 @@ function ConversationRuntimeProvider({
       }
     }
 
-    // Handle content safety blocked errors (400 with CONTENT_BLOCKED code)
-    if (response.status === 400) {
-      try {
-        // Clone response to read body without consuming it
-        const clonedResponse = response.clone()
-        const errorData = await clonedResponse.json()
-        if (errorData.code === 'CONTENT_BLOCKED') {
-          // Show user-friendly toast notification
-          toast.error('Content Blocked', {
-            description: errorData.error || 'This content is not appropriate for educational use.',
-            duration: 6000
-          })
-          log.warn('Content blocked by safety guardrails', { error: errorData.error })
-        }
-      } catch {
-        // If we can't parse the error, let the default error handling occur
-        log.debug('Could not parse error response as JSON')
-      }
-    }
+    // Issue #860: Handle CONTENT_BLOCKED 400 responses — shows toast and throws
+    // to prevent AI SDK runtime from parsing non-streaming JSON as a stream
+    await handleContentBlockedResponse(response, log)
 
     // Extract conversation ID from response header (new conversations only)
     const newConversationId = response.headers.get('X-Conversation-Id')
     if (newConversationId && newConversationId !== conversationId) {
-      log.debug('Received new conversation ID from server', {
-        newConversationId,
-        currentConversationId: conversationId
-      })
-      // Update parent state for URL and component updates
-      if (onConversationIdChange) {
-        onConversationIdChange(newConversationId)
+      if (!uuidSchema.safeParse(newConversationId).success) {
+        log.warn('Received malformed X-Conversation-Id header, ignoring', { newConversationId })
+      } else {
+        log.debug('Received new conversation ID from server', {
+          newConversationId,
+          currentConversationId: conversationId
+        })
+        // Update parent state for URL and component updates
+        if (onConversationIdChange) {
+          onConversationIdChange(newConversationId)
+        }
       }
     }
 
@@ -184,7 +188,7 @@ function ConversationRuntimeProvider({
   const runtime = useChatRuntime({
     transport: new AssistantChatTransport({
       api: '/api/nexus/chat',
-      fetch: customFetch,
+      fetch: customFetch as typeof fetch,
       body: () => selectedModel ? {
         modelId: selectedModel.modelId,
         provider: selectedModel.provider,
@@ -197,6 +201,7 @@ function ConversationRuntimeProvider({
       attachments: attachmentAdapter,
       history: historyAdapter,
       speech: new WebSpeechSynthesisAdapter(),
+      voice: voiceAdapter,
     },
     messages: initialMessages
   })
@@ -218,6 +223,8 @@ interface NexusRuntimeWrapperProps {
   enabledTools: string[]
   enabledConnectors: string[]
   attachmentAdapter: AttachmentAdapter
+  voiceAvailable: boolean
+  voiceUnavailableReason?: string
   initialMessages: UIMessage[]
   onConversationIdChange: (id: string) => void
   processingAttachments: Set<string>
@@ -234,6 +241,8 @@ function NexusRuntimeWrapper({
   enabledTools,
   enabledConnectors,
   attachmentAdapter,
+  voiceAvailable,
+  voiceUnavailableReason,
   initialMessages,
   onConversationIdChange,
   processingAttachments,
@@ -281,6 +290,29 @@ function NexusRuntimeWrapper({
     }
   }, [registerConnectorTools])
 
+  // Voice session lifecycle — manages adapter creation with conversation context,
+  // overlay state, and browser navigation cleanup. The adapter is recreated each
+  // time the user starts a voice session to include the latest conversation context.
+  const {
+    voiceAdapter,
+    voiceOverlayOpen,
+    handleVoiceStart,
+    handleVoiceClose,
+  } = useVoiceSession({ voiceAvailable, conversationId })
+
+  // Voice button rendered in composer extra actions slot — memoized to avoid
+  // re-creating JSX on every render (prevents unnecessary Thread re-renders).
+  // When voice is unavailable with a reason, show a disabled mic with tooltip
+  // so users understand why voice is not accessible (Issue #876 reviewer feedback).
+  const composerExtraActions = useMemo(
+    () => {
+      if (voiceAvailable) return <VoiceButton onVoiceStart={handleVoiceStart} />
+      if (voiceUnavailableReason) return <DisabledVoiceButton reason={voiceUnavailableReason} />
+      return null
+    },
+    [voiceAvailable, voiceUnavailableReason, handleVoiceStart]
+  )
+
   return (
     <ConversationRuntimeProvider
       conversationId={conversationId}
@@ -288,6 +320,7 @@ function NexusRuntimeWrapper({
       enabledTools={enabledTools}
       enabledConnectors={enabledConnectors}
       attachmentAdapter={attachmentAdapter}
+      voiceAdapter={voiceAdapter}
       initialMessages={initialMessages}
       onConversationIdChange={onConversationIdChange}
       onConnectorReconnect={handleConnectorReconnect}
@@ -323,8 +356,12 @@ function NexusRuntimeWrapper({
           onConnectorsChange={onConnectorsChange}
           onReconnectSuccess={removeFailedServerId}
           toolFallback={ConnectorToolFallback}
+          composerExtraActions={composerExtraActions}
         />
       </div>
+
+      {/* Full-screen voice mode overlay */}
+      <VoiceModeOverlay open={voiceOverlayOpen} onClose={handleVoiceClose} />
     </ConversationRuntimeProvider>
   )
 }
@@ -444,9 +481,6 @@ function NexusPageContent() {
   // This prevents remounting when ID is assigned during runtime
   const [stableConversationId] = useState<string | null>(validatedConversationId)
 
-  // Conversation context for history adapter
-  const conversationContext = useConversationContext()
-  
   // Debug logging for enabled tools
   useEffect(() => {
     log.debug('Enabled tools changed', { enabledTools })
@@ -502,18 +536,13 @@ function NexusPageContent() {
     setConversationId(newConversationId)
     // Clear fallback state — it's only relevant to the previously loaded conversation
     setConversationModelId(null)
-    conversationContext.setConversationId(newConversationId)
 
     // Update URL to reflect the current conversation
     const newUrl = `/nexus?id=${newConversationId}`
     router.push(newUrl, { scroll: false })
 
-    log.debug('Conversation ID updated', {
-      previousId: conversationId,
-      newId: newConversationId,
-      newUrl
-    })
-  }, [conversationId, conversationContext, router])
+    log.debug('Conversation ID updated', { newId: newConversationId })
+  }, [router])
   
   // Handle invalid conversation ID in URL - redirect to clean state
   useEffect(() => {
@@ -543,6 +572,9 @@ function NexusPageContent() {
       onProcessingComplete: handleAttachmentProcessingComplete,
     })
   }, [handleAttachmentProcessingStart, handleAttachmentProcessingComplete])
+
+  // Voice mode — check availability (adapter created inside NexusRuntimeWrapper via useVoiceSession)
+  const voiceAvailability = useVoiceAvailability()
 
 
   
@@ -591,6 +623,8 @@ function NexusPageContent() {
                         enabledTools={enabledTools}
                         enabledConnectors={enabledConnectors}
                         attachmentAdapter={attachmentAdapter}
+                        voiceAvailable={voiceAvailability.available}
+                        voiceUnavailableReason={!voiceAvailability.available && !voiceAvailability.loading ? voiceAvailability.reason : undefined}
                         initialMessages={initialMessages}
                         onConversationIdChange={handleConversationIdChange}
                         processingAttachments={processingAttachments}

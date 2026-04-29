@@ -53,11 +53,11 @@ describe("EnvironmentConfig", () => {
       const config = EnvironmentConfig.get("prod")
 
       expect(config.costOptimization).toBe(false)
-      expect(config.database.minCapacity).toBe(2)
-      expect(config.database.maxCapacity).toBe(8)
+      expect(config.database.minCapacity).toBe(1)
+      expect(config.database.maxCapacity).toBe(6)
       expect(config.database.autoPause).toBe(false)
       expect(config.database.deletionProtection).toBe(true)
-      expect(config.database.multiAz).toBe(true)
+      expect(config.database.multiAz).toBe(false)
     })
 
     test("should have maximum compute configuration for prod", () => {
@@ -302,7 +302,8 @@ describe("EnvironmentConfig", () => {
       const devConfig = EnvironmentConfig.get("dev")
       const prodConfig = EnvironmentConfig.get("prod")
 
-      expect(prodConfig.database.multiAz).toBe(true)
+      // multiAz disabled for prod (reader instance removed per #832 — re-add when traffic warrants)
+      expect(prodConfig.database.multiAz).toBe(false)
       expect(devConfig.database.multiAz).toBe(false)
 
       expect(prodConfig.database.deletionProtection).toBe(true)
@@ -312,13 +313,25 @@ describe("EnvironmentConfig", () => {
       expect(devConfig.monitoring.detailedMetrics).toBe(false)
     })
 
+    test("prod should have equal or greater capacity ceiling than staging", () => {
+      const stagingConfig = EnvironmentConfig.get("staging")
+      const prodConfig = EnvironmentConfig.get("prod")
+
+      // maxCapacity is the key differentiator now that minCapacity is equal (both 1)
+      expect(prodConfig.database.maxCapacity).toBeGreaterThanOrEqual(stagingConfig.database.maxCapacity)
+      // Prod must always have deletion protection even if capacity shrinks
+      expect(prodConfig.database.deletionProtection).toBe(true)
+      expect(stagingConfig.database.deletionProtection).toBe(false)
+    })
+
     test("staging should be between dev and prod", () => {
       const devConfig = EnvironmentConfig.get("dev")
       const stagingConfig = EnvironmentConfig.get("staging")
       const prodConfig = EnvironmentConfig.get("prod")
 
       expect(stagingConfig.database.minCapacity).toBeGreaterThan(devConfig.database.minCapacity)
-      expect(stagingConfig.database.minCapacity).toBeLessThan(prodConfig.database.minCapacity)
+      // Staging and prod now share same min ACU (1) after right-sizing per #832
+      expect(stagingConfig.database.minCapacity).toBeLessThanOrEqual(prodConfig.database.minCapacity)
 
       expect(stagingConfig.compute.lambdaMemory).toBeGreaterThan(devConfig.compute.lambdaMemory)
       expect(stagingConfig.compute.lambdaMemory).toBeLessThan(prodConfig.compute.lambdaMemory)

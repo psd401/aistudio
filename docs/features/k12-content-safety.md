@@ -37,12 +37,14 @@ The content filtering system evaluates all messages against configurable safety 
 
 | Category | Type | Description | Action |
 |----------|------|-------------|--------|
-| **Hate Speech** | Content Filter | Content targeting protected groups | Blocked (MEDIUM) |
-| **Violence** | Content Filter | Graphic violence or threats | Blocked (MEDIUM) |
+| **Hate Speech** | Content Filter | Content targeting protected groups | **Input: Blocked (LOW), Output: Detect only** — Bedrock minimum req. Asymmetric since Issue #860 |
+| **Violence** | Content Filter | Graphic violence or threats | **Detect only (Issue #761)** |
 | **Self-Harm** | Topic Policy | Content encouraging self-injury | **Detect only (Issue #742)** |
-| **Sexual Content** | Content Filter | Inappropriate sexual material | Blocked (HIGH) |
-| **Misconduct** | Content Filter | Illegal activities, dangerous instructions | Blocked (LOW) |
+| **Sexual Content** | Content Filter | Inappropriate sexual material | **Detect only (Issue #761)** |
+| **Insults** | Content Filter | Personal attacks, insults | **Detect only (Issue #761)** |
+| **Misconduct** | Content Filter | Illegal activities, dangerous instructions | **Detect only (Issue #761)** |
 | **Prompt Attacks** | Content Filter | Attempts to bypass safety measures | **Disabled (Issue #727)** |
+| **Profanity** | Managed Word List | Profane language | **Disabled (Issue #763)** — caused 97% of blocks, mostly on AI educational responses |
 | **Weapons** | Topic Policy | Weapons, firearms, explosives | **Detect only (Issue #742)** |
 | **Drugs** | Topic Policy | Illegal drug use/substance abuse | **Detect only (Issue #742)** |
 | **Bullying** | Topic Policy | Bullying, harassment, intimidation | **Detect only (Issue #742)** |
@@ -206,8 +208,8 @@ The guardrails infrastructure is deployed via the `GuardrailsStack`:
 
 ```bash
 cd infra
-npx cdk deploy AIStudio-GuardrailsStack-Dev
-npx cdk deploy AIStudio-GuardrailsStack-Prod
+bunx cdk deploy AIStudio-GuardrailsStack-Dev
+bunx cdk deploy AIStudio-GuardrailsStack-Prod
 ```
 
 This creates:
@@ -221,15 +223,15 @@ This creates:
 Automated unit tests validate graceful degradation but **cannot test actual guardrail behavior** due to cost/latency of Bedrock API calls. After deploying guardrail changes, perform manual validation:
 
 **Pre-Deployment Checklist:**
-1. ✅ `npm run typecheck` passes
-2. ✅ `npm run lint` passes
-3. ✅ Unit tests pass: `npx jest --testPathPatterns='bedrock-guardrails-service'`
-4. ✅ CDK synth succeeds: `cd infra && npx cdk synth`
+1. ✅ `bun run typecheck` passes
+2. ✅ `bun run lint` passes
+3. ✅ Unit tests pass: `bunx jest --testPathPatterns='bedrock-guardrails-service'`
+4. ✅ CDK synth succeeds: `cd infra && bunx cdk synth`
 
 **Deploy to Dev:**
 ```bash
 cd infra
-npx cdk deploy AIStudio-GuardrailsStack-Dev
+bunx cdk deploy AIStudio-GuardrailsStack-Dev
 ```
 
 **Manual Test Cases (Dev Environment):**
@@ -313,7 +315,7 @@ fields @timestamp, requestId, sessionId, patterns, contentPreview
 **Promote to Prod (if validation passes):**
 ```bash
 cd infra
-npx cdk deploy AIStudio-GuardrailsStack-Prod
+bunx cdk deploy AIStudio-GuardrailsStack-Prod
 ```
 
 Repeat manual testing in production and monitor for 1 week before considering deployment successful.
@@ -414,16 +416,19 @@ aws cloudwatch put-metric-alarm \
 
 ### Customizing Content Filter Strength
 
-Content filters use strength levels (`NONE`, `LOW`, `MEDIUM`, `HIGH`) to balance safety with educational flexibility. The default configuration uses MEDIUM for most filters to allow legitimate educational discussions:
+Content filters use strength levels (`NONE`, `LOW`, `MEDIUM`, `HIGH`) to balance safety with educational flexibility. The current configuration uses detect-only (`NONE`) for most filters due to high false positive rates on educational content (Issues #639, #727, #742, #761). Only `HATE` is active at `LOW` — the Bedrock minimum required to maintain a valid guardrail:
 
-| Filter | Default | Purpose | Educational Considerations |
-|--------|---------|---------|---------------------------|
-| **HATE** | MEDIUM | Blocks discrimination/prejudice | Allows civil rights, Holocaust education |
-| **VIOLENCE** | MEDIUM | Blocks graphic violence | Allows history (wars), literature, biology |
-| **SEXUAL** | HIGH | Blocks sexual content | Keep HIGH for K-12 environments |
-| **INSULTS** | MEDIUM | Blocks personal attacks | Allows character analysis in literature |
-| **MISCONDUCT** | LOW | Blocks illegal activities | Allows legal system, drug education, PBIS behavior management |
-| **PROMPT_ATTACK** | **NONE** | ~~Blocks jailbreak attempts~~ | **Disabled due to 75% false positive rate (Issue #727).** See [Security Trade-offs](#security-trade-offs) for monitoring approach.
+| Filter | Current Setting | Purpose | Educational Considerations |
+|--------|----------------|---------|---------------------------|
+| **HATE** | **Input: LOW, Output: NONE** | Blocks discrimination/prejudice | Issue #860 — asymmetric config. Input at LOW (Bedrock minimum), output at NONE. 30-day analysis showed 100% FP rate on output (educational docs). |
+| **VIOLENCE** | NONE (detect only) | Graphic violence | Issue #761 — FPs on history (wars, civil rights), literature, biology |
+| **SEXUAL** | NONE (detect only) | Sexual content | Issue #761 — FPs on health education discussions |
+| **INSULTS** | NONE (detect only) | Personal attacks | Issue #761 — FPs on teacher observations, behavior discussions |
+| **MISCONDUCT** | NONE (detect only) | Illegal activities | Issue #761 — FPs on PBIS behavior management content |
+| **PROMPT_ATTACK** | NONE (disabled) | Jailbreak attempts | Issue #727 — 75% FP rate. See [Security Trade-offs](#security-trade-offs). |
+| **PROFANITY** | **OFF** (disabled) | Profane language | Issue #763 — 97% of blocks, 24x block rate increase. AWS-controlled list, no tuning. Disabled 2026-03-12. See trade-off note below. |
+
+> **Trade-off (PROFANITY disabled):** Disabling the PROFANITY word list removes filtering for both AI-generated responses (OUTPUT) and user-submitted prompts (INPUT). In the 30-day analysis, 18 of 66 PROFANITY blocks were on user INPUT. LLM safety training prevents the AI from generating profanity, but user-submitted profane text is no longer caught at the guardrail layer. This is considered an acceptable trade-off given the 24x increase in false-positive blocks on legitimate AI educational responses, but should be revisited if inappropriate user input becomes an operational concern.
 
 To customize filter strengths, edit `infra/lib/guardrails-stack.ts`:
 
@@ -440,7 +445,7 @@ contentPolicyConfig: {
 
 After editing, redeploy:
 ```bash
-cd infra && npx cdk deploy AIStudio-GuardrailsStack-Dev
+cd infra && bunx cdk deploy AIStudio-GuardrailsStack-Dev
 ```
 
 ### Customizing Topic Policies
@@ -606,6 +611,7 @@ However, we strongly recommend keeping both enabled for K-12 deployments.
 
 ## Related Documentation
 
+- [Guardrail Tuning Analysis Guide](../operations/guardrail-tuning-analysis.md) - Detection data analysis and tuning strategy (Issue #763)
 - [Deployment Guide](../DEPLOYMENT.md) - Full deployment instructions
 - [IAM Security](../security/IAM_LEAST_PRIVILEGE.md) - IAM role configuration
 - [Architecture Overview](../ARCHITECTURE.md) - System architecture

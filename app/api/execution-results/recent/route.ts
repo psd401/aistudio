@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
+import { resolveUserId } from "@/lib/auth/resolve-user"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
-import { getRecentExecutionResults, getUserIdByCognitoSub } from "@/lib/db/drizzle"
+import type { TypedError } from "@/types/error-types"
+import { getRecentExecutionResults } from "@/lib/db/drizzle"
 import type { ExecutionResult } from "@/types/notifications"
 
 export async function GET(request: NextRequest) {
@@ -20,19 +22,14 @@ export async function GET(request: NextRequest) {
       throw ErrorFactories.authNoSession()
     }
 
-    // Get user ID from database using cognito sub
-    const userIdString = await getUserIdByCognitoSub(session.sub)
-
-    if (!userIdString) {
-      throw ErrorFactories.dbRecordNotFound("users", session.sub)
-    }
-
-    const userId = Number(userIdString)
+    // Resolve user ID (auto-provisions if missing)
+    const userId = await resolveUserId(session, requestId)
     log.info("Fetching recent execution results for user", { userId: sanitizeForLogging(userId) })
 
     // Get query parameters
     const url = new URL(request.url)
-    const limit = Math.min(Number.parseInt(url.searchParams.get('limit') || '20'), 50)
+    const parsed = Number.parseInt(url.searchParams.get('limit') ?? '20', 10)
+    const limit = Math.min(isNaN(parsed) || parsed <= 0 ? 20 : parsed, 50)
     const statusParam = url.searchParams.get('status')
     const status = statusParam && ['success', 'failed', 'running'].includes(statusParam)
       ? (statusParam as 'success' | 'failed' | 'running')
@@ -67,13 +64,20 @@ export async function GET(request: NextRequest) {
 
   } catch (error) {
     timer({ status: "error" })
+    // Use "code" in error to identify TypedErrors — consistent with error-utils.ts:414 pattern
+    const rawCode = error instanceof Error && "code" in error
+      ? (error as TypedError).statusCode ?? 500
+      : 500
+    const statusCode = Number.isInteger(rawCode) && rawCode >= 100 && rawCode <= 599
+      ? rawCode
+      : 500
     return NextResponse.json(
       handleError(error, "Failed to fetch recent execution results", {
         context: "GET /api/execution-results/recent",
         requestId,
         operation: "fetchRecentExecutionResults"
       }),
-      { status: 500 }
+      { status: statusCode }
     )
   }
 }

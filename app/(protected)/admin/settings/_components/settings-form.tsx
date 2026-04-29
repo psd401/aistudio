@@ -53,8 +53,10 @@ interface SettingsFormProps {
 const categories = [
   { value: "ai", label: "AI Configuration" },
   { value: "ai_providers", label: "AI Providers" },
+  { value: "branding", label: "Branding" },
   { value: "storage", label: "Storage" },
   { value: "external_services", label: "External Services" },
+  { value: "voice", label: "Voice Mode" },
 ]
 
 const commonSettings = [
@@ -70,8 +72,19 @@ const commonSettings = [
   { key: "S3_BUCKET", category: "storage", description: "AWS S3 bucket name for document storage", isSecret: false },
   { key: "AWS_REGION", category: "storage", description: "AWS region for S3 operations", isSecret: false },
   { key: "GITHUB_ISSUE_TOKEN", category: "external_services", description: "GitHub personal access token for creating issues", isSecret: true },
+  { key: "BRANDING_ORG_NAME", category: "branding", description: "Organization name displayed across the application", isSecret: false },
+  { key: "BRANDING_APP_NAME", category: "branding", description: "Application name displayed in titles and headers", isSecret: false },
+  { key: "BRANDING_PRIMARY_COLOR", category: "branding", description: "Primary brand color as hex value (e.g., #1B365D)", isSecret: false },
+  { key: "BRANDING_SUPPORT_URL", category: "branding", description: "Organization website or support URL", isSecret: false },
+  { key: "BRANDING_APP_URL", category: "branding", description: "Canonical application URL (e.g., https://ai.example.com) — used in download links and SEO metadata", isSecret: false },
+  { key: "VOICE_ENABLED", category: "voice", description: "Global kill switch for voice mode — set to 'true' to enable. New connections are blocked immediately. Active sessions are not terminated — users lose access when their current session ends. Changes may take up to ~5.5 minutes to reach new connections (server cache + HTTP cache).", isSecret: false },
+  { key: "VOICE_PROVIDER", category: "voice", description: "Voice provider identifier (e.g., gemini-live)", isSecret: false },
+  { key: "VOICE_MODEL", category: "voice", description: "Voice model ID (e.g., gemini-3.1-flash-live-preview)", isSecret: false },
+  { key: "VOICE_LANGUAGE", category: "voice", description: "BCP-47 language code for voice conversations (e.g., en-US)", isSecret: false },
+  { key: "VOICE_NAME", category: "voice", description: "Provider-specific voice name/ID (leave empty for model default)", isSecret: false },
 ]
 
+// eslint-disable-next-line max-lines-per-function -- Form component with extensive JSX for multiple field types
 export function SettingsForm({ open, onOpenChange, onSave, setting }: SettingsFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const form = useForm<FormValues>({

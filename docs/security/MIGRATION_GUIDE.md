@@ -29,7 +29,7 @@ Run the audit script to identify all policy violations:
 
 ```bash
 cd infra
-npx ts-node scripts/audit-iam-policies.ts > audit-results.txt
+bunx ts-node scripts/audit-iam-policies.ts > audit-results.txt
 ```
 
 Review the output and identify:
@@ -54,10 +54,10 @@ Deploy permission boundary policies for each environment:
 cd infra
 
 # Development
-npx cdk deploy AIStudio-PermissionBoundary-Dev --require-approval never
+bunx cdk deploy AIStudio-PermissionBoundary-Dev --require-approval never
 
 # Production (when ready)
-npx cdk deploy AIStudio-PermissionBoundary-Prod --require-approval never
+bunx cdk deploy AIStudio-PermissionBoundary-Prod --require-approval never
 ```
 
 Verify deployment:
@@ -137,7 +137,7 @@ const processorRole = ServiceRoleFactory.createLambdaRole(
 
 Deploy and test:
 ```bash
-npx cdk deploy AIStudio-DocumentProcessingStack-Dev
+bunx cdk deploy AIStudio-DocumentProcessingStack-Dev
 ```
 
 Test the Lambda function to ensure it still works.
@@ -294,7 +294,7 @@ new AccessAnalyzerStack(app, "AIStudio-AccessAnalyzer-Dev", {
 
 Deploy:
 ```bash
-npx cdk deploy AIStudio-AccessAnalyzer-Dev
+bunx cdk deploy AIStudio-AccessAnalyzer-Dev
 ```
 
 Configure email subscription:
@@ -311,7 +311,7 @@ After each migration:
 
 1. **Deploy the stack:**
    ```bash
-   npx cdk deploy STACK_NAME
+   bunx cdk deploy STACK_NAME
    ```
 
 2. **Test functionality:**
@@ -358,7 +358,7 @@ If you encounter AccessDenied errors:
 
 3. **Redeploy and test:**
    ```bash
-   npx cdk deploy STACK_NAME
+   bunx cdk deploy STACK_NAME
    ```
 
 ### Step 9: Production Deployment
@@ -367,18 +367,18 @@ Before deploying to production:
 
 1. **Review all changes:**
    ```bash
-   npx cdk diff AIStudio-*-Prod
+   bunx cdk diff AIStudio-*-Prod
    ```
 
 2. **Deploy permission boundary:**
    ```bash
-   npx cdk deploy AIStudio-PermissionBoundary-Prod
+   bunx cdk deploy AIStudio-PermissionBoundary-Prod
    ```
 
 3. **Deploy stacks one by one:**
    ```bash
-   npx cdk deploy AIStudio-DatabaseStack-Prod
-   npx cdk deploy AIStudio-ProcessingStack-Prod
+   bunx cdk deploy AIStudio-DatabaseStack-Prod
+   bunx cdk deploy AIStudio-ProcessingStack-Prod
    # etc.
    ```
 
@@ -389,7 +389,7 @@ Before deploying to production:
 
 5. **Deploy Access Analyzer:**
    ```bash
-   npx cdk deploy AIStudio-AccessAnalyzer-Prod
+   bunx cdk deploy AIStudio-AccessAnalyzer-Prod
    ```
 
    **Note:** Auto-remediation is disabled in production for safety.
@@ -462,7 +462,7 @@ If issues occur during migration:
 
 2. **Redeploy previous version:**
    ```bash
-   npx cdk deploy STACK_NAME
+   bunx cdk deploy STACK_NAME
    ```
 
 3. **Remove permission boundary (if needed):**
@@ -536,7 +536,7 @@ aws logs tail /aws/lambda/function-name --follow --filter-pattern "AccessDenied"
 
 1. Edit `infra/lib/constructs/security/permission-boundaries/{env}-boundary.json`
 2. Add the required action to the AllowedServices statement
-3. Redeploy: `npx cdk deploy AIStudio-PermissionBoundary-{env}`
+3. Redeploy: `bunx cdk deploy AIStudio-PermissionBoundary-{env}`
 
 ### Issue: Access Analyzer Shows External Access Finding
 

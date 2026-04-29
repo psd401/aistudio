@@ -82,7 +82,8 @@ INSERT INTO tools (identifier, name, description, is_active) VALUES
 ('assistant-architect', 'Assistant Architect', 'Build and schedule custom AI assistants', true),
 ('model-compare', 'Model Compare', 'Compare AI model responses side-by-side', true),
 ('knowledge-repositories', 'Knowledge Repositories', 'Manage knowledge bases for AI assistants', true),
-('decision-capture', 'Decision Capture', 'Extract and capture decisions from meeting transcripts into the context graph', true)
+('decision-capture', 'Decision Capture', 'Extract and capture decisions from meeting transcripts into the context graph', true),
+('voice-mode', 'Voice Mode', 'Real-time voice conversations in Nexus using AI speech providers', true)
 ON CONFLICT (identifier) DO UPDATE SET
     name = EXCLUDED.name,
     description = EXCLUDED.description,
@@ -95,7 +96,7 @@ SELECT r.id, t.id
 FROM roles r
 CROSS JOIN tools t
 WHERE r.name = 'administrator'
-  AND t.identifier IN ('assistant-architect', 'model-compare', 'knowledge-repositories', 'decision-capture')
+  AND t.identifier IN ('assistant-architect', 'model-compare', 'knowledge-repositories', 'decision-capture', 'voice-mode')
 ON CONFLICT (role_id, tool_id) DO NOTHING;
 
 -- Grant assistant-architect and model-compare to staff role
@@ -390,6 +391,24 @@ When capturing a decision, proactively ask about any missing elements. For examp
 )
 ON CONFLICT (key) DO NOTHING;
 
+-- ============================================================================
+-- Branding Settings
+-- ============================================================================
+-- Configurable branding for white-label deployments (Issue #824)
+-- These defaults match the original PSD branding. Other organizations
+-- should update these values in the admin settings UI.
+
+-- Defaults are intentionally generic for white-label deployments.
+-- Update these in the admin settings UI for your organization.
+INSERT INTO settings (key, value, description, category, is_secret)
+VALUES
+    ('BRANDING_ORG_NAME', 'Your Organization', 'Organization name displayed across the application', 'branding', false),
+    ('BRANDING_APP_NAME', 'AI Studio', 'Application name displayed in titles and headers', 'branding', false),
+    ('BRANDING_PRIMARY_COLOR', '#1B365D', 'Primary brand color as hex value', 'branding', false),
+    ('BRANDING_LOGO_URL', '/logo.png', 'Logo image URL (local path like /logo.png or S3 key)', 'branding', false),
+    ('BRANDING_SUPPORT_URL', 'https://example.com', 'Organization website or support URL', 'branding', false)
+ON CONFLICT (key) DO NOTHING;
+
 -- Decision capture model setting - required by decision-chat route
 -- Part of Epic #675 (Context Graph Decision Capture Layer) - Issue #681
 INSERT INTO settings (key, value, description, category, is_secret)
@@ -401,6 +420,18 @@ VALUES (
     false
 )
 ON CONFLICT (key) DO NOTHING;
+
+-- Voice mode global kill switch - Issue #876
+-- Use DO UPDATE so this overrides the migration default of 'false' for local dev
+INSERT INTO settings (key, value, description, category, is_secret)
+VALUES (
+    'VOICE_ENABLED',
+    'true',
+    'Global kill switch for voice mode. Set to "true" to enable voice features.',
+    'voice',
+    false
+)
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value;
 
 -- ============================================================================
 -- Summary

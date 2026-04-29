@@ -1,0 +1,9 @@
+{
+  "name": "psd-workspace",
+  "version": "1.0.0",
+  "description": "OpenClaw skill: Google Workspace (Gmail, Calendar, Drive, Docs, Meet, Chat) access via gws CLI and per-agent OAuth refresh tokens. Issue #912.",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.0.0"
+  }
+}

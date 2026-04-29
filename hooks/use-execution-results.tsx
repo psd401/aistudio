@@ -1,7 +1,9 @@
 "use client"
 
-import { useState, useEffect, useCallback } from "react"
+import { useState, useEffect, useCallback, useRef } from "react"
+import { useSession } from "next-auth/react"
 import { createLogger, generateRequestId } from "@/lib/client-logger"
+import { usePollingWithBackoff } from "@/lib/hooks/use-polling-with-backoff"
 import type { ExecutionResult } from "@/types/notifications"
 
 interface UseExecutionResultsOptions {
@@ -17,11 +19,20 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
     refreshInterval = 60000 // 1 minute
   } = options
 
+  const { status: sessionStatus } = useSession()
   const [results, setResults] = useState<ExecutionResult[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
+  // Stable logger for onFailure — created once, never changes
+  const log = useRef(createLogger({ hook: 'useExecutionResults' })).current
+
   const fetchResults = useCallback(async () => {
+    // Don't fetch if session is not authenticated
+    if (sessionStatus !== 'authenticated') {
+      return
+    }
+
     const requestId = generateRequestId()
     const requestLog = createLogger({ hook: 'useExecutionResults', requestId })
 
@@ -35,12 +46,17 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
 
       const response = await fetch(`/api/execution-results/recent?${params}`, {
         method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
+        headers: { 'Content-Type': 'application/json' },
       })
 
       if (!response.ok) {
+        // 401 returns without throwing — polling hook treats this as success (no backoff increment).
+        // Session expiry should not trigger exponential backoff.
+        if (response.status === 401) {
+          setResults([])
+          setIsLoading(false)
+          return
+        }
         throw new Error(`Failed to fetch execution results: ${response.status}`)
       }
 
@@ -56,34 +72,47 @@ export function useExecutionResults(options: UseExecutionResultsOptions = {}) {
       })
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      requestLog.error('Failed to fetch execution results', { error: errorMessage })
+      // Downgrade to warn — polling failures are expected transient states
+      requestLog.warn('Failed to fetch execution results', { error: errorMessage })
       setError(errorMessage)
+      throw err // Re-throw so the polling hook tracks the failure for backoff
     } finally {
       setIsLoading(false)
     }
-  }, [limit, status])
+  }, [limit, status, sessionStatus])
+
+  const { resetFailures } = usePollingWithBackoff(fetchResults, {
+    baseInterval: refreshInterval,
+    enabled: sessionStatus === 'authenticated',
+    // onFailure receives the post-increment count from the hook — no +1 arithmetic needed.
+    // No useCallback needed — the hook wraps this in a ref internally.
+    onFailure: (consecutiveFailures: number) => {
+      log.warn('Execution results polling backoff increasing', { consecutiveFailures })
+    },
+  })
+
+  // Reset state when session becomes unauthenticated to prevent stuck loading spinner.
+  // sessionStatus === 'loading' intentionally keeps isLoading=true while NextAuth resolves auth.
+  useEffect(() => {
+    if (sessionStatus === 'unauthenticated') {
+      setResults([])
+      setIsLoading(false)
+      setError(null)
+      resetFailures()
+    }
+  }, [sessionStatus, resetFailures])
+
+  // Initial fetch on mount (only when authenticated)
+  useEffect(() => {
+    if (sessionStatus === 'authenticated') {
+      fetchResults().catch(() => {}) // Error already logged inside fetchResults
+    }
+  }, [fetchResults, sessionStatus])
 
   const refreshResults = useCallback(async () => {
-    await fetchResults()
+    // Manual refresh: errors suppressed here (not counted toward polling backoff)
+    await fetchResults().catch(() => {})
   }, [fetchResults])
-
-  // Initial fetch on mount
-  useEffect(() => {
-    fetchResults()
-  }, [fetchResults])
-
-  // Set up periodic refresh
-  useEffect(() => {
-    if (refreshInterval > 0) {
-      const interval = setInterval(() => {
-        if (!isLoading) {
-          fetchResults()
-        }
-      }, refreshInterval)
-
-      return () => clearInterval(interval)
-    }
-  }, [fetchResults, isLoading, refreshInterval])
 
   return {
     results,

@@ -47,5 +47,5 @@ COPY scripts/docker/dev-entrypoint.sh /usr/local/bin/dev-entrypoint.sh
 RUN chmod +x /usr/local/bin/dev-entrypoint.sh
 ENTRYPOINT ["dev-entrypoint.sh"]
 
-# Run Next.js dev server
-CMD ["bun", "run", "dev"]
+# Run custom server with WebSocket support for voice mode (Issue #873)
+CMD ["bun", "run", "server.ts"]

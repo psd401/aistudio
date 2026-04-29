@@ -158,6 +158,7 @@ export type ContentFilterType =
   | 'VIOLENCE'
   | 'SELF_HARM'
   | 'SEXUAL'
+  | 'INSULTS'
   | 'MISCONDUCT'
   | 'PROMPT_ATTACK';
 
@@ -194,6 +195,13 @@ export interface GuardrailAssessment {
     customWords?: Array<{
       match: string;
       action: 'BLOCKED' | 'ALLOWED';
+    }>;
+    managedWordLists?: Array<{
+      match: string;
+      /** AWS currently only supports 'PROFANITY' as a managed word list type */
+      type: 'PROFANITY';
+      /** 'NONE' may appear when outputScope: 'FULL' returns non-triggered assessments */
+      action: 'BLOCKED' | 'ALLOWED' | 'NONE' | string;
     }>;
   };
   sensitiveInformationPolicy?: {

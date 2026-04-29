@@ -59,12 +59,56 @@ tags:
     description: Assistant listing, execution, and multi-turn conversations
   - name: Jobs
     description: Async job polling and cancellation
+  - name: Voice
+    description: Real-time voice conversations via WebSocket with Gemini Live API
 
 # ============================================
 # Paths
 # ============================================
 
 paths:
+  /api/nexus/voice/availability:
+    get:
+      operationId: getVoiceAvailability
+      tags: [Voice]
+      summary: Voice mode availability check
+      description: |
+        Returns voice availability with a human-readable reason string.
+        Clients call this before attempting a WebSocket connection.
+
+        Checks: admin kill switch, role-based permission, provider config, API key.
+        Response is cached (Cache-Control: max-age=30, private).
+      security:
+        - sessionAuth: []
+      responses:
+        "200":
+          description: Voice availability status
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [available]
+                properties:
+                  available:
+                    type: boolean
+                    description: Whether voice mode is available for this user
+                  reason:
+                    type: string
+                    description: Human-readable reason when unavailable
+                    example: Voice mode is disabled by administrator
+        "401":
+          description: Not authenticated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: Unauthorized
+        "500":
+          description: Internal server error
+
   /health:
     get:
       operationId: getHealth

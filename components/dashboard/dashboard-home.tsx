@@ -14,6 +14,7 @@ import {
   IconSearch,
 } from '@tabler/icons-react';
 import { cn } from '@/lib/utils';
+import { useBranding } from '@/contexts/branding-context';
 
 type AccentColor = 'navy' | 'coral' | 'purple' | 'green';
 
@@ -26,31 +27,70 @@ interface ToolCardProps {
   ctaColor?: AccentColor;
   accentColor: AccentColor;
   featured?: boolean;
-  image?: string;
 }
 
 const ACCENT_CLASSES: Record<AccentColor, string> = {
-  navy: 'from-[#1B365D]/10 to-transparent',
+  navy: 'from-[var(--brand-primary)]/10 to-transparent',
   coral: 'from-[#E8927C]/15 to-transparent',
   purple: 'from-[#7B68A6]/15 to-transparent',
   green: 'from-[#6B9E78]/15 to-transparent',
 };
 
 const ICON_BG_CLASSES: Record<AccentColor, string> = {
-  navy: 'bg-[#1B365D]/10 text-[#1B365D]',
+  navy: 'bg-[var(--brand-primary)]/10 text-[var(--brand-primary)]',
   coral: 'bg-[#E8927C]/15 text-[#E8927C]',
   purple: 'bg-[#7B68A6]/15 text-[#7B68A6]',
   green: 'bg-[#6B9E78]/15 text-[#6B9E78]',
 };
 
 const CTA_COLOR_CLASSES: Record<AccentColor, string> = {
-  navy: 'text-[#1B365D]',
+  navy: 'text-[var(--brand-primary)]',
   coral: 'text-[#E8927C]',
   purple: 'text-[#7B68A6]',
   green: 'text-[#6B9E78]',
 };
 
-function FeaturedToolCard({ title, description, href, icon, ctaText, accentColor, image }: ToolCardProps) {
+function ChatBubbleGraphic() {
+  return (
+    <div className="relative w-[180px] flex-shrink-0 bg-[var(--brand-primary)] hidden sm:flex items-center justify-center overflow-hidden">
+      {/* Subtle radial glow */}
+      <div className="absolute inset-0 bg-gradient-to-br from-white/10 via-transparent to-black/10" />
+      <svg
+        viewBox="0 0 180 280"
+        fill="none"
+        xmlns="http://www.w3.org/2000/svg"
+        className="w-full h-full opacity-90 motion-safe:transition-transform motion-safe:duration-500 group-hover:motion-safe:scale-105"
+        aria-hidden="true"
+      >
+        {/* Large chat bubble - right aligned (AI response) */}
+        <rect x="30" y="50" width="120" height="60" rx="16" fill="white" fillOpacity="0.2" />
+        {/* Text lines inside large bubble */}
+        <rect x="46" y="68" width="72" height="6" rx="3" fill="white" fillOpacity="0.3" />
+        <rect x="46" y="82" width="88" height="6" rx="3" fill="white" fillOpacity="0.25" />
+        <rect x="46" y="96" width="52" height="6" rx="3" fill="white" fillOpacity="0.2" />
+
+        {/* Small chat bubble - left aligned (user message) */}
+        <rect x="20" y="130" width="90" height="44" rx="14" fill="white" fillOpacity="0.15" />
+        <rect x="34" y="145" width="56" height="5" rx="2.5" fill="white" fillOpacity="0.25" />
+        <rect x="34" y="156" width="36" height="5" rx="2.5" fill="white" fillOpacity="0.2" />
+
+        {/* Typing indicator bubble — static dots when prefers-reduced-motion is set */}
+        <rect x="55" y="194" width="72" height="36" rx="12" fill="white" fillOpacity="0.12" />
+        <circle cx="77" cy="212" r="4" fill="white" fillOpacity="0.35">
+          <animate attributeName="opacity" values="0.2;0.5;0.2" dur="1.5s" repeatCount="indefinite" begin="0s" />
+        </circle>
+        <circle cx="93" cy="212" r="4" fill="white" fillOpacity="0.35">
+          <animate attributeName="opacity" values="0.2;0.5;0.2" dur="1.5s" repeatCount="indefinite" begin="0.3s" />
+        </circle>
+        <circle cx="109" cy="212" r="4" fill="white" fillOpacity="0.35">
+          <animate attributeName="opacity" values="0.2;0.5;0.2" dur="1.5s" repeatCount="indefinite" begin="0.6s" />
+        </circle>
+      </svg>
+    </div>
+  );
+}
+
+function FeaturedToolCard({ title, description, href, icon, ctaText, accentColor }: ToolCardProps) {
   return (
     <Link
       href={href}
@@ -59,7 +99,7 @@ function FeaturedToolCard({ title, description, href, icon, ctaText, accentColor
         'border border-border/40 shadow-sm',
         'transition-all duration-200 ease-out',
         'hover:shadow-lg hover:border-border/60 hover:-translate-y-0.5',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1B365D] focus-visible:ring-offset-2',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] focus-visible:ring-offset-2',
         'h-full min-h-[280px]'
       )}
     >
@@ -69,27 +109,23 @@ function FeaturedToolCard({ title, description, href, icon, ctaText, accentColor
             <div className={cn('inline-flex p-2 rounded-lg mb-3', ICON_BG_CLASSES[accentColor])}>
               {icon}
             </div>
-            <h3 className="text-lg font-bold text-[#1B365D] mb-2">{title}</h3>
+            <h3 className="text-lg font-bold text-[var(--brand-primary)] mb-2">{title}</h3>
             <p className="text-sm text-muted-foreground leading-relaxed">{description}</p>
           </div>
           <span
             className={cn(
               'mt-4 inline-flex items-center gap-2 px-5 py-2.5 rounded-full',
-              'bg-[#1B365D] text-white text-sm font-medium',
+              'bg-[var(--brand-primary)] text-white text-sm font-medium',
               'transition-all duration-200',
-              'group-hover:bg-[#1B365D]/90',
+              'group-hover:bg-[var(--brand-primary)]/90',
               'w-fit'
             )}
           >
             {ctaText || 'Get Started'}
-            <span className="transition-transform group-hover:translate-x-0.5">&rarr;</span>
+            <span className="motion-safe:transition-transform group-hover:translate-x-0.5 group-focus-visible:translate-x-0.5">&rarr;</span>
           </span>
         </div>
-        {image && (
-          <div className="relative w-[180px] flex-shrink-0 bg-[#1B365D]/95 hidden sm:block">
-            <Image src={image} alt="" fill className="object-contain p-4 opacity-90" sizes="180px" />
-          </div>
-        )}
+        <ChatBubbleGraphic />
       </div>
     </Link>
   );
@@ -106,7 +142,7 @@ function StandardToolCard({ title, description, href, icon, ctaText, ctaColor, a
         'border border-border/40 shadow-sm p-5',
         'transition-all duration-200 ease-out',
         'hover:shadow-lg hover:border-border/60 hover:-translate-y-0.5',
-        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#1B365D] focus-visible:ring-offset-2',
+        'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--brand-primary)] focus-visible:ring-offset-2',
         'h-full min-h-[140px]'
       )}
     >
@@ -153,15 +189,19 @@ function ToolCard(props: ToolCardProps) {
 
 interface DashboardHeaderProps {
   firstName: string;
+  orgName: string;
+  appName: string;
+  logoSrc: string;
+  logoIsExternal: boolean;
 }
 
-function DashboardHeader({ firstName }: DashboardHeaderProps) {
+function DashboardHeader({ firstName, orgName, appName, logoSrc, logoIsExternal }: DashboardHeaderProps) {
   return (
     <div className="mb-6">
       <div className="flex items-center gap-2 mb-1">
-        <Image src="/logo.png" alt="" width={20} height={20} className="opacity-70" />
+        <Image src={logoSrc} alt="" width={20} height={20} className="opacity-70" unoptimized={logoIsExternal} aria-hidden="true" />
         <span className="text-xs uppercase tracking-wider text-muted-foreground font-medium">
-          Peninsula School District - AI Studio
+          {orgName} - {appName}
         </span>
       </div>
       <h1 className="text-2xl sm:text-3xl font-normal text-foreground">
@@ -174,16 +214,18 @@ function DashboardHeader({ firstName }: DashboardHeaderProps) {
 function SearchBar() {
   return (
     <div className="relative mb-8">
-      <IconSearch size={20} className="absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground" />
+      <IconSearch size={20} className="absolute left-4 top-1/2 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
       <input
+        id="dashboard-search"
         type="search"
         placeholder="Search tools, prompts, or assistants..."
+        aria-label="Search tools, prompts, or assistants"
         className={cn(
           'w-full h-12 pl-12 pr-4 rounded-xl',
           'bg-white border border-border/40 shadow-sm',
           'text-sm placeholder:text-muted-foreground',
-          'focus:outline-none focus:ring-2 focus:ring-[#1B365D]/20 focus:border-[#1B365D]/40',
-          'transition-all duration-200'
+          'focus:outline-none focus:ring-2 focus:ring-[var(--brand-primary)]/20 focus:border-[var(--brand-primary)]/40',
+          'motion-safe:transition-all motion-safe:duration-200'
         )}
       />
     </div>
@@ -193,10 +235,10 @@ function SearchBar() {
 function FeaturedToolsHeader() {
   return (
     <div className="flex items-center justify-between mb-4">
-      <h2 className="text-lg font-bold text-[#1B365D]">Featured Tools</h2>
+      <h2 className="text-lg font-bold text-[var(--brand-primary)]">Featured Tools</h2>
       <Link
         href="/utilities/assistant-catalog"
-        className="text-sm text-[#1B365D] hover:text-[#1B365D]/80 font-medium flex items-center gap-1"
+        className="text-sm text-[var(--brand-primary)] hover:text-[var(--brand-primary)]/80 font-medium flex items-center gap-1"
       >
         View All
         <span>&rarr;</span>
@@ -226,7 +268,6 @@ function ToolCardsGrid() {
           accentColor="navy"
           ctaText="Start Chatting"
           featured
-          image="/psd-ai-logo.png"
         />
       </div>
 
@@ -294,6 +335,7 @@ function ToolCardsGrid() {
 
 export function DashboardHome() {
   const { data: session } = useSession();
+  const { orgName, appName, logoSrc, logoIsExternal } = useBranding();
 
   const firstName = useMemo(() => {
     return session?.user?.givenName || session?.user?.name?.split(' ')[0] || 'there';
@@ -302,7 +344,7 @@ export function DashboardHome() {
   return (
     <div className="min-h-screen bg-[#FBF7F4]">
       <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-        <DashboardHeader firstName={firstName} />
+        <DashboardHeader firstName={firstName} orgName={orgName} appName={appName} logoSrc={logoSrc} logoIsExternal={logoIsExternal} />
         <SearchBar />
         <FeaturedToolsHeader />
         <ToolCardsGrid />

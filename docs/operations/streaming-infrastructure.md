@@ -185,7 +185,7 @@ docker push {ACCOUNT}.dkr.ecr.{REGION}.amazonaws.com/aistudio-frontend:latest
 
 # 4. Deploy via CDK
 cd infra
-npx cdk deploy AIStudio-ECSServiceStack-Dev
+bunx cdk deploy AIStudio-ECSServiceStack-Dev
 ```
 
 ### Rollback Procedure

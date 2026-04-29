@@ -228,7 +228,7 @@ Run the audit script to identify all violations:
 
 ```bash
 cd infra
-npx ts-node scripts/audit-iam-policies.ts
+bunx ts-node scripts/audit-iam-policies.ts
 ```
 
 This generates:
@@ -241,8 +241,8 @@ This generates:
 1. Deploy permission boundary policies:
    ```bash
    cd infra
-   npx cdk deploy AIStudio-PermissionBoundary-Dev
-   npx cdk deploy AIStudio-PermissionBoundary-Prod
+   bunx cdk deploy AIStudio-PermissionBoundary-Dev
+   bunx cdk deploy AIStudio-PermissionBoundary-Prod
    ```
 
 2. Verify boundaries are created:
@@ -290,7 +290,7 @@ const role = ServiceRoleFactory.createLambdaRole(this, "LambdaRole", {
 
 1. Deploy Access Analyzer stack:
    ```bash
-   npx cdk deploy AIStudio-AccessAnalyzer-Dev
+   bunx cdk deploy AIStudio-AccessAnalyzer-Dev
    ```
 
 2. Configure SNS email subscription
@@ -312,7 +312,7 @@ const role = ServiceRoleFactory.createLambdaRole(this, "LambdaRole", {
 
 ```bash
 cd infra
-npx ts-node scripts/audit-iam-policies.ts
+bunx ts-node scripts/audit-iam-policies.ts
 ```
 
 ### Output
@@ -439,7 +439,7 @@ resources: [`arn:aws:dynamodb:${region}:${account}:table/MyTable`]
 
 **Solution**: Deploy permission boundary first:
 ```bash
-npx cdk deploy AIStudio-PermissionBoundary-Dev
+bunx cdk deploy AIStudio-PermissionBoundary-Dev
 ```
 
 ### Access Denied Errors

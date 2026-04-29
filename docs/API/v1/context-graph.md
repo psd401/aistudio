@@ -558,3 +558,37 @@ curl -X POST -H "Authorization: Bearer sk-your-key" \
 **Response `401`** — Missing or invalid API key.
 **Response `403`** — API key lacks `graph:write` scope.
 **Response `500`** — Internal error.
+
+---
+
+## Voice API (Issue #872, #877)
+
+### GET `/api/nexus/voice/availability`
+
+Returns voice availability with a human-readable reason string. Clients call this before attempting a WebSocket connection.
+
+**Auth:** Session cookie (not API key).
+
+**Response `200`:**
+
+```json
+{
+  "available": false,
+  "reason": "Voice mode is disabled by administrator"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `available` | boolean | Whether voice mode is available for this user |
+| `reason` | string? | Human-readable reason when unavailable |
+
+**Caching:** `Cache-Control: max-age=30, private`. Server-side settings cache TTL is 5 minutes.
+
+**Response `401`** — No authenticated session.
+**Response `500`** — Internal error.
+
+### WebSocket `/api/nexus/voice`
+
+Bidirectional audio streaming for real-time voice conversations. See [`features/voice-api.md`](../../features/voice-api.md) for the full WebSocket protocol specification including message types, close codes, and connection flow.
+

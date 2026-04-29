@@ -467,18 +467,30 @@ export async function POST(req: Request) {
     });
 
   } catch (error) {
+    if (error instanceof ContentSafetyBlockedError) {
+      log.warn('Content blocked by safety guardrails', {
+        error: { message: error.message, name: error.name },
+        categories: error.blockedCategories,
+        source: error.source
+      });
+      timer({ status: 'blocked' });
+      return new Response(
+        JSON.stringify({
+          error: error.message,
+          code: 'CONTENT_BLOCKED',
+          categories: error.blockedCategories,
+          source: error.source,
+          requestId,
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
+      );
+    }
+
     log.error('Decision chat API error', {
       error: error instanceof Error ? { message: error.message, name: error.name } : String(error),
     });
 
     timer({ status: 'error' });
-
-    if (error instanceof ContentSafetyBlockedError) {
-      return new Response(
-        JSON.stringify({ error: error.message, code: 'CONTENT_BLOCKED', requestId }),
-        { status: 400, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
-      );
-    }
 
     // Handle missing setting gracefully
     if (error instanceof Error && error.message.includes('Required setting')) {

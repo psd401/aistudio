@@ -55,6 +55,15 @@ Testing strategies including unit tests, integration tests, and E2E testing with
 #### [guides/TYPESCRIPT.md](./guides/TYPESCRIPT.md)
 TypeScript best practices, conventions, and guidelines for maintaining type safety.
 
+#### [guides/auth-security-checklist.md](./guides/auth-security-checklist.md)
+OAuth and auth security review checklist for PRs modifying auth flows or token handling.
+
+#### [guides/silent-failure-patterns.md](./guides/silent-failure-patterns.md)
+Catalog of silent failure patterns (Drizzle ORM, AI SDK v6, prototype pollution, SessionProvider).
+
+#### [guides/react-patterns.md](./guides/react-patterns.md)
+React pitfalls and patterns specific to this codebase (initialization guards, derived state, deferred loading).
+
 #### [guides/adding-ai-providers.md](./guides/adding-ai-providers.md)
 Step-by-step provider integration guide for adding new AI providers.
 
@@ -198,6 +207,9 @@ Structured decision capture and context graph system.
 #### [features/k12-content-safety.md](./features/k12-content-safety.md)
 K-12 content filtering with Amazon Bedrock Guardrails.
 
+#### [features/voice-api.md](./features/voice-api.md)
+Real-time voice conversations via WebSocket with Gemini Live API, transcript persistence, permissions, and content safety guardrails.
+
 ## 🚀 Quick Start
 
 ### For New Developers
@@ -264,9 +276,9 @@ Drizzle ORM with postgres.js driver and connection pooling. See [database/drizzl
 4. Follow [operations/OPERATIONS.md](./operations/OPERATIONS.md) for procedures
 
 ### Deploying Updates
-1. Test locally with `npm run dev`
-2. Run `npm run lint` and `npm run typecheck` (entire codebase)
-3. Deploy with CDK: `npx cdk deploy`
+1. Test locally with `bun run dev`
+2. Run `bun run lint` and `bun run typecheck` (entire codebase)
+3. Deploy with CDK: `bunx cdk deploy`
 4. Monitor CloudWatch for errors
 5. See [/infra/README.md](../infra/README.md) for detailed deployment commands
 
@@ -326,7 +338,7 @@ Key architectural decisions documented:
 
 ---
 
-**Last updated**: February 2026
+**Last updated**: April 2026
 **Status**: Active - comprehensive documentation with 9 architectural diagrams
 **Total Documentation**: 10,000+ lines across 50+ files
 *For AI assistant guidelines, see [CLAUDE.md](../CLAUDE.md)*

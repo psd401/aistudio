@@ -20,3 +20,4 @@ cdk.out
 
 # Package lock files in lambdas (can be regenerated)
 lambdas/**/package-lock.json
+lambdas/**/bun.lock

@@ -80,7 +80,6 @@ export class ClaudeAdapter extends BaseProviderAdapter {
   /**
    * Get list of tools supported by Claude models on Bedrock
    */
-   
   getSupportedTools(_modelId: string): string[] {
     // Claude models on Bedrock will support tools in future
     // For now, return empty
@@ -255,18 +254,34 @@ export class ClaudeAdapter extends BaseProviderAdapter {
   
   protected handleError(error: Error, callbacks: StreamingCallbacks): void {
     super.handleError(error, callbacks);
-    
+
     // Handle Claude-specific errors
     if (error.message.includes('thinking_budget_exceeded')) {
       log.warn('Claude thinking budget exceeded', {
         error: error.message
       });
     }
-    
+
     if (error.message.includes('content_policy_violation')) {
       log.warn('Claude content policy violation', {
         error: error.message
       });
     }
+
+    if (error.message.includes("doesn't support tool use in streaming mode")) {
+      log.warn('Claude model does not support streaming tool use', {
+        error: error.message,
+        note: 'Tool capability validation should prevent this — check getOrCreateTools()',
+      });
+    }
+  }
+
+  protected isTransientError(error: Error): boolean {
+    // "tool use in streaming mode" is a configuration error, not transient,
+    // but it should have been prevented by upstream validation
+    if (error.message.includes("doesn't support tool use in streaming mode")) {
+      return false;
+    }
+    return super.isTransientError(error);
   }
 }

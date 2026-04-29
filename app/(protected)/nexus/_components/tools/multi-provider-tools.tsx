@@ -5,7 +5,9 @@ import { makeAssistantToolUI, type ToolCallMessagePartStatus } from '@assistant-
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Globe, Clock, Code2, Terminal, ExternalLink } from 'lucide-react'
+import { isSafeUrl } from '@/lib/utils'
 import { ChartVisualizationUI } from './chart-visualization-ui'
+import { ToolArgsRecoveryBoundary } from '@/components/assistant-ui/tool-args-recovery-boundary'
 
 /**
  * Multi-Provider Tool UIs
@@ -165,13 +167,21 @@ const WebSearchRenderer = ({
 // OpenAI web search tool
 export const OpenAIWebSearchUI = makeAssistantToolUI<WebSearchArgs, WebSearchResult>({
   toolName: 'web_search_preview',
-  render: WebSearchRenderer,
+  render: (props) => (
+    <ToolArgsRecoveryBoundary toolName="web_search_preview">
+      <WebSearchRenderer {...props} />
+    </ToolArgsRecoveryBoundary>
+  ),
 })
 
 // Google search tool
 export const GoogleSearchUI = makeAssistantToolUI<WebSearchArgs, WebSearchResult>({
   toolName: 'google_search',
-  render: WebSearchRenderer,
+  render: (props) => (
+    <ToolArgsRecoveryBoundary toolName="google_search">
+      <WebSearchRenderer {...props} />
+    </ToolArgsRecoveryBoundary>
+  ),
 })
 
 // ============================================================================
@@ -264,7 +274,7 @@ function GeneratedFiles({ files }: { files: CodeFile[] }) {
     <div>
       <div className="text-xs font-semibold text-green-900 mb-1">Generated Files:</div>
       <div className="space-y-1">
-        {files.map((file, index) => (
+        {files.filter(file => isSafeUrl(file.url)).map((file, index) => (
           <a
             key={index}
             href={file.url}
@@ -331,7 +341,11 @@ const CodeInterpreterRenderer = ({
 
 export const CodeInterpreterUI = makeAssistantToolUI<CodeInterpreterArgs, CodeInterpreterResult>({
   toolName: 'code_interpreter',
-  render: CodeInterpreterRenderer,
+  render: (props) => (
+    <ToolArgsRecoveryBoundary toolName="code_interpreter">
+      <CodeInterpreterRenderer {...props} />
+    </ToolArgsRecoveryBoundary>
+  ),
 })
 
 // ============================================================================

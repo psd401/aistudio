@@ -45,15 +45,16 @@ export class DatabaseStack extends cdk.Stack {
       allowAllOutbound: true,
     });
 
-    // For development, allow PostgreSQL access from anywhere (you should restrict this to your IP)
+    // Restrict PostgreSQL access to VPC CIDR in all environments.
+    // Previously dev allowed 0.0.0.0/0, but with RDS Proxy removed (which enforced
+    // TLS termination), direct internet exposure on port 5432 is unacceptable.
+    // Local development uses DATABASE_URL in .env.local (see CLAUDE.md).
     if (props.environment === 'dev') {
       dbSg.addIngressRule(
-        ec2.Peer.anyIpv4(),
+        ec2.Peer.ipv4(vpc.vpcCidrBlock),
         ec2.Port.tcp(5432),
-        'Allow PostgreSQL access from anywhere (DEV ONLY)'
+        'Allow PostgreSQL access from VPC (DEV)'
       );
-      // Better practice: restrict to your IP
-      // dbSg.addIngressRule(ec2.Peer.ipv4('YOUR.IP.ADDRESS.HERE/32'), ec2.Port.tcp(5432), 'Allow PostgreSQL from my IP');
     } else {
       // Production: only allow from within VPC
       dbSg.addIngressRule(
@@ -101,16 +102,16 @@ export class DatabaseStack extends cdk.Stack {
         engineVersion: '15.12', // Match snapshot version
         dbClusterIdentifier: `aistudio-${props.environment}-cluster`,
         serverlessV2ScalingConfiguration: {
-          minCapacity: props.environment === 'prod' ? 2 : 0.5,
-          maxCapacity: props.environment === 'prod' ? 8 : 2,
+          minCapacity: config.database.minCapacity,
+          maxCapacity: config.database.maxCapacity,
         },
         enableHttpEndpoint: true, // Enable Data API
         storageEncrypted: true,
         enableCloudwatchLogsExports: ['postgresql'],
         vpcSecurityGroupIds: [dbSg.securityGroupId],
         dbSubnetGroupName: subnetGroup.dbSubnetGroupName,
-        backupRetentionPeriod: props.environment === 'prod' ? 7 : 1,
-        deletionProtection: props.environment === 'prod',
+        backupRetentionPeriod: config.database.backupRetention.toDays(),
+        deletionProtection: config.database.deletionProtection,
         // Note: masterUsername and masterUserPassword are not needed for snapshot restoration
       });
       cfnCluster.addDependency(subnetGroup);
@@ -151,19 +152,26 @@ export class DatabaseStack extends cdk.Stack {
           // Note: publiclyAccessible requires the DB to be in public subnets
           // We'll keep it in private subnets and use Data API instead
         }),
-        readers: props.environment === 'prod'
-          ? [rds.ClusterInstance.serverlessV2('Reader', {
-              scaleWithWriter: true,
-            })]
+        // Reader instance controlled by config.database.multiAz.
+        // Currently false for prod — avg 1.1 connections, peak 24 does not
+        // justify a dedicated reader. Re-enable multiAz in environment-config.ts
+        // when multi-district onboarding generates read-heavy traffic. See #832.
+        readers: config.database.multiAz
+          ? [rds.ClusterInstance.serverlessV2('Reader', { scaleWithWriter: true })]
           : [],
-        serverlessV2MinCapacity: props.environment === 'prod' ? 2 : 0.5,
-        serverlessV2MaxCapacity: props.environment === 'prod' ? 8 : 2,
+        // Capacity sourced from environment-config.ts — single source of truth.
+        serverlessV2MinCapacity: config.database.minCapacity,
+        serverlessV2MaxCapacity: config.database.maxCapacity,
         storageEncrypted: true,
         backup: {
-          retention: cdk.Duration.days(props.environment === 'prod' ? 7 : 1),
+          retention: config.database.backupRetention,
         },
+        // removalPolicy and deletionProtection are distinct:
+        // - removalPolicy controls CDK teardown behavior (RETAIN keeps cluster if stack is deleted)
+        // - deletionProtection prevents accidental RDS deletion via API/console
+        // Both are prod-only; using environment check avoids coupling them through config.
         removalPolicy: props.environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
-        deletionProtection: props.environment === 'prod',
+        deletionProtection: config.database.deletionProtection,
         cloudwatchLogsExports: ['postgresql'],
         vpc,
         vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_ISOLATED },
@@ -175,18 +183,9 @@ export class DatabaseStack extends cdk.Stack {
       this.databaseSecretArn = dbSecret.secretArn;
     }
 
-    // RDS Proxy (skip for snapshot restoration as imported cluster doesn't support addProxy)
-    let proxy: rds.IDatabaseProxy | undefined;
-    if (!restoreFromSnapshot && this.cluster instanceof rds.DatabaseCluster) {
-      proxy = this.cluster.addProxy('RdsProxy', {
-        secrets: [dbSecret],
-        vpc,
-        vpcSubnets: { subnetType: ec2.SubnetType.PUBLIC },
-        securityGroups: [dbSg],
-        requireTLS: true,
-        debugLogging: props.environment !== 'prod',
-      });
-    }
+    // RDS Proxy removed — the application uses postgres.js with built-in
+    // connection pooling (max 20 connections, idle timeout 20s), making
+    // RDS Proxy redundant. Saves ~$81/month. See issue #832.
 
     // Add cost optimization features (skip for snapshot restoration as AuroraCostOptimizer requires DatabaseCluster)
     if (!restoreFromSnapshot && this.cluster instanceof rds.DatabaseCluster) {
@@ -214,10 +213,10 @@ export class DatabaseStack extends cdk.Stack {
             daysOfWeek: 'MON-FRI',  // Weekdays only, weekends use lower capacity
           },
           scaling: {
-            businessHoursMin: 2.0,  // M-F 7am-5pm PT: 2-8 ACU
-            businessHoursMax: 8.0,
-            offHoursMin: 1.0,       // Nights and weekends: 1-4 ACU
-            offHoursMax: 4.0,
+            businessHoursMin: 1.0,  // M-F 7am-5pm PT: 1-6 ACU
+            businessHoursMax: 6.0,  // max=6 covers observed 6.0 ACU peak (see environment-config.ts)
+            offHoursMin: 0.5,       // Nights and weekends: 0.5-2 ACU
+            offHoursMax: 2.0,
           },
         }),
       });
@@ -371,14 +370,6 @@ export class DatabaseStack extends cdk.Stack {
     }
 
     // Outputs
-    if (proxy) {
-      new cdk.CfnOutput(this, 'RdsProxyEndpoint', {
-        value: proxy.endpoint,
-        description: 'RDS Proxy endpoint',
-        exportName: `${props.environment}-RdsProxyEndpoint`,
-      });
-    }
-
     if (!restoreFromSnapshot) {
       new cdk.CfnOutput(this, 'ClusterEndpoint', {
         value: this.cluster.clusterEndpoint.hostname,
@@ -386,11 +377,9 @@ export class DatabaseStack extends cdk.Stack {
         exportName: `${props.environment}-ClusterEndpoint`,
       });
 
-      new cdk.CfnOutput(this, 'ClusterReaderEndpoint', {
-        value: this.cluster.clusterReadEndpoint.hostname,
-        description: 'Aurora cluster reader endpoint',
-        exportName: `${props.environment}-ClusterReaderEndpoint`,
-      });
+      // ClusterReaderEndpoint removed — no reader instance deployed (see #832).
+      // Reader resolves to writer when no reader exists, which could mislead
+      // consumers expecting read/write separation. Re-add when reader is restored.
     }
 
     // Store values in SSM Parameter Store for cross-stack references

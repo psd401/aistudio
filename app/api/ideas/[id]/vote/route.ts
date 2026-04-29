@@ -1,6 +1,7 @@
 import { getServerSession } from '@/lib/auth/server-session';
 import { NextResponse } from 'next/server';
-import { getUserIdByCognitoSub, hasUserVoted, addVote, removeVote } from '@/lib/db/drizzle';
+import { hasUserVoted, addVote, removeVote } from '@/lib/db/drizzle';
+import { resolveUserId } from '@/lib/auth/resolve-user';
 import { hasRole } from '@/utils/roles';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
@@ -42,16 +43,8 @@ export async function POST(request: Request, { params }: { params: Promise<{ id:
 
     log.debug("Processing vote for idea", { ideaId });
 
-    // Get the user's numeric ID from their cognito_sub
-    const userIdString = await getUserIdByCognitoSub(session.sub);
-
-    if (!userIdString) {
-      log.warn("User not found", { cognitoSub: session.sub });
-      timer({ status: "error", reason: "user_not_found" });
-      return new NextResponse('User not found', { status: 404, headers: { "X-Request-Id": requestId } });
-    }
-
-    const userId = Number(userIdString);
+    // Get the user's numeric ID (provisions if missing)
+    const userId = await resolveUserId(session, requestId);
 
     // Check if the user has already voted
     const alreadyVoted = await hasUserVoted(ideaId, userId);

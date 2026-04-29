@@ -161,18 +161,18 @@ Open [http://localhost:3000](http://localhost:3000) to see the application.
 ```bash
 # Bootstrap CDK (one-time)
 cd infra
-npx cdk bootstrap aws://ACCOUNT-ID/REGION
+bunx cdk bootstrap aws://ACCOUNT-ID/REGION
 
 # Deploy infrastructure stacks
-npx cdk deploy AIStudio-DatabaseStack-Dev
-npx cdk deploy AIStudio-AuthStack-Dev
-npx cdk deploy AIStudio-StorageStack-Dev
-npx cdk deploy AIStudio-DocumentProcessingStack-Dev
-npx cdk deploy AIStudio-GuardrailsStack-Dev
-npx cdk deploy AIStudio-FrontendStack-Dev
+bunx cdk deploy AIStudio-DatabaseStack-Dev
+bunx cdk deploy AIStudio-AuthStack-Dev
+bunx cdk deploy AIStudio-StorageStack-Dev
+bunx cdk deploy AIStudio-DocumentProcessingStack-Dev
+bunx cdk deploy AIStudio-GuardrailsStack-Dev
+bunx cdk deploy AIStudio-FrontendStack-Dev
 
 # Or deploy all at once
-npx cdk deploy --all
+bunx cdk deploy --all
 ```
 
 See [Deployment Guide](./docs/DEPLOYMENT.md) for detailed instructions.

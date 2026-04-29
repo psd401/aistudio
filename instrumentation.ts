@@ -102,5 +102,6 @@ export async function register(): Promise<void> {
         // Errors already logged in warmupConnectionPool
       });
     });
+
   }
 }

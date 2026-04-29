@@ -53,5 +53,9 @@ next-env.d.ts
 /tests/e2e/videos/
 /.playwright-mcp/
 
+# Python
+__pycache__/
+
 # Claude agent internal state
 .claude/agent-memory/
+docs/learnings/.evolve-state.json

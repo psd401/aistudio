@@ -191,7 +191,7 @@ const MIGRATION_FILES = [
 ### Step 6: Deploy
 
 ```bash
-cd infra && npx cdk deploy AIStudio-DatabaseStack-Dev
+cd infra && bunx cdk deploy AIStudio-DatabaseStack-Dev
 ```
 
 ---
@@ -395,7 +395,7 @@ psql -h localhost -U postgres -d test -f migration.sql --dry-run
 
 ```bash
 # Deploy to dev
-cd infra && npx cdk deploy AIStudio-DatabaseStack-Dev
+cd infra && bunx cdk deploy AIStudio-DatabaseStack-Dev
 
 # Verify via MCP tools
 # Use: mcp__awslabs_postgres-mcp-server__get_table_schema
@@ -444,7 +444,7 @@ const result = await db.select().from(users).limit(1);
 
 5. **Redeploy:**
    ```bash
-   cd infra && npx cdk deploy AIStudio-DatabaseStack-Dev
+   cd infra && bunx cdk deploy AIStudio-DatabaseStack-Dev
    ```
 
 ### Adding Rollback SQL to Migrations

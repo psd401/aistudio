@@ -28,10 +28,10 @@
 cd infra
 
 # Destroy in reverse dependency order
-npx cdk destroy AIStudio-FrontendStack-ECS-Prod --force
-npx cdk destroy AIStudio-DocumentProcessingStack-Prod --force
-npx cdk destroy AIStudio-SchedulerStack-Prod --force
-npx cdk destroy AIStudio-DatabaseStack-Prod --force
+bunx cdk destroy AIStudio-FrontendStack-ECS-Prod --force
+bunx cdk destroy AIStudio-DocumentProcessingStack-Prod --force
+bunx cdk destroy AIStudio-SchedulerStack-Prod --force
+bunx cdk destroy AIStudio-DatabaseStack-Prod --force
 ```
 
 **Clean up orphaned resources:**
@@ -43,7 +43,7 @@ aws logs delete-log-group --log-group-name /aws/lambda/db-init-provider-prod
 ### Phase 2: Deploy Database Stack (15 minutes)
 
 ```bash
-npx cdk deploy AIStudio-DatabaseStack-Prod \
+bunx cdk deploy AIStudio-DatabaseStack-Prod \
   --context snapshotIdentifier=<YOUR-SNAPSHOT-ID> \
   --require-approval never
 ```
@@ -78,17 +78,17 @@ aws rds-data execute-statement \
 
 ```bash
 # Deploy Scheduler Stack
-npx cdk deploy AIStudio-SchedulerStack-Prod \
+bunx cdk deploy AIStudio-SchedulerStack-Prod \
   --context snapshotIdentifier=<YOUR-SNAPSHOT-ID> \
   --require-approval never
 
 # Deploy Document Processing Stack
-npx cdk deploy AIStudio-DocumentProcessingStack-Prod \
+bunx cdk deploy AIStudio-DocumentProcessingStack-Prod \
   --context snapshotIdentifier=<YOUR-SNAPSHOT-ID> \
   --require-approval never
 
 # Deploy Frontend Stack (this builds and pushes Docker image)
-npx cdk deploy AIStudio-FrontendStack-ECS-Prod \
+bunx cdk deploy AIStudio-FrontendStack-ECS-Prod \
   --context snapshotIdentifier=<YOUR-SNAPSHOT-ID> \
   --context baseDomain=aistudio.psd401.ai \
   --require-approval never
@@ -168,7 +168,7 @@ If critical issues occur within first hour:
 3. **Redeploy old stacks:**
    ```bash
    cd infra
-   npx cdk deploy --all --require-approval never
+   bunx cdk deploy --all --require-approval never
    ```
 
 ## Post-Migration Tasks

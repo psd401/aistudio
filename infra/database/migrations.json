@@ -58,6 +58,17 @@
     "060-mcp-cognito-passthrough-auth.sql",
     "061-mcp-oauth-credentials.sql",
     "062-mcp-tool-source.sql",
-    "063-prompt-library-settings.sql"
+    "063-prompt-library-settings.sql",
+    "064-add-voice-mode-tool.sql",
+    "065-agent-telemetry-tables.sql",
+    "066-agent-operations-tables.sql",
+    "067-agent-schedules-columns.sql",
+    "068-agent-cross-user-invocation.sql",
+    "069-agent-telemetry-phase2.sql",
+    "070-agent-skills-platform.sql",
+    "071-agent-workspace-tokens.sql",
+    "072-agent-workspace-nonce-agent-email.sql",
+    "073-agent-workspace-token-kind.sql",
+    "074-deep-research-capability.sql"
   ]
 }

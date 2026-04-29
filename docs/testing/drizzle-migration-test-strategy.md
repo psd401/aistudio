@@ -575,7 +575,7 @@ jobs:
       - run: npm run test:drizzle:e2e
 
       # Coverage check
-      - run: npx jest --coverage --testMatch='**/drizzle-helpers/**/*.test.ts'
+      - run: bunx jest --coverage --testMatch='**/drizzle-helpers/**/*.test.ts'
         env:
           COVERAGE_THRESHOLD: 80
 ```

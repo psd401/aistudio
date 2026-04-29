@@ -19,7 +19,9 @@ import {
 import { useConnectorToolsOptional, type ConnectorServerInfo } from './connector-tool-context'
 import type { McpToolResult } from '@/lib/mcp/types'
 import { ToolFallback } from '@/components/assistant-ui/tool-fallback'
+import { ToolArgsRecoveryBoundary } from '@/components/assistant-ui/tool-args-recovery-boundary'
 import { ExportUrlLinks, parseExportUrls, stripExportUrls } from '@/components/assistant-ui/export-url-link'
+import { SAFE_IMAGE_MIME_TYPES, MAX_IMAGE_BASE64_LENGTH } from '@/lib/utils/image-validation'
 
 /**
  * Format a tool name for display.
@@ -63,15 +65,6 @@ function summarizeArgs(argsText: string): string {
   }
 }
 
-/** Allowlist of safe image MIME types for data URI construction.
- * image/svg+xml is intentionally included: when rendered via <img> (not <object>/<embed>),
- * SVG scripts are sandboxed by browsers and do not execute.
- * WARNING: This allowlist is only safe for <img src> rendering. If these MIME types are ever
- * used in CSS backgrounds, <object>, or <embed> tags, SVG script execution is possible. */
-const SAFE_IMAGE_MIME_TYPES = new Set([
-  'image/png', 'image/jpeg', 'image/gif', 'image/webp', 'image/svg+xml', 'image/bmp',
-])
-
 /** Type guard for plain objects — excludes Date, RegExp, Array, and other built-ins */
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null) return false
@@ -82,8 +75,6 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 /** Maximum content items to render from a single tool result */
 const MAX_CONTENT_ITEMS = 50
 
-/** Maximum base64 string length for image rendering (~5MB decoded) */
-const MAX_IMAGE_BASE64_LENGTH = 5 * 1024 * 1024
 
 /**
  * Detect result type for rendering.
@@ -344,10 +335,18 @@ export const ConnectorToolFallback: ToolCallMessagePartComponent = (props) => {
   // Not a connector tool — render the standard generic fallback.
   // Early return avoids computing displayName, argsSummary, parsedResult for non-connector tools.
   if (!connectorInfo) {
-    return <ToolFallback {...props} />
+    return (
+      <ToolArgsRecoveryBoundary toolName={toolName}>
+        <ToolFallback {...props} />
+      </ToolArgsRecoveryBoundary>
+    )
   }
 
-  return <ConnectorToolCard toolName={toolName} argsText={argsText} result={result} connectorInfo={connectorInfo} />
+  return (
+    <ToolArgsRecoveryBoundary toolName={toolName}>
+      <ConnectorToolCard toolName={toolName} argsText={argsText} result={result} connectorInfo={connectorInfo} />
+    </ToolArgsRecoveryBoundary>
+  )
 }
 
 /** Inner component for connector tools — avoids conditional hooks in the parent. */

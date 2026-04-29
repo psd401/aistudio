@@ -10,7 +10,7 @@ jest.mock('aws-amplify/auth', () => ({
 describe('Home', () => {
   it('renders a heading', () => {
     render(<Home />);
-    const heading = screen.getByText(/Welcome to PSD AI Studio/i);
+    const heading = screen.getByText(/Welcome to AI Studio/i);
     expect(heading).toBeInTheDocument();
   });
-}); 
+});

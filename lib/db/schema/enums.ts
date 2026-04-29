@@ -86,3 +86,13 @@ export const toolStatusEnum = pgEnum("tool_status", [
   "rejected",
   "disabled",
 ]);
+
+// Agent skill scope/scan_status are NOT PostgreSQL enums — they are
+// VARCHAR + CHECK constraints (see migration 070). Re-exported constants
+// for runtime validation.
+export {
+  AGENT_SKILL_SCOPES,
+  AGENT_SKILL_SCAN_STATUSES,
+  type AgentSkillScope,
+  type AgentSkillScanStatus,
+} from "./tables/agent-skills";

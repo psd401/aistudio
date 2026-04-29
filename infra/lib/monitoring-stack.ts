@@ -391,6 +391,11 @@ export class MonitoringStack extends cdk.Stack {
     });
 
     // ============================================================================
+    // Enhanced Log Monitoring (Issue #843)
+    // ============================================================================
+    this.addEnhancedMonitoring(environment, `/ecs/aistudio-${environment}`);
+
+    // ============================================================================
     // Additional Alarms
     // ============================================================================
     this.createCriticalAlarms(environment);
@@ -488,12 +493,45 @@ export class MonitoringStack extends cdk.Stack {
       })
     );
 
+    // Content Safety & Operation Status
+    this.dashboard.addWidgets(
+      new cloudwatch.LogQueryWidget({
+        title: 'Content Safety Blocks',
+        logGroupNames: [logGroupName],
+        view: cloudwatch.LogQueryVisualizationType.TABLE,
+        queryLines: [
+          'fields @timestamp, message, error.name, action, requestId',
+          'filter error.name = "ContentSafetyBlockedError"',
+          'sort @timestamp desc',
+          'limit 20',
+        ],
+        width: 12,
+        height: 6,
+        region: this.region,
+      }),
+
+      // Operation Status Distribution
+      new cloudwatch.LogQueryWidget({
+        title: 'Operation Status Distribution',
+        logGroupNames: [logGroupName],
+        view: cloudwatch.LogQueryVisualizationType.PIE,
+        queryLines: [
+          'fields status, duration',
+          'filter ispresent(status) and ispresent(duration)',
+          'stats count() by status',
+        ],
+        width: 12,
+        height: 6,
+        region: this.region,
+      })
+    );
+
     // Insights Queries Reference
     this.dashboard.addWidgets(
       new cloudwatch.TextWidget({
         markdown: this.getInsightsQueriesReference(),
         width: 24,
-        height: 8,
+        height: 10,
       })
     );
   }
@@ -617,6 +655,22 @@ fields @timestamp, message, error.code, userId
 | filter error.code like /AUTH_/
 | sort @timestamp desc
 | limit 50
+\`\`\`
+
+### Content safety blocks
+\`\`\`
+fields @timestamp, message, error.name, action, requestId
+| filter error.name = "ContentSafetyBlockedError"
+| sort @timestamp desc
+| limit 50
+\`\`\`
+
+### Operation status breakdown (timer/performance logs only)
+\`\`\`
+fields status, duration
+| filter ispresent(status) and ispresent(duration)
+| stats count() as requests by status
+| sort requests desc
 \`\`\`
 
 ### X-Ray Trace Analysis

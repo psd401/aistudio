@@ -13,8 +13,10 @@ import {
   validateSSEEvent,
   validateEventType,
   extractEventFields,
-  generateValidationErrorMessage
+  generateValidationErrorMessage,
+  SSEEventSchema
 } from '@/lib/streaming/sse-event-schemas'
+import { VALID_SSE_EVENT_TYPES } from '@/lib/streaming/sse-event-types'
 
 describe('SSE Event Schemas', () => {
   describe('TextDeltaSchema', () => {
@@ -420,6 +422,105 @@ describe('SSE Event Schemas', () => {
 
       // Should complete in reasonable time (< 100ms for 1000 events)
       expect(duration).toBeLessThan(100)
+    })
+  })
+
+  describe('ToolInputDeltaSchema', () => {
+    it('should validate tool-input-delta with toolCallId and delta', () => {
+      const event = { type: 'tool-input-delta', toolCallId: 'call-123', delta: '{"key":' }
+      const result = validateSSEEvent(event)
+      expect(result.success).toBe(true)
+    })
+
+    it('should validate tool-input-delta without optional delta', () => {
+      const event = { type: 'tool-input-delta', toolCallId: 'call-123' }
+      const result = validateSSEEvent(event)
+      expect(result.success).toBe(true)
+    })
+
+    it('should reject tool-input-delta missing toolCallId', () => {
+      const event = { type: 'tool-input-delta', delta: '{"key":' }
+      const result = validateSSEEvent(event)
+      expect(result.success).toBe(false)
+    })
+  })
+
+  describe('ToolInputAvailableSchema', () => {
+    it('should validate tool-input-available with toolCallId only', () => {
+      const event = { type: 'tool-input-available', toolCallId: 'call-123' }
+      const result = validateSSEEvent(event)
+      expect(result.success).toBe(true)
+    })
+
+    it('should validate tool-input-available with all optional fields', () => {
+      const event = {
+        type: 'tool-input-available',
+        toolCallId: 'call-123',
+        toolName: 'web_search',
+        args: { query: 'test' }
+      }
+      const result = validateSSEEvent(event)
+      expect(result.success).toBe(true)
+    })
+
+    it('should reject tool-input-available missing toolCallId', () => {
+      const event = { type: 'tool-input-available', toolName: 'web_search' }
+      const result = validateSSEEvent(event)
+      expect(result.success).toBe(false)
+    })
+  })
+
+  describe('SourceUrlSchema', () => {
+    it('should validate source-url with valid https URL', () => {
+      const event = { type: 'source-url', sourceId: 'ws_1', url: 'https://example.com' }
+      const result = validateSSEEvent(event)
+      expect(result.success).toBe(true)
+    })
+
+    it('should validate source-url with optional title', () => {
+      const event = { type: 'source-url', sourceId: 'ws_1', url: 'https://example.com', title: 'Example' }
+      const result = validateSSEEvent(event)
+      expect(result.success).toBe(true)
+    })
+
+    it('should reject source-url with javascript: protocol', () => {
+      const event = { type: 'source-url', sourceId: 'ws_evil', url: 'javascript:alert(1)' }
+      const result = validateSSEEvent(event)
+      expect(result.success).toBe(false)
+    })
+
+    it('should reject source-url with data: protocol', () => {
+      const event = { type: 'source-url', sourceId: 'ws_evil', url: 'data:text/html,<script>alert(1)</script>' }
+      const result = validateSSEEvent(event)
+      expect(result.success).toBe(false)
+    })
+
+    it('should reject source-url missing sourceId', () => {
+      const event = { type: 'source-url', url: 'https://example.com' }
+      const result = validateSSEEvent(event)
+      expect(result.success).toBe(false)
+    })
+  })
+
+  describe('Schema Sync', () => {
+    it('SSEEventSchema and VALID_SSE_EVENT_TYPES must contain identical event types', () => {
+      // Extract type literals from discriminated union options
+      const schemaTypes = new Set(
+        SSEEventSchema.options.map((schema) => schema.shape.type.value as string)
+      )
+
+      // Every type in SSEEventSchema must be in VALID_SSE_EVENT_TYPES
+      for (const type of schemaTypes) {
+        expect(VALID_SSE_EVENT_TYPES).toContain(type)
+      }
+
+      // Every type in VALID_SSE_EVENT_TYPES must be in SSEEventSchema
+      for (const type of VALID_SSE_EVENT_TYPES) {
+        expect(schemaTypes).toContain(type)
+      }
+
+      // Sets must be the same size
+      expect(schemaTypes.size).toBe(VALID_SSE_EVENT_TYPES.size)
     })
   })
 })

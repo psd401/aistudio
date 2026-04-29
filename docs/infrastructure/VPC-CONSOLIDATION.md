@@ -199,7 +199,7 @@ Flow logs capture all network traffic for security monitoring:
 
 ```bash
 cd infra
-npx cdk deploy AIStudio-DatabaseStack-Dev
+bunx cdk deploy AIStudio-DatabaseStack-Dev
 ```
 
 The VPC will be automatically created on first deployment.
@@ -222,7 +222,7 @@ aws ec2 describe-flow-logs
 
 ```bash
 # ECS stack will automatically use the shared VPC
-npx cdk deploy AIStudio-FrontendStack-Ecs-Dev
+bunx cdk deploy AIStudio-FrontendStack-Ecs-Dev
 ```
 
 ### Step 4: Monitor Network Traffic
@@ -240,8 +240,8 @@ aws s3 ls s3://aistudio-dev-vpc-flow-logs-ACCOUNT_ID/vpc-flow-logs/
 After successful dev validation:
 
 ```bash
-npx cdk deploy AIStudio-DatabaseStack-Prod
-npx cdk deploy AIStudio-FrontendStack-Ecs-Prod
+bunx cdk deploy AIStudio-DatabaseStack-Prod
+bunx cdk deploy AIStudio-FrontendStack-Ecs-Prod
 ```
 
 ## Usage in Stacks
@@ -455,7 +455,7 @@ If issues arise, rollback to previous VPC configuration:
 
 3. **Redeploy previous version**
    ```bash
-   npx cdk deploy --all
+   bunx cdk deploy --all
    ```
 
 4. **Clean up orphaned resources**

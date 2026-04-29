@@ -13,7 +13,7 @@ export interface PowerTuningStackProps extends cdk.StackProps {
  * This is a utility stack that should be deployed once per environment and kept running.
  *
  * Usage:
- * 1. Deploy this stack once: `npx cdk deploy AIStudio-PowerTuningStack-Dev`
+ * 1. Deploy this stack once: `bunx cdk deploy AIStudio-PowerTuningStack-Dev`
  * 2. Run tuning on Lambda functions as needed
  * 3. Keep deployed - it costs almost nothing (~$0.10/month)
  *

@@ -13,6 +13,7 @@ import { EmailNotificationStack } from '../lib/email-notification-stack';
 import { PowerTuningStack } from '../lib/power-tuning-stack';
 import { SecretsManagerStack } from '../lib/secrets-manager-stack';
 import { GuardrailsStack } from '../lib/guardrails-stack';
+import { AgentPlatformStack } from '../lib/agent-platform-stack';
 import { SecretValue } from 'aws-cdk-lib';
 import { PermissionBoundaryConstruct } from '../lib/constructs/security';
 import { AccessAnalyzerStack } from '../lib/stacks/access-analyzer-stack';
@@ -29,6 +30,8 @@ const standardTags = {
 // Get configuration from context
 const baseDomain = app.node.tryGetContext('baseDomain');
 const alertEmail = app.node.tryGetContext('alertEmail');
+const brandingOrgName = app.node.tryGetContext('brandingOrgName');
+const brandingAppName = app.node.tryGetContext('brandingAppName');
 
 // Helper to get callback/logout URLs for any environment
 function getCallbackAndLogoutUrls(environment: string, baseDomain?: string): { callbackUrls: string[], logoutUrls: string[] } {
@@ -137,6 +140,7 @@ Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAuthStack)
 
 const devStorageStack = new StorageStack(app, 'AIStudio-StorageStack-Dev', {
   environment: 'dev',
+  baseDomain,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(devStorageStack).add('Environment', 'Dev');
@@ -151,6 +155,26 @@ const devGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-De
 });
 cdk.Tags.of(devGuardrailsStack).add('Environment', 'Dev');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devGuardrailsStack).add(key, value));
+
+// Agent Platform Stack — AgentCore Runtime, ECR, S3, DynamoDB, EventBridge, IAM, Router Lambda
+const devAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatformStack-Dev', {
+  environment: 'dev',
+  config: EnvironmentConfig.get('dev'),
+  databaseResourceArn: devDbStack.databaseResourceArn,
+  databaseSecretArn: devDbStack.databaseSecretArn,
+  databaseHost: devDbStack.cluster.clusterEndpoint.hostname,
+  guardrailArn: devGuardrailsStack.guardrail.attrGuardrailArn,
+  guardrailId: devGuardrailsStack.guardrail.attrGuardrailId,
+  alertEmail,
+  // Next.js app URL — used by the psd-workspace skill (#912) to call the
+  // consent-link API. Dev lives at dev.<baseDomain> (e.g. dev.aistudio.psd401.ai).
+  appBaseUrl: baseDomain ? `https://dev.${baseDomain}` : undefined,
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+devAgentPlatformStack.addDependency(devDbStack);
+devAgentPlatformStack.addDependency(devGuardrailsStack);
+cdk.Tags.of(devAgentPlatformStack).add('Environment', 'Dev');
+Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAgentPlatformStack).add(key, value));
 
 const devProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-Dev', {
   environment: 'dev',
@@ -188,6 +212,12 @@ const devSesIdentityExists = app.node.tryGetContext('devSesIdentityExists') === 
                              app.node.tryGetContext('sesIdentityExists') === 'true';
 
 // Only create dev email notification stack if emailDomain is provided
+if (devEmailDomain && !baseDomain) {
+  throw new Error(
+    'CDK context: baseDomain is required when emailDomain is set (used for appBaseUrl). ' +
+    'Deploy with: --context baseDomain=<your-domain> --context devEmailDomain=<email-domain>'
+  );
+}
 let devEmailNotificationStack: EmailNotificationStack | undefined;
 if (devEmailDomain) {
   devEmailNotificationStack = new EmailNotificationStack(app, 'AIStudio-EmailNotificationStack-Dev', {
@@ -198,8 +228,11 @@ if (devEmailDomain) {
     createSesIdentity: !devSesIdentityExists,
     emailDomain: devEmailDomain,
     fromEmail: `noreply@${devEmailDomain}`,
-    appBaseUrl: baseDomain ? `https://dev.${baseDomain}` : undefined,
+    appBaseUrl: `https://dev.${baseDomain}`, // baseDomain is guaranteed non-null by guard above
     useDomainIdentity: false, // Dev uses email identity by default
+    // Branding for email templates (passed as Lambda env vars)
+    brandingOrgName,
+    brandingAppName,
     env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
   });
   devEmailNotificationStack.addDependency(devDbStack);
@@ -248,6 +281,7 @@ Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAuthStack
 
 const prodStorageStack = new StorageStack(app, 'AIStudio-StorageStack-Prod', {
   environment: 'prod',
+  baseDomain,
   env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
 });
 cdk.Tags.of(prodStorageStack).add('Environment', 'Prod');
@@ -261,6 +295,30 @@ const prodGuardrailsStack = new GuardrailsStack(app, 'AIStudio-GuardrailsStack-P
 });
 cdk.Tags.of(prodGuardrailsStack).add('Environment', 'Prod');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodGuardrailsStack).add(key, value));
+
+// Agent Platform Stack — AgentCore Runtime, ECR, S3, DynamoDB, EventBridge, IAM, Router Lambda
+const prodAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatformStack-Prod', {
+  environment: 'prod',
+  config: EnvironmentConfig.get('prod'),
+  databaseResourceArn: prodDbStack.databaseResourceArn,
+  databaseSecretArn: prodDbStack.databaseSecretArn,
+  databaseHost: prodDbStack.cluster.clusterEndpoint.hostname,
+  guardrailArn: prodGuardrailsStack.guardrail.attrGuardrailArn,
+  guardrailId: prodGuardrailsStack.guardrail.attrGuardrailId,
+  // Pin to published version in prod — DRAFT allows live edits without deployment.
+  // After publishing a guardrail version in the Bedrock console, update this value.
+  // Dev uses 'DRAFT' (default) for rapid iteration.
+  guardrailVersion: '1',
+  alertEmail,
+  // Next.js app URL — used by the psd-workspace skill (#912) to call the
+  // consent-link API. Prod ECS lives at the root baseDomain (no subdomain).
+  appBaseUrl: baseDomain ? `https://${baseDomain}` : undefined,
+  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
+});
+prodAgentPlatformStack.addDependency(prodDbStack);
+prodAgentPlatformStack.addDependency(prodGuardrailsStack);
+cdk.Tags.of(prodAgentPlatformStack).add('Environment', 'Prod');
+Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAgentPlatformStack).add(key, value));
 
 const prodProcessingStack = new ProcessingStack(app, 'AIStudio-ProcessingStack-Prod', {
   environment: 'prod',
@@ -299,6 +357,12 @@ const prodSesIdentityExists = app.node.tryGetContext('prodSesIdentityExists') ==
 const prodUseDomainIdentity = app.node.tryGetContext('prodUseDomainIdentity') !== 'false';
 
 // Only create prod email notification stack if emailDomain is provided
+if (prodEmailDomain && !baseDomain) {
+  throw new Error(
+    'CDK context: baseDomain is required when emailDomain is set (used for appBaseUrl). ' +
+    'Deploy with: --context baseDomain=<your-domain> --context prodEmailDomain=<email-domain>'
+  );
+}
 let prodEmailNotificationStack: EmailNotificationStack | undefined;
 if (prodEmailDomain) {
   prodEmailNotificationStack = new EmailNotificationStack(app, 'AIStudio-EmailNotificationStack-Prod', {
@@ -309,8 +373,11 @@ if (prodEmailDomain) {
     createSesIdentity: !prodSesIdentityExists,
     emailDomain: prodEmailDomain,
     fromEmail: `noreply@${prodEmailDomain}`,
-    appBaseUrl: baseDomain ? `https://${baseDomain}` : undefined,
+    appBaseUrl: `https://${baseDomain}`, // baseDomain is guaranteed non-null by guard above
     useDomainIdentity: prodUseDomainIdentity, // Defaults to true for production
+    // Branding for email templates (passed as Lambda env vars)
+    brandingOrgName,
+    brandingAppName,
     env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
   });
   prodEmailNotificationStack.addDependency(prodDbStack);
@@ -325,8 +392,8 @@ if (baseDomain) {
 
   const devFrontendStack = new FrontendStackEcs(app, 'AIStudio-FrontendStack-ECS-Dev', {
     environment: 'dev',
-    baseDomain: 'aistudio.psd401.ai', // The subdomain for AI Studio
-    customSubdomain: 'dev', // Creates dev.aistudio.psd401.ai
+    baseDomain, // Passed via CDK context (e.g., aistudio.psd401.ai)
+    customSubdomain: 'dev', // Creates dev.<baseDomain>
     documentsBucketName: devStorageStack.documentsBucketName,
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation
     setupDns, // Enable DNS/certificate setup (false for CI validation with example.com)
@@ -344,8 +411,8 @@ if (baseDomain) {
 
   const prodFrontendStack = new FrontendStackEcs(app, 'AIStudio-FrontendStack-ECS-Prod', {
     environment: 'prod',
-    baseDomain: 'aistudio.psd401.ai', // The subdomain for AI Studio
-    // No customSubdomain for prod - will use root: aistudio.psd401.ai
+    baseDomain, // Passed via CDK context (e.g., aistudio.psd401.ai)
+    // No customSubdomain for prod - uses root baseDomain
     documentsBucketName: prodStorageStack.documentsBucketName,
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation
     setupDns, // Enable DNS/certificate setup (false for CI validation with example.com)

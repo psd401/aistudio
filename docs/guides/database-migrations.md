@@ -23,7 +23,7 @@ Where `XXX` is a three-digit number (e.g., `042`, `043`). Numbers 001-009 are re
 
 1. Create SQL file in `infra/database/schema/`
 2. Add filename to `MIGRATION_FILES` array in `db-init-handler.ts`
-3. Deploy with `npx cdk deploy`
+3. Deploy with `bunx cdk deploy`
 
 ## RDS Data API Limitations
 

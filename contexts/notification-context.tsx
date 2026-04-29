@@ -1,7 +1,9 @@
 "use client"
 
-import { createContext, useContext, useEffect, useState, useCallback, ReactNode } from "react"
+import { createContext, useContext, useEffect, useState, useCallback, useRef, ReactNode } from "react"
+import { useSession } from "next-auth/react"
 import { createLogger, generateRequestId } from "@/lib/client-logger"
+import { usePollingWithBackoff } from "@/lib/hooks/use-polling-with-backoff"
 import type { NotificationContextValue, UserNotification } from "@/types/notifications"
 import { isConnectionTimeoutEvent, isNotificationUpdateEvent } from "@/types/notification-sse-events"
 
@@ -20,13 +22,22 @@ interface NotificationProviderProps {
 }
 
 export function NotificationProvider({ children }: NotificationProviderProps) {
+  const { status: sessionStatus } = useSession()
   const [notifications, setNotifications] = useState<UserNotification[]>([])
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const log = createLogger({ component: 'NotificationProvider' })
+  // useRef is semantically correct for stable, non-derived values (useMemo is for computed values)
+  const log = useRef(createLogger({ component: 'NotificationProvider' })).current
 
+  // fetchNotifications re-throws errors so the polling hook can track backoff.
+  // All direct call sites (non-polling) must use .catch(() => {}) — errors are logged inside.
   const fetchNotifications = useCallback(async () => {
+    // Don't fetch if session is not authenticated
+    if (sessionStatus !== 'authenticated') {
+      return
+    }
+
     const requestId = generateRequestId()
     const requestLog = createLogger({ component: 'NotificationProvider', requestId })
 
@@ -42,7 +53,8 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       })
 
       if (!response.ok) {
-        // If unauthorized, just return empty notifications instead of throwing
+        // 401 returns without throwing — polling hook treats this as success (no backoff increment).
+        // Session expiry should not trigger exponential backoff.
         if (response.status === 401) {
           setNotifications([])
           setIsLoading(false)
@@ -63,12 +75,14 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       })
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : 'Unknown error'
-      requestLog.error('Failed to fetch notifications', { error: errorMessage })
+      // Downgrade to warn — polling failures are expected transient states
+      requestLog.warn('Failed to fetch notifications', { error: errorMessage })
       setError(errorMessage)
+      throw err // Re-throw so the polling hook tracks the failure for backoff
     } finally {
       setIsLoading(false)
     }
-  }, [])
+  }, [sessionStatus])
 
   const markAsRead = useCallback(async (notificationId: number) => {
     const requestId = generateRequestId()
@@ -116,7 +130,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       setError(errorMessage)
 
       // Refresh notifications to get correct state
-      await fetchNotifications()
+      await fetchNotifications().catch(() => {})
     }
   }, [fetchNotifications])
 
@@ -159,12 +173,13 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       setError(errorMessage)
 
       // Refresh notifications to get correct state
-      await fetchNotifications()
+      await fetchNotifications().catch(() => {})
     }
   }, [fetchNotifications])
 
   const refreshNotifications = useCallback(async () => {
-    await fetchNotifications()
+    // Manual refresh: errors suppressed here (not counted toward polling backoff)
+    await fetchNotifications().catch(() => {})
   }, [fetchNotifications])
 
   // Calculate unread count
@@ -172,21 +187,33 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
     notification => notification.status !== 'read'
   ).length
 
-  // Initial fetch on mount
-  useEffect(() => {
-    fetchNotifications()
-  }, [fetchNotifications])
+  const { resetFailures } = usePollingWithBackoff(fetchNotifications, {
+    baseInterval: 30000, // 30 seconds
+    enabled: sessionStatus === 'authenticated',
+    // onFailure receives the post-increment count from the hook — no +1 arithmetic needed.
+    // No useCallback needed — the hook wraps this in a ref internally.
+    onFailure: (consecutiveFailures: number) => {
+      log.warn('Notification polling backoff increasing', { consecutiveFailures })
+    },
+  })
 
-  // Set up periodic refresh (every 30 seconds)
+  // Reset state when session becomes unauthenticated to prevent stuck loading spinner.
+  // sessionStatus === 'loading' intentionally keeps isLoading=true while NextAuth resolves auth.
   useEffect(() => {
-    const interval = setInterval(() => {
-      if (!isLoading) {
-        fetchNotifications()
-      }
-    }, 30000)
+    if (sessionStatus === 'unauthenticated') {
+      setNotifications([])
+      setIsLoading(false)
+      setError(null)
+      resetFailures()
+    }
+  }, [sessionStatus, resetFailures])
 
-    return () => clearInterval(interval)
-  }, [fetchNotifications, isLoading])
+  // Initial fetch on mount (only when authenticated)
+  useEffect(() => {
+    if (sessionStatus === 'authenticated') {
+      fetchNotifications().catch(() => {})
+    }
+  }, [fetchNotifications, sessionStatus])
 
   // Set up EventSource for real-time updates with exponential backoff
   useEffect(() => {
@@ -260,7 +287,7 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
                 type: data.type,
                 serverTimestamp: data.timestamp
               })
-              fetchNotifications()
+              fetchNotifications().catch(() => {})
             }
           } catch (err) {
             log.error('Failed to parse SSE message', {
@@ -308,15 +335,15 @@ export function NotificationProvider({ children }: NotificationProviderProps) {
       }
     }
 
-    // Only setup SSE if browser supports it
-    if (typeof EventSource !== 'undefined') {
+    // Only setup SSE if browser supports it and session is authenticated
+    if (typeof EventSource !== 'undefined' && sessionStatus === 'authenticated') {
       setupEventSource()
     }
 
     return () => {
       cleanupEventSource()
     }
-  }, [fetchNotifications, log])
+  }, [fetchNotifications, log, sessionStatus])
 
   const value: NotificationContextValue = {
     notifications,

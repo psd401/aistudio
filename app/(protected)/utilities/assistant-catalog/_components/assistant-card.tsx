@@ -33,9 +33,9 @@ const CATEGORY_COLORS: Record<CatalogAssistant['category'], { bg: string; text: 
     icon: '#E8927C'
   },
   other: {
-    bg: 'bg-[#1B365D]/10',
-    text: 'text-[#1B365D]',
-    icon: '#1B365D'
+    bg: 'bg-[var(--brand-primary)]/10',
+    text: 'text-[var(--brand-primary)]',
+    icon: 'var(--brand-primary)'
   }
 }
 

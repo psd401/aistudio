@@ -305,16 +305,6 @@ export class OpenAIAdapter extends BaseProviderAdapter {
             stream_reasoning_summaries: true,
             preserve_reasoning_items: true,
 
-            // Response configuration
-            response_format: {
-              type: 'json_object' as const,
-              schema: {
-                reasoning_steps: 'array',
-                thinking_content: 'string',
-                final_answer: 'string'
-              }
-            },
-
             // Tool configuration for reasoning models
             parallel_tool_calls: true
           }
@@ -393,11 +383,27 @@ export class OpenAIAdapter extends BaseProviderAdapter {
             });
             await callbacks.onFinish(transformedData);
           }
+        },
+        onError: (event) => {
+          const error = event.error instanceof Error ? event.error : new Error(String(event.error));
+
+          // handleError() logs at warn (transient) or error (permanent) — no need to log here too.
+          this.handleError(error, callbacks);
+
+          if (callbacks.onError) {
+            callbacks.onError(error);
+          }
         }
       });
       
-      // Process reasoning content from the stream
-      this.processResponsesAPIStream(result, callbacks);
+      // Process supplementary reasoning content (fire-and-forget).
+      // Supplementary reasoning tokens only — main response already delivered;
+      // intentionally does not call callbacks.onError.
+      this.processResponsesAPIStream(result, callbacks).catch((err: unknown) => {
+        logger.error('Unexpected error escaping processResponsesAPIStream', {
+          error: err instanceof Error ? err.message : String(err)
+        });
+      });
       
       return {
         toDataStreamResponse: (options?: { headers?: Record<string, string> }) =>
@@ -450,7 +456,8 @@ export class OpenAIAdapter extends BaseProviderAdapter {
   }
 
   /**
-   * Process Responses API stream to extract reasoning content
+   * Process Responses API stream to extract reasoning content.
+   * Handles stale message ID errors ("Item not found") gracefully.
    */
   private async processResponsesAPIStream(
     result: { fullStream?: AsyncIterable<unknown> },
@@ -468,9 +475,23 @@ export class OpenAIAdapter extends BaseProviderAdapter {
         this.handleStreamPart(typedPart, callbacks, logger);
       }
     } catch (error) {
-      logger.error('Error processing Responses API stream', {
-        error: error instanceof Error ? error.message : String(error)
-      });
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      // Match the same precise pattern as isTransientStreamError — "No item with id X was found"
+      const isStaleReference = errorMessage.toLowerCase().includes('no item with id');
+
+      if (isStaleReference) {
+        // Stale message ID from OpenAI Responses API — a previous response ID
+        // reference became invalid. This is a transient issue that doesn't affect
+        // the current response content (already streamed via textStream).
+        logger.warn('OpenAI Responses API stale message reference', {
+          error: errorMessage,
+          note: 'Transient issue — response content was delivered successfully',
+        });
+      } else {
+        logger.error('Error processing Responses API stream', {
+          error: errorMessage,
+        });
+      }
     }
   }
   

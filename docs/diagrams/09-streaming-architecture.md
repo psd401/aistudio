@@ -93,8 +93,7 @@ const httpsListener = alb.addListener('HttpsListener', {
   // Connection settings for streaming
   defaultActions: [{
     type: ListenerAction.forward({
-      targets: [ecsService],
-      stickinessCookieDuration: Duration.hours(1)
+      targets: [ecsService]
     })
   }]
 });
@@ -112,10 +111,7 @@ const targetGroup = new ApplicationTargetGroup(this, 'ECSTargetGroup', {
   },
   // Streaming-friendly settings
   deregistrationDelay: Duration.seconds(30),
-  slowStart: Duration.seconds(60),
-  // Keep connections alive for streaming
-  stickiness Enabled: true,
-  stickinessCookieDuration: Duration.hours(1)
+  slowStart: Duration.seconds(60)
 });
 ```
 

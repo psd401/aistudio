@@ -1,6 +1,7 @@
 import { NextResponse, NextRequest } from 'next/server';
 import { getServerSession } from '@/lib/auth/server-session';
-import { getUserIdByCognitoSub, updateIdea } from '@/lib/db/drizzle';
+import { updateIdea } from '@/lib/db/drizzle';
+import { resolveUserId } from '@/lib/auth/resolve-user';
 import { executeTransaction as drizzleTransaction, ideas, ideaVotes, ideaNotes } from '@/lib/db/drizzle-client';
 import { hasRole } from '@/utils/roles';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
@@ -50,14 +51,8 @@ export async function PATCH(
     if (body.status) {
       updates.status = body.status;
       if (body.status === 'completed') {
-        // Get the user's numeric ID from their cognito_sub
-        const userIdString = await getUserIdByCognitoSub(session.sub);
-
-        if (!userIdString) {
-          return NextResponse.json({ error: 'User not found' }, { status: 404 });
-        }
-
-        updates.completedBy = userIdString;
+        const userId = await resolveUserId(session, requestId);
+        updates.completedBy = String(userId);
       }
     }
 

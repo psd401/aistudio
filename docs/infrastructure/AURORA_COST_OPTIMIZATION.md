@@ -81,14 +81,14 @@ export class DatabaseStack extends cdk.Stack {
 cd infra
 
 # Deploy to dev first (safest)
-npx cdk deploy AIStudio-DatabaseStack-Dev
+bunx cdk deploy AIStudio-DatabaseStack-Dev
 
 # Verify auto-pause is working (check Lambda logs after 30 min idle)
 aws logs tail /aws/lambda/pause-resume-dev --follow
 
 # Deploy to other environments
-npx cdk deploy AIStudio-DatabaseStack-Staging
-npx cdk deploy AIStudio-DatabaseStack-Prod
+bunx cdk deploy AIStudio-DatabaseStack-Staging
+bunx cdk deploy AIStudio-DatabaseStack-Prod
 ```
 
 ### Step 3: Monitor
@@ -429,7 +429,7 @@ If you need to disable optimization:
 // new AuroraCostOptimizer(this, "Optimizer", { ... })
 
 // Deploy
-npx cdk deploy AIStudio-DatabaseStack-Dev
+bunx cdk deploy AIStudio-DatabaseStack-Dev
 ```
 
 This removes automation but **does not affect** your database or its data.

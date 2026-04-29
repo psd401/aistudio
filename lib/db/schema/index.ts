@@ -133,6 +133,32 @@ export * from "./tables/graph-nodes";
 export * from "./tables/graph-edges";
 
 // ============================================
+// Agent Platform Telemetry
+// TODO: Add Zod insert/select validators (createInsertSchema/createSelectSchema)
+//       when admin dashboards are built for telemetry queries.
+// ============================================
+export * from "./tables/agent-messages";
+export * from "./tables/agent-sessions";
+export * from "./tables/agent-feedback";
+export * from "./tables/agent-health-snapshots";
+export * from "./tables/agent-patterns";
+
+// ============================================
+// Agent Skills Platform (#910)
+// ============================================
+export * from "./tables/agent-skills";
+export * from "./tables/agent-skill-audit";
+export * from "./tables/agent-credentials-audit";
+export * from "./tables/agent-credential-reads";
+export * from "./tables/agent-credential-requests";
+
+// ============================================
+// Agent Workspace Integration (#912)
+// ============================================
+export * from "./tables/agent-workspace-tokens";
+export * from "./tables/agent-workspace-consent-nonces";
+
+// ============================================
 // API Keys (External API Platform)
 // ============================================
 export * from "./tables/api-keys";

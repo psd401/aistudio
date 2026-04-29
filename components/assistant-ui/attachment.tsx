@@ -1,6 +1,7 @@
 "use client";
 
-import { PropsWithChildren, useEffect, useState, startTransition, type FC } from "react";
+import { PropsWithChildren, useEffect, useMemo, useState, startTransition, type FC } from "react";
+import { createLogger } from "@/lib/client-logger";
 import { CircleXIcon, FileIcon, PaperclipIcon, Loader2, CheckCircle2 } from "lucide-react";
 import {
   AttachmentPrimitive,
@@ -24,6 +25,8 @@ import {
 import { Avatar, AvatarImage, AvatarFallback } from "@/components/ui/avatar";
 import { TooltipIconButton } from "@/components/assistant-ui/tooltip-icon-button";
 import { DialogContent as DialogPrimitiveContent } from "@radix-ui/react-dialog";
+
+const log = createLogger({ module: 'attachment' });
 
 const useFileSrc = (file: File | undefined) => {
   const [src, setSrc] = useState<string | undefined>(undefined);
@@ -184,10 +187,9 @@ const AttachmentUI: FC<AttachmentUIProps> = ({ processingAttachments }) => {
         return "Document";
       case "file":
         return "File";
-      default: {
-        const _exhaustiveCheck: never = type;
-        throw new Error(`Unknown attachment type: ${_exhaustiveCheck}`);
-      }
+      default:
+        log.warn('Unknown attachment type encountered — rendering as File', { type });
+        return "File";
     }
   });
   return (
@@ -243,8 +245,13 @@ interface ComposerAttachmentsProps {
 }
 
 export const ComposerAttachments: FC<ComposerAttachmentsProps> = ({ processingAttachments }) => {
-  const AttachmentWithProcessing = (props: Record<string, unknown>) => <AttachmentUI {...props} processingAttachments={processingAttachments} />;
-  
+  const AttachmentWithProcessing = useMemo(
+    () => function AttachmentWithProcessing(props: AttachmentUIProps) {
+      return <AttachmentUI {...props} processingAttachments={processingAttachments} />;
+    },
+    [processingAttachments],
+  );
+
   return (
     <div className="flex w-full flex-row gap-3 overflow-x-auto">
       <ComposerPrimitive.Attachments

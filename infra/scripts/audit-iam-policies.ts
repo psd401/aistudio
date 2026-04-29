@@ -8,7 +8,7 @@
  * mentioned in issue #379.
  *
  * Usage:
- *   npx ts-node infra/scripts/audit-iam-policies.ts
+ *   bunx ts-node infra/scripts/audit-iam-policies.ts
  */
 
 import * as fs from "fs"

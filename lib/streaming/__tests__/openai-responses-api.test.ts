@@ -7,7 +7,7 @@ import {
 import type { StreamRequest, StreamingCallbacks } from '../types';
 
 // Mock fetch globally
-global.fetch = jest.fn() as jest.MockedFunction<typeof fetch>;
+global.fetch = jest.fn() as unknown as typeof fetch;
 
 // Polyfill ReadableStream for Node.js test environment
 if (!global.ReadableStream) {

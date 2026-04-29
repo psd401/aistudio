@@ -71,7 +71,7 @@ aws ses get-identity-verification-attributes --identities yourdomain.com --regio
 When you have domain verification:
 
 ```bash
-npx cdk deploy AIStudio-EmailNotificationStack-Dev \
+bunx cdk deploy AIStudio-EmailNotificationStack-Dev \
   --context emailDomain=yourdomain.com \
   --context sesIdentityExists=true \
   --context useDomainIdentity=true \
@@ -83,7 +83,7 @@ npx cdk deploy AIStudio-EmailNotificationStack-Dev \
 If the domain identity doesn't exist yet, let CDK create it:
 
 ```bash
-npx cdk deploy AIStudio-EmailNotificationStack-Dev \
+bunx cdk deploy AIStudio-EmailNotificationStack-Dev \
   --context emailDomain=yourdomain.com \
   --context sesIdentityExists=false \
   --context useDomainIdentity=true \
@@ -176,7 +176,7 @@ _amazonses.psd401.net TXT "verification-token-here"
 
 3. **Deploy with verified domain:**
 ```bash
-npx cdk deploy AIStudio-EmailNotificationStack-Dev \
+bunx cdk deploy AIStudio-EmailNotificationStack-Dev \
   --context emailDomain=psd401.net \
   --context sesIdentityExists=true \
   --context useDomainIdentity=true \

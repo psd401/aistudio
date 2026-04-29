@@ -11,6 +11,34 @@ import type {
 
 const log = createLogger({ module: 'base-provider-adapter' });
 
+/**
+ * Standalone transient error classifier used by both the streaming adapters
+ * and the dual-stream merger to ensure consistent behavior across all paths.
+ *
+ * Transient errors are recoverable conditions that don't indicate a systemic
+ * issue: network timeouts, connection resets, temporary provider outages.
+ */
+export function isTransientStreamError(error: Error): boolean {
+  const message = error.message.toLowerCase();
+  return (
+    message.includes('no output generated') ||
+    message.includes('timeout') ||
+    message.includes('econnreset') ||
+    message.includes('etimedout') ||
+    // OpenAI Responses API stale previous_response_id: "No item with id X was found"
+    message.includes('no item with id') ||
+    // Rate limits are transient — the request can succeed after backoff.
+    // Use precise patterns to avoid false positives on unrelated numeric strings.
+    message.includes('rate limit') ||
+    message.includes('too many requests') ||
+    // Match HTTP 429 status codes ("http 429", "status 429", "error 429") but not
+    // strings like "id 42991a" or port ":4299" that happen to contain "429".
+    /\bhttp\s*429\b/.test(message) ||
+    /\bstatus\s*429\b/.test(message) ||
+    /\berror\s*429\b/.test(message)
+  );
+}
+
 /** Tool call accumulated across streaming steps */
 export type AccumulatedToolCall = {
   toolCallId: string;
@@ -79,14 +107,12 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
   }
 
   /**
-   * Get list of tools supported by a specific model
-   * Override in subclasses to report model-specific tool capabilities
+   * Get list of tools supported by a specific model.
+   * Return [] to indicate the model supports no provider-native tools (all tool requests
+   * will be filtered out). Abstract to enforce a deliberate implementation in every adapter —
+   * a missing override would silently drop all tools, which is hard to debug.
    */
-   
-  getSupportedTools(_modelId: string): string[] {
-    // Base implementation returns empty - providers override this
-    return [];
-  }
+  abstract getSupportedTools(modelId: string): string[];
 
   /**
    * Get stored provider client instance (for debugging/testing)
@@ -340,15 +366,36 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
    * Can be overridden by specific providers
    */
   protected handleError(
-    error: Error, 
+    error: Error,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     callbacks: StreamingCallbacks
   ): void {
-    // Base error handling - log the error
-    log.error(`${this.providerName} adapter error`, {
-      error: error.message,
-      provider: this.providerName
-    });
+    const isTransient = this.isTransientError(error);
+    if (isTransient) {
+      log.warn(`${this.providerName} adapter transient error`, {
+        error: error.message,
+        provider: this.providerName,
+      });
+    } else {
+      log.error(`${this.providerName} adapter error`, {
+        error: error.message,
+        provider: this.providerName,
+      });
+    }
+  }
+
+  /**
+   * Check if an error is transient (recoverable) vs permanent.
+   * Transient errors are logged at warn level since they don't indicate
+   * a systemic issue.
+   *
+   * Subclasses may override this to add provider-specific transient patterns.
+   * Call `super.isTransientError(error)` to include the base patterns.
+   * Do not call the module-level `isTransientStreamError()` directly from
+   * subclass overrides — always go through `super` so the chain is extensible.
+   */
+  protected isTransientError(error: Error): boolean {
+    return isTransientStreamError(error);
   }
   
   /**

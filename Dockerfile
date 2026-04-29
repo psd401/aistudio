@@ -54,6 +54,11 @@ ENV RDS_SECRET_ARN=${RDS_SECRET_ARN}
 RUN --mount=type=cache,target=/app/.next/cache \
     node_modules/.bin/next build --webpack
 
+# Bundle voice WebSocket handler as a self-contained CJS artifact for voice-server.js.
+# The script fails the build if any non-builtin runtime externals leak into the bundle.
+# Writing into .next/standalone ensures the runner-stage COPY picks it up automatically.
+RUN node scripts/build-voice-ws-handler.mjs
+
 # ============================================================================
 # Stage 3: Production Runner
 # ============================================================================
@@ -82,6 +87,11 @@ COPY --from=builder --chown=nextjs:nodejs /app/public ./public
 # Copy static files to the .next/static location
 COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 
+# Copy voice server wrapper for WebSocket support (issue #872)
+# voice-server.js wraps the Next.js standalone server.js to add WebSocket
+# upgrade handling for /api/nexus/voice
+COPY --from=builder --chown=nextjs:nodejs /app/voice-server.js ./voice-server.js
+
 # Copy entrypoint script for fixing volume permissions at runtime (issue #509)
 # ECS volumes mount as root-owned, so entrypoint fixes ownership before starting app
 # The entrypoint runs as root, fixes permissions, then switches to nextjs user via su-exec
@@ -106,4 +116,5 @@ EXPOSE 3000
 
 # ECS Fargate provides built-in init process (initProcessEnabled: true)
 # No need for tini - ECS handles PID 1 signal management
-CMD ["node", "server.js"]
+# voice-server.js wraps server.js to add WebSocket support for voice (issue #872)
+CMD ["node", "voice-server.js"]

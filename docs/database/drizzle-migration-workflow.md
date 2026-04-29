@@ -107,7 +107,7 @@ const MIGRATION_FILES = [
 **Step 6: Deploy**
 
 ```bash
-cd infra && npx cdk deploy AIStudio-DatabaseStack-Dev
+cd infra && bunx cdk deploy AIStudio-DatabaseStack-Dev
 ```
 
 ### Option 2: Manual Migration

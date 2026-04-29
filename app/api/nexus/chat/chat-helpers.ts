@@ -8,7 +8,7 @@ import { executeQuery } from '@/lib/db/drizzle-client';
 import { nexusConversations, nexusMessages } from '@/lib/db/schema';
 import { sanitizeTextForDatabase, decodeHtmlEntitiesDeep } from '@/lib/utils/text-sanitizer';
 import { safeJsonbStringify } from '@/lib/db/json-utils';
-import { createLogger } from '@/lib/logger';
+import { createLogger, sanitizeForLogging } from '@/lib/logger';
 
 const log = createLogger({ route: 'api.nexus.chat.helpers' });
 
@@ -113,7 +113,7 @@ export async function createConversation(params: {
   }
 
   const conversationId = createResult[0].id as string;
-  log.info('Created new Nexus conversation', { conversationId, userId, title });
+  log.info('Created new Nexus conversation', sanitizeForLogging({ conversationId, userId, title }));
 
   return { conversationId };
 }
@@ -172,7 +172,13 @@ export function extractUserContent(message: MessageWithContent): {
 }
 
 /**
- * Save user message to database
+ * Save user message to database.
+ *
+ * Note: Unlike saveAssistantMessage(), this function does NOT guard against
+ * empty content because extractUserContent() only serializes text/image parts.
+ * Attachment-only messages (PDF, DOCX, etc.) arrive with content='' and parts=[]
+ * since processMessagePart() doesn't handle file types — but the user DID send
+ * something. The caller (setupConversation) validates the original message.
  */
 export async function saveUserMessage(params: {
   conversationId: string;
@@ -384,86 +390,4 @@ export async function saveAssistantMessage(params: {
   });
 }
 
-/**
- * Authenticate user and get user ID
- */
-export async function authenticateAndGetUser(
-  getServerSession: () => Promise<{ sub: string } | null>,
-  getCurrentUserAction: () => Promise<{ isSuccess: boolean; data: { user: { id: number } } }>,
-  log: { warn: (msg: string, data?: unknown) => void; error: (msg: string, data?: unknown) => void },
-  timer: (data: Record<string, unknown>) => void
-): Promise<{ userId: number; session: { sub: string } } | { error: Response }> {
-  const session = await getServerSession();
-  if (!session) {
-    log.warn('Unauthorized request - no session');
-    timer({ status: 'error', reason: 'unauthorized' });
-    return { error: new Response('Unauthorized', { status: 401 }) };
-  }
 
-  const currentUser = await getCurrentUserAction();
-  if (!currentUser.isSuccess) {
-    log.error('Failed to get current user');
-    return { error: new Response('Unauthorized', { status: 401 }) };
-  }
-
-  return { userId: currentUser.data.user.id, session };
-}
-
-/**
- * Get and validate model configuration
- */
-export async function getAndValidateModel(
-  modelId: string,
-  getModelConfig: (id: string) => Promise<{ id: number; provider: string; model_id: string } | null>,
-  getAIModelById: (id: number) => Promise<{ capabilities?: Record<string, unknown> } | null>,
-  hasCapability: (caps: Record<string, unknown> | undefined, cap: string) => boolean,
-  log: { error: (msg: string, data?: unknown) => void }
-): Promise<{
-  modelConfig: { id: number; provider: string; model_id: string };
-  isImageGenerationModel: boolean;
-} | { error: Response }> {
-  const modelConfig = await getModelConfig(modelId);
-  if (!modelConfig) {
-    log.error('Model not found', { modelId });
-    return {
-      error: new Response(
-        JSON.stringify({ error: 'Selected model not found' }),
-        { status: 404, headers: { 'Content-Type': 'application/json' } }
-      )
-    };
-  }
-
-  const modelWithCapabilities = await getAIModelById(modelConfig.id);
-  const isImageGenerationModel = hasCapability(modelWithCapabilities?.capabilities, 'imageGeneration');
-
-  return { modelConfig, isImageGenerationModel };
-}
-
-/**
- * Handle chat API errors
- */
-export function handleChatError(
-  error: unknown,
-  requestId: string,
-  timer: (data: Record<string, unknown>) => void,
-  log: { error: (msg: string, data?: unknown) => void },
-  ContentSafetyBlockedError: new (msg: string) => Error
-): Response {
-  log.error('Nexus chat API error', {
-    error: error instanceof Error ? { message: error.message, name: error.name } : String(error)
-  });
-
-  timer({ status: 'error' });
-
-  if (error instanceof ContentSafetyBlockedError) {
-    return new Response(
-      JSON.stringify({ error: (error as Error).message, code: 'CONTENT_BLOCKED', requestId }),
-      { status: 400, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
-    );
-  }
-
-  return new Response(
-    JSON.stringify({ error: 'Failed to process chat request', requestId }),
-    { status: 500, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
-  );
-}

@@ -2,11 +2,11 @@ import { NextRequest, NextResponse } from "next/server"
 import { requireAdmin } from "@/lib/auth/admin-check"
 import { getServerSession } from "@/lib/auth/server-session"
 import {
-  getUserIdByCognitoSubAsNumber,
   createAssistantArchitect,
   createChainPrompt,
   createToolInputField,
 } from "@/lib/db/drizzle"
+import { resolveUserId } from "@/lib/auth/resolve-user"
 import { validateImportFile, mapModelsForImport, type ExportFormat } from "@/lib/assistant-export-import"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
 
@@ -78,15 +78,8 @@ export async function POST(request: NextRequest) {
 
     log.info("Starting import", { assistantCount: importData.assistants.length })
 
-    // Get user ID from Cognito sub
-    const userId = await getUserIdByCognitoSubAsNumber(session.sub)
-
-    if (!userId) {
-      return NextResponse.json(
-        { isSuccess: false, message: "User not found" },
-        { status: 404 }
-      )
-    }
+    // Get user ID (provisions if missing)
+    const userId = await resolveUserId(session, requestId)
 
     // Collect all unique model names for mapping
     const modelNames = new Set<string>()

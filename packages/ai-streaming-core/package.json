@@ -26,7 +26,7 @@
     "@types/node": "^20.0.0",
     "@typescript-eslint/eslint-plugin": "^8.41.0",
     "@typescript-eslint/parser": "^8.41.0",
-    "eslint": "^9.34.0",
+    "eslint": "^9.39.2",
     "typescript": "^5.0.0"
   },
   "keywords": [
@@ -39,5 +39,10 @@
     "azure"
   ],
   "author": "AI Studio",
-  "license": "MIT"
+  "license": "MIT",
+  "overrides": {
+    "flatted": "^3.3.3",
+    "minimatch": "^9.0.5",
+    "picomatch": "^4.0.3"
+  }
 }

@@ -40,6 +40,10 @@ export class GuardrailsStack extends cdk.Stack {
     // 1. Amazon Bedrock Guardrail for K-12 Content Safety
     // =====================================================================
 
+    // Issue #763: Currently using CLASSIC tier (default). STANDARD tier available
+    // with benefits: 1000-char topic definitions (vs 200), better contextual
+    // classification, 60+ languages. Requires cross-region inference config.
+    // See docs/operations/guardrail-tuning-analysis.md for migration checklist.
     this.guardrail = new bedrock.CfnGuardrail(this, 'K12ContentGuardrail', {
       name: `aistudio-${props.environment}-k12-safety`,
       description: 'K-12 content safety guardrail for AI Studio - filters harmful content including hate speech, violence, self-harm, and inappropriate material for educational environments.',
@@ -62,6 +66,11 @@ export class GuardrailsStack extends cdk.Stack {
       // HATE at LOW is kept as the minimum required filter — LOW threshold has
       // the fewest false positives for K-12 educational content.
       //
+      // Issue #763 analysis (2026-03-12): HATE at LOW produced only 2 blocks in
+      // 30 days, both false positives on large educational documents (28KB, 52KB
+      // inputs that simultaneously triggered Bullying/Weapons topic detections).
+      // Keeping at LOW as Bedrock minimum requirement; FP rate is tolerable.
+      //
       // Safety net: LLM providers (OpenAI, Anthropic, Google) have built-in safety
       // training that provides baseline content filtering even without Bedrock.
       //
@@ -69,13 +78,21 @@ export class GuardrailsStack extends cdk.Stack {
       // - Issue #639: INSULTS/MISCONDUCT lowered from MEDIUM to LOW
       // - Issue #727: PROMPT_ATTACK disabled (75% false positive rate)
       // - Issue #761: All filters to NONE except HATE at LOW (Bedrock minimum requirement)
+      // - Issue #763: PROFANITY word policy disabled (97% of all blocks, 24x rate spike)
+      // - Issue #860: HATE asymmetric (input LOW, output NONE) — 100% FP rate on output
       contentPolicyConfig: {
         filtersConfig: [
           {
-            // Kept at LOW — Bedrock requires at least one non-NONE filter
+            // Issue #860: Asymmetric — input at LOW (Bedrock minimum), output at NONE.
+            // 30-day analysis (#763) found HATE at LOW had 100% false positive rate
+            // (2/2 blocks were on large educational documents: 28KB, 52KB).
+            // Asymmetric config eliminates output false positives (the most disruptive —
+            // blocks AI responses users already waited for) while satisfying Bedrock's
+            // requirement of at least one non-NONE content filter.
+            // inputStrength: 'LOW' still catches genuinely hateful user input.
             type: 'HATE',
             inputStrength: 'LOW',
-            outputStrength: 'LOW',
+            outputStrength: 'NONE',
           },
           {
             type: 'VIOLENCE',
@@ -204,14 +221,31 @@ export class GuardrailsStack extends cdk.Stack {
         ],
       },
 
-      // Word policy - block specific terms inappropriate for K-12
-      wordPolicyConfig: {
-        managedWordListsConfig: [
-          {
-            type: 'PROFANITY',
-          },
-        ],
-      },
+      // Word policy - PROFANITY managed word list
+      //
+      // Issue #763: DISABLED after 30-day analysis (2026-03-12). Data showed:
+      // - 66 of 68 blocks (97%) were from PROFANITY — the remaining 2 were HATE FPs
+      // - 48 of 66 PROFANITY blocks were on OUTPUT (AI-generated educational responses)
+      // - Block rate increased 24x starting March 6 (AWS likely updated the word list)
+      // - The extraction bug (missing managedWordLists) made these blocks invisible
+      //
+      // PROFANITY is binary on/off with no strength tuning. AWS controls the list
+      // and does not publish changes. With 97% of blocks being PROFANITY and the
+      // majority blocking AI educational OUTPUT, the cost exceeds the benefit.
+      //
+      // Compensating controls:
+      // - LLM safety training prevents actual profanity generation
+      // - HATE at LOW still catches hate speech (Bedrock minimum)
+      // - Content filters in detect-only mode provide visibility
+      //
+      // To re-enable: uncomment the wordPolicyConfig below.
+      // wordPolicyConfig: {
+      //   managedWordListsConfig: [
+      //     {
+      //       type: 'PROFANITY',
+      //     },
+      //   ],
+      // },
 
       // Resource tags
       tags: [

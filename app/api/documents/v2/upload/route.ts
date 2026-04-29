@@ -3,9 +3,10 @@ import { getServerSession } from '@/lib/auth/server-session';
 import { createDocumentJob, confirmDocumentUpload } from '@/lib/services/document-job-service';
 import { uploadToS3 } from '@/lib/aws/document-upload';
 import { sendToProcessingQueue } from '@/lib/aws/lambda-trigger';
-import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
+import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger';
 import { UploadRequestSchema } from '@/lib/validation/document-upload.validation';
 import { apiRateLimit } from '@/lib/rate-limit';
+import { UploadClassifiedError, type UploadErrorCode } from '@/lib/errors/upload-errors';
 
 /**
  * Server-side upload endpoint that proxies file uploads through the application server to S3.
@@ -68,44 +69,68 @@ function parseProcessingOptions(processingOptionsRaw: string | null, log: Return
   }
 }
 
-/** Error classification patterns with user-friendly messages */
-const ERROR_PATTERNS: Array<{ patterns: string[]; message: string; status: number }> = [
+/** Error classification patterns with user-friendly messages (fallback for untyped errors) */
+const ERROR_PATTERNS: Array<{ patterns: string[]; code: UploadErrorCode; message: string; status: number }> = [
   {
     patterns: ['file size', 'exceeds'],
+    code: 'FILE_TOO_LARGE',
     message: 'File size exceeds maximum allowed',
     status: 413
   },
   {
     patterns: ['file format', 'file type', 'unsupported format', 'invalid mime'],
+    code: 'INVALID_FORMAT',
     message: 'Invalid file format',
     status: 415
   },
   {
     patterns: ['request timeout', 'upload timeout', 'timed out', 'etimedout'],
+    code: 'UPLOAD_TIMEOUT',
     message: 'Upload timed out - please try again',
     status: 408
   },
   {
-    patterns: ['s3', 'storage service', 'bucket'],
-    message: 'Storage service temporarily unavailable',
+    patterns: ['upload to s3', 'storage service', 'bucket', 'nosuchbucket', 'accessdenied', 'slowdown', 's3 service'],
+    code: 'STORAGE_UNAVAILABLE',
+    message: 'Storage service temporarily unavailable - please try again',
+    status: 503
+  },
+  {
+    // Fallback pattern matching for DynamoDB errors not thrown as UploadClassifiedError
+    patterns: ['dynamodb', 'resourcenotfoundexception'],
+    code: 'JOB_SERVICE_UNAVAILABLE',
+    message: 'Document processing service temporarily unavailable - please try again',
+    status: 503
+  },
+  {
+    patterns: ['processing_queue_url', 'sqs'],
+    code: 'QUEUE_UNAVAILABLE',
+    message: 'Document processing queue temporarily unavailable - please try again',
     status: 503
   }
 ];
 
 /**
  * Classify error and return user-friendly message with status code.
- * Uses specific patterns to avoid misclassifying unrelated errors.
+ * Prefers typed UploadClassifiedError for explicit classification,
+ * falls back to string pattern matching for untyped AWS SDK errors.
  */
-function classifyUploadError(errorMessage: string): { message: string; status: number } {
+function classifyUploadError(error: unknown): { code: UploadErrorCode; message: string; status: number } {
+  // Prefer typed errors — no string coupling needed
+  if (error instanceof UploadClassifiedError) {
+    return { code: error.code, message: error.userMessage, status: error.statusCode };
+  }
+
+  const errorMessage = error instanceof Error ? error.message : String(error);
   const lowerMessage = errorMessage.toLowerCase();
 
-  for (const { patterns, message, status } of ERROR_PATTERNS) {
+  for (const { patterns, code, message, status } of ERROR_PATTERNS) {
     if (patterns.some(pattern => lowerMessage.includes(pattern))) {
-      return { message, status };
+      return { code, message, status };
     }
   }
 
-  return { message: 'Failed to upload file', status: 500 };
+  return { code: 'UPLOAD_FAILED', message: 'Failed to upload file', status: 500 };
 }
 
 async function uploadHandler(req: NextRequest) {
@@ -124,7 +149,7 @@ async function uploadHandler(req: NextRequest) {
     const session = await getServerSession();
     if (!session?.sub) {
       log.warn('Unauthorized request');
-      return NextResponse.json({ error: 'Unauthorized', requestId }, { status: 401 });
+      return NextResponse.json({ error: 'Unauthorized', code: 'UNAUTHORIZED', requestId }, { status: 401 });
     }
     userId = session.sub;
 
@@ -136,7 +161,7 @@ async function uploadHandler(req: NextRequest) {
 
     if (!file) {
       log.warn('No file provided');
-      return NextResponse.json({ error: 'No file provided', requestId }, { status: 400 });
+      return NextResponse.json({ error: 'No file provided', code: 'NO_FILE', requestId }, { status: 400 });
     }
 
     // Parse processing options
@@ -160,6 +185,7 @@ async function uploadHandler(req: NextRequest) {
       return NextResponse.json(
         {
           error: 'Invalid request data',
+          code: 'VALIDATION_ERROR',
           details: validationResult.error.issues.map((e) => `${e.path.join('.')}: ${e.message}`),
           requestId
         },
@@ -211,7 +237,7 @@ async function uploadHandler(req: NextRequest) {
     // Step 4: Send to processing queue (matching confirm-upload flow)
     if (process.env.NODE_ENV !== 'test' && !process.env.DOCUMENTS_BUCKET_NAME) {
       log.error('DOCUMENTS_BUCKET_NAME environment variable not configured');
-      return NextResponse.json({ error: 'Service configuration error', requestId }, { status: 500 });
+      return NextResponse.json({ error: 'Service configuration error', code: 'CONFIG_ERROR', requestId }, { status: 500 });
     }
 
     await sendToProcessingQueue({
@@ -243,8 +269,8 @@ async function uploadHandler(req: NextRequest) {
     log.error('Server-side upload failed', {
       error: errorMessage,
       name: errorName,
-      stack: errorStack,
-      fileName,
+      stack: process.env.NODE_ENV !== 'production' ? errorStack : undefined,
+      fileName: sanitizeForLogging(fileName),
       fileSize,
       userId,
       jobId,
@@ -253,8 +279,8 @@ async function uploadHandler(req: NextRequest) {
 
     timer({ status: 'error' });
 
-    const { message, status } = classifyUploadError(errorMessage);
-    return NextResponse.json({ error: message, requestId }, { status });
+    const { code, message, status } = classifyUploadError(error);
+    return NextResponse.json({ error: message, code, requestId }, { status });
   }
 }
 
