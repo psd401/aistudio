@@ -256,6 +256,20 @@ def main():
         """
         Handle an agent invocation from AgentCore.
 
+        Yields events as a streaming response (text/event-stream). Async-
+        generator entrypoints make BedrockAgentCoreApp emit SSE so bytes flow
+        on the wire continuously — required for invocations that exceed the
+        ~5-minute idle ceiling on buffered synchronous responses (the morning
+        brief takes 4–8 minutes when it scans Chat / Gmail / Calendar).
+
+        Stream contract:
+          - first yield: {"type": "start"} — flushes headers immediately
+          - heartbeats:  {"type": "heartbeat", "elapsed_s": int} every ~30s
+          - final yield: {"result": "...", "metadata": {...}}
+
+        The cron Lambda discards heartbeat events and uses the final event's
+        `result` field. See infra/lambdas/agent-cron/index.ts.
+
         Expected payload keys (all optional except `prompt`):
             prompt                    — the user's text
             user_email                — caller's email (used as stable identity)
@@ -286,7 +300,8 @@ def main():
         )
 
         if not user_message.strip():
-            return {"result": "I didn't receive a message. Could you try again?"}
+            yield {"result": "I didn't receive a message. Could you try again?"}
+            return
 
         # First invocation for a new workspace prefix → pull memory from S3.
         if workspace_prefix and workspace_prefix != _current_workspace_prefix:
@@ -355,17 +370,34 @@ def main():
         else:
             framed = f"{now_header}\n\n{user_message}"
 
+        # Flush the SSE headers immediately. Without an early yield the SDK
+        # waits for the first chunk before sending headers, defeating the
+        # streaming purpose.
+        invocation_start = time.time()
+        yield {"type": "start", "session_id": session_id}
+
         loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
+        process_task = loop.run_in_executor(
             None, adapter.process, framed, session_id, model_override
         )
 
+        # Heartbeat every 30s while adapter.process runs in the executor.
+        # Each yield writes bytes to the SSE response, keeping the connection
+        # alive past any infrastructure idle timeout.
+        while True:
+            try:
+                result = await asyncio.wait_for(asyncio.shield(process_task), timeout=30)
+                break
+            except asyncio.TimeoutError:
+                elapsed = int(time.time() - invocation_start)
+                yield {"type": "heartbeat", "elapsed_s": elapsed}
+
         logger.info(
-            "Invocation complete: session=%s response_length=%d",
-            session_id, len(result),
+            "Invocation complete: session=%s response_length=%d elapsed_s=%d",
+            session_id, len(result), int(time.time() - invocation_start),
         )
 
-        return {
+        yield {
             "result": result,
             "metadata": {
                 "session_id": session_id,

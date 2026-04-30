@@ -256,6 +256,69 @@ async function resolveDmSpace(
   return null;
 }
 
+async function consumeAgentCoreStream(
+  response: Response,
+  log: Logger,
+  fetchStart: number,
+): Promise<Record<string, unknown> | null> {
+  if (!response.body) {
+    log.error('AgentCore SSE response has no body');
+    return null;
+  }
+
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let heartbeats = 0;
+  let lastResultEvent: Record<string, unknown> | null = null;
+
+  // SSE events are separated by a blank line. Each event has zero or more
+  // `data:` lines whose payload concatenated forms a JSON object.
+  const flushEvent = (rawEvent: string) => {
+    const dataLines = rawEvent
+      .split('\n')
+      .filter((l) => l.startsWith('data:'))
+      .map((l) => l.slice(5).trimStart());
+    if (dataLines.length === 0) return;
+    const payload = dataLines.join('\n');
+    try {
+      const parsed: unknown = JSON.parse(payload);
+      if (parsed && typeof parsed === 'object') {
+        const obj = parsed as Record<string, unknown>;
+        if (obj.type === 'heartbeat') {
+          heartbeats += 1;
+          return;
+        }
+        if (typeof obj.result === 'string') {
+          lastResultEvent = obj;
+        }
+      }
+    } catch {
+      // Ignore non-JSON SSE frames (e.g. comments, the initial start event
+      // if it's emitted as a non-JSON string).
+    }
+  };
+
+  for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
+    buffer += decoder.decode(chunk, { stream: true });
+    let sep: number;
+    while ((sep = buffer.indexOf('\n\n')) !== -1) {
+      const rawEvent = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      flushEvent(rawEvent);
+    }
+  }
+  if (buffer.trim().length > 0) flushEvent(buffer);
+
+  log.info('AgentCore SSE stream complete', {
+    totalElapsedMs: Date.now() - fetchStart,
+    heartbeats,
+    haveResult: lastResultEvent !== null,
+    mode: 'streaming',
+  });
+
+  return lastResultEvent;
+}
+
 async function invokeAgentCore(
   prompt: string,
   userEmail: string,
@@ -312,10 +375,21 @@ async function invokeAgentCore(
     });
 
     const signed = await agentCoreSigner.sign(request);
+    const fetchStart = Date.now();
     const response = await fetch(`https://${signed.hostname}${signed.path}`, {
       method: signed.method,
       headers: signed.headers as Record<string, string>,
       body: signed.body as string,
+      // 13-minute client-side cap so we abort cleanly before the 14-min Lambda
+      // timeout. AgentCore's documented synchronous quota is 15 min, but
+      // non-streaming responses hit a ~5-min idle ceiling — see contentType
+      // logging below for diagnosis.
+      signal: AbortSignal.timeout(13 * 60 * 1000),
+    });
+    log.info('AgentCore response headers received', {
+      status: response.status,
+      contentType: response.headers.get('content-type') ?? 'none',
+      timeToHeadersMs: Date.now() - fetchStart,
     });
 
     if (!response.ok) {
@@ -332,12 +406,29 @@ async function invokeAgentCore(
       };
     }
 
-    const parsed: unknown = await response.json();
-    if (!parsed || typeof parsed !== 'object') {
-      log.error('AgentCore returned non-object body', { kind: typeof parsed });
-      return { response: 'Agent returned an unexpected response shape.', inputTokens: 0, outputTokens: 0, ok: false };
+    const contentType = response.headers.get('content-type') ?? '';
+    let responseBody: Record<string, unknown>;
+    if (contentType.includes('text/event-stream')) {
+      // Streaming entrypoint (see infra/agent-image/agentcore_wrapper.py).
+      // Drains the SSE stream, discards heartbeat events, and keeps the last
+      // event that carries a `result` field.
+      const finalEvent = await consumeAgentCoreStream(response, log, fetchStart);
+      if (!finalEvent) {
+        return { response: 'No response from agent.', inputTokens: 0, outputTokens: 0, ok: false };
+      }
+      responseBody = finalEvent;
+    } else {
+      const parsed: unknown = await response.json();
+      log.info('AgentCore response body parsed', {
+        totalElapsedMs: Date.now() - fetchStart,
+        mode: 'buffered',
+      });
+      if (!parsed || typeof parsed !== 'object') {
+        log.error('AgentCore returned non-object body', { kind: typeof parsed });
+        return { response: 'Agent returned an unexpected response shape.', inputTokens: 0, outputTokens: 0, ok: false };
+      }
+      responseBody = parsed as Record<string, unknown>;
     }
-    const responseBody = parsed as Record<string, unknown>;
     const rawResult = responseBody.result;
     const result = typeof rawResult === 'string' && rawResult.length > 0
       ? rawResult
@@ -351,11 +442,11 @@ async function invokeAgentCore(
     const outputTokens = typeof metadata.output_tokens === 'number' ? metadata.output_tokens : 0;
     return { response: result, inputTokens, outputTokens, ok };
   } catch (error) {
-    log.error('AgentCore invocation error', {
-      error: error instanceof Error ? error.message : String(error),
-    });
+    const errName = error instanceof Error ? error.name : 'Unknown';
+    const errMsg = error instanceof Error ? error.message : String(error);
+    log.error('AgentCore invocation error', { errorName: errName, error: errMsg });
     return {
-      response: 'Agent temporarily unavailable for scheduled task.',
+      response: `Agent temporarily unavailable: ${errName}: ${errMsg.substring(0, 240)}`,
       inputTokens: 0,
       outputTokens: 0,
       ok: false,

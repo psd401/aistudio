@@ -93,6 +93,7 @@ export class AgentPlatformStack extends cdk.Stack {
   public readonly signalsTable: dynamodb.Table;
   /** DynamoDB table for Chat message idempotency (dedup of retries) */
   public readonly messageDedupTable: dynamodb.Table;
+  public readonly sessionLocksTable: dynamodb.Table;
   /** IAM user that owns the Bedrock API key (service-specific credential) */
   public readonly bedrockApiUser: iam.User;
   /** Secrets Manager secret carrying the Bedrock API key for Mantle auth */
@@ -267,6 +268,28 @@ export class AgentPlatformStack extends cdk.Stack {
     });
     cdk.Tags.of(this.messageDedupTable).add('Environment', environment);
     cdk.Tags.of(this.messageDedupTable).add('ManagedBy', 'cdk');
+
+    // 4c-bis. Session Locks table — serializes concurrent invocations against
+    // the same AgentCore session ID. AgentCore sticky-routes by session ID, so
+    // two messages from the same user/space hit the same OpenClaw turn loop.
+    // Without serialization, message #2 lands while #1 is mid-turn and gets
+    // an empty response ("I processed your message but had no response.").
+    // The router takes this lock before InvokeAgentRuntime and releases after.
+    // TTL is a backstop: if a Lambda dies holding the lock, the row expires
+    // ~14 min later (just under Lambda's 15-min timeout) so the next message
+    // can proceed.
+    this.sessionLocksTable = new dynamodb.Table(this, 'AgentSessionLocksTable', {
+      tableName: `psd-agent-session-locks-${environment}`,
+      partitionKey: { name: 'sessionId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      timeToLiveAttribute: 'expiresAt',
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(this.sessionLocksTable).add('Environment', environment);
+    cdk.Tags.of(this.sessionLocksTable).add('ManagedBy', 'cdk');
 
     // 4d. Inter-Agent Communication table — tracks agent-to-agent messages
     // for rate limiting and anti-loop detection. Uses TTL for automatic cleanup.
@@ -841,6 +864,7 @@ export class AgentPlatformStack extends cdk.Stack {
         this.usersTable.tableName,
         this.signalsTable.tableName,
         this.messageDedupTable.tableName,
+        this.sessionLocksTable.tableName,
         interAgentTable.tableName,
       ],
       s3Buckets: [this.workspaceBucket.bucketName],
@@ -955,6 +979,15 @@ export class AgentPlatformStack extends cdk.Stack {
         }),
       ],
     });
+
+    // ServiceRoleFactory builds its inline logs ARN as
+    // /aws/lambda/${functionName}:* with functionName='psd-agent-cron', but the
+    // real log group is /aws/lambda/psd-agent-cron-${environment}. The ARN
+    // mismatch silently denied CreateLogStream/PutLogEvents starting Apr 24,
+    // 2026. Attach the AWS-managed basic exec role so logs always flow.
+    this.cronLambdaRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+    );
 
     // =====================================================================
     // 6. AgentCore Runtime
@@ -1483,6 +1516,7 @@ export class AgentPlatformStack extends cdk.Stack {
         USERS_TABLE: this.usersTable.tableName,
         SIGNALS_TABLE: this.signalsTable.tableName,
         MESSAGE_DEDUP_TABLE: this.messageDedupTable.tableName,
+        SESSION_LOCKS_TABLE: this.sessionLocksTable.tableName,
         INTERAGENT_TABLE: interAgentTable.tableName,
         MAX_INTERAGENT_MESSAGES_PER_HOUR: '5',
         GUARDRAIL_ID: props.guardrailId,
