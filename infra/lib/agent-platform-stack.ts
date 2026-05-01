@@ -984,9 +984,17 @@ export class AgentPlatformStack extends cdk.Stack {
     // /aws/lambda/${functionName}:* with functionName='psd-agent-cron', but the
     // real log group is /aws/lambda/psd-agent-cron-${environment}. The ARN
     // mismatch silently denied CreateLogStream/PutLogEvents starting Apr 24,
-    // 2026. Attach the AWS-managed basic exec role so logs always flow.
-    this.cronLambdaRole.addManagedPolicy(
-      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaBasicExecutionRole'),
+    // 2026. Narrow inline policy targeting the actual log group instead of the
+    // overly broad AWSLambdaBasicExecutionRole managed policy.
+    this.cronLambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'CronLambdaLogsCorrectArn',
+        effect: iam.Effect.ALLOW,
+        actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+        resources: [
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/psd-agent-cron-${environment}:*`,
+        ],
+      }),
     );
 
     // =====================================================================

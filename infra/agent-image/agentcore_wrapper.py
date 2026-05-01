@@ -267,8 +267,9 @@ def main():
           - heartbeats:  {"type": "heartbeat", "elapsed_s": int} every ~30s
           - final yield: {"result": "...", "metadata": {...}}
 
-        The cron Lambda discards heartbeat events and uses the final event's
-        `result` field. See infra/lambdas/agent-cron/index.ts.
+        Both the cron and router Lambdas discard heartbeat/start events and
+        extract the final event's `result` field. See consumeAgentCoreStream()
+        in infra/lambdas/agent-cron/index.ts and agent-router/index.ts.
 
         Expected payload keys (all optional except `prompt`):
             prompt                    — the user's text

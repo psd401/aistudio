@@ -256,6 +256,20 @@ async function resolveDmSpace(
   return null;
 }
 
+/**
+ * Drain an AgentCore SSE stream, discard heartbeat and start events, and
+ * return the last event carrying a `result` field.
+ *
+ * Stream contract (see infra/agent-image/agentcore_wrapper.py):
+ *   - start event:     {"type": "start"} — immediate header flush
+ *   - heartbeat event: {"type": "heartbeat", "elapsed_s": int} every ~30s
+ *   - final event:     {"result": "...", "metadata": {...}}
+ *
+ * NOTE: This function is intentionally duplicated in agent-router/index.ts.
+ * The two Lambda bundles compile independently (each has its own tsconfig
+ * with rootDir=./), so sharing source files requires build pipeline changes.
+ * If you modify the SSE parsing logic here, update agent-router/index.ts too.
+ */
 async function consumeAgentCoreStream(
   response: Response,
   log: Logger,
@@ -284,6 +298,7 @@ async function consumeAgentCoreStream(
       const parsed: unknown = JSON.parse(payload);
       if (parsed && typeof parsed === 'object') {
         const obj = parsed as Record<string, unknown>;
+        if (obj.type === 'start') return; // Header-flush event — no payload to process
         if (obj.type === 'heartbeat') {
           heartbeats += 1;
           return;
@@ -293,13 +308,13 @@ async function consumeAgentCoreStream(
         }
       }
     } catch {
-      // Ignore non-JSON SSE frames (e.g. comments, the initial start event
-      // if it's emitted as a non-JSON string).
+      // Ignore non-JSON SSE frames (e.g. comments).
     }
   };
 
   for await (const chunk of response.body as unknown as AsyncIterable<Uint8Array>) {
-    buffer += decoder.decode(chunk, { stream: true });
+    // Normalize \r\n → \n (SSE spec allows \r\n and \r as line terminators)
+    buffer += decoder.decode(chunk, { stream: true }).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
     let sep: number;
     while ((sep = buffer.indexOf('\n\n')) !== -1) {
       const rawEvent = buffer.slice(0, sep);
@@ -307,7 +322,11 @@ async function consumeAgentCoreStream(
       flushEvent(rawEvent);
     }
   }
-  if (buffer.trim().length > 0) flushEvent(buffer);
+  // Flush any residual bytes from the TextDecoder's internal buffer
+  // (required by spec when { stream: true } was used).
+  const residual = decoder.decode();
+  if (residual) buffer += residual;
+  if (buffer.length > 0) flushEvent(buffer);
 
   log.info('AgentCore SSE stream complete', {
     totalElapsedMs: Date.now() - fetchStart,
@@ -446,7 +465,8 @@ async function invokeAgentCore(
     const errMsg = error instanceof Error ? error.message : String(error);
     log.error('AgentCore invocation error', { errorName: errName, error: errMsg });
     return {
-      response: `Agent temporarily unavailable: ${errName}: ${errMsg.substring(0, 240)}`,
+      // Sanitized user-facing message — full error details are in CloudWatch logs above.
+      response: 'Agent temporarily unavailable for scheduled task. Please try again later.',
       inputTokens: 0,
       outputTokens: 0,
       ok: false,
