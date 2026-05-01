@@ -1275,11 +1275,14 @@ export class AgentPlatformStack extends cdk.Stack {
       // workspace; (b) OpenClaw gateway startup ~5s; (c) model + tool
       // time for the actual scheduled task (research briefs run 2–5 min).
       // Previous 5-minute timeout hit ceiling on every cold fire and
-      // silently prevented scheduled delivery. 14 min is just under
-      // Lambda's hard 15-min ceiling and 1 min under the harness
-      // adapter's internal 13-min chat deadline, so if the Lambda is
-      // about to time out the adapter has already returned something.
-      timeout: cdk.Duration.minutes(14),
+      // 15 min is Lambda's hard ceiling. The morning brief on May 1, 2026
+      // hit our 13-min client-side abort while the agent was still
+      // streaming heartbeats every 30s — it just hadn't finished yet.
+      // Stack: harness deadline 840s (14:00) < AbortSignal 870s (14:30) <
+      // Lambda 900s (15:00). Each layer has ~30s headroom over the next
+      // so failure modes degrade in order: harness returns partial → abort
+      // fires with whatever streamed → Lambda kills as last resort.
+      timeout: cdk.Duration.minutes(15),
       architecture: lambda.Architecture.ARM_64,
       role: this.cronLambdaRole,
       logGroup: cronLogGroup,

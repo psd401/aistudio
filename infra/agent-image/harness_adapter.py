@@ -316,7 +316,10 @@ class OpenClawAdapter(HarnessAdapter):
                 # OPENCLAW_CHAT_DEADLINE_S env override for escape hatch,
                 # clamped to [60, 840] so a misconfig can't either starve
                 # the turn or exceed the undici/Lambda ceilings.
-                default_deadline_s = 780  # 13 min — 1 min under undici
+                # 14 min — 30s under the cron Lambda's 14:30 AbortSignal so
+                # the harness gets a chance to return whatever it has
+                # accumulated before the client kills the connection.
+                default_deadline_s = 840
                 try:
                     deadline_s = int(os.environ.get(
                         "OPENCLAW_CHAT_DEADLINE_S",

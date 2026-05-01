@@ -380,11 +380,11 @@ async function invokeAgentCore(
       method: signed.method,
       headers: signed.headers as Record<string, string>,
       body: signed.body as string,
-      // 13-minute client-side cap so we abort cleanly before the 14-min Lambda
-      // timeout. AgentCore's documented synchronous quota is 15 min, but
-      // non-streaming responses hit a ~5-min idle ceiling — see contentType
-      // logging below for diagnosis.
-      signal: AbortSignal.timeout(13 * 60 * 1000),
+      // 14:30 client-side cap. Sits above the harness adapter's 14-min chat
+      // deadline (so the agent has a chance to return a partial first) and
+      // 30s under the 15-min Lambda timeout (so we have time to record
+      // telemetry and post the chat fallback before Lambda kills us).
+      signal: AbortSignal.timeout(870 * 1000),
     });
     log.info('AgentCore response headers received', {
       status: response.status,
