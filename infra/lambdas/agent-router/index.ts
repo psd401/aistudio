@@ -38,6 +38,7 @@ import {
 } from '@aws-sdk/client-bedrock-runtime';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import {
+  DeleteCommand,
   DynamoDBDocumentClient,
   PutCommand,
   QueryCommand,
@@ -384,6 +385,134 @@ const RUNTIME_ID_TTL_MS = 10 * 60 * 1000; // 10 minutes
 // Uses direct PostgreSQL (same as the rest of the app) instead of RDS Data API
 // for consistency and ~100-300ms lower latency per query.
 let pgClient: postgres.Sql | null = null;
+
+// Sentinel token for pass-through lock scenarios (lock table missing or DDB
+// error). Used instead of a real UUID so `releaseSessionLock` can short-circuit
+// without attempting a conditional DynamoDB delete that would fail by coincidence.
+const LOCK_PASS_THROUGH = '__lock-pass-through__';
+
+/**
+ * Try to acquire the per-session lock. Returns the unique lock token on
+ * success, `null` if another holder already has it, or `LOCK_PASS_THROUGH`
+ * when locking is disabled or DynamoDB is unavailable (fail-open).
+ *
+ * Each acquisition writes a random `lockToken` into the DynamoDB row. The
+ * token is required by `releaseSessionLock` so that a stale holder (whose
+ * lock expired and was re-acquired by a different invocation) cannot
+ * accidentally delete a newer holder's lock.
+ *
+ * Serialization is best-effort for turns longer than 14 min: the DynamoDB
+ * TTL backstop expires at that point and a new holder can re-acquire the
+ * lock while the first turn is still in-flight. The conditional-delete
+ * token mechanism prevents the first holder from releasing the second
+ * holder's lock, but the serialization guarantee itself is broken in
+ * that 14–15 min window. This is acceptable given the tail probability.
+ */
+async function tryAcquireSessionLock(
+  sessionId: string,
+  log: ReturnType<typeof createLogger>
+): Promise<string | null> {
+  const tableName = process.env.SESSION_LOCKS_TABLE;
+  if (!tableName) return LOCK_PASS_THROUGH; // Lock disabled (e.g. local) — pass through.
+
+  const lockToken = crypto.randomUUID();
+  const expiresAt = Math.floor(Date.now() / 1000) + 14 * 60;
+  try {
+    await dynamoClient.send(
+      new PutCommand({
+        TableName: tableName,
+        Item: { sessionId, expiresAt, lockToken, claimedAt: new Date().toISOString() },
+        ConditionExpression: 'attribute_not_exists(sessionId) OR expiresAt < :now',
+        ExpressionAttributeValues: { ':now': Math.floor(Date.now() / 1000) },
+      })
+    );
+    return lockToken;
+  } catch (error) {
+    const errName = (error as { name?: string } | null)?.name;
+    if (errName === 'ConditionalCheckFailedException') return null;
+    log.warn('Session lock acquire failed; proceeding without lock', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+    return LOCK_PASS_THROUGH; // Conservative — let the message through if DDB is broken.
+  }
+}
+
+/**
+ * Release the per-session lock. Uses a conditional delete on `lockToken` so
+ * only the current owner can release — prevents a stale holder from deleting
+ * a newer holder's lock after TTL expiry + re-acquisition.
+ *
+ * Pass-through tokens (`LOCK_PASS_THROUGH`) are no-ops — no DDB row was
+ * written, so there is nothing to delete.
+ */
+async function releaseSessionLock(
+  sessionId: string,
+  lockToken: string,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const tableName = process.env.SESSION_LOCKS_TABLE;
+  if (!tableName || lockToken === LOCK_PASS_THROUGH) return;
+  try {
+    await dynamoClient.send(
+      new DeleteCommand({
+        TableName: tableName,
+        Key: { sessionId },
+        ConditionExpression: 'lockToken = :tok',
+        ExpressionAttributeValues: { ':tok': lockToken },
+      })
+    );
+  } catch (error) {
+    const errName = (error as { name?: string } | null)?.name;
+    if (errName === 'ConditionalCheckFailedException') {
+      // Another invocation re-acquired the lock (ours expired). This is
+      // expected in long-running scenarios — the TTL backstop handles cleanup.
+      log.info('Session lock already re-acquired by another holder; skipping release');
+      return;
+    }
+    log.warn('Session lock release failed; relying on TTL backstop', {
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
+}
+
+/**
+ * Acquire-or-wait. Polls the lock with exponential backoff (1s -> 2s -> 4s,
+ * capped at 8s) up to maxWaitMs. Returns the lock token on success, or `null`
+ * if the wait times out. Caller MUST check the return value and only release
+ * when non-null. Bounded to leave headroom under the 15-min Lambda timeout —
+ * agent turns regularly take 1–4 min, so 13 min is the upper bound.
+ */
+async function waitForSessionLock(
+  sessionId: string,
+  log: ReturnType<typeof createLogger>,
+  maxWaitMs = 13 * 60 * 1000,
+): Promise<string | null> {
+  const start = Date.now();
+  let attempt = 0;
+  let backoffMs = 1000;
+  while (Date.now() - start < maxWaitMs) {
+    const token = await tryAcquireSessionLock(sessionId, log);
+    if (token !== null) {
+      if (attempt > 0) {
+        log.info('Session lock acquired after wait', {
+          waitedMs: Date.now() - start,
+          attempts: attempt + 1,
+        });
+      }
+      return token;
+    }
+    attempt += 1;
+    await new Promise((r) => setTimeout(r, backoffMs));
+    // Exponential backoff capped at 8s — reduces DDB read volume by ~75%
+    // for long waits (1s -> 2s -> 4s -> 8s -> 8s…) with negligible impact
+    // on response latency since agent turns take minutes.
+    backoffMs = Math.min(backoffMs * 2, 8000);
+  }
+  log.warn('Session lock wait timed out — returning busy message', {
+    waitedMs: Date.now() - start,
+  });
+  return null;
+}
 
 /**
  * Returns true if this message name has already been processed (or is being
@@ -825,6 +954,89 @@ async function applyGuardrails(
 // AgentCore invocation
 // ---------------------------------------------------------------------------
 
+/**
+ * Drain an AgentCore SSE stream, discard heartbeat and start events, and
+ * return the last event carrying a `result` field.
+ *
+ * Stream contract (see infra/agent-image/agentcore_wrapper.py):
+ *   - start event:     {"type": "start"} — immediate header flush
+ *   - heartbeat event: {"type": "heartbeat", "elapsed_s": int} every ~30s
+ *   - final event:     {"result": "...", "metadata": {...}}
+ *
+ * SYNC: This function is intentionally duplicated in agent-cron/index.ts
+ * (function `consumeAgentCoreStream`). The two Lambda bundles compile
+ * independently (each has its own tsconfig with rootDir=./), so sharing
+ * source files requires build pipeline changes. If you modify the SSE
+ * parsing logic here, update `consumeAgentCoreStream` in
+ * infra/lambdas/agent-cron/index.ts too, and vice versa.
+ *
+ * Known differences (intentional):
+ *   - agent-cron accepts `Response`, agent-router accepts `{ body: unknown }`
+ *   - agent-cron logs `totalElapsedMs` and `mode: 'streaming'`
+ */
+async function consumeAgentCoreStream(
+  response: { body: unknown },
+  log: ReturnType<typeof createLogger>,
+): Promise<Record<string, unknown> | null> {
+  if (!response.body) {
+    log.error('AgentCore SSE response has no body');
+    return null;
+  }
+
+  const decoder = new TextDecoder('utf-8');
+  let buffer = '';
+  let heartbeats = 0;
+  let lastResultEvent: Record<string, unknown> | null = null;
+
+  const flushEvent = (rawEvent: string) => {
+    const dataLines = rawEvent
+      .split('\n')
+      .filter((l) => l.startsWith('data:'))
+      .map((l) => l.slice(5).trimStart());
+    if (dataLines.length === 0) return;
+    const payload = dataLines.join('\n');
+    try {
+      const parsed: unknown = JSON.parse(payload);
+      if (parsed && typeof parsed === 'object') {
+        const obj = parsed as Record<string, unknown>;
+        if (obj.type === 'start') return; // Header-flush event — no payload to process
+        if (obj.type === 'heartbeat') {
+          heartbeats += 1;
+          return;
+        }
+        if (typeof obj.result === 'string') {
+          lastResultEvent = obj;
+        }
+      }
+    } catch {
+      // Ignore non-JSON SSE frames.
+    }
+  };
+
+  for await (const chunk of response.body as AsyncIterable<Uint8Array>) {
+    // Normalize \r\n → \n (SSE spec allows \r\n and \r as line terminators)
+    buffer += decoder.decode(chunk, { stream: true }).replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    let sep: number;
+    while ((sep = buffer.indexOf('\n\n')) !== -1) {
+      const rawEvent = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      flushEvent(rawEvent);
+    }
+  }
+  // Flush any residual bytes from the TextDecoder's internal buffer
+  // (required by spec when { stream: true } was used).
+  const residual = decoder.decode();
+  if (residual) buffer += residual;
+  if (buffer.length > 0) flushEvent(buffer);
+
+  log.info('AgentCore SSE stream complete', {
+    heartbeats,
+    haveResult: lastResultEvent !== null,
+  });
+
+  return lastResultEvent;
+}
+
 async function invokeAgentCore(
   message: string,
   userId: string,
@@ -965,7 +1177,17 @@ async function invokeAgentCore(
       };
     }
 
-    const responseBody = await response.json() as Record<string, unknown>;
+    // The AgentCore container uses an async-generator entrypoint, so the
+    // response Content-Type is text/event-stream. We discard heartbeat events
+    // and pick the last event carrying a `result` field. If the container
+    // ever falls back to a buffered JSON response, we still parse that.
+    const contentType = response.headers.get('content-type') ?? '';
+    let responseBody: Record<string, unknown>;
+    if (contentType.includes('text/event-stream')) {
+      responseBody = (await consumeAgentCoreStream(response, log)) ?? {};
+    } else {
+      responseBody = (await response.json()) as Record<string, unknown>;
+    }
     const result = (responseBody.result as string) || 'No response from agent.';
     const metadata = (responseBody.metadata as Record<string, unknown>) || {};
 
@@ -1778,6 +2000,18 @@ async function processRecord(
       const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
       const crossSessionId = `xuser-${targetUser.workspacePrefix}-${spaceHash}-${invokerHash}-${buildTag}`;
 
+      // Same per-session serialization as the owner path — cross-user
+      // invocations also collide if two queries land back-to-back.
+      const crossLockToken = await waitForSessionLock(crossSessionId, log);
+      if (!crossLockToken) {
+        const ownerLabel = targetUser.displayName || targetUser.email;
+        await sendGoogleChatResponse(
+          spaceName, threadName,
+          `[${ownerLabel}'s Agent] I'm currently busy processing another request. Please try again in a moment.`,
+          log,
+        );
+        return;
+      }
       const agentResult = await invokeAgentCore(
         actualMessage,
         targetUser.email,
@@ -1792,7 +2026,7 @@ async function processRecord(
           },
           threadContext,
         }
-      );
+      ).finally(() => releaseSessionLock(crossSessionId, crossLockToken, log));
 
       // Token alerting
       const totalTokens = agentResult.inputTokens + agentResult.outputTokens;
@@ -1889,6 +2123,20 @@ async function processRecord(
   const spaceHash = crypto.createHash('sha256').update(spaceName).digest('hex');
   const buildTag = process.env.AGENT_BUILD_TAG || 'unset';
   const sessionId = `${user.workspacePrefix}-${spaceHash}-${buildTag}`;
+
+  // Serialize per-session invocations. Two messages back-to-back from the
+  // same user/space share this session ID and would otherwise hit the same
+  // OpenClaw turn loop concurrently — the second turn comes back empty.
+  // Wait up to 13 min for a prior turn to finish, then proceed.
+  const lockToken = await waitForSessionLock(sessionId, log);
+  if (!lockToken) {
+    await sendGoogleChatResponse(
+      spaceName, threadName,
+      "I'm currently busy processing another request. Please try again in a moment.",
+      log,
+    );
+    return;
+  }
   const agentResult = await invokeAgentCore(
     messageText,
     senderEmail,
@@ -1898,7 +2146,7 @@ async function processRecord(
       displayName: senderDisplayName,
       workspacePrefix: user.workspacePrefix,
     }
-  );
+  ).finally(() => releaseSessionLock(sessionId, lockToken, log));
 
   // Step 5: Token usage alerting threshold (warn-only, not enforcement)
   // The response is still delivered — this is for monitoring/alerting.
