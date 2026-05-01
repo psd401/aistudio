@@ -265,10 +265,16 @@ async function resolveDmSpace(
  *   - heartbeat event: {"type": "heartbeat", "elapsed_s": int} every ~30s
  *   - final event:     {"result": "...", "metadata": {...}}
  *
- * NOTE: This function is intentionally duplicated in agent-router/index.ts.
- * The two Lambda bundles compile independently (each has its own tsconfig
- * with rootDir=./), so sharing source files requires build pipeline changes.
- * If you modify the SSE parsing logic here, update agent-router/index.ts too.
+ * SYNC: This function is intentionally duplicated in agent-router/index.ts
+ * (function `consumeAgentCoreStream`). The two Lambda bundles compile
+ * independently (each has its own tsconfig with rootDir=./), so sharing
+ * source files requires build pipeline changes. If you modify the SSE
+ * parsing logic here, update `consumeAgentCoreStream` in
+ * infra/lambdas/agent-router/index.ts too, and vice versa.
+ *
+ * Known differences (intentional):
+ *   - agent-cron accepts `Response`, agent-router accepts `{ body: unknown }`
+ *   - agent-cron logs `totalElapsedMs` and `mode: 'streaming'`
  */
 async function consumeAgentCoreStream(
   response: Response,

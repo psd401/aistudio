@@ -386,40 +386,34 @@ const RUNTIME_ID_TTL_MS = 10 * 60 * 1000; // 10 minutes
 // for consistency and ~100-300ms lower latency per query.
 let pgClient: postgres.Sql | null = null;
 
-/**
- * Returns true if this message name has already been processed (or is being
- * processed concurrently) by claiming its row via a conditional PutItem. The
- * row carries a 1-hour TTL so the table self-prunes.
- *
- * Conservative on errors: if the dedup table is unreachable we return `false`
- * so the message still flows. Better to risk a rare double-send than to drop
- * messages on a transient DDB blip.
- */
-/**
- * Per-session lock so two concurrent messages on the same AgentCore session
- * don't collide. AgentCore sticky-routes by session ID — without this, the
- * second message lands on the busy OpenClaw turn loop, gets rejected fast,
- * and surfaces as "I processed your message but had no response."
- *
- * Implementation: DynamoDB conditional PutItem on `sessionId`. The row carries
- * a TTL backstop (~14 min) so a crashed Lambda doesn't permanently wedge a
- * session. Returns true on acquire, false if another holder already has it.
- */
+// Sentinel token for pass-through lock scenarios (lock table missing or DDB
+// error). Used instead of a real UUID so `releaseSessionLock` can short-circuit
+// without attempting a conditional DynamoDB delete that would fail by coincidence.
+const LOCK_PASS_THROUGH = '__lock-pass-through__';
+
 /**
  * Try to acquire the per-session lock. Returns the unique lock token on
- * success, or `null` if another holder already has it.
+ * success, `null` if another holder already has it, or `LOCK_PASS_THROUGH`
+ * when locking is disabled or DynamoDB is unavailable (fail-open).
  *
  * Each acquisition writes a random `lockToken` into the DynamoDB row. The
  * token is required by `releaseSessionLock` so that a stale holder (whose
  * lock expired and was re-acquired by a different invocation) cannot
  * accidentally delete a newer holder's lock.
+ *
+ * Serialization is best-effort for turns longer than 14 min: the DynamoDB
+ * TTL backstop expires at that point and a new holder can re-acquire the
+ * lock while the first turn is still in-flight. The conditional-delete
+ * token mechanism prevents the first holder from releasing the second
+ * holder's lock, but the serialization guarantee itself is broken in
+ * that 14–15 min window. This is acceptable given the tail probability.
  */
 async function tryAcquireSessionLock(
   sessionId: string,
   log: ReturnType<typeof createLogger>
 ): Promise<string | null> {
   const tableName = process.env.SESSION_LOCKS_TABLE;
-  if (!tableName) return 'no-table'; // Lock disabled (e.g. local) — pass through.
+  if (!tableName) return LOCK_PASS_THROUGH; // Lock disabled (e.g. local) — pass through.
 
   const lockToken = crypto.randomUUID();
   const expiresAt = Math.floor(Date.now() / 1000) + 14 * 60;
@@ -439,7 +433,7 @@ async function tryAcquireSessionLock(
     log.warn('Session lock acquire failed; proceeding without lock', {
       error: error instanceof Error ? error.message : String(error),
     });
-    return 'ddb-error'; // Conservative — let the message through if DDB is broken.
+    return LOCK_PASS_THROUGH; // Conservative — let the message through if DDB is broken.
   }
 }
 
@@ -447,6 +441,9 @@ async function tryAcquireSessionLock(
  * Release the per-session lock. Uses a conditional delete on `lockToken` so
  * only the current owner can release — prevents a stale holder from deleting
  * a newer holder's lock after TTL expiry + re-acquisition.
+ *
+ * Pass-through tokens (`LOCK_PASS_THROUGH`) are no-ops — no DDB row was
+ * written, so there is nothing to delete.
  */
 async function releaseSessionLock(
   sessionId: string,
@@ -454,7 +451,7 @@ async function releaseSessionLock(
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
   const tableName = process.env.SESSION_LOCKS_TABLE;
-  if (!tableName) return;
+  if (!tableName || lockToken === LOCK_PASS_THROUGH) return;
   try {
     await dynamoClient.send(
       new DeleteCommand({
@@ -517,6 +514,15 @@ async function waitForSessionLock(
   return null;
 }
 
+/**
+ * Returns true if this message name has already been processed (or is being
+ * processed concurrently) by claiming its row via a conditional PutItem. The
+ * row carries a 1-hour TTL so the table self-prunes.
+ *
+ * Conservative on errors: if the dedup table is unreachable we return `false`
+ * so the message still flows. Better to risk a rare double-send than to drop
+ * messages on a transient DDB blip.
+ */
 async function isDuplicateMessage(
   messageName: string,
   log: ReturnType<typeof createLogger>
@@ -957,10 +963,16 @@ async function applyGuardrails(
  *   - heartbeat event: {"type": "heartbeat", "elapsed_s": int} every ~30s
  *   - final event:     {"result": "...", "metadata": {...}}
  *
- * NOTE: This function is intentionally duplicated in agent-cron/index.ts.
- * The two Lambda bundles compile independently (each has its own tsconfig
- * with rootDir=./), so sharing source files requires build pipeline changes.
- * If you modify the SSE parsing logic here, update agent-cron/index.ts too.
+ * SYNC: This function is intentionally duplicated in agent-cron/index.ts
+ * (function `consumeAgentCoreStream`). The two Lambda bundles compile
+ * independently (each has its own tsconfig with rootDir=./), so sharing
+ * source files requires build pipeline changes. If you modify the SSE
+ * parsing logic here, update `consumeAgentCoreStream` in
+ * infra/lambdas/agent-cron/index.ts too, and vice versa.
+ *
+ * Known differences (intentional):
+ *   - agent-cron accepts `Response`, agent-router accepts `{ body: unknown }`
+ *   - agent-cron logs `totalElapsedMs` and `mode: 'streaming'`
  */
 async function consumeAgentCoreStream(
   response: { body: unknown },
@@ -2000,26 +2012,21 @@ async function processRecord(
         );
         return;
       }
-      let agentResult;
-      try {
-        agentResult = await invokeAgentCore(
-          actualMessage,
-          targetUser.email,
-          crossSessionId,
-          log,
-          {
-            displayName: targetUser.displayName,
-            workspacePrefix: targetUser.workspacePrefix,
-            invokedBy: {
-              email: senderEmail,
-              displayName: senderDisplayName,
-            },
-            threadContext,
-          }
-        );
-      } finally {
-        await releaseSessionLock(crossSessionId, crossLockToken, log);
-      }
+      const agentResult = await invokeAgentCore(
+        actualMessage,
+        targetUser.email,
+        crossSessionId,
+        log,
+        {
+          displayName: targetUser.displayName,
+          workspacePrefix: targetUser.workspacePrefix,
+          invokedBy: {
+            email: senderEmail,
+            displayName: senderDisplayName,
+          },
+          threadContext,
+        }
+      ).finally(() => releaseSessionLock(crossSessionId, crossLockToken, log));
 
       // Token alerting
       const totalTokens = agentResult.inputTokens + agentResult.outputTokens;
@@ -2130,21 +2137,16 @@ async function processRecord(
     );
     return;
   }
-  let agentResult;
-  try {
-    agentResult = await invokeAgentCore(
-      messageText,
-      senderEmail,
-      sessionId,
-      log,
-      {
-        displayName: senderDisplayName,
-        workspacePrefix: user.workspacePrefix,
-      }
-    );
-  } finally {
-    await releaseSessionLock(sessionId, lockToken, log);
-  }
+  const agentResult = await invokeAgentCore(
+    messageText,
+    senderEmail,
+    sessionId,
+    log,
+    {
+      displayName: senderDisplayName,
+      workspacePrefix: user.workspacePrefix,
+    }
+  ).finally(() => releaseSessionLock(sessionId, lockToken, log));
 
   // Step 5: Token usage alerting threshold (warn-only, not enforcement)
   // The response is still delivered — this is for monitoring/alerting.
