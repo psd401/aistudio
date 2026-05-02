@@ -146,6 +146,8 @@ RUN cd /home/node/.openclaw/skills/psd-schedules && npm install --omit=dev --no-
 RUN cd /home/node/.openclaw/skills/psd-credentials && npm install --omit=dev --no-audit --no-fund
 RUN cd /home/node/.openclaw/skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund
 RUN cd /home/node/.openclaw/skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
+RUN cd /home/node/.openclaw/skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund
+# psd-freshservice has zero npm dependencies (native fetch + child_process only).
 
 # Upstream gws-* skills (#912) — per-API SKILL.md guidance for Gmail, Drive,
 # Docs, Sheets, Slides, Forms, Tasks, Calendar, Chat, Meet, Contacts, etc.

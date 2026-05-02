@@ -52,6 +52,11 @@ export const psdAgentSkills = pgTable("psd_agent_skills", {
   summary: text("summary").notNull(),
   scanStatus: varchar("scan_status", { length: 16 }).$type<AgentSkillScanStatus>().notNull().default("pending"),
   scanFindings: jsonb("scan_findings").$type<SkillScanFindings>(),
+  // Capability identifier (matches `tools.identifier`, soon `capabilities.identifier`
+  // under epic #922 / issue #923). NULL means the skill is open to all callers;
+  // a non-null value gates skill-load on `hasToolAccess(required_capability)`.
+  // Added in migration 075.
+  requiredCapability: text("required_capability"),
   approvedBy: integer("approved_by").references(() => users.id, { onDelete: "set null" }),
   approvedAt: timestamp("approved_at", { withTimezone: true }),
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),

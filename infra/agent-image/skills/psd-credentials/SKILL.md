@@ -32,6 +32,29 @@ node /home/node/.openclaw/skills/psd-credentials/list.js \
 
 Returns `{"credentials":[{"name":"...","scope":"shared|user"},...]}`.
 
+### `put` — store a per-user credential
+
+```bash
+node /home/node/.openclaw/skills/psd-credentials/put.js \
+  --user <email> \
+  --name "<credential-name>" \
+  --value "<secret-value>"
+```
+
+Stores a value at `psd-agent-creds/{env}/user/<email>/<name>`. Skills can only write per-user secrets. Shared (district-wide) secrets must be provisioned by an admin out of band. Returns `{"name":"...","scope":"user","action":"created"|"rotated"}`. The credential value never appears in stdout, audit, or telemetry.
+
+Use this when a skill prompts the user for an API key and needs to persist it for future invocations.
+
+### `check_capability` — verify a capability grant for the caller
+
+```bash
+node /home/node/.openclaw/skills/psd-credentials/check_capability.js \
+  --user <email> \
+  --capability "<capability-identifier>"
+```
+
+Returns `{"granted":true|false,"capability":"...","user":"..."}` and exits `0` on grant, `3` on deny, `1` on internal error. Used by restricted skills (e.g. `psd-image-gen`) to enforce the AI Studio role-based capability model at invocation time. Fails closed on database errors — a restricted skill should refuse to act when the grant cannot be confirmed.
+
 ### `request_new` — request provisioning of a new credential
 
 ```bash

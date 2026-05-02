@@ -19,6 +19,9 @@ const {
   SecretsManagerClient,
   GetSecretValueCommand,
   ListSecretsCommand,
+  CreateSecretCommand,
+  PutSecretValueCommand,
+  ResourceExistsException,
 } = require('@aws-sdk/client-secrets-manager');
 
 const {
@@ -271,6 +274,133 @@ async function logCredentialRead(credentialName, userEmail, sessionId) {
 }
 
 /**
+ * Write a per-user credential to Secrets Manager. Always scoped to the
+ * caller's email path (psd-agent-creds/{env}/user/{email}/{name}). The
+ * shared scope cannot be written by skills — admins provision shared
+ * secrets out of band.
+ *
+ * Uses CreateSecret on first write and falls back to PutSecretValue when
+ * the secret already exists. Caller-trusted on value contents (no length
+ * or format validation per plan decision).
+ *
+ * Audit row is appended to psd_agent_credentials_audit with action='put'.
+ * The credential value is never logged.
+ */
+async function putUserCredential(name, value, userEmail) {
+  validateCredentialName(name);
+  if (typeof value !== 'string' || value.length === 0) {
+    fail('--value must be a non-empty string');
+  }
+
+  const secretId = `${CREDS_PREFIX}/user/${userEmail}/${name}`;
+  const tags = [
+    { Key: 'Environment', Value: ENVIRONMENT },
+    { Key: 'ManagedBy', Value: 'psd-credentials-skill' },
+    { Key: 'Scope', Value: 'user' },
+  ];
+
+  let action = 'created';
+  try {
+    await smClient.send(new CreateSecretCommand({
+      Name: secretId,
+      SecretString: value,
+      Tags: tags,
+      Description: `Per-user agent credential ${name} for ${userEmail}`,
+    }));
+  } catch (err) {
+    const isExists = err instanceof ResourceExistsException
+      || err.name === 'ResourceExistsException';
+    if (!isExists) {
+      throw err;
+    }
+    await smClient.send(new PutSecretValueCommand({
+      SecretId: secretId,
+      SecretString: value,
+    }));
+    action = 'rotated';
+  }
+
+  // Bust the in-memory cache so subsequent get() calls in the same
+  // session see the new value rather than the prior cached miss.
+  const cacheKey = `${userEmail}\x00${name}`;
+  delete _cache[cacheKey];
+
+  return { name, scope: 'user', action };
+}
+
+/**
+ * Append an audit row recording a per-user credential write. Best-effort.
+ * Never logs the credential value — only the name, scope, and action.
+ */
+async function logCredentialPut(credentialName, userEmail, action) {
+  if (!rdsClient || !DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) {
+    return;
+  }
+  try {
+    await rdsClient.send(new ExecuteStatementCommand({
+      resourceArn: DATABASE_RESOURCE_ARN,
+      secretArn: DATABASE_SECRET_ARN,
+      database: 'aistudio',
+      sql: `INSERT INTO psd_agent_credentials_audit
+              (credential_name, scope, action, details)
+            VALUES (:name, 'user', :action, CAST(:details AS JSONB))`,
+      parameters: [
+        { name: 'name', value: { stringValue: credentialName } },
+        { name: 'action', value: { stringValue: action } },
+        {
+          name: 'details',
+          value: { stringValue: JSON.stringify({ user_email: userEmail }) },
+        },
+      ],
+    }));
+  } catch (err) {
+    console.error(`Audit log failed (non-fatal): ${err.message}`);
+  }
+}
+
+/**
+ * Check whether a given user email has been granted a capability via
+ * their role assignments. Source-of-truth tables are `users` (email →
+ * id), `user_roles` (id → role_id), `role_tools` (role_id → tool_id),
+ * and `tools` (capability identifier; the table will be renamed to
+ * `capabilities` under epic #922 / issue #923).
+ *
+ * Returns `true` if at least one matching grant exists and the
+ * capability is still active. Returns `false` if no grant is found or
+ * if the database is not configured (fail-closed for restricted skills
+ * — better to refuse the action than to expose it on a misconfig).
+ */
+async function userHasCapability(userEmail, capabilityIdentifier) {
+  if (!rdsClient || !DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) {
+    return false;
+  }
+  try {
+    const resp = await rdsClient.send(new ExecuteStatementCommand({
+      resourceArn: DATABASE_RESOURCE_ARN,
+      secretArn: DATABASE_SECRET_ARN,
+      database: 'aistudio',
+      sql: `SELECT 1
+              FROM users u
+              JOIN user_roles ur ON ur.user_id = u.id
+              JOIN role_tools rt ON rt.role_id = ur.role_id
+              JOIN tools t ON t.id = rt.tool_id
+             WHERE u.email = :email
+               AND t.identifier = :cap
+               AND t.is_active = true
+             LIMIT 1`,
+      parameters: [
+        { name: 'email', value: { stringValue: userEmail } },
+        { name: 'cap', value: { stringValue: capabilityIdentifier } },
+      ],
+    }));
+    return Array.isArray(resp.records) && resp.records.length > 0;
+  } catch (err) {
+    console.error(`Capability check failed (treating as denied): ${err.message}`);
+    return false;
+  }
+}
+
+/**
  * Insert a credential request into the database.
  */
 async function insertCredentialRequest(credentialName, reason, skillContext, userEmail) {
@@ -316,4 +446,7 @@ module.exports = {
   listCredentials,
   logCredentialRead,
   insertCredentialRequest,
+  putUserCredential,
+  logCredentialPut,
+  userHasCapability,
 };

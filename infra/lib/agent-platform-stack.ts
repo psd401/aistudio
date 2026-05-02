@@ -823,6 +823,26 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: ['*'],
     }));
 
+    // Per-user credential WRITE — for the psd-credentials/put.js helper.
+    // Scope is intentionally locked to the per-user prefix
+    // (psd-agent-creds/{env}/user/*) so a skill cannot write or rotate
+    // a shared (district-wide) secret. Shared-scope provisioning stays
+    // an admin-only operation done out of band. CreateSecret is
+    // namespace-scoped via the resource pattern; the optional Tags
+    // attribute on CreateSecret requires TagResource permission.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'AgentCredentialsWritePerUser',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'secretsmanager:CreateSecret',
+        'secretsmanager:PutSecretValue',
+        'secretsmanager:TagResource',
+      ],
+      resources: [
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent-creds/${environment}/user/*`,
+      ],
+    }));
+
     // Secrets Manager — psd-workspace skill (#912): read shared OAuth client
     // credentials and the internal API key for consent-link generation.
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
