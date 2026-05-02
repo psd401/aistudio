@@ -53,7 +53,7 @@ node /home/node/.openclaw/skills/psd-credentials/check_capability.js \
   --capability "<capability-identifier>"
 ```
 
-Returns `{"granted":true|false,"capability":"...","user":"..."}` and exits `0` on grant, `3` on deny, `1` on internal error. Used by restricted skills (e.g. `psd-image-gen`) to enforce the AI Studio role-based capability model at invocation time. Fails closed on database errors — a restricted skill should refuse to act when the grant cannot be confirmed.
+Returns `{"granted":true|false,"capability":"..."}` and exits `0` on grant, `3` on deny, `1` on internal error. Used by restricted skills (e.g. `psd-image-gen`) to enforce the AI Studio role-based capability model at invocation time. Fails closed on database errors — a restricted skill should refuse to act when the grant cannot be confirmed.
 
 ### `request_new` — request provisioning of a new credential
 

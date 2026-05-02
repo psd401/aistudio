@@ -1,25 +1,48 @@
 /**
  * Aggregation helpers shared between daily and weekly summary scripts.
  *
- * Pacific time conversions are intentionally fixed at UTC-8 (no DST
- * adjustment) — matches the reference implementation's behavior. The
- * date math is correct for the bulk of the school year; during DST
- * (Mar–Nov) summary boundaries shift by one hour. Acceptable tradeoff
- * versus pulling in a tz library here.
+ * Pacific time conversions use Intl.DateTimeFormat with
+ * 'America/Los_Angeles' for correct PST/PDT handling. No external
+ * tz library needed — Node.js ships ICU data by default.
  */
 
 'use strict';
 
 const { fsFetch } = require('./api');
 
-const PACIFIC_OFFSET_HOURS = 8;
+const PACIFIC_TZ = 'America/Los_Angeles';
+
+/**
+ * Get the UTC offset in milliseconds for a given date in Pacific time.
+ * Handles PST (UTC-8) vs PDT (UTC-7) automatically via Intl API.
+ */
+function getPacificOffsetMs(date) {
+  // Format the date parts in Pacific time to reconstruct the local
+  // timestamp, then diff against the UTC timestamp to find the offset.
+  const formatter = new Intl.DateTimeFormat('en-US', {
+    timeZone: PACIFIC_TZ,
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false,
+  });
+  const parts = Object.fromEntries(
+    formatter.formatToParts(date).map((p) => [p.type, p.value]),
+  );
+  // Reconstruct a UTC timestamp that represents "what Pacific clocks show"
+  const pacificAsUtc = new Date(
+    `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}Z`,
+  );
+  return date.getTime() - pacificAsUtc.getTime();
+}
 
 function toUTC(date) {
-  return new Date(date.getTime() + PACIFIC_OFFSET_HOURS * 60 * 60 * 1000).toISOString();
+  const offsetMs = getPacificOffsetMs(date);
+  return new Date(date.getTime() + offsetMs).toISOString();
 }
 
 function fromUTCToPacific(date) {
-  return new Date(date.getTime() - PACIFIC_OFFSET_HOURS * 60 * 60 * 1000);
+  const offsetMs = getPacificOffsetMs(date);
+  return new Date(date.getTime() - offsetMs);
 }
 
 function categorizeTicket(subject) {

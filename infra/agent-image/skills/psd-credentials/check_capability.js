@@ -41,7 +41,9 @@ async function main() {
     fail(`Capability check failed: ${err.message}`);
   }
 
-  emit({ granted, capability: args.capability, user: args.user });
+  // Omit user email from output — the caller already knows it, and
+  // including PII in tool stdout increases accidental exposure surface.
+  emit({ granted, capability: args.capability });
   process.exit(granted ? 0 : 3);
 }
 

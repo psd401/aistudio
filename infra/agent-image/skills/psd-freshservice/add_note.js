@@ -10,7 +10,7 @@
 
 'use strict';
 
-const { fail, emit, parseArgs, requireUser, getApiKey, fsFetch, parseJsonArg } =
+const { fail, emit, parseArgs, requireUser, getApiKey, fsFetch, requireTicketId, parseJsonArg } =
   require('./lib/api');
 
 async function main() {
@@ -20,8 +20,7 @@ async function main() {
     process.exit(0);
   }
   const userEmail = requireUser(args);
-  const id = args.id;
-  if (!id || id === true) fail('--id is required', 'bad_args');
+  const id = requireTicketId(args);
   const data = parseJsonArg(args.data, '--data');
   if (!data.body) fail('data.body is required', 'bad_args');
   if (data.private === undefined) data.private = true;

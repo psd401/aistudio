@@ -156,6 +156,18 @@ async function fsFetch(apiKey, urlPath, init = {}) {
   return { __ok: true, status: resp.status, data: json };
 }
 
+/**
+ * Validate and return a numeric ticket ID from parsed args. Freshservice
+ * ticket IDs are always positive integers — reject anything else to
+ * prevent path-traversal in URL interpolation.
+ */
+function requireTicketId(args) {
+  const id = args.id;
+  if (!id || id === true) fail('--id is required', 'bad_args');
+  if (!/^\d+$/.test(String(id))) fail('--id must be a numeric ticket ID', 'bad_args');
+  return String(id);
+}
+
 function parseJsonArg(arg, fieldName = 'JSON argument') {
   if (!arg || arg === true) {
     fail(`${fieldName} required`, 'bad_args');
@@ -177,5 +189,6 @@ module.exports = {
   requireUser,
   getApiKey,
   fsFetch,
+  requireTicketId,
   parseJsonArg,
 };

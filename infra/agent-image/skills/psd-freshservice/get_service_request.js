@@ -9,7 +9,7 @@
 
 'use strict';
 
-const { fail, emit, parseArgs, requireUser, getApiKey, fsFetch } = require('./lib/api');
+const { fail, emit, parseArgs, requireUser, getApiKey, fsFetch, requireTicketId } = require('./lib/api');
 
 async function main() {
   const args = parseArgs(process.argv);
@@ -18,8 +18,7 @@ async function main() {
     process.exit(0);
   }
   const userEmail = requireUser(args);
-  const id = args.id;
-  if (!id || id === true) fail('--id is required', 'bad_args');
+  const id = requireTicketId(args);
 
   const apiKey = getApiKey(userEmail);
   const ticketRes = await fsFetch(apiKey, `/tickets/${id}?include=conversations,requester`);

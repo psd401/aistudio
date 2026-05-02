@@ -62,6 +62,13 @@ function validateUserEmail(email) {
   if (!EMAIL.test(email)) {
     fail(`Invalid --user "${email}". Must be a valid email address.`);
   }
+  // Defense-in-depth: reject path separators in the email since the value
+  // is interpolated into Secrets Manager secret paths. SM treats names as
+  // flat strings (no filesystem traversal), but blocking `/` prevents
+  // unintended namespace crossings in the psd-agent-creds path hierarchy.
+  if (email.includes('/')) {
+    fail('Email must not contain path separators (/).');
+  }
 }
 
 function parseArgs(argv) {
