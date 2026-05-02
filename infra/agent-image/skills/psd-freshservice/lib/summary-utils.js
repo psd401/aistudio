@@ -1,49 +1,15 @@
 /**
  * Aggregation helpers shared between daily and weekly summary scripts.
  *
- * Pacific time conversions use Intl.DateTimeFormat with
- * 'America/Los_Angeles' for correct PST/PDT handling. No external
- * tz library needed — Node.js ships ICU data by default.
+ * Pacific time is handled via the container's TZ=America/Los_Angeles
+ * setting (Dockerfile). Date objects use the system timezone automatically
+ * — no manual offset arithmetic needed. .toISOString() converts local
+ * timestamps to the correct UTC instants for Freshservice API queries.
  */
 
 'use strict';
 
 const { fsFetch } = require('./api');
-
-const PACIFIC_TZ = 'America/Los_Angeles';
-
-/**
- * Get the UTC offset in milliseconds for a given date in Pacific time.
- * Handles PST (UTC-8) vs PDT (UTC-7) automatically via Intl API.
- */
-function getPacificOffsetMs(date) {
-  // Format the date parts in Pacific time to reconstruct the local
-  // timestamp, then diff against the UTC timestamp to find the offset.
-  const formatter = new Intl.DateTimeFormat('en-US', {
-    timeZone: PACIFIC_TZ,
-    year: 'numeric', month: '2-digit', day: '2-digit',
-    hour: '2-digit', minute: '2-digit', second: '2-digit',
-    hour12: false,
-  });
-  const parts = Object.fromEntries(
-    formatter.formatToParts(date).map((p) => [p.type, p.value]),
-  );
-  // Reconstruct a UTC timestamp that represents "what Pacific clocks show"
-  const pacificAsUtc = new Date(
-    `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}Z`,
-  );
-  return date.getTime() - pacificAsUtc.getTime();
-}
-
-function toUTC(date) {
-  const offsetMs = getPacificOffsetMs(date);
-  return new Date(date.getTime() + offsetMs).toISOString();
-}
-
-function fromUTCToPacific(date) {
-  const offsetMs = getPacificOffsetMs(date);
-  return new Date(date.getTime() - offsetMs);
-}
 
 function categorizeTicket(subject) {
   const lower = (subject || '').toLowerCase();
@@ -63,7 +29,35 @@ function categorizeTicket(subject) {
   return 'Other';
 }
 
-async function fetchAgentMap(apiKey) {
+/**
+ * Build an agent-ID-to-name map. When agentIds are provided, fetches
+ * only those specific agents (one API call per agent) instead of
+ * paginating through all agents (up to 50 pages / 5000 agents).
+ * Falls back to full pagination when no IDs are provided.
+ */
+async function fetchAgentMap(apiKey, agentIds) {
+  const map = Object.create(null);
+
+  if (agentIds && agentIds.length > 0) {
+    // Fetch only the agents we need — one call per unique ID. For a
+    // typical daily summary (~10-20 unique responders) this is 10-20
+    // API calls vs. potentially 50 paginated calls for the full roster.
+    const uniqueIds = [...new Set(agentIds)];
+    await Promise.all(uniqueIds.map(async (id) => {
+      const r = await fsFetch(apiKey, `/agents/${id}`);
+      if (!r.__ok) return;
+      const agent = r.data.agent || r.data;
+      map[id] = {
+        name: `${agent.first_name || ''} ${agent.last_name || ''}`.trim(),
+        first_name: agent.first_name,
+        job_title: agent.job_title,
+      };
+    }));
+    return map;
+  }
+
+  // Fallback: fetch all agents via pagination (used when caller
+  // doesn't know which IDs to expect).
   let all = [];
   let page = 1;
   while (page <= 50) {
@@ -74,7 +68,6 @@ async function fetchAgentMap(apiKey) {
     if (batch.length < 100) break;
     page += 1;
   }
-  const map = Object.create(null);
   for (const agent of all) {
     map[agent.id] = {
       name: `${agent.first_name || ''} ${agent.last_name || ''}`.trim(),
@@ -86,9 +79,11 @@ async function fetchAgentMap(apiKey) {
 }
 
 async function searchClosedTickets(apiKey, startDate, endDate, workspaceId = 2) {
-  const startUTC = toUTC(startDate);
-  const endUTC = toUTC(endDate);
-  const query = `(status:4 OR status:5) AND updated_at:>'${startUTC.split('T')[0]}T00:00:00Z' AND updated_at:<'${endUTC.split('T')[0]}T23:59:59Z'`;
+  // startDate/endDate are local Date objects (Pacific, per Dockerfile TZ).
+  // .toISOString() emits the correct UTC instant for Pacific midnight/EOD.
+  // Previous code used toUTC() then .split('T')[0] which discarded the time
+  // component and reconstructed midnight UTC — off by 7-8 hours.
+  const query = `(status:4 OR status:5) AND updated_at:>'${startDate.toISOString()}' AND updated_at:<'${endDate.toISOString()}'`;
 
   let all = [];
   let page = 1;
@@ -105,8 +100,6 @@ async function searchClosedTickets(apiKey, startDate, endDate, workspaceId = 2) 
 }
 
 module.exports = {
-  toUTC,
-  fromUTCToPacific,
   categorizeTicket,
   fetchAgentMap,
   searchClosedTickets,

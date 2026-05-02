@@ -78,9 +78,17 @@ function parseArgs(argv) {
   return args;
 }
 
+// NOTE: parseArgs, fail, emit, validateEmail are intentionally duplicated from
+// psd-credentials/common.js — skills are standalone packages with no cross-skill
+// require(). The source of truth for these helpers is psd-credentials/common.js.
 function validateEmail(email) {
   const RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-  return typeof email === 'string' && RE.test(email);
+  if (typeof email !== 'string' || !RE.test(email)) return false;
+  // Defense-in-depth: reject path separators — email is interpolated into S3
+  // key paths (`images/{email}/{uuid}.png`) and slashes would create unexpected
+  // key prefixes.
+  if (email.includes('/')) return false;
+  return true;
 }
 
 /**
@@ -96,7 +104,7 @@ function validateEmail(email) {
  * future change once OpenClaw exposes a per-session catalog hook.
  */
 function enforceCapability(userEmail) {
-  let exitStatus = 1;
+  let exitStatus;
   let stdout = '';
   try {
     stdout = execFileSync('node', [
@@ -129,15 +137,17 @@ function enforceCapability(userEmail) {
 }
 
 /**
- * Fetch the shared OpenAI API key from psd-credentials. The skill is
- * its own process and cannot share the credential cache, so we shell
- * out and parse one JSON object from stdout. The value is held in a
- * local variable and never written elsewhere.
+ * Fetch the shared (district-funded) OpenAI API key from psd-credentials.
+ * Uses --shared to skip user-scoped lookups — ensures a per-user key
+ * cannot override the district-funded key. The skill is its own process
+ * and cannot share the credential cache, so we shell out and parse one
+ * JSON object from stdout. The value is held in a local variable and
+ * never written elsewhere.
  */
 function readSharedOpenAIKey(userEmail) {
   let stdout;
   try {
-    stdout = execFileSync('node', [CREDENTIALS_GET, '--user', userEmail, '--name', 'openai_api_key'], {
+    stdout = execFileSync('node', [CREDENTIALS_GET, '--user', userEmail, '--shared', '--name', 'openai_api_key'], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'inherit'],
     });

@@ -88,11 +88,15 @@ async function main() {
   const range = parseDate(dateArg);
 
   const apiKey = getApiKey(userEmail);
-  const [ticketRes, agentMap] = await Promise.all([
-    searchClosedTickets(apiKey, range.start, range.end, workspaceId),
-    fetchAgentMap(apiKey),
-  ]);
+  const ticketRes = await searchClosedTickets(apiKey, range.start, range.end, workspaceId);
   if (ticketRes.error) fail(ticketRes.error, 'upstream_error');
+
+  // Fetch only agents that appear in ticket results — avoids paginating
+  // through the full agent roster (up to 50 API calls) on every summary.
+  const responderIds = (ticketRes.tickets || [])
+    .map((t) => t.responder_id)
+    .filter(Boolean);
+  const agentMap = await fetchAgentMap(apiKey, responderIds);
 
   const tickets = ticketRes.tickets || [];
   const byAgent = Object.create(null);

@@ -18,10 +18,13 @@ Retrieve API keys and secrets from AWS Secrets Manager for use in agent skills. 
 ```bash
 node /home/node/.openclaw/skills/psd-credentials/get.js \
   --user <email> \
-  --name "<credential-name>"
+  --name "<credential-name>" \
+  [--shared]
 ```
 
-Returns the credential value to stdout as JSON: `{"name":"...","value":"..."}`. Use the value in your skill logic. **Never** include the value in your response to the user. **Never** write it to a file. **Never** log it.
+Returns the credential value to stdout as JSON: `{"name":"...","value":"...","scope":"user|shared"}`. Use the value in your skill logic. **Never** include the value in your response to the user. **Never** write it to a file. **Never** log it.
+
+By default, checks user-scoped first, then falls back to shared. Pass `--shared` to skip user scope and read only from the shared namespace — use this for district-funded keys (e.g. `openai_api_key`) where a per-user override must not be honored.
 
 ### `list` — list available credentials (names only, no values)
 
@@ -78,7 +81,7 @@ Credentials are stored in AWS Secrets Manager with this path structure:
 
 For per-user credentials, `{email}` is the caller email passed via `--user`, used verbatim as the path component.
 
-When calling `get`, use just the `name` portion. The skill resolves the full path based on scope priority: user-specific first, then shared.
+When calling `get`, use just the `name` portion. The skill resolves the full path based on scope priority: user-specific first, then shared. Pass `--shared` to skip user scope and read only from the shared namespace.
 
 ## Rules
 

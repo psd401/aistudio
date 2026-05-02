@@ -23,7 +23,11 @@ async function resolveAgentId(apiKey, email) {
 async function fetchApprovals(apiKey, agentId, status, parent) {
   const url = `/approvals?approver_id=${agentId}&status=${encodeURIComponent(status)}&parent=${parent}`;
   const r = await fsFetch(apiKey, url);
-  if (!r.__ok) return { error: r.error, approvals: [] };
+  if (!r.__ok) {
+    // Surface the error instead of silently returning empty data —
+    // callers must distinguish "no approvals" from "API failure".
+    fail(`Failed to fetch ${parent} approvals: ${r.error}`, 'upstream_error');
+  }
   return {
     approvals: (r.data.approvals || []).map((a) => ({
       id: a.id,

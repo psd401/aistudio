@@ -99,7 +99,7 @@ node get_daily_summary.js --user <email> [--date today] [--workspace-id 2]
 node get_weekly_summary.js --user <email> [--weeks-ago 0] [--workspace-id 2]
 ```
 
-Both summaries query closed (status 4) and resolved (status 5) tickets in the named workspace, then aggregate by agent and by category. Pacific time conversion is fixed at UTC-8 (no DST adjustment).
+Both summaries query closed (status 4) and resolved (status 5) tickets in the named workspace, then aggregate by agent and by category. Pacific time handling uses the container's `TZ=America/Los_Angeles` setting, which handles PST/PDT transitions automatically.
 
 ### Narrative style for summaries
 

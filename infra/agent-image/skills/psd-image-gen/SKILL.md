@@ -1,7 +1,7 @@
 ---
 name: psd-image-gen
 summary: Generate images with OpenAI gpt-image-2 — shared API key, district-funded.
-description: Generates an image from a text prompt via OpenAI's gpt-image-2 model and returns a presigned S3 URL the agent can surface in chat. Uses a shared (district-funded) OpenAI API key from Secrets Manager — usage costs accrue centrally. Restricted by the `skill.image-gen` capability; users without the capability cannot see or invoke this skill. Output includes the URL, model, and resolved size; never the API key.
+description: Generates an image from a text prompt via OpenAI's gpt-image-2 model and returns a presigned S3 URL the agent can surface in chat. Uses a shared (district-funded) OpenAI API key from Secrets Manager — usage costs accrue centrally. Restricted by the `skill.image-gen` capability; users without the capability will be refused at invocation time (the skill remains visible in the catalog until OpenClaw supports per-session filtering). Output includes the URL, model, and resolved size; never the API key.
 allowed-tools: Bash(node:*)
 ---
 
@@ -49,6 +49,6 @@ This skill enforces the `skill.image-gen` capability at invocation time. The cap
 
 ## Operational Notes
 
-- Always reads the OpenAI key via `psd-credentials/get.js --shared --name openai_api_key`. Never reads from environment variables.
-- Uploads to `s3://$WORKSPACE_BUCKET/images/<email>/<uuid>.png` with `application/png` content type.
+- Always reads the OpenAI key via `psd-credentials/get.js --user <email> --shared --name openai_api_key`. The `--shared` flag skips user-scoped lookups to ensure the district-funded key is always used. Never reads from environment variables.
+- Uploads to `s3://$WORKSPACE_BUCKET/images/<email>/<uuid>.png` with `image/png` content type.
 - Presigned URL TTL: 3600s. Re-generate via this skill if a longer-lived link is needed (we do not extend TTLs).

@@ -23,7 +23,10 @@ const BASE_URL = `https://${DOMAIN}/api/v2`;
 
 const CREDENTIALS_GET = path.resolve(__dirname, '..', '..', 'psd-credentials', 'get.js');
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+// Basic email validation — intentionally simple for a CLI tool that only
+// accepts PSD domain emails. Rejects path separators (/) as defense-in-depth
+// since email values are interpolated into URL paths and Secrets Manager paths.
+const EMAIL_RE = /^[^\s@/]+@[^\s@/]+\.[^\s@/]+$/;
 
 function fail(message, code = 'error') {
   process.stderr.write(`Error: ${message}\n`);

@@ -124,14 +124,25 @@ function resolveSecretId(name, userEmail) {
 /**
  * Fetch a secret value from Secrets Manager, checking user scope first,
  * then falling back to shared scope. Uses in-memory cache.
+ *
+ * @param {string} name       - Credential name (alphanumeric/hyphens/underscores/dots).
+ * @param {string} userEmail  - Authenticated caller's email.
+ * @param {object} [options]  - Optional flags.
+ * @param {boolean} [options.sharedOnly=false] - If true, skip user scope and
+ *   read only from the shared namespace. Use this for district-funded keys
+ *   (e.g. openai_api_key) where a user-scoped override must not be honored.
  */
-async function getCredential(name, userEmail) {
+async function getCredential(name, userEmail, options) {
+  const sharedOnly = options && options.sharedOnly === true;
+
   // H1 fix: Validate credential name to prevent path traversal in SM paths
   validateCredentialName(name);
 
   // Use a null byte as delimiter — cannot appear in an email or a
   // SAFE_CRED_NAME_RE-validated name, so (user, name) pairs are unambiguous.
-  const cacheKey = `${userEmail}\x00${name}`;
+  // Append scope mode to distinguish cached entries between shared-only and
+  // normal lookups for the same credential name.
+  const cacheKey = `${userEmail}\x00${name}\x00${sharedOnly ? 's' : 'a'}`;
   if (cacheKey in _cache) {
     const cached = _cache[cacheKey];
     if (Date.now() - cached.cachedAt < CACHE_TTL_MS) {
@@ -143,11 +154,16 @@ async function getCredential(name, userEmail) {
 
   const { userPath, sharedPath } = resolveSecretId(name, userEmail);
 
-  // Try user-scoped first
-  let value = await tryGetSecret(userPath);
-  let scope = 'user';
+  let value = null;
+  let scope = 'shared';
 
-  // Fall back to shared
+  if (!sharedOnly) {
+    // Try user-scoped first
+    value = await tryGetSecret(userPath);
+    scope = 'user';
+  }
+
+  // Fall back to (or exclusively use) shared
   if (value === null) {
     value = await tryGetSecret(sharedPath);
     scope = 'shared';
@@ -290,7 +306,8 @@ async function logCredentialRead(credentialName, userEmail, sessionId) {
  * the secret already exists. Caller-trusted on value contents (no length
  * or format validation per plan decision).
  *
- * Audit row is appended to psd_agent_credentials_audit with action='put'.
+ * The caller (put.js) appends an audit row to psd_agent_credentials_audit
+ * via logCredentialPut() with action='created' or 'rotated'.
  * The credential value is never logged.
  */
 async function putUserCredential(name, value, userEmail) {

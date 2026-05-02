@@ -1,10 +1,16 @@
 -- Migration 075: Skill-load capability gate + image-gen skill capability
 --
--- Adds the runtime permission gate for the agent skills platform. The
--- agent harness reads psd_agent_skills.required_capability and only
--- exposes the skill to OpenClaw when the calling user's role-granted
--- capabilities include the named identifier. NULL means the skill is
--- open to all (preserves prior behavior for migrations 070-era skills).
+-- Adds the schema plumbing for per-skill capability gating. The column
+-- psd_agent_skills.required_capability stores the capability identifier
+-- that a user must hold (via their role grants in tools/role_tools) to
+-- invoke the skill. NULL means the skill is open to all (preserves prior
+-- behavior for migrations 070-era skills).
+--
+-- The harness-level enforcement (reading this column and filtering
+-- skill exposure per session) is a planned follow-up once OpenClaw
+-- exposes a per-session catalog hook. Currently, skills enforce their
+-- own capability gate at invocation time (see psd-image-gen/generate.js
+-- enforceCapability()).
 --
 -- Seeds the first restricted capability (`skill.image-gen`) used by the
 -- new psd-image-gen skill, and grants it to administrator + staff roles

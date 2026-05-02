@@ -12,8 +12,6 @@
 
 const { fail, emit, parseArgs, requireUser, getApiKey, fsFetch } = require('./lib/api');
 
-const KNOWN_WORKSPACE_IDS = [2, 3, 4, 5, 6, 8, 9, 10, 11, 13];
-
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
@@ -30,13 +28,19 @@ async function main() {
     return;
   }
 
-  const results = await Promise.all(KNOWN_WORKSPACE_IDS.map(async (id) => {
-    const r = await fsFetch(apiKey, `/workspaces/${id}`);
-    if (!r.__ok) return null;
-    const w = r.data.workspace || r.data;
-    return { id: w.id, name: w.name, primary: w.primary, state: w.state };
+  // Use the /workspaces endpoint to list all accessible workspaces in a
+  // single API call instead of probing a hardcoded list of IDs. This is
+  // more robust (auto-discovers new workspaces) and more efficient (one
+  // call vs. N parallel calls).
+  const result = await fsFetch(apiKey, '/workspaces');
+  if (!result.__ok) fail(result.error, 'upstream_error');
+  const workspaces = (result.data.workspaces || []).map((w) => ({
+    id: w.id,
+    name: w.name,
+    primary: w.primary,
+    state: w.state,
   }));
-  emit({ workspaces: results.filter(Boolean) });
+  emit({ workspaces });
 }
 
 main().catch((err) => fail(err instanceof Error ? err.message : String(err)));

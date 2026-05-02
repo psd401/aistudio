@@ -11,12 +11,29 @@
 const { fail, emit, parseArgs, requireUser, getApiKey } = require('./lib/api');
 const {
   categorizeTicket,
-  fromUTCToPacific,
   fetchAgentMap,
   searchClosedTickets,
 } = require('./lib/summary-utils');
 
 const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+
+/**
+ * Count the number of elapsed weekdays (Mon-Fri) between start and now,
+ * capped at 5. For past-week queries this returns 5; for the current
+ * week (weeks-ago 0), it returns 1-5 based on what day it is today.
+ */
+function countElapsedWeekdays(rangeStart, rangeEnd) {
+  const now = new Date();
+  const effectiveEnd = rangeEnd < now ? rangeEnd : now;
+  let count = 0;
+  const cursor = new Date(rangeStart);
+  while (cursor <= effectiveEnd && count < 5) {
+    const day = cursor.getDay();
+    if (day >= 1 && day <= 5) count += 1;
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return Math.max(count, 1); // avoid division by zero
+}
 
 function getWeekRange(weeksAgo) {
   const now = new Date();
@@ -56,11 +73,15 @@ async function main() {
   const range = getWeekRange(weeksAgo);
 
   const apiKey = getApiKey(userEmail);
-  const [ticketRes, agentMap] = await Promise.all([
-    searchClosedTickets(apiKey, range.start, range.end, workspaceId),
-    fetchAgentMap(apiKey),
-  ]);
+  const ticketRes = await searchClosedTickets(apiKey, range.start, range.end, workspaceId);
   if (ticketRes.error) fail(ticketRes.error, 'upstream_error');
+
+  // Fetch only agents that appear in ticket results — avoids paginating
+  // through the full agent roster (up to 50 API calls) on every summary.
+  const responderIds = (ticketRes.tickets || [])
+    .map((t) => t.responder_id)
+    .filter(Boolean);
+  const agentMap = await fetchAgentMap(apiKey, responderIds);
 
   const tickets = ticketRes.tickets || [];
   const byDay = Object.create(null);
@@ -72,8 +93,9 @@ async function main() {
 
   for (const ticket of tickets) {
     const updatedAt = new Date(ticket.updated_at);
-    const pacific = fromUTCToPacific(updatedAt);
-    const dayName = getDayName(pacific);
+    // Dockerfile sets TZ=America/Los_Angeles — Date methods already use
+    // Pacific time. No manual offset conversion needed.
+    const dayName = getDayName(updatedAt);
     const category = categorizeTicket(ticket.subject);
 
     if (byDay[dayName]) {
@@ -103,6 +125,8 @@ async function main() {
     }
   }
 
+  const elapsedWeekdays = countElapsedWeekdays(range.start, range.end);
+
   const sortedAgents = Object.entries(byAgent)
     .map(([id, data]) => ({
       id,
@@ -112,12 +136,12 @@ async function main() {
       count: data.count,
       categories: data.categories,
       byDay: data.byDay,
-      avg_per_day: (data.count / 5).toFixed(1),
+      avg_per_day: (data.count / elapsedWeekdays).toFixed(1),
     }))
     .sort((a, b) => b.count - a.count);
 
   const weekdayCounts = DAY_LABELS.slice(0, 5).map((d) => byDay[d].count);
-  const avgDaily = weekdayCounts.reduce((a, b) => a + b, 0) / 5;
+  const avgDaily = weekdayCounts.reduce((a, b) => a + b, 0) / elapsedWeekdays;
   const peakDay = DAY_LABELS.slice(0, 5).reduce((max, d) => byDay[d].count > byDay[max].count ? d : max, 'Mon');
   const slowDay = DAY_LABELS.slice(0, 5).reduce((min, d) => byDay[d].count < byDay[min].count ? d : min, 'Mon');
 

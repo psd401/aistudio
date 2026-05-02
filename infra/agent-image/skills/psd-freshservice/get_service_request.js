@@ -42,6 +42,16 @@ async function main() {
     }
   }
 
+  // Map all requested items — a service request may contain multiple line
+  // items (e.g. "Chromebook + charger"), not just the first one.
+  const serviceItems = requestedItems.map((item) => ({
+    id: item.service_item_id,
+    name: item.service_item_name,
+    quantity: item.quantity,
+    cost: item.cost_per_request,
+    custom_fields: item.custom_fields || {},
+  }));
+
   emit({
     ticket: {
       id: ticket.id,
@@ -60,12 +70,15 @@ async function main() {
       approval_status_name: ticket.approval_status_name,
     },
     requester,
-    form_data: requestedItems[0]?.custom_fields || {},
-    service_item: requestedItems[0] ? {
-      id: requestedItems[0].service_item_id,
-      name: requestedItems[0].service_item_name,
-      quantity: requestedItems[0].quantity,
-      cost: requestedItems[0].cost_per_request,
+    // Preserve backward-compat: form_data from the first item (most common case)
+    form_data: serviceItems[0]?.custom_fields || {},
+    service_items: serviceItems,
+    // Legacy singular field for backward compat — first item only
+    service_item: serviceItems[0] ? {
+      id: serviceItems[0].id,
+      name: serviceItems[0].name,
+      quantity: serviceItems[0].quantity,
+      cost: serviceItems[0].cost,
     } : null,
     conversations: (ticket.conversations || []).map((c) => ({
       id: c.id,

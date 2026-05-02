@@ -827,16 +827,40 @@ export class AgentPlatformStack extends cdk.Stack {
     // Scope is intentionally locked to the per-user prefix
     // (psd-agent-creds/{env}/user/*) so a skill cannot write or rotate
     // a shared (district-wide) secret. Shared-scope provisioning stays
-    // an admin-only operation done out of band. CreateSecret is
-    // namespace-scoped via the resource pattern; the optional Tags
-    // attribute on CreateSecret requires TagResource permission.
+    // an admin-only operation done out of band.
+    //
+    // CreateSecret and TagResource are constrained by aws:RequestTag
+    // conditions matching what psd-credentials/put.js sets on new secrets.
+    // This prevents a compromised task from re-tagging existing per-user
+    // secrets with arbitrary Environment or ManagedBy values.
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'AgentCredentialsWritePerUser',
       effect: iam.Effect.ALLOW,
       actions: [
         'secretsmanager:CreateSecret',
-        'secretsmanager:PutSecretValue',
         'secretsmanager:TagResource',
+      ],
+      resources: [
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent-creds/${environment}/user/*`,
+      ],
+      conditions: {
+        StringEquals: {
+          'aws:RequestTag/Environment': environment,
+          'aws:RequestTag/ManagedBy': 'psd-credentials-skill',
+        },
+        'ForAllValues:StringEquals': {
+          'aws:TagKeys': ['Environment', 'ManagedBy', 'Scope'],
+        },
+      },
+    }));
+
+    // PutSecretValue does not support tag conditions — it only updates
+    // the secret value, not tags. Scoped to the per-user resource prefix.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'AgentCredentialsUpdatePerUser',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'secretsmanager:PutSecretValue',
       ],
       resources: [
         `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent-creds/${environment}/user/*`,
