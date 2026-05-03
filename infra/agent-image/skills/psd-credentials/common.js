@@ -346,8 +346,10 @@ async function putUserCredential(name, value, userEmail) {
 
   // Bust the in-memory cache so subsequent get() calls in the same
   // session see the new value rather than the prior cached miss.
-  const cacheKey = `${userEmail}\x00${name}`;
-  delete _cache[cacheKey];
+  // Cache keys use three-part format: email + NUL + name + NUL + scope flag.
+  // Delete both scope variants ('a' = all-scopes, 's' = shared-only).
+  delete _cache[`${userEmail}\x00${name}\x00a`];
+  delete _cache[`${userEmail}\x00${name}\x00s`];
 
   return { name, scope: 'user', action };
 }

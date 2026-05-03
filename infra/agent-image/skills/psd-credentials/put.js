@@ -44,9 +44,9 @@ async function main() {
   try {
     const result = await putUserCredential(args.name, args.value, args.user);
 
-    await logCredentialPut(args.name, args.user, result.action).catch((err) => {
-      console.error(`Audit log failed (non-fatal): ${err.message}`);
-    });
+    // logCredentialPut handles errors internally (logs and swallows) so no
+    // outer .catch() is needed — it would never fire.
+    await logCredentialPut(args.name, args.user, result.action);
 
     emit({
       name: result.name,

@@ -22,6 +22,11 @@ async function main() {
   const apiKey = getApiKey(userEmail);
 
   if (args.id && args.id !== true) {
+    // Workspace IDs are positive integers — apply the same numeric-only guard
+    // used for ticket IDs (requireTicketId) to prevent path traversal.
+    if (!/^\d+$/.test(String(args.id))) {
+      fail('--id must be a numeric workspace ID', 'bad_args');
+    }
     const result = await fsFetch(apiKey, `/workspaces/${encodeURIComponent(args.id)}`);
     if (!result.__ok) fail(result.error, 'upstream_error');
     emit(result.data.workspace || result.data);

@@ -56,6 +56,9 @@ next-env.d.ts
 # Python
 __pycache__/
 
+# CDK Lambda bundling artifacts
+infra/database/lambda/package-lock.json
+
 # Claude agent internal state
 .claude/agent-memory/
 docs/learnings/.evolve-state.json

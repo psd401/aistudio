@@ -81,6 +81,12 @@ function parseArgs(argv) {
 // NOTE: parseArgs, fail, emit, validateEmail are intentionally duplicated from
 // psd-credentials/common.js — skills are standalone packages with no cross-skill
 // require(). The source of truth for these helpers is psd-credentials/common.js.
+//
+// Email regex divergence: psd-freshservice/lib/api.js uses /^[^\s@/]+@[^\s@/]+\.[^\s@/]+$/
+// (blocks `/` inside the character classes), while this file uses a separate
+// `.includes('/')` check. Both produce the same behavior — reject emails with `/`.
+// Unifying into a shared helper is tracked for the planned cross-skill utility
+// module (see psd-credentials SKILL.md).
 function validateEmail(email) {
   const RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
   if (typeof email !== 'string' || !RE.test(email)) return false;
@@ -127,6 +133,11 @@ function enforceCapability(userEmail) {
   if (lines.length > 0) {
     try { parsed = JSON.parse(lines[lines.length - 1]); } catch { /* fall through */ }
   }
+  // Intentionally defensive: check_capability.js's contract is exit 0 = granted
+  // (handled above), exit 3 = denied. This second check covers the edge case where
+  // check_capability exits non-zero (e.g. signal/crash) but still emitted
+  // {granted: true} to stdout before dying. In that scenario we trust the stdout
+  // payload over the exit code, because the capability query itself succeeded.
   const granted = parsed && parsed.granted === true;
   if (granted) return;
   fail(
@@ -201,6 +212,8 @@ async function generateImage(apiKey, params) {
 }
 
 async function uploadAndPresign(bytes, userEmail) {
+  // Defense-in-depth guard — main() checks WORKSPACE_BUCKET before the OpenAI
+  // call, so this is only reachable if the function is called from a new path.
   if (!WORKSPACE_BUCKET) {
     fail('WORKSPACE_BUCKET env var not set — cannot upload generated image', 'misconfigured');
   }
@@ -252,6 +265,12 @@ async function main() {
   }
   if (!ALLOWED_BACKGROUNDS.has(background)) {
     fail(`Invalid --background. Allowed: ${[...ALLOWED_BACKGROUNDS].join(', ')}`, 'bad_args');
+  }
+
+  // Validate WORKSPACE_BUCKET early — before capability checks or OpenAI calls —
+  // so we don't spend API quota only to fail on upload. (Review PR #934 feedback)
+  if (!WORKSPACE_BUCKET) {
+    fail('WORKSPACE_BUCKET env var not set — cannot upload generated image', 'misconfigured');
   }
 
   enforceCapability(args.user);

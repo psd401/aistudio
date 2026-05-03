@@ -46,6 +46,10 @@ function getWeekRange(weeksAgo) {
   sunday.setDate(sunday.getDate() + 6);
   sunday.setHours(23, 59, 59, 999);
 
+  // Approximate week number — not ISO 8601 week numbering. May return
+  // incorrect values near year boundaries (ISO week 52/53 edge cases,
+  // e.g. Dec 31 of some years is ISO week 1 of the next year). This is
+  // used only for display labels, not for date arithmetic.
   const firstDayOfYear = new Date(monday.getFullYear(), 0, 1);
   const pastDaysOfYear = (monday - firstDayOfYear) / 86400000;
   const weekNum = Math.ceil((pastDaysOfYear + firstDayOfYear.getDay() + 1) / 7);

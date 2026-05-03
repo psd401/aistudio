@@ -91,6 +91,20 @@ When calling `get`, use just the `name` portion. The skill resolves the full pat
 4. **Cache in memory only** — the skill caches values for the session. Credential values do not persist across sessions.
 5. **If a credential is not found**, suggest the user ask an admin to provision it, or use `request_new` to file a request.
 
+## Security: Trust Boundaries
+
+### `--user` parameter trust boundary
+
+The `--user` parameter is the authenticated caller's email, passed by the agent harness from the session context. **put.js** uses this value to scope `PutSecretValue` calls to `psd-agent-creds/{env}/user/{email}/{name}`. The IAM policy (`AgentCredentialsUpdatePerUser`) restricts `PutSecretValue` to the `psd-agent-creds/{env}/user/*` path but cannot enforce per-email scoping (AWS does not support tag-based conditions on `PutSecretValue`).
+
+**Current trust model:** The harness is trusted to pass the correct `--user` value. A compromised or malicious skill process that can call `put.js` with an arbitrary `--user` could overwrite another user's credential.
+
+**Planned mitigation:** Harness-level enforcement that injects `--user` from the verified session and strips/rejects user-supplied `--user` overrides. Until then, credential overwrites are logged in `psd_agent_credentials_audit` for forensic review.
+
+### CLI argument exposure
+
+`put.js` accepts `--value` on the command line. CLI arguments are visible in `ps aux` output and may be captured by container runtime logging or process auditing. The exposure window is short (process lifetime), but for long-term secrets this is a meaningful risk. A future improvement will read the secret value from stdin instead of CLI args.
+
 ## Examples
 
 **Using an API key in a skill:**

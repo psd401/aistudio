@@ -115,6 +115,11 @@ function getApiKey(userEmail) {
  * they have not registered their Freshservice API key yet. Exits 2 so
  * the agent can detect the registration-needed state distinctly from
  * other failure modes.
+ *
+ * Note: The storeCommand passes the secret via --value CLI argument,
+ * which is visible in ps output for the process lifetime. This is a
+ * known trade-off documented in psd-credentials/SKILL.md § "CLI argument
+ * exposure". A future improvement will pipe the value via stdin.
  */
 function promptForKey(userEmail, reason) {
   process.stdout.write(JSON.stringify({
