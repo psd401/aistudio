@@ -20,12 +20,17 @@ const { execFileSync } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const path = require('node:path');
 
-const { S3Client, PutObjectCommand, GetObjectCommand } = require('@aws-sdk/client-s3');
-const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
+const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const WORKSPACE_BUCKET = process.env.WORKSPACE_BUCKET || '';
-const PRESIGN_TTL_SECONDS = 3600;
+// Skill output lives under `public-images/` which is granted public
+// `s3:GetObject` by the workspace bucket's resource policy (see
+// agent-platform-stack.ts:AgentWorkspaceBucket). Anyone who receives the
+// returned URL can fetch the image — same security model as Google
+// Drive "anyone with the link" sharing. The UUID in the key makes the
+// path unguessable. Keep this prefix in sync with the bucket policy.
+const PUBLIC_PREFIX = 'public-images';
 // The unversioned alias rather than a dated snapshot. The dated form
 // (`gpt-image-2-2026-04-21`) is gated by an OpenAI per-project allowlist
 // and silently 404s for projects that don't have that snapshot enabled —
@@ -212,13 +217,16 @@ async function generateImage(apiKey, params) {
   return Buffer.from(first.b64_json, 'base64');
 }
 
-async function uploadAndPresign(bytes, userEmail) {
+async function uploadAndShare(bytes, userEmail) {
   // Defense-in-depth guard — main() checks WORKSPACE_BUCKET before the OpenAI
   // call, so this is only reachable if the function is called from a new path.
   if (!WORKSPACE_BUCKET) {
     fail('WORKSPACE_BUCKET env var not set — cannot upload generated image', 'misconfigured');
   }
-  const key = `images/${userEmail}/${randomUUID()}.png`;
+  // Encode each path segment so emails with `+` (subaddressing) survive the
+  // URL round-trip. randomUUID() returns RFC4122 hex with hyphens — already
+  // URL-safe.
+  const key = `${PUBLIC_PREFIX}/${userEmail}/${randomUUID()}.png`;
   const s3 = new S3Client({ region: REGION });
 
   await s3.send(new PutObjectCommand({
@@ -232,14 +240,12 @@ async function uploadAndPresign(bytes, userEmail) {
     },
   }));
 
-  const url = await getSignedUrl(
-    s3,
-    new GetObjectCommand({ Bucket: WORKSPACE_BUCKET, Key: key }),
-    { expiresIn: PRESIGN_TTL_SECONDS },
-  );
-
-  const expiresAt = new Date(Date.now() + PRESIGN_TTL_SECONDS * 1000).toISOString();
-  return { url, key, expiresAt };
+  // Path-style URL: avoids any DNS-vs-virtual-hosted-style ambiguity for
+  // bucket names that contain dots. Path segments are URL-encoded so
+  // emails with reserved characters (`+`, `/`, `&`) survive intact.
+  const encodedKey = key.split('/').map(encodeURIComponent).join('/');
+  const url = `https://${WORKSPACE_BUCKET}.s3.${REGION}.amazonaws.com/${encodedKey}`;
+  return { url, key };
 }
 
 async function main() {
@@ -282,7 +288,7 @@ async function main() {
   enforceCapability(args.user);
   const apiKey = readSharedOpenAIKey(args.user);
   const bytes = await generateImage(apiKey, { prompt: args.prompt, size, quality, background });
-  const { url, key, expiresAt } = await uploadAndPresign(bytes, args.user);
+  const { url, key } = await uploadAndShare(bytes, args.user);
 
   emit({
     url,
@@ -292,7 +298,9 @@ async function main() {
     size,
     quality,
     background,
-    expiresAt,
+    // The URL is unsigned and does not expire. Anyone with the link can fetch
+    // until the object is deleted (manual lifecycle policy may be added later).
+    sharing: 'public-by-link',
   });
 }
 

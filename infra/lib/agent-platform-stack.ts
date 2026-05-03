@@ -165,7 +165,22 @@ export class AgentPlatformStack extends cdk.Stack {
     // =====================================================================
     this.workspaceBucket = new s3.Bucket(this, 'AgentWorkspaceBucket', {
       bucketName: `psd-agents-${environment}-${cdk.Aws.ACCOUNT_ID}`,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      // BlockPublicAcls + IgnorePublicAcls keep ACL-driven public access
+      // forbidden. BlockPublicPolicy and RestrictPublicBuckets are FALSE so
+      // the resource policy below can grant unauthenticated GetObject on
+      // the single `public-images/*` prefix used by the psd-image-gen
+      // skill. Without this carve-out the skill returns presigned URLs
+      // signed with AgentCore's STS session credentials; those URLs embed
+      // an `X-Amz-Security-Token` query parameter that intermittently
+      // fails with `InvalidToken` when fetched through chat clients
+      // (observed in PR #934 dev rollout 2026-05-03). Switching to a
+      // public-by-link prefix eliminates the failure mode entirely.
+      blockPublicAccess: new s3.BlockPublicAccess({
+        blockPublicAcls: true,
+        ignorePublicAcls: true,
+        blockPublicPolicy: false,
+        restrictPublicBuckets: false,
+      }),
       // SSE-S3 chosen over SSE-KMS: workspace data is agent-generated artifacts
       // (not direct student PII). KMS adds ~$1/mo per key + $0.03/10k API calls.
       // Upgrade to SSE-KMS with dedicated key if student data is stored here.
@@ -192,6 +207,21 @@ export class AgentPlatformStack extends cdk.Stack {
 
     cdk.Tags.of(this.workspaceBucket).add('Environment', environment);
     cdk.Tags.of(this.workspaceBucket).add('ManagedBy', 'cdk');
+
+    // Public-read carve-out for psd-image-gen output. Skill writes generated
+    // PNGs to `public-images/<email>/<uuid>.png` and returns an unsigned
+    // HTTPS URL. The UUID makes the path unguessable; anyone who receives
+    // the URL can fetch — same security model as Google Drive "anyone with
+    // the link" sharing. The skill, IAM grants, and this policy must all
+    // agree on the `public-images/` prefix. Other prefixes in the bucket
+    // remain private (no other allow-public statements exist).
+    this.workspaceBucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'PublicReadOnPublicImagesPrefix',
+      effect: iam.Effect.ALLOW,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['s3:GetObject'],
+      resources: [`${this.workspaceBucket.bucketArn}/public-images/*`],
+    }));
 
     // =====================================================================
     // 4. DynamoDB Tables
