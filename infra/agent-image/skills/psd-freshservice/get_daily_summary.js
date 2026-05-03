@@ -76,7 +76,11 @@ function parseDate(arg) {
       label: t.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' }),
     };
   }
-  const d = new Date(arg);
+  // Append T00:00:00 to force parsing as local midnight. Without it,
+  // `new Date('2024-01-15')` is parsed as UTC midnight, which in the
+  // Pacific timezone (UTC-7/8) yields the *previous* calendar day for
+  // d.getFullYear()/getMonth()/getDate() — an off-by-one bug.
+  const d = new Date(`${arg}T00:00:00`);
   if (isNaN(d.getTime())) fail(`Could not parse --date: ${arg}`, 'bad_args');
   return {
     start: new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0),

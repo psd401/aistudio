@@ -40,6 +40,12 @@ async function main() {
   if (!args.value || args.value === true) {
     fail('--value is required (the secret value to store)');
   }
+  // Secrets Manager accepts up to 65 KB, but no real-world API key exceeds
+  // 4 KB. Cap early to prevent accidental storage of large blobs (e.g. an
+  // agent-generated multi-KB response pasted into --value by mistake).
+  if (args.value.length > 4096) {
+    fail('--value exceeds 4096 characters — API keys should not be this long', 'bad_args');
+  }
   // Guard against the agent running the storeCommand template verbatim without
   // substituting the placeholder. Storing the literal string wastes a Secrets
   // Manager secret and silently "succeeds" with a non-functional credential.

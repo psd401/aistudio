@@ -57,7 +57,10 @@ function fail(message, code = 'error') {
 }
 
 function emit(obj) {
-  process.stdout.write(JSON.stringify(obj) + '\n');
+  // Pretty-print for consistency with psd-freshservice/lib/api.js:emit.
+  // All skills should emit the same JSON format so the agent receives
+  // uniform output regardless of which skill produced it.
+  process.stdout.write(JSON.stringify(obj, null, 2) + '\n');
 }
 
 function parseArgs(argv) {
@@ -115,7 +118,6 @@ function validateEmail(email) {
  * future change once OpenClaw exposes a per-session catalog hook.
  */
 function enforceCapability(userEmail) {
-  let exitStatus;
   try {
     execFileSync('node', [
       CREDENTIALS_CHECK_CAPABILITY,
@@ -125,11 +127,11 @@ function enforceCapability(userEmail) {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'inherit'],
     });
-    exitStatus = 0;
-  } catch (err) {
-    exitStatus = err.status === undefined ? 1 : err.status;
+    // Exit code 0 — capability granted, return without error.
+    return;
+  } catch {
+    // Non-zero exit — fall through to fail-closed denial below.
   }
-  if (exitStatus === 0) return;
 
   // Fail-closed: any non-zero exit from check_capability.js means denied.
   // We do NOT trust stdout {granted: true} when the process exited non-zero

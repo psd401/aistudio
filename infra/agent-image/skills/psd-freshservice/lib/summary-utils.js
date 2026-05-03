@@ -52,8 +52,16 @@ async function fetchAgentMap(apiKey, agentIds) {
     // saturating Freshservice's rate limits when a workspace has 50+
     // unique responders in a single summary period.
     const BATCH_SIZE = 10;
+    const INTER_BATCH_DELAY_MS = 50;
     const uniqueIds = [...new Set(agentIds)];
     for (let i = 0; i < uniqueIds.length; i += BATCH_SIZE) {
+      // Yield between batches to avoid saturating Freshservice's 400 req/min
+      // rate limit when a workspace has 50+ unique responders in a single
+      // summary period. The first batch fires immediately; subsequent batches
+      // wait 50ms to spread the load.
+      if (i > 0) {
+        await new Promise((r) => setTimeout(r, INTER_BATCH_DELAY_MS));
+      }
       const batch = uniqueIds.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (id) => {
         const r = await fsFetch(apiKey, `/agents/${id}`);

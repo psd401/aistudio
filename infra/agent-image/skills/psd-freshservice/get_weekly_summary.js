@@ -147,8 +147,17 @@ async function main() {
 
   const weekdayCounts = DAY_LABELS.slice(0, 5).map((d) => byDay[d].count);
   const avgDaily = weekdayCounts.reduce((a, b) => a + b, 0) / elapsedWeekdays;
-  const peakDay = DAY_LABELS.slice(0, 5).reduce((max, d) => byDay[d].count > byDay[max].count ? d : max, 'Mon');
-  const slowDay = DAY_LABELS.slice(0, 5).reduce((min, d) => byDay[d].count < byDay[min].count ? d : min, 'Mon');
+
+  // When no tickets exist, peak/slow day are meaningless — return null to
+  // avoid misleading the agent into reporting "Monday was the slowest day"
+  // when every day had 0 tickets.
+  const hasTickets = tickets.length > 0;
+  const peakDay = hasTickets
+    ? DAY_LABELS.slice(0, 5).reduce((max, d) => byDay[d].count > byDay[max].count ? d : max, 'Mon')
+    : null;
+  const slowDay = hasTickets
+    ? DAY_LABELS.slice(0, 5).reduce((min, d) => byDay[d].count < byDay[min].count ? d : min, 'Mon')
+    : null;
 
   const output = {
     week: range.label,
@@ -157,8 +166,8 @@ async function main() {
     total_closed: tickets.length,
     daily_average: avgDaily.toFixed(1),
     trends: {
-      peak_day: { day: peakDay, count: byDay[peakDay].count },
-      slow_day: { day: slowDay, count: byDay[slowDay].count },
+      peak_day: peakDay ? { day: peakDay, count: byDay[peakDay].count } : null,
+      slow_day: slowDay ? { day: slowDay, count: byDay[slowDay].count } : null,
       daily_counts: byDay,
     },
     by_category: Object.fromEntries(

@@ -158,6 +158,11 @@ async function fsFetch(apiKey, urlPath, init = {}) {
   // Always prepend BASE_URL — never allow callers to bypass the DOMAIN guard
   // by passing an absolute URL. All paths must be relative to the Freshservice
   // API v2 base (e.g. '/tickets/123', not 'https://...').
+  // Guard: urlPath must start with '/' to prevent accidental concatenation
+  // producing an invalid URL (e.g. BASE_URL + 'tickets' → '...v2tickets').
+  if (typeof urlPath !== 'string' || !urlPath.startsWith('/')) {
+    fail(`fsFetch: urlPath must start with '/' (got: ${String(urlPath).slice(0, 50)})`, 'bad_args');
+  }
   const url = `${BASE_URL}${urlPath}`;
   const headers = {
     'Authorization': authHeader(apiKey),
