@@ -23,12 +23,14 @@ async function main() {
   const id = requireTicketId(args);
   const data = parseJsonArg(args.data, '--data');
   if (!data.body) fail('data.body is required', 'bad_args');
-  if (data.private === undefined) data.private = true;
+  // Avoid mutating the parsed JSON object in-place — spread a new object
+  // with `private` defaulting to true (overridable by the caller's JSON).
+  const payload = { private: true, ...data };
 
   const apiKey = getApiKey(userEmail);
   const result = await fsFetch(apiKey, `/tickets/${id}/notes`, {
     method: 'POST',
-    body: JSON.stringify(data),
+    body: JSON.stringify(payload),
   });
   if (!result.__ok) fail(result.error, 'upstream_error');
   emit(result.data);

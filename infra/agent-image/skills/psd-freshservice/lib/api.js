@@ -78,6 +78,12 @@ function requireUser(args) {
  * Fetch the per-user Freshservice API key from psd-credentials. Returns
  * the key string, or emits a structured registration-prompt and exits
  * non-zero if the credential is not provisioned.
+ *
+ * Uses execFileSync (blocks the event loop) because each psd-freshservice
+ * script is a short-lived CLI process that does one thing then exits — no
+ * concurrent I/O to worry about. Do NOT call this from a server context;
+ * use the async execFile variant if this is ever imported into a long-lived
+ * process.
  */
 function getApiKey(userEmail) {
   let stdout = '';

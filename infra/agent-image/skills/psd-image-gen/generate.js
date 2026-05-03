@@ -26,6 +26,11 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const WORKSPACE_BUCKET = process.env.WORKSPACE_BUCKET || '';
 const PRESIGN_TTL_SECONDS = 3600;
+// Pinned to a dated snapshot for reproducibility. OpenAI may deprecate this
+// specific version without notice — if the skill starts returning upstream_error,
+// update to the latest `gpt-image-2-YYYY-MM-DD` version (or the unversioned
+// `gpt-image-2` alias if reproducibility is no longer a concern). Also update
+// SKILL.md when changing this value.
 const MODEL_ID = 'gpt-image-2-2026-04-21';
 const ALLOWED_SIZES = new Set(['1024x1024', '1024x1536', '1536x1024', 'auto']);
 const ALLOWED_QUALITIES = new Set(['low', 'medium', 'high', 'auto']);

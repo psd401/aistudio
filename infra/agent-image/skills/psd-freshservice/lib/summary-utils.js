@@ -106,9 +106,14 @@ async function searchClosedTickets(apiKey, startDate, endDate, workspaceId = 2) 
     if (!r.__ok) return { error: r.error };
     const batch = r.data.tickets || [];
     all = all.concat(batch);
+    // If this page was full AND we've reached the cap, stop with truncation flag.
+    // Explicit break avoids a subtle post-increment check that's fragile to refactoring.
+    if (batch.length === 100 && page === MAX_PAGES) {
+      hitPageCap = true;
+      break;
+    }
     if (batch.length < 100) break;
     page += 1;
-    if (page > MAX_PAGES) hitPageCap = true;
   }
   // Signal to callers when the page cap (50 × 100 = 5,000 tickets) was reached
   // so the agent can warn the user that the summary may be incomplete.

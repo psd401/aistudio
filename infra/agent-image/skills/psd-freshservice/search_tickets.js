@@ -28,6 +28,12 @@ async function main() {
   if (isNaN(workspaceId)) fail('--workspace-id must be a number', 'bad_args');
 
   const apiKey = getApiKey(userEmail);
+  // The query string is passed through to Freshservice's filter API as-is
+  // (after URL-encoding). This is intentional — search_tickets is a power-user
+  // tool that exposes the full Freshservice filter syntax (field:value AND/OR
+  // field:value). Freshservice enforces its own access controls on the
+  // caller's API key, so this does not expand the user's data access beyond
+  // what their key already permits.
   const url = `/tickets/filter?query="${encodeURIComponent(query)}"&workspace_id=${workspaceId}`;
   const result = await fsFetch(apiKey, url);
   if (!result.__ok) fail(result.error, 'upstream_error');

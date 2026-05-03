@@ -856,6 +856,16 @@ export class AgentPlatformStack extends cdk.Stack {
 
     // PutSecretValue does not support tag conditions — it only updates
     // the secret value, not tags. Scoped to the per-user resource prefix.
+    //
+    // KNOWN LIMITATION (AWS API): PutSecretValue cannot be scoped to a
+    // single user's email path because the action does not support
+    // aws:RequestTag/* or aws:ResourceTag/* conditions. This means any
+    // skill running on the AgentCore task can rotate any user's credential
+    // under the `psd-agent-creds/{env}/user/*` prefix. Compensating
+    // controls: (1) skills validate --user is the authenticated caller,
+    // (2) psd_agent_credentials_audit logs all writes with action/email,
+    // (3) the ECS task is isolated per-session. This is not a gap in our
+    // design — it is a Secrets Manager API constraint.
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'AgentCredentialsUpdatePerUser',
       effect: iam.Effect.ALLOW,
