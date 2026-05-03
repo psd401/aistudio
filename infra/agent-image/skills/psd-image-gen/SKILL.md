@@ -7,7 +7,7 @@ allowed-tools: Bash(node:*)
 
 # psd-image-gen
 
-Generate an image from a prompt using OpenAI `gpt-image-2-2026-04-21`. The image is uploaded to the agent workspace S3 bucket and returned as a presigned URL valid for 1 hour. Surface the URL to the user — Google Chat will render it as a download link today (inline rendering is a planned follow-up).
+Generate an image from a prompt using OpenAI `gpt-image-2`. The image is uploaded to the agent workspace S3 bucket and returned as a presigned URL valid for 1 hour. Surface the URL to the user — Google Chat will render it as a download link today (inline rendering is a planned follow-up).
 
 **Identity.** All commands require `--user <caller-email>`. Pass the email verbatim from the `[caller: Name <email>]` header of the user turn.
 
@@ -22,7 +22,7 @@ node /home/node/.openclaw/skills/psd-image-gen/generate.js \
   [--background opaque | transparent | auto]
 ```
 
-Returns JSON: `{ "url": "...", "model": "gpt-image-2-2026-04-21", "prompt": "...", "size": "...", "expiresAt": "..." }`.
+Returns JSON: `{ "url": "...", "model": "gpt-image-2", "prompt": "...", "size": "...", "expiresAt": "..." }`.
 
 ## Prompting Guidance
 
@@ -52,3 +52,9 @@ This skill enforces the `skill.image-gen` capability at invocation time. The cap
 - Always reads the OpenAI key via `psd-credentials/get.js --user <email> --shared --name openai_api_key`. The `--shared` flag skips user-scoped lookups to ensure the district-funded key is always used. Never reads from environment variables.
 - Uploads to `s3://$WORKSPACE_BUCKET/images/<email>/<uuid>.png` with `image/png` content type.
 - Presigned URL TTL: 3600s. Re-generate via this skill if a longer-lived link is needed (we do not extend TTLs).
+
+## Known limitation: presigned URLs returning `InvalidToken` in chat
+
+When the skill runs inside the AgentCore runtime, the presigned URL is signed with the runtime's STS session credentials and embeds an `X-Amz-Security-Token` query parameter. Some chat clients (observed: Google Chat link-preview fetcher) mishandle the URL-encoded characters in the security token, producing `InvalidToken: The provided token is malformed or otherwise invalid` when the user clicks the URL — even though the underlying object is intact in S3.
+
+The agent should not retry generating the URL when this happens — the failure is structural to session-credentialed presigning, not a per-invocation flake. Tracked in the follow-up issue noted in the PR description; fix path is to stop returning STS-signed URLs and instead either return a public URL from a dedicated public-read prefix, or have the agent-router (long-lived role) re-sign with its own credentials before posting to chat.

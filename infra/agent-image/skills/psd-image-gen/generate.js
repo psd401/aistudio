@@ -26,12 +26,16 @@ const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const WORKSPACE_BUCKET = process.env.WORKSPACE_BUCKET || '';
 const PRESIGN_TTL_SECONDS = 3600;
-// Pinned to a dated snapshot for reproducibility. OpenAI may deprecate this
-// specific version without notice — if the skill starts returning upstream_error,
-// update to the latest `gpt-image-2-YYYY-MM-DD` version (or the unversioned
-// `gpt-image-2` alias if reproducibility is no longer a concern). Also update
-// SKILL.md when changing this value.
-const MODEL_ID = 'gpt-image-2-2026-04-21';
+// The unversioned alias rather than a dated snapshot. The dated form
+// (`gpt-image-2-2026-04-21`) is gated by an OpenAI per-project allowlist
+// and silently 404s for projects that don't have that snapshot enabled —
+// observed in dev on 2026-05-03, broke image-gen end-to-end. The alias
+// resolves to whatever the project has access to and rolls forward
+// automatically as OpenAI publishes new versions. We trade pin-style
+// reproducibility for actually working; if a future OpenAI release
+// changes output meaningfully, we'll re-pin to the new dated version.
+// Also update SKILL.md when changing this value.
+const MODEL_ID = 'gpt-image-2';
 const ALLOWED_SIZES = new Set(['1024x1024', '1024x1536', '1536x1024', 'auto']);
 const ALLOWED_QUALITIES = new Set(['low', 'medium', 'high', 'auto']);
 const ALLOWED_BACKGROUNDS = new Set(['opaque', 'transparent', 'auto']);
