@@ -41,6 +41,12 @@ async function fetchAgentMap(apiKey, agentIds) {
   // warn the user that some agent names are placeholders ("Agent 12345").
   let partialNames = false;
 
+  // Type guard: callers must pass an array (or omit entirely for full pagination).
+  // Spreading a non-array into `new Set()` throws cryptically — fail fast instead.
+  if (agentIds != null && !Array.isArray(agentIds)) {
+    throw new Error('fetchAgentMap: agentIds must be an array or null/undefined');
+  }
+
   if (agentIds && agentIds.length > 0) {
     // Fetch only the agents we need. Batched in groups of 10 to avoid
     // saturating Freshservice's rate limits when a workspace has 50+

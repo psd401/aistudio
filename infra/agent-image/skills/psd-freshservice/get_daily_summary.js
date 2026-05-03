@@ -18,6 +18,15 @@ const {
 
 const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];
 
+/**
+ * Parse a human-friendly --date argument into a start/end Date pair.
+ *
+ * TIMEZONE: Date labels (toLocaleDateString) and day-of-week calculations
+ * depend on the container's TZ environment variable. The agent Dockerfile
+ * sets TZ=America/Los_Angeles so all date operations use Pacific time.
+ * If TZ is incorrect, date labels will misalign with the query window
+ * constructed in searchClosedTickets().
+ */
 function parseDate(arg) {
   const now = new Date();
   if (!arg || arg === 'today') {

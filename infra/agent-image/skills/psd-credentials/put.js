@@ -43,7 +43,9 @@ async function main() {
   // Guard against the agent running the storeCommand template verbatim without
   // substituting the placeholder. Storing the literal string wastes a Secrets
   // Manager secret and silently "succeeds" with a non-functional credential.
-  if (args.value === '<PASTE THE KEY HERE>') {
+  // Case-insensitive to catch variations like "<paste the key here>" or
+  // "<Paste The Key Here>" that a user or model might produce.
+  if (args.value.trim().toLowerCase() === '<paste the key here>') {
     fail('--value contains the template placeholder — replace with the actual secret before storing', 'bad_args');
   }
 

@@ -33,6 +33,13 @@ async function main() {
   if (!args.capability || args.capability === true) {
     fail('--capability is required');
   }
+  // Format guard: capability identifiers are dot-delimited lowercase tokens
+  // (e.g. "skill.image-gen"). Reject empty, overlong, or non-printable values
+  // to surface clear errors rather than confusing downstream behavior.
+  if (!/^[a-z0-9._-]{1,64}$/.test(args.capability)) {
+    fail(`Invalid capability format: "${args.capability}". ` +
+      'Must be 1-64 chars of lowercase alphanumeric, dots, hyphens, underscores.');
+  }
 
   let granted = false;
   try {

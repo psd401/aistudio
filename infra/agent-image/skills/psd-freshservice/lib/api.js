@@ -47,9 +47,9 @@ function parseArgs(argv) {
       continue;
     }
     if (!arg.startsWith('--')) {
-      args._positional = args._positional || [];
-      args._positional.push(arg);
-      continue;
+      // Positional args are not supported by psd-freshservice commands.
+      // Fail fast rather than silently ignoring.
+      fail(`Unexpected positional argument: ${arg}`, 'bad_args');
     }
     const key = arg.slice(2).replace(/-/g, '_');
     const next = argv[i + 1];

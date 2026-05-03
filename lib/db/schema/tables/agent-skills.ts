@@ -53,6 +53,12 @@ export const psdAgentSkills = pgTable("psd_agent_skills", {
   scanStatus: varchar("scan_status", { length: 16 }).$type<AgentSkillScanStatus>().notNull().default("pending"),
   scanFindings: jsonb("scan_findings").$type<SkillScanFindings>(),
   // Added in migration 075. NULL = open to all; non-null = capability required.
+  // NOTE: No FK constraint to `tools` — the column stores a capability
+  // identifier string (e.g. "skill.image-gen") validated at application
+  // level. Setting a non-existent identifier silently blocks the skill.
+  // Harness-level enforcement (catalog filtering per session) is pending
+  // OpenClaw's per-session catalog hook. Currently, skills self-enforce
+  // via check_capability.js at invocation time.
   requiredCapability: text("required_capability"),
   approvedBy: integer("approved_by").references(() => users.id, { onDelete: "set null" }),
   approvedAt: timestamp("approved_at", { withTimezone: true }),
