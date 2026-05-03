@@ -8,6 +8,14 @@
  * (denied). Other errors exit 1. Fail-closed on database errors —
  * restricted skills must refuse to run when capability cannot be
  * confirmed.
+ *
+ * TRUST BOUNDARY: --user is caller-trusted. The harness is expected to
+ * inject the authenticated user's email from the verified session and
+ * strip any user-supplied overrides. If a prompt-injection or malicious
+ * tool output can control --user, a user could gain another user's
+ * capability grants. This is an inherent constraint of the CLI-based
+ * skill architecture — see psd-credentials/SKILL.md § Security: Trust
+ * Boundaries for the full analysis and compensating controls.
  */
 
 'use strict';

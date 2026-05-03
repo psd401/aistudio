@@ -56,6 +56,8 @@ function validateEnv() {
   if (!ENVIRONMENT) fail('ENVIRONMENT env var not set');
 }
 
+// Keep email validation in sync with: psd-freshservice/lib/api.js and
+// psd-image-gen/generate.js.
 function validateUserEmail(email) {
   if (!email) fail('--user is required (authenticated caller email)');
   const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -303,8 +305,9 @@ async function logCredentialRead(credentialName, userEmail, sessionId) {
  * secrets out of band.
  *
  * Uses CreateSecret on first write and falls back to PutSecretValue when
- * the secret already exists. Caller-trusted on value contents (no length
- * or format validation per plan decision).
+ * the secret already exists. Minimal validation on value contents is
+ * performed by the caller (put.js): length cap, placeholder detection,
+ * and minimum-length check.
  *
  * The caller (put.js) appends an audit row to psd_agent_credentials_audit
  * via logCredentialPut() with action='created' or 'rotated'.
@@ -332,6 +335,10 @@ async function putUserCredential(name, value, userEmail) {
       Description: `Per-user agent credential ${name} for ${userEmail}`,
     }));
   } catch (err) {
+    // Both checks are needed for AWS SDK v3 resilience: `instanceof` works
+    // when the exact class is imported from the same package version, but
+    // fails in edge cases (transitive dependency version skew, bundler
+    // deduplication). The string `.name` check covers those cases.
     const isExists = err instanceof ResourceExistsException
       || err.name === 'ResourceExistsException';
     if (!isExists) {

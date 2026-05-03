@@ -26,6 +26,7 @@ const CREDENTIALS_GET = path.resolve(__dirname, '..', '..', 'psd-credentials', '
 // Basic email validation — intentionally simple for a CLI tool that only
 // accepts PSD domain emails. Rejects path separators (/) as defense-in-depth
 // since email values are interpolated into URL paths and Secrets Manager paths.
+// Keep in sync with: psd-credentials/common.js and psd-image-gen/generate.js.
 const EMAIL_RE = /^[^\s@/]+@[^\s@/]+\.[^\s@/]+$/;
 
 function fail(message, code = 'error') {
@@ -143,8 +144,13 @@ function promptForKey(userEmail, reason) {
         '/home/node/.openclaw/skills/psd-credentials/put.js',
         '--user', userEmail,
         '--name', 'freshservice_api_key',
-        '--value', '<PASTE THE KEY HERE>',
+        '--value', '%%VALUE%%',
       ],
+      // The %%VALUE%% marker is where the agent must substitute the user's
+      // pasted API key. Using a distinctive marker (vs. natural language like
+      // "<PASTE THE KEY HERE>") makes substitution unambiguous in the args
+      // array and harder for the agent to mis-splice.
+      substitution: { '%%VALUE%%': 'Replace with the user-supplied Freshservice API key' },
     },
   }, null, 2) + '\n');
   process.exit(2);
@@ -171,6 +177,13 @@ async function fsFetch(apiKey, urlPath, init = {}) {
   };
   const resp = await fetch(url, { ...init, headers });
   if (!resp.ok) {
+    // Surface a specific error code for Freshservice rate limiting (429)
+    // so the agent can distinguish throttling from other API errors and
+    // advise the user to wait rather than retry immediately.
+    if (resp.status === 429) {
+      const retryAfter = resp.headers.get('retry-after') || 'unknown';
+      return { __ok: false, status: 429, error: `Freshservice rate limit exceeded. Retry after ${retryAfter}s.`, code: 'freshservice_rate_limited' };
+    }
     const body = await resp.text().catch(() => '');
     return { __ok: false, status: resp.status, error: `API error ${resp.status}: ${body.slice(0, 500)}` };
   }

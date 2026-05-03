@@ -89,6 +89,7 @@ function parseArgs(argv) {
 // NOTE: parseArgs, fail, emit, validateEmail are intentionally duplicated from
 // psd-credentials/common.js — skills are standalone packages with no cross-skill
 // require(). The source of truth for these helpers is psd-credentials/common.js.
+// Keep in sync with: psd-credentials/common.js and psd-freshservice/lib/api.js.
 //
 // Email regex divergence: psd-freshservice/lib/api.js uses /^[^\s@/]+@[^\s@/]+\.[^\s@/]+$/
 // (blocks `/` inside the character classes), while this file uses a separate

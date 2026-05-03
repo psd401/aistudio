@@ -21,6 +21,11 @@
 -- `capabilities` under epic #922 / issue #923; the rename is mechanical
 -- for our string identifier `skill.image-gen`).
 
+-- Standard retry pattern (also used in 065, 070): clear a prior 'failed'
+-- status so the migration Lambda re-runs this file on the next deploy.
+-- Safe because all DDL/DML below is idempotent (IF NOT EXISTS, ON CONFLICT
+-- DO NOTHING) — a partial prior run leaves the schema in a state this
+-- script can complete from.
 UPDATE migration_log SET status = 'completed'
 WHERE description = '075-skill-required-capability.sql' AND status = 'failed';
 

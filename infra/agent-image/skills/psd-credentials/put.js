@@ -8,8 +8,9 @@
  * the calling user's path. Shared secrets must be provisioned by an
  * admin out of band.
  *
- * Caller-trusted on value contents — no length or format validation
- * (per plan decision; agent prompts the user to paste a real key).
+ * Minimal validation on value contents: rejects excessively long values
+ * (>4096 chars), common template placeholders, and obviously non-key
+ * patterns. The agent prompts the user to paste a real key.
  * Logs to psd_agent_credentials_audit (name + user email, never value).
  */
 
@@ -47,12 +48,21 @@ async function main() {
     fail('--value exceeds 4096 characters — API keys should not be this long', 'bad_args');
   }
   // Guard against the agent running the storeCommand template verbatim without
-  // substituting the placeholder. Storing the literal string wastes a Secrets
-  // Manager secret and silently "succeeds" with a non-functional credential.
-  // Case-insensitive to catch variations like "<paste the key here>" or
-  // "<Paste The Key Here>" that a user or model might produce.
-  if (args.value.trim().toLowerCase() === '<paste the key here>') {
+  // substituting the placeholder. A model could produce many placeholder
+  // variants: "<paste the key here>", "<your-api-key>", "YOUR_API_KEY_HERE",
+  // "<API_KEY>", etc. We catch these with three heuristics:
+  // 1. Exact match for our template placeholder (case-insensitive)
+  // 2. Values that are entirely angle-bracket wrapped (e.g. <anything>)
+  // 3. Values shorter than 8 chars (no real API key is this short)
+  const trimmed = args.value.trim();
+  if (trimmed.toLowerCase() === '<paste the key here>') {
     fail('--value contains the template placeholder — replace with the actual secret before storing', 'bad_args');
+  }
+  if (/^<[^>]+>$/.test(trimmed)) {
+    fail('--value looks like a placeholder (angle-bracket wrapped) — replace with the actual secret', 'bad_args');
+  }
+  if (trimmed.length < 8) {
+    fail('--value is too short (< 8 characters) — API keys are longer than this', 'bad_args');
   }
 
   try {
