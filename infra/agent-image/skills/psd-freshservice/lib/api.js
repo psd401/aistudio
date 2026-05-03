@@ -80,7 +80,7 @@ function requireUser(args) {
  * non-zero if the credential is not provisioned.
  */
 function getApiKey(userEmail) {
-  let stdout;
+  let stdout = '';
   try {
     stdout = execFileSync('node', [
       CREDENTIALS_GET,
@@ -149,7 +149,10 @@ function authHeader(apiKey) {
 }
 
 async function fsFetch(apiKey, urlPath, init = {}) {
-  const url = urlPath.startsWith('http') ? urlPath : `${BASE_URL}${urlPath}`;
+  // Always prepend BASE_URL — never allow callers to bypass the DOMAIN guard
+  // by passing an absolute URL. All paths must be relative to the Freshservice
+  // API v2 base (e.g. '/tickets/123', not 'https://...').
+  const url = `${BASE_URL}${urlPath}`;
   const headers = {
     'Authorization': authHeader(apiKey),
     'Content-Type': 'application/json',

@@ -149,7 +149,7 @@ async function main() {
   const peakDay = DAY_LABELS.slice(0, 5).reduce((max, d) => byDay[d].count > byDay[max].count ? d : max, 'Mon');
   const slowDay = DAY_LABELS.slice(0, 5).reduce((min, d) => byDay[d].count < byDay[min].count ? d : min, 'Mon');
 
-  emit({
+  const output = {
     week: range.label,
     date_range: { start: range.start.toISOString(), end: range.end.toISOString() },
     workspace_id: workspaceId,
@@ -168,7 +168,11 @@ async function main() {
     category_trends: byCategoryByDay,
     top_agents: sortedAgents.slice(0, 10),
     all_agents: sortedAgents,
-  });
+  };
+  // Surface truncation warning so the agent can inform the user that
+  // the summary may be incomplete (>5,000 tickets in the period).
+  if (ticketRes.truncated) output.truncated = true;
+  emit(output);
 }
 
 main().catch((err) => fail(err instanceof Error ? err.message : String(err)));

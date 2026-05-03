@@ -39,20 +39,24 @@ async function fetchAgentMap(apiKey, agentIds) {
   const map = Object.create(null);
 
   if (agentIds && agentIds.length > 0) {
-    // Fetch only the agents we need — one call per unique ID. For a
-    // typical daily summary (~10-20 unique responders) this is 10-20
-    // API calls vs. potentially 50 paginated calls for the full roster.
+    // Fetch only the agents we need. Batched in groups of 10 to avoid
+    // saturating Freshservice's rate limits when a workspace has 50+
+    // unique responders in a single summary period.
+    const BATCH_SIZE = 10;
     const uniqueIds = [...new Set(agentIds)];
-    await Promise.all(uniqueIds.map(async (id) => {
-      const r = await fsFetch(apiKey, `/agents/${id}`);
-      if (!r.__ok) return;
-      const agent = r.data.agent || r.data;
-      map[id] = {
-        name: `${agent.first_name || ''} ${agent.last_name || ''}`.trim(),
-        first_name: agent.first_name,
-        job_title: agent.job_title,
-      };
-    }));
+    for (let i = 0; i < uniqueIds.length; i += BATCH_SIZE) {
+      const batch = uniqueIds.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (id) => {
+        const r = await fsFetch(apiKey, `/agents/${id}`);
+        if (!r.__ok) return;
+        const agent = r.data.agent || r.data;
+        map[id] = {
+          name: `${agent.first_name || ''} ${agent.last_name || ''}`.trim(),
+          first_name: agent.first_name,
+          job_title: agent.job_title,
+        };
+      }));
+    }
     return map;
   }
 
@@ -85,9 +89,11 @@ async function searchClosedTickets(apiKey, startDate, endDate, workspaceId = 2) 
   // component and reconstructed midnight UTC — off by 7-8 hours.
   const query = `(status:4 OR status:5) AND updated_at:>'${startDate.toISOString()}' AND updated_at:<'${endDate.toISOString()}'`;
 
+  const MAX_PAGES = 50;
   let all = [];
   let page = 1;
-  while (page <= 50) {
+  let hitPageCap = false;
+  while (page <= MAX_PAGES) {
     const url = `/tickets/filter?query="${encodeURIComponent(query)}"&workspace_id=${workspaceId}&page=${page}&per_page=100`;
     const r = await fsFetch(apiKey, url);
     if (!r.__ok) return { error: r.error };
@@ -95,8 +101,11 @@ async function searchClosedTickets(apiKey, startDate, endDate, workspaceId = 2) 
     all = all.concat(batch);
     if (batch.length < 100) break;
     page += 1;
+    if (page > MAX_PAGES) hitPageCap = true;
   }
-  return { tickets: all };
+  // Signal to callers when the page cap (50 × 100 = 5,000 tickets) was reached
+  // so the agent can warn the user that the summary may be incomplete.
+  return { tickets: all, truncated: hitPageCap };
 }
 
 module.exports = {

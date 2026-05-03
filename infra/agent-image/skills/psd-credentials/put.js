@@ -40,6 +40,12 @@ async function main() {
   if (!args.value || args.value === true) {
     fail('--value is required (the secret value to store)');
   }
+  // Guard against the agent running the storeCommand template verbatim without
+  // substituting the placeholder. Storing the literal string wastes a Secrets
+  // Manager secret and silently "succeeds" with a non-functional credential.
+  if (args.value === '<PASTE THE KEY HERE>') {
+    fail('--value contains the template placeholder — replace with the actual secret before storing', 'bad_args');
+  }
 
   try {
     const result = await putUserCredential(args.name, args.value, args.user);

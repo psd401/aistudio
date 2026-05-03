@@ -27,7 +27,8 @@ async function main() {
     if (!/^\d+$/.test(String(args.id))) {
       fail('--id must be a numeric workspace ID', 'bad_args');
     }
-    const result = await fsFetch(apiKey, `/workspaces/${encodeURIComponent(args.id)}`);
+    // encodeURIComponent is unnecessary after ^\d+$ validation (digits never encode)
+    const result = await fsFetch(apiKey, `/workspaces/${args.id}`);
     if (!result.__ok) fail(result.error, 'upstream_error');
     emit(result.data.workspace || result.data);
     return;

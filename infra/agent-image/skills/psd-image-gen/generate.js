@@ -128,18 +128,9 @@ function enforceCapability(userEmail) {
   }
   if (exitStatus === 0) return;
 
-  const lines = stdout.split('\n').filter((l) => l.trim().length > 0);
-  let parsed = null;
-  if (lines.length > 0) {
-    try { parsed = JSON.parse(lines[lines.length - 1]); } catch { /* fall through */ }
-  }
-  // Intentionally defensive: check_capability.js's contract is exit 0 = granted
-  // (handled above), exit 3 = denied. This second check covers the edge case where
-  // check_capability exits non-zero (e.g. signal/crash) but still emitted
-  // {granted: true} to stdout before dying. In that scenario we trust the stdout
-  // payload over the exit code, because the capability query itself succeeded.
-  const granted = parsed && parsed.granted === true;
-  if (granted) return;
+  // Fail-closed: any non-zero exit from check_capability.js means denied.
+  // We do NOT trust stdout {granted: true} when the process exited non-zero
+  // (e.g. signal, crash) — exit code is the sole source of truth for RBAC gates.
   fail(
     `User ${userEmail} lacks the ${REQUIRED_CAPABILITY} capability. ` +
     'Ask an administrator to grant it via the role assignments at /admin/roles.',

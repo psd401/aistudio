@@ -52,13 +52,7 @@ export const psdAgentSkills = pgTable("psd_agent_skills", {
   summary: text("summary").notNull(),
   scanStatus: varchar("scan_status", { length: 16 }).$type<AgentSkillScanStatus>().notNull().default("pending"),
   scanFindings: jsonb("scan_findings").$type<SkillScanFindings>(),
-  // Capability identifier (matches `tools.identifier`, soon `capabilities.identifier`
-  // under epic #922 / issue #923). NULL means the skill is open to all callers;
-  // a non-null value indicates a capability the user must hold to invoke the
-  // skill. Currently enforced at invocation time by the skill itself (e.g.
-  // psd-image-gen/generate.js enforceCapability()). Harness-level gating via
-  // this column is a planned follow-up.
-  // Added in migration 075.
+  // Added in migration 075. NULL = open to all; non-null = capability required.
   requiredCapability: text("required_capability"),
   approvedBy: integer("approved_by").references(() => users.id, { onDelete: "set null" }),
   approvedAt: timestamp("approved_at", { withTimezone: true }),

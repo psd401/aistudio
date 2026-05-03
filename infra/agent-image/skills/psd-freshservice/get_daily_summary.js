@@ -148,7 +148,7 @@ async function main() {
     }))
     .sort((a, b) => b.count - a.count);
 
-  emit({
+  const output = {
     date: range.label,
     date_range: { start: range.start.toISOString(), end: range.end.toISOString() },
     workspace_id: workspaceId,
@@ -158,7 +158,11 @@ async function main() {
     ),
     by_agent: sortedAgents,
     automated: { count: automated.length, tickets: automated },
-  });
+  };
+  // Surface truncation warning so the agent can inform the user that
+  // the summary may be incomplete (>5,000 tickets in the period).
+  if (ticketRes.truncated) output.truncated = true;
+  emit(output);
 }
 
 main().catch((err) => fail(err instanceof Error ? err.message : String(err)));

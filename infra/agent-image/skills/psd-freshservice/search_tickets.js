@@ -22,7 +22,9 @@ async function main() {
   const userEmail = requireUser(args);
   const query = args.query;
   if (!query || query === true) fail('--query is required', 'bad_args');
-  const workspaceId = args.workspace_id || '0';
+  // Default to workspace 2 (Technology) — consistent with daily/weekly summary
+  // scripts. Freshservice's workspace_id=0 behavior is undocumented.
+  const workspaceId = args.workspace_id || '2';
 
   const apiKey = getApiKey(userEmail);
   const url = `/tickets/filter?query="${encodeURIComponent(query)}"&workspace_id=${encodeURIComponent(workspaceId)}`;
