@@ -111,9 +111,8 @@ function validateEmail(email) {
  */
 function enforceCapability(userEmail) {
   let exitStatus;
-  let stdout = '';
   try {
-    stdout = execFileSync('node', [
+    execFileSync('node', [
       CREDENTIALS_CHECK_CAPABILITY,
       '--user', userEmail,
       '--capability', REQUIRED_CAPABILITY,
@@ -124,7 +123,6 @@ function enforceCapability(userEmail) {
     exitStatus = 0;
   } catch (err) {
     exitStatus = err.status === undefined ? 1 : err.status;
-    stdout = err.stdout ? err.stdout.toString() : '';
   }
   if (exitStatus === 0) return;
 
@@ -243,6 +241,11 @@ async function main() {
   }
   if (!args.prompt || args.prompt === true) {
     fail('--prompt is required', 'bad_args');
+  }
+  // Cap prompt length to prevent sending excessively large payloads to OpenAI
+  // and to give a clear client-side error instead of a raw upstream_error.
+  if (args.prompt.length > 4000) {
+    fail('--prompt must be 4000 characters or fewer', 'bad_args');
   }
   const size = args.size && args.size !== true ? String(args.size) : 'auto';
   const quality = args.quality && args.quality !== true ? String(args.quality) : 'auto';

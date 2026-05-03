@@ -25,10 +25,28 @@ async function main() {
   const id = requireTicketId(args);
   const data = parseJsonArg(args.data, '--data');
 
+  // Allowlist of Freshservice ticket fields the agent may update. Mirrors the
+  // ALLOWED_FIELDS set in create_ticket.js — prevents the agent from sending
+  // privileged fields (e.g. source, type, internal metadata) that Freshservice
+  // accepts but the agent should not control. custom_fields is included because
+  // Freshservice treats it as an opaque JSON object scoped to the ticket.
+  const ALLOWED_FIELDS = new Set([
+    'subject', 'description', 'status', 'priority',
+    'group_id', 'responder_id', 'cc_emails', 'tags',
+    'category', 'sub_category', 'item_category', 'due_by', 'fr_due_by',
+    'urgency', 'impact', 'custom_fields',
+  ]);
+  const filtered = Object.create(null);
+  for (const key of Object.keys(data)) {
+    if (ALLOWED_FIELDS.has(key)) {
+      filtered[key] = data[key];
+    }
+  }
+
   const apiKey = getApiKey(userEmail);
   const result = await fsFetch(apiKey, `/tickets/${id}`, {
     method: 'PUT',
-    body: JSON.stringify(data),
+    body: JSON.stringify(filtered),
   });
   if (!result.__ok) fail(result.error, 'upstream_error');
   emit(result.data);

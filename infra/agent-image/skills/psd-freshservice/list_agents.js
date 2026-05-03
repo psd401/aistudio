@@ -36,7 +36,7 @@ async function main() {
     .filter((a) => a.active)
     .map((a) => ({
       id: a.id,
-      name: `${a.first_name} ${a.last_name}`,
+      name: `${a.first_name || ''} ${a.last_name || ''}`.trim(),
       first_name: a.first_name,
       last_name: a.last_name,
       email: a.email,

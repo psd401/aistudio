@@ -85,6 +85,7 @@ async function main() {
   const userEmail = requireUser(args);
   const dateArg = args.date && args.date !== true ? String(args.date) : 'today';
   const workspaceId = args.workspace_id ? Number(args.workspace_id) : 2;
+  if (isNaN(workspaceId)) fail('--workspace-id must be a number', 'bad_args');
   const range = parseDate(dateArg);
 
   const apiKey = getApiKey(userEmail);
@@ -162,6 +163,9 @@ async function main() {
   // Surface truncation warning so the agent can inform the user that
   // the summary may be incomplete (>5,000 tickets in the period).
   if (ticketRes.truncated) output.truncated = true;
+  // Surface partial-name warning when some agent lookups failed — callers
+  // should note that agent names like "Agent 12345" are placeholders.
+  if (agentMap.__partialNames) output.partial_agent_names = true;
   emit(output);
 }
 

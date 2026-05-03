@@ -37,6 +37,9 @@ function categorizeTicket(subject) {
  */
 async function fetchAgentMap(apiKey, agentIds) {
   const map = Object.create(null);
+  // Track whether any individual agent lookups failed, so callers can
+  // warn the user that some agent names are placeholders ("Agent 12345").
+  let partialNames = false;
 
   if (agentIds && agentIds.length > 0) {
     // Fetch only the agents we need. Batched in groups of 10 to avoid
@@ -48,7 +51,10 @@ async function fetchAgentMap(apiKey, agentIds) {
       const batch = uniqueIds.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (id) => {
         const r = await fsFetch(apiKey, `/agents/${id}`);
-        if (!r.__ok) return;
+        if (!r.__ok) {
+          partialNames = true;
+          return;
+        }
         const agent = r.data.agent || r.data;
         map[id] = {
           name: `${agent.first_name || ''} ${agent.last_name || ''}`.trim(),
@@ -57,6 +63,7 @@ async function fetchAgentMap(apiKey, agentIds) {
         };
       }));
     }
+    map.__partialNames = partialNames;
     return map;
   }
 
