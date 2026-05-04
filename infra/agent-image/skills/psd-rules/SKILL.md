@@ -193,12 +193,19 @@ If a skill exists for a task, that skill's interface is the **only** path. Do no
 **How to apply:**
 
 1. If the user's request maps to a known skill (image generation → `psd-image-gen`, Freshservice ticket → `psd-freshservice`, schedule → `psd-schedules`, secret → `psd-credentials`, Workspace API → `psd-workspace`), call that skill's CLI verbatim.
-2. Surface the skill's returned values *as-is*. If it returns a URL, paste that URL. Do not generate a "fresh" one.
-3. If the skill returns an `error` field, surface the error text and stop. Do not pivot to a custom pipeline.
-4. If you don't know what a skill does, call `psd-skills-meta load --name <skill>` first to read its full SKILL.md. Don't guess.
-5. Building the skill's behavior yourself in Bash is *always* the wrong answer — even when the skill seems broken. Report the failure and stop.
+2. Surface the skill's returned values *as-is*. Do not generate a "fresh" one.
+3. **If a skill's JSON output contains a `url` field, your reply MUST include that exact URL on a line by itself** — no `**`, no `[label](url)`, no parentheses, no trailing period, no other text on that line. Narration (one short sentence at most) goes on a *separate* line above or below, or is omitted entirely. The user cannot see the tool result; the URL only reaches them if you put it in the chat message.
+4. Describing the artifact in prose ("Here is your infographic showing three layers…") is **never** a substitute for pasting the URL. If you describe the image, you have failed the rule — even if the description is accurate. The URL is the deliverable.
+5. If the skill returns an `error` field, surface the error text and stop. Do not pivot to a custom pipeline.
+6. If you don't know what a skill does, call `psd-skills-meta load --name <skill>` first to read its full SKILL.md. Don't guess.
+7. Building the skill's behavior yourself in Bash is *always* the wrong answer — even when the skill seems broken. Report the failure and stop.
 
-**Self-check:** Does my reply contain a URL with `X-Amz-Signature`, `X-Amz-Security-Token`, or `X-Amz-Expires`? If yes, I built that URL myself instead of using the skill — undo it.
+**Why (URL paste):** On 2026-05-03 the `psd-image-gen` skill returned a clean public-by-link URL (`https://psd-agents-dev-…s3…amazonaws.com/public-images/…/.png`, HTTP 200, no STS token), but the agent's reply was a paragraph of prose describing the infographic's layers — the URL was never put on the wire and the user got nothing. The skill worked; the surfacing failed.
+
+**Self-checks:**
+
+- Did the last tool result contain a `url` field? Then is that exact URL on a line by itself in my reply? If no — fix before sending.
+- Does my reply contain a URL with `X-Amz-Signature`, `X-Amz-Security-Token`, or `X-Amz-Expires`? If yes, I built that URL myself instead of using the skill — undo it.
 
 ---
 
@@ -213,5 +220,6 @@ Run this checklist mentally before every reply:
 5. ✅ Is the reply length proportional to the information density?
 6. ✅ Did I update the memory files this turn?
 7. ✅ For any task a skill covers, did I call the skill — not replicate it in Bash?
+8. ✅ If the last tool result had a `url` field, is that exact URL pasted on its own line in my reply? Prose description ≠ URL.
 
 If any answer is "no" — fix the reply before sending.

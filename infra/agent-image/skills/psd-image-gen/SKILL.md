@@ -24,6 +24,21 @@ node /opt/psd-skills/psd-image-gen/generate.js \
 
 Returns JSON: `{ "url": "...", "s3Key": "public-images/.../...png", "model": "gpt-image-2", "prompt": "...", "size": "...", "sharing": "public-by-link" }`.
 
+## Required Reply Format
+
+After this skill returns a 2xx result, your **next chat message MUST be the bare `url` value on a line by itself**.
+
+- ✅ Correct:
+  ```
+  Here you go:
+  https://psd-agents-dev-390844780692.s3.us-east-1.amazonaws.com/public-images/<email>/<uuid>.png
+  ```
+- ❌ Wrong: Describing the image's contents/layers/composition in prose without pasting the URL. The user cannot see the tool result. If the URL is not in your chat reply, the user got nothing.
+- ❌ Wrong: Wrapping the URL in `[label](url)` or `**bold**` — Google Chat's renderer corrupts these for long S3 URLs. Bare URL only.
+- ❌ Wrong: Re-generating, "fixing," or presigning the returned URL. It is already a public-by-link URL with HTTP 200; do not touch it.
+
+You may add one short sentence of context above or below the URL line ("Here's the infographic.") but the URL line itself is non-negotiable.
+
 ## Prompting Guidance
 
 - Be specific about subject, composition, lighting, style.
