@@ -268,14 +268,14 @@ export const handler = async (): Promise<{ processed: number; abandoned: number 
   return { processed, abandoned: abandonedCount };
 };
 
-const FAILURE_RETENTION_DAYS_ACKED = parseInt(
-  process.env.FAILURE_RETENTION_DAYS_ACKED || '90',
-  10,
-);
-const FAILURE_RETENTION_DAYS_UNACKED = parseInt(
-  process.env.FAILURE_RETENTION_DAYS_UNACKED || '180',
-  10,
-);
+const FAILURE_RETENTION_DAYS_ACKED = (() => {
+  const parsed = parseInt(process.env.FAILURE_RETENTION_DAYS_ACKED || '90', 10);
+  return Number.isFinite(parsed) && parsed >= 1 ? parsed : 90;
+})();
+const FAILURE_RETENTION_DAYS_UNACKED = (() => {
+  const parsed = parseInt(process.env.FAILURE_RETENTION_DAYS_UNACKED || '180', 10);
+  return Number.isFinite(parsed) && parsed >= 1 ? parsed : 180;
+})();
 
 /**
  * Trim aged rows from agent_failures. Acknowledged rows expire faster than

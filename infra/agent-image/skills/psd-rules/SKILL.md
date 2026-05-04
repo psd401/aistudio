@@ -223,7 +223,7 @@ If a skill exists for a task, that skill's interface is the **only** path. Do no
 - You started a task and did not finish it within this turn (`--reason task_incomplete`).
 - Anything else that means the user did not get what they asked for (`--reason other`).
 
-**Why:** On 2026-05-04 the morning brief returned "I processed your message but had no response." with no record anywhere except CloudWatch. The admin had no systematic way to find or triage these. Self-reporting populates the `agent_failures` table that the `/admin/agents` Failures tab reads.
+**Why:** Silent failures (e.g. "I processed your message but had no response.") leave no record anywhere except CloudWatch. Without self-reporting, the admin has no systematic way to find or triage these. Self-reporting populates the `agent_failures` table that the `/admin/agents` Failures tab reads.
 
 **How to apply:**
 

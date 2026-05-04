@@ -72,9 +72,8 @@ export function AgentHealthTable({ data, loading = false }: Props) {
               Expected schedule: once per day. If{" "}
               <code className="text-[11px]">agent_health_scan_runs</code> stays
               empty for &gt;48h, the Lambda is failing silently — check
-              CloudWatch logs. Last known fix: commit{" "}
-              <code className="text-[11px]">b9d56750</code> (revert bogus
-              users-table join).
+              CloudWatch logs for the{" "}
+              <code className="text-[11px]">agent-health-daily</code> function.
             </div>
           </div>
         </CardContent>

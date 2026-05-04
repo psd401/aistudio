@@ -240,6 +240,8 @@ export async function acknowledgeFailures(
 
   try {
     await requireRole("administrator")
+    // requireRole guarantees auth, but we need the session object for ackBy.
+    // The null check satisfies TypeScript narrowing.
     const session = await getServerSession()
     if (!session) throw ErrorFactories.authNoSession()
 
@@ -395,7 +397,7 @@ async function fetchSessionMessagesForFailures(
         .from(agentMessages)
         .where(inArray(agentMessages.sessionId, sessionIds))
         .orderBy(desc(agentMessages.createdAt))
-        .limit(500),
+        .limit(Math.min(sessionIds.length * 10, 500)),
     "agentFailures.bundleMessages",
   )
 
@@ -431,13 +433,13 @@ interface SessionMessageRow {
   topic: string | null
 }
 
-function appendCodeBlock(lines: string[], label: string, body: string, fence = "```") {
+function appendCodeBlock(lines: string[], label: string, body: string, lang = "") {
   lines.push(`- **${label}:**`)
-  lines.push(`  ${fence}`)
+  lines.push(`  \`\`\`${lang}`)
   for (const ln of body.split("\n").slice(0, 40)) {
     lines.push(`  ${ln}`)
   }
-  lines.push(`  ${fence}`)
+  lines.push("  ```")
 }
 
 function appendFailureSection(lines: string[], index: number, f: FailureRow) {
@@ -451,7 +453,7 @@ function appendFailureSection(lines: string[], index: number, f: FailureRow) {
   if (f.errorClass) lines.push(`- **error class:** ${f.errorClass}`)
   if (f.errorMessage) appendCodeBlock(lines, "error message", f.errorMessage)
   if (f.context) {
-    appendCodeBlock(lines, "context", JSON.stringify(f.context, null, 2), "```json")
+    appendCodeBlock(lines, "context", JSON.stringify(f.context, null, 2), "json")
   }
   if (f.stackExcerpt) appendCodeBlock(lines, "stack", f.stackExcerpt)
   if (f.notes) lines.push(`- **operator notes:** ${f.notes}`)

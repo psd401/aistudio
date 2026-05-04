@@ -1881,6 +1881,22 @@ export class AgentPlatformStack extends cdk.Stack {
       defaultValue: 0,
     });
 
+    // Attach to the alternate AgentCore log group path as well, so failures
+    // are captured regardless of which naming convention the runtime uses.
+    const harnessLogGroup2 = logs.LogGroup.fromLogGroupName(
+      this,
+      'AgentCoreLogGroupRef2',
+      `/aws/bedrock/agentcore/runtimes/psd_agent_${environment}`,
+    );
+    new logs.MetricFilter(this, 'HarnessAgentFailureMetric2', {
+      logGroup: harnessLogGroup2,
+      metricNamespace: failureMetricNamespace,
+      metricName: failureMetricName,
+      filterPattern: logs.FilterPattern.literal('AGENT_FAILURE_RECORD'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
     // CloudWatch alarm on agent failure rate. Fires when failures exceed 10
     // per 5-minute window — same threshold as the router error alarm so the
     // pager doesn't differentiate the two except by which alarm fired. Tune

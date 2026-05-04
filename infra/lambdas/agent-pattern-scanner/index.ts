@@ -164,6 +164,10 @@ export const handler = async (
   const currentWeek = isoWeek(today);
   const weeksToScan: string[] = [];
   if (event?.week) {
+    if (!/^\d{4}-W\d{2}$/.test(event.week)) {
+      log('ERROR', 'Invalid week format', { week: event.week, expected: 'YYYY-WNN' });
+      throw new Error(`Invalid week format: "${event.week}" — expected YYYY-WNN (e.g. "2026-W18")`);
+    }
     weeksToScan.push(event.week);
   } else if (event?.backfillWeeks && event.backfillWeeks > 0) {
     const n = Math.min(Math.floor(event.backfillWeeks), 52);
@@ -175,24 +179,30 @@ export const handler = async (
     weeksToScan.push(currentWeek);
   }
 
+  // Scan DynamoDB once and reuse the signal set across all weeks to avoid
+  // O(N * table_size) reads during multi-week backfills.
+  const signals = await scanAllSignals();
+  log('INFO', 'Scanned signals for backfill', { total: signals.length, weeks: weeksToScan.length });
+
   let totalDetected = 0;
   for (const targetWeek of weeksToScan) {
-    totalDetected += await scanForWeek(targetWeek);
+    totalDetected += await scanForWeek(targetWeek, signals);
   }
   return { detected: totalDetected, weeks: weeksToScan };
 };
 
-async function scanForWeek(currentWeek: string): Promise<number> {
+async function scanForWeek(currentWeek: string, prefetchedSignals?: SignalItem[]): Promise<number> {
   const rollingWeeks = new Set<string>();
   for (let i = 1; i <= ROLLING_WEEKS; i++) {
     rollingWeeks.add(priorWeek(currentWeek, i));
   }
 
-  const signals = await scanAllSignals();
-  log('INFO', 'Scanned signals', {
+  const signals = prefetchedSignals ?? await scanAllSignals();
+  log('INFO', 'Processing signals', {
     total: signals.length,
     currentWeek,
     rollingWeeks: Array.from(rollingWeeks),
+    prefetched: !!prefetchedSignals,
   });
 
   // Aggregate: topic → { currentCount, buildings: Set, priorCounts: number[] }
@@ -218,12 +228,14 @@ async function scanForWeek(currentWeek: string): Promise<number> {
 
   const sql = await getSql();
   let detected = 0;
+  let suppressed = 0;
 
   for (const [topic, agg] of byTopic.entries()) {
     // Suppression: below thresholds → skip entirely. Do NOT write anything,
     // not even "topic below threshold". Dashboard users should never see
     // low-count signals that could proxy individual users.
     if (agg.currentCount < MIN_SIGNALS || agg.buildings.size < MIN_BUILDINGS) {
+      suppressed += 1;
       continue;
     }
 
@@ -268,7 +280,7 @@ async function scanForWeek(currentWeek: string): Promise<number> {
       INSERT INTO agent_pattern_scan_runs
         (run_at, week, signals_total, topics_total, detected, suppressed)
       VALUES (NOW(), ${currentWeek}, ${signals.length}, ${byTopic.size}, ${detected},
-              ${byTopic.size - detected})
+              ${suppressed})
     `;
   } catch (err) {
     log('WARN', 'Failed to record scan_runs marker', {
@@ -281,7 +293,7 @@ async function scanForWeek(currentWeek: string): Promise<number> {
     currentWeek,
     signalsTotal: signals.length,
     topicsTotal: byTopic.size,
-    suppressed: byTopic.size - detected,
+    suppressed,
   });
   return detected;
 }

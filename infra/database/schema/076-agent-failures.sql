@@ -52,6 +52,11 @@ CREATE INDEX IF NOT EXISTS idx_agent_failures_unack
 CREATE INDEX IF NOT EXISTS idx_agent_failures_severity
     ON agent_failures (severity, occurred_at DESC);
 
+-- Partial index for retention sweep: acked rows are deleted by acknowledged_at age.
+CREATE INDEX IF NOT EXISTS idx_agent_failures_acked_at
+    ON agent_failures (acknowledged_at)
+    WHERE acknowledged = true;
+
 -- agent_pattern_scan_runs: audit log of each weekly scan invocation.
 -- Lets the admin dashboard distinguish "scanner never ran" from
 -- "scanner ran but everything was below the suppression threshold".

@@ -6,6 +6,7 @@
  * single failure feed for triage. Migration 076.
  */
 
+import { sql } from "drizzle-orm";
 import {
   bigint,
   boolean,
@@ -70,8 +71,9 @@ export const agentFailures = pgTable(
     index("idx_agent_failures_occurred_at").on(table.occurredAt),
     index("idx_agent_failures_source").on(table.source, table.occurredAt),
     index("idx_agent_failures_user").on(table.userId, table.occurredAt),
-    index("idx_agent_failures_unack").on(table.occurredAt),
+    index("idx_agent_failures_unack").on(table.occurredAt).where(sql`acknowledged = false`),
     index("idx_agent_failures_severity").on(table.severity, table.occurredAt),
+    index("idx_agent_failures_acked_at").on(table.acknowledgedAt).where(sql`acknowledged = true`),
   ],
 );
 

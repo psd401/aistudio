@@ -38,6 +38,8 @@ const VALID_REASONS = new Set([
   'other',
 ]);
 
+// Restrict to @psd401.net domain — all agent users are PSD staff.
+// Update this regex if the agent platform expands to other domains.
 const EMAIL_RE = /^[^\s@]+@psd401\.net$/i;
 
 function fail(message, code = 1) {
@@ -166,7 +168,7 @@ async function main() {
     }
     emit({ logged: true, failure_id: id });
   } catch (err) {
-    process.stderr.write(`agent_failures insert failed: ${err.message}\n`);
+    process.stderr.write(`agent_failures insert failed: ${err instanceof Error ? err.message : String(err)}\n`); // eslint-disable-line no-console
     emit({ logged: false, reason: 'database_error' });
   }
 }
