@@ -79,6 +79,8 @@ _SKIP_RELATIVE_PREFIXES = (
     # NOT image-owned, must round-trip. Don't blanket-skip skills/.
     "skills/gws-",
     "skills/psd-credentials/",
+    "skills/psd-freshservice/",
+    "skills/psd-image-gen/",
     "skills/psd-rules/",
     "skills/psd-schedules/",
     "skills/psd-skills-meta/",
