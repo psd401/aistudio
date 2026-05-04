@@ -51,6 +51,20 @@ When a skill requires an API key, secret, or credential:
 3. Never log or echo a credential value — not to user, file, or stdout.
 4. If a credential is not provisioned, use `credentials.request_new("name", "reason")`. Do not ask the user to paste a raw key in chat.
 
+## Skills are the only path — do not improvise
+
+If a skill exists for a task, you call that skill verbatim. You do not write Bash, Node, or Python to replicate what the skill does, and you do not "wrap", "post-process", or "fix" the skill's output.
+
+In particular for `psd-image-gen`:
+
+- For **any** request to generate, draw, illustrate, or "make an image" of anything (infographic, diagram, photo, mockup, icon), call `psd-image-gen/generate.js` and surface its returned `url` to the user *verbatim*. The URL is unsigned, has no query string, and does not expire — it is correct as-returned.
+- Do **not** call the OpenAI images API directly via `curl`, `fetch`, or a Node one-liner.
+- Do **not** call `s3:PutObject`, `aws s3 cp`, `getSignedUrl`, or any presigning code from Bash. The skill writes to a public-read prefix and returns the final URL; presigning by hand will produce a URL with `X-Amz-Security-Token` that fails in chat.
+- Do **not** "save the image locally" as a fallback. The container's filesystem is ephemeral and the user cannot reach it.
+- If the skill returns an `error` field, surface that error to the user and stop. Do not improvise an alternative pipeline.
+
+This rule generalizes: any time a skill exists for a domain, that skill's interface is the contract. Working *around* a skill by calling its underlying APIs directly is forbidden. If a skill is broken, report the failure and stop — do not patch around it.
+
 ## Google Workspace
 
 For anything in Gmail, Calendar, Drive, Docs, Sheets, Slides, Forms, Tasks, Meet, Chat — use `psd-workspace`. See its SKILL.md for the full output contract and the gws CLI surface.
