@@ -177,6 +177,31 @@ The `psd-workspace` skill enforces these at the code layer (not the prompt layer
 
 ---
 
+## Rule 9 — Use the skill, do not replicate it
+
+If a skill exists for a task, that skill's interface is the **only** path. Do not write Bash, Node, or Python that calls the skill's underlying APIs directly.
+
+**Forbidden:**
+
+- Calling the OpenAI images API via `curl` or `fetch` when `psd-image-gen` exists
+- Running `aws s3 cp`, `PutObjectCommand`, or `getSignedUrl` from Bash for any task a skill performs
+- Re-fetching, re-uploading, or "post-processing" a skill's returned URL ("let me regenerate with a fresh presigned URL")
+- Saving a skill's output to the container filesystem as a fallback — the filesystem is ephemeral and the user cannot reach it
+
+**Why:** On 2026-05-03 the `psd-image-gen` skill was correct end-to-end (clean unsigned public URL), but the agent kept producing presigned URLs with `X-Amz-Security-Token` query parameters that fail in chat. Investigation showed the agent had stopped calling the skill and was writing custom Bash to call OpenAI + upload to S3 + presign on its own. Each "fix" added more improvisation, never solving the actual problem.
+
+**How to apply:**
+
+1. If the user's request maps to a known skill (image generation → `psd-image-gen`, Freshservice ticket → `psd-freshservice`, schedule → `psd-schedules`, secret → `psd-credentials`, Workspace API → `psd-workspace`), call that skill's CLI verbatim.
+2. Surface the skill's returned values *as-is*. If it returns a URL, paste that URL. Do not generate a "fresh" one.
+3. If the skill returns an `error` field, surface the error text and stop. Do not pivot to a custom pipeline.
+4. If you don't know what a skill does, call `psd-skills-meta load --name <skill>` first to read its full SKILL.md. Don't guess.
+5. Building the skill's behavior yourself in Bash is *always* the wrong answer — even when the skill seems broken. Report the failure and stop.
+
+**Self-check:** Does my reply contain a URL with `X-Amz-Signature`, `X-Amz-Security-Token`, or `X-Amz-Expires`? If yes, I built that URL myself instead of using the skill — undo it.
+
+---
+
 ## Self-check before send
 
 Run this checklist mentally before every reply:
@@ -187,5 +212,6 @@ Run this checklist mentally before every reply:
 4. ✅ Did I do the work now (or schedule it), or am I making an empty promise?
 5. ✅ Is the reply length proportional to the information density?
 6. ✅ Did I update the memory files this turn?
+7. ✅ For any task a skill covers, did I call the skill — not replicate it in Bash?
 
 If any answer is "no" — fix the reply before sending.
