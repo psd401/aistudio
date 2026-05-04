@@ -1861,41 +1861,26 @@ export class AgentPlatformStack extends cdk.Stack {
       defaultValue: 0,
     });
 
-    // Harness adapter writes AGENT_FAILURE_RECORD to the AgentCore log groups.
-    // The alpha agentcore CDK construct does not expose a typed log group
-    // handle, so we attach the metric filter to the conventional AgentCore
-    // CloudWatch path. Two paths exist (`/aws/bedrock/agentcore/*` and
-    // `/aws/bedrock-agentcore/*`); we attach to both as imports so the filter
-    // catches whichever the runtime ends up using.
+    // Harness adapter writes AGENT_FAILURE_RECORD to the AgentCore runtime log
+    // group. The current AgentCore alpha construct (and the build-and-push
+    // script's tail command) uses the `/aws/bedrock-agentcore/runtimes/...`
+    // convention. The alternate `/aws/bedrock/agentcore/...` path is from
+    // older alpha versions and the IAM policy above grants write access to
+    // both for forward compatibility, but only one log group exists at deploy
+    // time — referencing a non-existent path fails CFN with NotFound.
     //
-    // Each filter uses a DISTINCT metric name to avoid double-counting. The
-    // alarm below aggregates both via a MathExpression. At any given time only
-    // one log group will actually receive events; the other metric stays at 0.
-    const harnessLogGroup1 = logs.LogGroup.fromLogGroupName(
+    // We attach to the path the runtime actually uses today. If AWS ever
+    // renames it, the IAM grants already cover both paths and we can flip
+    // this reference; metric values would briefly stop until the rename.
+    const harnessLogGroup = logs.LogGroup.fromLogGroupName(
       this,
       'AgentCoreLogGroupRef',
       `/aws/bedrock-agentcore/runtimes/psd_agent_${environment}`,
     );
     new logs.MetricFilter(this, 'HarnessAgentFailureMetric', {
-      logGroup: harnessLogGroup1,
+      logGroup: harnessLogGroup,
       metricNamespace: failureMetricNamespace,
-      metricName: 'AgentFailuresHarness1',
-      filterPattern: logs.FilterPattern.literal('AGENT_FAILURE_RECORD'),
-      metricValue: '1',
-      defaultValue: 0,
-    });
-
-    // Attach to the alternate AgentCore log group path as well, so failures
-    // are captured regardless of which naming convention the runtime uses.
-    const harnessLogGroup2 = logs.LogGroup.fromLogGroupName(
-      this,
-      'AgentCoreLogGroupRef2',
-      `/aws/bedrock/agentcore/runtimes/psd_agent_${environment}`,
-    );
-    new logs.MetricFilter(this, 'HarnessAgentFailureMetric2', {
-      logGroup: harnessLogGroup2,
-      metricNamespace: failureMetricNamespace,
-      metricName: 'AgentFailuresHarness2',
+      metricName: 'AgentFailuresHarness',
       filterPattern: logs.FilterPattern.literal('AGENT_FAILURE_RECORD'),
       metricValue: '1',
       defaultValue: 0,
@@ -1906,19 +1891,15 @@ export class AgentPlatformStack extends cdk.Stack {
     // pager doesn't differentiate the two except by which alarm fired. Tune
     // via the env-specific config if dev noise becomes a problem.
     //
-    // The alarm uses a MathExpression to aggregate the three distinct metric
-    // names. Router and cron share `AgentFailures` (separate log groups, no
-    // double-counting). The two harness filters use distinct names because
-    // they cover two possible AgentCore log group naming conventions — at
-    // runtime only one will receive events, but if both did, using the same
-    // metric name would double-count each harness failure.
+    // Aggregates router/cron (shared `AgentFailures` metric, separate log
+    // groups so no double-counting) with the harness metric.
     const period = cdk.Duration.minutes(5);
     const failureRateAlarm = new cloudwatch.Alarm(this, 'AgentFailureRateAlarm', {
       alarmName: `psd-agent-failures-${environment}`,
       alarmDescription:
         'agent_failures table is filling up faster than expected — investigate via /admin/agents Failures tab',
       metric: new cloudwatch.MathExpression({
-        expression: 'routerCron + harness1 + harness2',
+        expression: 'routerCron + harness',
         usingMetrics: {
           routerCron: new cloudwatch.Metric({
             namespace: failureMetricNamespace,
@@ -1926,15 +1907,9 @@ export class AgentPlatformStack extends cdk.Stack {
             period,
             statistic: 'Sum',
           }),
-          harness1: new cloudwatch.Metric({
+          harness: new cloudwatch.Metric({
             namespace: failureMetricNamespace,
-            metricName: 'AgentFailuresHarness1',
-            period,
-            statistic: 'Sum',
-          }),
-          harness2: new cloudwatch.Metric({
-            namespace: failureMetricNamespace,
-            metricName: 'AgentFailuresHarness2',
+            metricName: 'AgentFailuresHarness',
             period,
             statistic: 'Sum',
           }),
