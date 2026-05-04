@@ -1139,6 +1139,7 @@ export class AgentPlatformStack extends cdk.Stack {
           GUARDRAIL_ARN: props.guardrailArn,
           DATABASE_RESOURCE_ARN: props.databaseResourceArn,
           DATABASE_SECRET_ARN: props.databaseSecretArn,
+          DATABASE_NAME: props.databaseName ?? 'aistudio',
           // ARN of the Secrets Manager secret holding the Bedrock API key.
           // `agentcore_wrapper.py` fetches this on startup and exports its
           // value as AWS_BEARER_TOKEN_BEDROCK so OpenClaw can authenticate
@@ -1835,11 +1836,77 @@ export class AgentPlatformStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
+    // CloudWatch metric filter — emit a metric every time an
+    // AGENT_FAILURE_RECORD line lands in the router Lambda log. Combined with
+    // the harness-image structured log line of the same shape, this gives us
+    // a single "agent failures per period" metric across all chokepoints.
+    const failureMetricNamespace = `PSD/AgentPlatform/${environment}`;
+    const failureMetricName = 'AgentFailures';
+
+    new logs.MetricFilter(this, 'RouterAgentFailureMetric', {
+      logGroup: this.routerLambda.logGroup,
+      metricNamespace: failureMetricNamespace,
+      metricName: failureMetricName,
+      filterPattern: logs.FilterPattern.literal('AGENT_FAILURE_RECORD'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    new logs.MetricFilter(this, 'CronAgentFailureMetric', {
+      logGroup: cronLogGroup,
+      metricNamespace: failureMetricNamespace,
+      metricName: failureMetricName,
+      filterPattern: logs.FilterPattern.literal('AGENT_FAILURE_RECORD'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    // Harness adapter writes AGENT_FAILURE_RECORD to the AgentCore log groups.
+    // The alpha agentcore CDK construct does not expose a typed log group
+    // handle, so we attach the metric filter to the conventional AgentCore
+    // CloudWatch path. Two paths exist (`/aws/bedrock/agentcore/*` and
+    // `/aws/bedrock-agentcore/*`); we attach to both as imports so the filter
+    // catches whichever the runtime ends up using.
+    const harnessLogGroup1 = logs.LogGroup.fromLogGroupName(
+      this,
+      'AgentCoreLogGroupRef',
+      `/aws/bedrock-agentcore/runtimes/psd_agent_${environment}`,
+    );
+    new logs.MetricFilter(this, 'HarnessAgentFailureMetric', {
+      logGroup: harnessLogGroup1,
+      metricNamespace: failureMetricNamespace,
+      metricName: failureMetricName,
+      filterPattern: logs.FilterPattern.literal('AGENT_FAILURE_RECORD'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    // CloudWatch alarm on agent failure rate. Fires when failures exceed 10
+    // per 5-minute window — same threshold as the router error alarm so the
+    // pager doesn't differentiate the two except by which alarm fired. Tune
+    // via the env-specific config if dev noise becomes a problem.
+    const failureRateAlarm = new cloudwatch.Alarm(this, 'AgentFailureRateAlarm', {
+      alarmName: `psd-agent-failures-${environment}`,
+      alarmDescription:
+        'agent_failures table is filling up faster than expected — investigate via /admin/agents Failures tab',
+      metric: new cloudwatch.Metric({
+        namespace: failureMetricNamespace,
+        metricName: failureMetricName,
+        period: cdk.Duration.minutes(5),
+        statistic: 'Sum',
+      }),
+      threshold: 10,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
     // Wire alarm notifications if SNS topic is configured
     if (alarmTopic) {
       const snsAction = new cloudwatchActions.SnsAction(alarmTopic);
       dlqAlarm.addAlarmAction(snsAction);
       errorAlarm.addAlarmAction(snsAction);
+      failureRateAlarm.addAlarmAction(snsAction);
     }
 
     // =====================================================================

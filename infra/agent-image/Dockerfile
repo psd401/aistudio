@@ -174,6 +174,7 @@ RUN cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no
 RUN cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund
 RUN cd /opt/psd-skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
 RUN cd /opt/psd-skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund
+RUN cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund
 # psd-freshservice has zero npm dependencies (native fetch + child_process only).
 
 # Upstream gws-* skills (#912) — per-API SKILL.md guidance for Gmail, Drive,

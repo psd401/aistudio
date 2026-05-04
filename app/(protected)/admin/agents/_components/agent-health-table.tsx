@@ -41,16 +41,41 @@ export function AgentHealthTable({ data, loading = false }: Props) {
   }
 
   if (!data || data.rows.length === 0) {
+    const lastScan = data?.lastScan
     return (
       <Card>
         <CardHeader>
           <CardTitle className="text-base">Agent Health</CardTitle>
         </CardHeader>
         <CardContent>
-          <div className="h-32 flex items-center justify-center text-muted-foreground text-sm">
-            {data?.snapshotDate
-              ? "No snapshots recorded yet."
-              : "Daily health Lambda has not run yet."}
+          {lastScan && (
+            <div className="text-xs text-muted-foreground mb-3 border rounded p-2 bg-muted/30">
+              <span className="font-medium">Last scan:</span>{" "}
+              {formatDate(lastScan.runAt, true)} · snapshot{" "}
+              {lastScan.snapshotDate} · {lastScan.usersTotal} users ·{" "}
+              {lastScan.abandoned} abandoned
+              {lastScan.error && (
+                <span className="text-destructive">
+                  {" "}
+                  · error: {lastScan.error}
+                </span>
+              )}
+            </div>
+          )}
+          <div className="h-40 flex flex-col items-center justify-center gap-2 text-sm">
+            <div className="text-muted-foreground">
+              {lastScan
+                ? "Scanner ran but produced 0 snapshots. Check users table & S3 workspace prefixes."
+                : "Daily health Lambda has not run yet."}
+            </div>
+            <div className="text-xs text-muted-foreground max-w-md text-center">
+              Expected schedule: once per day. If{" "}
+              <code className="text-[11px]">agent_health_scan_runs</code> stays
+              empty for &gt;48h, the Lambda is failing silently — check
+              CloudWatch logs. Last known fix: commit{" "}
+              <code className="text-[11px]">b9d56750</code> (revert bogus
+              users-table join).
+            </div>
           </div>
         </CardContent>
       </Card>
@@ -91,6 +116,13 @@ export function AgentHealthTable({ data, loading = false }: Props) {
           <CardTitle className="text-base">
             Per-user Health (snapshot {data.snapshotDate})
           </CardTitle>
+          {data.lastScan && (
+            <p className="text-xs text-muted-foreground mt-1">
+              Last scan: {formatDate(data.lastScan.runAt, true)} ·{" "}
+              {data.lastScan.usersTotal} users ·{" "}
+              {data.lastScan.abandoned} abandoned
+            </p>
+          )}
         </CardHeader>
         <CardContent>
           <Table>

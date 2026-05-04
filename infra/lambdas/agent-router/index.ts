@@ -1334,6 +1334,79 @@ async function logTelemetry(
 }
 
 // ---------------------------------------------------------------------------
+// Failure capture (agent_failures)
+// ---------------------------------------------------------------------------
+
+/**
+ * Persist a failure row in agent_failures. Never throws — failure-of-the-failure-writer
+ * must not affect the user-facing flow. Logs to CloudWatch on insert error so the
+ * original failure remains discoverable there.
+ */
+async function recordFailure(
+  params: {
+    source: 'router' | 'harness' | 'cron' | 'agent_self_report' | 'tool';
+    severity: 'error' | 'warn' | 'empty_response';
+    userId?: string | null;
+    sessionId?: string | null;
+    scheduleName?: string | null;
+    model?: string | null;
+    errorClass?: string | null;
+    errorMessage?: string | null;
+    stackExcerpt?: string | null;
+    context?: Record<string, unknown> | null;
+  },
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  // Emit a structured CloudWatch line first so the metric filter ticks even
+  // when the DB write fails. The string AGENT_FAILURE_RECORD is matched by a
+  // CloudWatch MetricFilter — keep it stable.
+  log.error('AGENT_FAILURE_RECORD', {
+    source: params.source,
+    severity: params.severity,
+    userId: params.userId ?? null,
+    sessionId: params.sessionId ?? null,
+    errorClass: params.errorClass ?? null,
+  });
+  if (!DATABASE_HOST || !DATABASE_SECRET_ARN) {
+    log.warn('Database not configured, skipping failure record');
+    return;
+  }
+  try {
+    const sql = await getDbClient();
+    const truncate = (s: string | null | undefined, max: number) =>
+      typeof s === 'string' ? s.slice(0, max) : null;
+    const ctx = params.context ? JSON.stringify(params.context) : null;
+    await sql`INSERT INTO agent_failures
+        (source, severity, user_id, session_id, schedule_name, model,
+         error_class, error_message, stack_excerpt, context, occurred_at)
+        VALUES (${params.source}, ${params.severity},
+                ${params.userId ?? null}, ${params.sessionId ?? null},
+                ${params.scheduleName ?? null}, ${params.model ?? null},
+                ${truncate(params.errorClass, 128)},
+                ${truncate(params.errorMessage, 4000)},
+                ${truncate(params.stackExcerpt, 4000)},
+                ${ctx}::jsonb, NOW())`;
+  } catch (error) {
+    log.error('Failed to record agent failure', {
+      error: error instanceof Error ? error.message : String(error),
+      originalSource: params.source,
+      originalSeverity: params.severity,
+    });
+  }
+}
+
+function classifyError(err: unknown): { errorClass: string; message: string; stack: string | null } {
+  if (err instanceof Error) {
+    return {
+      errorClass: err.name || 'Error',
+      message: err.message,
+      stack: err.stack ? err.stack.split('\n').slice(0, 20).join('\n') : null,
+    };
+  }
+  return { errorClass: 'NonError', message: String(err), stack: null };
+}
+
+// ---------------------------------------------------------------------------
 // Organizational Nervous System — signal store
 // ---------------------------------------------------------------------------
 
@@ -1589,15 +1662,30 @@ export async function handler(
   );
 
   const batchItemFailures: { itemIdentifier: string }[] = [];
-  results.forEach((result, idx) => {
-    if (result.status === 'rejected') {
-      batchItemFailures.push({ itemIdentifier: event.Records[idx].messageId });
-      log.error('Record processing failed', {
-        messageId: event.Records[idx].messageId,
-        error: result.reason instanceof Error ? result.reason.message : String(result.reason),
-      });
-    }
-  });
+  await Promise.all(
+    results.map(async (result, idx) => {
+      if (result.status === 'rejected') {
+        const messageId = event.Records[idx].messageId;
+        batchItemFailures.push({ itemIdentifier: messageId });
+        const classified = classifyError(result.reason);
+        log.error('Record processing failed', {
+          messageId,
+          error: classified.message,
+        });
+        await recordFailure(
+          {
+            source: 'router',
+            severity: 'error',
+            errorClass: classified.errorClass,
+            errorMessage: classified.message,
+            stackExcerpt: classified.stack,
+            context: { messageId, requestId, attempt: event.Records[idx].attributes?.ApproximateReceiveCount },
+          },
+          log
+        );
+      }
+    })
+  );
 
   return { batchItemFailures };
 }

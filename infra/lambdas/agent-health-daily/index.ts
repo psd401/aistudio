@@ -244,6 +244,70 @@ export const handler = async (): Promise<{ processed: number; abandoned: number 
     }
   }
 
+  // Record an explicit "scan run" marker so admins can tell the difference
+  // between "Lambda never ran" and "Lambda ran but produced 0 snapshots".
+  // Best-effort — failure of the marker write must not fail the whole run.
+  try {
+    await sql`
+      INSERT INTO agent_health_scan_runs
+        (run_at, snapshot_date, users_total, abandoned, error)
+      VALUES (NOW(), ${snapshotDate}, ${processed}, ${abandonedCount}, NULL)
+    `;
+  } catch (err) {
+    log('WARN', 'Failed to record scan_runs marker', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // Retention cleanup — keep agent_failures fresh. Default: 90 days for ack'd,
+  // 180 days for unack'd. Override via env var. Run at most once per day off
+  // the daily Lambda; failure is non-fatal.
+  await runFailureRetentionCleanup(sql, log);
+
   log('INFO', 'Health snapshot complete', { processed, abandonedCount, snapshotDate });
   return { processed, abandoned: abandonedCount };
 };
+
+const FAILURE_RETENTION_DAYS_ACKED = parseInt(
+  process.env.FAILURE_RETENTION_DAYS_ACKED || '90',
+  10,
+);
+const FAILURE_RETENTION_DAYS_UNACKED = parseInt(
+  process.env.FAILURE_RETENTION_DAYS_UNACKED || '180',
+  10,
+);
+
+/**
+ * Trim aged rows from agent_failures. Acknowledged rows expire faster than
+ * untriaged ones because once you've reviewed a failure, the historical
+ * record stops carrying signal. Unacknowledged rows live longer so newly
+ * onboarded admins can audit recent history.
+ */
+async function runFailureRetentionCleanup(
+  sql: postgres.Sql,
+  logger: typeof log,
+): Promise<void> {
+  try {
+    const ackResult = (await sql`
+      DELETE FROM agent_failures
+      WHERE acknowledged = true
+        AND acknowledged_at IS NOT NULL
+        AND acknowledged_at < NOW() - (${FAILURE_RETENTION_DAYS_ACKED}::int * INTERVAL '1 day')
+    `) as unknown as { count?: number };
+    const unackResult = (await sql`
+      DELETE FROM agent_failures
+      WHERE acknowledged = false
+        AND occurred_at < NOW() - (${FAILURE_RETENTION_DAYS_UNACKED}::int * INTERVAL '1 day')
+    `) as unknown as { count?: number };
+    logger('INFO', 'agent_failures retention sweep', {
+      ackedDeleted: ackResult.count ?? 0,
+      unackedDeleted: unackResult.count ?? 0,
+      ackRetentionDays: FAILURE_RETENTION_DAYS_ACKED,
+      unackRetentionDays: FAILURE_RETENTION_DAYS_UNACKED,
+    });
+  } catch (err) {
+    logger('WARN', 'agent_failures retention sweep failed', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}

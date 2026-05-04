@@ -142,14 +142,47 @@ async function getSql(): Promise<postgres.Sql> {
   return sqlClient;
 }
 
-export const handler = async (): Promise<{ detected: number }> => {
+interface ScanEvent {
+  /** ISO 8601 week (e.g. "2026-W18") to scan. Defaults to current week. */
+  week?: string;
+  /** When true, scan the last N weeks (1..52). Useful for first-time backfill. */
+  backfillWeeks?: number;
+}
+
+export const handler = async (
+  event?: ScanEvent,
+): Promise<{ detected: number; weeks: string[] }> => {
   if (!SIGNALS_TABLE || !DATABASE_HOST || !DATABASE_SECRET_ARN) {
     log('ERROR', 'Missing required environment variables');
     throw new Error('Pattern scanner misconfigured');
   }
 
+  // Build the list of weeks to scan. Default = current. Manual invocations
+  // can override with `{ week: "2026-W18" }` or backfill with
+  // `{ backfillWeeks: 12 }` to populate the last 12 weeks at once.
   const today = new Date();
   const currentWeek = isoWeek(today);
+  const weeksToScan: string[] = [];
+  if (event?.week) {
+    weeksToScan.push(event.week);
+  } else if (event?.backfillWeeks && event.backfillWeeks > 0) {
+    const n = Math.min(Math.floor(event.backfillWeeks), 52);
+    weeksToScan.push(currentWeek);
+    for (let i = 1; i < n; i++) {
+      weeksToScan.push(priorWeek(currentWeek, i));
+    }
+  } else {
+    weeksToScan.push(currentWeek);
+  }
+
+  let totalDetected = 0;
+  for (const targetWeek of weeksToScan) {
+    totalDetected += await scanForWeek(targetWeek);
+  }
+  return { detected: totalDetected, weeks: weeksToScan };
+};
+
+async function scanForWeek(currentWeek: string): Promise<number> {
   const rollingWeeks = new Set<string>();
   for (let i = 1; i <= ROLLING_WEEKS; i++) {
     rollingWeeks.add(priorWeek(currentWeek, i));
@@ -226,6 +259,29 @@ export const handler = async (): Promise<{ detected: number }> => {
     detected += 1;
   }
 
-  log('INFO', 'Pattern scan complete', { detected, currentWeek });
-  return { detected };
-};
+  // Record an explicit "scan run" marker so admins can tell the difference
+  // between "scanner never ran" (table empty + no marker) and "scanner ran
+  // but suppression thresholds filtered everything" (table empty + marker).
+  // Best-effort — failure of the marker write must not fail the scan.
+  try {
+    await sql`
+      INSERT INTO agent_pattern_scan_runs
+        (run_at, week, signals_total, topics_total, detected, suppressed)
+      VALUES (NOW(), ${currentWeek}, ${signals.length}, ${byTopic.size}, ${detected},
+              ${byTopic.size - detected})
+    `;
+  } catch (err) {
+    log('WARN', 'Failed to record scan_runs marker', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  log('INFO', 'Pattern scan complete', {
+    detected,
+    currentWeek,
+    signalsTotal: signals.length,
+    topicsTotal: byTopic.size,
+    suppressed: byTopic.size - detected,
+  });
+  return detected;
+}
