@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { Fragment, useCallback, useEffect, useMemo, useState } from "react"
 import {
   Card,
   CardContent,
@@ -379,8 +379,8 @@ export function AgentFailuresClient() {
                 {rows.map((r) => {
                   const isExpanded = expanded.has(r.id)
                   return (
-                    <>
-                      <TableRow key={r.id}>
+                    <Fragment key={r.id}>
+                      <TableRow>
                         <TableCell>
                           <Checkbox
                             checked={selected.has(r.id)}
@@ -437,14 +437,14 @@ export function AgentFailuresClient() {
                         </TableCell>
                       </TableRow>
                       {isExpanded && (
-                        <TableRow key={`${r.id}-detail`}>
+                        <TableRow>
                           <TableCell />
                           <TableCell colSpan={8} className="bg-muted/30">
                             <FailureDetail row={r} />
                           </TableCell>
                         </TableRow>
                       )}
-                    </>
+                    </Fragment>
                   )
                 })}
               </TableBody>

@@ -38,7 +38,7 @@ const VALID_REASONS = new Set([
   'other',
 ]);
 
-const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const EMAIL_RE = /^[^\s@]+@psd401\.net$/i;
 
 function fail(message, code = 1) {
   process.stderr.write(`Error: ${message}\n`);
@@ -50,7 +50,7 @@ function emit(obj) {
 }
 
 function parseArgs(argv) {
-  const args = {};
+  const args = Object.create(null);
   for (let i = 2; i < argv.length; i++) {
     const arg = argv[i];
     if (arg === '--help' || arg === '-h') {

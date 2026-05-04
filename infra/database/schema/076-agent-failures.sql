@@ -18,8 +18,10 @@ WHERE description = '076-agent-failures.sql' AND status = 'failed';
 CREATE TABLE IF NOT EXISTS agent_failures (
     id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     occurred_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    source            VARCHAR(32) NOT NULL,
-    severity          VARCHAR(16) NOT NULL,
+    source            VARCHAR(32) NOT NULL
+                      CHECK (source IN ('router','harness','cron','agent_self_report','tool')),
+    severity          VARCHAR(16) NOT NULL
+                      CHECK (severity IN ('error','warn','empty_response')),
     user_id           VARCHAR(255),
     session_id        VARCHAR(512),
     schedule_name     VARCHAR(255),

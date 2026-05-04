@@ -247,6 +247,7 @@ export async function acknowledgeFailures(
       ? input.ids
           .map((n) => Number(n))
           .filter((n) => Number.isInteger(n) && n > 0)
+          .slice(0, 500)
       : []
     if (ids.length === 0) throw ErrorFactories.validationFailed([
       { field: "ids", message: "ids must be a non-empty list of positive integers" },
@@ -266,7 +267,7 @@ export async function acknowledgeFailures(
             acknowledged: true,
             acknowledgedBy: ackBy,
             acknowledgedAt: new Date(),
-            notes: notes ?? undefined,
+            notes: notes ?? null,
           })
           .where(inArray(agentFailures.id, ids))
           .returning({ id: agentFailures.id }),
