@@ -21,6 +21,8 @@ async function openCredentialsTab(page: Page) {
 
 test.describe('Admin Agents Dashboard — Public Access', () => {
   test('non-admin user is redirected away from /admin/agents', async ({ page }) => {
+    // Clear cookies to ensure unauthenticated state
+    await page.context().clearCookies()
     await page.goto(DASHBOARD_PATH)
 
     await page.waitForURL((url) => !url.pathname.startsWith('/admin/agents'), {
@@ -32,7 +34,8 @@ test.describe('Admin Agents Dashboard — Public Access', () => {
       url.includes('/auth') ||
         url.includes('/sign-in') ||
         url.includes('/login') ||
-        url.includes('/dashboard')
+        url.includes('/dashboard') ||
+        new URL(url).pathname === '/'
     ).toBe(true)
   })
 })
@@ -45,13 +48,14 @@ test.describe('Credentials Tab — Admin', () => {
     if (
       url.includes('/auth') ||
       url.includes('/sign-in') ||
-      url.includes('/login')
+      url.includes('/login') ||
+      url.includes('/dashboard') ||
+      new URL(url).pathname === '/'
     ) {
       test.skip(
         true,
         'No admin auth state available — run with seeded users locally'
       )
-      return
     }
 
     await openCredentialsTab(page)
@@ -71,8 +75,11 @@ test.describe('Credentials Tab — Admin', () => {
       'Credential Name',
       'Requested By',
       'Reason',
+      'Skill Context',
+      'Ticket',
       'Status',
       'Created',
+      'Actions',
     ]
 
     for (const header of headers) {

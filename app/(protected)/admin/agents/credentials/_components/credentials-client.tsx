@@ -193,7 +193,7 @@ function ProvisionForm({ onSuccess }: { onSuccess: () => void }) {
               placeholder="e.g. openai-api-key"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              pattern="^[a-z][\da-z_-]{0,127}$"
+              pattern="^[a-z][\d_a-z-]{0,127}$"
               autoComplete="off"
               required
               disabled={submitting}

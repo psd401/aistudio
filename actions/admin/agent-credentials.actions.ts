@@ -6,6 +6,7 @@ import type { ActionState } from "@/types"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { desc, eq } from "drizzle-orm"
+import { isRedirectError } from "next/dist/client/components/redirect-error"
 import { psdAgentCredentialsAudit } from "@/lib/db/schema/tables/agent-credentials-audit"
 import { psdAgentCredentialReads } from "@/lib/db/schema/tables/agent-credential-reads"
 import { psdAgentCredentialRequests } from "@/lib/db/schema/tables/agent-credential-requests"
@@ -79,6 +80,7 @@ export async function getCredentialReads(
       }))
     )
   } catch (error) {
+    if (isRedirectError(error)) throw error
     timer({ status: "error" })
     return handleError(error, "Failed to load credential reads", {
       context: "getCredentialReads",
@@ -138,6 +140,7 @@ export async function getCredentialRequests(
       }))
     )
   } catch (error) {
+    if (isRedirectError(error)) throw error
     timer({ status: "error" })
     return handleError(error, "Failed to load credential requests", {
       context: "getCredentialRequests",
@@ -182,6 +185,7 @@ export async function resolveCredentialRequest(
 
     return createSuccess({ success: true }, `Request ${status}`)
   } catch (error) {
+    if (isRedirectError(error)) throw error
     timer({ status: "error" })
     return handleError(error, "Failed to resolve credential request", {
       context: "resolveCredentialRequest",
@@ -231,6 +235,7 @@ export async function getCredentialAuditLog(
       }))
     )
   } catch (error) {
+    if (isRedirectError(error)) throw error
     timer({ status: "error" })
     return handleError(error, "Failed to load credential audit log", {
       context: "getCredentialAuditLog",
@@ -276,6 +281,7 @@ export async function logCredentialProvisioningAction(
 
     return createSuccess({ success: true })
   } catch (error) {
+    if (isRedirectError(error)) throw error
     timer({ status: "error" })
     return handleError(error, "Failed to log credential provisioning", {
       context: "logCredentialProvisioningAction",
@@ -285,25 +291,47 @@ export async function logCredentialProvisioningAction(
   }
 }
 
-/**
- * Credential name validation regex.
- * Only lowercase alphanumeric, hyphens, and underscores allowed.
- * Must start with a letter and be between 1-128 chars.
- */
+// Lowercase alphanumeric, hyphens, and underscores; must start with a letter (1-128 chars)
 const CREDENTIAL_NAME_RE = /^[a-z][\d_a-z-]{0,127}$/
 
-/**
- * Provision (create or rotate) a shared secret in AWS Secrets Manager.
- *
- * Path: psd-agent-creds/{env}/shared/{name}
- *
- * Writes the secret value and logs an audit entry with scope=shared
- * and action=created or action=rotated depending on whether the secret
- * existed prior.
- *
- * The secret value is NEVER logged or returned — only success/failure status.
- * Admin identity is resolved from the authenticated session.
- */
+// Module-scoped client — reuses the HTTP connection pool across calls
+let _smClient: InstanceType<typeof import("@aws-sdk/client-secrets-manager").SecretsManagerClient> | null = null
+
+async function getProvisionSecretsClient() {
+  if (_smClient) return _smClient
+  const { SecretsManagerClient } = await import("@aws-sdk/client-secrets-manager")
+  _smClient = new SecretsManagerClient({
+    region: process.env.AWS_REGION ?? process.env.CDK_DEFAULT_REGION,
+  })
+  return _smClient
+}
+
+function validateSecretInputs(name: string, value: string, requestId: string): ActionState<never> | null {
+  if (!name || !CREDENTIAL_NAME_RE.test(name)) {
+    return handleError(
+      new Error("Invalid credential name"),
+      "Credential name must start with a lowercase letter and contain only lowercase letters, numbers, hyphens, or underscores (1-128 chars).",
+      { context: "provisionSharedSecret", requestId, operation: "provisionSharedSecret" }
+    )
+  }
+  if (!value.trim()) {
+    return handleError(
+      new Error("Empty secret value"),
+      "Secret value cannot be empty or whitespace-only.",
+      { context: "provisionSharedSecret", requestId, operation: "provisionSharedSecret" }
+    )
+  }
+  if (value.length > 65536) {
+    return handleError(
+      new Error("Secret value too large"),
+      "Secret value must be 65,536 characters or fewer (AWS Secrets Manager limit).",
+      { context: "provisionSharedSecret", requestId, operation: "provisionSharedSecret" }
+    )
+  }
+  return null
+}
+
+/** Provision (create or rotate) a shared secret in AWS Secrets Manager. */
 export async function provisionSharedSecret(
   name: string,
   value: string
@@ -316,31 +344,8 @@ export async function provisionSharedSecret(
     const currentUser = await requireRole("administrator")
     const adminUserId = currentUser.user.id
 
-    // Validate inputs
-    if (!name || !CREDENTIAL_NAME_RE.test(name)) {
-      return handleError(
-        new Error("Invalid credential name"),
-        "Credential name must start with a lowercase letter and contain only lowercase letters, numbers, hyphens, or underscores (1-128 chars).",
-        { context: "provisionSharedSecret", requestId, operation: "provisionSharedSecret" }
-      )
-    }
-
-    if (!value || value.length === 0) {
-      return handleError(
-        new Error("Empty secret value"),
-        "Secret value cannot be empty.",
-        { context: "provisionSharedSecret", requestId, operation: "provisionSharedSecret" }
-      )
-    }
-
-    // AWS Secrets Manager limit is 65,536 bytes for SecretString
-    if (value.length > 65536) {
-      return handleError(
-        new Error("Secret value too large"),
-        "Secret value must be 65,536 characters or fewer (AWS Secrets Manager limit).",
-        { context: "provisionSharedSecret", requestId, operation: "provisionSharedSecret" }
-      )
-    }
+    const validationError = validateSecretInputs(name, value, requestId)
+    if (validationError) return validationError
 
     const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
     const secretId = `psd-agent-creds/${environment}/shared/${name}`
@@ -356,7 +361,7 @@ export async function provisionSharedSecret(
           db.insert(psdAgentCredentialsAudit).values({
             credentialName: name,
             scope: "shared",
-            action: "created",
+            action: "provisioned",
             actorUserId: adminUserId,
             details: { secretId, environment, localDevSkipped: true },
           }),
@@ -371,42 +376,51 @@ export async function provisionSharedSecret(
     const {
       PutSecretValueCommand,
       CreateSecretCommand,
+      TagResourceCommand,
       ResourceNotFoundException,
     } = await import("@aws-sdk/client-secrets-manager")
-    const { SecretsManagerClient } = await import("@aws-sdk/client-secrets-manager")
-    const client = new SecretsManagerClient({})
+    const client = await getProvisionSecretsClient()
+
+    const tags = [
+      { Key: "Environment", Value: environment },
+      { Key: "ManagedBy", Value: "aistudio" },
+    ]
 
     let auditAction: "created" | "rotated"
 
     try {
       // Try to update existing secret first (rotation case)
       await client.send(
-        new PutSecretValueCommand({
-          SecretId: secretId,
-          SecretString: value,
-        })
+        new PutSecretValueCommand({ SecretId: secretId, SecretString: value })
       )
+      // Ensure tags are consistent on rotation (secret may have been created manually)
+      await client.send(new TagResourceCommand({ SecretId: secretId, Tags: tags }))
       auditAction = "rotated"
       log.info("Shared secret rotated", { secretId })
     } catch (putError) {
-      if (putError instanceof ResourceNotFoundException) {
-        // Secret doesn't exist — create it
+      if (!(putError instanceof ResourceNotFoundException)) throw putError
+
+      // Secret doesn't exist — create it (handle race with ResourceExistsException)
+      try {
         await client.send(
           new CreateSecretCommand({
             Name: secretId,
             SecretString: value,
             Description: `Shared agent credential: ${name}`,
-            Tags: [
-              { Key: "Environment", Value: environment },
-              { Key: "ManagedBy", Value: "aistudio" },
-              { Key: "Scope", Value: "shared" },
-            ],
+            Tags: tags,
           })
         )
         auditAction = "created"
         log.info("Shared secret created", { secretId })
-      } else {
-        throw putError
+      } catch (createError: unknown) {
+        if (!(createError instanceof Error) || createError.name !== "ResourceExistsException") {
+          throw createError
+        }
+        // Race: another admin created between our PutSecretValue and CreateSecret
+        await client.send(new PutSecretValueCommand({ SecretId: secretId, SecretString: value }))
+        await client.send(new TagResourceCommand({ SecretId: secretId, Tags: tags }))
+        auditAction = "rotated"
+        log.info("Shared secret rotated (race recovery)", { secretId })
       }
     }
 
@@ -429,6 +443,7 @@ export async function provisionSharedSecret(
       : `Shared secret "${name}" rotated at ${secretId}`
     return createSuccess({ action: auditAction }, message)
   } catch (error) {
+    if (isRedirectError(error)) throw error
     timer({ status: "error" })
     return handleError(error, "Failed to provision shared secret", {
       context: "provisionSharedSecret",
