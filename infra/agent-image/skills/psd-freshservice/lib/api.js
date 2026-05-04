@@ -141,7 +141,7 @@ function promptForKey(userEmail, reason) {
     storeCommand: {
       cmd: 'node',
       args: [
-        '/home/node/.openclaw/skills/psd-credentials/put.js',
+        '/opt/psd-skills/psd-credentials/put.js',
         '--user', userEmail,
         '--name', 'freshservice_api_key',
         '--value', '%%VALUE%%',

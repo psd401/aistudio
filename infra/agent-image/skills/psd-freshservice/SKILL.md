@@ -31,7 +31,7 @@ If the credential is missing, the skill exits `2` and prints a structured prompt
 When you see `freshservice_key_missing`, ask the user to paste their key. After they paste, run:
 
 ```bash
-node /home/node/.openclaw/skills/psd-credentials/put.js \
+node /opt/psd-skills/psd-credentials/put.js \
   --user <email> \
   --name freshservice_api_key \
   --value "<pasted-key>"

@@ -16,7 +16,7 @@ Retrieve API keys and secrets from AWS Secrets Manager for use in agent skills. 
 ### `get` — retrieve a credential value
 
 ```bash
-node /home/node/.openclaw/skills/psd-credentials/get.js \
+node /opt/psd-skills/psd-credentials/get.js \
   --user <email> \
   --name "<credential-name>" \
   [--shared]
@@ -29,7 +29,7 @@ By default, checks user-scoped first, then falls back to shared. Pass `--shared`
 ### `list` — list available credentials (names only, no values)
 
 ```bash
-node /home/node/.openclaw/skills/psd-credentials/list.js \
+node /opt/psd-skills/psd-credentials/list.js \
   --user <email>
 ```
 
@@ -38,7 +38,7 @@ Returns `{"credentials":[{"name":"...","scope":"shared|user"},...]}`.
 ### `put` — store a per-user credential
 
 ```bash
-node /home/node/.openclaw/skills/psd-credentials/put.js \
+node /opt/psd-skills/psd-credentials/put.js \
   --user <email> \
   --name "<credential-name>" \
   --value "<secret-value>"
@@ -51,7 +51,7 @@ Use this when a skill prompts the user for an API key and needs to persist it fo
 ### `check_capability` — verify a capability grant for the caller
 
 ```bash
-node /home/node/.openclaw/skills/psd-credentials/check_capability.js \
+node /opt/psd-skills/psd-credentials/check_capability.js \
   --user <email> \
   --capability "<capability-identifier>"
 ```
@@ -61,7 +61,7 @@ Returns `{"granted":true|false,"capability":"..."}` and exits `0` on grant, `3` 
 ### `request_new` — request provisioning of a new credential
 
 ```bash
-node /home/node/.openclaw/skills/psd-credentials/request_new.js \
+node /opt/psd-skills/psd-credentials/request_new.js \
   --user <email> \
   --name "<desired-credential-name>" \
   --reason "<why this credential is needed>" \
@@ -111,7 +111,7 @@ The `--user` parameter is the authenticated caller's email, passed by the agent 
 
 ```bash
 # Get the credential
-CRED=$(node /home/node/.openclaw/skills/psd-credentials/get.js --user hagelk@psd401.net --name "openai_api_key")
+CRED=$(node /opt/psd-skills/psd-credentials/get.js --user hagelk@psd401.net --name "openai_api_key")
 # Extract the value (in your skill logic, not in chat)
 API_KEY=$(echo "$CRED" | node -e "process.stdout.write(JSON.parse(require('fs').readFileSync(0,'utf8')).value)")
 # Use it in an API call (the key never appears in your response)
@@ -121,13 +121,13 @@ curl -s -H "Authorization: Bearer $API_KEY" https://api.openai.com/v1/models
 **Listing available credentials:**
 
 ```bash
-node /home/node/.openclaw/skills/psd-credentials/list.js --user hagelk@psd401.net
+node /opt/psd-skills/psd-credentials/list.js --user hagelk@psd401.net
 ```
 
 **Requesting a new credential:**
 
 ```bash
-node /home/node/.openclaw/skills/psd-credentials/request_new.js \
+node /opt/psd-skills/psd-credentials/request_new.js \
   --user hagelk@psd401.net \
   --name "google_workspace_api_key" \
   --reason "Needed for the psd-google-integration skill to access Calendar API" \

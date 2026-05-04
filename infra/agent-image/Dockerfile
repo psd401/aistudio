@@ -153,15 +153,27 @@ RUN awk 'BEGIN{f=0} /^---[[:space:]]*$/{f++; next} f>=2{print}' /tmp/psd-rules.S
 COPY IDENTITY.md /home/node/.openclaw/IDENTITY.md
 COPY USER.md /home/node/.openclaw/USER.md
 COPY MEMORY.md /home/node/.openclaw/MEMORY.md
-# Install OpenClaw skills — each skill is a directory under
-# /home/node/.openclaw/skills/ loaded via openclaw.json skills.load.extraDirs.
-# Install dependencies at build time so the agent container starts fast.
-COPY skills /home/node/.openclaw/skills
-RUN cd /home/node/.openclaw/skills/psd-schedules && npm install --omit=dev --no-audit --no-fund
-RUN cd /home/node/.openclaw/skills/psd-credentials && npm install --omit=dev --no-audit --no-fund
-RUN cd /home/node/.openclaw/skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund
-RUN cd /home/node/.openclaw/skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
-RUN cd /home/node/.openclaw/skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund
+# Install OpenClaw skills under /opt/psd-skills (NOT /home/node/.openclaw/).
+# Putting image-bundled skills outside the workspace path is structural —
+# `workspace_sync.py` only round-trips /home/node/.openclaw/, so paths under
+# /opt/ are physically unreachable to S3 sync. Earlier we kept skills under
+# the workspace path and protected them with a `_SKIP_RELATIVE_PREFIXES`
+# allow-list in workspace_sync; that allow-list silently broke when new
+# skills were added (PR #934 — psd-image-gen and psd-freshservice were
+# missing entries, so the agent's runtime edits were synced to S3 and
+# restored on every cold-start, defeating two image rebuilds in a row).
+# Path separation closes that bug class permanently — it is no longer
+# possible for workspace state to override an image-bundled skill, no
+# allow-list maintenance burden.
+#
+# Loaded via openclaw.json skills.load.extraDirs. Install dependencies at
+# build time so the agent container starts fast.
+COPY skills /opt/psd-skills
+RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund
+RUN cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no-fund
+RUN cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund
+RUN cd /opt/psd-skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
+RUN cd /opt/psd-skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund
 # psd-freshservice has zero npm dependencies (native fetch + child_process only).
 
 # Upstream gws-* skills (#912) — per-API SKILL.md guidance for Gmail, Drive,
@@ -176,9 +188,19 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* && \
     git clone --depth 1 --branch "v${GWS_VERSION}" \
       https://github.com/googleworkspace/cli /tmp/gws-repo && \
-    cp -r /tmp/gws-repo/skills/gws-* /home/node/.openclaw/skills/ && \
+    cp -r /tmp/gws-repo/skills/gws-* /opt/psd-skills/ && \
     rm -rf /tmp/gws-repo && \
     apt-get purge -y git && apt-get autoremove -y
+
+# Defense-in-depth: lock /opt/psd-skills to root-owned and read-only AFTER
+# all installs complete. The container runs as the `node` user, so root
+# ownership plus `a-w` means the agent process literally cannot edit a
+# bundled skill (EACCES on write/chmod attempts). Combined with the path
+# separation above, this is belt-and-suspenders against the regression
+# observed 2026-05-03. User-authored draft skills go through
+# psd-skills-meta and are uploaded to S3 directly — no local-FS write
+# path is needed for legitimate work.
+RUN chown -R root:root /opt/psd-skills && chmod -R a-w /opt/psd-skills
 
 # Defense-in-depth: disable OpenClaw's cron subsystem via both config
 # (cron.enabled: false in openclaw.json) and env var (OPENCLAW_SKIP_CRON=1)

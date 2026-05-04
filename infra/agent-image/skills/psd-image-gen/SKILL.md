@@ -14,7 +14,7 @@ Generate an image from a prompt using OpenAI `gpt-image-2`. The image is uploade
 ## Usage
 
 ```bash
-node /home/node/.openclaw/skills/psd-image-gen/generate.js \
+node /opt/psd-skills/psd-image-gen/generate.js \
   --user <email> \
   --prompt "<image description>" \
   [--size 1024x1024 | 1024x1536 | 1536x1024 | auto] \
