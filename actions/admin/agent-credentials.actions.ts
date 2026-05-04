@@ -284,3 +284,147 @@ export async function logCredentialProvisioningAction(
     })
   }
 }
+
+/**
+ * Credential name validation regex.
+ * Only lowercase alphanumeric, hyphens, and underscores allowed.
+ * Must start with a letter and be between 1-128 chars.
+ */
+const CREDENTIAL_NAME_RE = /^[a-z][\d_a-z-]{0,127}$/
+
+/**
+ * Provision (create or rotate) a shared secret in AWS Secrets Manager.
+ *
+ * Path: psd-agent-creds/{env}/shared/{name}
+ *
+ * Writes the secret value and logs an audit entry with scope=shared
+ * and action=created or action=rotated depending on whether the secret
+ * existed prior.
+ *
+ * The secret value is NEVER logged or returned — only success/failure status.
+ * Admin identity is resolved from the authenticated session.
+ */
+export async function provisionSharedSecret(
+  name: string,
+  value: string
+): Promise<ActionState<{ action: "created" | "rotated" }>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("provisionSharedSecret")
+  const log = createLogger({ requestId, action: "provisionSharedSecret" })
+
+  try {
+    const currentUser = await requireRole("administrator")
+    const adminUserId = currentUser.user.id
+
+    // Validate inputs
+    if (!name || !CREDENTIAL_NAME_RE.test(name)) {
+      return handleError(
+        new Error("Invalid credential name"),
+        "Credential name must start with a lowercase letter and contain only lowercase letters, numbers, hyphens, or underscores (1-128 chars).",
+        { context: "provisionSharedSecret", requestId, operation: "provisionSharedSecret" }
+      )
+    }
+
+    if (!value || value.length === 0) {
+      return handleError(
+        new Error("Empty secret value"),
+        "Secret value cannot be empty.",
+        { context: "provisionSharedSecret", requestId, operation: "provisionSharedSecret" }
+      )
+    }
+
+    const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
+    const secretId = `psd-agent-creds/${environment}/shared/${name}`
+
+    log.info("Provisioning shared secret", { secretId, adminUserId })
+
+    // In local development, skip Secrets Manager but still log audit
+    if (process.env.NODE_ENV === "development") {
+      log.info("Local dev mode — skipping Secrets Manager write", { secretId })
+
+      await executeQuery(
+        (db) =>
+          db.insert(psdAgentCredentialsAudit).values({
+            credentialName: name,
+            scope: "shared",
+            action: "created",
+            actorUserId: adminUserId,
+            details: { secretId, environment, localDevSkipped: true },
+          }),
+        "agentCredentials.provisionAudit"
+      )
+
+      timer({ status: "success" })
+      return createSuccess({ action: "created" as const }, "Secret provisioned (local dev — Secrets Manager write skipped)")
+    }
+
+    // Write to AWS Secrets Manager
+    const {
+      PutSecretValueCommand,
+      CreateSecretCommand,
+      ResourceNotFoundException,
+    } = await import("@aws-sdk/client-secrets-manager")
+    const { SecretsManagerClient } = await import("@aws-sdk/client-secrets-manager")
+    const client = new SecretsManagerClient({})
+
+    let auditAction: "created" | "rotated"
+
+    try {
+      // Try to update existing secret first (rotation case)
+      await client.send(
+        new PutSecretValueCommand({
+          SecretId: secretId,
+          SecretString: value,
+        })
+      )
+      auditAction = "rotated"
+      log.info("Shared secret rotated", { secretId })
+    } catch (putError) {
+      if (putError instanceof ResourceNotFoundException) {
+        // Secret doesn't exist — create it
+        await client.send(
+          new CreateSecretCommand({
+            Name: secretId,
+            SecretString: value,
+            Description: `Shared agent credential: ${name}`,
+            Tags: [
+              { Key: "Environment", Value: environment },
+              { Key: "ManagedBy", Value: "aistudio" },
+              { Key: "Scope", Value: "shared" },
+            ],
+          })
+        )
+        auditAction = "created"
+        log.info("Shared secret created", { secretId })
+      } else {
+        throw putError
+      }
+    }
+
+    // Write audit entry
+    await executeQuery(
+      (db) =>
+        db.insert(psdAgentCredentialsAudit).values({
+          credentialName: name,
+          scope: "shared",
+          action: auditAction,
+          actorUserId: adminUserId,
+          details: { secretId, environment },
+        }),
+      "agentCredentials.provisionAudit"
+    )
+
+    timer({ status: "success" })
+    const message = auditAction === "created"
+      ? `Shared secret "${name}" created at ${secretId}`
+      : `Shared secret "${name}" rotated at ${secretId}`
+    return createSuccess({ action: auditAction }, message)
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to provision shared secret", {
+      context: "provisionSharedSecret",
+      requestId,
+      operation: "provisionSharedSecret",
+    })
+  }
+}
