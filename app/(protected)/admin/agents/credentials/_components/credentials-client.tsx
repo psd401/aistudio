@@ -23,6 +23,16 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
 import { IconRefresh, IconCheck, IconX, IconLock, IconPlus } from "@tabler/icons-react"
 import {
   getCredentialReads,
@@ -127,11 +137,15 @@ function ProvisionForm({ onSuccess }: { onSuccess: () => void }) {
   const [name, setName] = useState("")
   const [value, setValue] = useState("")
   const [submitting, setSubmitting] = useState(false)
+  const [confirmOpen, setConfirmOpen] = useState(false)
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault()
     if (!name.trim() || !value.trim()) return
+    setConfirmOpen(true)
+  }
 
+  const handleConfirmedProvision = async () => {
     setSubmitting(true)
     try {
       const result = await provisionSharedSecret(name.trim(), value)
@@ -179,7 +193,8 @@ function ProvisionForm({ onSuccess }: { onSuccess: () => void }) {
               placeholder="e.g. openai-api-key"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              pattern="^[a-z][a-z0-9_-]{0,127}$"
+              pattern="^[a-z][\da-z_-]{0,127}$"
+              autoComplete="off"
               required
               disabled={submitting}
             />
@@ -195,6 +210,8 @@ function ProvisionForm({ onSuccess }: { onSuccess: () => void }) {
               placeholder="Paste the secret value here..."
               value={value}
               onChange={(e) => setValue(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
               required
               disabled={submitting}
               rows={3}
@@ -210,6 +227,27 @@ function ProvisionForm({ onSuccess }: { onSuccess: () => void }) {
             {submitting ? "Provisioning..." : "Provision Secret"}
           </Button>
         </form>
+
+        <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Confirm Secret Provisioning</AlertDialogTitle>
+              <AlertDialogDescription>
+                This will create or overwrite the secret at{" "}
+                <code className="text-xs bg-muted px-1 py-0.5 rounded">
+                  psd-agent-creds/&#123;env&#125;/shared/{name}
+                </code>
+                . If the secret already exists, the current value will be permanently replaced. This action cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={handleConfirmedProvision}>
+                Confirm Provision
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
       </CardContent>
     </Card>
   )

@@ -333,6 +333,15 @@ export async function provisionSharedSecret(
       )
     }
 
+    // AWS Secrets Manager limit is 65,536 bytes for SecretString
+    if (value.length > 65536) {
+      return handleError(
+        new Error("Secret value too large"),
+        "Secret value must be 65,536 characters or fewer (AWS Secrets Manager limit).",
+        { context: "provisionSharedSecret", requestId, operation: "provisionSharedSecret" }
+      )
+    }
+
     const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
     const secretId = `psd-agent-creds/${environment}/shared/${name}`
 
