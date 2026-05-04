@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 /**
  * get.js — credentials.get
- * Usage: node get.js --user <email> --name <credential-name>
+ * Usage: node get.js --user <email> --name <credential-name> [--shared]
  *
- * Retrieves a credential value from AWS Secrets Manager. Checks
- * user-scoped first, then shared. Logs the read to telemetry
- * (name only, never value).
+ * Retrieves a credential value from AWS Secrets Manager. By default,
+ * checks user-scoped first, then shared. Pass --shared to skip user
+ * scope and read only from the shared namespace (for district-funded
+ * keys that must not be overridden by per-user values).
+ *
+ * Logs the read to telemetry (name only, never value).
  */
 
 'use strict';
@@ -23,7 +26,7 @@ const {
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
-    console.log('Usage: get.js --user <email> --name <credential-name>');
+    console.log('Usage: get.js --user <email> --name <credential-name> [--shared]');
     process.exit(0);
   }
   validateEnv();
@@ -34,7 +37,9 @@ async function main() {
   }
 
   try {
-    const result = await getCredential(args.name, args.user);
+    const result = await getCredential(args.name, args.user, {
+      sharedOnly: args.shared === true,
+    });
 
     if (!result) {
       emit({

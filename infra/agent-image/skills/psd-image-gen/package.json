@@ -1,0 +1,9 @@
+{
+  "name": "psd-image-gen",
+  "version": "1.0.0",
+  "description": "OpenClaw skill: generate images via OpenAI gpt-image-2, upload to workspace S3 public-images/ prefix, return unsigned shareable URL",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.0.0"
+  }
+}

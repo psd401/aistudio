@@ -165,7 +165,22 @@ export class AgentPlatformStack extends cdk.Stack {
     // =====================================================================
     this.workspaceBucket = new s3.Bucket(this, 'AgentWorkspaceBucket', {
       bucketName: `psd-agents-${environment}-${cdk.Aws.ACCOUNT_ID}`,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      // BlockPublicAcls + IgnorePublicAcls keep ACL-driven public access
+      // forbidden. BlockPublicPolicy and RestrictPublicBuckets are FALSE so
+      // the resource policy below can grant unauthenticated GetObject on
+      // the single `public-images/*` prefix used by the psd-image-gen
+      // skill. Without this carve-out the skill returns presigned URLs
+      // signed with AgentCore's STS session credentials; those URLs embed
+      // an `X-Amz-Security-Token` query parameter that intermittently
+      // fails with `InvalidToken` when fetched through chat clients
+      // (observed in PR #934 dev rollout 2026-05-03). Switching to a
+      // public-by-link prefix eliminates the failure mode entirely.
+      blockPublicAccess: new s3.BlockPublicAccess({
+        blockPublicAcls: true,
+        ignorePublicAcls: true,
+        blockPublicPolicy: false,
+        restrictPublicBuckets: false,
+      }),
       // SSE-S3 chosen over SSE-KMS: workspace data is agent-generated artifacts
       // (not direct student PII). KMS adds ~$1/mo per key + $0.03/10k API calls.
       // Upgrade to SSE-KMS with dedicated key if student data is stored here.
@@ -192,6 +207,21 @@ export class AgentPlatformStack extends cdk.Stack {
 
     cdk.Tags.of(this.workspaceBucket).add('Environment', environment);
     cdk.Tags.of(this.workspaceBucket).add('ManagedBy', 'cdk');
+
+    // Public-read carve-out for psd-image-gen output. Skill writes generated
+    // PNGs to `public-images/<email>/<uuid>.png` and returns an unsigned
+    // HTTPS URL. The UUID makes the path unguessable; anyone who receives
+    // the URL can fetch — same security model as Google Drive "anyone with
+    // the link" sharing. The skill, IAM grants, and this policy must all
+    // agree on the `public-images/` prefix. Other prefixes in the bucket
+    // remain private (no other allow-public statements exist).
+    this.workspaceBucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'PublicReadOnPublicImagesPrefix',
+      effect: iam.Effect.ALLOW,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['s3:GetObject'],
+      resources: [`${this.workspaceBucket.bucketArn}/public-images/*`],
+    }));
 
     // =====================================================================
     // 4. DynamoDB Tables
@@ -821,6 +851,60 @@ export class AgentPlatformStack extends cdk.Stack {
       effect: iam.Effect.ALLOW,
       actions: ['secretsmanager:ListSecrets'],
       resources: ['*'],
+    }));
+
+    // Per-user credential WRITE — for the psd-credentials/put.js helper.
+    // Scope is intentionally locked to the per-user prefix
+    // (psd-agent-creds/{env}/user/*) so a skill cannot write or rotate
+    // a shared (district-wide) secret. Shared-scope provisioning stays
+    // an admin-only operation done out of band.
+    //
+    // CreateSecret and TagResource are constrained by aws:RequestTag
+    // conditions matching what psd-credentials/put.js sets on new secrets.
+    // This prevents a compromised task from re-tagging existing per-user
+    // secrets with arbitrary Environment or ManagedBy values.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'AgentCredentialsWritePerUser',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'secretsmanager:CreateSecret',
+        'secretsmanager:TagResource',
+      ],
+      resources: [
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent-creds/${environment}/user/*`,
+      ],
+      conditions: {
+        StringEquals: {
+          'aws:RequestTag/Environment': environment,
+          'aws:RequestTag/ManagedBy': 'psd-credentials-skill',
+        },
+        'ForAllValues:StringEquals': {
+          'aws:TagKeys': ['Environment', 'ManagedBy', 'Scope'],
+        },
+      },
+    }));
+
+    // PutSecretValue does not support tag conditions — it only updates
+    // the secret value, not tags. Scoped to the per-user resource prefix.
+    //
+    // KNOWN LIMITATION (AWS API): PutSecretValue cannot be scoped to a
+    // single user's email path because the action does not support
+    // aws:RequestTag/* or aws:ResourceTag/* conditions. This means any
+    // skill running on the AgentCore task can rotate any user's credential
+    // under the `psd-agent-creds/{env}/user/*` prefix. Compensating
+    // controls: (1) skills validate --user is the authenticated caller,
+    // (2) psd_agent_credentials_audit logs all writes with action/email,
+    // (3) the ECS task is isolated per-session. This is not a gap in our
+    // design — it is a Secrets Manager API constraint.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'AgentCredentialsUpdatePerUser',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'secretsmanager:PutSecretValue',
+      ],
+      resources: [
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent-creds/${environment}/user/*`,
+      ],
     }));
 
     // Secrets Manager — psd-workspace skill (#912): read shared OAuth client

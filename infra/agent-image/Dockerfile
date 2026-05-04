@@ -128,7 +128,22 @@ COPY openclaw.json /home/node/.openclaw/openclaw.json
 # NOTE: Do NOT put HTML comments or TODO notes in this file — they are
 # visible to the LLM. Keep roadmap notes here in the Dockerfile instead.
 # TODO(phase-2): Add Google Calendar and Gmail read-only tool access to the agent.
-COPY SOUL.md /home/node/.openclaw/SOUL.md
+#
+# Tier-1 enforcement: SOUL.md alone is auto-loaded, but the rules in
+# psd-rules SKILL.md are NOT auto-injected by OpenClaw — the model only
+# sees a Tier-2 catalog stub for any skill it has not explicitly loaded.
+# That meant the "non-negotiable" rules were never actually present in
+# the system prompt and the agent ignored them (observed 2026-05-03).
+# At build time we strip psd-rules' YAML frontmatter and append the body
+# to SOUL.md so the rules ARE in the system prompt every turn. The
+# canonical edit point stays `skills/psd-rules/SKILL.md`.
+COPY SOUL.md /tmp/SOUL.preamble.md
+COPY skills/psd-rules/SKILL.md /tmp/psd-rules.SKILL.md
+RUN awk 'BEGIN{f=0} /^---[[:space:]]*$/{f++; next} f>=2{print}' /tmp/psd-rules.SKILL.md > /tmp/psd-rules.body.md && \
+    cat /tmp/SOUL.preamble.md > /home/node/.openclaw/SOUL.md && \
+    printf '\n\n---\n\n# Operating Rules (from psd-rules)\n\n_The following rules are concatenated from `skills/psd-rules/SKILL.md` at container build time so they are guaranteed to appear in every turn\xe2\x80\x99s system prompt. Edit them in that file, not here._\n\n' >> /home/node/.openclaw/SOUL.md && \
+    cat /tmp/psd-rules.body.md >> /home/node/.openclaw/SOUL.md && \
+    rm -f /tmp/SOUL.preamble.md /tmp/psd-rules.SKILL.md /tmp/psd-rules.body.md
 # OpenClaw also auto-loads IDENTITY.md, USER.md, MEMORY.md (and AGENTS.md,
 # TOOLS.md, HEARTBEAT.md, BOOTSTRAP.md) when present. We seed empty stubs so
 # every brand-new user workspace boots with the same scaffolding; the agent
@@ -138,14 +153,28 @@ COPY SOUL.md /home/node/.openclaw/SOUL.md
 COPY IDENTITY.md /home/node/.openclaw/IDENTITY.md
 COPY USER.md /home/node/.openclaw/USER.md
 COPY MEMORY.md /home/node/.openclaw/MEMORY.md
-# Install OpenClaw skills — each skill is a directory under
-# /home/node/.openclaw/skills/ loaded via openclaw.json skills.load.extraDirs.
-# Install dependencies at build time so the agent container starts fast.
-COPY skills /home/node/.openclaw/skills
-RUN cd /home/node/.openclaw/skills/psd-schedules && npm install --omit=dev --no-audit --no-fund
-RUN cd /home/node/.openclaw/skills/psd-credentials && npm install --omit=dev --no-audit --no-fund
-RUN cd /home/node/.openclaw/skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund
-RUN cd /home/node/.openclaw/skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
+# Install OpenClaw skills under /opt/psd-skills (NOT /home/node/.openclaw/).
+# Putting image-bundled skills outside the workspace path is structural —
+# `workspace_sync.py` only round-trips /home/node/.openclaw/, so paths under
+# /opt/ are physically unreachable to S3 sync. Earlier we kept skills under
+# the workspace path and protected them with a `_SKIP_RELATIVE_PREFIXES`
+# allow-list in workspace_sync; that allow-list silently broke when new
+# skills were added (PR #934 — psd-image-gen and psd-freshservice were
+# missing entries, so the agent's runtime edits were synced to S3 and
+# restored on every cold-start, defeating two image rebuilds in a row).
+# Path separation closes that bug class permanently — it is no longer
+# possible for workspace state to override an image-bundled skill, no
+# allow-list maintenance burden.
+#
+# Loaded via openclaw.json skills.load.extraDirs. Install dependencies at
+# build time so the agent container starts fast.
+COPY skills /opt/psd-skills
+RUN cd /opt/psd-skills/psd-schedules && npm install --omit=dev --no-audit --no-fund
+RUN cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no-fund
+RUN cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund
+RUN cd /opt/psd-skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
+RUN cd /opt/psd-skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund
+# psd-freshservice has zero npm dependencies (native fetch + child_process only).
 
 # Upstream gws-* skills (#912) — per-API SKILL.md guidance for Gmail, Drive,
 # Docs, Sheets, Slides, Forms, Tasks, Calendar, Chat, Meet, Contacts, etc.
@@ -159,9 +188,19 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/* && \
     git clone --depth 1 --branch "v${GWS_VERSION}" \
       https://github.com/googleworkspace/cli /tmp/gws-repo && \
-    cp -r /tmp/gws-repo/skills/gws-* /home/node/.openclaw/skills/ && \
+    cp -r /tmp/gws-repo/skills/gws-* /opt/psd-skills/ && \
     rm -rf /tmp/gws-repo && \
     apt-get purge -y git && apt-get autoremove -y
+
+# Defense-in-depth: lock /opt/psd-skills to root-owned and read-only AFTER
+# all installs complete. The container runs as the `node` user, so root
+# ownership plus `a-w` means the agent process literally cannot edit a
+# bundled skill (EACCES on write/chmod attempts). Combined with the path
+# separation above, this is belt-and-suspenders against the regression
+# observed 2026-05-03. User-authored draft skills go through
+# psd-skills-meta and are uploaded to S3 directly — no local-FS write
+# path is needed for legitimate work.
+RUN chown -R root:root /opt/psd-skills && chmod -R a-w /opt/psd-skills
 
 # Defense-in-depth: disable OpenClaw's cron subsystem via both config
 # (cron.enabled: false in openclaw.json) and env var (OPENCLAW_SKIP_CRON=1)

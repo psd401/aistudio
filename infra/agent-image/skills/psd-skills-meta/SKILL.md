@@ -17,7 +17,7 @@ loading, and agent-authored skill creation.
 ### `search` — search the skill catalog
 
 ```bash
-node /home/node/.openclaw/skills/psd-skills-meta/search.js \
+node /opt/psd-skills/psd-skills-meta/search.js \
   --user <email> \
   --query "<search term>"
 ```
@@ -28,7 +28,7 @@ the user asks "do you have a skill for X?" or you need to find a skill.
 ### `load` — load a skill's full SKILL.md into the session
 
 ```bash
-node /home/node/.openclaw/skills/psd-skills-meta/load.js \
+node /opt/psd-skills/psd-skills-meta/load.js \
   --user <email> \
   --name "<skill-name>"
 ```
@@ -40,7 +40,7 @@ indicates a skill exists but you need the full instructions.
 ### `author` — create a new skill draft
 
 ```bash
-node /home/node/.openclaw/skills/psd-skills-meta/author.js \
+node /opt/psd-skills/psd-skills-meta/author.js \
   --user <email> \
   --name "<skill-name>" \
   --summary "<one-line summary>" \
