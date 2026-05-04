@@ -10,18 +10,18 @@ Shared secrets (e.g., API keys for external services) are stored in AWS Secrets 
 psd-agent-creds/{env}/shared/{name}
 ```
 
-The admin UI at `/admin/agents/credentials` replaces the previous manual `aws secretsmanager put-secret-value` workflow.
+The admin UI on the Agents dashboard replaces the previous manual `aws secretsmanager put-secret-value` workflow.
 
 ## Access
 
-- **Route**: `/admin/agents/credentials` > "Provision" tab
+- **Route**: `/admin/agents` > **Credentials** tab > **Provision** sub-tab
 - **Role required**: `administrator`
 - **IAM**: The ECS frontend task role has `secretsmanager:CreateSecret`, `PutSecretValue`, and `TagResource` on `psd-agent-creds/{env}/*`
 
 ## Provisioning a New Shared Secret
 
-1. Navigate to `/admin/agents/credentials`
-2. Click the **Provision** tab
+1. Navigate to `/admin/agents` and open the **Credentials** tab
+2. Click the **Provision** sub-tab
 3. Enter the credential name (lowercase, alphanumeric, hyphens, underscores; must start with a letter)
 4. Paste the secret value
 5. Click **Provision Secret**
@@ -48,8 +48,8 @@ View the audit log on the **Audit Log** tab.
 
 When an agent calls `credentials.request_new()`, a row is inserted into `psd_agent_credential_requests` and a Freshservice ticket is filed. To fulfill:
 
-1. On the **Requests** tab, review pending requests
-2. Provision the secret using the **Provision** tab (use the credential name from the request)
+1. On the **Requests** sub-tab, review pending requests
+2. Provision the secret using the **Provision** sub-tab (use the credential name from the request)
 3. Return to **Requests** and click the checkmark to mark as fulfilled
 
 ## Naming Conventions

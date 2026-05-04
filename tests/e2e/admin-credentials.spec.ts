@@ -1,26 +1,29 @@
-import { test, expect } from '@playwright/test'
+import { test, expect, type Page } from '@playwright/test'
 
 /**
- * E2E tests for the Admin Agent Credentials page (Issue #933)
+ * E2E tests for the Admin Agent Credentials tab (Issue #933)
  *
- * Covers:
- * - Non-admin is redirected
- * - Admin can access /admin/agents/credentials
- * - Requests tab renders table with expected columns
- * - Provision tab renders the form
- * - Audit Log tab renders table
- * - Provisioning form validates inputs
+ * The Credentials UI lives as a tab on the /admin/agents dashboard,
+ * not as a standalone route. These tests open the dashboard, switch
+ * to the Credentials tab, then exercise its sub-tabs and the
+ * Provision form.
  *
  * Auth note: tests requiring admin session auto-skip in CI unless
  * PLAYWRIGHT_AUTH_ENABLED=true is set.
  */
 
-test.describe('Credentials Page — Public Access', () => {
-  test('non-admin user is redirected away from /admin/agents/credentials', async ({ page }) => {
-    await page.goto('/admin/agents/credentials')
+const DASHBOARD_PATH = '/admin/agents'
 
-    // Should redirect to sign-in or dashboard
-    await page.waitForURL((url) => !url.pathname.includes('/admin/agents/credentials'), {
+async function openCredentialsTab(page: Page) {
+  const credentialsTab = page.locator('[role="tab"]').filter({ hasText: 'Credentials' }).first()
+  await credentialsTab.click()
+}
+
+test.describe('Admin Agents Dashboard — Public Access', () => {
+  test('non-admin user is redirected away from /admin/agents', async ({ page }) => {
+    await page.goto(DASHBOARD_PATH)
+
+    await page.waitForURL((url) => !url.pathname.startsWith('/admin/agents'), {
       timeout: 10000,
     })
 
@@ -34,11 +37,10 @@ test.describe('Credentials Page — Public Access', () => {
   })
 })
 
-test.describe('Credentials Page — Admin', () => {
+test.describe('Credentials Tab — Admin', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/admin/agents/credentials')
+    await page.goto(DASHBOARD_PATH)
 
-    // If no admin auth state, skip the rest of the suite
     const url = page.url()
     if (
       url.includes('/auth') ||
@@ -51,26 +53,20 @@ test.describe('Credentials Page — Admin', () => {
       )
       return
     }
+
+    await openCredentialsTab(page)
   })
 
-  test('page loads and renders heading', async ({ page }) => {
-    const heading = page.locator('h1').filter({
-      hasText: /Agent Credentials/i,
-    })
-    await expect(heading).toBeVisible({ timeout: 10000 })
-  })
+  test('credentials tab exposes expected sub-tabs', async ({ page }) => {
+    const subTabs = ['Requests', 'Provision', 'Usage', 'Audit Log']
 
-  test('tabs render correctly', async ({ page }) => {
-    const tabs = ['Requests', 'Provision', 'Usage', 'Audit Log']
-
-    for (const tab of tabs) {
+    for (const tab of subTabs) {
       const trigger = page.locator('[role="tab"]').filter({ hasText: tab })
-      await expect(trigger).toBeVisible({ timeout: 5000 })
+      await expect(trigger.first()).toBeVisible({ timeout: 5000 })
     }
   })
 
-  test('requests tab shows table with expected columns', async ({ page }) => {
-    // Default tab is Requests
+  test('requests sub-tab shows table with expected columns', async ({ page }) => {
     const headers = [
       'Credential Name',
       'Requested By',
@@ -81,16 +77,14 @@ test.describe('Credentials Page — Admin', () => {
 
     for (const header of headers) {
       const th = page.locator('th').filter({ hasText: header })
-      await expect(th).toBeVisible({ timeout: 5000 })
+      await expect(th.first()).toBeVisible({ timeout: 5000 })
     }
   })
 
-  test('provision tab renders form', async ({ page }) => {
-    // Click Provision tab
+  test('provision sub-tab renders form', async ({ page }) => {
     const provisionTab = page.locator('[role="tab"]').filter({ hasText: 'Provision' })
     await provisionTab.click()
 
-    // Should see form elements
     await expect(page.locator('label').filter({ hasText: 'Credential Name' })).toBeVisible({ timeout: 5000 })
     await expect(page.locator('label').filter({ hasText: 'Secret Value' })).toBeVisible({ timeout: 5000 })
     await expect(page.locator('button').filter({ hasText: 'Provision Secret' })).toBeVisible({ timeout: 5000 })
@@ -104,7 +98,7 @@ test.describe('Credentials Page — Admin', () => {
     await expect(submitButton).toBeDisabled({ timeout: 5000 })
   })
 
-  test('audit log tab renders table', async ({ page }) => {
+  test('audit log sub-tab renders table', async ({ page }) => {
     const auditTab = page.locator('[role="tab"]').filter({ hasText: 'Audit Log' })
     await auditTab.click()
 
@@ -112,18 +106,7 @@ test.describe('Credentials Page — Admin', () => {
 
     for (const header of headers) {
       const th = page.locator('th').filter({ hasText: header })
-      await expect(th).toBeVisible({ timeout: 5000 })
+      await expect(th.first()).toBeVisible({ timeout: 5000 })
     }
-  })
-
-  test('refresh button works without error', async ({ page }) => {
-    const refreshButton = page.locator('button').filter({ hasText: /Refresh/i })
-    await expect(refreshButton).toBeVisible({ timeout: 10000 })
-    await refreshButton.click()
-
-    // Should not navigate away or show error toast
-    await page.waitForTimeout(1000)
-    const url = page.url()
-    expect(url).toContain('/admin/agents/credentials')
   })
 })
