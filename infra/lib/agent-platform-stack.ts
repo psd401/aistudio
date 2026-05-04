@@ -1867,6 +1867,10 @@ export class AgentPlatformStack extends cdk.Stack {
     // CloudWatch path. Two paths exist (`/aws/bedrock/agentcore/*` and
     // `/aws/bedrock-agentcore/*`); we attach to both as imports so the filter
     // catches whichever the runtime ends up using.
+    //
+    // Each filter uses a DISTINCT metric name to avoid double-counting. The
+    // alarm below aggregates both via a MathExpression. At any given time only
+    // one log group will actually receive events; the other metric stays at 0.
     const harnessLogGroup1 = logs.LogGroup.fromLogGroupName(
       this,
       'AgentCoreLogGroupRef',
@@ -1875,7 +1879,7 @@ export class AgentPlatformStack extends cdk.Stack {
     new logs.MetricFilter(this, 'HarnessAgentFailureMetric', {
       logGroup: harnessLogGroup1,
       metricNamespace: failureMetricNamespace,
-      metricName: failureMetricName,
+      metricName: 'AgentFailuresHarness1',
       filterPattern: logs.FilterPattern.literal('AGENT_FAILURE_RECORD'),
       metricValue: '1',
       defaultValue: 0,
@@ -1891,7 +1895,7 @@ export class AgentPlatformStack extends cdk.Stack {
     new logs.MetricFilter(this, 'HarnessAgentFailureMetric2', {
       logGroup: harnessLogGroup2,
       metricNamespace: failureMetricNamespace,
-      metricName: failureMetricName,
+      metricName: 'AgentFailuresHarness2',
       filterPattern: logs.FilterPattern.literal('AGENT_FAILURE_RECORD'),
       metricValue: '1',
       defaultValue: 0,
@@ -1901,15 +1905,41 @@ export class AgentPlatformStack extends cdk.Stack {
     // per 5-minute window — same threshold as the router error alarm so the
     // pager doesn't differentiate the two except by which alarm fired. Tune
     // via the env-specific config if dev noise becomes a problem.
+    //
+    // The alarm uses a MathExpression to aggregate the three distinct metric
+    // names. Router and cron share `AgentFailures` (separate log groups, no
+    // double-counting). The two harness filters use distinct names because
+    // they cover two possible AgentCore log group naming conventions — at
+    // runtime only one will receive events, but if both did, using the same
+    // metric name would double-count each harness failure.
+    const period = cdk.Duration.minutes(5);
     const failureRateAlarm = new cloudwatch.Alarm(this, 'AgentFailureRateAlarm', {
       alarmName: `psd-agent-failures-${environment}`,
       alarmDescription:
         'agent_failures table is filling up faster than expected — investigate via /admin/agents Failures tab',
-      metric: new cloudwatch.Metric({
-        namespace: failureMetricNamespace,
-        metricName: failureMetricName,
-        period: cdk.Duration.minutes(5),
-        statistic: 'Sum',
+      metric: new cloudwatch.MathExpression({
+        expression: 'routerCron + harness1 + harness2',
+        usingMetrics: {
+          routerCron: new cloudwatch.Metric({
+            namespace: failureMetricNamespace,
+            metricName: failureMetricName,
+            period,
+            statistic: 'Sum',
+          }),
+          harness1: new cloudwatch.Metric({
+            namespace: failureMetricNamespace,
+            metricName: 'AgentFailuresHarness1',
+            period,
+            statistic: 'Sum',
+          }),
+          harness2: new cloudwatch.Metric({
+            namespace: failureMetricNamespace,
+            metricName: 'AgentFailuresHarness2',
+            period,
+            statistic: 'Sum',
+          }),
+        },
+        period,
       }),
       threshold: 10,
       evaluationPeriods: 1,

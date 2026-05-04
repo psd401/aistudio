@@ -101,6 +101,18 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   )
 }
 
+function narrowSource(value: string): AgentFailureSource {
+  return (VALID_SOURCES as readonly string[]).includes(value)
+    ? (value as AgentFailureSource)
+    : "router" // safe fallback — will still be visible in the UI
+}
+
+function narrowSeverity(value: string): AgentFailureSeverity {
+  return (VALID_SEVERITIES as readonly string[]).includes(value)
+    ? (value as AgentFailureSeverity)
+    : "error" // safe fallback
+}
+
 function rowToFailure(r: {
   id: number | string | bigint
   occurredAt: string | null
@@ -122,8 +134,8 @@ function rowToFailure(r: {
   return {
     id: Number(r.id),
     occurredAt: stripJsonQuotes(r.occurredAt) ?? "",
-    source: r.source as AgentFailureSource,
-    severity: r.severity as AgentFailureSeverity,
+    source: narrowSource(r.source),
+    severity: narrowSeverity(r.severity),
     userId: r.userId,
     sessionId: r.sessionId,
     scheduleName: r.scheduleName,
@@ -166,8 +178,8 @@ export async function getAgentFailures(
     if (filters.severity && VALID_SEVERITIES.includes(filters.severity)) {
       conditions.push(eq(agentFailures.severity, filters.severity))
     }
-    if (filters.userId) {
-      conditions.push(eq(agentFailures.userId, filters.userId))
+    if (typeof filters.userId === "string" && filters.userId.trim().length > 0) {
+      conditions.push(eq(agentFailures.userId, filters.userId.trim()))
     }
     if (typeof filters.acknowledged === "boolean") {
       conditions.push(eq(agentFailures.acknowledged, filters.acknowledged))
@@ -346,9 +358,9 @@ export async function generateTroubleshootingBundle(
     )
 
     const failures = rows.map((r) => rowToFailure(r))
-    const sessionMessages = await fetchSessionMessagesForFailures(failures)
+    const sessionData = await fetchSessionMessagesForFailures(failures)
 
-    const markdown = renderBundle(failures, sessionMessages)
+    const markdown = renderBundle(failures, sessionData)
 
     timer({ status: "success" })
     log.info("Troubleshooting bundle generated", { count: failures.length })
@@ -366,17 +378,28 @@ export async function generateTroubleshootingBundle(
   }
 }
 
+interface SessionMessagesResult {
+  messages: Map<string, SessionMessageRow[]>
+  totalSessions: number
+  includedSessions: number
+}
+
 async function fetchSessionMessagesForFailures(
   failures: FailureRow[],
-): Promise<Map<string, SessionMessageRow[]>> {
-  const sessionIds = [
+): Promise<SessionMessagesResult> {
+  const allSessionIds = [
     ...new Set(
       failures
         .map((f) => f.sessionId)
         .filter((s): s is string => typeof s === "string" && s.length > 0),
     ),
-  ].slice(0, 25)
-  const result = new Map<string, SessionMessageRow[]>()
+  ]
+  const sessionIds = allSessionIds.slice(0, 25)
+  const result: SessionMessagesResult = {
+    messages: new Map(),
+    totalSessions: allSessionIds.length,
+    includedSessions: sessionIds.length,
+  }
   if (sessionIds.length === 0) return result
 
   const messageRows = await executeQuery(
@@ -404,8 +427,8 @@ async function fetchSessionMessagesForFailures(
   for (const row of messageRows) {
     const sid = row.sessionId
     if (!sid) continue
-    if (!result.has(sid)) result.set(sid, [])
-    const list = result.get(sid)
+    if (!result.messages.has(sid)) result.messages.set(sid, [])
+    const list = result.messages.get(sid)
     if (list && list.length < 10) {
       list.push({
         id: Number(row.id),
@@ -461,8 +484,9 @@ function appendFailureSection(lines: string[], index: number, f: FailureRow) {
 
 function renderBundle(
   failures: FailureRow[],
-  sessionMessages: Map<string, SessionMessageRow[]> = new Map(),
+  sessionData: SessionMessagesResult,
 ): string {
+  const { messages: sessionMessages, totalSessions, includedSessions } = sessionData
   const generatedAt = new Date().toISOString()
   const sources = [...new Set(failures.map((f) => f.source))]
   const earliest = failures
@@ -484,6 +508,13 @@ function renderBundle(
   lines.push(
     `- Time range: ${earliest ?? "n/a"} → ${latest ?? "n/a"}`,
   )
+  if (totalSessions > includedSessions) {
+    lines.push(
+      `- Session context: ${includedSessions} of ${totalSessions} sessions included (limit 25)`,
+    )
+  } else if (totalSessions > 0) {
+    lines.push(`- Session context: ${totalSessions} session(s) included`)
+  }
   lines.push("")
   lines.push("## Failures")
   for (const [i, f] of failures.entries()) {
