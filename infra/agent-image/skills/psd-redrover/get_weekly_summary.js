@@ -9,8 +9,14 @@ const {
   parseArgs, requireUser, getCredentials, getOrganization, getVacancyDetails, getWeekRange, emit, fail,
 } = require('./lib/api.js');
 
-const DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 const SCHOOL_DAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+
+// Use Intl.DateTimeFormat with explicit timezone to avoid UTC-shift bugs.
+// The container may run in UTC; PSD is always America/Los_Angeles.
+const DAY_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  weekday: 'long',
+  timeZone: 'America/Los_Angeles',
+});
 
 function buildWeeklySummary(vacancies, weekRange) {
   const summary = {
@@ -38,8 +44,7 @@ function buildWeeklySummary(vacancies, weekRange) {
   }
 
   for (const v of vacancies) {
-    const start = new Date(v.start);
-    const dayOfWeek = DAY_NAMES[start.getDay()];
+    const dayOfWeek = DAY_FORMATTER.format(new Date(v.start));
     const isFilled = !!v.substitute;
 
     if (Object.prototype.hasOwnProperty.call(summary.by_day, dayOfWeek)) {
@@ -60,6 +65,8 @@ function buildWeeklySummary(vacancies, weekRange) {
     summary.by_position_type[posType] = (summary.by_position_type[posType] || 0) + 1;
   }
 
+  // Intentionally divide by 5 (full school week) even on partial weeks so
+  // cross-week trend comparisons use a consistent denominator.
   summary.daily_average = Math.round((summary.total_absences / SCHOOL_DAYS.length) * 10) / 10;
   summary.fill_rate = summary.total_absences > 0
     ? Math.round((summary.filled / summary.total_absences) * 100)

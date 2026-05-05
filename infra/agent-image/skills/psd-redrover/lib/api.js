@@ -89,6 +89,7 @@ function getCredentials(userEmail) {
     ], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'inherit'],
+      timeout: 10_000,
     });
   } catch (err) {
     fail(
@@ -150,9 +151,10 @@ async function rrGet(urlOrPath, creds, extraHeaders = {}) {
   const url = urlOrPath.startsWith('http') ? urlOrPath : `${BASE_URL}${urlOrPath}`;
   const resp = await fetch(url, {
     method: 'GET',
+    signal: AbortSignal.timeout(30_000),
     headers: {
       Authorization: basicAuthHeader(creds.username, creds.password),
-      'Content-Type': 'application/json',
+      Accept: 'application/json',
       ...extraHeaders,
     },
   });
@@ -215,15 +217,26 @@ async function getVacancyDetails(orgId, apiKey, creds, startDate, endDate, fille
     if (!result.hasMoreData) break;
     page++;
     // Defensive ceiling to prevent runaway loops on a misbehaving API.
-    if (page > 200) break;
+    // Return an explicit error so callers know results are incomplete.
+    if (page > 200) {
+      return { error: 'Query exceeded maximum page limit (200). Please narrow the date range for complete results.', status: 400 };
+    }
   }
   return { data: allData, total: allData.length };
 }
 
 // ---------- Date helpers ----------
 
+/**
+ * Format a Date as YYYY-MM-DD using local time components.
+ * Previous implementation used toISOString() which converts to UTC first —
+ * after 5 PM Pacific (UTC-7/-8), "today" would format as tomorrow's date.
+ */
 function formatDate(date) {
-  return date.toISOString().split('T')[0];
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const d = String(date.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
 }
 
 const DAY_NAMES = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday'];

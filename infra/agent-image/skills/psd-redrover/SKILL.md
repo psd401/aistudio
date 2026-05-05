@@ -24,13 +24,13 @@ If the credential is missing the skill exits non-zero with `error: "redrover_cre
 
 ## Commands
 
-### `get_organization` — validate credentials, return orgId + dynamic apiKey
+### `get_organization` — validate credentials, return orgId
 
 ```bash
 node /opt/psd-skills/psd-redrover/get_organization.js --user <email>
 ```
 
-Returns `{"orgId":..., "name":"...", "apiKey":"..."}`. Useful as a connectivity smoke test. Never include the `apiKey` in chat output — it's returned for tooling only.
+Returns `{"orgId":..., "name":"..."}`. Useful as a connectivity smoke test. The apiKey is not included in output to prevent accidental credential exposure — downstream commands fetch it internally.
 
 ### `get_absences` — raw vacancy data for a date range
 

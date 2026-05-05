@@ -31,8 +31,10 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
   const startMs = Date.parse(`${startDate}T00:00:00Z`);
   const endMs = Date.parse(`${endDate}T00:00:00Z`);
   if (!(startMs <= endMs)) fail('--end must be on or after --start', 'bad_args');
-  if ((endMs - startMs) / (1000 * 60 * 60 * 24) > 31) {
-    fail('Date range exceeds 31-day maximum', 'bad_args');
+  // Inclusive day count: end - start + 1 day. Allow up to 31 inclusive days.
+  // (endMs - startMs) / day gives the gap; 30 = 31 inclusive days (Jan 1..Jan 31).
+  if ((endMs - startMs) / (1000 * 60 * 60 * 24) >= 31) {
+    fail('Date range exceeds 31-day maximum (inclusive)', 'bad_args');
   }
 
   try {
