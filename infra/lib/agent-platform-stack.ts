@@ -813,6 +813,21 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: [props.databaseResourceArn],
     }));
 
+    // CloudWatch custom metrics — harness emits PSD/AgentPlatform/{env}/AgentFailuresHarness
+    // via boto3 put_metric_data. Resource must be '*' per AWS API contract; we
+    // scope by namespace condition.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'CloudWatchMetricsPublish',
+      effect: iam.Effect.ALLOW,
+      actions: ['cloudwatch:PutMetricData'],
+      resources: ['*'],
+      conditions: {
+        StringEquals: {
+          'cloudwatch:namespace': `PSD/AgentPlatform/${environment}`,
+        },
+      },
+    }));
+
     // Secrets Manager — read DB credentials referenced by DATABASE_SECRET_ARN
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'SecretsManagerAccess',
@@ -1139,6 +1154,7 @@ export class AgentPlatformStack extends cdk.Stack {
           GUARDRAIL_ARN: props.guardrailArn,
           DATABASE_RESOURCE_ARN: props.databaseResourceArn,
           DATABASE_SECRET_ARN: props.databaseSecretArn,
+          DATABASE_NAME: props.databaseName ?? 'aistudio',
           // ARN of the Secrets Manager secret holding the Bedrock API key.
           // `agentcore_wrapper.py` fetches this on startup and exports its
           // value as AWS_BEARER_TOKEN_BEDROCK so OpenClaw can authenticate
@@ -1835,11 +1851,84 @@ export class AgentPlatformStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
+    // CloudWatch metric filter — emit a metric every time an
+    // AGENT_FAILURE_RECORD line lands in the router Lambda log. Combined with
+    // the harness-image structured log line of the same shape, this gives us
+    // a single "agent failures per period" metric across all chokepoints.
+    const failureMetricNamespace = `PSD/AgentPlatform/${environment}`;
+    const failureMetricName = 'AgentFailures';
+
+    // Both router and cron filters intentionally write to the same metric name.
+    // They accumulate into one `AgentFailures` metric; per-source breakdown
+    // requires querying agent_failures.source in the DB.
+    new logs.MetricFilter(this, 'RouterAgentFailureMetric', {
+      logGroup: this.routerLambda.logGroup,
+      metricNamespace: failureMetricNamespace,
+      metricName: failureMetricName,
+      filterPattern: logs.FilterPattern.literal('AGENT_FAILURE_RECORD'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    new logs.MetricFilter(this, 'CronAgentFailureMetric', {
+      logGroup: cronLogGroup,
+      metricNamespace: failureMetricNamespace,
+      metricName: failureMetricName,
+      filterPattern: logs.FilterPattern.literal('AGENT_FAILURE_RECORD'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    // Harness adapter emits the `AgentFailuresHarness` metric directly via
+    // boto3 cloudwatch.put_metric_data() from inside the AgentCore container
+    // (see infra/agent-image/agent_failures.py). We can't use a CloudWatch
+    // MetricFilter the way router/cron do because the AgentCore log group
+    // name has a runtime-generated suffix (`psd_agent_<env>-<random>-DEFAULT`)
+    // that isn't predictable at CDK synth time, and CFN won't import a
+    // non-existent log group.
+
+    // CloudWatch alarm on agent failure rate. Fires when failures exceed 10
+    // per 5-minute window — same threshold as the router error alarm so the
+    // pager doesn't differentiate the two except by which alarm fired. Tune
+    // via the env-specific config if dev noise becomes a problem.
+    //
+    // Aggregates router/cron (shared `AgentFailures` metric, separate log
+    // groups so no double-counting) with the harness metric.
+    const period = cdk.Duration.minutes(5);
+    const failureRateAlarm = new cloudwatch.Alarm(this, 'AgentFailureRateAlarm', {
+      alarmName: `psd-agent-failures-${environment}`,
+      alarmDescription:
+        `Agent failures >= 10 in 5 min. Triage: https://aistudio.psd401.net/admin/agents (Failures tab)`,
+      metric: new cloudwatch.MathExpression({
+        expression: 'routerCron + harness',
+        usingMetrics: {
+          routerCron: new cloudwatch.Metric({
+            namespace: failureMetricNamespace,
+            metricName: failureMetricName,
+            period,
+            statistic: 'Sum',
+          }),
+          harness: new cloudwatch.Metric({
+            namespace: failureMetricNamespace,
+            metricName: 'AgentFailuresHarness',
+            period,
+            statistic: 'Sum',
+          }),
+        },
+        period,
+      }),
+      threshold: 10,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
     // Wire alarm notifications if SNS topic is configured
     if (alarmTopic) {
       const snsAction = new cloudwatchActions.SnsAction(alarmTopic);
       dlqAlarm.addAlarmAction(snsAction);
       errorAlarm.addAlarmAction(snsAction);
+      failureRateAlarm.addAlarmAction(snsAction);
     }
 
     // =====================================================================

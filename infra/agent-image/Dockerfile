@@ -174,6 +174,7 @@ RUN cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no
 RUN cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund
 RUN cd /opt/psd-skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
 RUN cd /opt/psd-skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund
+RUN cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund
 # psd-freshservice has zero npm dependencies (native fetch + child_process only).
 
 # Upstream gws-* skills (#912) — per-API SKILL.md guidance for Gmail, Drive,
@@ -209,6 +210,7 @@ RUN chown -R root:root /opt/psd-skills && chmod -R a-w /opt/psd-skills
 # The psd-schedules skill is the only scheduling surface in this deployment.
 ENV OPENCLAW_SKIP_CRON=1
 COPY harness_adapter.py /app/harness_adapter.py
+COPY agent_failures.py /app/agent_failures.py
 COPY agentcore_wrapper.py /app/agentcore_wrapper.py
 COPY workspace_sync.py /app/workspace_sync.py
 COPY mantle_proxy.py /app/mantle_proxy.py

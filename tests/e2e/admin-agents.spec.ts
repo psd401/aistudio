@@ -73,6 +73,7 @@ test.describe('Agent Dashboard — Admin', () => {
       'Usage',
       'Cost',
       'Adoption',
+      'Failures',
       'Health',
       'Safety',
       'Patterns',
@@ -83,6 +84,34 @@ test.describe('Agent Dashboard — Admin', () => {
       const trigger = page.locator('[role="tab"]').filter({ hasText: tab })
       await expect(trigger).toBeVisible({ timeout: 5000 })
     }
+  })
+
+  test('failures tab loads and shows table or empty state', async ({ page }) => {
+    await page.waitForSelector('[role="tab"][aria-selected="true"]', {
+      timeout: 10000,
+    })
+    const failuresTab = page
+      .locator('[role="tab"]')
+      .filter({ hasText: 'Failures' })
+    await failuresTab.click()
+    const card = page.locator('text=/Agent Failures/i').first()
+    await expect(card).toBeVisible({ timeout: 10000 })
+    // Either rows render OR the empty-state message shows
+    const emptyOrTable = page.locator(
+      'text=/No failures match these filters|Showing/i',
+    )
+    await expect(emptyOrTable.first()).toBeVisible({ timeout: 10000 })
+  })
+
+  test('failures filters are interactive', async ({ page }) => {
+    await page.waitForSelector('[role="tab"][aria-selected="true"]', {
+      timeout: 10000,
+    })
+    await page.locator('[role="tab"]').filter({ hasText: 'Failures' }).click()
+    // Acknowledge button starts disabled (no rows selected)
+    const ackBtn = page.locator('button').filter({ hasText: /Acknowledge \(0\)/ })
+    await expect(ackBtn).toBeVisible({ timeout: 10000 })
+    await expect(ackBtn).toBeDisabled()
   })
 
   test('clicking a tab switches content', async ({ page }) => {

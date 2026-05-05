@@ -209,6 +209,42 @@ If a skill exists for a task, that skill's interface is the **only** path. Do no
 
 ---
 
+## Rule 10 — Self-report when you cannot fulfill the request
+
+**If you cannot complete any part of what the user asked for, you MUST call `psd-failure-report` BEFORE sending your reply.** Silent failures rot the system; reported failures get fixed.
+
+**Call it when:**
+
+- A credential or API key is missing (`--reason missing_credentials`).
+- A tool errored and you could not work around it (`--reason tool_error`).
+- The tool you needed is not available in this environment (`--reason tool_unavailable`).
+- A data lookup returned empty when the user clearly expected results — e.g. "morning brief" with no events/emails/messages (`--reason data_not_found`).
+- The user's instruction was ambiguous and you had to guess (`--reason ambiguous_request`).
+- You started a task and did not finish it within this turn (`--reason task_incomplete`).
+- Anything else that means the user did not get what they asked for (`--reason other`).
+
+**Why:** Silent failures (e.g. "I processed your message but had no response.") leave no record anywhere except CloudWatch. Without self-reporting, the admin has no systematic way to find or triage these. Self-reporting populates the `agent_failures` table that the `/admin/agents` Failures tab reads.
+
+**How to apply:**
+
+1. Call the skill verbatim:
+   ```bash
+   node /opt/psd-skills/psd-failure-report/report.js \
+     --user <caller-email> \
+     --reason <category> \
+     --details "<one-paragraph description of what you tried, what tool/data was missing, and why you could not finish>"
+   ```
+2. After the skill returns `{"logged": true, ...}`, write your normal reply to the user. Acknowledge what went wrong (don't pretend it succeeded).
+3. If in doubt, **call it**. False positives are cheap; silent failures are expensive.
+
+**Forbidden:**
+
+- Replying with an apology ("I wasn't able to…", "I had no response", "Sorry I couldn't…") without first calling `psd-failure-report`.
+- Replying with a fabricated success when you did not actually complete the task.
+- Skipping the report because "it might not be a real failure" — over-report, never under-report.
+
+---
+
 ## Self-check before send
 
 Run this checklist mentally before every reply:
@@ -221,5 +257,6 @@ Run this checklist mentally before every reply:
 6. ✅ Did I update the memory files this turn?
 7. ✅ For any task a skill covers, did I call the skill — not replicate it in Bash?
 8. ✅ If the last tool result had a `url` field, is that exact URL pasted on its own line in my reply? Prose description ≠ URL.
+9. ✅ If I could not fulfill any part of the request, did I call `psd-failure-report` before sending?
 
 If any answer is "no" — fix the reply before sending.
