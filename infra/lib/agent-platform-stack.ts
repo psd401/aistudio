@@ -813,6 +813,21 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: [props.databaseResourceArn],
     }));
 
+    // CloudWatch custom metrics — harness emits PSD/AgentPlatform/{env}/AgentFailuresHarness
+    // via boto3 put_metric_data. Resource must be '*' per AWS API contract; we
+    // scope by namespace condition.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'CloudWatchMetricsPublish',
+      effect: iam.Effect.ALLOW,
+      actions: ['cloudwatch:PutMetricData'],
+      resources: ['*'],
+      conditions: {
+        StringEquals: {
+          'cloudwatch:namespace': `PSD/AgentPlatform/${environment}`,
+        },
+      },
+    }));
+
     // Secrets Manager — read DB credentials referenced by DATABASE_SECRET_ARN
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'SecretsManagerAccess',
@@ -1861,30 +1876,13 @@ export class AgentPlatformStack extends cdk.Stack {
       defaultValue: 0,
     });
 
-    // Harness adapter writes AGENT_FAILURE_RECORD to the AgentCore runtime log
-    // group. The current AgentCore alpha construct (and the build-and-push
-    // script's tail command) uses the `/aws/bedrock-agentcore/runtimes/...`
-    // convention. The alternate `/aws/bedrock/agentcore/...` path is from
-    // older alpha versions and the IAM policy above grants write access to
-    // both for forward compatibility, but only one log group exists at deploy
-    // time — referencing a non-existent path fails CFN with NotFound.
-    //
-    // We attach to the path the runtime actually uses today. If AWS ever
-    // renames it, the IAM grants already cover both paths and we can flip
-    // this reference; metric values would briefly stop until the rename.
-    const harnessLogGroup = logs.LogGroup.fromLogGroupName(
-      this,
-      'AgentCoreLogGroupRef',
-      `/aws/bedrock-agentcore/runtimes/psd_agent_${environment}`,
-    );
-    new logs.MetricFilter(this, 'HarnessAgentFailureMetric', {
-      logGroup: harnessLogGroup,
-      metricNamespace: failureMetricNamespace,
-      metricName: 'AgentFailuresHarness',
-      filterPattern: logs.FilterPattern.literal('AGENT_FAILURE_RECORD'),
-      metricValue: '1',
-      defaultValue: 0,
-    });
+    // Harness adapter emits the `AgentFailuresHarness` metric directly via
+    // boto3 cloudwatch.put_metric_data() from inside the AgentCore container
+    // (see infra/agent-image/agent_failures.py). We can't use a CloudWatch
+    // MetricFilter the way router/cron do because the AgentCore log group
+    // name has a runtime-generated suffix (`psd_agent_<env>-<random>-DEFAULT`)
+    // that isn't predictable at CDK synth time, and CFN won't import a
+    // non-existent log group.
 
     // CloudWatch alarm on agent failure rate. Fires when failures exceed 10
     // per 5-minute window — same threshold as the router error alarm so the

@@ -23,11 +23,14 @@ logger = logging.getLogger("agent_failures")
 _DATABASE_RESOURCE_ARN = os.environ.get("DATABASE_RESOURCE_ARN")
 _DATABASE_SECRET_ARN = os.environ.get("DATABASE_SECRET_ARN")
 _DATABASE_NAME = os.environ.get("DATABASE_NAME")
+_ENVIRONMENT = os.environ.get("ENVIRONMENT", "unknown")
+_AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
 
 _VALID_SOURCES = {"router", "harness", "cron", "agent_self_report", "tool"}
 _VALID_SEVERITIES = {"error", "warn", "empty_response"}
 
 _rds_client = None
+_cloudwatch_client = None
 
 
 def _get_rds_client():
@@ -42,6 +45,47 @@ def _get_rds_client():
     except Exception as exc:  # noqa: BLE001
         logger.debug("rds-data client unavailable: %s", exc)
         return None
+
+
+def _get_cloudwatch_client():
+    global _cloudwatch_client
+    if _cloudwatch_client is not None:
+        return _cloudwatch_client
+    try:
+        import boto3  # type: ignore[import-not-found]
+
+        _cloudwatch_client = boto3.client("cloudwatch", region_name=_AWS_REGION)
+        return _cloudwatch_client
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("cloudwatch client unavailable: %s", exc)
+        return None
+
+
+def _emit_failure_metric(source: str) -> None:
+    """
+    Best-effort: emit a CloudWatch custom metric for the failure so the
+    AgentFailureRateAlarm in agent-platform-stack picks it up. Bypasses the
+    log-group-based MetricFilter approach because AgentCore log group names
+    contain a runtime-generated suffix (`psd_agent_<env>-<id>-DEFAULT`) that
+    isn't predictable at CDK synth time.
+    """
+    client = _get_cloudwatch_client()
+    if client is None:
+        return
+    try:
+        client.put_metric_data(
+            Namespace=f"PSD/AgentPlatform/{_ENVIRONMENT}",
+            MetricData=[
+                {
+                    "MetricName": "AgentFailuresHarness",
+                    "Value": 1,
+                    "Unit": "Count",
+                    "Dimensions": [{"Name": "Source", "Value": source}],
+                }
+            ],
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("put_metric_data failed: %s", exc)
 
 
 def _truncate(s: Optional[str], max_len: int) -> Optional[str]:
@@ -104,6 +148,9 @@ def record_failure(
         # Always emit a structured CloudWatch line so failures are recoverable
         # even if the DB write fails or env vars are missing.
         logger.error("AGENT_FAILURE_RECORD %s", json.dumps(payload, default=str))
+
+        # Emit a CloudWatch metric so the AgentFailureRateAlarm fires.
+        _emit_failure_metric(source)
 
         if not (_DATABASE_RESOURCE_ARN and _DATABASE_SECRET_ARN and _DATABASE_NAME):
             return
