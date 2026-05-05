@@ -353,7 +353,21 @@ export class ServiceRoleFactory {
             },
           },
         }),
-        // Bucket operations - tag conditions enforce environment isolation
+        // Bucket operations - tag conditions enforce environment isolation.
+        //
+        // NOTE: `aws:ResourceTag` evaluation against an S3 bucket requires the
+        // principal to also be able to read the bucket's tags via
+        // s3:GetBucketTagging. Without it, IAM cannot resolve the tag values
+        // and the condition silently fails closed, denying the call. We grant
+        // GetBucketTagging unconditionally on the same bucket ARN so the
+        // tag-based isolation actually evaluates instead of blanket-denying
+        // every ListBucket request. (Pre-existing bug — see
+        // psd-agent-health-daily-dev s3:ListBucket denials May 2026.)
+        new iam.PolicyStatement({
+          effect: iam.Effect.ALLOW,
+          actions: ["s3:GetBucketTagging"],
+          resources: bucketArns,
+        }),
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,
           actions: ["s3:ListBucket", "s3:GetBucketLocation"],
