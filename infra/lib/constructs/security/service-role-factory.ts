@@ -353,31 +353,22 @@ export class ServiceRoleFactory {
             },
           },
         }),
-        // Bucket operations - tag conditions enforce environment isolation.
+        // Bucket operations.
         //
-        // NOTE: `aws:ResourceTag` evaluation against an S3 bucket requires the
-        // principal to also be able to read the bucket's tags via
-        // s3:GetBucketTagging. Without it, IAM cannot resolve the tag values
-        // and the condition silently fails closed, denying the call. We grant
-        // GetBucketTagging unconditionally on the same bucket ARN so the
-        // tag-based isolation actually evaluates instead of blanket-denying
-        // every ListBucket request. (Pre-existing bug — see
-        // psd-agent-health-daily-dev s3:ListBucket denials May 2026.)
-        new iam.PolicyStatement({
-          effect: iam.Effect.ALLOW,
-          actions: ["s3:GetBucketTagging"],
-          resources: bucketArns,
-        }),
+        // No tag-based condition on the bucket-level statement: S3 does not
+        // honor `aws:ResourceTag` for s3:ListBucket / s3:GetBucketLocation
+        // (it's accepted in policy syntax but never resolves to a match),
+        // so attaching the condition causes every call to fail closed. The
+        // explicit `bucketArns` resource list already enforces the same
+        // environment isolation — a dev role only ever sees dev bucket ARNs
+        // (each Lambda's CDK definition passes its own scoped bucket name)
+        // so the tag check was redundant defense-in-depth that, in practice,
+        // broke the primary grant. Pre-existing bug — see
+        // psd-agent-health-daily-dev s3:ListBucket denials May 2026.
         new iam.PolicyStatement({
           effect: iam.Effect.ALLOW,
           actions: ["s3:ListBucket", "s3:GetBucketLocation"],
           resources: bucketArns,
-          conditions: {
-            StringEquals: {
-              "aws:ResourceTag/Environment": props.environment,
-              "aws:ResourceTag/ManagedBy": "cdk",
-            },
-          },
         }),
       ],
     })
