@@ -210,6 +210,7 @@ RUN chown -R root:root /opt/psd-skills && chmod -R a-w /opt/psd-skills
 # The psd-schedules skill is the only scheduling surface in this deployment.
 ENV OPENCLAW_SKIP_CRON=1
 COPY harness_adapter.py /app/harness_adapter.py
+COPY agent_failures.py /app/agent_failures.py
 COPY agentcore_wrapper.py /app/agentcore_wrapper.py
 COPY workspace_sync.py /app/workspace_sync.py
 COPY mantle_proxy.py /app/mantle_proxy.py
