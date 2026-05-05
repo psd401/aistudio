@@ -6,6 +6,7 @@
  * the suppression threshold". Migration 076.
  */
 
+import { desc } from "drizzle-orm";
 import {
   bigint,
   index,
@@ -29,7 +30,7 @@ export const agentPatternScanRuns = pgTable(
     suppressed: integer("suppressed").notNull().default(0),
   },
   (table) => [
-    index("idx_agent_pattern_scan_runs_run_at").on(table.runAt),
+    index("idx_agent_pattern_scan_runs_run_at").on(desc(table.runAt)),
   ],
 );
 

@@ -584,13 +584,17 @@ async function recordCronFailure(
   log: Logger,
 ): Promise<void> {
   // Emit a structured CloudWatch line so the metric filter on AGENT_FAILURE_RECORD
-  // fires regardless of whether the DB write below succeeds.
+  // fires regardless of whether the DB write below succeeds. Include the error
+  // message (truncated) as a fallback for triage when the DB write fails.
   log.error('AGENT_FAILURE_RECORD', {
     source: 'cron',
     severity: 'error',
     userId: params.userEmail,
     sessionId: params.sessionId,
     scheduleName: params.scheduleName,
+    errorMessage: typeof params.errorMessage === 'string'
+      ? params.errorMessage.slice(0, 500)
+      : null,
   });
   if (!DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) return;
   try {

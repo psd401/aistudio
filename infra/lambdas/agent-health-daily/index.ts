@@ -288,20 +288,21 @@ async function runFailureRetentionCleanup(
   logger: typeof log,
 ): Promise<void> {
   try {
-    const ackResult = (await sql`
+    const ackResult = await sql`
       DELETE FROM agent_failures
       WHERE acknowledged = true
         AND acknowledged_at IS NOT NULL
         AND acknowledged_at < NOW() - (${FAILURE_RETENTION_DAYS_ACKED}::int * INTERVAL '1 day')
-    `) as unknown as { count?: number };
-    const unackResult = (await sql`
+    `;
+    const unackResult = await sql`
       DELETE FROM agent_failures
       WHERE acknowledged = false
         AND occurred_at < NOW() - (${FAILURE_RETENTION_DAYS_UNACKED}::int * INTERVAL '1 day')
-    `) as unknown as { count?: number };
+    `;
+    // postgres.js v3 returns .count as bigint — coerce to number for safe logging/JSON
     logger('INFO', 'agent_failures retention sweep', {
-      ackedDeleted: ackResult.count ?? 0,
-      unackedDeleted: unackResult.count ?? 0,
+      ackedDeleted: Number(ackResult.count ?? 0),
+      unackedDeleted: Number(unackResult.count ?? 0),
       ackRetentionDays: FAILURE_RETENTION_DAYS_ACKED,
       unackRetentionDays: FAILURE_RETENTION_DAYS_UNACKED,
     });

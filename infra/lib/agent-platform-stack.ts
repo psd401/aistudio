@@ -1858,6 +1858,9 @@ export class AgentPlatformStack extends cdk.Stack {
     const failureMetricNamespace = `PSD/AgentPlatform/${environment}`;
     const failureMetricName = 'AgentFailures';
 
+    // Both router and cron filters intentionally write to the same metric name.
+    // They accumulate into one `AgentFailures` metric; per-source breakdown
+    // requires querying agent_failures.source in the DB.
     new logs.MetricFilter(this, 'RouterAgentFailureMetric', {
       logGroup: this.routerLambda.logGroup,
       metricNamespace: failureMetricNamespace,
@@ -1895,7 +1898,7 @@ export class AgentPlatformStack extends cdk.Stack {
     const failureRateAlarm = new cloudwatch.Alarm(this, 'AgentFailureRateAlarm', {
       alarmName: `psd-agent-failures-${environment}`,
       alarmDescription:
-        'agent_failures table is filling up faster than expected — investigate via /admin/agents Failures tab',
+        `Agent failures >= 10 in 5 min. Triage: https://aistudio.psd401.net/admin/agents (Failures tab)`,
       metric: new cloudwatch.MathExpression({
         expression: 'routerCron + harness',
         usingMetrics: {

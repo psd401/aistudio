@@ -168,8 +168,15 @@ export const handler = async (
       log('ERROR', 'Invalid week format', { week: event.week, expected: 'YYYY-WNN' });
       throw new Error(`Invalid week format: "${event.week}" — expected YYYY-WNN (e.g. "2026-W18")`);
     }
+    // Validate week number is in range (W01–W53)
+    const weekNum = parseInt(event.week.split('-W')[1], 10);
+    if (weekNum < 1 || weekNum > 53) {
+      log('ERROR', 'Week number out of range', { week: event.week, weekNum });
+      throw new Error(`Week number out of range: "${event.week}" — must be W01–W53`);
+    }
     weeksToScan.push(event.week);
   } else if (event?.backfillWeeks && event.backfillWeeks > 0) {
+    // n weeks total: currentWeek + (n-1) prior weeks
     const n = Math.min(Math.floor(event.backfillWeeks), 52);
     weeksToScan.push(currentWeek);
     for (let i = 1; i < n; i++) {
@@ -181,12 +188,35 @@ export const handler = async (
 
   // Scan DynamoDB once and reuse the signal set across all weeks to avoid
   // O(N * table_size) reads during multi-week backfills.
+  //
+  // NOTE: This means historical weeks are evaluated against the *current*
+  // signal set rather than the set that existed at that time. This is
+  // intentional — backfills populate the dashboard "last scan ran" banner
+  // rather than reconstructing exact historical pattern detection.
   const signals = await scanAllSignals();
   log('INFO', 'Scanned signals for backfill', { total: signals.length, weeks: weeksToScan.length });
 
   let totalDetected = 0;
+  const failedWeeks: string[] = [];
   for (const targetWeek of weeksToScan) {
-    totalDetected += await scanForWeek(targetWeek, signals);
+    try {
+      totalDetected += await scanForWeek(targetWeek, signals);
+    } catch (err) {
+      // Log but continue — a single week's failure should not abort the
+      // entire backfill. The skipped week will have no scan-run marker,
+      // making it retryable via `{ week: "YYYY-WNN" }`.
+      log('ERROR', 'scanForWeek failed, continuing with remaining weeks', {
+        week: targetWeek,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      failedWeeks.push(targetWeek);
+    }
+  }
+  if (failedWeeks.length > 0) {
+    log('WARN', 'Backfill completed with partial failures', {
+      failedWeeks,
+      succeeded: weeksToScan.length - failedWeeks.length,
+    });
   }
   return { detected: totalDetected, weeks: weeksToScan };
 };
@@ -212,7 +242,12 @@ async function scanForWeek(currentWeek: string, prefetchedSignals?: SignalItem[]
     priorTotals: Map<string, number>;
   }
   const byTopic = new Map<string, Agg>();
+  // Count signals that are relevant to this week (current or rolling window)
+  // rather than using the total DynamoDB signal count which includes all weeks.
+  let weekRelevantSignals = 0;
   for (const s of signals) {
+    if (s.week !== currentWeek && !rollingWeeks.has(s.week)) continue;
+    weekRelevantSignals++;
     let agg = byTopic.get(s.topic);
     if (!agg) {
       agg = { currentCount: 0, buildings: new Set(), priorTotals: new Map() };
@@ -279,7 +314,7 @@ async function scanForWeek(currentWeek: string, prefetchedSignals?: SignalItem[]
     await sql`
       INSERT INTO agent_pattern_scan_runs
         (run_at, week, signals_total, topics_total, detected, suppressed)
-      VALUES (NOW(), ${currentWeek}, ${signals.length}, ${byTopic.size}, ${detected},
+      VALUES (NOW(), ${currentWeek}, ${weekRelevantSignals}, ${byTopic.size}, ${detected},
               ${suppressed})
     `;
   } catch (err) {
@@ -291,7 +326,8 @@ async function scanForWeek(currentWeek: string, prefetchedSignals?: SignalItem[]
   log('INFO', 'Pattern scan complete', {
     detected,
     currentWeek,
-    signalsTotal: signals.length,
+    signalsRelevant: weekRelevantSignals,
+    signalsTotalPrefetched: signals.length,
     topicsTotal: byTopic.size,
     suppressed,
   });

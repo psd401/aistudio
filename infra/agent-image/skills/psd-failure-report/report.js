@@ -21,8 +21,13 @@ const {
   RDSDataClient,
   ExecuteStatementCommand,
 } = require('@aws-sdk/client-rds-data');
+const {
+  CloudWatchClient,
+  PutMetricDataCommand,
+} = require('@aws-sdk/client-cloudwatch');
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
+const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
 const DATABASE_RESOURCE_ARN = process.env.DATABASE_RESOURCE_ARN || '';
 const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN || '';
 const DATABASE_NAME = process.env.DATABASE_NAME || 'aistudio';
@@ -130,6 +135,26 @@ async function main() {
       '\n',
   );
 
+  // Emit a CloudWatch metric directly so the AgentFailureRateAlarm picks up
+  // self-reports. The AgentCore log group name contains a runtime-generated
+  // suffix that isn't predictable at CDK synth time, so MetricFilter-based
+  // detection (used for router/cron) doesn't work here. This mirrors the
+  // approach used by agent_failures.py for harness failures.
+  try {
+    const cw = new CloudWatchClient({ region: REGION });
+    await cw.send(new PutMetricDataCommand({
+      Namespace: `PSD/AgentPlatform/${ENVIRONMENT}`,
+      MetricData: [{
+        MetricName: 'AgentFailuresHarness',
+        Value: 1,
+        Unit: 'Count',
+        Dimensions: [{ Name: 'Source', Value: 'agent_self_report' }],
+      }],
+    }));
+  } catch {
+    // Best-effort — metric emission failure must not affect the skill output
+  }
+
   if (!DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) {
     emit({ logged: false, reason: 'database_not_configured' });
     return;
@@ -168,7 +193,7 @@ async function main() {
     }
     emit({ logged: true, failure_id: id });
   } catch (err) {
-    process.stderr.write(`agent_failures insert failed: ${err instanceof Error ? err.message : String(err)}\n`); // eslint-disable-line no-console
+    process.stderr.write(`agent_failures insert failed: ${err instanceof Error ? err.message : String(err)}\n`);
     emit({ logged: false, reason: 'database_error' });
   }
 }

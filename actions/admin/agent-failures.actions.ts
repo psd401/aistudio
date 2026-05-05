@@ -3,6 +3,7 @@
 import {
   createLogger,
   generateRequestId,
+  sanitizeForLogging,
   startTimer,
 } from "@/lib/logger"
 import { handleError, createSuccess, ErrorFactories } from "@/lib/error-utils"
@@ -18,7 +19,6 @@ import {
 } from "@/lib/db/schema/tables/agent-failures"
 import { agentMessages } from "@/lib/db/schema/tables/agent-messages"
 import { getDateThreshold } from "@/lib/date-utils"
-import { getServerSession } from "@/lib/auth/server-session"
 import { revalidatePath } from "next/cache"
 
 export type FailureRange = "7d" | "30d" | "90d" | "all"
@@ -29,6 +29,7 @@ const VALID_SOURCES: AgentFailureSource[] = [
   "cron",
   "agent_self_report",
   "tool",
+  "other",
 ]
 
 const VALID_SEVERITIES: AgentFailureSeverity[] = [
@@ -104,7 +105,7 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 function narrowSource(value: string): AgentFailureSource {
   return (VALID_SOURCES as readonly string[]).includes(value)
     ? (value as AgentFailureSource)
-    : "router" // safe fallback — will still be visible in the UI
+    : "other" // neutral fallback — avoids misattributing unknown sources to "router"
 }
 
 function narrowSeverity(value: string): AgentFailureSeverity {
@@ -114,7 +115,7 @@ function narrowSeverity(value: string): AgentFailureSeverity {
 }
 
 function rowToFailure(r: {
-  id: number | string | bigint
+  id: number
   occurredAt: string | null
   source: string
   severity: string
@@ -219,11 +220,11 @@ export async function getAgentFailures(
     const failures = rows.map((r) => rowToFailure(r))
 
     timer({ status: "success" })
-    log.info("Agent failures loaded", {
+    log.info("Agent failures loaded", sanitizeForLogging({
       range,
       total,
       returned: failures.length,
-    })
+    }))
     return createSuccess({ failures, total })
   } catch (error) {
     timer({ status: "error" })
@@ -251,11 +252,7 @@ export async function acknowledgeFailures(
   const log = createLogger({ requestId, action: "acknowledgeFailures" })
 
   try {
-    await requireRole("administrator")
-    // requireRole guarantees auth, but we need the session object for ackBy.
-    // The null check satisfies TypeScript narrowing.
-    const session = await getServerSession()
-    if (!session) throw ErrorFactories.authNoSession()
+    const currentUser = await requireRole("administrator")
 
     const ids = Array.isArray(input.ids)
       ? input.ids
@@ -271,7 +268,7 @@ export async function acknowledgeFailures(
         ? input.notes.slice(0, 4000)
         : null
 
-    const ackBy = session.email ?? session.sub ?? "unknown"
+    const ackBy = currentUser.user.email ?? "unknown"
 
     const updated = await executeQuery(
       (db) =>
@@ -465,6 +462,8 @@ function appendCodeBlock(lines: string[], label: string, body: string, lang = ""
   lines.push("  ```")
 }
 
+// NOTE: Fields like userId, scheduleName, model are inlined as plain text.
+// No XSS risk since the bundle is admin-only and pasted into Claude Code.
 function appendFailureSection(lines: string[], index: number, f: FailureRow) {
   lines.push("")
   lines.push(`### [${index + 1}] ${f.source} · ${f.severity} · ${f.occurredAt}`)

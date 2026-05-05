@@ -67,6 +67,7 @@ const SOURCE_OPTIONS = [
   { value: "cron", label: "Cron" },
   { value: "agent_self_report", label: "Agent self-report" },
   { value: "tool", label: "Tool" },
+  { value: "other", label: "Other" },
 ] as const
 
 const SEVERITY_OPTIONS = [
@@ -125,8 +126,8 @@ export function AgentFailuresClient() {
   const [rows, setRows] = useState<FailureRow[]>([])
   const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
-  const [selected, setSelected] = useState<Set<number>>(new Set())
-  const [expanded, setExpanded] = useState<Set<number>>(new Set())
+  const [selected, setSelected] = useState<number[]>([])
+  const [expanded, setExpanded] = useState<number[]>([])
   const [ackOpen, setAckOpen] = useState(false)
   const [ackNotes, setAckNotes] = useState("")
   const [bundleOpen, setBundleOpen] = useState(false)
@@ -149,7 +150,7 @@ export function AgentFailuresClient() {
       if (result.isSuccess && result.data) {
         setRows(result.data.failures)
         setTotal(result.data.total)
-        setSelected(new Set())
+        setSelected([])
       } else {
         toast({
           variant: "destructive",
@@ -157,6 +158,12 @@ export function AgentFailuresClient() {
           description: result.message,
         })
       }
+    } catch {
+      toast({
+        variant: "destructive",
+        title: "Error loading failures",
+        description: "A network error occurred. Please try again.",
+      })
     } finally {
       setLoading(false)
     }
@@ -167,31 +174,25 @@ export function AgentFailuresClient() {
   }, [load])
 
   const toggleSelect = (id: number) => {
-    setSelected((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
+    setSelected((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    )
   }
 
   const toggleAll = () => {
     setSelected((prev) =>
-      prev.size === rows.length ? new Set() : new Set(rows.map((r) => r.id)),
+      prev.length === rows.length ? [] : rows.map((r) => r.id),
     )
   }
 
   const toggleExpand = (id: number) => {
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) next.delete(id)
-      else next.add(id)
-      return next
-    })
+    setExpanded((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    )
   }
 
   const handleAcknowledge = async () => {
-    if (selected.size === 0) return
+    if (selected.length === 0) return
     setBusy(true)
     try {
       const result = await acknowledgeFailures({
@@ -216,7 +217,7 @@ export function AgentFailuresClient() {
   }
 
   const handleGenerateBundle = async () => {
-    if (selected.size === 0) return
+    if (selected.length === 0) return
     setBusy(true)
     try {
       const result = await generateTroubleshootingBundle([...selected])
@@ -240,6 +241,7 @@ export function AgentFailuresClient() {
     try {
       await navigator.clipboard.writeText(bundleMd)
       setBundleCopied(true)
+      setTimeout(() => setBundleCopied(false), 2000)
       toast({ title: "Bundle copied to clipboard" })
     } catch {
       toast({
@@ -252,10 +254,10 @@ export function AgentFailuresClient() {
 
   const headerCheckboxState = useMemo<boolean | "indeterminate">(() => {
     if (rows.length === 0) return false
-    if (selected.size === 0) return false
-    if (selected.size === rows.length) return true
+    if (selected.length === 0) return false
+    if (selected.length === rows.length) return true
     return "indeterminate"
-  }, [rows.length, selected.size])
+  }, [rows.length, selected.length])
 
   return (
     <Card>
@@ -327,18 +329,18 @@ export function AgentFailuresClient() {
           <Button
             variant="default"
             size="sm"
-            disabled={selected.size === 0 || busy}
+            disabled={selected.length === 0 || busy}
             onClick={() => setAckOpen(true)}
           >
-            Acknowledge ({selected.size})
+            Acknowledge ({selected.length})
           </Button>
           <Button
             variant="secondary"
             size="sm"
-            disabled={selected.size === 0 || busy}
+            disabled={selected.length === 0 || busy}
             onClick={handleGenerateBundle}
           >
-            Generate bundle ({selected.size})
+            Generate bundle ({selected.length})
           </Button>
         </div>
       </CardHeader>
@@ -377,13 +379,13 @@ export function AgentFailuresClient() {
               </TableHeader>
               <TableBody>
                 {rows.map((r) => {
-                  const isExpanded = expanded.has(r.id)
+                  const isExpanded = expanded.includes(r.id)
                   return (
                     <Fragment key={r.id}>
                       <TableRow>
                         <TableCell>
                           <Checkbox
-                            checked={selected.has(r.id)}
+                            checked={selected.includes(r.id)}
                             onCheckedChange={() => toggleSelect(r.id)}
                             aria-label={`Select failure ${r.id}`}
                           />
@@ -453,10 +455,10 @@ export function AgentFailuresClient() {
         )}
       </CardContent>
 
-      <Dialog open={ackOpen} onOpenChange={setAckOpen}>
+      <Dialog open={ackOpen} onOpenChange={(open) => { setAckOpen(open); if (!open) setAckNotes("") }}>
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>Acknowledge {selected.size} failure(s)</DialogTitle>
+            <DialogTitle>Acknowledge {selected.length} failure(s)</DialogTitle>
             <DialogDescription>
               Optional note about how this was handled (visible in audit log).
             </DialogDescription>

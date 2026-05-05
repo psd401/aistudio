@@ -6,6 +6,7 @@
  * distinguishable from "Lambda never ran". Migration 076.
  */
 
+import { desc } from "drizzle-orm";
 import {
   bigint,
   date,
@@ -29,7 +30,7 @@ export const agentHealthScanRuns = pgTable(
     error: text("error"),
   },
   (table) => [
-    index("idx_agent_health_scan_runs_run_at").on(table.runAt),
+    index("idx_agent_health_scan_runs_run_at").on(desc(table.runAt)),
   ],
 );
 

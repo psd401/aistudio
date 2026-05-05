@@ -6,7 +6,7 @@
  * single failure feed for triage. Migration 076.
  */
 
-import { sql } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import {
   bigint,
   boolean,
@@ -23,7 +23,8 @@ export type AgentFailureSource =
   | "harness"
   | "cron"
   | "agent_self_report"
-  | "tool";
+  | "tool"
+  | "other";
 
 export type AgentFailureSeverity = "error" | "warn" | "empty_response";
 
@@ -68,12 +69,14 @@ export const agentFailures = pgTable(
     notes: text("notes"),
   },
   (table) => [
-    index("idx_agent_failures_occurred_at").on(table.occurredAt),
-    index("idx_agent_failures_source").on(table.source, table.occurredAt),
-    index("idx_agent_failures_user").on(table.userId, table.occurredAt),
-    index("idx_agent_failures_unack").on(table.occurredAt).where(sql`acknowledged = false`),
-    index("idx_agent_failures_severity").on(table.severity, table.occurredAt),
-    index("idx_agent_failures_acked_at").on(table.acknowledgedAt).where(sql`acknowledged = true`),
+    // DESC matches the SQL migration (076) — all dashboard queries order by
+    // occurred_at DESC so the index avoids a backward scan.
+    index("idx_agent_failures_occurred_at").on(desc(table.occurredAt)),
+    index("idx_agent_failures_source").on(table.source, desc(table.occurredAt)),
+    index("idx_agent_failures_user").on(table.userId, desc(table.occurredAt)),
+    index("idx_agent_failures_unack").on(desc(table.occurredAt)).where(sql`acknowledged = false`),
+    index("idx_agent_failures_severity").on(table.severity, desc(table.occurredAt)),
+    index("idx_agent_failures_acked_at").on(desc(table.acknowledgedAt)).where(sql`acknowledged = true`),
   ],
 );
 

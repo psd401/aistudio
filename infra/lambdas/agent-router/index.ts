@@ -1679,7 +1679,7 @@ export async function handler(
             errorClass: classified.errorClass,
             errorMessage: classified.message,
             stackExcerpt: classified.stack,
-            context: { messageId, requestId, attempt: event.Records[idx].attributes?.ApproximateReceiveCount },
+            context: { messageId, requestId, attempt: event.Records[idx].attributes?.ApproximateReceiveCount ?? "0" },
           },
           log
         );
