@@ -335,7 +335,7 @@ const Composer: FC<ComposerProps> = ({
   composerExtraActions,
 }) => {
   return (
-    <div className="bg-white relative mx-auto flex w-full max-w-[var(--thread-max-width)] flex-col gap-4 px-[var(--thread-padding-x)] pb-4 md:pb-6">
+    <div className="bg-white relative mx-auto flex w-full max-w-[var(--thread-max-width)] shrink-0 flex-col gap-4 px-[var(--thread-padding-x)] pb-4 md:pb-6">
       <ThreadScrollToBottom />
       <ThreadPrimitive.Empty>
         <ThreadWelcomeSuggestions actions={suggestedActions} />
@@ -358,7 +358,7 @@ const Composer: FC<ComposerProps> = ({
         <ComposerAttachments processingAttachments={processingAttachments} />
         <ComposerPrimitive.Input
           placeholder="How can I help you today?"
-          className="bg-muted dark:border-muted-foreground/15 focus:outline-primary placeholder:text-muted-foreground max-h-[calc(50dvh)] min-h-16 w-full resize-none px-4 pb-3 pt-2 text-base outline-none"
+          className="bg-muted dark:border-muted-foreground/15 focus:outline-primary placeholder:text-muted-foreground max-h-[calc(50vh)] min-h-16 w-full resize-none px-4 pb-3 pt-2 text-base outline-none"
           rows={1}
           // eslint-disable-next-line jsx-a11y/no-autofocus -- Intentional: message input is primary interaction
           autoFocus
