@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -100,31 +100,33 @@ const CHART_COLORS_DARK = [
   '#fde047', // Light Yellow
 ] as const
 
-/**
- * Hook to detect dark mode via prefers-color-scheme media query.
- * Returns true when the user's system is in dark mode.
- * Uses lazy initializer to read the media query synchronously on mount,
- * and listens for changes thereafter.
- */
+// Detect dark mode by observing the .dark class on <html>, matching the app's class-based theme.
 function useDarkMode(): boolean {
-  const [isDark, setIsDark] = useState(() => {
-    if (typeof window === 'undefined') return false
-    return window.matchMedia('(prefers-color-scheme: dark)').matches
-  })
+  const [isDark, setIsDark] = useState(false)
+  const observerRef = useRef<MutationObserver | null>(null)
 
   useEffect(() => {
-    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
-    const handler = (e: MediaQueryListEvent) => setIsDark(e.matches)
-    mediaQuery.addEventListener('change', handler)
-    return () => mediaQuery.removeEventListener('change', handler)
+    const check = () => document.documentElement.classList.contains('dark')
+    startTransition(() => setIsDark(check()))
+
+    observerRef.current = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+          setIsDark(check())
+        }
+      }
+    })
+    observerRef.current.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['class'],
+    })
+
+    return () => observerRef.current?.disconnect()
   }, [])
 
   return isDark
 }
 
-/**
- * Get the appropriate color palette based on dark mode preference.
- */
 function getColorPalette(isDark: boolean): readonly string[] {
   return isDark ? CHART_COLORS_DARK : CHART_COLORS
 }
@@ -175,7 +177,7 @@ export interface ChartSeries {
 
 interface ChartSeriesWithColor extends ChartSeries {
   color: string
-  /** True when the color was explicitly set by the AI (not a default palette color). */
+  // True when a color was explicitly provided (vs. assigned from the default palette).
   isCustomColor: boolean
 }
 
@@ -400,12 +402,12 @@ function renderPieChart(opts: PieChartOptions) {
   const { data, xKey, series, showLegend, title, colorPalette } = opts
   const dataKey = series[0]?.key || 'value'
 
-  // Determine per-slice colors:
-  // 1. If individual data items have a "color" field, use those
-  // 2. If any series has a custom color and there are enough series entries, use those
-  // 3. Fall back to the color palette (light/dark mode aware)
+  // Per-slice color priority:
+  // 1. Per-item "color" field in data (e.g., pie slices with individual colors)
+  // 2. Series-level custom color applied uniformly to all slices (series[0])
+  // 3. Palette fallback (light/dark aware)
   const hasDataColors = data.some((d) => typeof d.color === 'string')
-  const hasSeriesColors = series.some((s) => s.isCustomColor)
+  const seriesColor = series[0]?.isCustomColor ? series[0].color : null
 
   return (
     <LazyPieChart aria-label={`Pie chart: ${title}`}>
@@ -422,8 +424,8 @@ function renderPieChart(opts: PieChartOptions) {
           let fillColor: string
           if (hasDataColors && typeof d.color === 'string') {
             fillColor = d.color
-          } else if (hasSeriesColors && series[index]?.isCustomColor) {
-            fillColor = series[index].color
+          } else if (seriesColor) {
+            fillColor = seriesColor
           } else {
             fillColor = colorPalette[index % colorPalette.length]
           }
