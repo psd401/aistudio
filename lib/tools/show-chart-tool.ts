@@ -103,7 +103,7 @@ function createChartSchema() {
       },
       data: {
         type: 'array',
-        description: 'Array of data points. Each object should have a key matching xKey for labels, and keys matching series[].key for numeric values. Example: [{month: "Jan", sales: 100}, {month: "Feb", sales: 150}]',
+        description: 'Array of data points. Each object should have a key matching xKey for labels, and keys matching series[].key for numeric values. For pie charts, each data item can include an optional "color" field (hex code) to set per-slice colors. Example: [{month: "Jan", sales: 100}, {month: "Feb", sales: 150}]',
         items: { type: 'object', additionalProperties: true },
         minItems: 1,
         maxItems: 1000
@@ -145,7 +145,7 @@ Supported chart types:
 - scatter: For correlations between variables
 - pie: For proportional data (e.g., budget allocation)
 
-COLOR CUSTOMIZATION: When the user requests specific colors for chart series, set the "color" field on each series entry with a hex color code. Common colors: "#dc2626" (red), "#2563eb" (blue), "#16a34a" (green), "#9333ea" (purple), "#ea580c" (orange), "#0891b2" (cyan), "#c026d3" (magenta), "#854d0e" (brown). For pie charts, set the color on each series entry corresponding to each data slice. If the user asks to change or swap colors, regenerate the chart with the updated color values.
+COLOR CUSTOMIZATION: When the user requests specific colors for chart series, set the "color" field on each series entry with a hex color code. Common colors: "#dc2626" (red), "#2563eb" (blue), "#16a34a" (green), "#9333ea" (purple), "#ea580c" (orange), "#0891b2" (cyan), "#c026d3" (magenta), "#854d0e" (brown). For pie charts, add a "color" field to each data item to set per-slice colors (e.g., {"category": "A", "value": 30, "color": "#dc2626"}). If the user asks to change or swap colors, regenerate the chart with the updated color values.
 
 Example: To show enrollment data, call with:
 {
