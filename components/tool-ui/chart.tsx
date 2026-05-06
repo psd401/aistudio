@@ -1,6 +1,6 @@
 'use client'
 
-import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -101,18 +101,19 @@ const CHART_COLORS_DARK = [
 ] as const
 
 // Detect dark mode by observing the .dark class on <html>, matching the app's class-based theme.
+// Charts are rendered client-side only (next/dynamic ssr:false), so document is available at
+// mount time. The lazy initializer reads the initial theme synchronously to avoid a flash.
 function useDarkMode(): boolean {
-  const [isDark, setIsDark] = useState(false)
+  const [isDark, setIsDark] = useState(() =>
+    typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
+  )
   const observerRef = useRef<MutationObserver | null>(null)
 
   useEffect(() => {
-    const check = () => document.documentElement.classList.contains('dark')
-    startTransition(() => setIsDark(check()))
-
     observerRef.current = new MutationObserver((mutations) => {
       for (const mutation of mutations) {
         if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
-          setIsDark(check())
+          setIsDark(document.documentElement.classList.contains('dark'))
         }
       }
     })
@@ -288,11 +289,15 @@ interface ChartRenderOptions {
   showLegend: boolean
   legendContent: React.ReactElement
   title: string
+}
+
+// Bar charts need the palette for multi-color mode (one series, each bar a different color).
+interface BarChartRenderOptions extends ChartRenderOptions {
   colorPalette: readonly string[]
 }
 
 // Chart type renderers - using options object to reduce param count
-function renderBarChart(opts: ChartRenderOptions) {
+function renderBarChart(opts: BarChartRenderOptions) {
   const { data, xKey, visibleSeries, showGrid, showLegend, legendContent, title, colorPalette } = opts
   // Use multi-color mode for single series ONLY when no custom color is set.
   // When the user specifies a color on the series, all bars use that single color.
@@ -513,12 +518,11 @@ export function Chart({
       showLegend,
       legendContent,
       title,
-      colorPalette,
     }
 
     switch (type) {
       case 'bar':
-        return renderBarChart(opts)
+        return renderBarChart({ ...opts, colorPalette })
       case 'line':
         return renderLineChart(opts)
       case 'area':
