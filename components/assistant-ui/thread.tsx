@@ -358,7 +358,7 @@ const Composer: FC<ComposerProps> = ({
         <ComposerAttachments processingAttachments={processingAttachments} />
         <ComposerPrimitive.Input
           placeholder="How can I help you today?"
-          className="bg-muted dark:border-muted-foreground/15 focus:outline-primary placeholder:text-muted-foreground max-h-[calc(50vh)] min-h-16 w-full resize-none px-4 pb-3 pt-2 text-base outline-none"
+          className="bg-muted dark:border-muted-foreground/15 focus:outline-primary placeholder:text-muted-foreground max-h-[50svh] min-h-16 w-full resize-none px-4 pb-3 pt-2 text-base outline-none"
           rows={1}
           // eslint-disable-next-line jsx-a11y/no-autofocus -- Intentional: message input is primary interaction
           autoFocus
