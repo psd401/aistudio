@@ -120,7 +120,7 @@ function createChartSchema() {
           properties: {
             key: { type: 'string', description: 'Data key from the data array' },
             label: { type: 'string', description: 'Display label for the series' },
-            color: { type: 'string', description: 'Optional hex color (e.g., #2563eb)' }
+            color: { type: 'string', description: 'Hex color for this series (e.g., "#2563eb" for blue, "#dc2626" for red). Set this when the user requests specific colors.' }
           },
           required: ['key', 'label']
         },
@@ -145,6 +145,8 @@ Supported chart types:
 - scatter: For correlations between variables
 - pie: For proportional data (e.g., budget allocation)
 
+COLOR CUSTOMIZATION: When the user requests specific colors for chart series, set the "color" field on each series entry with a hex color code. Common colors: "#dc2626" (red), "#2563eb" (blue), "#16a34a" (green), "#9333ea" (purple), "#ea580c" (orange), "#0891b2" (cyan), "#c026d3" (magenta), "#854d0e" (brown). For pie charts, set the color on each series entry corresponding to each data slice. If the user asks to change or swap colors, regenerate the chart with the updated color values.
+
 Example: To show enrollment data, call with:
 {
   "type": "bar",
@@ -152,6 +154,15 @@ Example: To show enrollment data, call with:
   "data": [{"grade": "K", "students": 120}, {"grade": "1st", "students": 135}],
   "xKey": "grade",
   "series": [{"key": "students", "label": "Students"}]
+}
+
+Example with custom colors:
+{
+  "type": "bar",
+  "title": "Sales Comparison",
+  "data": [{"month": "Jan", "online": 100, "inStore": 80}],
+  "xKey": "month",
+  "series": [{"key": "online", "label": "Online", "color": "#2563eb"}, {"key": "inStore", "label": "In-Store", "color": "#dc2626"}]
 }`
 
 /**
