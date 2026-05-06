@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import dynamic from 'next/dynamic'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -100,6 +100,38 @@ const CHART_COLORS_DARK = [
   '#fde047', // Light Yellow
 ] as const
 
+// Detect dark mode by observing the .dark class on <html>, matching the app's class-based theme.
+// Charts are rendered client-side only (next/dynamic ssr:false), so document is available at
+// mount time. The lazy initializer reads the initial theme synchronously to avoid a flash.
+function useDarkMode(): boolean {
+  const [isDark, setIsDark] = useState(() =>
+    typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
+  )
+  const observerRef = useRef<MutationObserver | null>(null)
+
+  useEffect(() => {
+    observerRef.current = new MutationObserver((mutations) => {
+      for (const mutation of mutations) {
+        if (mutation.type === 'attributes' && mutation.attributeName === 'class') {
+          setIsDark(document.documentElement.classList.contains('dark'))
+        }
+      }
+    })
+    observerRef.current.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['class'],
+    })
+
+    return () => observerRef.current?.disconnect()
+  }, [])
+
+  return isDark
+}
+
+function getColorPalette(isDark: boolean): readonly string[] {
+  return isDark ? CHART_COLORS_DARK : CHART_COLORS
+}
+
 // Memoized style objects to prevent re-renders
 const COMMON_AXIS_PROPS = {
   tick: { fontSize: 12 },
@@ -146,6 +178,8 @@ export interface ChartSeries {
 
 interface ChartSeriesWithColor extends ChartSeries {
   color: string
+  // True when a color was explicitly provided (vs. assigned from the default palette).
+  isCustomColor: boolean
 }
 
 export interface ChartProps {
@@ -257,11 +291,19 @@ interface ChartRenderOptions {
   title: string
 }
 
+// Bar charts need the palette for multi-color mode (one series, each bar a different color).
+interface BarChartRenderOptions extends ChartRenderOptions {
+  colorPalette: readonly string[]
+}
+
 // Chart type renderers - using options object to reduce param count
-function renderBarChart(opts: ChartRenderOptions) {
-  const { data, xKey, visibleSeries, showGrid, showLegend, legendContent, title } = opts
-  // Use multi-color mode for single series to make each bar a different color
-  const useMultiColor = visibleSeries.length === 1
+function renderBarChart(opts: BarChartRenderOptions) {
+  const { data, xKey, visibleSeries, showGrid, showLegend, legendContent, title, colorPalette } = opts
+  // Use multi-color mode for single series ONLY when no custom color is set.
+  // When the user specifies a color on the series, all bars use that single color.
+  const singleSeries = visibleSeries.length === 1
+  const hasCustomColor = singleSeries && visibleSeries[0].isCustomColor
+  const useMultiColor = singleSeries && !hasCustomColor
 
   return (
     <LazyBarChart data={data} aria-label={`Bar chart: ${title}`}>
@@ -279,7 +321,7 @@ function renderBarChart(opts: ChartRenderOptions) {
           radius={BAR_RADIUS}
         >
           {useMultiColor && data.map((_, index) => (
-            <Cell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
+            <Cell key={`cell-${index}`} fill={colorPalette[index % colorPalette.length]} />
           ))}
         </LazyBar>
       ))}
@@ -352,14 +394,26 @@ function renderScatterChart(opts: ChartRenderOptions) {
   )
 }
 
-function renderPieChart(
-  data: Array<Record<string, unknown>>,
-  xKey: string,
-  series: ChartSeries[],
-  showLegend: boolean,
+interface PieChartOptions {
+  data: Array<Record<string, unknown>>
+  xKey: string
+  series: ChartSeriesWithColor[]
+  showLegend: boolean
   title: string
-) {
+  colorPalette: readonly string[]
+}
+
+function renderPieChart(opts: PieChartOptions) {
+  const { data, xKey, series, showLegend, title, colorPalette } = opts
   const dataKey = series[0]?.key || 'value'
+
+  // Per-slice color priority:
+  // 1. Per-item "color" field in data (e.g., pie slices with individual colors)
+  // 2. Series-level custom color applied uniformly to all slices (series[0])
+  // 3. Palette fallback (light/dark aware)
+  const hasDataColors = data.some((d) => typeof d.color === 'string')
+  const seriesColor = series[0]?.isCustomColor ? series[0].color : null
+
   return (
     <LazyPieChart aria-label={`Pie chart: ${title}`}>
       <LazyPie
@@ -371,9 +425,17 @@ function renderPieChart(
         outerRadius={80}
         label={formatPieLabel}
       >
-        {data.map((_, index) => (
-          <Cell key={`cell-${index}`} fill={CHART_COLORS[index % CHART_COLORS.length]} />
-        ))}
+        {data.map((d, index) => {
+          let fillColor: string
+          if (hasDataColors && typeof d.color === 'string') {
+            fillColor = d.color
+          } else if (seriesColor) {
+            fillColor = seriesColor
+          } else {
+            fillColor = colorPalette[index % colorPalette.length]
+          }
+          return <Cell key={`cell-${index}`} fill={fillColor} />
+        })}
       </LazyPie>
       <LazyTooltip contentStyle={TOOLTIP_STYLE} />
       {showLegend && <LazyLegend />}
@@ -400,13 +462,17 @@ export function Chart({
 }: ChartProps) {
   const [hiddenSeries, setHiddenSeries] = useState<Set<string>>(new Set())
 
+  const isDark = useDarkMode()
+  const colorPalette = useMemo(() => getColorPalette(isDark), [isDark])
+
   const seriesWithColors = useMemo(
     () =>
       series.map((s, index) => ({
         ...s,
-        color: s.color || CHART_COLORS[index % CHART_COLORS.length],
+        color: s.color || colorPalette[index % colorPalette.length],
+        isCustomColor: Boolean(s.color),
       })),
-    [series]
+    [series, colorPalette]
   )
 
   const visibleSeries = useMemo(
@@ -456,7 +522,7 @@ export function Chart({
 
     switch (type) {
       case 'bar':
-        return renderBarChart(opts)
+        return renderBarChart({ ...opts, colorPalette })
       case 'line':
         return renderLineChart(opts)
       case 'area':
@@ -464,11 +530,11 @@ export function Chart({
       case 'scatter':
         return renderScatterChart(opts)
       case 'pie':
-        return renderPieChart(data, xKey, series, showLegend, title)
+        return renderPieChart({ data, xKey, series: seriesWithColors, showLegend, title, colorPalette })
       default:
         return null
     }
-  }, [type, data, xKey, visibleSeries, showGrid, showLegend, legendContent, title, series])
+  }, [type, data, xKey, visibleSeries, showGrid, showLegend, legendContent, title, seriesWithColors, colorPalette])
 
   return (
     <Card id={id} className={cn('w-full', className)}>
