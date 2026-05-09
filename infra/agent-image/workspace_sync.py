@@ -82,6 +82,7 @@ _SKIP_RELATIVE_PREFIXES = (
     "skills/psd-rules/",
     "skills/psd-schedules/",
     "skills/psd-skills-meta/",
+    "skills/psd-html-output/",
     "skills/psd-workspace/",
 )
 

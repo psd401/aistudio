@@ -56,7 +56,7 @@ Keep Markdown (or plain Chat text) for:
 ### Interactivity
 
 - For interactive artifacts (design exploration, prompt tuning, config editors): include JavaScript directly in the HTML file.
-- Add a **"Copy as prompt"** or **"Copy as JSON"** button that exports the current state as paste-ready text. This is the key interaction pattern — the user tweaks something visually, then copies the result back into a prompt.
+- Add a **"Copy as prompt"** or **"Copy as JSON"** button that exports the current state as paste-ready text. Include brief visual feedback (e.g., changing button text to "Copied!") upon success. This is the key interaction pattern — the user tweaks something visually, then copies the result back into a prompt.
 - Keep JS minimal and dependency-free. No CDN imports, no build tools. Vanilla JS only.
 - **Sanitize user-provided text** before embedding it in the HTML. Escape `<`, `>`, `&`, `"`, and `'` as HTML entities (`&lt;`, `&gt;`, `&amp;`, `&quot;`, `&#39;`). This prevents accidental script injection when artifact content includes user input such as project names, PR titles, or search queries.
 
@@ -64,7 +64,7 @@ Keep Markdown (or plain Chat text) for:
 
 - Every HTML artifact must be a **single file** that opens in any browser with no server.
 - No external CSS/JS dependencies. No CDN links. Everything inline.
-- Images: use inline SVG or base64 data URIs if absolutely necessary. Prefer SVG.
+- Images: use inline SVG. Avoid base64 data URIs as they are token-intensive and prone to corruption; use them only for tiny icons if SVG is unavailable.
 - Include a **Content Security Policy** meta tag in `<head>` to enforce the self-contained constraint at the browser level: `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:;">`. This prevents accidental loading of external resources.
 
 ### Links
