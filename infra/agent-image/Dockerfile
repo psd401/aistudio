@@ -81,6 +81,26 @@ RUN set -eux; \
     chmod +x /usr/local/bin/gws; \
     gws --version
 
+# GitHub CLI (#965 follow-on) — single Go binary so the agent can read PRs,
+# issues, and run gh-api calls without us shipping a custom skill. ARM64
+# matches AgentCore runtime.
+#
+# Pinned version + SHA256. When bumping, run:
+#   curl -fsSL "https://github.com/cli/cli/releases/download/v<VER>/gh_<VER>_linux_arm64.tar.gz" \
+#     | shasum -a 256
+# and paste the hex digest into GH_SHA256 below.
+ARG GH_VERSION=2.92.0
+ARG GH_SHA256=c2248526dd0160c08d3fccca2332c3c1a07c15a78b23978e77735f1b5a18cfee
+RUN set -eux; \
+    curl -fsSL -o /tmp/gh.tar.gz \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_arm64.tar.gz"; \
+    echo "${GH_SHA256}  /tmp/gh.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/gh.tar.gz -C /tmp; \
+    mv "/tmp/gh_${GH_VERSION}_linux_arm64/bin/gh" /usr/local/bin/gh; \
+    rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_arm64"; \
+    chmod +x /usr/local/bin/gh; \
+    gh --version
+
 # Install the bedrock-agentcore SDK in a virtual environment (avoids --break-system-packages)
 # BLOCKER(prod): Verify the "bedrock-agentcore" PyPI package is the official AWS SDK
 # (not an unrelated name-squatted package). The SDK is pre-GA as of this PR — confirm
