@@ -142,24 +142,97 @@ async function getSql(): Promise<postgres.Sql> {
   return sqlClient;
 }
 
-export const handler = async (): Promise<{ detected: number }> => {
+interface ScanEvent {
+  /** ISO 8601 week (e.g. "2026-W18") to scan. Defaults to current week. */
+  week?: string;
+  /** When true, scan the last N weeks (1..52). Useful for first-time backfill. */
+  backfillWeeks?: number;
+}
+
+export const handler = async (
+  event?: ScanEvent,
+): Promise<{ detected: number; weeks: string[] }> => {
   if (!SIGNALS_TABLE || !DATABASE_HOST || !DATABASE_SECRET_ARN) {
     log('ERROR', 'Missing required environment variables');
     throw new Error('Pattern scanner misconfigured');
   }
 
+  // Build the list of weeks to scan. Default = current. Manual invocations
+  // can override with `{ week: "2026-W18" }` or backfill with
+  // `{ backfillWeeks: 12 }` to populate the last 12 weeks at once.
   const today = new Date();
   const currentWeek = isoWeek(today);
+  const weeksToScan: string[] = [];
+  if (event?.week) {
+    if (!/^\d{4}-W\d{2}$/.test(event.week)) {
+      log('ERROR', 'Invalid week format', { week: event.week, expected: 'YYYY-WNN' });
+      throw new Error(`Invalid week format: "${event.week}" — expected YYYY-WNN (e.g. "2026-W18")`);
+    }
+    // Validate week number is in range (W01–W53)
+    const weekNum = parseInt(event.week.split('-W')[1], 10);
+    if (weekNum < 1 || weekNum > 53) {
+      log('ERROR', 'Week number out of range', { week: event.week, weekNum });
+      throw new Error(`Week number out of range: "${event.week}" — must be W01–W53`);
+    }
+    weeksToScan.push(event.week);
+  } else if (event?.backfillWeeks && event.backfillWeeks > 0) {
+    // n weeks total: currentWeek + (n-1) prior weeks
+    const n = Math.min(Math.floor(event.backfillWeeks), 52);
+    weeksToScan.push(currentWeek);
+    for (let i = 1; i < n; i++) {
+      weeksToScan.push(priorWeek(currentWeek, i));
+    }
+  } else {
+    weeksToScan.push(currentWeek);
+  }
+
+  // Scan DynamoDB once and reuse the signal set across all weeks to avoid
+  // O(N * table_size) reads during multi-week backfills.
+  //
+  // NOTE: This means historical weeks are evaluated against the *current*
+  // signal set rather than the set that existed at that time. This is
+  // intentional — backfills populate the dashboard "last scan ran" banner
+  // rather than reconstructing exact historical pattern detection.
+  const signals = await scanAllSignals();
+  log('INFO', 'Scanned signals for backfill', { total: signals.length, weeks: weeksToScan.length });
+
+  let totalDetected = 0;
+  const failedWeeks: string[] = [];
+  for (const targetWeek of weeksToScan) {
+    try {
+      totalDetected += await scanForWeek(targetWeek, signals);
+    } catch (err) {
+      // Log but continue — a single week's failure should not abort the
+      // entire backfill. The skipped week will have no scan-run marker,
+      // making it retryable via `{ week: "YYYY-WNN" }`.
+      log('ERROR', 'scanForWeek failed, continuing with remaining weeks', {
+        week: targetWeek,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      failedWeeks.push(targetWeek);
+    }
+  }
+  if (failedWeeks.length > 0) {
+    log('WARN', 'Backfill completed with partial failures', {
+      failedWeeks,
+      succeeded: weeksToScan.length - failedWeeks.length,
+    });
+  }
+  return { detected: totalDetected, weeks: weeksToScan };
+};
+
+async function scanForWeek(currentWeek: string, prefetchedSignals?: SignalItem[]): Promise<number> {
   const rollingWeeks = new Set<string>();
   for (let i = 1; i <= ROLLING_WEEKS; i++) {
     rollingWeeks.add(priorWeek(currentWeek, i));
   }
 
-  const signals = await scanAllSignals();
-  log('INFO', 'Scanned signals', {
+  const signals = prefetchedSignals ?? await scanAllSignals();
+  log('INFO', 'Processing signals', {
     total: signals.length,
     currentWeek,
     rollingWeeks: Array.from(rollingWeeks),
+    prefetched: !!prefetchedSignals,
   });
 
   // Aggregate: topic → { currentCount, buildings: Set, priorCounts: number[] }
@@ -169,7 +242,12 @@ export const handler = async (): Promise<{ detected: number }> => {
     priorTotals: Map<string, number>;
   }
   const byTopic = new Map<string, Agg>();
+  // Count signals that are relevant to this week (current or rolling window)
+  // rather than using the total DynamoDB signal count which includes all weeks.
+  let weekRelevantSignals = 0;
   for (const s of signals) {
+    if (s.week !== currentWeek && !rollingWeeks.has(s.week)) continue;
+    weekRelevantSignals++;
     let agg = byTopic.get(s.topic);
     if (!agg) {
       agg = { currentCount: 0, buildings: new Set(), priorTotals: new Map() };
@@ -185,12 +263,14 @@ export const handler = async (): Promise<{ detected: number }> => {
 
   const sql = await getSql();
   let detected = 0;
+  let suppressed = 0;
 
   for (const [topic, agg] of byTopic.entries()) {
     // Suppression: below thresholds → skip entirely. Do NOT write anything,
     // not even "topic below threshold". Dashboard users should never see
     // low-count signals that could proxy individual users.
     if (agg.currentCount < MIN_SIGNALS || agg.buildings.size < MIN_BUILDINGS) {
+      suppressed += 1;
       continue;
     }
 
@@ -226,6 +306,30 @@ export const handler = async (): Promise<{ detected: number }> => {
     detected += 1;
   }
 
-  log('INFO', 'Pattern scan complete', { detected, currentWeek });
-  return { detected };
-};
+  // Record an explicit "scan run" marker so admins can tell the difference
+  // between "scanner never ran" (table empty + no marker) and "scanner ran
+  // but suppression thresholds filtered everything" (table empty + marker).
+  // Best-effort — failure of the marker write must not fail the scan.
+  try {
+    await sql`
+      INSERT INTO agent_pattern_scan_runs
+        (run_at, week, signals_total, topics_total, detected, suppressed)
+      VALUES (NOW(), ${currentWeek}, ${weekRelevantSignals}, ${byTopic.size}, ${detected},
+              ${suppressed})
+    `;
+  } catch (err) {
+    log('WARN', 'Failed to record scan_runs marker', {
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  log('INFO', 'Pattern scan complete', {
+    detected,
+    currentWeek,
+    signalsRelevant: weekRelevantSignals,
+    signalsTotalPrefetched: signals.length,
+    topicsTotal: byTopic.size,
+    suppressed,
+  });
+  return detected;
+}

@@ -93,6 +93,7 @@ export class AgentPlatformStack extends cdk.Stack {
   public readonly signalsTable: dynamodb.Table;
   /** DynamoDB table for Chat message idempotency (dedup of retries) */
   public readonly messageDedupTable: dynamodb.Table;
+  public readonly sessionLocksTable: dynamodb.Table;
   /** IAM user that owns the Bedrock API key (service-specific credential) */
   public readonly bedrockApiUser: iam.User;
   /** Secrets Manager secret carrying the Bedrock API key for Mantle auth */
@@ -164,7 +165,22 @@ export class AgentPlatformStack extends cdk.Stack {
     // =====================================================================
     this.workspaceBucket = new s3.Bucket(this, 'AgentWorkspaceBucket', {
       bucketName: `psd-agents-${environment}-${cdk.Aws.ACCOUNT_ID}`,
-      blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
+      // BlockPublicAcls + IgnorePublicAcls keep ACL-driven public access
+      // forbidden. BlockPublicPolicy and RestrictPublicBuckets are FALSE so
+      // the resource policy below can grant unauthenticated GetObject on
+      // the single `public-images/*` prefix used by the psd-image-gen
+      // skill. Without this carve-out the skill returns presigned URLs
+      // signed with AgentCore's STS session credentials; those URLs embed
+      // an `X-Amz-Security-Token` query parameter that intermittently
+      // fails with `InvalidToken` when fetched through chat clients
+      // (observed in PR #934 dev rollout 2026-05-03). Switching to a
+      // public-by-link prefix eliminates the failure mode entirely.
+      blockPublicAccess: new s3.BlockPublicAccess({
+        blockPublicAcls: true,
+        ignorePublicAcls: true,
+        blockPublicPolicy: false,
+        restrictPublicBuckets: false,
+      }),
       // SSE-S3 chosen over SSE-KMS: workspace data is agent-generated artifacts
       // (not direct student PII). KMS adds ~$1/mo per key + $0.03/10k API calls.
       // Upgrade to SSE-KMS with dedicated key if student data is stored here.
@@ -191,6 +207,21 @@ export class AgentPlatformStack extends cdk.Stack {
 
     cdk.Tags.of(this.workspaceBucket).add('Environment', environment);
     cdk.Tags.of(this.workspaceBucket).add('ManagedBy', 'cdk');
+
+    // Public-read carve-out for psd-image-gen output. Skill writes generated
+    // PNGs to `public-images/<email>/<uuid>.png` and returns an unsigned
+    // HTTPS URL. The UUID makes the path unguessable; anyone who receives
+    // the URL can fetch — same security model as Google Drive "anyone with
+    // the link" sharing. The skill, IAM grants, and this policy must all
+    // agree on the `public-images/` prefix. Other prefixes in the bucket
+    // remain private (no other allow-public statements exist).
+    this.workspaceBucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'PublicReadOnPublicImagesPrefix',
+      effect: iam.Effect.ALLOW,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['s3:GetObject'],
+      resources: [`${this.workspaceBucket.bucketArn}/public-images/*`],
+    }));
 
     // =====================================================================
     // 4. DynamoDB Tables
@@ -267,6 +298,28 @@ export class AgentPlatformStack extends cdk.Stack {
     });
     cdk.Tags.of(this.messageDedupTable).add('Environment', environment);
     cdk.Tags.of(this.messageDedupTable).add('ManagedBy', 'cdk');
+
+    // 4c-bis. Session Locks table — serializes concurrent invocations against
+    // the same AgentCore session ID. AgentCore sticky-routes by session ID, so
+    // two messages from the same user/space hit the same OpenClaw turn loop.
+    // Without serialization, message #2 lands while #1 is mid-turn and gets
+    // an empty response ("I processed your message but had no response.").
+    // The router takes this lock before InvokeAgentRuntime and releases after.
+    // TTL is a backstop: if a Lambda dies holding the lock, the row expires
+    // ~14 min later (just under Lambda's 15-min timeout) so the next message
+    // can proceed.
+    this.sessionLocksTable = new dynamodb.Table(this, 'AgentSessionLocksTable', {
+      tableName: `psd-agent-session-locks-${environment}`,
+      partitionKey: { name: 'sessionId', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      timeToLiveAttribute: 'expiresAt',
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(this.sessionLocksTable).add('Environment', environment);
+    cdk.Tags.of(this.sessionLocksTable).add('ManagedBy', 'cdk');
 
     // 4d. Inter-Agent Communication table — tracks agent-to-agent messages
     // for rate limiting and anti-loop detection. Uses TTL for automatic cleanup.
@@ -760,6 +813,21 @@ export class AgentPlatformStack extends cdk.Stack {
       resources: [props.databaseResourceArn],
     }));
 
+    // CloudWatch custom metrics — harness emits PSD/AgentPlatform/{env}/AgentFailuresHarness
+    // via boto3 put_metric_data. Resource must be '*' per AWS API contract; we
+    // scope by namespace condition.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'CloudWatchMetricsPublish',
+      effect: iam.Effect.ALLOW,
+      actions: ['cloudwatch:PutMetricData'],
+      resources: ['*'],
+      conditions: {
+        StringEquals: {
+          'cloudwatch:namespace': `PSD/AgentPlatform/${environment}`,
+        },
+      },
+    }));
+
     // Secrets Manager — read DB credentials referenced by DATABASE_SECRET_ARN
     this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
       sid: 'SecretsManagerAccess',
@@ -798,6 +866,60 @@ export class AgentPlatformStack extends cdk.Stack {
       effect: iam.Effect.ALLOW,
       actions: ['secretsmanager:ListSecrets'],
       resources: ['*'],
+    }));
+
+    // Per-user credential WRITE — for the psd-credentials/put.js helper.
+    // Scope is intentionally locked to the per-user prefix
+    // (psd-agent-creds/{env}/user/*) so a skill cannot write or rotate
+    // a shared (district-wide) secret. Shared-scope provisioning stays
+    // an admin-only operation done out of band.
+    //
+    // CreateSecret and TagResource are constrained by aws:RequestTag
+    // conditions matching what psd-credentials/put.js sets on new secrets.
+    // This prevents a compromised task from re-tagging existing per-user
+    // secrets with arbitrary Environment or ManagedBy values.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'AgentCredentialsWritePerUser',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'secretsmanager:CreateSecret',
+        'secretsmanager:TagResource',
+      ],
+      resources: [
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent-creds/${environment}/user/*`,
+      ],
+      conditions: {
+        StringEquals: {
+          'aws:RequestTag/Environment': environment,
+          'aws:RequestTag/ManagedBy': 'psd-credentials-skill',
+        },
+        'ForAllValues:StringEquals': {
+          'aws:TagKeys': ['Environment', 'ManagedBy', 'Scope'],
+        },
+      },
+    }));
+
+    // PutSecretValue does not support tag conditions — it only updates
+    // the secret value, not tags. Scoped to the per-user resource prefix.
+    //
+    // KNOWN LIMITATION (AWS API): PutSecretValue cannot be scoped to a
+    // single user's email path because the action does not support
+    // aws:RequestTag/* or aws:ResourceTag/* conditions. This means any
+    // skill running on the AgentCore task can rotate any user's credential
+    // under the `psd-agent-creds/{env}/user/*` prefix. Compensating
+    // controls: (1) skills validate --user is the authenticated caller,
+    // (2) psd_agent_credentials_audit logs all writes with action/email,
+    // (3) the ECS task is isolated per-session. This is not a gap in our
+    // design — it is a Secrets Manager API constraint.
+    this.agentCoreExecutionRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'AgentCredentialsUpdatePerUser',
+      effect: iam.Effect.ALLOW,
+      actions: [
+        'secretsmanager:PutSecretValue',
+      ],
+      resources: [
+        `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent-creds/${environment}/user/*`,
+      ],
     }));
 
     // Secrets Manager — psd-workspace skill (#912): read shared OAuth client
@@ -841,6 +963,7 @@ export class AgentPlatformStack extends cdk.Stack {
         this.usersTable.tableName,
         this.signalsTable.tableName,
         this.messageDedupTable.tableName,
+        this.sessionLocksTable.tableName,
         interAgentTable.tableName,
       ],
       s3Buckets: [this.workspaceBucket.bucketName],
@@ -956,6 +1079,23 @@ export class AgentPlatformStack extends cdk.Stack {
       ],
     });
 
+    // ServiceRoleFactory builds its inline logs ARN as
+    // /aws/lambda/${functionName}:* with functionName='psd-agent-cron', but the
+    // real log group is /aws/lambda/psd-agent-cron-${environment}. The ARN
+    // mismatch silently denied CreateLogStream/PutLogEvents starting Apr 24,
+    // 2026. Narrow inline policy targeting the actual log group instead of the
+    // overly broad AWSLambdaBasicExecutionRole managed policy.
+    this.cronLambdaRole.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'CronLambdaLogsCorrectArn',
+        effect: iam.Effect.ALLOW,
+        actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+        resources: [
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/psd-agent-cron-${environment}:*`,
+        ],
+      }),
+    );
+
     // =====================================================================
     // 6. AgentCore Runtime
     // =====================================================================
@@ -1014,6 +1154,7 @@ export class AgentPlatformStack extends cdk.Stack {
           GUARDRAIL_ARN: props.guardrailArn,
           DATABASE_RESOURCE_ARN: props.databaseResourceArn,
           DATABASE_SECRET_ARN: props.databaseSecretArn,
+          DATABASE_NAME: props.databaseName ?? 'aistudio',
           // ARN of the Secrets Manager secret holding the Bedrock API key.
           // `agentcore_wrapper.py` fetches this on startup and exports its
           // value as AWS_BEARER_TOKEN_BEDROCK so OpenClaw can authenticate
@@ -1242,11 +1383,14 @@ export class AgentPlatformStack extends cdk.Stack {
       // workspace; (b) OpenClaw gateway startup ~5s; (c) model + tool
       // time for the actual scheduled task (research briefs run 2–5 min).
       // Previous 5-minute timeout hit ceiling on every cold fire and
-      // silently prevented scheduled delivery. 14 min is just under
-      // Lambda's hard 15-min ceiling and 1 min under the harness
-      // adapter's internal 13-min chat deadline, so if the Lambda is
-      // about to time out the adapter has already returned something.
-      timeout: cdk.Duration.minutes(14),
+      // 15 min is Lambda's hard ceiling. The morning brief on May 1, 2026
+      // hit our 13-min client-side abort while the agent was still
+      // streaming heartbeats every 30s — it just hadn't finished yet.
+      // Stack: harness deadline 840s (14:00) < AbortSignal 870s (14:30) <
+      // Lambda 900s (15:00). Each layer has ~30s headroom over the next
+      // so failure modes degrade in order: harness returns partial → abort
+      // fires with whatever streamed → Lambda kills as last resort.
+      timeout: cdk.Duration.minutes(15),
       architecture: lambda.Architecture.ARM_64,
       role: this.cronLambdaRole,
       logGroup: cronLogGroup,
@@ -1483,6 +1627,7 @@ export class AgentPlatformStack extends cdk.Stack {
         USERS_TABLE: this.usersTable.tableName,
         SIGNALS_TABLE: this.signalsTable.tableName,
         MESSAGE_DEDUP_TABLE: this.messageDedupTable.tableName,
+        SESSION_LOCKS_TABLE: this.sessionLocksTable.tableName,
         INTERAGENT_TABLE: interAgentTable.tableName,
         MAX_INTERAGENT_MESSAGES_PER_HOUR: '5',
         GUARDRAIL_ID: props.guardrailId,
@@ -1706,11 +1851,84 @@ export class AgentPlatformStack extends cdk.Stack {
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     });
 
+    // CloudWatch metric filter — emit a metric every time an
+    // AGENT_FAILURE_RECORD line lands in the router Lambda log. Combined with
+    // the harness-image structured log line of the same shape, this gives us
+    // a single "agent failures per period" metric across all chokepoints.
+    const failureMetricNamespace = `PSD/AgentPlatform/${environment}`;
+    const failureMetricName = 'AgentFailures';
+
+    // Both router and cron filters intentionally write to the same metric name.
+    // They accumulate into one `AgentFailures` metric; per-source breakdown
+    // requires querying agent_failures.source in the DB.
+    new logs.MetricFilter(this, 'RouterAgentFailureMetric', {
+      logGroup: this.routerLambda.logGroup,
+      metricNamespace: failureMetricNamespace,
+      metricName: failureMetricName,
+      filterPattern: logs.FilterPattern.literal('AGENT_FAILURE_RECORD'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    new logs.MetricFilter(this, 'CronAgentFailureMetric', {
+      logGroup: cronLogGroup,
+      metricNamespace: failureMetricNamespace,
+      metricName: failureMetricName,
+      filterPattern: logs.FilterPattern.literal('AGENT_FAILURE_RECORD'),
+      metricValue: '1',
+      defaultValue: 0,
+    });
+
+    // Harness adapter emits the `AgentFailuresHarness` metric directly via
+    // boto3 cloudwatch.put_metric_data() from inside the AgentCore container
+    // (see infra/agent-image/agent_failures.py). We can't use a CloudWatch
+    // MetricFilter the way router/cron do because the AgentCore log group
+    // name has a runtime-generated suffix (`psd_agent_<env>-<random>-DEFAULT`)
+    // that isn't predictable at CDK synth time, and CFN won't import a
+    // non-existent log group.
+
+    // CloudWatch alarm on agent failure rate. Fires when failures exceed 10
+    // per 5-minute window — same threshold as the router error alarm so the
+    // pager doesn't differentiate the two except by which alarm fired. Tune
+    // via the env-specific config if dev noise becomes a problem.
+    //
+    // Aggregates router/cron (shared `AgentFailures` metric, separate log
+    // groups so no double-counting) with the harness metric.
+    const period = cdk.Duration.minutes(5);
+    const failureRateAlarm = new cloudwatch.Alarm(this, 'AgentFailureRateAlarm', {
+      alarmName: `psd-agent-failures-${environment}`,
+      alarmDescription:
+        `Agent failures >= 10 in 5 min. Triage: https://aistudio.psd401.net/admin/agents (Failures tab)`,
+      metric: new cloudwatch.MathExpression({
+        expression: 'routerCron + harness',
+        usingMetrics: {
+          routerCron: new cloudwatch.Metric({
+            namespace: failureMetricNamespace,
+            metricName: failureMetricName,
+            period,
+            statistic: 'Sum',
+          }),
+          harness: new cloudwatch.Metric({
+            namespace: failureMetricNamespace,
+            metricName: 'AgentFailuresHarness',
+            period,
+            statistic: 'Sum',
+          }),
+        },
+        period,
+      }),
+      threshold: 10,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    });
+
     // Wire alarm notifications if SNS topic is configured
     if (alarmTopic) {
       const snsAction = new cloudwatchActions.SnsAction(alarmTopic);
       dlqAlarm.addAlarmAction(snsAction);
       errorAlarm.addAlarmAction(snsAction);
+      failureRateAlarm.addAlarmAction(snsAction);
     }
 
     // =====================================================================

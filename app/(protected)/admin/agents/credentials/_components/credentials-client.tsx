@@ -4,6 +4,9 @@ import { useState, useEffect, useCallback } from "react"
 import { useToast } from "@/components/ui/use-toast"
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { Button } from "@/components/ui/button"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Textarea } from "@/components/ui/textarea"
 import {
   Table,
   TableBody,
@@ -13,12 +16,30 @@ import {
   TableRow,
 } from "@/components/ui/table"
 import { Badge } from "@/components/ui/badge"
-import { IconRefresh, IconCheck, IconX } from "@tabler/icons-react"
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card"
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+import { IconRefresh, IconCheck, IconX, IconLock, IconPlus } from "@tabler/icons-react"
 import {
   getCredentialReads,
   getCredentialRequests,
   getCredentialAuditLog,
   resolveCredentialRequest,
+  provisionSharedSecret,
   type CredentialReadRow,
   type CredentialRequestRow,
   type CredentialAuditRow,
@@ -86,12 +107,17 @@ export function CredentialsClient() {
           <TabsTrigger value="requests">
             Requests {pendingCount > 0 && `(${pendingCount})`}
           </TabsTrigger>
+          <TabsTrigger value="provision">Provision</TabsTrigger>
           <TabsTrigger value="usage">Usage</TabsTrigger>
           <TabsTrigger value="audit">Audit Log</TabsTrigger>
         </TabsList>
 
         <TabsContent value="requests" className="mt-4">
           <RequestsTable requests={requests} loading={loading} onResolve={handleResolve} />
+        </TabsContent>
+
+        <TabsContent value="provision" className="mt-4">
+          <ProvisionForm onSuccess={loadAll} />
         </TabsContent>
 
         <TabsContent value="usage" className="mt-4">
@@ -103,6 +129,127 @@ export function CredentialsClient() {
         </TabsContent>
       </Tabs>
     </div>
+  )
+}
+
+function ProvisionForm({ onSuccess }: { onSuccess: () => void }) {
+  const { toast } = useToast()
+  const [name, setName] = useState("")
+  const [value, setValue] = useState("")
+  const [submitting, setSubmitting] = useState(false)
+  const [confirmOpen, setConfirmOpen] = useState(false)
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!name.trim() || !value.trim()) return
+    setConfirmOpen(true)
+  }
+
+  const handleConfirmedProvision = async () => {
+    setSubmitting(true)
+    try {
+      const result = await provisionSharedSecret(name.trim(), value)
+      if (result.isSuccess) {
+        toast({
+          title: result.data.action === "created" ? "Secret Created" : "Secret Rotated",
+          description: result.message,
+        })
+        setName("")
+        setValue("")
+        onSuccess()
+      } else {
+        toast({
+          title: "Error",
+          description: result.message || "Failed to provision secret",
+          variant: "destructive",
+        })
+      }
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <IconLock className="h-5 w-5" />
+          Provision Shared Secret
+        </CardTitle>
+        <CardDescription>
+          Create or rotate a district-wide shared secret at{" "}
+          <code className="text-xs bg-muted px-1 py-0.5 rounded">
+            psd-agent-creds/&#123;env&#125;/shared/&#123;name&#125;
+          </code>
+          . The secret value is written to AWS Secrets Manager and an audit entry is recorded.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <form onSubmit={handleSubmit} className="space-y-4">
+          <div className="space-y-2">
+            <Label htmlFor="secret-name">Credential Name</Label>
+            <Input
+              id="secret-name"
+              placeholder="e.g. openai-api-key"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              pattern="^[a-z][\d_a-z-]{0,127}$"
+              autoComplete="off"
+              required
+              disabled={submitting}
+            />
+            <p className="text-xs text-muted-foreground">
+              Lowercase letters, numbers, hyphens, underscores. Must start with a letter.
+            </p>
+          </div>
+
+          <div className="space-y-2">
+            <Label htmlFor="secret-value">Secret Value</Label>
+            <Textarea
+              id="secret-value"
+              placeholder="Paste the secret value here..."
+              value={value}
+              onChange={(e) => setValue(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+              required
+              disabled={submitting}
+              rows={3}
+              className="font-mono text-sm"
+            />
+            <p className="text-xs text-muted-foreground">
+              If the secret already exists, it will be rotated (overwritten). Never logged or displayed again.
+            </p>
+          </div>
+
+          <Button type="submit" disabled={submitting || !name.trim() || !value.trim()}>
+            <IconPlus className="h-4 w-4 mr-1" />
+            {submitting ? "Provisioning..." : "Provision Secret"}
+          </Button>
+        </form>
+
+        <AlertDialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Confirm Secret Provisioning</AlertDialogTitle>
+              <AlertDialogDescription>
+                This will create or overwrite the secret at{" "}
+                <code className="text-xs bg-muted px-1 py-0.5 rounded">
+                  psd-agent-creds/&#123;env&#125;/shared/{name}
+                </code>
+                . If the secret already exists, the current value will be permanently replaced. This action cannot be undone.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction onClick={handleConfirmedProvision}>
+                Confirm Provision
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      </CardContent>
+    </Card>
   )
 }
 
@@ -122,6 +269,7 @@ function RequestsTable({
             <TableHead>Requested By</TableHead>
             <TableHead>Reason</TableHead>
             <TableHead>Skill Context</TableHead>
+            <TableHead>Ticket</TableHead>
             <TableHead>Status</TableHead>
             <TableHead>Created</TableHead>
             <TableHead className="w-[160px]">Actions</TableHead>
@@ -130,7 +278,7 @@ function RequestsTable({
         <TableBody>
           {requests.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={7} className="text-center text-muted-foreground">
+              <TableCell colSpan={8} className="text-center text-muted-foreground">
                 {loading ? "Loading..." : "No credential requests"}
               </TableCell>
             </TableRow>
@@ -141,6 +289,15 @@ function RequestsTable({
                 <TableCell>{req.requestedBy}</TableCell>
                 <TableCell className="max-w-[200px] truncate">{req.reason}</TableCell>
                 <TableCell>{req.skillContext || "—"}</TableCell>
+                <TableCell>
+                  {req.freshserviceTicketId ? (
+                    <Badge variant="outline" className="font-mono text-xs">
+                      {req.freshserviceTicketId}
+                    </Badge>
+                  ) : (
+                    "—"
+                  )}
+                </TableCell>
                 <TableCell>
                   <Badge
                     variant={

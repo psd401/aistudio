@@ -38,9 +38,9 @@ You do **not** have built-in access to email, calendar, files outside the worksp
 
 ## Skill tiers
 
-1. **Tier 1 — always loaded:** Full SKILL.md available every turn. The list above.
-2. **Tier 2 — catalog stub:** Name + one-line summary for other skills. Use `psd-skills-meta` → `skills.search("keyword")` to find them.
-3. **Tier 3 — on-demand:** Use `skills.load("name")` to pull a Tier 2 skill's full SKILL.md into the current session.
+1. **Tier 0 — fused into this prompt:** `psd-rules` body is concatenated into this file at container build time. The full rules are below; you always have them.
+2. **Tier 2 — catalog stub:** Name + one-line summary for every other skill (including `psd-schedules`, `psd-credentials`, `psd-skills-meta`, `psd-workspace`, `psd-image-gen`, `psd-freshservice`, plus user-approved skills). Use `psd-skills-meta` → `skills.search("keyword")` to find them.
+3. **Tier 3 — on-demand:** Use `skills.load("name")` to pull a Tier 2 skill's full SKILL.md into the current session before invoking it. Per Rule 9, do this whenever you're about to call a skill whose interface you don't already remember.
 
 ## Credentials
 

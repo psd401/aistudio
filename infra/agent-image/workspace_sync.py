@@ -77,8 +77,19 @@ _SKIP_RELATIVE_PREFIXES = (
     #
     # IMPORTANT: skills/user/ is the agent's own authoring scratchpad —
     # NOT image-owned, must round-trip. Don't blanket-skip skills/.
+    # Image-bundled skills now live at /opt/psd-skills/, OUTSIDE this
+    # workspace dir, so they CANNOT be overlaid by S3 state — the path
+    # separation makes the "agent overwrites a district skill" bug class
+    # physically impossible. The skip entries below remain as a defense
+    # against S3 pollution: stale files exist in some users' workspace
+    # prefixes from the pre-separation era, and an agent that hand-creates
+    # `~/.openclaw/skills/psd-foo/` would sync that scratch to S3 forever.
+    # Skipping these prefixes prevents both. Keep the list aligned with
+    # the directories that exist at /opt/psd-skills/.
     "skills/gws-",
     "skills/psd-credentials/",
+    "skills/psd-freshservice/",
+    "skills/psd-image-gen/",
     "skills/psd-rules/",
     "skills/psd-schedules/",
     "skills/psd-skills-meta/",

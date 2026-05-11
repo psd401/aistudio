@@ -37,7 +37,7 @@
   },
   "skills": {
     "load": {
-      "extraDirs": ["/home/node/.openclaw/skills"],
+      "extraDirs": ["/opt/psd-skills"],
       "watch": false
     }
   },

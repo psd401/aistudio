@@ -21,7 +21,7 @@ If you omit `--scope`, the skill defaults to `user`. Phase 1 work is overwhelmin
 ## Invocation
 
 ```bash
-node /home/node/.openclaw/skills/psd-workspace/run.js \
+node /opt/psd-skills/psd-workspace/run.js \
   --user <caller-email> \
   --command "<gws-subcommand-with-args>" \
   [--scope user|agent]
@@ -31,33 +31,33 @@ Examples:
 
 ```bash
 # Read user's unread mail (Phase 1 default scope = user)
-node /home/node/.openclaw/skills/psd-workspace/run.js \
+node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
   --command "gmail users messages list --params '{\"userId\":\"me\",\"q\":\"is:unread\",\"maxResults\":20}'"
 
 # Create a draft on the user's account (lands in their Drafts folder, marker
 # is auto-appended to the body — they review and send themselves)
-node /home/node/.openclaw/skills/psd-workspace/run.js \
+node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
   --command "gmail +draft --to principal@psd401.net --subject 'Follow up' --body 'Hi Bill,...'"
 
 # Create a task on the user's tasks (in the 'Your Agent' tasklist)
-node /home/node/.openclaw/skills/psd-workspace/run.js \
+node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
   --command "tasks tasks insert --params '{\"tasklist\":\"@default\"}' --json '{\"title\":\"Review budget\",\"due\":\"2026-04-29T17:00:00Z\"}'"
 
 # Create a calendar event on the user's calendar (marker auto-prepended to description)
-node /home/node/.openclaw/skills/psd-workspace/run.js \
+node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net \
   --command "calendar events insert --params '{\"calendarId\":\"primary\"}' --json '{\"summary\":\"Standup\",\"start\":{\"dateTime\":\"2026-05-01T09:00:00-07:00\"},\"end\":{\"dateTime\":\"2026-05-01T09:30:00-07:00\"}}'"
 
 # Schedule something on the AGENT's own calendar (e.g. internal reminders)
-node /home/node/.openclaw/skills/psd-workspace/run.js \
+node /opt/psd-skills/psd-workspace/run.js \
   --user hagelk@psd401.net --scope agent \
   --command "calendar events insert --params '{\"calendarId\":\"primary\"}' --json '{\"summary\":\"agent self-reminder\"}'"
 
 # The full gws command surface
-node /home/node/.openclaw/skills/psd-workspace/run.js --user hagelk@psd401.net --command "--help"
+node /opt/psd-skills/psd-workspace/run.js --user hagelk@psd401.net --command "--help"
 ```
 
 ## Phase 1 boundaries (hard gates — refused at the skill layer)

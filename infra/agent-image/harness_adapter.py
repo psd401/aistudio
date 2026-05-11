@@ -15,6 +15,7 @@ import time
 import uuid
 from typing import Optional
 
+from agent_failures import record_failure
 from chat_format import markdown_to_chat
 
 logger = logging.getLogger("harness_adapter")
@@ -316,7 +317,10 @@ class OpenClawAdapter(HarnessAdapter):
                 # OPENCLAW_CHAT_DEADLINE_S env override for escape hatch,
                 # clamped to [60, 840] so a misconfig can't either starve
                 # the turn or exceed the undici/Lambda ceilings.
-                default_deadline_s = 780  # 13 min — 1 min under undici
+                # 14 min — 30s under the cron Lambda's 14:30 AbortSignal so
+                # the harness gets a chance to return whatever it has
+                # accumulated before the client kills the connection.
+                default_deadline_s = 840
                 try:
                     deadline_s = int(os.environ.get(
                         "OPENCLAW_CHAT_DEADLINE_S",
@@ -442,6 +446,14 @@ class OpenClawAdapter(HarnessAdapter):
 
         except Exception as exc:
             logger.error("WebSocket error: %s", str(exc)[:500])
+            record_failure(
+                source="harness",
+                severity="error",
+                exc=exc,
+                session_id=session_id,
+                model=model_override,
+                context={"phase": "websocket"},
+            )
             return "I'm temporarily unable to respond. The agent process may be restarting."
 
         if not got_final:
@@ -464,6 +476,23 @@ class OpenClawAdapter(HarnessAdapter):
             )
             if response_text:
                 return _format_for_chat(response_text.strip())
+            record_failure(
+                source="harness",
+                severity="error",
+                error_class="ChatDeadlineExpired",
+                error_message=(
+                    f"chat deadline expired without final event "
+                    f"(last_state={last_state})"
+                ),
+                session_id=session_id,
+                model=model_override,
+                context={
+                    "phase": "deadline",
+                    "last_state": last_state,
+                    "event_counts": event_counts,
+                    "first_events": first_event_types,
+                },
+            )
             return (
                 "I wasn't able to finish responding in time — the agent "
                 "stalled. Please try again in a moment."
@@ -478,7 +507,24 @@ class OpenClawAdapter(HarnessAdapter):
             json.dumps(event_counts),
         )
 
-        return _format_for_chat(response_text.strip()) if response_text.strip() else "I processed your message but had no response."
+        if response_text.strip():
+            return _format_for_chat(response_text.strip())
+        record_failure(
+            source="harness",
+            severity="empty_response",
+            error_class="EmptyAgentResponse",
+            error_message=(
+                "Agent reached final state but produced no user-visible text"
+            ),
+            session_id=session_id,
+            model=model_override,
+            context={
+                "last_state": last_state,
+                "event_counts": event_counts,
+                "first_events": first_event_types,
+            },
+        )
+        return "I processed your message but had no response."
 
     @staticmethod
     def _extract_text(content) -> str:

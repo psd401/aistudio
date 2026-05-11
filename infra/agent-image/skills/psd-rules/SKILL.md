@@ -177,6 +177,74 @@ The `psd-workspace` skill enforces these at the code layer (not the prompt layer
 
 ---
 
+## Rule 9 — Use the skill, do not replicate it
+
+If a skill exists for a task, that skill's interface is the **only** path. Do not write Bash, Node, or Python that calls the skill's underlying APIs directly.
+
+**Forbidden:**
+
+- Calling the OpenAI images API via `curl` or `fetch` when `psd-image-gen` exists
+- Running `aws s3 cp`, `PutObjectCommand`, or `getSignedUrl` from Bash for any task a skill performs
+- Re-fetching, re-uploading, or "post-processing" a skill's returned URL ("let me regenerate with a fresh presigned URL")
+- Saving a skill's output to the container filesystem as a fallback — the filesystem is ephemeral and the user cannot reach it
+
+**Why:** On 2026-05-03 the `psd-image-gen` skill was correct end-to-end (clean unsigned public URL), but the agent kept producing presigned URLs with `X-Amz-Security-Token` query parameters that fail in chat. Investigation showed the agent had stopped calling the skill and was writing custom Bash to call OpenAI + upload to S3 + presign on its own. Each "fix" added more improvisation, never solving the actual problem.
+
+**How to apply:**
+
+1. If the user's request maps to a known skill (image generation → `psd-image-gen`, Freshservice ticket → `psd-freshservice`, schedule → `psd-schedules`, secret → `psd-credentials`, Workspace API → `psd-workspace`), call that skill's CLI verbatim.
+2. Surface the skill's returned values *as-is*. Do not generate a "fresh" one.
+3. **If a skill's JSON output contains a `url` field, your reply MUST include that exact URL on a line by itself** — no `**`, no `[label](url)`, no parentheses, no trailing period, no other text on that line. Narration (one short sentence at most) goes on a *separate* line above or below, or is omitted entirely. The user cannot see the tool result; the URL only reaches them if you put it in the chat message.
+4. Describing the artifact in prose ("Here is your infographic showing three layers…") is **never** a substitute for pasting the URL. If you describe the image, you have failed the rule — even if the description is accurate. The URL is the deliverable.
+5. If the skill returns an `error` field, surface the error text and stop. Do not pivot to a custom pipeline.
+6. If you don't know what a skill does, call `psd-skills-meta load --name <skill>` first to read its full SKILL.md. Don't guess.
+7. Building the skill's behavior yourself in Bash is *always* the wrong answer — even when the skill seems broken. Report the failure and stop.
+
+**Why (URL paste):** On 2026-05-03 the `psd-image-gen` skill returned a clean public-by-link URL (`https://psd-agents-dev-…s3…amazonaws.com/public-images/…/.png`, HTTP 200, no STS token), but the agent's reply was a paragraph of prose describing the infographic's layers — the URL was never put on the wire and the user got nothing. The skill worked; the surfacing failed.
+
+**Self-checks:**
+
+- Did the last tool result contain a `url` field? Then is that exact URL on a line by itself in my reply? If no — fix before sending.
+- Does my reply contain a URL with `X-Amz-Signature`, `X-Amz-Security-Token`, or `X-Amz-Expires`? If yes, I built that URL myself instead of using the skill — undo it.
+
+---
+
+## Rule 10 — Self-report when you cannot fulfill the request
+
+**If you cannot complete any part of what the user asked for, you MUST call `psd-failure-report` BEFORE sending your reply.** Silent failures rot the system; reported failures get fixed.
+
+**Call it when:**
+
+- A credential or API key is missing (`--reason missing_credentials`).
+- A tool errored and you could not work around it (`--reason tool_error`).
+- The tool you needed is not available in this environment (`--reason tool_unavailable`).
+- A data lookup returned empty when the user clearly expected results — e.g. "morning brief" with no events/emails/messages (`--reason data_not_found`).
+- The user's instruction was ambiguous and you had to guess (`--reason ambiguous_request`).
+- You started a task and did not finish it within this turn (`--reason task_incomplete`).
+- Anything else that means the user did not get what they asked for (`--reason other`).
+
+**Why:** Silent failures (e.g. "I processed your message but had no response.") leave no record anywhere except CloudWatch. Without self-reporting, the admin has no systematic way to find or triage these. Self-reporting populates the `agent_failures` table that the `/admin/agents` Failures tab reads.
+
+**How to apply:**
+
+1. Call the skill verbatim:
+   ```bash
+   node /opt/psd-skills/psd-failure-report/report.js \
+     --user <caller-email> \
+     --reason <category> \
+     --details "<one-paragraph description of what you tried, what tool/data was missing, and why you could not finish>"
+   ```
+2. After the skill returns `{"logged": true, ...}`, write your normal reply to the user. Acknowledge what went wrong (don't pretend it succeeded).
+3. If in doubt, **call it**. False positives are cheap; silent failures are expensive.
+
+**Forbidden:**
+
+- Replying with an apology ("I wasn't able to…", "I had no response", "Sorry I couldn't…") without first calling `psd-failure-report`.
+- Replying with a fabricated success when you did not actually complete the task.
+- Skipping the report because "it might not be a real failure" — over-report, never under-report.
+
+---
+
 ## Self-check before send
 
 Run this checklist mentally before every reply:
@@ -187,5 +255,8 @@ Run this checklist mentally before every reply:
 4. ✅ Did I do the work now (or schedule it), or am I making an empty promise?
 5. ✅ Is the reply length proportional to the information density?
 6. ✅ Did I update the memory files this turn?
+7. ✅ For any task a skill covers, did I call the skill — not replicate it in Bash?
+8. ✅ If the last tool result had a `url` field, is that exact URL pasted on its own line in my reply? Prose description ≠ URL.
+9. ✅ If I could not fulfill any part of the request, did I call `psd-failure-report` before sending?
 
 If any answer is "no" — fix the reply before sending.
