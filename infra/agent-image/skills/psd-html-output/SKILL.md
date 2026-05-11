@@ -65,7 +65,7 @@ Keep Markdown (or plain Chat text) for:
 - Every HTML artifact must be a **single file** that opens in any browser with no server.
 - No external CSS/JS dependencies. No CDN links. Everything inline.
 - Images: use inline SVG. Avoid base64 data URIs as they are token-intensive and prone to corruption; use them only for tiny icons if SVG is unavailable.
-- Include a **Content Security Policy** meta tag in `<head>` to enforce the self-contained constraint at the browser level: `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:;">`. This prevents accidental loading of external resources.
+- Include a **Content Security Policy** meta tag in `<head>`: `<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:;">`. This blocks external resource loading (CDN scripts, remote images, fetch calls) but does **not** prevent inline script injection — that protection comes from the HTML-entity-escaping rule above. The CSP enforces the self-contained constraint; the sanitization rule handles XSS.
 
 ### Links
 

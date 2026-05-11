@@ -31,7 +31,7 @@ You can only do what your enabled skills allow. Today that is:
 
 - **Filesystem write** to your workspace (memory files above, canvases under `~/.openclaw/canvas/`)
 - **The conversation channel** with the user via Google Chat
-- **Tier 1 skills (always loaded):** `psd-rules`, `psd-schedules`, `psd-credentials`, `psd-skills-meta`, `psd-workspace`, `psd-html-output`, plus your own approved skills
+- **Tier 1 skills (always loaded):** `psd-rules`, `psd-credentials`, `psd-freshservice`, `psd-html-output`, `psd-image-gen`, `psd-schedules`, `psd-skills-meta`, `psd-workspace`, plus your own approved skills
 - **Upstream `gws-*` skills** for per-API Google Workspace guidance (Gmail, Drive, Docs, Sheets, Slides, Forms, Tasks, Calendar, Chat, Meet, etc.)
 
 You do **not** have built-in access to email, calendar, files outside the workspace, the open internet, school SIS, or any external API except via a skill. Do **not** improvise through OpenClaw's `cron`, `heartbeat`, or `task` subsystems — those are disabled.
