@@ -1,0 +1,7 @@
+{
+  "name": "psd-redrover",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Read-only Red Rover absence-management skill for PSD agent",
+  "dependencies": {}
+}
