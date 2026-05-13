@@ -209,9 +209,11 @@ export function ConversationInitializer({
         const loadedMessages = data.messages || []
         log.debug('Messages loaded from API', { count: loadedMessages.length })
 
-        // Pass conversation model info up to parent
-        if (onModelUsed && data.conversation?.modelUsed) {
-          onModelUsed(data.conversation.modelUsed)
+        // Pass conversation model info up to parent (including null, so the
+        // parent can show fallback info for assistant-architect convos that
+        // store modelUsed: null — Issue #974)
+        if (onModelUsed) {
+          onModelUsed(data.conversation?.modelUsed ?? null)
         }
 
         // Convert to UIMessage format (required by useChatRuntime)
