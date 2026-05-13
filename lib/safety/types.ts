@@ -273,9 +273,15 @@ export const K12_PII_TYPES: ComprehendPIIType[] = [
  * A threshold of 0.90 eliminates the hardware false-positive class while
  * preserving all genuine PII detections.
  *
+ * Override at runtime via PII_MIN_CONFIDENCE_SCORE env var (0–1 float).
+ * This allows threshold tuning without redeployment if AWS retrains the
+ * Comprehend model and score distributions shift.
+ *
  * See: GitHub issue #972 — PII tokenizer false-positives on hardware part numbers.
  */
-export const PII_MIN_CONFIDENCE_SCORE = 0.90;
+const _envScore = parseFloat(process.env.PII_MIN_CONFIDENCE_SCORE ?? '');
+export const PII_MIN_CONFIDENCE_SCORE: number =
+  !isNaN(_envScore) && _envScore >= 0 && _envScore <= 1 ? _envScore : 0.90;
 
 /**
  * Custom PII pattern definition for district-specific identifiers
