@@ -55,19 +55,19 @@ restore_github_auth() {
     echo "[agent-startup] Found GITHUB_PAT environment variable."
   fi
 
-  # Method 2: AWS Secrets Manager — secret 'psd-credentials', key 'github_pat'
-  if [ -z "$pat" ] && command -v aws >/dev/null 2>&1; then
-    echo "[agent-startup] Trying AWS Secrets Manager (secret: psd-credentials)..."
-    local secret_json
-    secret_json=$(aws secretsmanager get-secret-value \
-      --secret-id psd-credentials \
-      --query SecretString \
-      --output text 2>/dev/null || echo "")
-    if [ -n "$secret_json" ]; then
-      pat=$(echo "$secret_json" | python3 -c \
-        "import sys,json; d=json.load(sys.stdin); print(d.get('github_pat',''))" \
-        2>/dev/null || echo "")
-    fi
+  # Method 2: AWS Secrets Manager via boto3 — secret 'psd-credentials', key 'github_pat'
+  # Uses boto3 (installed in the image) rather than the aws CLI (not in the image).
+  if [ -z "$pat" ] && command -v python3 >/dev/null 2>&1; then
+    echo "[agent-startup] Trying AWS Secrets Manager via boto3 (secret: psd-credentials)..."
+    pat=$(python3 -c "
+import boto3, json, sys
+try:
+    c = boto3.client('secretsmanager')
+    print(json.loads(c.get_secret_value(SecretId='psd-credentials')['SecretString']).get('github_pat', ''))
+except Exception as e:
+    sys.stderr.write('[agent-startup] boto3: ' + str(e) + '\n')
+    print('')
+" 2>/dev/null || echo "")
   fi
 
   # Method 3: local .env file (development / local sessions)
@@ -88,8 +88,9 @@ restore_github_auth() {
     return 1
   fi
 
-  # Pipe PAT directly to gh — never echo it to stdout or a log file
-  if echo "$pat" | gh auth login --with-token 2>&1; then
+  # Pipe PAT directly to gh — never echo it to stdout or a log file.
+  # printf avoids issues if the token starts with a hyphen.
+  if printf '%s\n' "$pat" | gh auth login --with-token 2>&1; then
     echo "[agent-startup] GitHub CLI authentication restored."
     gh auth status 2>/dev/null | head -4
   else
@@ -110,25 +111,35 @@ is_safe_name() {
 
 restore_skills() {
   local clone_dir="/tmp/psd-plugins-session"
+  local tmp_archive="/tmp/psd-plugins-session.tar.gz"
 
   echo "[agent-startup] Syncing psd401/psd-claude-plugins..."
 
-  if [ -d "$clone_dir/.git" ]; then
-    git -C "$clone_dir" pull --quiet --depth 1 origin main 2>/dev/null \
-      || echo "[agent-startup] WARNING: git pull failed; using cached clone." >&2
-  else
-    rm -rf "$clone_dir"
-    if ! git clone --depth 1 --branch main \
-        https://github.com/psd401/psd-claude-plugins.git "$clone_dir" \
-        2>&1 | tail -3; then
-      echo "[agent-startup] WARNING: Could not clone psd-claude-plugins. Skills not restored." >&2
-      return 1
-    fi
+  # git is not available in the agent image (purged to reduce image size).
+  # Download the repo as a tarball via the GitHub API instead.
+  # Use gh token for auth if available (supports private forks).
+  local gh_token
+  gh_token=$(gh auth token 2>/dev/null || echo "")
+
+  rm -rf "$clone_dir" "$tmp_archive"
+  mkdir -p "$clone_dir"
+
+  if ! curl -fsSL --connect-timeout 10 --max-time 60 \
+      ${gh_token:+ -H "Authorization: Bearer $gh_token"} \
+      "https://api.github.com/repos/psd401/psd-claude-plugins/tarball/main" \
+      -o "$tmp_archive" 2>/dev/null; then
+    echo "[agent-startup] WARNING: Could not download psd-claude-plugins. Skills not restored." >&2
+    return 1
   fi
 
-  local head_sha
-  head_sha=$(git -C "$clone_dir" rev-parse --short HEAD 2>/dev/null || echo "unknown")
-  echo "[agent-startup] psd-claude-plugins @ ${head_sha}"
+  if ! tar -xzf "$tmp_archive" -C "$clone_dir" --strip-components=1 2>/dev/null; then
+    echo "[agent-startup] WARNING: Could not extract psd-claude-plugins archive. Skills not restored." >&2
+    rm -f "$tmp_archive"
+    return 1
+  fi
+  rm -f "$tmp_archive"
+
+  echo "[agent-startup] psd-claude-plugins downloaded"
 
   local skill_dirs=(
     "$clone_dir/plugins/psd-coding-system/skills"
@@ -183,12 +194,19 @@ restore_skills() {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# Run — both phases are non-fatal so a failure in one doesn't block the other
+# Run — both phases are non-fatal so a failure in one doesn't block the other.
+# The startup marker is only written when BOTH phases succeed. This allows
+# failed phases (e.g. transient AWS/network outage) to retry on the next
+# SessionStart rather than being permanently skipped for the container lifetime.
 # ──────────────────────────────────────────────────────────────────────────────
-restore_github_auth || true
-restore_skills       || true
+auth_rc=0; restore_github_auth || auth_rc=$?
+skills_rc=0; restore_skills    || skills_rc=$?
 
-touch "$STARTUP_MARKER"
+if [ "$auth_rc" -eq 0 ] && [ "$skills_rc" -eq 0 ]; then
+  touch "$STARTUP_MARKER"
+else
+  echo "[agent-startup] One or more phases failed (auth_rc=$auth_rc skills_rc=$skills_rc); will retry on next session." >&2
+fi
 
 echo "[agent-startup] Initialization complete."
 date -u +"[agent-startup] %Y-%m-%dT%H:%M:%SZ"
