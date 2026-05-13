@@ -211,7 +211,7 @@ export function ConversationInitializer({
 
         // Pass conversation model info up to parent (including null, so the
         // parent can show fallback info for assistant-architect convos that
-        // store modelUsed: null — Issue #974)
+        // store modelUsed: null)
         if (onModelUsed) {
           onModelUsed(data.conversation?.modelUsed ?? null)
         }

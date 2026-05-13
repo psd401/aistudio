@@ -18,7 +18,7 @@ export class ContentBlockedFetchError extends Error {
 /**
  * Client-side error for generic server-side validation failures (400).
  * Thrown from customFetch to prevent the AI SDK runtime from trying to
- * parse the non-streaming JSON error as a stream (Issue #974).
+ * parse the non-streaming JSON error as a stream.
  */
 export class ValidationFetchError extends Error {
   constructor(message: string) {

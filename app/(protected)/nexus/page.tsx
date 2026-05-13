@@ -241,7 +241,7 @@ function ConversationRuntimeProvider({
         if (!model) {
           // selectedModel is null — models haven't finished loading from localStorage.
           // Throwing here prevents the runtime from sending an empty body which the
-          // server rejects with a 400 Zod validation error (Issue #974).
+          // server rejects with a 400 Zod validation error.
           toast.error('Model not ready', {
             description: 'Please wait a moment for models to load, then try again.',
             duration: 5000,
@@ -253,7 +253,7 @@ function ConversationRuntimeProvider({
           provider: model.provider,
           enabledTools,
           enabledConnectors,
-          conversationId: conversationId || undefined
+          conversationId: conversationIdRef.current || undefined
         }
       }
     }),

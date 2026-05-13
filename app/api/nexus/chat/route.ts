@@ -442,6 +442,7 @@ async function handleDeepResearch(params: {
     provider: modelConfig.provider,
     modelId,
     dbModelId,
+    requestId,
     log,
   });
   if ('error' in convSetup) return convSetup.error;
@@ -725,9 +726,10 @@ async function setupConversation(params: {
   provider: string;
   modelId: string;
   dbModelId: number;
+  requestId: string;
   log: ReturnType<typeof createLogger>;
 }): Promise<{ conversationId: string; conversationTitle: string } | { error: Response }> {
-  const { conversationIdValue, messages, userId, provider, modelId, dbModelId, log } = params;
+  const { conversationIdValue, messages, userId, provider, modelId, dbModelId, requestId, log } = params;
 
   let conversationId = conversationIdValue || '';
   let conversationTitle = 'New Conversation';
@@ -755,8 +757,8 @@ async function setupConversation(params: {
       log.warn('Conversation ownership check failed — access denied', { conversationId, userId });
       return {
         error: new Response(
-          JSON.stringify({ error: 'Conversation not found or access denied' }),
-          { status: 403, headers: { 'Content-Type': 'application/json' } }
+          JSON.stringify({ error: 'Conversation not found or access denied', requestId }),
+          { status: 404, headers: { 'Content-Type': 'application/json' } }
         )
       };
     }
@@ -842,7 +844,7 @@ export async function POST(req: Request) {
 
     // 6. Setup conversation and save user message
     const convSetup = await setupConversation({
-      conversationIdValue, messages, userId, provider, modelId, dbModelId, log
+      conversationIdValue, messages, userId, provider, modelId, dbModelId, requestId, log
     });
     if ('error' in convSetup) return convSetup.error;
     const { conversationId, conversationTitle } = convSetup;
