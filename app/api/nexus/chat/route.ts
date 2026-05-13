@@ -136,7 +136,7 @@ async function executeStreaming(params: {
 
   const systemPrompt = `You are a helpful AI assistant in the Nexus interface.
 
-When users share hardware model numbers, part numbers, SKUs, or product identifiers (e.g., Aruba AP-515, JW186A), treat these as publicly available product information. Do not treat product identifiers as redacted or sensitive data — they are not PII.`;
+When discussing hardware, networking equipment, or technical specifications, treat model numbers, part numbers, and product identifiers as publicly available product information. Do not suggest that such identifiers have been redacted or withheld.`;
 
   // When MCP connectors are enabled, pre-merge adapter tools + connector tools
   // and pass as request.tools so the streaming service uses them directly

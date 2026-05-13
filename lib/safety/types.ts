@@ -259,14 +259,22 @@ export type ComprehendPIIType =
 export const PII_CONFIDENCE_THRESHOLD = 0.90;
 
 /**
+ * Per-type confidence overrides that supersede PII_CONFIDENCE_THRESHOLD.
+ *
+ * DATE_TIME requires a higher floor (0.97) because Comprehend routinely
+ * scores hardware firmware/revision strings (e.g., "8.11.2", "AP-505") in
+ * the 0.65–0.93 range as DATE_TIME, while actual calendar dates (birthdates,
+ * enrollment dates) score above 0.97. Keeping DATE_TIME in K12_PII_TYPES with
+ * a raised threshold protects FERPA-sensitive dates without false-positiving
+ * on hardware specs. See issue #950 / #972.
+ */
+export const PII_TYPE_CONFIDENCE_OVERRIDES: Partial<Record<ComprehendPIIType, number>> = {
+  DATE_TIME: 0.97,
+};
+
+/**
  * PII types to tokenize for K-12 safety
  * (Subset of Comprehend types relevant for student data protection)
- *
- * DATE_TIME is intentionally excluded: timestamps and date-like strings appear
- * in virtually all technical conversations (firmware versions, AP revisions, specs)
- * and are not uniquely re-identifying on their own. Comprehend frequently
- * misclassifies hardware revision strings (e.g., "8.11.2") as DATE_TIME,
- * causing false-positive tokenization. See issue #950 / #972.
  */
 export const K12_PII_TYPES: ComprehendPIIType[] = [
   'NAME',
@@ -274,6 +282,7 @@ export const K12_PII_TYPES: ComprehendPIIType[] = [
   'PHONE',
   'ADDRESS',
   'SSN',
+  'DATE_TIME',
   'AGE',
 ];
 

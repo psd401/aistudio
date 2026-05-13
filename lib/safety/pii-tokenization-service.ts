@@ -36,7 +36,7 @@ import type {
   PIITokenDynamoDBItem,
   GuardrailsConfig,
 } from './types';
-import { K12_PII_TYPES, PII_CONFIDENCE_THRESHOLD, CUSTOM_PII_PATTERNS, type ComprehendPIIType } from './types';
+import { K12_PII_TYPES, PII_CONFIDENCE_THRESHOLD, PII_TYPE_CONFIDENCE_OVERRIDES, CUSTOM_PII_PATTERNS, type ComprehendPIIType } from './types';
 
 /**
  * PIITokenizationService - Reversible PII protection for student data
@@ -209,14 +209,17 @@ export class PIITokenizationService {
       // Detect PII entities from Amazon Comprehend
       const comprehendEntities = await this.detectPII(text);
 
-      // Filter to K-12 relevant PII types above the confidence threshold.
-      // The threshold prevents Comprehend false positives (e.g., hardware model
-      // numbers like "AP-515" or "JW186A" misclassified as NAME at low confidence)
-      // from being tokenized and breaking technical conversations. See issue #950.
-      const relevantComprehendEntities = comprehendEntities.filter((entity) =>
-        K12_PII_TYPES.includes(entity.type as ComprehendPIIType) &&
-        entity.score >= PII_CONFIDENCE_THRESHOLD
-      );
+      // Filter to K-12 relevant PII types above the per-type (or global) confidence
+      // threshold. PII_TYPE_CONFIDENCE_OVERRIDES allows DATE_TIME to require a higher
+      // floor (0.97) so real birthdates are protected while firmware revision strings
+      // (e.g., "8.11.2") that Comprehend scores ~0.65–0.93 are skipped. The global
+      // PII_CONFIDENCE_THRESHOLD (0.90) blocks low-confidence NAME misclassifications
+      // of hardware model numbers like "AP-515". See issue #950 / #972.
+      const relevantComprehendEntities = comprehendEntities.filter((entity) => {
+        if (!K12_PII_TYPES.includes(entity.type as ComprehendPIIType)) return false;
+        const floor = PII_TYPE_CONFIDENCE_OVERRIDES[entity.type as ComprehendPIIType] ?? PII_CONFIDENCE_THRESHOLD;
+        return entity.score >= floor;
+      });
 
       // Detect custom PII patterns (e.g., student IDs)
       const customEntities = this.detectCustomPII(text);
