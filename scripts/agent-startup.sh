@@ -40,7 +40,7 @@ echo "[agent-startup] HOME=${HOME}  whoami=$(whoami 2>/dev/null || echo unknown)
 # ──────────────────────────────────────────────────────────────────────────────
 restore_github_auth() {
   # Already authenticated — nothing to do
-  if gh auth status >/dev/null 2>&1; then
+  if timeout 15 gh auth status >/dev/null 2>&1; then
     echo "[agent-startup] GitHub CLI already authenticated."
     return 0
   fi
@@ -62,7 +62,8 @@ restore_github_auth() {
     pat=$(python3 -c "
 import boto3, json, sys
 try:
-    c = boto3.client('secretsmanager')
+    from botocore.config import Config
+    c = boto3.client('secretsmanager', config=Config(connect_timeout=5, read_timeout=10, retries={'max_attempts': 1}))
     print(json.loads(c.get_secret_value(SecretId='psd-credentials')['SecretString']).get('github_pat', ''))
 except Exception as e:
     sys.stderr.write('[agent-startup] boto3: ' + str(e) + '\n')
@@ -77,7 +78,8 @@ except Exception as e:
     if [ -f "$env_file" ]; then
       chmod 600 "$env_file" 2>/dev/null || true
       pat=$(grep -E '^GITHUB_PAT=' "$env_file" \
-        | cut -d= -f2- | tr -d '"'"'" 2>/dev/null || echo "")
+        | cut -d= -f2- \
+        | sed "s/^[\"']//;s/[\"']\$//" 2>/dev/null || echo "")
     fi
   fi
 
@@ -90,9 +92,11 @@ except Exception as e:
 
   # Pipe PAT directly to gh — never echo it to stdout or a log file.
   # printf avoids issues if the token starts with a hyphen.
+  # WARNING: Do NOT run this script with 'bash -x' — set -x tracing prints
+  #          the PAT value to stderr, leaking the token into session logs.
   if printf '%s\n' "$pat" | gh auth login --with-token 2>&1; then
     echo "[agent-startup] GitHub CLI authentication restored."
-    gh auth status 2>/dev/null | head -4
+    timeout 15 gh auth status 2>/dev/null | head -4 || true
   else
     echo "[agent-startup] WARNING: 'gh auth login --with-token' failed." >&2
     return 1
@@ -124,8 +128,9 @@ restore_skills() {
   rm -rf "$clone_dir" "$tmp_archive"
   mkdir -p "$clone_dir"
 
-  if ! curl -fsSL --connect-timeout 10 --max-time 60 \
-      ${gh_token:+ -H "Authorization: Bearer $gh_token"} \
+  local -a auth_args=()
+  [ -n "$gh_token" ] && auth_args=(-H "Authorization: Bearer $gh_token")
+  if ! curl -fsSL --connect-timeout 10 --max-time 60 "${auth_args[@]}" \
       "https://api.github.com/repos/psd401/psd-claude-plugins/tarball/main" \
       -o "$tmp_archive" 2>/dev/null; then
     echo "[agent-startup] WARNING: Could not download psd-claude-plugins. Skills not restored." >&2
@@ -188,7 +193,7 @@ restore_skills() {
 
       cp "$agent_file" "$agents_dir/"
       agent_count=$((agent_count + 1))
-    done < <(find "$agents_src" -name "*.md" -type f)
+    done < <(find "$agents_src" -maxdepth 1 -name "*.md" -type f)
   fi
   echo "[agent-startup] Agents → $agents_dir: $agent_count installed"
 }
