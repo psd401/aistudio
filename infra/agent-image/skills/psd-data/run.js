@@ -45,7 +45,7 @@ function usage() {
     [
       'Usage: node run.js <subcommand> --user <email> [...]',
       '',
-      'Subcommands:',
+      'Typed subcommands (validated args, recommended for known tools):',
       '  tables [--detailed]',
       '  schema --table <name|json-array>',
       '  permissions --table <name|json-array>',
@@ -54,6 +54,10 @@ function usage() {
       '  lesson-delete --uuid <id>',
       '  lesson-check --task <text> --tables <json> [--columns <json>]',
       '  lesson-rate --id <int> --rating <helpful|unhelpful> [--feedback <text>]',
+      '',
+      'Discovery / passthrough (use when a typed subcommand does not exist):',
+      '  list                              MCP tools/list — names + descriptions + inputSchema',
+      '  call --tool <name> --args <json>  MCP tools/call passthrough for any tool',
       '',
     ].join('\n')
   );
@@ -105,6 +109,25 @@ async function main() {
   const ownerEmail = args.user;
 
   switch (subcommand) {
+    case 'list': {
+      // Discovery — surface the MCP server's current tool catalog so the
+      // agent can detect new tools or schema changes without a redeploy.
+      await callMcp('tools/list', {}, ownerEmail);
+      return;
+    }
+
+    case 'call': {
+      // Generic passthrough — invoke any MCP tool by name with a
+      // JSON-encoded arguments object. Use this when a tool exists on
+      // the server but does not yet have a typed subcommand here.
+      const toolName = requireArg(args, 'tool');
+      const argsRaw = args.args === undefined || args.args === true ? '{}' : args.args;
+      const toolArgs = parseJsonArg('args', argsRaw);
+      const params = { name: toolName, arguments: toolArgs };
+      await callMcp('tools/call', params, ownerEmail);
+      return;
+    }
+
     case 'tables': {
       const params = {
         name: 'list_available_tables',

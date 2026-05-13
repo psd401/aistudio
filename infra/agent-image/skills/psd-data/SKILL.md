@@ -46,6 +46,38 @@ verbatim instead of inventing your own explanation.
 
 ## Subcommands
 
+The 8 typed subcommands below cover the tools the MCP server exposes today
+and validate their arguments before sending. For **anything not listed
+here** — including new tools the server may add after this skill was
+shipped — use the **`list` + `call` discovery pair** at the bottom.
+Hardcoded subcommands are a convenience, not a fence; the agent is never
+limited to them.
+
+### `list` — discover available MCP tools
+
+```bash
+node /opt/psd-skills/psd-data/run.js list --user <caller-email>
+```
+
+Returns the MCP server's current `tools/list` response: every tool name,
+description, and JSON-Schema `inputSchema`. **Use this first** if:
+
+- You're not sure whether a typed subcommand below covers what you need
+- The server might have added new tools since this skill was built
+- A typed subcommand returns a `MethodNotFound` or schema-mismatch error
+
+### `call` — generic passthrough to any MCP tool
+
+```bash
+node /opt/psd-skills/psd-data/run.js call --user <caller-email> \
+  --tool <tool-name> \
+  --args '{"arg1": "value", "arg2": 42}'
+```
+
+`--args` is a JSON object matching the tool's `inputSchema`. Always run
+`list` first so you can craft a correct args object. Use this when a
+typed subcommand doesn't exist for the tool you need.
+
 ### `tables` — list every table the user can see
 
 ```bash
