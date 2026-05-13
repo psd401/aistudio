@@ -20,10 +20,14 @@
 
 'use strict';
 
+// Load the AWS SDK from psd-workspace's already-installed copy. Both skills
+// would otherwise install the same `@aws-sdk/client-secrets-manager` tree;
+// importing absolutely keeps the image file-count identical to a no-psd-data
+// build. See Dockerfile for the rationale.
 const {
   SecretsManagerClient,
   GetSecretValueCommand,
-} = require('@aws-sdk/client-secrets-manager');
+} = require('/opt/psd-skills/psd-workspace/node_modules/@aws-sdk/client-secrets-manager');
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
