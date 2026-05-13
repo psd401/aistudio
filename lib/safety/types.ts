@@ -297,6 +297,25 @@ export const PII_MIN_CONFIDENCE_SCORE: number =
   !isNaN(envScore) && envScore >= 0 && envScore <= 1 ? envScore : 0.90;
 
 /**
+ * Per-type confidence floors that override PII_MIN_CONFIDENCE_SCORE for
+ * specific gated types. Used when a type needs a stricter threshold than
+ * the global floor.
+ *
+ * DATE_TIME: firmware/version strings ("8.11.2", "3.2.14") can score
+ * Comprehend confidence anywhere from 0.65 to ~0.93, while real calendar
+ * dates and birthdates (FERPA-sensitive) consistently score above 0.97.
+ * A flat 0.90 floor would let a 0.91-scored firmware string through as
+ * a false-positive PII tokenization. Raising the DATE_TIME floor to
+ * 0.97 eliminates that band without rejecting any real dates.
+ *
+ * Types in CONFIDENCE_GATED_PII_TYPES not listed here fall back to
+ * PII_MIN_CONFIDENCE_SCORE.
+ */
+export const PII_TYPE_CONFIDENCE_OVERRIDES: Partial<Record<ComprehendPIIType, number>> = {
+  DATE_TIME: 0.97,
+};
+
+/**
  * Custom PII pattern definition for district-specific identifiers
  *
  * Use this to define patterns that Amazon Comprehend doesn't detect,

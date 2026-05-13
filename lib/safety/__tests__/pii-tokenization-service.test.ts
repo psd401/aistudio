@@ -5,7 +5,7 @@
  */
 
 import { PIITokenizationService } from '../pii-tokenization-service';
-import { PII_MIN_CONFIDENCE_SCORE } from '../types';
+import { PII_MIN_CONFIDENCE_SCORE, PII_TYPE_CONFIDENCE_OVERRIDES } from '../types';
 
 // Mock AWS SDK clients
 jest.mock('@aws-sdk/client-comprehend');
@@ -265,6 +265,40 @@ describe('PIITokenizationService', () => {
 
       expect(result.hasPII).toBe(false);
       expect(result.tokens).toHaveLength(0);
+    });
+
+    it('should NOT tokenize DATE_TIME between the global floor and the per-type override', async () => {
+      // DATE_TIME has a stricter per-type floor (0.97). A score of 0.95 clears
+      // the global 0.90 floor but is still below the DATE_TIME override —
+      // firmware/version strings commonly fall in this band and must pass through.
+      const dateTimeFloor = PII_TYPE_CONFIDENCE_OVERRIDES.DATE_TIME ?? 0.97;
+      const scoreBetween = (PII_MIN_CONFIDENCE_SCORE + dateTimeFloor) / 2;
+      mockComprehendResponse([
+        { Type: 'DATE_TIME', BeginOffset: 17, EndOffset: 23, Score: scoreBetween },
+      ]);
+
+      const text = 'Firmware version 8.11.2 deployed last week.';
+      const result = await service.tokenize(text, SESSION);
+
+      expect(result.hasPII).toBe(false);
+      expect(result.tokens).toHaveLength(0);
+      expect(result.tokenizedText).toContain('8.11.2');
+    });
+
+    it('should tokenize DATE_TIME at or above the per-type override (real birthdate)', async () => {
+      // Real calendar dates and birthdates score ≥ 0.97. Confirm the override
+      // still allows them through.
+      const dateTimeFloor = PII_TYPE_CONFIDENCE_OVERRIDES.DATE_TIME ?? 0.97;
+      mockComprehendResponse([
+        { Type: 'DATE_TIME', BeginOffset: 11, EndOffset: 21, Score: dateTimeFloor },
+      ]);
+
+      const text = 'Born on 1995-03-14 according to records.';
+      const result = await service.tokenize(text, SESSION);
+
+      expect(result.hasPII).toBe(true);
+      expect(result.tokens).toHaveLength(1);
+      expect(result.tokens[0].type).toBe('DATE_TIME');
     });
 
     it('should tokenize EMAIL at low confidence — high-precision types bypass the confidence gate', async () => {
