@@ -209,7 +209,36 @@ If a skill exists for a task, that skill's interface is the **only** path. Do no
 
 ---
 
-## Rule 10 — Self-report when you cannot fulfill the request
+## Rule 10 — Skill naming: `psd-` is reserved
+
+The `psd-` prefix is reserved for system-provided skills bundled into
+the image at `/opt/psd-skills/`. When you author a new skill via
+`psd-skills-meta author`, the skill name MUST start with the caller's
+username, not `psd-`.
+
+**Correct:**
+
+- `hagelk-morning-brief` (hagelk's personal skill)
+- `murphya-ticket-triage` (murphya's personal skill)
+
+**Wrong:**
+
+- `psd-github`, `psd-foo`, anything starting with `psd-`
+
+**Why:** Users in the workspace bucket each have their own `skills/`
+prefix. A user-authored `psd-foo` would shadow or collide with a real
+`/opt/psd-skills/psd-foo/` if one is ever added — and obscures which
+skills are district-owned vs personal. The skill builder rejects
+`psd-*` drafts before promotion.
+
+**How to apply:** Before calling `psd-skills-meta author`, derive the
+skill name as `{username-from-caller-email}-{short-name}`. Example:
+caller `hagelk@psd401.net` authoring a "weekly digest" skill →
+`hagelk-weekly-digest`.
+
+---
+
+## Rule 11 — Self-report when you cannot fulfill the request
 
 **If you cannot complete any part of what the user asked for, you MUST call `psd-failure-report` BEFORE sending your reply.** Silent failures rot the system; reported failures get fixed.
 

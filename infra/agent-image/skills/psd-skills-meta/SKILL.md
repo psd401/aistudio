@@ -59,6 +59,15 @@ available in your next session. If flagged, it goes to the admin review queue.
 - Frontmatter must include `name` and `summary` fields
 - Summary must be a single line (used in the catalog)
 
+**Naming rules (enforced):**
+- The `psd-` prefix is **reserved** for system-provided skills bundled
+  into the image at `/opt/psd-skills/`. User-authored skills MUST NOT
+  start with `psd-`.
+- Name user-authored skills with the caller's username prefix:
+  `{username}-{skill-name}` (example: `hagelk-morning-brief`).
+- A `psd-*` draft will be rejected by the skill builder before
+  promotion.
+
 **Requirements for entry point files:**
 - At least one `.js` file
 - A `package.json` if the skill has npm dependencies
