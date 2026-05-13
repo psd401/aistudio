@@ -105,22 +105,33 @@ export async function syncCognitoRefreshForAgent(
     return null
   }
 
-  // We need at minimum the user pool ID + client ID + region to make the
-  // stored token usable. If these aren't configured we still log a warning
-  // but don't write a half-populated record.
-  const userPoolId =
-    process.env.AUTH_COGNITO_USER_POOL_ID ?? process.env.COGNITO_USER_POOL_ID ?? null
+  // The agent uses client_id + region to refresh the token. user_pool_id is
+  // stored alongside for traceability but is not required for the refresh
+  // flow — derive it from AUTH_COGNITO_ISSUER when AUTH_COGNITO_USER_POOL_ID
+  // is absent (the web ECS task only sets the issuer).
   const clientId =
     process.env.AUTH_COGNITO_CLIENT_ID ?? process.env.COGNITO_CLIENT_ID ?? null
-  const region =
-    process.env.AUTH_COGNITO_REGION ?? process.env.AWS_REGION ?? "us-east-1"
-  if (!userPoolId || !clientId) {
+  if (!clientId) {
     log.warn(
-      "Skipping cognito-refresh sync — AUTH_COGNITO_USER_POOL_ID / AUTH_COGNITO_CLIENT_ID not set",
-      sanitizeForLogging({ ownerEmail, hasPoolId: !!userPoolId, hasClientId: !!clientId }),
+      "Skipping cognito-refresh sync — AUTH_COGNITO_CLIENT_ID not set",
+      sanitizeForLogging({ ownerEmail }),
     )
     return null
   }
+  // Issuer format: https://cognito-idp.<region>.amazonaws.com/<pool-id>
+  const issuer = process.env.AUTH_COGNITO_ISSUER ?? ""
+  const issuerMatch = issuer.match(
+    /^https:\/\/cognito-idp\.([a-z0-9-]+)\.amazonaws\.com\/([a-z0-9-_]+)$/i,
+  )
+  const userPoolId =
+    process.env.AUTH_COGNITO_USER_POOL_ID ??
+    process.env.COGNITO_USER_POOL_ID ??
+    (issuerMatch ? issuerMatch[2] : "unknown")
+  const region =
+    process.env.AUTH_COGNITO_REGION ??
+    (issuerMatch ? issuerMatch[1] : undefined) ??
+    process.env.AWS_REGION ??
+    "us-east-1"
 
   const secretId = cognitoRefreshSecretId(ownerEmail)
   const payload: CognitoRefreshTokenRecord = {
