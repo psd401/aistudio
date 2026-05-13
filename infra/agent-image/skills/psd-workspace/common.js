@@ -290,19 +290,113 @@ const PHASE1_FORBIDDEN = [
 ];
 
 /**
+ * Narrow exception to the `drive.permissions.create` block: the agent is
+ * permitted to share files it owns (scope === 'agent_account') back to the
+ * caller who initiated the conversation, as `reader` or `commenter` only.
+ *
+ * Rationale: when the agent creates artifacts on a user's behalf — investigation
+ * reports, drafts, generated docs — it stores them in its own agent_account
+ * Drive (because user_account scopes are intentionally narrow). Without this
+ * exception, the user has no way to view the artifact, since the broad
+ * `drive.permissions.create` block prevents even hand-back-to-owner sharing.
+ *
+ * Hard constraints (ALL must be true to allow):
+ *   - context.scope is 'agent_account'  (sharing FROM the agent's own Drive)
+ *   - context.ownerEmail matches the permission's emailAddress (caller only;
+ *     no third-party shares, no domain shares, no anyone-with-link)
+ *   - permission.type === 'user'        (no domain / group / anyone)
+ *   - permission.role ∈ {reader, commenter}  (no writer/owner transfer)
+ *
+ * Returns true if the share request is the narrow caller-only handoff;
+ * false otherwise. False means fall through to the existing block.
+ */
+function isShareToCallerHandoff(commandString, context) {
+  if (!context || context.scope !== 'agent_account' || !context.ownerEmail) {
+    return false;
+  }
+  // Must be the create variant — update/delete remain blocked.
+  if (!/\bdrive[\s.]+permissions[\s.]+create\b/i.test(commandString)) {
+    return false;
+  }
+
+  // Extract the --json payload without mutating it. We reuse the same brace-
+  // balanced parser idea as mutateJsonField but read-only.
+  const jsonFlagIdx = commandString.search(/--json\s+['"]?\{/);
+  if (jsonFlagIdx === -1) return false;
+  let i = jsonFlagIdx + '--json'.length;
+  while (i < commandString.length && /\s/.test(commandString[i])) i++;
+  if (commandString[i] === "'" || commandString[i] === '"') i++;
+  const jsonStart = i;
+  if (commandString[jsonStart] !== '{') return false;
+  let depth = 0;
+  let inString = false;
+  let stringChar = '';
+  let escape = false;
+  let jsonEnd = -1;
+  for (let j = jsonStart; j < commandString.length; j++) {
+    const ch = commandString[j];
+    if (escape) { escape = false; continue; }
+    if (ch === '\\') { escape = true; continue; }
+    if (inString) {
+      if (ch === stringChar) inString = false;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { inString = true; stringChar = ch; continue; }
+    if (ch === '{') depth++;
+    else if (ch === '}') { depth--; if (depth === 0) { jsonEnd = j; break; } }
+  }
+  if (jsonEnd === -1) return false;
+  let payload;
+  try {
+    payload = JSON.parse(commandString.slice(jsonStart, jsonEnd + 1));
+  } catch {
+    return false;
+  }
+
+  // gws drive permissions create wraps the permission under `resource`,
+  // `requestBody`, or accepts the fields at top level depending on the
+  // invocation style. Look in all three.
+  const perm = payload.resource || payload.requestBody || payload;
+  if (!perm || typeof perm !== 'object') return false;
+
+  const type = typeof perm.type === 'string' ? perm.type.toLowerCase() : '';
+  const role = typeof perm.role === 'string' ? perm.role.toLowerCase() : '';
+  const emailAddress = typeof perm.emailAddress === 'string'
+    ? perm.emailAddress.toLowerCase()
+    : '';
+
+  if (type !== 'user') return false;
+  if (role !== 'reader' && role !== 'commenter') return false;
+  if (emailAddress !== context.ownerEmail.toLowerCase()) return false;
+
+  return true;
+}
+
+/**
  * Test the gws command against Phase 1 forbidden patterns. Returns
  * `{allowed: true}` if the command can proceed, or
  * `{allowed: false, reason: '<short description>'}` if it must be refused.
  *
  * The check is intentionally permissive on whitespace and dot-vs-space
  * separators so different gws invocation styles all hit the same rules.
+ *
+ * Optional `context` argument enables narrow per-request exceptions:
+ *   { scope: 'agent_account' | 'user_account', ownerEmail: '<caller@…>' }
+ * Currently used for the share-to-caller handoff on Drive permissions.
  */
-function enforcePhase1Gates(commandString) {
+function enforcePhase1Gates(commandString, context) {
   if (!commandString || typeof commandString !== 'string') {
     return { allowed: true };
   }
   for (const { pattern, reason } of PHASE1_FORBIDDEN) {
     if (pattern.test(commandString)) {
+      // Narrow exception: agent shares its own file with the caller, read-only.
+      if (
+        /\bdrive[\s.]+permissions[\s.]+create\b/i.test(commandString) &&
+        isShareToCallerHandoff(commandString, context)
+      ) {
+        return { allowed: true };
+      }
       return { allowed: false, reason };
     }
   }

@@ -87,6 +87,7 @@ _SKIP_RELATIVE_PREFIXES = (
     # Skipping these prefixes prevents both. Keep the list aligned with
     # the directories that exist at /opt/psd-skills/.
     "skills/gws-",
+    "skills/psd-brand-guidelines/",
     "skills/psd-credentials/",
     "skills/psd-failure-report/",
     "skills/psd-freshservice/",

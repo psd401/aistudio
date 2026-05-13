@@ -1,0 +1,7 @@
+{
+  "name": "psd-brand-guidelines",
+  "version": "1.0.0",
+  "private": true,
+  "description": "PSD brand reference data + Node CLI for colors, typography, logos.",
+  "main": "brand.js"
+}

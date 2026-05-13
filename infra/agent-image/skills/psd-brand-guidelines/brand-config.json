@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "brand_id": "psd",
+  "name": "Peninsula School District",
+  "version": "1.0.0",
+
+  "colors": {
+    "primary": {
+      "seaGlass": {
+        "hex": "#6CA18A",
+        "rgb": [108, 161, 138],
+        "usage": "Primary green, landscape elements, accent borders"
+      },
+      "pacific": {
+        "hex": "#25424C",
+        "rgb": [37, 66, 76],
+        "usage": "Primary dark blue, text, headers, title backgrounds"
+      },
+      "driftwood": {
+        "hex": "#D7CDBE",
+        "rgb": [215, 205, 190],
+        "usage": "Neutral tan, backgrounds"
+      }
+    },
+    "supporting": {
+      "cedar": {
+        "hex": "#466857",
+        "rgb": [70, 104, 87],
+        "usage": "Dark green accent"
+      },
+      "whulge": {
+        "hex": "#346780",
+        "rgb": [52, 103, 128],
+        "usage": "Medium blue accent, links"
+      },
+      "seaFoam": {
+        "hex": "#EEEBE4",
+        "rgb": [238, 235, 228],
+        "usage": "Light background, content slides"
+      },
+      "meadow": {
+        "hex": "#5D9068",
+        "rgb": [93, 144, 104],
+        "usage": "Green accent"
+      },
+      "ocean": {
+        "hex": "#7396A9",
+        "rgb": [115, 150, 169],
+        "usage": "Light blue accent"
+      },
+      "skylight": {
+        "hex": "#FFFAEC",
+        "rgb": [255, 250, 236],
+        "usage": "Off-white/cream background, text on dark"
+      }
+    }
+  },
+
+  "typography": {
+    "heading": {
+      "family": "Josefin Sans",
+      "weight": "Bold",
+      "fallback": "Arial, sans-serif",
+      "googleFont": "https://fonts.google.com/specimen/Josefin+Sans",
+      "css": "'Josefin Sans', Arial, sans-serif"
+    },
+    "body": {
+      "family": "Josefin Slab",
+      "weight": "Regular",
+      "fallback": "Georgia, serif",
+      "googleFont": "https://fonts.google.com/specimen/Josefin+Slab",
+      "css": "'Josefin Slab', Georgia, serif"
+    }
+  },
+
+  "logos": {
+    "basePath": "/opt/psd-skills/psd-brand-guidelines/assets",
+    "format": "png",
+    "variants": {
+      "2color": {
+        "files": ["emblem", "fulllandscape", "stacked", "horizontal", "square"],
+        "description": "Sea Glass + Pacific, primary use",
+        "bestFor": ["light backgrounds", "general use"]
+      },
+      "1color-blue": {
+        "files": ["emblem", "fulllandscape", "stacked", "horizontal", "square"],
+        "description": "Pacific Blue only",
+        "bestFor": ["light backgrounds", "monochrome printing"]
+      },
+      "1color-green": {
+        "files": ["emblem", "fulllandscape", "stacked", "horizontal", "square"],
+        "description": "Sea Glass only",
+        "bestFor": ["medium backgrounds"]
+      },
+      "white": {
+        "files": ["emblem", "stacked", "horizontal", "square"],
+        "description": "White/knockout version",
+        "bestFor": ["dark backgrounds", "pacific blue backgrounds"]
+      }
+    },
+    "layouts": {
+      "fulllandscape": {
+        "description": "Bridge connecting peninsula landscape, district name contained within",
+        "bestFor": ["letterheads", "wide spaces", "primary branding"],
+        "minWidth": {"print": "1.5in", "web": "300px"}
+      },
+      "horizontal": {
+        "description": "Compact horizontal, for when name/tagline would be too small",
+        "bestFor": ["headers", "footers", "constrained horizontal spaces"]
+      },
+      "stacked": {
+        "description": "Vertical layout with name separated from brandmark",
+        "bestFor": ["vertical spaces", "social media profiles"]
+      },
+      "emblem": {
+        "description": "Round versions, perfect for square spaces or tight fits",
+        "bestFor": ["small sizes", "avatars", "icons", "tight spaces"]
+      },
+      "square": {
+        "description": "Square format",
+        "bestFor": ["social media", "square containers"]
+      }
+    },
+    "selectionRules": {
+      "byBackground": {
+        "light": ["2color", "1color-blue"],
+        "medium": ["1color-green", "2color"],
+        "dark": ["white"]
+      },
+      "bySpace": {
+        "wide": ["fulllandscape", "horizontal"],
+        "square": ["square", "emblem"],
+        "vertical": ["stacked"],
+        "small": ["emblem", "square"]
+      }
+    },
+    "constraints": {
+      "minWidthPrint": "1.5in",
+      "minWidthWeb": "300px",
+      "noRotation": true,
+      "noEffects": true,
+      "noStretching": true,
+      "noNonBrandFonts": true
+    }
+  },
+
+  "forbiddenGeneration": {
+    "description": "Only blocks explicit requests to generate logos/emblems as the image output. Allows normal use of district name and design terms.",
+    "patterns": [
+      "generate (?:a |the )?(?:psd |district |school )?logo",
+      "create (?:a |the )?(?:psd |district |school )?logo",
+      "make (?:a |the )?(?:psd |district |school )?logo",
+      "draw (?:a |the )?(?:psd |district |school )?logo",
+      "design (?:a |the )?(?:psd |district |school )?logo",
+      "generate (?:a |the )?(?:district |school )?emblem",
+      "create (?:a |the )?(?:district |school )?emblem",
+      "(?:psd|peninsula|district) seal"
+    ],
+    "message": "Cannot generate logos/emblems. Use the actual logo files from /opt/psd-skills/psd-brand-guidelines/assets/.",
+    "suggestion": "Reference a real logo asset path returned by `brand.js logo` instead of generating one."
+  },
+
+  "applications": {
+    "presentations": {
+      "titleSlide": {
+        "background": "pacific",
+        "textColor": "skylight",
+        "logoPosition": "bottom-right",
+        "logoVariant": "white-horizontal"
+      },
+      "contentSlide": {
+        "background": "seaFoam",
+        "textColor": "pacific",
+        "accentColor": "seaGlass",
+        "logoPosition": "bottom-right",
+        "logoVariant": "2color-emblem"
+      }
+    },
+    "documents": {
+      "headings": {
+        "font": "heading",
+        "color": "pacific"
+      },
+      "body": {
+        "font": "body",
+        "color": "pacific"
+      },
+      "links": {
+        "color": "whulge"
+      },
+      "backgrounds": ["seaFoam", "skylight"]
+    },
+    "digital": {
+      "primaryButton": "seaGlass",
+      "secondaryButton": "whulge",
+      "textOnLight": "pacific",
+      "textOnDark": "skylight"
+    }
+  },
+
+  "contact": {
+    "name": "Danielle Chastaine",
+    "title": "Digital Media Coordinator",
+    "email": "chastained@psd401.net"
+  },
+
+  "sources": {
+    "brandGuidePdf": "PSD_Branding_Guide.pdf"
+  }
+}
