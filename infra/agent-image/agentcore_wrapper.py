@@ -103,6 +103,99 @@ def start_mantle_proxy() -> None:
 # (a) skip redundant S3 pulls and (b) push to the right prefix on shutdown.
 _current_workspace_prefix: str | None = None
 
+# Track which user the on-disk `gh` auth file is currently written for, so we
+# only re-hit Secrets Manager when the invoking user changes within a microVM.
+_current_gh_user: str | None = None
+
+
+def hydrate_github_auth(user_email: str) -> None:
+    """
+    Write ~/.config/gh/hosts.yml so the `gh` CLI (baked into the image at
+    /usr/local/bin/gh) is authenticated for the current invoking user.
+
+    The `gh` binary persists across container restarts, but its auth state
+    (normally written by `gh auth login`) does NOT — `~/.config/gh/` is
+    ephemeral filesystem and not synced via workspace_sync. Skills that
+    shell out to `gh` (notably the user-authored psd-github skill) hit
+    "not authenticated" errors after every microVM cold-start.
+
+    Setting GH_TOKEN in os.environ does not help here: OpenClaw is spawned
+    once at container start with a frozen env snapshot, and skill
+    subprocesses inherit that snapshot rather than the wrapper's current
+    environment. Writing the on-disk config is the only mechanism that
+    propagates to every gh invocation regardless of process tree.
+
+    Per-user PAT location:
+        psd-agent-creds/{ENVIRONMENT}/user/{user_email}/github_pat
+
+    Non-fatal: many users don't have a PAT provisioned. Log and continue.
+    """
+    global _current_gh_user
+
+    if not user_email or user_email == "unknown":
+        return
+    if user_email == _current_gh_user:
+        return
+
+    import boto3
+    from botocore.exceptions import ClientError
+
+    env = os.environ.get("ENVIRONMENT", "dev")
+    secret_id = f"psd-agent-creds/{env}/user/{user_email}/github_pat"
+    region = os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "us-east-1"
+
+    try:
+        # Avoid AWS_PROFILE leakage — same reason as hydrate_bedrock_api_key.
+        saved_profile = os.environ.pop("AWS_PROFILE", None)
+        try:
+            sm = boto3.client("secretsmanager", region_name=region)
+        finally:
+            if saved_profile is not None:
+                os.environ["AWS_PROFILE"] = saved_profile
+        resp = sm.get_secret_value(SecretId=secret_id)
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code", "")
+        if code == "ResourceNotFoundException":
+            logger.info("No github_pat provisioned for %s — gh remains unauthenticated", user_email)
+        else:
+            logger.warning("gh hydrate ClientError for %s: %s", user_email, code)
+        return
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("gh hydrate failed for %s: %s", user_email, exc)
+        return
+
+    pat = (resp.get("SecretString") or "").strip()
+    if not pat:
+        logger.warning("github_pat secret for %s is empty", user_email)
+        return
+
+    gh_dir = "/home/node/.config/gh"
+    hosts_path = os.path.join(gh_dir, "hosts.yml")
+    try:
+        os.makedirs(gh_dir, exist_ok=True)
+        os.chmod(gh_dir, 0o700)
+        # Minimal hosts.yml — `gh` will resolve the username via /user on demand.
+        content = (
+            "github.com:\n"
+            f"    oauth_token: {pat}\n"
+            "    git_protocol: https\n"
+        )
+        tmp_path = hosts_path + ".tmp"
+        # Use os.open with O_CREAT|O_WRONLY|O_TRUNC and explicit 0600 mode so
+        # the token never lands on disk readable by anyone but `node`.
+        fd = os.open(tmp_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, content.encode("utf-8"))
+        finally:
+            os.close(fd)
+        os.replace(tmp_path, hosts_path)
+    except OSError as exc:
+        logger.warning("failed to write gh hosts.yml for %s: %s", user_email, exc)
+        return
+
+    _current_gh_user = user_email
+    logger.info("gh auth hydrated for %s", user_email)
+
 
 def hydrate_bedrock_api_key() -> None:
     """
@@ -303,6 +396,14 @@ def main():
         if not user_message.strip():
             yield {"result": "I didn't receive a message. Could you try again?"}
             return
+
+        # Hydrate `gh` auth for the invoking user (no-op if same user, missing
+        # PAT, or unknown identity). Runs every invocation cheaply because the
+        # function short-circuits when _current_gh_user already matches.
+        if user_email and user_email != "unknown":
+            await asyncio.get_running_loop().run_in_executor(
+                None, hydrate_github_auth, user_email
+            )
 
         # First invocation for a new workspace prefix → pull memory from S3.
         if workspace_prefix and workspace_prefix != _current_workspace_prefix:
