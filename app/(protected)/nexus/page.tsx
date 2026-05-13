@@ -108,6 +108,10 @@ function ConversationRuntimeProvider({
   const selectedModelRef = useRef(selectedModel)
   selectedModelRef.current = selectedModel
 
+  // Prevents the "Model not ready" toast from firing multiple times if body()
+  // is called in rapid succession before models finish loading.
+  const modelNotReadyToastShownRef = useRef(false)
+
   const historyAdapter = useMemo(
     () => createNexusHistoryAdapter(() => conversationIdRef.current),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally stable; conversationId accessed via ref
@@ -242,10 +246,14 @@ function ConversationRuntimeProvider({
           // selectedModel is null — models haven't finished loading from localStorage.
           // Throwing here prevents the runtime from sending an empty body which the
           // server rejects with a 400 Zod validation error.
-          toast.error('Model not ready', {
-            description: 'Please wait a moment for models to load, then try again.',
-            duration: 5000,
-          })
+          if (!modelNotReadyToastShownRef.current) {
+            modelNotReadyToastShownRef.current = true
+            toast.error('Model not ready', {
+              description: 'Please wait a moment for models to load, then try again.',
+              duration: 5000,
+            })
+            setTimeout(() => { modelNotReadyToastShownRef.current = false }, 5000)
+          }
           throw new Error('No model selected — please wait for models to load')
         }
         return {

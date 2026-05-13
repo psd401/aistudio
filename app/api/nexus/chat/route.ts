@@ -290,7 +290,8 @@ async function handleImageGeneration(params: {
     imagePrompt,
     imageProvider,
     modelId,
-    userId
+    userId,
+    requestId
   });
 
   if ('error' in convResult) {
