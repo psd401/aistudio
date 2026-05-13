@@ -185,7 +185,21 @@ export async function verifyConsentAndGetOAuthUrl(
     // Scopes and login_hint are kind-dependent:
     //   agent_account → log in as agnt_<uniqname>, broad agent scopes
     //   user_account  → log in as the user themself, narrow Phase 1 scopes
-    const kind = payload.kind ?? "agent_account"
+    //
+    // cognito_data tokens belong to a different consent flow
+    // (/agent-connect-data) and must not flow through this Workspace path —
+    // reject them here so a misrouted token doesn't accidentally trigger
+    // a Google OAuth redirect.
+    const payloadKind = payload.kind ?? "agent_account"
+    if (payloadKind !== "agent_account" && payloadKind !== "user_account") {
+      timer({ status: "error" })
+      log.warn("Consent token has non-Workspace kind", { kind: payloadKind })
+      return createSuccess({
+        valid: false,
+        error: "This consent link is for a different flow.",
+      })
+    }
+    const kind: "agent_account" | "user_account" = payloadKind
     const scopes = SCOPES_BY_KIND[kind]
     const loginHint = kind === "user_account" ? payload.sub : payload.agent
     const params = new URLSearchParams({
@@ -597,6 +611,20 @@ export async function handleOAuthCallback(
       return createSuccess({
         success: false,
         error: "This consent link has already been used or has expired. Ask your agent for a new one.",
+      })
+    }
+
+    // cognito_data nonces belong to the /agent-connect-data flow and must
+    // never enter the Google OAuth callback — the page consumes them
+    // directly. Reject here as defence-in-depth.
+    if (nonceRow.tokenKind !== "agent_account" && nonceRow.tokenKind !== "user_account") {
+      timer({ status: "error" })
+      log.warn("Consent nonce has non-Workspace kind in OAuth callback", {
+        kind: nonceRow.tokenKind,
+      })
+      return createSuccess({
+        success: false,
+        error: "This consent link is for a different flow.",
       })
     }
 
