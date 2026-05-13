@@ -264,6 +264,19 @@ export const K12_PII_TYPES: ComprehendPIIType[] = [
 ];
 
 /**
+ * The subset of K12_PII_TYPES where Comprehend commonly produces false positives
+ * on technical strings (hardware model numbers, firmware versions, etc.).
+ * PII_MIN_CONFIDENCE_SCORE is applied only to these types; high-precision types
+ * (EMAIL, PHONE, SSN, ADDRESS) are always tokenized when detected as K-12 PII,
+ * regardless of the Comprehend score.
+ */
+export const CONFIDENCE_GATED_PII_TYPES: ReadonlySet<ComprehendPIIType> = new Set([
+  'NAME',
+  'DATE_TIME',
+  'AGE',
+]);
+
+/**
  * Minimum Comprehend confidence score required to tokenize a detected entity.
  *
  * Comprehend's ML model can misclassify alphanumeric hardware identifiers

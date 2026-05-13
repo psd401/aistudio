@@ -36,7 +36,7 @@ import type {
   PIITokenDynamoDBItem,
   GuardrailsConfig,
 } from './types';
-import { K12_PII_TYPES, CUSTOM_PII_PATTERNS, PII_MIN_CONFIDENCE_SCORE, type ComprehendPIIType } from './types';
+import { K12_PII_TYPES, CUSTOM_PII_PATTERNS, PII_MIN_CONFIDENCE_SCORE, CONFIDENCE_GATED_PII_TYPES, type ComprehendPIIType } from './types';
 
 /**
  * PIITokenizationService - Reversible PII protection for student data
@@ -209,13 +209,15 @@ export class PIITokenizationService {
       // Detect PII entities from Amazon Comprehend
       const comprehendEntities = await this.detectPII(text);
 
-      // Filter to K-12 relevant PII types above the minimum confidence threshold.
-      // The confidence gate prevents hardware model/part numbers (e.g., "AP-505",
-      // "JW177A") from being tokenized when Comprehend misclassifies them as NAME,
-      // DATE_TIME, or AGE with low confidence. See issue #972.
+      // Filter to K-12 relevant PII types. For types prone to hardware/version-string
+      // false positives (NAME, DATE_TIME, AGE), also require a minimum confidence score.
+      // High-precision types (EMAIL, PHONE, SSN, ADDRESS) are always tokenized when
+      // detected, since legitimate instances of those types are not ambiguous enough
+      // for Comprehend to score them below 0.90.
       const relevantComprehendEntities = comprehendEntities.filter((entity) =>
         K12_PII_TYPES.includes(entity.type as ComprehendPIIType) &&
-        entity.score >= PII_MIN_CONFIDENCE_SCORE
+        (!CONFIDENCE_GATED_PII_TYPES.has(entity.type as ComprehendPIIType) ||
+          entity.score >= PII_MIN_CONFIDENCE_SCORE)
       );
 
       // Detect custom PII patterns (e.g., student IDs)

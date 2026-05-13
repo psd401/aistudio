@@ -191,7 +191,13 @@ describe('PIITokenizationService', () => {
       );
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       jest.spyOn(DynamoDBClient.prototype as any, 'send')
-        .mockResolvedValue({});
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockImplementation(async (command: any) => {
+          if (command instanceof PutItemCommand) {
+            return {};
+          }
+          throw new Error(`DynamoDB mock received unexpected command: ${command.constructor.name}`);
+        });
     }
 
     it('should NOT tokenize Comprehend detections below the confidence threshold', async () => {
@@ -208,7 +214,7 @@ describe('PIITokenizationService', () => {
       expect(result.tokenizedText).toBe(text);
     });
 
-    it('should NOT tokenize NAME detections at exactly the threshold boundary (score < threshold)', async () => {
+    it('should NOT tokenize NAME detections just below the threshold (score 0.89)', async () => {
       // Score of 0.89 is just below the 0.90 threshold
       mockComprehendResponse([
         { Type: 'NAME', BeginOffset: 7, EndOffset: 17, Score: PII_MIN_CONFIDENCE_SCORE - 0.01 },
@@ -262,9 +268,12 @@ describe('PIITokenizationService', () => {
     });
 
     it('should tokenize a mix: reject low-confidence hardware hit, keep high-confidence real PII', async () => {
+      // text = 'Please compare the Aruba access point AP-505 with user@example.com for support.'
+      // "AP-505"          → indices 38–44
+      // "user@example.com" → indices 50–66
       mockComprehendResponse([
         { Type: 'NAME', BeginOffset: 38, EndOffset: 44, Score: 0.78 },   // "AP-505" → false positive
-        { Type: 'EMAIL', BeginOffset: 56, EndOffset: 78, Score: 0.997 },  // real email
+        { Type: 'EMAIL', BeginOffset: 50, EndOffset: 66, Score: 0.997 }, // "user@example.com"
       ]);
 
       const text = 'Please compare the Aruba access point AP-505 with user@example.com for support.';
@@ -273,8 +282,8 @@ describe('PIITokenizationService', () => {
       expect(result.hasPII).toBe(true);
       expect(result.tokens).toHaveLength(1);
       expect(result.tokens[0].type).toBe('EMAIL');
-      // The hardware model should be preserved in the tokenized text
       expect(result.tokenizedText).toContain('AP-505');
+      expect(result.tokenizedText).not.toContain('user@example.com');
     });
   });
 
