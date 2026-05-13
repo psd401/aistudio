@@ -267,6 +267,23 @@ describe('PIITokenizationService', () => {
       expect(result.tokens).toHaveLength(0);
     });
 
+    it('should tokenize EMAIL at low confidence — high-precision types bypass the confidence gate', async () => {
+      // EMAIL is not in CONFIDENCE_GATED_PII_TYPES, so the score gate does not apply.
+      // Even a low-confidence EMAIL detection must still be tokenized to protect student data.
+      // "user@example.com" occupies indices 0–16 in the text string below.
+      mockComprehendResponse([
+        { Type: 'EMAIL', BeginOffset: 0, EndOffset: 16, Score: 0.50 },
+      ]);
+
+      const text = 'user@example.com needs support today.';
+      const result = await service.tokenize(text, SESSION);
+
+      expect(result.hasPII).toBe(true);
+      expect(result.tokens).toHaveLength(1);
+      expect(result.tokens[0].type).toBe('EMAIL');
+      expect(result.tokenizedText).not.toContain('user@example.com');
+    });
+
     it('should tokenize a mix: reject low-confidence hardware hit, keep high-confidence real PII', async () => {
       // text = 'Please compare the Aruba access point AP-505 with user@example.com for support.'
       // "AP-505"          → indices 38–44

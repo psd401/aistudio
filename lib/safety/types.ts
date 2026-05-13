@@ -292,9 +292,9 @@ export const CONFIDENCE_GATED_PII_TYPES: ReadonlySet<ComprehendPIIType> = new Se
  *
  * See: GitHub issue #972 — PII tokenizer false-positives on hardware part numbers.
  */
-const _envScore = parseFloat(process.env.PII_MIN_CONFIDENCE_SCORE ?? '');
+const envScore = parseFloat(process.env.PII_MIN_CONFIDENCE_SCORE ?? '');
 export const PII_MIN_CONFIDENCE_SCORE: number =
-  !isNaN(_envScore) && _envScore >= 0 && _envScore <= 1 ? _envScore : 0.90;
+  !isNaN(envScore) && envScore >= 0 && envScore <= 1 ? envScore : 0.90;
 
 /**
  * Custom PII pattern definition for district-specific identifiers
