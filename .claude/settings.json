@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/agent-startup.sh 2>&1 | tee /tmp/agent-startup.log"
+          }
+        ]
+      }
+    ]
+  }
+}
