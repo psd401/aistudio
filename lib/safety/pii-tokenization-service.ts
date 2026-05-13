@@ -209,12 +209,7 @@ export class PIITokenizationService {
       // Detect PII entities from Amazon Comprehend
       const comprehendEntities = await this.detectPII(text);
 
-      // Filter to K-12 relevant PII types above the per-type (or global) confidence
-      // threshold. PII_TYPE_CONFIDENCE_OVERRIDES allows DATE_TIME to require a higher
-      // floor (0.97) so real birthdates are protected while firmware revision strings
-      // (e.g., "8.11.2") that Comprehend scores ~0.65–0.93 are skipped. The global
-      // PII_CONFIDENCE_THRESHOLD (0.90) blocks low-confidence NAME misclassifications
-      // of hardware model numbers like "AP-515". See issue #950 / #972.
+      // Per-type floor via PII_TYPE_CONFIDENCE_OVERRIDES; DATE_TIME uses a higher override to protect birthdates while skipping firmware strings.
       const relevantComprehendEntities = comprehendEntities.filter((entity) => {
         if (!K12_PII_TYPES.includes(entity.type as ComprehendPIIType)) return false;
         const floor = PII_TYPE_CONFIDENCE_OVERRIDES[entity.type as ComprehendPIIType] ?? PII_CONFIDENCE_THRESHOLD;

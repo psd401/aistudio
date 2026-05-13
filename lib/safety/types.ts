@@ -249,25 +249,10 @@ export type ComprehendPIIType =
   | 'USERNAME'
   | 'PASSWORD';
 
-/**
- * Minimum Comprehend confidence score (0–1) required before tokenizing a detected entity.
- * Scores below this threshold are treated as likely false positives and skipped.
- * Without this gate, Comprehend misclassifies hardware model/part numbers (e.g., "AP-515",
- * "JW186A") as NAME at low confidence, causing the AI to see [PII:uuid] placeholders
- * and tell users their input was "redacted". See issue #950 / #972.
- */
+// Hardware model numbers (e.g. "AP-515") misclassify as NAME at low confidence; skip detections below this score.
 export const PII_CONFIDENCE_THRESHOLD = 0.90;
 
-/**
- * Per-type confidence overrides that supersede PII_CONFIDENCE_THRESHOLD.
- *
- * DATE_TIME requires a higher floor (0.97) because Comprehend routinely
- * scores hardware firmware/revision strings (e.g., "8.11.2", "AP-505") in
- * the 0.65–0.93 range as DATE_TIME, while actual calendar dates (birthdates,
- * enrollment dates) score above 0.97. Keeping DATE_TIME in K12_PII_TYPES with
- * a raised threshold protects FERPA-sensitive dates without false-positiving
- * on hardware specs. See issue #950 / #972.
- */
+// DATE_TIME uses a higher floor: firmware strings ("8.11.2") score 0.65–0.93; real birthdates (FERPA) score >0.97.
 export const PII_TYPE_CONFIDENCE_OVERRIDES: Partial<Record<ComprehendPIIType, number>> = {
   DATE_TIME: 0.97,
 };
