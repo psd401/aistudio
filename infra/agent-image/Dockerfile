@@ -195,7 +195,13 @@ RUN cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no
 RUN cd /opt/psd-skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
 RUN cd /opt/psd-skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund
 RUN cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund
-RUN cd /opt/psd-skills/psd-data && npm install --omit=dev --no-audit --no-fund
+# psd-data depends on @aws-sdk/client-secrets-manager — the SAME package
+# psd-workspace already installed. Rather than duplicate the entire SDK tree
+# (~2,900 files, ~7 MB), symlink to psd-workspace's node_modules. Node's
+# resolver walks up looking for node_modules, so requires from psd-data
+# resolve through the symlink into the shared tree. Both skills pin the
+# same major version (^3.0.0) so the shared install is API-compatible.
+RUN ln -s ../psd-workspace/node_modules /opt/psd-skills/psd-data/node_modules
 # psd-freshservice has zero npm dependencies (native fetch + child_process only).
 # psd-brand-guidelines has zero npm dependencies (config + static assets only).
 # psd-github has zero npm dependencies (wraps /usr/local/bin/gh).
