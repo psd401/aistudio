@@ -85,8 +85,10 @@ async function main() {
   let command = args.command;
 
   // 1. Phase 1 hard gates — refused at the skill layer regardless of scope
-  // or how the model phrases the request.
-  const gateCheck = enforcePhase1Gates(command);
+  // or how the model phrases the request. The scope+ownerEmail context lets
+  // the gate apply a narrow exception for share-to-caller handoffs (the
+  // agent shares files it owns back to the conversation owner, read-only).
+  const gateCheck = enforcePhase1Gates(command, { scope, ownerEmail });
   if (!gateCheck.allowed) {
     emit({
       status: 'phase1-forbidden',

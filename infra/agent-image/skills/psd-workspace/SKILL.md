@@ -68,6 +68,22 @@ These cannot be bypassed by phrasing. The skill returns exit code 13 with `statu
 - **No deletes.** Mail (delete/trash/batchDelete), events, calendars, Drive files, drive trash, tasks, tasklists.
 - **No permission changes.** `drive.permissions.create/update/delete`.
 
+**Narrow exception — share-to-caller handoff.** `drive.permissions.create` is permitted in ONE case: the agent shares a file it owns back to the conversation's caller, read-only. ALL of the following must be true:
+
+- `--scope agent` (file is in the agent's own Drive)
+- payload `type: "user"` (no domain / group / anyone)
+- payload `role: "reader"` or `"commenter"` (no writer / owner)
+- payload `emailAddress` matches the `--user` arg exactly (caller only; no third parties)
+
+Use this when you've created an artifact for the user (investigation report, generated doc, etc.) in your own Drive and need to hand it back. Example:
+
+```bash
+gws drive.permissions.create --scope agent --user hagelk@psd401.net \
+  --json '{"fileId":"<id>","type":"user","role":"reader","emailAddress":"hagelk@psd401.net"}'
+```
+
+Anything outside the narrow shape is still blocked.
+
 If a user explicitly asks the agent to send something, post the draft + a clear "I drafted it; reply 'send' if it's right" in Chat instead. The user clicks send themselves.
 
 ## Marker conventions (auto-injected on writes)
