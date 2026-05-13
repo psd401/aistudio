@@ -68,7 +68,7 @@ try:
 except Exception as e:
     sys.stderr.write('[agent-startup] boto3: ' + str(e) + '\n')
     print('')
-" 2>/dev/null || echo "")
+" || echo "")
   fi
 
   # Method 3: local .env file (development / local sessions)
@@ -96,7 +96,7 @@ except Exception as e:
   #          the PAT value to stderr, leaking the token into session logs.
   if printf '%s\n' "$pat" | gh auth login --with-token 2>&1; then
     echo "[agent-startup] GitHub CLI authentication restored."
-    timeout 15 gh auth status 2>/dev/null | head -4 || true
+    timeout 15 gh auth status 2>/dev/null | head -4 >&2 || true
   else
     echo "[agent-startup] WARNING: 'gh auth login --with-token' failed." >&2
     return 1
