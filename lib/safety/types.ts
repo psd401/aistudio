@@ -250,8 +250,23 @@ export type ComprehendPIIType =
   | 'PASSWORD';
 
 /**
+ * Minimum Comprehend confidence score (0–1) required before tokenizing a detected entity.
+ * Scores below this threshold are treated as likely false positives and skipped.
+ * Without this gate, Comprehend misclassifies hardware model/part numbers (e.g., "AP-515",
+ * "JW186A") as NAME at low confidence, causing the AI to see [PII:uuid] placeholders
+ * and tell users their input was "redacted". See issue #950 / #972.
+ */
+export const PII_CONFIDENCE_THRESHOLD = 0.90;
+
+/**
  * PII types to tokenize for K-12 safety
  * (Subset of Comprehend types relevant for student data protection)
+ *
+ * DATE_TIME is intentionally excluded: timestamps and date-like strings appear
+ * in virtually all technical conversations (firmware versions, AP revisions, specs)
+ * and are not uniquely re-identifying on their own. Comprehend frequently
+ * misclassifies hardware revision strings (e.g., "8.11.2") as DATE_TIME,
+ * causing false-positive tokenization. See issue #950 / #972.
  */
 export const K12_PII_TYPES: ComprehendPIIType[] = [
   'NAME',
@@ -259,7 +274,6 @@ export const K12_PII_TYPES: ComprehendPIIType[] = [
   'PHONE',
   'ADDRESS',
   'SSN',
-  'DATE_TIME',
   'AGE',
 ];
 

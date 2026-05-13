@@ -36,7 +36,7 @@ import type {
   PIITokenDynamoDBItem,
   GuardrailsConfig,
 } from './types';
-import { K12_PII_TYPES, CUSTOM_PII_PATTERNS, type ComprehendPIIType } from './types';
+import { K12_PII_TYPES, PII_CONFIDENCE_THRESHOLD, CUSTOM_PII_PATTERNS, type ComprehendPIIType } from './types';
 
 /**
  * PIITokenizationService - Reversible PII protection for student data
@@ -209,9 +209,13 @@ export class PIITokenizationService {
       // Detect PII entities from Amazon Comprehend
       const comprehendEntities = await this.detectPII(text);
 
-      // Filter to only K-12 relevant PII types
+      // Filter to K-12 relevant PII types above the confidence threshold.
+      // The threshold prevents Comprehend false positives (e.g., hardware model
+      // numbers like "AP-515" or "JW186A" misclassified as NAME at low confidence)
+      // from being tokenized and breaking technical conversations. See issue #950.
       const relevantComprehendEntities = comprehendEntities.filter((entity) =>
-        K12_PII_TYPES.includes(entity.type as ComprehendPIIType)
+        K12_PII_TYPES.includes(entity.type as ComprehendPIIType) &&
+        entity.score >= PII_CONFIDENCE_THRESHOLD
       );
 
       // Detect custom PII patterns (e.g., student IDs)
