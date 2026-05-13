@@ -264,6 +264,20 @@ export const K12_PII_TYPES: ComprehendPIIType[] = [
 ];
 
 /**
+ * Minimum Comprehend confidence score required to tokenize a detected entity.
+ *
+ * Comprehend's ML model can misclassify alphanumeric hardware identifiers
+ * (e.g., "AP-505", "JW177A") as NAME, and numeric version/revision strings
+ * as DATE_TIME or AGE. Actual PII (real names, dates of birth) consistently
+ * scores ≥ 0.99 while misclassified technical strings score substantially lower.
+ * A threshold of 0.90 eliminates the hardware false-positive class while
+ * preserving all genuine PII detections.
+ *
+ * See: GitHub issue #972 — PII tokenizer false-positives on hardware part numbers.
+ */
+export const PII_MIN_CONFIDENCE_SCORE = 0.90;
+
+/**
  * Custom PII pattern definition for district-specific identifiers
  *
  * Use this to define patterns that Amazon Comprehend doesn't detect,
