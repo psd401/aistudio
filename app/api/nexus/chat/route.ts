@@ -36,6 +36,10 @@ import {
   saveAssistantMessage,
 } from './chat-helpers';
 
+import { eq, and } from 'drizzle-orm';
+import { executeQuery } from '@/lib/db/drizzle-client';
+import { nexusConversations } from '@/lib/db/schema';
+
 // Allow streaming responses up to 30 minutes. Deep Research runs take 5–25
 // minutes; standard chat and image-gen finish well within this window.
 // Platforms that enforce maxDuration (e.g. Vercel) will terminate the request
@@ -438,6 +442,7 @@ async function handleDeepResearch(params: {
     provider: modelConfig.provider,
     modelId,
     dbModelId,
+    log,
   });
   if ('error' in convSetup) return convSetup.error;
   const { conversationId, conversationTitle } = convSetup;
@@ -720,8 +725,9 @@ async function setupConversation(params: {
   provider: string;
   modelId: string;
   dbModelId: number;
+  log: ReturnType<typeof createLogger>;
 }): Promise<{ conversationId: string; conversationTitle: string } | { error: Response }> {
-  const { conversationIdValue, messages, userId, provider, modelId, dbModelId } = params;
+  const { conversationIdValue, messages, userId, provider, modelId, dbModelId, log } = params;
 
   let conversationId = conversationIdValue || '';
   let conversationTitle = 'New Conversation';
@@ -731,6 +737,29 @@ async function setupConversation(params: {
     const convResult = await createConversation({ userId, provider, modelId, title: conversationTitle });
     if ('error' in convResult) return convResult;
     conversationId = convResult.conversationId;
+  } else {
+    // Verify the authenticated user owns this conversation before appending messages.
+    // Without this check any authenticated user can inject messages into any conversation.
+    const owned = await executeQuery(
+      (db) => db
+        .select({ id: nexusConversations.id })
+        .from(nexusConversations)
+        .where(and(
+          eq(nexusConversations.id, conversationId),
+          eq(nexusConversations.userId, userId)
+        ))
+        .limit(1),
+      'verifyConversationOwnership'
+    );
+    if (!owned || owned.length === 0) {
+      log.warn('Conversation ownership check failed — access denied', { conversationId, userId });
+      return {
+        error: new Response(
+          JSON.stringify({ error: 'Conversation not found or access denied' }),
+          { status: 403, headers: { 'Content-Type': 'application/json' } }
+        )
+      };
+    }
   }
 
   // Save user message — guard against truly empty messages (no parts, no content)
@@ -813,7 +842,7 @@ export async function POST(req: Request) {
 
     // 6. Setup conversation and save user message
     const convSetup = await setupConversation({
-      conversationIdValue, messages, userId, provider, modelId, dbModelId
+      conversationIdValue, messages, userId, provider, modelId, dbModelId, log
     });
     if ('error' in convSetup) return convSetup.error;
     const { conversationId, conversationTitle } = convSetup;
