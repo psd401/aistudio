@@ -23,10 +23,11 @@ function syncCognitoRefreshForAgentBackground(
     try {
       const mod = await import("@/lib/auth/agent-token-sync")
       await mod.syncCognitoRefreshForAgent(email, refreshToken)
-    } catch {
+    } catch (err) {
       // edge runtime, missing IAM, etc. — swallow. The on-demand consent
       // flow is the fallback for users whose token never makes it here.
-      // No logger access in edge contexts is acceptable.
+      // eslint-disable-next-line no-console
+      console.error("[agent-token-sync] background sync failed:", err)
     }
   })()
 }
