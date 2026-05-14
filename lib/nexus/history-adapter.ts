@@ -29,14 +29,23 @@ type MessageData = {
   [key: string]: unknown
 }
 
+// Allow only https: image URLs to prevent javascript:/data: XSS via stored imageUrl values.
+const isSafeImageUrl = (url: string): boolean => {
+  try {
+    return new URL(url).protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 // Helper to convert a content part to text format
 // Handles text, image, and other part types by converting to displayable text
 const convertPartToText = (part: { type: string; text?: string; imageUrl?: string; [key: string]: unknown }): string => {
   if (part.type === 'text') {
     return part.text || ''
   }
-  if (part.type === 'image' && part.imageUrl) {
-    // Convert image parts to markdown image syntax
+  if (part.type === 'image' && part.imageUrl && isSafeImageUrl(part.imageUrl)) {
+    // Convert image parts to markdown image syntax (URL already validated as https: only)
     return `![Generated Image](${part.imageUrl})`
   }
   // Skip step-start, step-finish, and other control types
@@ -44,6 +53,19 @@ const convertPartToText = (part: { type: string; text?: string; imageUrl?: strin
     return ''
   }
   return ''
+}
+
+// Validated role set — guards against non-standard roles from partial writes or migrations.
+const VALID_ROLES = new Set(['user', 'assistant', 'system'] as const)
+type ValidRole = 'user' | 'assistant' | 'system'
+const safeRole = (role: string | undefined): ValidRole =>
+  VALID_ROLES.has(role as ValidRole) ? (role as ValidRole) : 'user'
+
+// Returns a valid Date if the value is parseable and finite, otherwise undefined.
+const safeDate = (value: string | Date | undefined): Date | undefined => {
+  if (!value) return undefined
+  const d = new Date(value)
+  return isFinite(d.getTime()) ? d : undefined
 }
 
 // JSON object type for tool arguments (matches assistant-ui's ReadonlyJSONObject)
@@ -106,7 +128,7 @@ const createExportedMessageRepository = (messages: MessageData[]): ExportedMessa
               }
               return toolPart
             }
-            if (partData.type === 'image' && partData.imageUrl) {
+            if (partData.type === 'image' && partData.imageUrl && isSafeImageUrl(partData.imageUrl)) {
               return { type: 'text', text: `![Generated Image](${partData.imageUrl})` }
             }
             // Skip step-start, step-finish, tool-result (legacy), and other control types
@@ -126,14 +148,20 @@ const createExportedMessageRepository = (messages: MessageData[]): ExportedMessa
         content = [{ type: 'text', text: '' }]
       }
 
+      // Validate role and createdAt before passing to fromThreadMessageLike.
+      // msg.role arrives from the DB and may be non-standard in partial-write scenarios;
+      // msg.createdAt may be an unparseable or extreme string — both must be sanitised.
+      const msgRole = safeRole(msg.role)
+      const msgDate = safeDate(msg.createdAt as string | Date | undefined)
+
       try {
         return {
           // Cast content to unknown to allow tool-result parts (assistant-ui handles them internally)
           message: INTERNAL.fromThreadMessageLike({
             id: msg.id,
-            role: msg.role,
+            role: msgRole,
             content: content as unknown as string,  // Cast needed for tool-result parts
-            ...(msg.createdAt && { createdAt: new Date(msg.createdAt) }),
+            ...(msgDate && { createdAt: msgDate }),
           }, msg.id, { type: 'complete', reason: 'unknown' }),
           parentId: index === 0 ? null : validMessages[index - 1]?.id || null
         }
@@ -144,12 +172,13 @@ const createExportedMessageRepository = (messages: MessageData[]): ExportedMessa
         log.warn('Failed to convert message, using placeholder', {
           messageId: msg.id,
           messageIndex: index,
-          error: error instanceof Error ? error.message : String(error),
+          // Truncate error message to avoid forwarding arbitrary content to logs (L-2)
+          error: error instanceof Error ? error.message.substring(0, 200) : String(error).substring(0, 200),
         })
         return {
           message: INTERNAL.fromThreadMessageLike({
             id: msg.id,
-            role: msg.role,
+            role: msgRole,
             content: [{ type: 'text', text: '[Message could not be loaded]' }] as unknown as string,
           }, msg.id, { type: 'complete', reason: 'unknown' }),
           parentId: index === 0 ? null : validMessages[index - 1]?.id || null
