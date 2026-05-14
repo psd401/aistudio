@@ -170,8 +170,10 @@ async function main() {
       const reason = requireArg(args, 'reason');
       const sql = requireArg(args, 'sql');
       const toolArgs = { reason, sql_query: sql };
-      if (args['export']) toolArgs.export = true;
-      if (args.view_results) toolArgs.view_results = true;
+      // parseArgs returns the string "false" for `--flag false`, which is
+      // truthy. Explicitly convert to boolean so --export false / --view-results false work.
+      if (args['export'] !== undefined) toolArgs.export = args['export'] === true || args['export'] === 'true';
+      if (args.view_results !== undefined) toolArgs.view_results = args.view_results === true || args.view_results === 'true';
       const limit = parseIntArg('limit', args.limit);
       const offset = parseIntArg('offset', args.offset);
       if (limit !== undefined) toolArgs.limit = limit;

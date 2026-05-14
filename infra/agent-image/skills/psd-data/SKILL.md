@@ -164,6 +164,8 @@ node /opt/psd-skills/psd-data/run.js lesson-check --user <caller-email> \
 
 **Rate a lesson** that came back from `lesson-check`:
 
+`--feedback` is **required** when `--rating unhelpful`; optional (but encouraged) for `helpful`.
+
 ```bash
 node /opt/psd-skills/psd-data/run.js lesson-rate --user <caller-email> \
   --id 42 --rating helpful
