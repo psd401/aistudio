@@ -57,7 +57,7 @@ function extractPartText(part: Record<string, unknown>): string | null {
 // scanAttachmentPII — mirrors the logic from route.ts for unit testing
 // without importing the server-only route module.
 // ---------------------------------------------------------------------------
-type TokenMapping = { token: string; original: string; type: string };
+type TokenMapping = { token: string; placeholder: string; original: string; type: string };
 
 async function runScanAttachmentPII(
   messagesWithParts: Array<{ id: string; role: string; parts: Array<Record<string, unknown>> }>,
@@ -92,7 +92,7 @@ async function runScanAttachmentPII(
   const scanResult = await safetyService.processInput(combinedText, 'session-1');
   if (!scanResult.tokens || scanResult.tokens.length === 0) return [];
 
-  const replacements = new Map(scanResult.tokens.map(t => [t.original, t.token]));
+  const replacements = new Map(scanResult.tokens.map(t => [t.original, t.placeholder]));
 
   const updatedParts = [...lastUserMsg.parts];
   for (const { partIdx, text } of attachmentTexts) {
@@ -113,7 +113,7 @@ async function runScanAttachmentPII(
           const cpObj = cp as Record<string, unknown>;
           if (cpObj.type === 'text' && typeof cpObj.text === 'string') {
             let t = cpObj.text as string;
-            for (const [orig, tok] of replacements) t = t.replaceAll(orig, tok);
+            for (const [orig, ph] of replacements) t = t.replaceAll(orig, ph);
             return { ...cpObj, text: t };
           }
           return cp;
@@ -126,7 +126,12 @@ async function runScanAttachmentPII(
 }
 
 const mockTokens: TokenMapping[] = [
-  { token: '[PII:aaaa-bbbb-cccc-dddd-eeeeffff0000]', original: 'Kris', type: 'PERSON' },
+  {
+    token: 'aaaa-bbbb-cccc-dddd-eeeeffff0000',
+    placeholder: '[PII:aaaa-bbbb-cccc-dddd-eeeeffff0000]',
+    original: 'Kris',
+    type: 'PERSON',
+  },
 ];
 
 function makeMockService(opts: { piiEnabled: boolean; tokens?: TokenMapping[] }) {
