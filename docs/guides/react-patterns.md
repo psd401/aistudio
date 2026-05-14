@@ -195,9 +195,14 @@ useEffect(() => {
     timer = setTimeout(poll, interval)
   }
   const poll = () => {
-    fetchData().finally(() => {
-      if (!cancelled) scheduleNext()
-    })
+    fetchData()
+      .then(() => { if (!cancelled) scheduleNext() })
+      .catch((err) => {
+        // Always handle rejections — unhandled promise rejections in useEffect
+        // closures are not caught by React error boundaries.
+        log.warn('poll failed', err)
+        if (!cancelled) scheduleNext() // retry or stop based on your error strategy
+      })
   }
 
   poll()
@@ -210,8 +215,9 @@ useEffect(() => {
 
 **Rules:**
 - Any `.then()` or `.finally()` inside a polling `useEffect` must guard on a `cancelled` flag
-- Use `.finally()` instead of `.then()` so `scheduleNext` fires on both success and failure
 - Always pair `clearTimeout` with a `cancelled = true` assignment in cleanup
+- **Always add a `.catch()`** — unhandled promise rejections inside `useEffect` closures bypass React error boundaries and can produce silent polling failures
+- Handle errors inside `fetchData` or at the `.catch()` on the polling chain; do not let rejections go unhandled
 
 *See also: Polling Timer Churn section above — `cancelled` flag and `useRef` for `isLoading` are complementary; both are needed.*
 
@@ -300,6 +306,8 @@ conversationIdRef.current = conversationId // synchronous render-body assignment
 const historyAdapter = useMemo(
   () => createHistoryAdapter(() => conversationIdRef.current),
   [] // empty deps — instance never recreated
+  // The empty array is intentional: the ref object is stable across renders;
+  // conversationIdRef.current always returns the latest value via the getter.
 )
 ```
 
@@ -307,6 +315,7 @@ const historyAdapter = useMemo(
 - Any object passed to `useChatRuntime` (adapter, runtime config) must have a stable reference across renders
 - When the adapter needs a value that changes over time, pass a ref-based getter, not the value directly
 - Treat `useChatRuntime` adapter props like `useEffect` cleanup functions — new reference = runtime teardown and re-initialization
+- The empty `useMemo` dep array here is correct, not an `exhaustive-deps` oversight — the getter function captures the ref object (stable), not the ref's value
 
 ---
 
