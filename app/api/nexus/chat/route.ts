@@ -861,18 +861,16 @@ async function scanAttachmentPII(
     combinedLength: combinedText.length,
   });
 
-  let scanResult;
-  try {
-    scanResult = await contentSafetyService.processInput(combinedText, sessionId);
-  } catch (err) {
-    log.warn('Pre-flight attachment PII scan failed — continuing without tokenization', {
-      requestId,
-      error: err instanceof Error ? err.message : String(err),
+  const scanResult = await contentSafetyService.processInput(combinedText, sessionId)
+    .catch((err: unknown) => {
+      log.warn('Pre-flight attachment PII scan failed — continuing without tokenization', {
+        requestId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
     });
-    return [];
-  }
 
-  if (!scanResult.tokens || scanResult.tokens.length === 0) return [];
+  if (!scanResult || !scanResult.tokens || scanResult.tokens.length === 0) return [];
 
   // Build a quick-lookup map: original value → placeholder string (e.g. "[PII:uuid]")
   // TokenMapping.token is the raw UUID; TokenMapping.placeholder is the formatted

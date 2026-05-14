@@ -149,7 +149,7 @@ function makeMockService(opts: { piiEnabled: boolean; tokens?: TokenMapping[] })
     processInput: jest.fn().mockResolvedValue({
       allowed: true,
       tokens: opts.tokens ?? [],
-    }) as jest.MockedFunction<(text: string, sessionId: string) => Promise<{ allowed: boolean; tokens: TokenMapping[] }>>,
+    }) as jest.Mock,
   };
 }
 
