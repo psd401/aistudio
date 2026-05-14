@@ -146,7 +146,7 @@ const mockTokens: TokenMapping[] = [
 function makeMockService(opts: { piiEnabled: boolean; tokens?: TokenMapping[] }) {
   return {
     isPiiTokenizationEnabled: () => opts.piiEnabled,
-    processInput: jest.fn().mockResolvedValue({
+    processInput: (jest.fn() as jest.Mock<any>).mockResolvedValue({
       allowed: true,
       tokens: opts.tokens ?? [],
     }),
