@@ -173,7 +173,6 @@ export async function syncCognitoRefreshForAgent(
               { Key: "Environment", Value: environment },
               { Key: "ManagedBy", Value: "aistudio" },
               { Key: "OwnerEmail", Value: ownerEmail },
-              { Key: "Purpose", Value: "agent-cognito-refresh" },
             ],
           }),
         )
