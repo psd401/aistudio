@@ -28,9 +28,8 @@ const AGENT_INTERNAL_API_KEY_SECRET_ID = process.env.AGENT_INTERNAL_API_KEY_SECR
 
 // Two slots per user (#912 Phase 1 — see secrets-manager.ts):
 //   'agent_account' = OAuth on agnt_<uniqname>@psd401.net (broad scopes)
-//   'user_account'  = OAuth on the human user (narrow Phase 1 scopes:
-//                     gmail.readonly, gmail.compose, calendar, tasks,
-//                     drive.file)
+//   'user_account'  = OAuth on the human user (scopes:
+//                     gmail.modify, calendar, tasks, drive.file)
 //
 // The user_account path is suffixed (-user) so revocation tools can iterate
 // by prefix and tell the slots apart.
@@ -236,10 +235,15 @@ function execGws(commandString, accessToken) {
 // argv-tokenized command before exec.
 //
 // Phase 1 product policy:
-//   - No sending mail (drafts only — user must hit send themselves)
+//   - No sending mail (drafts only — user must hit send themselves).
+//     Note: the OAuth grant on the user_account scope is now gmail.modify
+//     (upgraded from gmail.compose) so the agent can archive/label on the
+//     user's behalf. gmail.modify ALSO carries send capability at the API
+//     level, so the regex below is now the sole barrier against the agent
+//     actually putting a message on the wire. Treat this list as load-bearing.
 //   - No deleting anything (mail, events, files, tasks)
-//   - No modifying user-created mail (modify labels via gmail.users.messages.modify
-//     is allowed for marking-as-read / archiving, but trash is not)
+//   - Archive / label-modify allowed via gmail.users.messages.modify;
+//     trashing / permanent delete still blocked below.
 //
 // Each entry: {pattern: regex, reason: human-readable explanation}.
 // `pattern` matches against the SPACE-JOINED argv tokens, lowercased — so

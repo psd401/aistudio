@@ -20,12 +20,14 @@ import { addUserRole } from "@/lib/db/drizzle/user-roles"
  * because the agent owns its own Calendar/Drive/Chat presence and may need
  * write access to shared resources.
  *
- * user_account: the human's own identity. NARROW Phase 1 scopes only —
- * read mail + create drafts, manage tasks, scoped Drive files. No send,
- * no destructive operations. Calendar scope included so the agent can
- * write events directly to the user's calendar (Calendar via sharing
- * already worked, but the user wants the agent to be able to make
- * changes from the user-account side as well).
+ * user_account: the human's own identity. Mail is gmail.modify so the
+ * agent can read, draft, send, archive, and label on the user's behalf
+ * (no permanent delete — gmail.modify cannot bypass Trash). This is a
+ * single scope because Google does not split "modify metadata" from
+ * "send" — once you go beyond gmail.compose, archiving requires
+ * gmail.modify and that scope includes send. The agent's behavioral
+ * rules (psd-rules) still gate sending on explicit user confirmation.
+ * Calendar / Tasks / Drive.file remain narrow.
  */
 const SCOPES_BY_KIND: Record<"agent_account" | "user_account", string[]> = {
   agent_account: [
@@ -41,9 +43,11 @@ const SCOPES_BY_KIND: Record<"agent_account" | "user_account", string[]> = {
     "profile",
   ],
   user_account: [
-    // Phase 1: read mail and create drafts only. No send.
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.compose",
+    // gmail.modify supersedes readonly + compose and adds archive/label/
+    // mark-read/trash + send. No permanent-delete bypass. Granting this
+    // requires a fresh consent click — existing refresh tokens retain
+    // only the original scope set until re-issued.
+    "https://www.googleapis.com/auth/gmail.modify",
     // Full calendar so the agent can write events with markers (per user
     // direction 2026-04-26: "the way it is working right now is fine").
     "https://www.googleapis.com/auth/calendar",
@@ -420,7 +424,7 @@ async function exchangeAndStore(
       "https://www.googleapis.com/auth/drive",
     ],
     user_account: [
-      "https://www.googleapis.com/auth/gmail.readonly",
+      "https://www.googleapis.com/auth/gmail.modify",
       "https://www.googleapis.com/auth/calendar",
       "https://www.googleapis.com/auth/tasks",
     ],

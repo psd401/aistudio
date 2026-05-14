@@ -13,7 +13,7 @@ Google Workspace access for the user's data, gated by Phase 1 boundaries (#912).
 
 Phase 1 introduces two parallel OAuth identities per user. The `--scope` flag selects which:
 
-- `--scope user` (**default**) — OAuth on the human user (e.g. `hagelk@psd401.net`). Narrow scopes: `gmail.readonly`, `gmail.compose`, `calendar`, `tasks`, `drive.file`. Use this for reading the user's mail, managing their tasks, writing to their calendar, creating new Drive files for them.
+- `--scope user` (**default**) — OAuth on the human user (e.g. `hagelk@psd401.net`). Scopes: `gmail.modify` (read + draft + send + archive/label, no permanent delete), `calendar`, `tasks`, `drive.file`. Use this for reading the user's mail, managing their tasks, writing to their calendar, creating new Drive files for them. Sending is gated by behavioral rules — always confirm before actually sending.
 - `--scope agent` — OAuth on the agent identity (e.g. `agnt_hagelk@psd401.net`). Broad scopes. Use this for actions the agent takes *as itself* (the agent's own calendar, drafts owned by the agent, agent-owned Drive folder).
 
 If you omit `--scope`, the skill defaults to `user`. Phase 1 work is overwhelmingly on user data.

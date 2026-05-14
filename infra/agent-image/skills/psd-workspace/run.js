@@ -9,8 +9,10 @@
  * the skill uses to authenticate the gws call:
  *
  *   --scope user (default for Phase 1) →
- *     OAuth on the human user's identity (hagelk@psd401.net), narrow scopes
- *     (gmail.readonly, gmail.compose, calendar, tasks, drive.file). Use for
+ *     OAuth on the human user's identity (hagelk@psd401.net), scopes
+ *     (gmail.modify, calendar, tasks, drive.file). gmail.modify covers
+ *     read + draft + archive/label + (technically) send — sending is
+ *     blocked by the skill's regex gate, not by the OAuth scope. Use for
  *     reading/writing the human's own data.
  *
  *   --scope agent →
