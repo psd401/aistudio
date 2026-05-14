@@ -468,5 +468,5 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 **Knowledge Base**: Stored in S3, retrieved during execution
 
 ---
-*Token-optimized for Claude Code efficiency. Last updated: January 2025*
+*Token-optimized for Claude Code efficiency. Last updated: May 2026*
 *Infrastructure optimized via Epic #372 - AWS Well-Architected Framework aligned*
