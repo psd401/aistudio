@@ -1,4 +1,5 @@
 import type { UIMessage, LanguageModel, ModelMessage, ToolSet } from 'ai';
+import type { TokenMapping } from '@/lib/safety/types';
 import type { SSEEventEmitter } from '@/types/sse-events';
 import type { SSEEvent } from './sse-event-types';
 
@@ -74,6 +75,14 @@ export interface StreamRequest {
   
   // Callbacks for streaming events
   callbacks?: StreamingCallbacks;
+
+  /**
+   * Token mappings pre-computed by the route (e.g. from scanning attachment text
+   * before it is moved to S3). These are merged with any tokens produced by the
+   * streaming service's own inline-text scan so the detokenization transform can
+   * reverse PII from both inline text and document attachments.
+   */
+  precomputedInputTokenMappings?: TokenMapping[];
 }
 
 export interface StreamResponse {

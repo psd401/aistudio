@@ -262,16 +262,43 @@ interface OutputSafetyCheckResult {
 }
 
 /**
- * Extract text content from a UIMessage (AI SDK v5 format)
+ * Extract text content from a UIMessage (AI SDK v6 format).
+ * Handles both inline text parts and document/file parts that may still contain
+ * their extracted text (i.e. before they are moved to S3 by processMessagesWithAttachments).
  */
-function extractTextFromUIMessage(message: { parts?: Array<{ type: string; text?: string }> }): string {
+function extractTextFromUIMessage(
+  message: { parts?: Array<{ type: string; text?: string; content?: unknown; data?: unknown }> }
+): string {
   if (!message.parts || !Array.isArray(message.parts)) {
     return '';
   }
-  return message.parts
-    .filter((part) => part.type === 'text' && part.text)
-    .map((part) => part.text)
-    .join('\n');
+  const segments: string[] = [];
+  for (const part of message.parts) {
+    if (part.type === 'text' && part.text) {
+      segments.push(part.text);
+      continue;
+    }
+    // Extract text from document / file parts when their content is still present
+    // (i.e. the message has not yet been through processMessagesWithAttachments).
+    if (part.type === 'document' || part.type === 'file') {
+      const raw = (part as { content?: unknown; data?: unknown }).content
+        ?? (part as { content?: unknown; data?: unknown }).data;
+      if (typeof raw === 'string' && raw) {
+        segments.push(raw);
+      } else if (Array.isArray(raw)) {
+        for (const cp of raw) {
+          if (
+            typeof cp === 'object' && cp !== null &&
+            (cp as Record<string, unknown>).type === 'text' &&
+            typeof (cp as Record<string, unknown>).text === 'string'
+          ) {
+            segments.push((cp as { text: string }).text);
+          }
+        }
+      }
+    }
+  }
+  return segments.join('\n');
 }
 
 /**
@@ -821,9 +848,16 @@ export class UnifiedStreamingService {
           source: request.source
         });
 
+        // Merge inline-scan tokens with any tokens pre-computed at the route
+        // level (e.g. from scanning attachment / document text before S3 storage).
+        const allTokenMappings: TokenMapping[] = [
+          ...(request.precomputedInputTokenMappings || []),
+          ...(inputSafetyResult?.tokens || []),
+        ];
+
         return buildStreamResponse({
           result, requestId, capabilities, telemetryConfig,
-          tokenMappings: inputSafetyResult?.tokens || [],
+          tokenMappings: allTokenMappings,
           log
         });
         

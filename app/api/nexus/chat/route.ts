@@ -9,6 +9,8 @@ import { processMessagesWithAttachments } from '@/lib/services/attachment-storag
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import type { StreamRequest } from '@/lib/streaming/types';
 import { ContentSafetyBlockedError } from '@/lib/streaming/types';
+import { getContentSafetyService } from '@/lib/safety';
+import type { TokenMapping } from '@/lib/safety/types';
 import { getModelConfig } from '@/lib/ai/model-config';
 import { getConnectorTools } from '@/lib/mcp/connector-service';
 import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
@@ -131,16 +133,20 @@ async function executeStreaming(params: {
   dbModelId: number;
   log: ReturnType<typeof createLogger>;
   timer: (data: Record<string, unknown>) => void;
+  precomputedInputTokenMappings?: TokenMapping[];
 }): Promise<Response> {
   const {
     messages, modelConfig, userId, sessionId, conversationId,
     conversationIdValue, conversationTitle, enabledTools, enabledConnectors,
-    connectorToolResults, failedConnectorIds, reasoningEffort, responseMode, requestId, dbModelId, log, timer
+    connectorToolResults, failedConnectorIds, reasoningEffort, responseMode,
+    requestId, dbModelId, log, timer, precomputedInputTokenMappings
   } = params;
 
   const systemPrompt = `You are a helpful AI assistant in the Nexus interface.
 
-When discussing hardware, networking equipment, or technical specifications, treat model numbers, part numbers, and product identifiers as publicly available product information. Do not suggest that such identifiers have been redacted or withheld.`;
+When discussing hardware, networking equipment, or technical specifications, treat model numbers, part numbers, and product identifiers as publicly available product information. Do not suggest that such identifiers have been redacted or withheld.
+
+IMPORTANT: If text contains privacy tokens like [PII:xxxx-xxxx-xxxx-xxxx], preserve them exactly as written. Do not modify, expand, or interpret these tokens.`;
 
   // When MCP connectors are enabled, pre-merge adapter tools + connector tools
   // and pass as request.tools so the streaming service uses them directly
@@ -172,6 +178,7 @@ When discussing hardware, networking equipment, or technical specifications, tre
     // 10 steps is a reasonable upper bound for MCP tool chains (fetch→process→respond).
     maxSteps: connectorToolResults.length > 0 ? 10 : undefined,
     options: { reasoningEffort, responseMode },
+    precomputedInputTokenMappings,
     callbacks: {
       onFinish: createOnFinishCallback({ conversationId, dbModelId, connectorToolResults, log, timer }),
       onError: async (error: Error) => {
@@ -787,6 +794,127 @@ async function setupConversation(params: {
 }
 
 /**
+ * Extract plain text from a single message part (document or file type).
+ * Returns null when the part has no accessible text (e.g. an S3-only reference).
+ */
+function extractPartText(part: Record<string, unknown>): string | null {
+  const raw = part.content ?? part.data;
+  if (typeof raw === 'string' && raw.trim()) return raw;
+  if (Array.isArray(raw)) {
+    const segments = raw
+      .filter(
+        (cp): cp is { type: string; text: string } =>
+          typeof cp === 'object' && cp !== null &&
+          (cp as Record<string, unknown>).type === 'text' &&
+          typeof (cp as Record<string, unknown>).text === 'string'
+      )
+      .map(cp => cp.text);
+    if (segments.length > 0) return segments.join('\n');
+  }
+  return null;
+}
+
+/**
+ * Scan PII in file / document attachment parts of the last user message BEFORE
+ * processMessagesWithAttachments moves their content to S3. Returns token
+ * mappings produced by the scan and mutates `messagesWithParts` in-place so
+ * that document text is tokenized before being stored.
+ *
+ * This runs at the route level so that:
+ * 1. The extracted document text is available (not yet replaced with s3:// refs).
+ * 2. Token mappings can be passed to executeStreaming as `precomputedInputTokenMappings`
+ *    and merged with inline-text tokens from the streaming service's own scan.
+ */
+async function scanAttachmentPII(
+  messagesWithParts: UIMessage[],
+  sessionId: string,
+  log: ReturnType<typeof createLogger>,
+  requestId: string
+): Promise<TokenMapping[]> {
+  const contentSafetyService = getContentSafetyService();
+  if (!contentSafetyService.isPiiTokenizationEnabled()) return [];
+
+  const lastUserIdx = messagesWithParts.length - 1 -
+    [...messagesWithParts].reverse().findIndex(m => m.role === 'user');
+  if (lastUserIdx < 0) return [];
+
+  const lastUserMsg = messagesWithParts[lastUserIdx];
+  if (!Array.isArray(lastUserMsg.parts)) return [];
+
+  const attachmentTexts: Array<{ partIdx: number; text: string }> = [];
+  lastUserMsg.parts.forEach((part, partIdx) => {
+    const p = part as Record<string, unknown>;
+    if (p.type === 'document' || p.type === 'file') {
+      const text = extractPartText(p);
+      if (text) attachmentTexts.push({ partIdx, text });
+    }
+  });
+
+  if (attachmentTexts.length === 0) return [];
+
+  const combinedText = attachmentTexts.map(a => a.text).join('\n');
+  log.info('Running pre-flight PII scan on attachment text', {
+    requestId,
+    attachmentCount: attachmentTexts.length,
+    combinedLength: combinedText.length,
+  });
+
+  let scanResult;
+  try {
+    scanResult = await contentSafetyService.processInput(combinedText, sessionId);
+  } catch (err) {
+    log.warn('Pre-flight attachment PII scan failed — continuing without tokenization', {
+      requestId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+
+  if (!scanResult.tokens || scanResult.tokens.length === 0) return [];
+
+  // Build a quick-lookup map: original value → token string
+  const replacements = new Map(scanResult.tokens.map(t => [t.original, t.token]));
+
+  // Apply tokenization to each attachment part text in-place
+  const updatedParts = [...lastUserMsg.parts];
+  for (const { partIdx, text } of attachmentTexts) {
+    let tokenizedText = text;
+    for (const [original, token] of replacements) {
+      tokenizedText = tokenizedText.replaceAll(original, token);
+    }
+    if (tokenizedText === text) continue;
+
+    const originalPart = updatedParts[partIdx] as Record<string, unknown>;
+    // Preserve whichever field held the text (content vs data)
+    const field = originalPart.content !== undefined ? 'content' : 'data';
+    const rawValue = originalPart[field];
+
+    if (typeof rawValue === 'string') {
+      updatedParts[partIdx] = { ...originalPart, [field]: tokenizedText } as typeof updatedParts[number];
+    } else if (Array.isArray(rawValue)) {
+      const tokenizedArray = rawValue.map(cp => {
+        const cpObj = cp as Record<string, unknown>;
+        if (cpObj.type === 'text' && typeof cpObj.text === 'string') {
+          let t = cpObj.text;
+          for (const [orig, tok] of replacements) t = t.replaceAll(orig, tok);
+          return { ...cpObj, text: t };
+        }
+        return cp;
+      });
+      updatedParts[partIdx] = { ...originalPart, [field]: tokenizedArray } as typeof updatedParts[number];
+    }
+  }
+
+  messagesWithParts[lastUserIdx] = { ...lastUserMsg, parts: updatedParts };
+  log.info('Pre-flight attachment PII tokenized', {
+    requestId,
+    tokenCount: scanResult.tokens.length,
+  });
+
+  return scanResult.tokens;
+}
+
+/**
  * Nexus Chat API - Native Streaming with AI SDK v5
  */
 export async function POST(req: Request) {
@@ -850,8 +978,14 @@ export async function POST(req: Request) {
     if ('error' in convSetup) return convSetup.error;
     const { conversationId, conversationTitle } = convSetup;
 
-    // 7. Convert messages and process attachments
+    // 7. Convert messages and process attachments.
+    // Run a pre-flight PII scan on attachment text BEFORE calling
+    // processMessagesWithAttachments so we can tokenize document content while
+    // it is still accessible (the call below replaces it with S3 references).
     const messagesWithParts = convertMessagesToPartsFormat(messages as UIMessage[]);
+    const precomputedInputTokenMappings = await scanAttachmentPII(
+      messagesWithParts, session.sub, log, requestId
+    );
     const { lightweightMessages } = await processMessagesWithAttachments(
       conversationId,
       messagesWithParts
@@ -905,7 +1039,8 @@ export async function POST(req: Request) {
       requestId,
       dbModelId,
       log,
-      timer
+      timer,
+      precomputedInputTokenMappings,
     });
 
   } catch (error) {
