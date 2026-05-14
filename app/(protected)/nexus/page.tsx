@@ -495,11 +495,13 @@ function NexusPageContent() {
     // Clear conversation ID and fallback state when switching models
     setConversationId(null);
     setConversationModelId(null);
-    // Force page reload to ensure clean state
+    // Navigate to clean /nexus URL (without ?id=) so the stale conversation is
+    // not reloaded under the new model. window.location.reload() preserved ?id=
+    // in the URL, causing the history adapter to fetch an incompatible conversation.
     if (model && selectedModel && model.modelId !== selectedModel.modelId) {
-      window.location.reload();
+      router.replace('/nexus');
     }
-  }, [originalSetSelectedModel, selectedModel])
+  }, [originalSetSelectedModel, selectedModel, router])
 
   // Store the conversation's model ID when received — availability check is derived via useMemo above
   const handleModelUsed = useCallback((modelId: string | null) => {
