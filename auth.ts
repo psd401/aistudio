@@ -5,6 +5,33 @@ import type { JWT } from "next-auth/jwt"
 import { refreshAccessToken, shouldRefreshToken } from "@/lib/auth/token-refresh-client"
 import { createLogger } from "@/lib/auth/edge-logger"
 
+/**
+ * Fire-and-forget mirror of the user's Cognito refresh token to Secrets
+ * Manager so the AgentCore agent (running in a different environment) can
+ * authenticate to the data MCP server on their behalf.
+ *
+ * Dynamic import so this never loads on edge runtime, and any failure
+ * (missing env vars, IAM, AWS unavailable) is logged but does NOT break
+ * the auth flow.
+ */
+function syncCognitoRefreshForAgentBackground(
+  email: string | undefined,
+  refreshToken: string | undefined,
+): void {
+  if (!email || !refreshToken) return
+  ;(async () => {
+    try {
+      const mod = await import("@/lib/auth/agent-token-sync")
+      await mod.syncCognitoRefreshForAgent(email, refreshToken)
+    } catch (err) {
+      // edge runtime, missing IAM, etc. — swallow. The on-demand consent
+      // flow is the fallback for users whose token never makes it here.
+      // eslint-disable-next-line no-console
+      console.error("[agent-token-sync] background sync failed:", err)
+    }
+  })()
+}
+
 export const authConfig: NextAuthConfig = {
   providers: [
     Cognito({
@@ -104,6 +131,15 @@ export const authConfig: NextAuthConfig = {
             expiresAt: newToken.expiresAt ? new Date(newToken.expiresAt).toISOString() : 'unknown'
           })
 
+          // Mirror the freshly-issued Cognito refresh token into Secrets
+          // Manager so the AgentCore agent (different environment) can
+          // authenticate as this user against the data MCP server. Best
+          // effort — see syncCognitoRefreshForAgentBackground above.
+          syncCognitoRefreshForAgentBackground(
+            typeof newToken.email === "string" ? newToken.email : undefined,
+            typeof newToken.refreshToken === "string" ? newToken.refreshToken : undefined,
+          )
+
           return newToken
         } catch (error) {
           // Log error but don't fail authentication
@@ -184,6 +220,14 @@ export const authConfig: NextAuthConfig = {
             log.info("Token refresh successful", {
               newExpiresAt: new Date(refreshedTokens.expiresAt).toISOString()
             })
+
+            // Re-mirror the rotated refresh token to Secrets Manager so the
+            // agent's stored copy stays current. Best effort — see
+            // syncCognitoRefreshForAgentBackground above.
+            syncCognitoRefreshForAgentBackground(
+              typeof token.email === "string" ? token.email : undefined,
+              refreshedTokens.refreshToken,
+            )
 
             // Return refreshed token with existing user data and preserve lifetime info
             const tokenWithLifetime = token as JWT & { tokenLifetimeMs?: number }

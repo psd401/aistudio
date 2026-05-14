@@ -173,6 +173,9 @@ const devAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatfor
 });
 devAgentPlatformStack.addDependency(devDbStack);
 devAgentPlatformStack.addDependency(devGuardrailsStack);
+// Cognito user-pool exports are imported via Fn.importValue for the
+// psd-data skill env vars (AUTH_COGNITO_USER_POOL_ID, AUTH_COGNITO_CLIENT_ID).
+devAgentPlatformStack.addDependency(devAuthStack);
 cdk.Tags.of(devAgentPlatformStack).add('Environment', 'Dev');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devAgentPlatformStack).add(key, value));
 
@@ -317,6 +320,7 @@ const prodAgentPlatformStack = new AgentPlatformStack(app, 'AIStudio-AgentPlatfo
 });
 prodAgentPlatformStack.addDependency(prodDbStack);
 prodAgentPlatformStack.addDependency(prodGuardrailsStack);
+prodAgentPlatformStack.addDependency(prodAuthStack);
 cdk.Tags.of(prodAgentPlatformStack).add('Environment', 'Prod');
 Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodAgentPlatformStack).add(key, value));
 

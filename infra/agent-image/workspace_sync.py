@@ -89,6 +89,7 @@ _SKIP_RELATIVE_PREFIXES = (
     "skills/gws-",
     "skills/psd-brand-guidelines/",
     "skills/psd-credentials/",
+    "skills/psd-data/",
     "skills/psd-failure-report/",
     "skills/psd-freshservice/",
     "skills/psd-github/",

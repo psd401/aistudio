@@ -17,12 +17,26 @@ Generate an image from a prompt using OpenAI `gpt-image-2`. The image is uploade
 node /opt/psd-skills/psd-image-gen/generate.js \
   --user <email> \
   --prompt "<image description>" \
+  [--image <path-to-reference-image>] \
   [--size 1024x1024 | 1024x1536 | 1536x1024 | auto] \
   [--quality low | medium | high | auto] \
   [--background opaque | transparent | auto]
 ```
 
-Returns JSON: `{ "url": "...", "s3Key": "public-images/.../...png", "model": "gpt-image-2", "prompt": "...", "size": "...", "sharing": "public-by-link" }`.
+Returns JSON: `{ "url": "...", "s3Key": "public-images/.../...png", "model": "gpt-image-2", "prompt": "...", "size": "...", "mode": "generate"|"edit", "sharing": "public-by-link" }`.
+
+### With a reference image (logo, brand asset, layout)
+
+When the user asks for a flyer / header / social card that must include a PSD logo or other supplied artwork, fetch the asset first (typically via `psd-brand-guidelines`) and pass its local path with `--image`. The skill then calls OpenAI's `/v1/images/edits` endpoint so the model composes around the supplied image rather than hallucinating a similar one.
+
+```bash
+node /opt/psd-skills/psd-image-gen/generate.js \
+  --user <email> \
+  --image /home/node/workspace/brand/psd-logo.png \
+  --prompt "School newsletter header with this logo top-left, navy/gold palette, space for a date on the right."
+```
+
+Accepted reference-image formats: `.png`, `.jpg`/`.jpeg`, `.webp`, `.gif`. Max 8 MB. Multiple reference images are not supported in this version — pick the single most important asset.
 
 ## Required Reply Format
 

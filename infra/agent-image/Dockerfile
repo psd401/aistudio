@@ -195,7 +195,13 @@ RUN cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no
 RUN cd /opt/psd-skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
 RUN cd /opt/psd-skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund
 RUN cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund
+# psd-data has zero npm install of its own. Its common.js require()s
+# `@aws-sdk/client-secrets-manager` from psd-workspace's already-installed
+# tree via an absolute path. No symlink, no duplicate install — keeps the
+# image file-count identical to a no-psd-data build.
 # psd-freshservice has zero npm dependencies (native fetch + child_process only).
+# psd-brand-guidelines has zero npm dependencies (config + static assets only).
+# psd-github has zero npm dependencies (wraps /usr/local/bin/gh).
 
 # Upstream gws-* skills (#912) — per-API SKILL.md guidance for Gmail, Drive,
 # Docs, Sheets, Slides, Forms, Tasks, Calendar, Chat, Meet, Contacts, etc.

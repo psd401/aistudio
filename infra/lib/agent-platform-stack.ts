@@ -1111,6 +1111,64 @@ export class AgentPlatformStack extends cdk.Stack {
     const imageTag = this.node.tryGetContext('agentImageTag') as string | undefined;
     const imageDigest = this.node.tryGetContext('agentImageDigest') as string | undefined;
 
+    // Runtime environment variables shared by the AgentCore Runtime AND used
+    // to derive AGENT_BUILD_TAG. Extracting them lets us hash the config so
+    // that env-var-only deploys (no image change) still rotate session IDs.
+    // Without this, AgentCore sticky-routes existing sessions back to old
+    // microVMs whose env snapshot pre-dates the new config.
+    const runtimeEnvVars: Record<string, string> = {
+      ENVIRONMENT: environment,
+      WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
+      USERS_TABLE: this.usersTable.tableName,
+      SIGNALS_TABLE: this.signalsTable.tableName,
+      SCHEDULES_TABLE: schedulesTable.tableName,
+      EVENTBRIDGE_SCHEDULE_GROUP: `psd-agent-${environment}`,
+      CRON_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:psd-agent-cron-${environment}`,
+      EVENTBRIDGE_ROLE_ARN: `arn:aws:iam::${this.account}:role/psd-agent-scheduler-invoke-${environment}`,
+      GUARDRAIL_ARN: props.guardrailArn,
+      DATABASE_RESOURCE_ARN: props.databaseResourceArn,
+      DATABASE_SECRET_ARN: props.databaseSecretArn,
+      DATABASE_NAME: props.databaseName ?? 'aistudio',
+      BEDROCK_API_KEY_SECRET_ARN: this.bedrockApiKeySecret.secretArn,
+      SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:psd-agent-skill-builder-${environment}`,
+      GOOGLE_OAUTH_CLIENT_SECRET_ID: googleOAuthClientSecret.secretName,
+      AGENT_INTERNAL_API_KEY_SECRET_ID: agentInternalApiKeySecret.secretName,
+      APP_BASE_URL: props.appBaseUrl ?? '',
+      PSD_DATA_MCP_URL:
+        (this.node.tryGetContext('psdDataMcpUrl') as string | undefined)
+        ?? 'https://l3jpggwgsojgql275k6axcboue0syeuq.lambda-url.us-west-2.on.aws/mcp',
+      AUTH_COGNITO_USER_POOL_ID: cdk.Fn.importValue(
+        `${environment}-CognitoUserPoolId`,
+      ),
+      AUTH_COGNITO_CLIENT_ID: cdk.Fn.importValue(
+        `${environment}-CognitoUserPoolClientId`,
+      ),
+      AUTH_COGNITO_REGION: this.region,
+      BUILD_MARKER: imageDigest
+        ? `${imageTag ?? 'no-tag'}@${imageDigest}`
+        : (imageTag ?? 'unset'),
+    };
+
+    // Fingerprint the env-var config so non-image deploys rotate session IDs.
+    // cdk.Fn.importValue tokens stringify to deterministic placeholders, so
+    // an upstream value change won't bump the fingerprint — but env-var
+    // ADD/REMOVE or literal-value changes (URLs, ARN templates, defaults)
+    // will. DJB2 is intentional: this is a non-security fingerprint, and
+    // sha256 here trips CodeQL's password-hash detector with a false
+    // positive because the dict references (but does not contain) secrets.
+    const configFingerprint = (() => {
+      const s = JSON.stringify(runtimeEnvVars);
+      let h = 5381;
+      for (let i = 0; i < s.length; i++) {
+        h = ((h * 33) ^ s.charCodeAt(i)) >>> 0;
+      }
+      return h.toString(16).padStart(8, '0');
+    })();
+
+    const agentBuildTag = imageDigest
+      ? `${imageDigest.replace('sha256:', '').substring(0, 12)}-${configFingerprint}`
+      : `${imageTag ?? ''}-${configFingerprint}`;
+
     const artifact = imageDigest
       ? agentcore.AgentRuntimeArtifact.fromImageUri(
           `${this.ecrRepository.repositoryUri}@${imageDigest}`,
@@ -1137,47 +1195,7 @@ export class AgentPlatformStack extends cdk.Stack {
           },
         }),
         description: `PSD AI Agent Platform runtime (${environment})`,
-        environmentVariables: {
-          ENVIRONMENT: environment,
-          WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
-          USERS_TABLE: this.usersTable.tableName,
-          SIGNALS_TABLE: this.signalsTable.tableName,
-          SCHEDULES_TABLE: schedulesTable.tableName,
-          // Inputs for the psd-schedules OpenClaw skill. The skill writes
-          // EventBridge Scheduler entries directly under the AgentCore role.
-          // Compute ARNs / names from stable identifiers so we don't need to
-          // reorder this block before the Scheduler constructs are declared;
-          // CDK dependency tracking still links them through the IAM grants.
-          EVENTBRIDGE_SCHEDULE_GROUP: `psd-agent-${environment}`,
-          CRON_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:psd-agent-cron-${environment}`,
-          EVENTBRIDGE_ROLE_ARN: `arn:aws:iam::${this.account}:role/psd-agent-scheduler-invoke-${environment}`,
-          GUARDRAIL_ARN: props.guardrailArn,
-          DATABASE_RESOURCE_ARN: props.databaseResourceArn,
-          DATABASE_SECRET_ARN: props.databaseSecretArn,
-          DATABASE_NAME: props.databaseName ?? 'aistudio',
-          // ARN of the Secrets Manager secret holding the Bedrock API key.
-          // `agentcore_wrapper.py` fetches this on startup and exports its
-          // value as AWS_BEARER_TOKEN_BEDROCK so OpenClaw can authenticate
-          // to Bedrock Mantle (the OpenAI-compatible endpoint). Using a
-          // reference rather than embedding the secret value keeps rotation
-          // seamless — new microVMs just re-read the latest version.
-          BEDROCK_API_KEY_SECRET_ARN: this.bedrockApiKeySecret.secretArn,
-          // Skill Builder Lambda ARN — used by the psd-skills-meta skill
-          // to trigger async scan + promotion of agent-authored drafts.
-          SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:psd-agent-skill-builder-${environment}`,
-          // Google Workspace OAuth secrets — used by psd-workspace skill (#912)
-          GOOGLE_OAUTH_CLIENT_SECRET_ID: googleOAuthClientSecret.secretName,
-          AGENT_INTERNAL_API_KEY_SECRET_ID: agentInternalApiKeySecret.secretName,
-          // Base URL the psd-workspace skill uses to reach /api/agent/consent-link.
-          // Empty string is harmless at runtime — the skill fails with an
-          // explicit error message if a consent URL is ever actually required.
-          APP_BASE_URL: props.appBaseUrl ?? '',
-          // Identity marker — surfaced in container startup log so we can
-          // verify the running code matches the deployed image manifest.
-          BUILD_MARKER: imageDigest
-            ? `${imageTag ?? 'no-tag'}@${imageDigest}`
-            : (imageTag ?? 'unset'),
-        },
+        environmentVariables: runtimeEnvVars,
         lifecycleConfiguration: {
           idleRuntimeSessionTimeout: cdk.Duration.minutes(config.agent.microVmIdleTimeoutMinutes),
         },
@@ -1648,16 +1666,16 @@ export class AgentPlatformStack extends cdk.Stack {
         // from SSM at runtime because the Runtime resource is conditionally
         // created only when an image tag is provided via CDK context.
         //
-        // AGENT_BUILD_TAG — short stable identifier for the deployed AgentCore
-        // image. Mixed into the AgentCore session ID so every deploy
-        // invalidates sticky-routed microVMs. Without this, AgentCore happily
-        // serves an existing user's session from a microVM running an OLD
-        // image until idleRuntimeSessionTimeout, which can be hours for an
-        // active user — a real correctness/security risk at scale. Empty
-        // string is fine; it just means we did not pin a digest this deploy.
-        AGENT_BUILD_TAG: imageDigest
-          ? imageDigest.replace('sha256:', '').substring(0, 12)
-          : (imageTag ?? ''),
+        // AGENT_BUILD_TAG — identifier mixed into the AgentCore session ID
+        // so deploys invalidate sticky-routed microVMs. Composed of:
+        //   - imageDigest (or tag) — rotates on image change
+        //   - configHash — rotates on env-var change (computed above)
+        // Either kind of change forces the next user message to spawn a
+        // fresh microVM with the current env snapshot. Without the
+        // configHash component, an env-only deploy leaves users pinned to
+        // the OLD microVM until idleRuntimeSessionTimeout (hours for an
+        // active user).
+        AGENT_BUILD_TAG: agentBuildTag,
       },
       vpc,
       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },

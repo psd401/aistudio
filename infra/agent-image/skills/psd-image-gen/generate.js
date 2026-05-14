@@ -18,6 +18,7 @@
 
 const { execFileSync } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
+const fs = require('node:fs');
 const path = require('node:path');
 
 const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
@@ -44,6 +45,20 @@ const MODEL_ID = 'gpt-image-2';
 const ALLOWED_SIZES = new Set(['1024x1024', '1024x1536', '1536x1024', 'auto']);
 const ALLOWED_QUALITIES = new Set(['low', 'medium', 'high', 'auto']);
 const ALLOWED_BACKGROUNDS = new Set(['opaque', 'transparent', 'auto']);
+// Reference-image input — psd-brand-guidelines drops logo files in the
+// workspace, then the agent passes one via --image to compose branded
+// outputs through OpenAI's /v1/images/edits endpoint. The endpoint expects
+// each image as a data URL inside an `images: [{ image_url }]` array.
+const ALLOWED_IMAGE_EXTS = new Map([
+  ['.png', 'image/png'],
+  ['.jpg', 'image/jpeg'],
+  ['.jpeg', 'image/jpeg'],
+  ['.webp', 'image/webp'],
+  ['.gif', 'image/gif'],
+]);
+// OpenAI's edits endpoint accepts up to ~20MB per image. Cap at 8MB to keep
+// JSON payload reasonable (base64 inflates 33%, so 8MB → ~11MB on the wire).
+const MAX_REFERENCE_IMAGE_BYTES = 8 * 1024 * 1024;
 
 const CREDENTIALS_GET = path.resolve(
   __dirname,
@@ -189,6 +204,72 @@ function readSharedOpenAIKey(userEmail) {
   return parsed.value;
 }
 
+/**
+ * Read a reference image from disk and return `{ dataUrl, mime }`.
+ * Validates the extension is one OpenAI accepts and the file size is
+ * under MAX_REFERENCE_IMAGE_BYTES so we fail fast with a clear message
+ * rather than blowing up the JSON payload.
+ */
+function loadReferenceImage(imagePath) {
+  let stat;
+  try {
+    stat = fs.statSync(imagePath);
+  } catch (err) {
+    fail(`--image file not found or unreadable: ${imagePath} (${err.message})`, 'bad_args');
+  }
+  if (!stat.isFile()) {
+    fail(`--image path is not a file: ${imagePath}`, 'bad_args');
+  }
+  if (stat.size > MAX_REFERENCE_IMAGE_BYTES) {
+    fail(
+      `--image file is ${stat.size} bytes; maximum is ${MAX_REFERENCE_IMAGE_BYTES}`,
+      'bad_args',
+    );
+  }
+  const ext = path.extname(imagePath).toLowerCase();
+  const mime = ALLOWED_IMAGE_EXTS.get(ext);
+  if (!mime) {
+    fail(
+      `--image extension ${ext || '(none)'} not supported. Allowed: ${[...ALLOWED_IMAGE_EXTS.keys()].join(', ')}`,
+      'bad_args',
+    );
+  }
+  const base64 = fs.readFileSync(imagePath).toString('base64');
+  return { dataUrl: `data:${mime};base64,${base64}`, mime };
+}
+
+async function editWithImage(apiKey, params, referenceDataUrl) {
+  const body = {
+    model: MODEL_ID,
+    images: [{ image_url: referenceDataUrl }],
+    prompt: params.prompt,
+  };
+  if (params.size && params.size !== 'auto') body.size = params.size;
+  if (params.quality && params.quality !== 'auto') body.quality = params.quality;
+  if (params.background && params.background !== 'auto') body.background = params.background;
+
+  const resp = await fetch('https://api.openai.com/v1/images/edits', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text().catch(() => '');
+    fail(`OpenAI API ${resp.status}: ${text.slice(0, 500)}`, 'upstream_error');
+  }
+
+  const data = await resp.json();
+  const first = (data && Array.isArray(data.data)) ? data.data[0] : null;
+  if (!first || !first.b64_json) {
+    fail('OpenAI response missing b64_json image data', 'upstream_error');
+  }
+  return Buffer.from(first.b64_json, 'base64');
+}
+
 async function generateImage(apiKey, params) {
   const body = { model: MODEL_ID, prompt: params.prompt };
   if (params.size && params.size !== 'auto') body.size = params.size;
@@ -251,7 +332,7 @@ async function uploadAndShare(bytes, userEmail) {
 async function main() {
   const args = parseArgs(process.argv);
   if (args.help) {
-    console.log('Usage: generate.js --user <email> --prompt "<text>" [--size auto|1024x1024|1024x1536|1536x1024] [--quality auto|low|medium|high] [--background auto|opaque|transparent]');
+    console.log('Usage: generate.js --user <email> --prompt "<text>" [--image <path>] [--size auto|1024x1024|1024x1536|1536x1024] [--quality auto|low|medium|high] [--background auto|opaque|transparent]');
     process.exit(0);
   }
   if (!validateEmail(args.user)) {
@@ -285,9 +366,22 @@ async function main() {
     fail('WORKSPACE_BUCKET env var not set — cannot upload generated image', 'misconfigured');
   }
 
+  // --image is optional. When present it must be a real path (no `--image`
+  // followed by another flag) and selects the /v1/images/edits endpoint so
+  // the model composes the output around the reference image. Validate the
+  // path up front — same tier as size/quality checks — so we fail fast
+  // before the RBAC shell-out + API-key fetch.
+  const imagePath = args.image && args.image !== true ? String(args.image) : null;
+  // Load + validate the reference image up front so a bad path fails fast,
+  // before the RBAC shell-out and API-key fetch.
+  const referenceImage = imagePath ? loadReferenceImage(imagePath) : null;
+
   enforceCapability(args.user);
   const apiKey = readSharedOpenAIKey(args.user);
-  const bytes = await generateImage(apiKey, { prompt: args.prompt, size, quality, background });
+  const params = { prompt: args.prompt, size, quality, background };
+  const bytes = referenceImage
+    ? await editWithImage(apiKey, params, referenceImage.dataUrl)
+    : await generateImage(apiKey, params);
   const { url, key } = await uploadAndShare(bytes, args.user);
 
   emit({
@@ -298,6 +392,7 @@ async function main() {
     size,
     quality,
     background,
+    mode: referenceImage ? 'edit' : 'generate',
     // The URL is unsigned and does not expire. Anyone with the link can fetch
     // until the object is deleted (manual lifecycle policy may be added later).
     sharing: 'public-by-link',
