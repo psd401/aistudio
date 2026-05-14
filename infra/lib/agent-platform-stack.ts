@@ -1173,12 +1173,13 @@ export class AgentPlatformStack extends cdk.Stack {
           // explicit error message if a consent URL is ever actually required.
           APP_BASE_URL: props.appBaseUrl ?? '',
           // psd-data skill — wires the agent to the PSD data MCP server.
-          // REQUIRED: pass -c psdDataMcpUrl=<url> at synth/deploy time.
-          // An empty string causes the skill to fail loudly (missing URL),
-          // which is safer than silently routing all environments to prod.
+          // Same Lambda URL for dev and prod (the MCP server trusts both
+          // Cognito pools), so we hardcode rather than threading through
+          // CDK context. Override at deploy time with -c psdDataMcpUrl=<url>
+          // if a future environment needs a different endpoint.
           PSD_DATA_MCP_URL:
             (this.node.tryGetContext('psdDataMcpUrl') as string | undefined)
-            ?? '',
+            ?? 'https://l3jpggwgsojgql275k6axcboue0syeuq.lambda-url.us-west-2.on.aws/mcp',
           // Cognito identifiers — used by the psd-data skill to refresh
           // the caller's stored refresh token into a fresh id_token. We
           // import these from AuthStack's CloudFormation exports rather
