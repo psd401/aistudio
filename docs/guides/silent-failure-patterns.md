@@ -56,7 +56,7 @@ if (!response.ok) {
   const body = contentType.includes('application/json')
     ? await response.json().catch(() => null)
     : await response.text().catch(() => null);
-  throw new Error(`Request failed: HTTP ${response.status} — ${body ?? 'no body'}`);
+  throw new Error(`Request failed: HTTP ${response.status} — ${typeof body === 'object' && body !== null ? JSON.stringify(body) : (body ?? 'no body')}`);
 }
 const data = await response.json();
 ```
@@ -203,6 +203,19 @@ async function getSetting(key: string): Promise<Setting | null> {
 }
 
 // In SWR refresh: on null/error, preserve existing cache rather than overwriting
+```
+
+**Generation counter pattern** — prevents a slow background refresh from overwriting cache with stale data after an explicit invalidation:
+
+```typescript
+let refreshGeneration = 0;
+
+async function refreshCache(key: string) {
+  const myGen = ++refreshGeneration;
+  const data = await fetchFreshData(key);
+  if (myGen !== refreshGeneration) return; // a newer refresh started; discard result
+  cache.set(key, data);
+}
 ```
 
 **Review rule:** Before implementing SWR, audit the DB accessor's null semantics. If it returns null for errors, fix the accessor first. Background refresh callbacks must use a generation counter to avoid writing stale data after explicit cache invalidation.
