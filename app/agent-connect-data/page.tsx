@@ -82,9 +82,21 @@ async function processConsent(token: string | undefined, selfPath: string): Prom
     return { status: "no-refresh-token", ownerEmail: payload.sub }
   }
 
-  // Atomic burn-then-write: try to mark the nonce consumed first. If the
-  // update affects zero rows, the nonce was already consumed (replay) — we
-  // treat that as success because the secret is already populated.
+  // Write the refresh token to Secrets Manager first (idempotent: put-or-
+  // create). This way, if the write fails the nonce is still unconsumed and
+  // the user can click the same link again to retry.
+  const arn = await syncCognitoRefreshForAgent(payload.sub, refreshToken)
+  if (!arn) {
+    log.error(
+      "Cognito-data consent: refresh-token sync returned null — IAM or env missing",
+      sanitizeForLogging({ ownerEmail: payload.sub }),
+    )
+    return { status: "write-failed", ownerEmail: payload.sub }
+  }
+
+  // Burn the nonce only after a successful write. If the update affects zero
+  // rows, the nonce was already consumed (replay or duplicate click) — treat
+  // as success because the secret is already populated.
   const burn = await executeQuery(
     (db) =>
       db
@@ -106,16 +118,6 @@ async function processConsent(token: string | undefined, selfPath: string): Prom
       sanitizeForLogging({ ownerEmail: payload.sub }),
     )
     return { status: "already-consumed", ownerEmail: payload.sub }
-  }
-
-  // Write the refresh token to Secrets Manager.
-  const arn = await syncCognitoRefreshForAgent(payload.sub, refreshToken)
-  if (!arn) {
-    log.error(
-      "Cognito-data consent: refresh-token sync returned null — IAM or env missing",
-      sanitizeForLogging({ ownerEmail: payload.sub }),
-    )
-    return { status: "write-failed", ownerEmail: payload.sub }
   }
 
   log.info(
@@ -235,6 +237,7 @@ export default async function AgentConnectDataPage({ searchParams }: PageProps) 
             usually means the deployment is missing IAM or environment
             configuration. Please ping the AI Studio team.
           </p>
+          <p>Your consent link is still valid — you can try clicking it again once the issue is resolved.</p>
         </CardContent>
       </Layout>
     )
