@@ -444,7 +444,7 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 - **Don't** rely on `clearTimeout` alone for polling cleanup — pair with a `cancelled = true` flag
 - **Don't** assign callback refs inside `useEffect` — assign synchronously in the render body to close the stale-ref timing gap
 - **Don't** return internal state getters from hooks when the caller also supplies `fn` — use `onFailure(count)` event callbacks
-- When a hook `.catch()` mutates a ref and re-throws, callers read the pre-mutation value — use `onFailure(count)` or add `+1`
+- **Don't** read a ref mutated inside a hook's `.catch()` without `+1` — use `onFailure(count)` callback instead (callers see pre-mutation value)
 - **Don't** pass unstable adapter references to `useChatRuntime` — use ref-based getters with empty dep arrays to prevent runtime re-initialization and duplicate messages
 
 ## 📖 Documentation

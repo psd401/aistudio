@@ -137,6 +137,7 @@ When refactoring inline form fields into extracted components:
 // WRONG — isLoading state in deps causes timer to reset on every toggle
 const [isLoading, setIsLoading] = useState(false)
 useEffect(() => {
+  let timer: ReturnType<typeof setTimeout>
   const poll = async () => {
     setIsLoading(true)
     await fetchData()
