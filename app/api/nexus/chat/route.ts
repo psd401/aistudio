@@ -814,45 +814,16 @@ function extractPartText(part: Record<string, unknown>): string | null {
   return null;
 }
 
-// AWS Comprehend DetectPiiEntities hard limit in UTF-8 bytes.
-// We leave a 5 KB headroom to account for multi-byte characters.
-const COMPREHEND_MAX_BYTES = 95_000;
-
-/**
- * Truncate `text` to at most `maxBytes` UTF-8 bytes, respecting code-point
- * boundaries so we never produce an invalid surrogate pair.
- */
-function truncateToBytes(text: string, maxBytes: number): string {
-  if (Buffer.byteLength(text, 'utf8') <= maxBytes) return text;
-  // Binary-search the safe truncation point
-  let lo = 0;
-  let hi = text.length;
-  while (lo < hi) {
-    const mid = Math.ceil((lo + hi) / 2);
-    if (Buffer.byteLength(text.slice(0, mid), 'utf8') <= maxBytes) lo = mid;
-    else hi = mid - 1;
-  }
-  return text.slice(0, lo);
-}
-
 /**
  * Scan PII in file / document attachment parts of the last user message BEFORE
- * processMessagesWithAttachments moves their content to S3.
+ * processMessagesWithAttachments moves their content to S3. Returns token
+ * mappings produced by the scan and mutates `messagesWithParts` in-place so
+ * that document text is tokenized before being stored.
  *
- * Design choices:
- * - Each attachment is scanned individually to avoid cross-boundary Comprehend
- *   detections that can't be written back accurately.
- * - Each attachment is truncated to COMPREHEND_MAX_BYTES (95 KB) to stay within
- *   the Comprehend DetectPiiEntities API limit; text beyond that limit is sent
- *   to the model un-tokenized but a warning is logged.
- * - We use `scanResult.processedContent` (the already-tokenized text returned
- *   by the service) to update the part content, so we inherit the service's
- *   exact offset-based replacement rather than doing our own string-level
- *   replaceAll that could cause substring over-tokenization.
- * - `scanResult.allowed` is checked; if attachment content is blocked by
- *   Bedrock Guardrails it throws ContentSafetyBlockedError like inline text does.
- * - Token mappings from all attachments are merged (using a Map to deduplicate
- *   by placeholder so the same PII value across attachments gets one token).
+ * This runs at the route level so that:
+ * 1. The extracted document text is available (not yet replaced with s3:// refs).
+ * 2. Token mappings can be passed to executeStreaming as `precomputedInputTokenMappings`
+ *    and merged with inline-text tokens from the streaming service's own scan.
  */
 async function scanAttachmentPII(
   messagesWithParts: UIMessage[],
@@ -863,106 +834,74 @@ async function scanAttachmentPII(
   const contentSafetyService = getContentSafetyService();
   if (!contentSafetyService.isPiiTokenizationEnabled()) return [];
 
-  const lastUserIdx = messagesWithParts.length - 1 -
-    [...messagesWithParts].reverse().findIndex(m => m.role === 'user');
-  if (lastUserIdx < 0) return [];
+  // findIndex returns -1 when no user message exists; check before computing the index
+  // to avoid the silent out-of-bounds: length-1-(-1) = length (always positive).
+  const reversedIdx = [...messagesWithParts].reverse().findIndex(m => m.role === 'user');
+  if (reversedIdx === -1) return [];
+  const lastUserIdx = messagesWithParts.length - 1 - reversedIdx;
 
   const lastUserMsg = messagesWithParts[lastUserIdx];
   if (!Array.isArray(lastUserMsg.parts)) return [];
 
-  // Collect attachment parts that have extractable text
-  const attachmentEntries: Array<{ partIdx: number; text: string }> = [];
+  const attachmentTexts: Array<{ partIdx: number; text: string }> = [];
   lastUserMsg.parts.forEach((part, partIdx) => {
     const p = part as Record<string, unknown>;
     if (p.type === 'document' || p.type === 'file') {
       const text = extractPartText(p);
-      if (text) attachmentEntries.push({ partIdx, text });
+      if (text) attachmentTexts.push({ partIdx, text });
     }
   });
 
-  if (attachmentEntries.length === 0) return [];
+  if (attachmentTexts.length === 0) return [];
 
+  const combinedText = attachmentTexts.map(a => a.text).join('\n');
   log.info('Running pre-flight PII scan on attachment text', {
     requestId,
-    attachmentCount: attachmentEntries.length,
+    attachmentCount: attachmentTexts.length,
+    combinedLength: combinedText.length,
   });
 
-  // Merged token map: placeholder → TokenMapping (deduplicates same PII across attachments)
-  const mergedTokens = new Map<string, TokenMapping>();
+  let scanResult;
+  try {
+    scanResult = await contentSafetyService.processInput(combinedText, sessionId);
+  } catch (err) {
+    log.warn('Pre-flight attachment PII scan failed — continuing without tokenization', {
+      requestId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+
+  if (!scanResult.tokens || scanResult.tokens.length === 0) return [];
+
+  // Build a quick-lookup map: original value → placeholder string (e.g. "[PII:uuid]")
+  // TokenMapping.token is the raw UUID; TokenMapping.placeholder is the formatted
+  // [PII:uuid] string that the model receives and the detokenizer looks up.
+  const replacements = new Map(scanResult.tokens.map(t => [t.original, t.placeholder]));
+
+  // Apply tokenization to each attachment part text in-place
   const updatedParts = [...lastUserMsg.parts];
-
-  for (const { partIdx, text } of attachmentEntries) {
-    // Enforce Comprehend 100 KB limit per attachment
-    const safeText = truncateToBytes(text, COMPREHEND_MAX_BYTES);
-    if (safeText.length < text.length) {
-      log.warn('Attachment text truncated before PII scan — content exceeds Comprehend limit', {
-        requestId,
-        originalLength: text.length,
-        truncatedLength: safeText.length,
-        partIdx,
-      });
+  for (const { partIdx, text } of attachmentTexts) {
+    let tokenizedText = text;
+    for (const [original, placeholder] of replacements) {
+      tokenizedText = tokenizedText.replaceAll(original, placeholder);
     }
-
-    let scanResult;
-    try {
-      scanResult = await contentSafetyService.processInput(safeText, sessionId);
-    } catch (err) {
-      log.warn('Pre-flight attachment PII scan failed — skipping attachment', {
-        requestId,
-        partIdx,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      continue;
-    }
-
-    // Surface content blocks from Bedrock Guardrails (same as inline-text check)
-    if (!scanResult.allowed) {
-      throw new ContentSafetyBlockedError(
-        scanResult.blockedMessage || 'Content blocked by safety guardrails',
-        scanResult.blockedCategories || [],
-        'input'
-      );
-    }
-
-    if (!scanResult.tokens || scanResult.tokens.length === 0) continue;
-
-    // Accumulate tokens (deduplicate by placeholder across attachments)
-    for (const t of scanResult.tokens) {
-      mergedTokens.set(t.placeholder, t);
-    }
-
-    // Use processedContent (offset-based tokenization from the service) as the
-    // replacement text. For truncated attachments we only have tokenized text
-    // for safeText; the truncated tail is appended un-tokenized.
-    const tokenizedHead = scanResult.hasPII
-      ? scanResult.processedContent
-      : safeText;
-    const tokenizedText = text.length > safeText.length
-      ? tokenizedHead + text.slice(safeText.length)
-      : tokenizedHead;
-
     if (tokenizedText === text) continue;
 
     const originalPart = updatedParts[partIdx] as Record<string, unknown>;
+    // Preserve whichever field held the text (content vs data)
     const field = originalPart.content !== undefined ? 'content' : 'data';
     const rawValue = originalPart[field];
 
     if (typeof rawValue === 'string') {
       updatedParts[partIdx] = { ...originalPart, [field]: tokenizedText } as typeof updatedParts[number];
     } else if (Array.isArray(rawValue)) {
-      // ContentPart[] — apply original→placeholder substitutions per text segment.
-      // Comprehend's NER is context-aware so substring collisions are rare in practice.
-      const knownOriginals = new Map(
-        scanResult.tokens.map(t => [t.original, t.placeholder])
-      );
       const tokenizedArray = rawValue.map(cp => {
         const cpObj = cp as Record<string, unknown>;
         if (cpObj.type === 'text' && typeof cpObj.text === 'string') {
-          let segText = cpObj.text as string;
-          for (const [orig, ph] of knownOriginals) {
-            segText = segText.replaceAll(orig, ph);
-          }
-          return { ...cpObj, text: segText };
+          let tokenizedSegment = cpObj.text;
+          for (const [orig, ph] of replacements) tokenizedSegment = tokenizedSegment.replaceAll(orig, ph);
+          return { ...cpObj, text: tokenizedSegment };
         }
         return cp;
       });
@@ -970,15 +909,13 @@ async function scanAttachmentPII(
     }
   }
 
-  if (mergedTokens.size === 0) return [];
-
   messagesWithParts[lastUserIdx] = { ...lastUserMsg, parts: updatedParts };
-  const allTokens = Array.from(mergedTokens.values());
   log.info('Pre-flight attachment PII tokenized', {
     requestId,
-    tokenCount: allTokens.length,
+    tokenCount: scanResult.tokens.length,
   });
-  return allTokens;
+
+  return scanResult.tokens;
 }
 
 /**

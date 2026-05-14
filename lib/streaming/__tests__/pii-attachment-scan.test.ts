@@ -57,7 +57,10 @@ function extractPartText(part: Record<string, unknown>): string | null {
 // scanAttachmentPII — mirrors the logic from route.ts for unit testing
 // without importing the server-only route module.
 // ---------------------------------------------------------------------------
-type TokenMapping = { token: string; placeholder: string; original: string; type: string };
+
+// Matches the shape of lib/safety/types.ts TokenMapping.
+// token: raw UUID; placeholder: formatted "[PII:uuid]" string used in text.
+type TokenMapping = { token: string; original: string; type: string; placeholder: string };
 
 async function runScanAttachmentPII(
   messagesWithParts: Array<{ id: string; role: string; parts: Array<Record<string, unknown>> }>,
@@ -71,9 +74,11 @@ async function runScanAttachmentPII(
 ): Promise<TokenMapping[]> {
   if (!safetyService.isPiiTokenizationEnabled()) return [];
 
-  const lastUserIdx = messagesWithParts.length - 1 -
-    [...messagesWithParts].reverse().findIndex(m => m.role === 'user');
-  if (lastUserIdx < 0) return [];
+  // findIndex returns -1 when no user message exists; check before computing
+  // the index to avoid the silent out-of-bounds: length-1-(-1) = length.
+  const reversedIdx = [...messagesWithParts].reverse().findIndex(m => m.role === 'user');
+  if (reversedIdx === -1) return [];
+  const lastUserIdx = messagesWithParts.length - 1 - reversedIdx;
 
   const lastUserMsg = messagesWithParts[lastUserIdx];
   if (!Array.isArray(lastUserMsg.parts)) return [];
@@ -92,12 +97,14 @@ async function runScanAttachmentPII(
   const scanResult = await safetyService.processInput(combinedText, 'session-1');
   if (!scanResult.tokens || scanResult.tokens.length === 0) return [];
 
+  // Use placeholder ("[PII:uuid]") not token (raw UUID) — the placeholder is
+  // what gets embedded in the text and what the detokenizer searches for.
   const replacements = new Map(scanResult.tokens.map(t => [t.original, t.placeholder]));
 
   const updatedParts = [...lastUserMsg.parts];
   for (const { partIdx, text } of attachmentTexts) {
     let tokenizedText = text;
-    for (const [original, token] of replacements) tokenizedText = tokenizedText.replaceAll(original, token);
+    for (const [original, placeholder] of replacements) tokenizedText = tokenizedText.replaceAll(original, placeholder);
     if (tokenizedText === text) continue;
 
     const originalPart = updatedParts[partIdx] as Record<string, unknown>;
@@ -112,9 +119,9 @@ async function runScanAttachmentPII(
         [field]: rawValue.map(cp => {
           const cpObj = cp as Record<string, unknown>;
           if (cpObj.type === 'text' && typeof cpObj.text === 'string') {
-            let t = cpObj.text as string;
-            for (const [orig, ph] of replacements) t = t.replaceAll(orig, ph);
-            return { ...cpObj, text: t };
+            let seg = cpObj.text as string;
+            for (const [orig, ph] of replacements) seg = seg.replaceAll(orig, ph);
+            return { ...cpObj, text: seg };
           }
           return cp;
         }),
@@ -125,12 +132,14 @@ async function runScanAttachmentPII(
   return scanResult.tokens;
 }
 
+// token: raw UUID (as produced by the real PII tokenization service)
+// placeholder: formatted "[PII:uuid]" string embedded in text
 const mockTokens: TokenMapping[] = [
   {
     token: 'aaaa-bbbb-cccc-dddd-eeeeffff0000',
-    placeholder: '[PII:aaaa-bbbb-cccc-dddd-eeeeffff0000]',
     original: 'Kris',
     type: 'PERSON',
+    placeholder: '[PII:aaaa-bbbb-cccc-dddd-eeeeffff0000]',
   },
 ];
 
@@ -234,7 +243,7 @@ describe('scanAttachmentPII — attachment PII tokenization', () => {
     expect(service.processInput).toHaveBeenCalledWith('Dear Kris, please review.', 'session-1');
   });
 
-  it('replaces PII in string content field in-place', async () => {
+  it('replaces PII in string content field using placeholder (not raw token UUID)', async () => {
     const service = makeMockService({ piiEnabled: true, tokens: mockTokens });
     const messages = [makeMsgWithDocument({ documentContent: 'Hi Kris' })];
     await runScanAttachmentPII(messages as never, service);
