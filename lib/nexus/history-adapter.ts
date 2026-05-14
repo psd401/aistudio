@@ -155,14 +155,19 @@ const createExportedMessageRepository = (messages: MessageData[]): ExportedMessa
       const msgDate = safeDate(msg.createdAt as string | Date | undefined)
 
       try {
+        const converted = INTERNAL.fromThreadMessageLike({
+          id: msg.id,
+          role: msgRole,
+          content: content as unknown as string,  // Cast needed for tool-result parts
+          ...(msgDate && { createdAt: msgDate }),
+        }, msg.id, { type: 'complete', reason: 'unknown' })
+        // Guard against a falsy return (library contract is to throw, but defensive check
+        // prevents downstream crashes in withFormat.load which reads .message.id).
+        if (!converted) {
+          throw new Error('fromThreadMessageLike returned falsy')
+        }
         return {
-          // Cast content to unknown to allow tool-result parts (assistant-ui handles them internally)
-          message: INTERNAL.fromThreadMessageLike({
-            id: msg.id,
-            role: msgRole,
-            content: content as unknown as string,  // Cast needed for tool-result parts
-            ...(msgDate && { createdAt: msgDate }),
-          }, msg.id, { type: 'complete', reason: 'unknown' }),
+          message: converted,
           parentId: index === 0 ? null : validMessages[index - 1]?.id || null
         }
       } catch (error) {
