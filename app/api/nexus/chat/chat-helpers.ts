@@ -428,38 +428,6 @@ export async function saveAssistantMessage(params: {
 }
 
 /**
- * Insert a single assistant message row without updating conversation stats.
- * Used by saveConversationSteps to insert multiple step messages before
- * doing one consolidated stats update.
- */
-async function insertAssistantMessageRow(params: {
-  conversationId: string;
-  sanitizedContent: string;
-  parts: AssistantPart[];
-  dbModelId: number;
-  finishReason: string;
-}): Promise<void> {
-  const { conversationId, sanitizedContent, parts, dbModelId, finishReason } = params;
-  const now = new Date();
-  await executeQuery(
-    (db) => db.insert(nexusMessages)
-      .values({
-        conversationId,
-        role: 'assistant',
-        content: sanitizedContent,
-        parts: sql`${safeJsonbStringify(parts)}::jsonb`,
-        modelId: dbModelId,
-        tokenUsage: sql`${safeJsonbStringify({ promptTokens: 0, completionTokens: 0, totalTokens: 0 })}::jsonb`,
-        finishReason,
-        metadata: sql`${safeJsonbStringify({})}::jsonb`,
-        createdAt: now,
-        updatedAt: now,
-      }),
-    'insertAssistantMessageRow'
-  );
-}
-
-/**
  * Persist a multi-step tool-use response as separate per-step messages.
  *
  * When maxSteps > 1, the AI SDK runs an agentic loop where each step may
@@ -557,4 +525,3 @@ export async function saveConversationSteps(params: {
     totalTokens: usage?.totalTokens,
   });
 }
-
