@@ -85,6 +85,60 @@ onFinish: async (event) => {
 }
 ```
 
+### `convertToModelMessages` requires `state` + `input` on every tool-call part
+
+AI SDK v6's `convertToModelMessages()` REQUIRES both `state: 'output-available'` AND `input: Record<string, unknown>` on every tool-call `UIMessage` part. If either field is missing, the SDK emits a `tool_use` block with no matching `tool_result` block, which Anthropic's API rejects on the next user turn with `AI_MissingToolResultsError: "Expected toolResult blocks"`.
+
+```typescript
+// WRONG — missing state and input; SDK silently omits the tool_result block
+{
+  type: 'tool-call',
+  toolCallId: 'tc_123',
+  toolName: 'my_tool',
+  args: { query: 'hello' },
+  // no state, no input → Anthropic rejects follow-up with AI_MissingToolResultsError
+}
+
+// CORRECT — both fields required for SDK to emit paired tool_use + tool_result
+{
+  type: 'tool-call',
+  toolCallId: 'tc_123',
+  toolName: 'my_tool',
+  args: { query: 'hello' },
+  state: 'output-available',   // required: one of 'input-available' | 'output-available' | 'output-error' | 'partial-call'
+  input: { query: 'hello' },   // required: mirrors args, used by SDK to reconstruct tool_result
+}
+```
+
+**Review rule:** Any code path that builds or persists assistant tool-call parts (especially `buildAssistantParts`, history adapters, and `convertContentToParts`) MUST set `state` and `input`. Also validate `state` against the allowed enum when reading it from storage — a stored `state: undefined` must not silently downgrade to `input-available`. See `app/api/nexus/chat/chat-helpers.ts` and `lib/nexus/history-adapter.ts`.
+
+### Multi-step MCP tool runs must persist per-step DB rows
+
+When `maxSteps > 1` (enabled for MCP connector runs), AI SDK v6's `streamText` may complete multiple assistant→tool→assistant turns in one streaming call. Consolidating these into a **single DB row** produces a message containing both tool-call parts AND text. On conversation reload, `convertToModelMessages()` cannot reconstruct the correct multi-turn Anthropic structure from a single row, producing consecutive user turns that the Anthropic API rejects.
+
+```typescript
+// WRONG — one consolidated row covers all steps; replay produces consecutive user turns
+await executeQuery(
+  (db) => db.insert(messages).values({
+    content: JSON.stringify(allStepsConsolidated), // tool-calls + text in one row
+  }),
+  'saveConversation'
+)
+
+// CORRECT — each step (assistant turn, tool result turn) gets its own row,
+// all written atomically inside a single executeTransaction
+await executeTransaction(async (tx) => {
+  for (const step of event.steps) {
+    await tx.insert(messages).values({ content: JSON.stringify(step.parts), role: 'assistant' })
+    if (step.toolResults.length > 0) {
+      await tx.insert(messages).values({ content: JSON.stringify(step.toolResults), role: 'tool' })
+    }
+  }
+}, 'saveConversationSteps')
+```
+
+**Review rule:** Any streaming handler that uses `maxSteps > 1` MUST call `saveConversationSteps()` (or equivalent) rather than a single-row persist. If existing conversations contain consolidated multi-step rows, a `normalizeMultiStepMessages()` pre-processing step is required before passing history to `convertToModelMessages()`. See `app/api/nexus/chat/chat-helpers.ts` (`saveConversationSteps`) and `lib/streaming/unified-streaming-service.ts` (`normalizeMultiStepMessages`).
+
 ### `execute()` return shape vs sanitization
 
 If `execute()` returns `{ id, success }`, any arg sanitization inside it is **dead code**. The frontend reads args from the streaming tool invocation object, not from `execute()` return.
@@ -288,4 +342,4 @@ text.replace(/&amp;/g, '&').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+
 
 ---
 
-*Source: learnings from database, ai-sdk, streaming, security, frontend, api-patterns, infrastructure, and monitoring categories (2026-02-18 through 2026-04-08)*
+*Source: learnings from database, ai-sdk, streaming, security, frontend, api-patterns, infrastructure, and monitoring categories (2026-02-18 through 2026-05-15)*

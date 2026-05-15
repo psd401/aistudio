@@ -495,6 +495,22 @@ useEffect(() => {
 // The component doesn't remount, so useEffect only runs once
 ```
 
+### ❌ Pitfall 7: Consolidating multi-step MCP responses into a single DB row
+
+When MCP connector tools are enabled, `streamText` runs with `maxSteps > 1`, producing multiple assistant→tool→assistant turns in one streaming call. Writing all steps into a single `nexus_messages` row causes `convertToModelMessages()` to produce consecutive user turns on reload, which Anthropic's API rejects.
+
+```typescript
+// WRONG — one row for all steps; replay triggers AI_MissingToolResultsError / consecutive-user-turn rejection
+await saveAssistantMessage(conversationId, consolidatedContent)
+
+// CORRECT — saveConversationSteps() writes each step as a separate row inside executeTransaction
+await saveConversationSteps(conversationId, event.steps)
+// If existing rows are already consolidated, normalizeMultiStepMessages() pre-processes them
+// before passing to convertToModelMessages() without requiring a DB migration.
+```
+
+Additionally, every tool-call part must carry `state: 'output-available'` and `input: Record<string,unknown>`. Without both fields the SDK emits `tool_use` with no paired `tool_result`, causing Anthropic to reject the next user turn. See `app/api/nexus/chat/chat-helpers.ts` and `docs/guides/silent-failure-patterns.md` for the full patterns.
+
 ### ❌ Pitfall 6: Session object reference in useEffect deps
 
 ```typescript
@@ -682,6 +698,13 @@ After making changes to conversation handling, test ALL of these scenarios:
 ---
 
 ## Version History
+
+### May 2026 - Multi-Step MCP Tool-Use Persistence (Issue #977)
+- **Problem:** `AI_MissingToolResultsError` ("Expected toolResult blocks") on follow-up messages in conversations that previously used MCP connector tools
+- **Root Causes:** (1) Tool-call parts missing `state`/`input` fields required by `convertToModelMessages`; (2) multi-step responses consolidated into a single DB row, producing invalid Anthropic turn structure on reload; (3) `convertContentToParts` silently downgraded stored `state` fields
+- **Solution:** `buildAssistantParts` now sets `state` and `input` on every tool-call part; `saveConversationSteps()` persists each step as a separate row inside `executeTransaction`; `normalizeMultiStepMessages()` repairs existing consolidated rows without migration; `convertContentToParts` validates the stored `state` enum
+- **Files Changed:** `app/api/nexus/chat/chat-helpers.ts`, `app/api/nexus/chat/route.ts`, `lib/streaming/types.ts`, `lib/streaming/provider-adapters/base-adapter.ts`, `lib/streaming/unified-streaming-service.ts`, `lib/nexus/history-adapter.ts`, `app/(protected)/nexus/_components/conversation-initializer.tsx`
+- **Breaking:** None (backward-compatible; normalizer handles existing rows)
 
 ### January 2025 - Stable Conversation ID Pattern
 - **Problem:** Component remounting on conversation ID assignment, losing streaming state

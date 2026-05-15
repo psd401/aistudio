@@ -435,6 +435,8 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 - **Don't** return `null` from a DB accessor for both not-found and error in an SWR cache — cache cannot distinguish the two; DB errors silently overwrite valid cached state with defaults
 - **Don't** pass a Web API `Blob` to `@google/genai` SDK methods — the SDK expects `{ data: base64string, mimeType: string }`, not a `Blob` object
 - **Don't** assume AWS SDK assessment objects are flat — check ALL sub-properties (e.g., `wordPolicy.customWords` AND `wordPolicy.managedWordLists`); missing one drops an entire blocking category from observability
+- **Don't** omit `state: 'output-available'` and `input` on tool-call UIMessage parts — `convertToModelMessages` silently skips the `tool_result` block, causing `AI_MissingToolResultsError` on replay
+- **Don't** consolidate multi-step MCP responses into a single DB row — persist each step separately inside `executeTransaction` or reload fails with consecutive user turns (see `chat-helpers.ts:saveConversationSteps`)
 
 ### React (see `docs/guides/react-patterns.md`)
 - **Don't** put `key` on Provider/context wrapper components
