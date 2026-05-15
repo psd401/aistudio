@@ -479,14 +479,16 @@ export async function saveConversationSteps(params: {
   }
 
   const savedCount = rowsToInsert.length;
-  // Compute timestamp once so all step rows and the stats update share the same value.
-  // Using separate new Date() calls inside the transaction would produce microsecond
-  // skews between step createdAt and conversation lastMessageAt.
-  const now = new Date();
+  // Base timestamp for this batch. Each step row gets createdAt = baseTime + stepIndex
+  // milliseconds so that ORDER BY created_at always returns steps in the correct
+  // agentic sequence. All rows sharing the same timestamp would produce a
+  // nondeterministic read order and break multi-turn replay. (Issue #977)
+  const baseTime = new Date();
 
   // All inserts + stats update in a single transaction to prevent partial writes
   await executeTransaction(async (tx) => {
     for (const row of rowsToInsert) {
+      const createdAt = new Date(baseTime.getTime() + row.stepIndex);
       await tx.insert(nexusMessages).values({
         conversationId,
         role: 'assistant',
@@ -498,16 +500,16 @@ export async function saveConversationSteps(params: {
         tokenUsage: sql`${safeJsonbStringify({ promptTokens: 0, completionTokens: 0, totalTokens: 0 })}::jsonb`,
         finishReason: row.stepFinishReason,
         metadata: sql`${safeJsonbStringify({})}::jsonb`,
-        createdAt: now,
-        updatedAt: now,
+        createdAt,
+        updatedAt: baseTime,
       });
     }
     await tx.update(nexusConversations)
       .set({
         messageCount: sql`${nexusConversations.messageCount} + ${savedCount}`,
         totalTokens: sql`${nexusConversations.totalTokens} + ${usage?.totalTokens ?? 0}`,
-        lastMessageAt: now,
-        updatedAt: now,
+        lastMessageAt: new Date(baseTime.getTime() + rowsToInsert.length - 1),
+        updatedAt: baseTime,
       })
       .where(eq(nexusConversations.id, conversationId));
   }, 'saveConversationSteps');
