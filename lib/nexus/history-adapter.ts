@@ -126,8 +126,14 @@ const createExportedMessageRepository = (messages: MessageData[]): ExportedMessa
               // AI_MissingToolResultsError on follow-up messages. (Issue #977)
               const hasResult = partData.result != null
               const isError = partData.isError === true
+              // Prefer the stored state field — a part persisted with state 'output-error'
+              // but isError=false and a non-null result would be wrongly classified as
+              // 'output-available' if we only checked isError and hasResult.
+              const rawState = (partData as unknown as Record<string, unknown>).state
               const state: 'input-available' | 'output-available' | 'output-error' =
-                isError ? 'output-error' : hasResult ? 'output-available' : 'input-available'
+                rawState === 'input-available' || rawState === 'output-available' || rawState === 'output-error'
+                  ? rawState
+                  : isError ? 'output-error' : hasResult ? 'output-available' : 'input-available'
 
               const toolPart: ContentPartLike = {
                 type: 'tool-call',

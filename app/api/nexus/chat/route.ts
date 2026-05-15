@@ -37,6 +37,7 @@ import {
   convertMessagesToPartsFormat,
   saveAssistantMessage,
   saveConversationSteps,
+  type StepData,
 } from './chat-helpers';
 
 import { eq, and } from 'drizzle-orm';
@@ -91,11 +92,7 @@ function createOnFinishCallback(params: {
       args: Record<string, unknown>;
       result?: unknown;
     }>;
-    steps?: Array<{
-      text: string;
-      toolCalls: Array<{ toolCallId: string; toolName: string; args: Record<string, unknown>; result?: unknown }>;
-      finishReason: string;
-    }>;
+    steps?: StepData[];
   }) => {
     log.info('Stream finished, saving assistant message', {
       conversationId,

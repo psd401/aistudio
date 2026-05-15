@@ -244,6 +244,9 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
           // Each step's toolResults are matched to its toolCalls so the caller
           // can persist them as separate messages and preserve the correct
           // multi-turn structure on conversation replay. (Issue #977)
+          // AI SDK v6 TypeScript types don't declare `steps` on the onFinish event
+          // object, but the runtime value includes it for multi-step tool-use flows.
+          // Cast to access the field until the SDK's types are updated.
           const rawSteps = (event as Record<string, unknown>).steps;
           const steps = Array.isArray(rawSteps)
             ? rawSteps.map((rawStep: unknown) => {
