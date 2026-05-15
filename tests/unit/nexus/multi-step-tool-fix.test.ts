@@ -9,6 +9,39 @@
  *  - Defect 3: missing/malformed state in convertContentToParts
  */
 
+// Mock heavy dependencies so the module can load in Jest's CJS environment.
+// unified-streaming-service.ts transitively loads provider-adapters/index.ts which
+// instantiates @ai-sdk/* adapter classes at module level — those packages can fail
+// to load without mocking. The existing unified-streaming-service.test.ts uses the
+// same strategy via jest.doMock + require(). Jest auto-hoists jest.mock() calls
+// above static import statements, so the mocks are registered before any module loads.
+jest.mock('@/lib/logger', () => ({
+  createLogger: () => ({
+    info: jest.fn(),
+    warn: jest.fn(),
+    error: jest.fn(),
+    debug: jest.fn(),
+  }),
+  generateRequestId: jest.fn(() => 'test-request-id'),
+  startTimer: jest.fn(() => jest.fn()),
+}));
+
+jest.mock('@/lib/streaming/provider-adapters', () => ({
+  getProviderAdapter: jest.fn(),
+}));
+
+jest.mock('@/lib/streaming/telemetry-service', () => ({
+  getTelemetryConfig: jest.fn(),
+}));
+
+jest.mock('@/lib/safety', () => ({
+  getContentSafetyService: jest.fn(() => ({
+    isEnabled: jest.fn(() => false),
+    processInput: jest.fn(),
+    processOutput: jest.fn(),
+  })),
+}));
+
 import { describe, it, expect } from '@jest/globals';
 import { convertContentToParts } from '@/app/(protected)/nexus/_components/conversation-initializer';
 import { normalizeMultiStepMessages } from '@/lib/streaming/unified-streaming-service';
@@ -75,7 +108,8 @@ describe('convertContentToParts', () => {
   });
 
   it('prefers stored state=output-error even when isError flag is missing (Defect 3 guard)', () => {
-    // Simulate a part that has the stored state field from the DB fix but no isError flag
+    // Simulate a part that has the stored state field from the DB fix but no isError flag.
+    // Cast via unknown to suppress excess-property error (state not in MessagePart schema).
     const parts = convertContentToParts([
       {
         type: 'tool-call',
@@ -84,9 +118,8 @@ describe('convertContentToParts', () => {
         args: {},
         result: 'some error',
         isError: false,
-        // stored state from Issue #977 DB fix:
         state: 'output-error',
-      } as Parameters<typeof convertContentToParts>[0] extends (infer T)[] ? T : never,
+      } as unknown as { type: 'tool-call'; toolCallId: string; toolName: string; args: Record<string, unknown>; result: unknown; isError: boolean },
     ]);
 
     expect(parts).toHaveLength(1);
