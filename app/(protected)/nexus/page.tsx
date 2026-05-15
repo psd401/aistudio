@@ -118,6 +118,7 @@ function ConversationRuntimeProvider({
     if (sessionStatusRef.current === 'unauthenticated') {
       log.warn('Pre-send check: session unauthenticated, blocking chat request')
       toast.error('Session Expired', {
+        id: 'nexus-session-expired',
         description: 'Your session has expired. Please sign in again to continue.',
         duration: 0,
         action: {
@@ -137,6 +138,7 @@ function ConversationRuntimeProvider({
     if (response.status === 401) {
       log.warn('Session expired during chat request — 401 from server')
       toast.error('Session Expired', {
+        id: 'nexus-session-expired',
         description: 'Your session has expired. Please sign in again to continue.',
         duration: 0,
         action: {
