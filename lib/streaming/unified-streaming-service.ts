@@ -5,7 +5,7 @@ import { getProviderAdapter, type ProviderCapabilities } from './provider-adapte
 import { CircuitBreaker, CircuitBreakerOpenError } from './circuit-breaker';
 import { getContentSafetyService, type ContentSafetyResult } from '@/lib/safety';
 import type { TokenMapping } from '@/lib/safety/types';
-import type { StreamRequest, StreamResponse, StreamConfig, StreamingProgress, TelemetrySpan, TelemetryConfig } from './types';
+import type { StreamRequest, StreamResponse, StreamConfig, StreamingProgress, TelemetrySpan, TelemetryConfig, StepCallbackData } from './types';
 import { ContentSafetyBlockedError } from './types';
 
 // Logger for PII transform debugging
@@ -245,7 +245,7 @@ interface InputSafetyCheckOptions {
  * Options for output content safety check
  */
 interface OutputSafetyCheckOptions {
-  data: { text: string; usage?: { promptTokens: number; completionTokens: number; totalTokens: number; reasoningTokens?: number; totalCost?: number }; finishReason: string };
+  data: { text: string; usage?: { promptTokens: number; completionTokens: number; totalTokens: number; reasoningTokens?: number; totalCost?: number }; finishReason: string; steps?: StepCallbackData[] };
   request: StreamRequest;
   contentSafetyService: ReturnType<typeof getContentSafetyService>;
   log: ReturnType<typeof createLogger>;
