@@ -84,6 +84,9 @@ type ContentPartLike =
       argsText: string;
       result?: unknown;
       isError?: boolean;
+      // AI SDK v6 UIMessage fields required by convertToModelMessages (Issue #977)
+      state: 'input-available' | 'output-available' | 'output-error';
+      input: JSONObject;
     }
 
 // We'll use a simple implementation since ExportedMessageRepository.fromArray may not be accessible
@@ -117,6 +120,15 @@ const createExportedMessageRepository = (messages: MessageData[]): ExportedMessa
               // switch and throws "Unsupported assistant message part type". (Issue #798)
               const args: JSONObject = (partData.args ?? {}) as JSONObject
 
+              // Derive state from result so convertToModelMessages emits paired
+              // tool_result blocks on conversation replay. Without state+input,
+              // convertToModelMessages emits tool_use without tool_result, causing
+              // AI_MissingToolResultsError on follow-up messages. (Issue #977)
+              const hasResult = partData.result != null
+              const isError = partData.isError === true
+              const state: 'input-available' | 'output-available' | 'output-error' =
+                isError ? 'output-error' : hasResult ? 'output-available' : 'input-available'
+
               const toolPart: ContentPartLike = {
                 type: 'tool-call',
                 toolCallId: partData.toolCallId,
@@ -124,7 +136,9 @@ const createExportedMessageRepository = (messages: MessageData[]): ExportedMessa
                 args,
                 argsText: JSON.stringify(args),
                 result: partData.result,
-                isError: partData.isError === true,
+                isError,
+                state,
+                input: args,
               }
               return toolPart
             }

@@ -70,7 +70,10 @@ export function convertContentToParts(content?: ApiMessageContent): UIMessagePar
         const args = part.args ?? {}
         // null means stream error before onFinish — treat same as no result
         const hasResult = part.result != null
-        const isError = part.isError === true
+        // Prefer the stored state (added in Issue #977 fix) over derived state so
+        // that output-error parts aren't silently downgraded to input-available.
+        const storedState = (part as Record<string, unknown>).state as string | undefined
+        const isError = part.isError === true || storedState === 'output-error'
         const input = typeof args === 'object' && args !== null ? args as Record<string, unknown> : {}
 
         let toolPart: StaticToolPart

@@ -200,6 +200,13 @@ export interface ToolCallData {
   result?: unknown;  // Tool execution result for persistence
 }
 
+/** A single resolved streaming step for per-step persistence */
+export interface StepCallbackData {
+  text: string;
+  toolCalls: ToolCallData[];
+  finishReason: string;
+}
+
 export interface StreamingCallbacks {
   onProgress?: (event: StreamingProgress) => void;
   onReasoning?: (reasoning: string) => void;
@@ -216,6 +223,8 @@ export interface StreamingCallbacks {
     finishReason: string;
     /** Tool calls made during this response (from all steps) */
     toolCalls?: ToolCallData[];
+    /** Per-step breakdown — populated when maxSteps > 1 (MCP connector multi-step) */
+    steps?: StepCallbackData[];
   }) => void;
   onError?: (error: Error) => void;
 

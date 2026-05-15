@@ -239,6 +239,53 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
 
           // Transform to our expected format
           const usage = event.usage as StreamUsage;
+
+          // Build per-step breakdown for multi-step tool-use persistence.
+          // Each step's toolResults are matched to its toolCalls so the caller
+          // can persist them as separate messages and preserve the correct
+          // multi-turn structure on conversation replay. (Issue #977)
+          const rawSteps = (event as Record<string, unknown>).steps;
+          const steps = Array.isArray(rawSteps)
+            ? rawSteps.map((rawStep: unknown) => {
+                if (typeof rawStep !== 'object' || rawStep === null) {
+                  return { text: '', toolCalls: [], finishReason: 'stop' };
+                }
+                const s = rawStep as Record<string, unknown>;
+
+                const stepToolCalls: AccumulatedToolCall[] = [];
+                const rawCalls = s.toolCalls;
+                if (Array.isArray(rawCalls)) {
+                  for (const tc of rawCalls) {
+                    if (typeof tc !== 'object' || tc === null) continue;
+                    const tcTyped = tc as { toolCallId?: string; toolName?: string; args?: unknown; input?: unknown };
+                    if (typeof tcTyped.toolCallId !== 'string' || typeof tcTyped.toolName !== 'string') continue;
+                    stepToolCalls.push({
+                      toolCallId: tcTyped.toolCallId,
+                      toolName: tcTyped.toolName,
+                      args: ((tcTyped.input ?? tcTyped.args) as Record<string, unknown>) || {},
+                    });
+                  }
+                }
+
+                const rawResults = s.toolResults;
+                if (Array.isArray(rawResults)) {
+                  for (const tr of rawResults) {
+                    if (typeof tr !== 'object' || tr === null) continue;
+                    const trTyped = tr as { toolCallId?: string; output?: unknown };
+                    if (typeof trTyped.toolCallId !== 'string') continue;
+                    const match = stepToolCalls.find(tc => tc.toolCallId === trTyped.toolCallId);
+                    if (match) match.result = trTyped.output;
+                  }
+                }
+
+                return {
+                  text: typeof s.text === 'string' ? s.text : '',
+                  toolCalls: stepToolCalls,
+                  finishReason: typeof s.finishReason === 'string' ? s.finishReason : 'stop',
+                };
+              })
+            : undefined;
+
           const transformedData = {
             text: event.text || '',
             usage: usage ? {
@@ -247,7 +294,8 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
               totalTokens: usage.totalTokens || 0
             } : undefined,
             finishReason: event.finishReason || 'stop',
-            toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined
+            toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined,
+            steps: steps && steps.length > 1 ? steps : undefined,
           };
 
           // Call provider-specific finish handler
