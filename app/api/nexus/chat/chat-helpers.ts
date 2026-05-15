@@ -479,6 +479,9 @@ export async function saveConversationSteps(params: {
   }
 
   const savedCount = rowsToInsert.length;
+  // Compute timestamp once so all step rows and the stats update share the same value.
+  // Using separate new Date() calls inside the transaction would produce microsecond
+  // skews between step createdAt and conversation lastMessageAt.
   const now = new Date();
 
   // All inserts + stats update in a single transaction to prevent partial writes
@@ -490,6 +493,8 @@ export async function saveConversationSteps(params: {
         content: row.sanitizedContent,
         parts: sql`${safeJsonbStringify(row.parts)}::jsonb`,
         modelId: dbModelId,
+        // Token usage not available per-step; real totals are aggregated at the
+        // conversation level in the stats update below.
         tokenUsage: sql`${safeJsonbStringify({ promptTokens: 0, completionTokens: 0, totalTokens: 0 })}::jsonb`,
         finishReason: row.stepFinishReason,
         metadata: sql`${safeJsonbStringify({})}::jsonb`,
@@ -501,8 +506,8 @@ export async function saveConversationSteps(params: {
       .set({
         messageCount: sql`${nexusConversations.messageCount} + ${savedCount}`,
         totalTokens: sql`${nexusConversations.totalTokens} + ${usage?.totalTokens ?? 0}`,
-        lastMessageAt: new Date(),
-        updatedAt: new Date(),
+        lastMessageAt: now,
+        updatedAt: now,
       })
       .where(eq(nexusConversations.id, conversationId));
   }, 'saveConversationSteps');
