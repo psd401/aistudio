@@ -539,7 +539,7 @@ function validateAndCopyMessages(
  * This is safe for single-step responses too — splitting doesn't change the
  * semantic meaning, it only separates concerns across turns.
  */
-function normalizeMultiStepMessages(messages: StreamRequest['messages']): StreamRequest['messages'] {
+export function normalizeMultiStepMessages(messages: StreamRequest['messages']): StreamRequest['messages'] {
   type AnyPart = Record<string, unknown>;
   const normalized: StreamRequest['messages'] = [];
 
