@@ -111,12 +111,11 @@ function ConversationRuntimeProvider({
   // Custom fetch to intercept X-Conversation-Id header for conversation continuity
   // and handle content safety blocked errors with user-friendly messages
   const customFetch = useCallback(async (input: RequestInfo | URL, init?: RequestInit) => {
-    // Pre-send check: if NextAuth has already detected session expiry (via its 5-min
-    // poll), block the request immediately rather than letting the 401 come back from
-    // the server. This closes the gap between server-side token invalidation and client-
-    // side detection without changing the global poll interval (see session-provider.tsx).
-    if (sessionStatusRef.current === 'unauthenticated') {
-      log.warn('Pre-send check: session unauthenticated, blocking chat request')
+    // Extracted helper to show session-expired toast and throw. Used in both the
+    // pre-send check and the 401 response handler so the UX is identical regardless
+    // of which detection path fires first.
+    const throwSessionExpired = (reason: string): never => {
+      log.warn(reason)
       toast.error('Session Expired', {
         id: 'nexus-session-expired',
         description: 'Your session has expired. Please sign in again to continue.',
@@ -129,24 +128,24 @@ function ConversationRuntimeProvider({
       throw new Error('Session expired - please sign in again')
     }
 
+    // Pre-send check: if NextAuth has already detected session expiry (via its 5-min
+    // poll), block the request immediately rather than letting the 401 come back from
+    // the server. This closes the gap between server-side token invalidation and client-
+    // side detection without changing the global poll interval (see session-provider.tsx).
+    if (sessionStatusRef.current === 'unauthenticated') {
+      throwSessionExpired('Pre-send check: session unauthenticated, blocking chat request')
+    }
+
     const response = await fetch(input, init)
 
     // Handle session expiry — 401 returned when JWT is invalid or Cognito token refresh
     // failed overnight. Without this handler the AI SDK runtime tries to parse
     // "Unauthorized" as an SSE stream, throws TypeError, and onFinish never fires, so
-    // messages are silently lost. Throw here to abort cleanly and surface the error.
+    // messages are silently lost. Drain the body first to release the connection, then
+    // throw to abort cleanly and surface the error.
     if (response.status === 401) {
-      log.warn('Session expired during chat request — 401 from server')
-      toast.error('Session Expired', {
-        id: 'nexus-session-expired',
-        description: 'Your session has expired. Please sign in again to continue.',
-        duration: 0,
-        action: {
-          label: 'Sign In',
-          onClick: () => { window.location.href = '/api/auth/signin?callbackUrl=/nexus' },
-        },
-      })
-      throw new Error('Session expired - please sign in again')
+      await response.body?.cancel().catch(() => {})
+      throwSessionExpired('Session expired during chat request — 401 from server')
     }
 
     // Handle model-not-found errors (404)
