@@ -9,6 +9,13 @@
  *  - Defect 3: missing/malformed state in convertContentToParts
  */
 
+// jest must be imported before jest.mock() calls to satisfy TypeScript type-checking.
+// @jest/globals is used project-wide (not @types/jest globals) so jest is not
+// available as a global type without this import. Jest's babel transform hoists
+// jest.mock() calls above all imports at runtime, so the import order here only
+// matters for TypeScript, not for execution.
+import { jest } from '@jest/globals';
+
 // Mock heavy dependencies so the module can load in Jest's CJS environment.
 // unified-streaming-service.ts transitively loads provider-adapters/index.ts which
 // instantiates @ai-sdk/* adapter classes at module level — those packages can fail
