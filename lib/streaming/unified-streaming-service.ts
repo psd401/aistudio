@@ -550,6 +550,10 @@ export function normalizeMultiStepMessages(messages: StreamRequest['messages']):
     }
 
     const parts = msg.parts as AnyPart[];
+    // At this point in the pipeline, messages have passed through convertContentToParts so
+    // tool parts use the static format type: 'tool-{toolName}' (e.g. 'tool-query_db').
+    // 'tool-call'.startsWith('tool-') is also true, but native tool-call parts only appear
+    // before convertContentToParts runs, so this filter is safe for the normalized messages.
     const toolParts = parts.filter(p => typeof p.type === 'string' && (p.type as string).startsWith('tool-'));
     const textParts = parts.filter(p => p.type === 'text');
 
