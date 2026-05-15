@@ -4,7 +4,7 @@
  */
 import { UIMessage } from 'ai';
 import { sql, eq } from 'drizzle-orm';
-import { executeQuery } from '@/lib/db/drizzle-client';
+import { executeQuery, executeTransaction } from '@/lib/db/drizzle-client';
 import { nexusConversations, nexusMessages } from '@/lib/db/schema';
 import { sanitizeTextForDatabase, decodeHtmlEntitiesDeep } from '@/lib/utils/text-sanitizer';
 import { safeJsonbStringify } from '@/lib/db/json-utils';
@@ -480,56 +480,75 @@ export async function saveConversationSteps(params: {
 }): Promise<void> {
   const { conversationId, steps, dbModelId, usage, finishReason } = params;
 
-  let savedCount = 0;
+  // Build all row data before opening a transaction (pure computation)
+  type RowData = {
+    sanitizedContent: string;
+    parts: AssistantPart[];
+    stepFinishReason: string;
+    stepIndex: number;
+    hasToolCalls: boolean;
+    toolCallCount: number;
+    hasText: boolean;
+    isLastStep: boolean;
+  };
 
+  const rowsToInsert: RowData[] = [];
   for (let i = 0; i < steps.length; i++) {
     const step = steps[i];
     const isLastStep = i === steps.length - 1;
     const stepFinishReason = isLastStep ? (finishReason ?? 'stop') : step.finishReason;
-
     const hasToolCalls = step.toolCalls.length > 0;
     const hasText = step.text.length > 0;
-
     if (!hasToolCalls && !hasText) continue;
-
     const sanitizedContent = step.text ? sanitizeTextForDatabase(step.text) : '';
     const parts = buildAssistantParts(sanitizedContent, hasToolCalls ? step.toolCalls : undefined);
-
-    await insertAssistantMessageRow({
-      conversationId,
-      sanitizedContent,
-      parts,
-      dbModelId,
-      finishReason: stepFinishReason,
-    });
-    savedCount++;
-
-    log.info('Saved step message', {
-      conversationId,
-      stepIndex: i,
-      isLastStep,
-      hasToolCalls,
-      toolCallCount: step.toolCalls.length,
-      hasText,
-    });
+    rowsToInsert.push({ sanitizedContent, parts, stepFinishReason, stepIndex: i, hasToolCalls, toolCallCount: step.toolCalls.length, hasText, isLastStep });
   }
 
-  if (savedCount === 0) {
+  if (rowsToInsert.length === 0) {
     log.warn('No step messages had content to save', { conversationId });
     return;
   }
 
-  await executeQuery(
-    (db) => db.update(nexusConversations)
+  const savedCount = rowsToInsert.length;
+  const now = new Date();
+
+  // All inserts + stats update in a single transaction to prevent partial writes
+  await executeTransaction(async (tx) => {
+    for (const row of rowsToInsert) {
+      await tx.insert(nexusMessages).values({
+        conversationId,
+        role: 'assistant',
+        content: row.sanitizedContent,
+        parts: sql`${safeJsonbStringify(row.parts)}::jsonb`,
+        modelId: dbModelId,
+        tokenUsage: sql`${safeJsonbStringify({ promptTokens: 0, completionTokens: 0, totalTokens: 0 })}::jsonb`,
+        finishReason: row.stepFinishReason,
+        metadata: sql`${safeJsonbStringify({})}::jsonb`,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+    await tx.update(nexusConversations)
       .set({
         messageCount: sql`${nexusConversations.messageCount} + ${savedCount}`,
         totalTokens: sql`${nexusConversations.totalTokens} + ${usage?.totalTokens ?? 0}`,
         lastMessageAt: new Date(),
         updatedAt: new Date(),
       })
-      .where(eq(nexusConversations.id, conversationId)),
-    'updateConversationAfterSteps'
-  );
+      .where(eq(nexusConversations.id, conversationId));
+  }, 'saveConversationSteps');
+
+  for (const row of rowsToInsert) {
+    log.info('Saved step message', {
+      conversationId,
+      stepIndex: row.stepIndex,
+      isLastStep: row.isLastStep,
+      hasToolCalls: row.hasToolCalls,
+      toolCallCount: row.toolCallCount,
+      hasText: row.hasText,
+    });
+  }
 
   log.info('Multi-step response saved', {
     conversationId,
