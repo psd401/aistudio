@@ -61,4 +61,5 @@ infra/**/package-lock.json
 
 # Claude agent internal state
 .claude/agent-memory/
+.claude/worktrees/
 docs/learnings/.evolve-state.json
