@@ -149,6 +149,7 @@ useEffect(() => {
 }, [isLoading, interval]) // isLoading change triggers teardown/recreate
 
 // CORRECT — ref mutation doesn't trigger the effect
+const { status } = useSession() // primitive string — won't churn deps
 const isLoadingRef = useRef(false)
 useEffect(() => {
   let timer: ReturnType<typeof setTimeout>
