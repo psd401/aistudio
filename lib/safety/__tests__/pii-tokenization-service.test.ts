@@ -5,12 +5,14 @@
  */
 
 import { PIITokenizationService } from '../pii-tokenization-service';
+import { PII_MIN_CONFIDENCE_SCORE, PII_TYPE_CONFIDENCE_OVERRIDES } from '../types';
 
 // Mock AWS SDK clients
 jest.mock('@aws-sdk/client-comprehend');
 jest.mock('@aws-sdk/client-dynamodb');
 
-import { DynamoDBClient, BatchGetItemCommand } from '@aws-sdk/client-dynamodb';
+import { ComprehendClient, DetectPiiEntitiesCommand } from '@aws-sdk/client-comprehend';
+import { DynamoDBClient, BatchGetItemCommand, PutItemCommand } from '@aws-sdk/client-dynamodb';
 
 interface MockBatchGetItemInput {
   RequestItems: {
@@ -163,6 +165,176 @@ describe('PIITokenizationService', () => {
       // Not a valid UUID format - should be left as-is
       const result = await service.detokenize('[PII:invalid]', 'session-123');
       expect(result).toBe('[PII:invalid]');
+    });
+  });
+
+  describe('confidence score threshold (Issue #972)', () => {
+    const SESSION = 'session-threshold-test';
+
+    afterEach(() => {
+      jest.restoreAllMocks();
+    });
+
+    function mockComprehendResponse(entities: Array<{ Type: string; BeginOffset: number; EndOffset: number; Score: number }>) {
+      const MockedDetectPiiEntitiesCommand = DetectPiiEntitiesCommand as jest.MockedClass<typeof DetectPiiEntitiesCommand>;
+      MockedDetectPiiEntitiesCommand.mockImplementation((input) =>
+        Object.assign(Object.create(DetectPiiEntitiesCommand.prototype), { input })
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      jest.spyOn(ComprehendClient.prototype as any, 'send')
+        .mockResolvedValue({ Entities: entities });
+
+      // DynamoDB PutItem must succeed for tokens to be stored
+      const MockedPutItemCommand = PutItemCommand as jest.MockedClass<typeof PutItemCommand>;
+      MockedPutItemCommand.mockImplementation((input) =>
+        Object.assign(Object.create(PutItemCommand.prototype), { input })
+      );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      jest.spyOn(DynamoDBClient.prototype as any, 'send')
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockImplementation(async (command: any) => {
+          if (command instanceof PutItemCommand) {
+            return {};
+          }
+          throw new Error(`DynamoDB mock received unexpected command: ${command.constructor.name}`);
+        });
+    }
+
+    it('should NOT tokenize Comprehend detections below the confidence threshold', async () => {
+      // Simulate "AP-505" misclassified as NAME with low confidence
+      mockComprehendResponse([
+        { Type: 'NAME', BeginOffset: 34, EndOffset: 40, Score: 0.72 },
+      ]);
+
+      const text = 'Compare these Aruba access points: AP-505 and AP-515';
+      const result = await service.tokenize(text, SESSION);
+
+      expect(result.hasPII).toBe(false);
+      expect(result.tokens).toHaveLength(0);
+      expect(result.tokenizedText).toBe(text);
+    });
+
+    it('should NOT tokenize NAME detections just below the threshold (score 0.89)', async () => {
+      // Score of 0.89 is just below the 0.90 threshold
+      mockComprehendResponse([
+        { Type: 'NAME', BeginOffset: 7, EndOffset: 17, Score: PII_MIN_CONFIDENCE_SCORE - 0.01 },
+      ]);
+
+      const text = 'Hello JW177A, please confirm your model.';
+      const result = await service.tokenize(text, SESSION);
+
+      expect(result.hasPII).toBe(false);
+      expect(result.tokens).toHaveLength(0);
+    });
+
+    it('should tokenize NAME detections at or above the threshold', async () => {
+      // High-confidence real name detection
+      mockComprehendResponse([
+        { Type: 'NAME', BeginOffset: 6, EndOffset: 16, Score: 0.99 },
+      ]);
+
+      const text = 'Hello John Smith, how are you?';
+      const result = await service.tokenize(text, SESSION);
+
+      expect(result.hasPII).toBe(true);
+      expect(result.tokens).toHaveLength(1);
+      expect(result.tokens[0].type).toBe('NAME');
+      expect(result.tokenizedText).not.toContain('John Smith');
+    });
+
+    it('should tokenize NAME at exactly the threshold boundary (score === threshold)', async () => {
+      mockComprehendResponse([
+        { Type: 'NAME', BeginOffset: 6, EndOffset: 16, Score: PII_MIN_CONFIDENCE_SCORE },
+      ]);
+
+      const text = 'Hello John Smith, how are you?';
+      const result = await service.tokenize(text, SESSION);
+
+      expect(result.hasPII).toBe(true);
+      expect(result.tokens).toHaveLength(1);
+    });
+
+    it('should NOT tokenize DATE_TIME or AGE misclassified from version strings at low confidence', async () => {
+      mockComprehendResponse([
+        { Type: 'DATE_TIME', BeginOffset: 17, EndOffset: 23, Score: 0.65 },
+        { Type: 'AGE', BeginOffset: 33, EndOffset: 36, Score: 0.71 },
+      ]);
+
+      const text = 'Firmware version 3.2.14 requires age 18+ authorization.';
+      const result = await service.tokenize(text, SESSION);
+
+      expect(result.hasPII).toBe(false);
+      expect(result.tokens).toHaveLength(0);
+    });
+
+    it('should NOT tokenize DATE_TIME between the global floor and the per-type override', async () => {
+      // DATE_TIME has a stricter per-type floor (0.97). A score of 0.95 clears
+      // the global 0.90 floor but is still below the DATE_TIME override —
+      // firmware/version strings commonly fall in this band and must pass through.
+      const dateTimeFloor = PII_TYPE_CONFIDENCE_OVERRIDES.DATE_TIME ?? 0.97;
+      const scoreBetween = (PII_MIN_CONFIDENCE_SCORE + dateTimeFloor) / 2;
+      mockComprehendResponse([
+        { Type: 'DATE_TIME', BeginOffset: 17, EndOffset: 23, Score: scoreBetween },
+      ]);
+
+      const text = 'Firmware version 8.11.2 deployed last week.';
+      const result = await service.tokenize(text, SESSION);
+
+      expect(result.hasPII).toBe(false);
+      expect(result.tokens).toHaveLength(0);
+      expect(result.tokenizedText).toContain('8.11.2');
+    });
+
+    it('should tokenize DATE_TIME at or above the per-type override (real birthdate)', async () => {
+      // Real calendar dates and birthdates score ≥ 0.97. Confirm the override
+      // still allows them through.
+      const dateTimeFloor = PII_TYPE_CONFIDENCE_OVERRIDES.DATE_TIME ?? 0.97;
+      mockComprehendResponse([
+        { Type: 'DATE_TIME', BeginOffset: 11, EndOffset: 21, Score: dateTimeFloor },
+      ]);
+
+      const text = 'Born on 1995-03-14 according to records.';
+      const result = await service.tokenize(text, SESSION);
+
+      expect(result.hasPII).toBe(true);
+      expect(result.tokens).toHaveLength(1);
+      expect(result.tokens[0].type).toBe('DATE_TIME');
+    });
+
+    it('should tokenize EMAIL at low confidence — high-precision types bypass the confidence gate', async () => {
+      // EMAIL is not in CONFIDENCE_GATED_PII_TYPES, so the score gate does not apply.
+      // Even a low-confidence EMAIL detection must still be tokenized to protect student data.
+      // "user@example.com" occupies indices 0–16 in the text string below.
+      mockComprehendResponse([
+        { Type: 'EMAIL', BeginOffset: 0, EndOffset: 16, Score: 0.50 },
+      ]);
+
+      const text = 'user@example.com needs support today.';
+      const result = await service.tokenize(text, SESSION);
+
+      expect(result.hasPII).toBe(true);
+      expect(result.tokens).toHaveLength(1);
+      expect(result.tokens[0].type).toBe('EMAIL');
+      expect(result.tokenizedText).not.toContain('user@example.com');
+    });
+
+    it('should tokenize a mix: reject low-confidence hardware hit, keep high-confidence real PII', async () => {
+      // text = 'Please compare the Aruba access point AP-505 with user@example.com for support.'
+      // "AP-505"          → indices 38–44
+      // "user@example.com" → indices 50–66
+      mockComprehendResponse([
+        { Type: 'NAME', BeginOffset: 38, EndOffset: 44, Score: 0.78 },   // "AP-505" → false positive
+        { Type: 'EMAIL', BeginOffset: 50, EndOffset: 66, Score: 0.997 }, // "user@example.com"
+      ]);
+
+      const text = 'Please compare the Aruba access point AP-505 with user@example.com for support.';
+      const result = await service.tokenize(text, SESSION);
+
+      expect(result.hasPII).toBe(true);
+      expect(result.tokens).toHaveLength(1);
+      expect(result.tokens[0].type).toBe('EMAIL');
+      expect(result.tokenizedText).toContain('AP-505');
+      expect(result.tokenizedText).not.toContain('user@example.com');
     });
   });
 

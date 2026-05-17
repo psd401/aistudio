@@ -9,8 +9,10 @@
  * the skill uses to authenticate the gws call:
  *
  *   --scope user (default for Phase 1) →
- *     OAuth on the human user's identity (hagelk@psd401.net), narrow scopes
- *     (gmail.readonly, gmail.compose, calendar, tasks, drive.file). Use for
+ *     OAuth on the human user's identity (hagelk@psd401.net), scopes
+ *     (gmail.modify, calendar, tasks, drive.file). gmail.modify covers
+ *     read + draft + archive/label + (technically) send — sending is
+ *     blocked by the skill's regex gate, not by the OAuth scope. Use for
  *     reading/writing the human's own data.
  *
  *   --scope agent →
@@ -85,8 +87,10 @@ async function main() {
   let command = args.command;
 
   // 1. Phase 1 hard gates — refused at the skill layer regardless of scope
-  // or how the model phrases the request.
-  const gateCheck = enforcePhase1Gates(command);
+  // or how the model phrases the request. The scope+ownerEmail context lets
+  // the gate apply a narrow exception for share-to-caller handoffs (the
+  // agent shares files it owns back to the conversation owner, read-only).
+  const gateCheck = enforcePhase1Gates(command, { scope, ownerEmail });
   if (!gateCheck.allowed) {
     emit({
       status: 'phase1-forbidden',

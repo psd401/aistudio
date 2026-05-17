@@ -9,6 +9,8 @@ import { stripJsonQuotes, pgTimestampAsText } from "@/lib/db/drizzle-helpers"
 import { sql, desc, eq } from "drizzle-orm"
 import { agentHealthSnapshots } from "@/lib/db/schema/tables/agent-health-snapshots"
 import { agentPatterns } from "@/lib/db/schema/tables/agent-patterns"
+import { agentHealthScanRuns } from "@/lib/db/schema/tables/agent-health-scan-runs"
+import { agentPatternScanRuns } from "@/lib/db/schema/tables/agent-pattern-scan-runs"
 
 export interface AgentHealthRow {
   userEmail: string
@@ -22,6 +24,14 @@ export interface AgentHealthRow {
   snapshotDate: string
 }
 
+export interface AgentHealthScanRun {
+  runAt: string
+  snapshotDate: string
+  usersTotal: number
+  abandoned: number
+  error: string | null
+}
+
 export interface AgentHealthSummary {
   totalUsers: number
   abandonedCount: number
@@ -30,6 +40,46 @@ export interface AgentHealthSummary {
   totalMemoryFiles: number
   snapshotDate: string | null
   rows: AgentHealthRow[]
+  lastScan: AgentHealthScanRun | null
+}
+
+async function loadLatestSnapshotDate(): Promise<string | null> {
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({
+          date: sql<string>`MAX(${agentHealthSnapshots.snapshotDate})::text`,
+        })
+        .from(agentHealthSnapshots),
+    "agentHealth.latest",
+  )
+  return rows[0]?.date ?? null
+}
+
+async function loadLastHealthScan(): Promise<AgentHealthScanRun | null> {
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({
+          runAt: pgTimestampAsText(agentHealthScanRuns.runAt),
+          snapshotDate: sql<string>`${agentHealthScanRuns.snapshotDate}::text`,
+          usersTotal: agentHealthScanRuns.usersTotal,
+          abandoned: agentHealthScanRuns.abandoned,
+          error: agentHealthScanRuns.error,
+        })
+        .from(agentHealthScanRuns)
+        .orderBy(desc(agentHealthScanRuns.runAt))
+        .limit(1),
+    "agentHealth.lastScan",
+  )
+  if (!rows[0]) return null
+  return {
+    runAt: stripJsonQuotes(rows[0].runAt) ?? "",
+    snapshotDate: String(rows[0].snapshotDate),
+    usersTotal: Number(rows[0].usersTotal),
+    abandoned: Number(rows[0].abandoned),
+    error: rows[0].error,
+  }
 }
 
 /**
@@ -51,18 +101,11 @@ export async function getAgentHealthSummary(
     // users today and this cap leaves headroom for 2.5x growth.
     const safeLim = Math.min(Math.max(1, limit), 500)
 
-    // Use the latest snapshot_date that exists. If the Lambda hasn't run yet
-    // the table is empty and the response is zeros.
-    const latest = await executeQuery(
-      (db) =>
-        db
-          .select({
-            date: sql<string>`MAX(${agentHealthSnapshots.snapshotDate})::text`,
-          })
-          .from(agentHealthSnapshots),
-      "agentHealth.latest"
-    )
-    const snapshotDate = latest[0]?.date ?? null
+    const [latest, lastScan] = await Promise.all([
+      loadLatestSnapshotDate(),
+      loadLastHealthScan(),
+    ])
+    const snapshotDate = latest
 
     if (!snapshotDate) {
       return createSuccess<AgentHealthSummary>({
@@ -73,6 +116,7 @@ export async function getAgentHealthSummary(
         totalMemoryFiles: 0,
         snapshotDate: null,
         rows: [],
+        lastScan,
       })
     }
 
@@ -138,6 +182,7 @@ export async function getAgentHealthSummary(
       totalMemoryFiles: Number(agg?.totalMemoryFiles ?? 0),
       snapshotDate,
       rows: data,
+      lastScan,
     }
 
     timer({ status: "success" })
@@ -169,6 +214,20 @@ export interface AgentPatternRow {
   detectedAt: string
 }
 
+export interface AgentPatternScanRun {
+  runAt: string
+  week: string
+  signalsTotal: number
+  topicsTotal: number
+  detected: number
+  suppressed: number
+}
+
+export interface AgentPatternsEnvelope {
+  rows: AgentPatternRow[]
+  lastScan: AgentPatternScanRun | null
+}
+
 /**
  * Load detected patterns from the Pattern Scanner Lambda.
  * Filtered to the most recent N weeks. Privacy guarantee: rows contain
@@ -176,7 +235,7 @@ export interface AgentPatternRow {
  */
 export async function getAgentPatterns(
   weeks = 8
-): Promise<ActionState<AgentPatternRow[]>> {
+): Promise<ActionState<AgentPatternsEnvelope>> {
   const requestId = generateRequestId()
   const timer = startTimer("getAgentPatterns")
   const log = createLogger({ requestId, action: "getAgentPatterns" })
@@ -187,25 +246,43 @@ export async function getAgentPatterns(
     // Clamp weeks to prevent unbounded result sets (CWE-400)
     const safeWeeks = Math.min(Math.max(1, weeks), 52)
 
-    const rows = await executeQuery(
-      (db) =>
-        db
-          .select({
-            week: agentPatterns.week,
-            topic: agentPatterns.topic,
-            signalCount: agentPatterns.signalCount,
-            buildingCount: agentPatterns.buildingCount,
-            rollingAvg: agentPatterns.rollingAvg,
-            spikeRatio: agentPatterns.spikeRatio,
-            isEmerging: agentPatterns.isEmerging,
-            buildings: agentPatterns.buildings,
-            detectedAt: pgTimestampAsText(agentPatterns.detectedAt),
-          })
-          .from(agentPatterns)
-          .orderBy(desc(agentPatterns.week), desc(agentPatterns.signalCount))
-          .limit(safeWeeks * 20),
-      "agentPatterns.list"
-    )
+    const [rows, lastScanRows] = await Promise.all([
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              week: agentPatterns.week,
+              topic: agentPatterns.topic,
+              signalCount: agentPatterns.signalCount,
+              buildingCount: agentPatterns.buildingCount,
+              rollingAvg: agentPatterns.rollingAvg,
+              spikeRatio: agentPatterns.spikeRatio,
+              isEmerging: agentPatterns.isEmerging,
+              buildings: agentPatterns.buildings,
+              detectedAt: pgTimestampAsText(agentPatterns.detectedAt),
+            })
+            .from(agentPatterns)
+            .orderBy(desc(agentPatterns.week), desc(agentPatterns.signalCount))
+            .limit(safeWeeks * 20),
+        "agentPatterns.list",
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              runAt: pgTimestampAsText(agentPatternScanRuns.runAt),
+              week: agentPatternScanRuns.week,
+              signalsTotal: agentPatternScanRuns.signalsTotal,
+              topicsTotal: agentPatternScanRuns.topicsTotal,
+              detected: agentPatternScanRuns.detected,
+              suppressed: agentPatternScanRuns.suppressed,
+            })
+            .from(agentPatternScanRuns)
+            .orderBy(desc(agentPatternScanRuns.runAt))
+            .limit(1),
+        "agentPatterns.lastScan",
+      ),
+    ])
 
     const data: AgentPatternRow[] = rows.map((r) => ({
       week: String(r.week),
@@ -219,9 +296,23 @@ export async function getAgentPatterns(
       detectedAt: stripJsonQuotes(r.detectedAt) ?? "",
     }))
 
+    const lastScan: AgentPatternScanRun | null = lastScanRows[0]
+      ? {
+          runAt: stripJsonQuotes(lastScanRows[0].runAt) ?? "",
+          week: String(lastScanRows[0].week),
+          signalsTotal: Number(lastScanRows[0].signalsTotal),
+          topicsTotal: Number(lastScanRows[0].topicsTotal),
+          detected: Number(lastScanRows[0].detected),
+          suppressed: Number(lastScanRows[0].suppressed),
+        }
+      : null
+
     timer({ status: "success" })
-    log.info("Agent patterns loaded", { count: data.length })
-    return createSuccess(data)
+    log.info("Agent patterns loaded", {
+      count: data.length,
+      hasLastScan: lastScan !== null,
+    })
+    return createSuccess({ rows: data, lastScan })
   } catch (error) {
     timer({ status: "error" })
     return handleError(error, "Failed to load agent patterns", {

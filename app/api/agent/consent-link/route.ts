@@ -142,14 +142,16 @@ export async function POST(request: NextRequest) {
 
   // Validate kind. Default to 'agent_account' for backwards compatibility
   // with skills that haven't been updated to pass kind explicitly.
-  const kind: "agent_account" | "user_account" = body.kind === "user_account"
-    ? "user_account"
-    : body.kind === "agent_account" || body.kind === undefined
-      ? "agent_account"
-      : (() => { return "invalid" as never })()
-  if (body.kind !== undefined && body.kind !== "agent_account" && body.kind !== "user_account") {
+  type Kind = "agent_account" | "user_account" | "cognito_data"
+  const allowedKinds: Kind[] = ["agent_account", "user_account", "cognito_data"]
+  const kind: Kind = body.kind === undefined
+    ? "agent_account"
+    : (allowedKinds as readonly string[]).includes(body.kind)
+      ? (body.kind as Kind)
+      : "agent_account"
+  if (body.kind !== undefined && !(allowedKinds as readonly string[]).includes(body.kind)) {
     return NextResponse.json(
-      { error: "kind must be 'agent_account' or 'user_account' if provided" },
+      { error: "kind must be 'agent_account', 'user_account', or 'cognito_data' if provided" },
       { status: 400 }
     )
   }
@@ -198,9 +200,12 @@ export async function POST(request: NextRequest) {
     kind,
   })
 
-  // Build the consent URL
+  // Build the consent URL. cognito_data has its own dedicated page that
+  // captures a NextAuth session's Cognito refresh token; the other kinds
+  // route to the Google Workspace OAuth start page.
   const baseUrl = getIssuerUrl()
-  const url = `${baseUrl}/agent-connect?token=${encodeURIComponent(token)}`
+  const path = kind === "cognito_data" ? "/agent-connect-data" : "/agent-connect"
+  const url = `${baseUrl}${path}?token=${encodeURIComponent(token)}`
 
   log.info("Consent link generated", sanitizeForLogging({ ownerEmail, agentEmail, kind, requestId }))
 

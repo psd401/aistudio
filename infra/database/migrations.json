@@ -70,6 +70,8 @@
     "072-agent-workspace-nonce-agent-email.sql",
     "073-agent-workspace-token-kind.sql",
     "074-deep-research-capability.sql",
-    "075-skill-required-capability.sql"
+    "075-skill-required-capability.sql",
+    "076-agent-failures.sql",
+    "077-agent-workspace-consent-nonces-cognito-data.sql"
   ]
 }

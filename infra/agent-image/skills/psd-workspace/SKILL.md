@@ -13,7 +13,7 @@ Google Workspace access for the user's data, gated by Phase 1 boundaries (#912).
 
 Phase 1 introduces two parallel OAuth identities per user. The `--scope` flag selects which:
 
-- `--scope user` (**default**) — OAuth on the human user (e.g. `hagelk@psd401.net`). Narrow scopes: `gmail.readonly`, `gmail.compose`, `calendar`, `tasks`, `drive.file`. Use this for reading the user's mail, managing their tasks, writing to their calendar, creating new Drive files for them.
+- `--scope user` (**default**) — OAuth on the human user (e.g. `hagelk@psd401.net`). Scopes: `gmail.modify` (read + draft + send + archive/label, no permanent delete), `calendar`, `tasks`, `drive.file`. Use this for reading the user's mail, managing their tasks, writing to their calendar, creating new Drive files for them. Sending is gated by behavioral rules — always confirm before actually sending.
 - `--scope agent` — OAuth on the agent identity (e.g. `agnt_hagelk@psd401.net`). Broad scopes. Use this for actions the agent takes *as itself* (the agent's own calendar, drafts owned by the agent, agent-owned Drive folder).
 
 If you omit `--scope`, the skill defaults to `user`. Phase 1 work is overwhelmingly on user data.
@@ -67,6 +67,22 @@ These cannot be bypassed by phrasing. The skill returns exit code 13 with `statu
 - **No sending mail.** `gmail.users.messages.send`, `gmail.users.drafts.send`, `+send`, `+reply`, `+reply-all`, `+forward` — all blocked. Drafts only.
 - **No deletes.** Mail (delete/trash/batchDelete), events, calendars, Drive files, drive trash, tasks, tasklists.
 - **No permission changes.** `drive.permissions.create/update/delete`.
+
+**Narrow exception — share-to-caller handoff.** `drive.permissions.create` is permitted in ONE case: the agent shares a file it owns back to the conversation's caller, read-only. ALL of the following must be true:
+
+- `--scope agent` (file is in the agent's own Drive)
+- payload `type: "user"` (no domain / group / anyone)
+- payload `role: "reader"` or `"commenter"` (no writer / owner)
+- payload `emailAddress` matches the `--user` arg exactly (caller only; no third parties)
+
+Use this when you've created an artifact for the user (investigation report, generated doc, etc.) in your own Drive and need to hand it back. Example:
+
+```bash
+gws drive.permissions.create --scope agent --user hagelk@psd401.net \
+  --json '{"fileId":"<id>","type":"user","role":"reader","emailAddress":"hagelk@psd401.net"}'
+```
+
+Anything outside the narrow shape is still blocked.
 
 If a user explicitly asks the agent to send something, post the draft + a clear "I drafted it; reply 'send' if it's right" in Chat instead. The user clicks send themselves.
 

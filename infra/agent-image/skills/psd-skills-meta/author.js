@@ -35,6 +35,19 @@ async function main() {
   if (!args.summary) fail('--summary is required (one-line summary for catalog)');
   if (!args.skill_md) fail('--skill-md is required (base64-encoded SKILL.md content)');
 
+  // Reserved-prefix enforcement. The `psd-` prefix is reserved for
+  // system-provided skills bundled into /opt/psd-skills/ at image build
+  // time. User-authored skills must use a `{username}-{name}` form so
+  // they cannot shadow or collide with district-owned skills.
+  if (/^psd-/i.test(args.name)) {
+    fail(
+      `Skill name "${args.name}" uses the reserved "psd-" prefix. ` +
+      'User-authored skills must start with the caller\'s username ' +
+      '(e.g. "hagelk-weekly-digest"). The "psd-" prefix is reserved ' +
+      'for system-provided skills bundled into /opt/psd-skills/.'
+    );
+  }
+
   // Decode SKILL.md
   let skillMdContent;
   try {

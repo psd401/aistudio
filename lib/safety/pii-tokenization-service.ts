@@ -36,7 +36,7 @@ import type {
   PIITokenDynamoDBItem,
   GuardrailsConfig,
 } from './types';
-import { K12_PII_TYPES, CUSTOM_PII_PATTERNS, type ComprehendPIIType } from './types';
+import { K12_PII_TYPES, CUSTOM_PII_PATTERNS, PII_MIN_CONFIDENCE_SCORE, CONFIDENCE_GATED_PII_TYPES, PII_TYPE_CONFIDENCE_OVERRIDES, type ComprehendPIIType } from './types';
 
 /**
  * PIITokenizationService - Reversible PII protection for student data
@@ -209,10 +209,20 @@ export class PIITokenizationService {
       // Detect PII entities from Amazon Comprehend
       const comprehendEntities = await this.detectPII(text);
 
-      // Filter to only K-12 relevant PII types
-      const relevantComprehendEntities = comprehendEntities.filter((entity) =>
-        K12_PII_TYPES.includes(entity.type as ComprehendPIIType)
-      );
+      // Filter to K-12 relevant PII types. For types prone to hardware/version-string
+      // false positives (NAME, DATE_TIME, AGE), also require a minimum confidence score.
+      // High-precision types (EMAIL, PHONE, SSN, ADDRESS) are always tokenized when
+      // detected, since legitimate instances of those types are not ambiguous enough
+      // for Comprehend to score them below 0.90. Gated types may have a stricter
+      // per-type floor via PII_TYPE_CONFIDENCE_OVERRIDES (e.g., DATE_TIME at 0.97
+      // to distinguish firmware strings from real birthdates).
+      const relevantComprehendEntities = comprehendEntities.filter((entity) => {
+        const type = entity.type as ComprehendPIIType;
+        if (!K12_PII_TYPES.includes(type)) return false;
+        if (!CONFIDENCE_GATED_PII_TYPES.has(type)) return true;
+        const floor = PII_TYPE_CONFIDENCE_OVERRIDES[type] ?? PII_MIN_CONFIDENCE_SCORE;
+        return entity.score >= floor;
+      });
 
       // Detect custom PII patterns (e.g., student IDs)
       const customEntities = this.detectCustomPII(text);

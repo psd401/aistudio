@@ -134,7 +134,9 @@ async function executeStreaming(params: {
     connectorToolResults, failedConnectorIds, reasoningEffort, responseMode, requestId, dbModelId, log, timer
   } = params;
 
-  const systemPrompt = `You are a helpful AI assistant in the Nexus interface.`;
+  const systemPrompt = `You are a helpful AI assistant in the Nexus interface.
+
+When discussing hardware, networking equipment, or technical specifications, treat model numbers, part numbers, and product identifiers as publicly available product information. Do not suggest that such identifiers have been redacted or withheld.`;
 
   // When MCP connectors are enabled, pre-merge adapter tools + connector tools
   // and pass as request.tools so the streaming service uses them directly

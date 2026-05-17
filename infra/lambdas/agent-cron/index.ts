@@ -552,6 +552,87 @@ async function recordRun(params: {
       error: error instanceof Error ? error.message : String(error),
     });
   }
+
+  // Mirror error/skipped runs into agent_failures so the admin dashboard sees
+  // them alongside router/harness failures. agent_scheduled_runs remains the
+  // source of truth for cron analytics.
+  if (params.status === 'error') {
+    await recordCronFailure(
+      {
+        userEmail: params.userEmail,
+        sessionId: params.sessionId,
+        scheduleId: params.scheduleId,
+        scheduleName: params.scheduleName,
+        errorMessage: params.errorMessage ?? null,
+      },
+      log,
+    );
+  }
+}
+
+/**
+ * Mirror a failed scheduled run into agent_failures. Best-effort, never throws.
+ */
+async function recordCronFailure(
+  params: {
+    userEmail: string;
+    sessionId: string;
+    scheduleId: string;
+    scheduleName: string;
+    errorMessage: string | null;
+  },
+  log: Logger,
+): Promise<void> {
+  // Emit a structured CloudWatch line so the metric filter on AGENT_FAILURE_RECORD
+  // fires regardless of whether the DB write below succeeds. Include the error
+  // message (truncated) as a fallback for triage when the DB write fails.
+  log.error('AGENT_FAILURE_RECORD', {
+    source: 'cron',
+    severity: 'error',
+    userId: params.userEmail,
+    sessionId: params.sessionId,
+    scheduleName: params.scheduleName,
+    errorMessage: typeof params.errorMessage === 'string'
+      ? params.errorMessage.slice(0, 500)
+      : null,
+  });
+  if (!DATABASE_RESOURCE_ARN || !DATABASE_SECRET_ARN) return;
+  try {
+    const truncated =
+      typeof params.errorMessage === 'string'
+        ? params.errorMessage.slice(0, 4000)
+        : null;
+    const context = JSON.stringify({
+      scheduleId: params.scheduleId,
+    });
+    await rdsDataClient.send(
+      new ExecuteStatementCommand({
+        resourceArn: DATABASE_RESOURCE_ARN,
+        secretArn: DATABASE_SECRET_ARN,
+        database: DATABASE_NAME,
+        sql: `INSERT INTO agent_failures
+                (source, severity, user_id, session_id, schedule_name,
+                 error_message, context, occurred_at)
+              VALUES
+                ('cron', 'error', :user_id, :session_id, :schedule_name,
+                 :error_message, CAST(:context AS jsonb), NOW())`,
+        parameters: [
+          { name: 'user_id', value: { stringValue: params.userEmail } },
+          { name: 'session_id', value: { stringValue: params.sessionId } },
+          { name: 'schedule_name', value: { stringValue: params.scheduleName } },
+          truncated
+            ? { name: 'error_message', value: { stringValue: truncated } }
+            : { name: 'error_message', value: { isNull: true } },
+          { name: 'context', value: { stringValue: context } },
+        ],
+      }),
+    );
+  } catch (error) {
+    log.error('Failed to record cron failure mirror', {
+      scheduleId: params.scheduleId,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  }
 }
 
 /**

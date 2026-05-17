@@ -11,14 +11,20 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table"
-import type { AgentPatternRow } from "@/actions/admin/agent-health.actions"
+import type {
+  AgentPatternRow,
+  AgentPatternsEnvelope,
+} from "@/actions/admin/agent-health.actions"
+import { formatDate } from "@/lib/date-utils"
 
 interface Props {
-  data: AgentPatternRow[]
+  data: AgentPatternsEnvelope
   loading?: boolean
 }
 
 export function AgentPatternsTable({ data, loading = false }: Props) {
+  const rows: AgentPatternRow[] = data.rows
+  const lastScan = data.lastScan
   if (loading) {
     return (
       <Card>
@@ -42,9 +48,29 @@ export function AgentPatternsTable({ data, loading = false }: Props) {
         </p>
       </CardHeader>
       <CardContent>
-        {data.length === 0 ? (
-          <div className="h-32 flex items-center justify-center text-muted-foreground text-sm">
-            No patterns detected yet. The weekly scanner runs on a recurring schedule.
+        {lastScan && (
+          <div className="text-xs text-muted-foreground mb-3 border rounded p-2 bg-muted/30">
+            <span className="font-medium">Last scan:</span>{" "}
+            {formatDate(lastScan.runAt, true)} · week {lastScan.week} ·{" "}
+            {lastScan.signalsTotal} signals · {lastScan.topicsTotal} topics ·{" "}
+            <span className="text-foreground">{lastScan.detected} detected</span>
+            {lastScan.suppressed > 0 && ` · ${lastScan.suppressed} suppressed`}
+          </div>
+        )}
+        {rows.length === 0 ? (
+          <div className="h-40 flex flex-col items-center justify-center gap-2 text-sm">
+            <div className="text-muted-foreground">
+              {lastScan
+                ? "Scanner ran but no patterns met the suppression threshold."
+                : "Pattern scanner has not run yet."}
+            </div>
+            <div className="text-xs text-muted-foreground max-w-md text-center">
+              Scanner runs Sundays 23:00 UTC. Patterns are suppressed below 3
+              signals / 2 buildings (privacy guarantee). If{" "}
+              <code className="text-[11px]">agent_pattern_scan_runs</code>{" "}
+              stays empty despite agent_messages activity, the Lambda is
+              likely failing silently — check CloudWatch logs.
+            </div>
           </div>
         ) : (
           <Table>
@@ -60,7 +86,7 @@ export function AgentPatternsTable({ data, loading = false }: Props) {
               </TableRow>
             </TableHeader>
             <TableBody>
-              {data.map((r) => (
+              {rows.map((r) => (
                 <TableRow key={`${r.week}:${r.topic}`}>
                   <TableCell className="font-mono text-xs">{r.week}</TableCell>
                   <TableCell className="font-medium text-sm">

@@ -81,6 +81,26 @@ RUN set -eux; \
     chmod +x /usr/local/bin/gws; \
     gws --version
 
+# GitHub CLI (#965 follow-on) — single Go binary so the agent can read PRs,
+# issues, and run gh-api calls without us shipping a custom skill. ARM64
+# matches AgentCore runtime.
+#
+# Pinned version + SHA256. When bumping, run:
+#   curl -fsSL "https://github.com/cli/cli/releases/download/v<VER>/gh_<VER>_linux_arm64.tar.gz" \
+#     | shasum -a 256
+# and paste the hex digest into GH_SHA256 below.
+ARG GH_VERSION=2.92.0
+ARG GH_SHA256=c2248526dd0160c08d3fccca2332c3c1a07c15a78b23978e77735f1b5a18cfee
+RUN set -eux; \
+    curl -fsSL -o /tmp/gh.tar.gz \
+      "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_arm64.tar.gz"; \
+    echo "${GH_SHA256}  /tmp/gh.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/gh.tar.gz -C /tmp; \
+    mv "/tmp/gh_${GH_VERSION}_linux_arm64/bin/gh" /usr/local/bin/gh; \
+    rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_arm64"; \
+    chmod +x /usr/local/bin/gh; \
+    gh --version
+
 # Install the bedrock-agentcore SDK in a virtual environment (avoids --break-system-packages)
 # BLOCKER(prod): Verify the "bedrock-agentcore" PyPI package is the official AWS SDK
 # (not an unrelated name-squatted package). The SDK is pre-GA as of this PR — confirm
@@ -174,7 +194,14 @@ RUN cd /opt/psd-skills/psd-credentials && npm install --omit=dev --no-audit --no
 RUN cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no-fund
 RUN cd /opt/psd-skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
 RUN cd /opt/psd-skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund
+RUN cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund
+# psd-data has zero npm install of its own. Its common.js require()s
+# `@aws-sdk/client-secrets-manager` from psd-workspace's already-installed
+# tree via an absolute path. No symlink, no duplicate install — keeps the
+# image file-count identical to a no-psd-data build.
 # psd-freshservice has zero npm dependencies (native fetch + child_process only).
+# psd-brand-guidelines has zero npm dependencies (config + static assets only).
+# psd-github has zero npm dependencies (wraps /usr/local/bin/gh).
 
 # Upstream gws-* skills (#912) — per-API SKILL.md guidance for Gmail, Drive,
 # Docs, Sheets, Slides, Forms, Tasks, Calendar, Chat, Meet, Contacts, etc.
@@ -209,6 +236,7 @@ RUN chown -R root:root /opt/psd-skills && chmod -R a-w /opt/psd-skills
 # The psd-schedules skill is the only scheduling surface in this deployment.
 ENV OPENCLAW_SKIP_CRON=1
 COPY harness_adapter.py /app/harness_adapter.py
+COPY agent_failures.py /app/agent_failures.py
 COPY agentcore_wrapper.py /app/agentcore_wrapper.py
 COPY workspace_sync.py /app/workspace_sync.py
 COPY mantle_proxy.py /app/mantle_proxy.py

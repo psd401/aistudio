@@ -26,6 +26,7 @@ import { AgentPatternsTable } from "./agent-patterns-table"
 import { SkillsListClient } from "../skills/_components/skills-list-client"
 import { CredentialsClient } from "../credentials/_components/credentials-client"
 import { AgentWorkspaceTable } from "./agent-workspace-table"
+import { AgentFailuresClient } from "./agent-failures-client"
 
 import {
   getAgentTelemetryStats,
@@ -46,7 +47,7 @@ import {
   getAgentHealthSummary,
   getAgentPatterns,
   type AgentHealthSummary,
-  type AgentPatternRow,
+  type AgentPatternsEnvelope,
 } from "@/actions/admin/agent-health.actions"
 import {
   getAgentCostSummary,
@@ -65,6 +66,7 @@ type DashboardTab =
   | "skills"
   | "credentials"
   | "workspace"
+  | "failures"
 
 /**
  * Map telemetry date range to Cost Explorer range.
@@ -83,7 +85,7 @@ interface LoaderSetters {
   setFeedbackList: (v: FeedbackItem[]) => void
   setHealthSummary: (v: AgentHealthSummary | null) => void
   setCostSummary: (v: AgentCostSummary | null) => void
-  setPatterns: (v: AgentPatternRow[]) => void
+  setPatterns: (v: AgentPatternsEnvelope) => void
 }
 
 interface LoaderContext extends LoaderSetters {
@@ -164,6 +166,7 @@ function buildLoaders(
     skills: async () => {},
     credentials: async () => {},
     workspace: async () => {},
+    failures: async () => {},
   }
 }
 
@@ -249,7 +252,7 @@ function DashboardTabs({
   feedbackList: FeedbackItem[]
   healthSummary: AgentHealthSummary | null
   costSummary: AgentCostSummary | null
-  patterns: AgentPatternRow[]
+  patterns: AgentPatternsEnvelope
 }) {
   return (
     <Tabs value={activeTab} onValueChange={onTabChange}>
@@ -257,6 +260,7 @@ function DashboardTabs({
         <TabsTrigger value="usage">Usage</TabsTrigger>
         <TabsTrigger value="cost">Cost</TabsTrigger>
         <TabsTrigger value="adoption">Adoption</TabsTrigger>
+        <TabsTrigger value="failures">Failures</TabsTrigger>
         <TabsTrigger value="health">Health</TabsTrigger>
         <TabsTrigger value="safety">Safety</TabsTrigger>
         <TabsTrigger value="patterns">Patterns</TabsTrigger>
@@ -311,6 +315,10 @@ function DashboardTabs({
       <TabsContent value="workspace" className="mt-4">
         <AgentWorkspaceTable />
       </TabsContent>
+
+      <TabsContent value="failures" className="mt-4">
+        <AgentFailuresClient />
+      </TabsContent>
     </Tabs>
   )
 }
@@ -328,7 +336,10 @@ export function AgentDashboardClient() {
   const [feedbackList, setFeedbackList] = useState<FeedbackItem[]>([])
   const [healthSummary, setHealthSummary] = useState<AgentHealthSummary | null>(null)
   const [costSummary, setCostSummary] = useState<AgentCostSummary | null>(null)
-  const [patterns, setPatterns] = useState<AgentPatternRow[]>([])
+  const [patterns, setPatterns] = useState<AgentPatternsEnvelope>({
+    rows: [],
+    lastScan: null,
+  })
   const [tabLoading, setTabLoading] = useState(false)
 
   // Request version counter — prevents stale responses from overwriting
