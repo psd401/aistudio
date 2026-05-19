@@ -270,6 +270,79 @@ bunx cdk deploy AIStudio-AgentPlatformStack-Dev \
   --context baseDomain=yourdomain.com
 ```
 
+## Rich Chat output — cards, charts, button callbacks
+
+Phase 1 of native Chat interactivity (#TBD) added two skills and one shared
+contract between the agent and the Lambdas that talk to Chat. Reference
+material when wiring new skills, debugging missing cards, or extending
+interactivity.
+
+### The PSD_AGENT_RICH_V1 envelope
+
+The agent emits a sentinel-wrapped JSON block inside its final reply. The
+Router and Cron Lambdas detect it and lift the payload into the
+`spaces.messages.create` request alongside the plain-text fallback:
+
+```
+<<<PSD_AGENT_RICH_V1>>>
+{ "cardsV2": [...], "accessoryWidgets": [...]?, "textFallback": "..."? }
+<<<END_PSD_AGENT_RICH_V1>>>
+```
+
+- The envelope shape lives in three places that must stay in lockstep:
+  - `infra/agent-image/chat_format.py` (`extract_rich_envelope`)
+  - `infra/lambdas/agent-router/rich-envelope.ts`
+  - `infra/lambdas/agent-cron/rich-envelope.ts` (byte-identical copy)
+- Sentinels are deterministic strings, not regex — `JSON.parse` validates
+  the payload. Malformed envelopes fall back to plain-text send and log
+  `rich_envelope_malformed` at WARNING. Look for that log line first when
+  cards stop appearing.
+- `text` is always sent for notification previews. When the envelope
+  carries `textFallback` and the agent's prose is empty, we use the
+  fallback; otherwise prose wins.
+
+### Skills that emit the envelope
+
+- `infra/agent-image/skills/chat-card` — high-level flags (`--title`,
+  `--paragraph`, `--kv`, `--button`, `--image`, `--divider`) plus a
+  `--card-json` escape hatch for widget types not exposed by flags.
+- `infra/agent-image/skills/chat-chart` — chart renderer. `--engine auto`
+  routes sensitive data (or anything that trips the inline PII regex) to
+  the local matplotlib path; everything else goes to QuickChart.io.
+
+### Button click contract (CARD_CLICKED)
+
+Every button emitted by `chat-card` uses:
+
+```json
+{ "onClick": { "action": { "function": "psd-agent", "parameters": [
+  { "key": "intent", "value": "<freeform-intent>" },
+  { "key": "<extra>", "value": "<extra-value>" }
+] } } }
+```
+
+Chat delivers the click as a `CARD_CLICKED` event. The Router Lambda
+normalises it into a synthesised user MESSAGE of the form
+`[button] intent=<intent> key=value key=value` and routes through the
+normal agent pipeline — same auth, same allowlist, same thread session
+continuity. The agent decides what to do based on the intent name; we
+don't dispatch on `intent` Lambda-side.
+
+When testing: send any prompt that exercises the agent's use of
+`chat-card --button …`, click the button in Chat, then check the next
+event the Router logs — it should appear as `MESSAGE` with the bracketed
+intent text.
+
+### Troubleshooting cards
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| Card looks like plain text in Chat | Envelope reached Lambda but malformed | Search CloudWatch for `rich_envelope_malformed`; preview field shows the first 200 chars |
+| Chart is the wrong type | Agent passed wrong `--type` | Re-read chat-chart SKILL.md; only bar/line/pie/scatter supported in v1 |
+| QuickChart image is broken | Spec URL > ~16KB | Cut data points (≤ 50 series points is the design target) |
+| Local engine "renderer claimed success but produced no file" | matplotlib install missing from agent image | Rebuild image — matplotlib goes into `/opt/agentcore-venv` |
+| Buttons do nothing | CARD_CLICKED event not arriving at Router | Verify `chat.buttonClickedPayload` is in the Pub/Sub event — check Bridge Lambda logs |
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |

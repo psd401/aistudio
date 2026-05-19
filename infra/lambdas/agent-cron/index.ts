@@ -40,6 +40,7 @@ import type { Context as LambdaContext } from 'aws-lambda';
 import * as chatPkg from '@googleapis/chat';
 import * as crypto from 'crypto';
 import { RDSDataClient, ExecuteStatementCommand } from '@aws-sdk/client-rds-data';
+import { extractRichEnvelope } from './rich-envelope';
 
 // ---------------------------------------------------------------------------
 // PII sanitization — mask email addresses in logs (FERPA compliance)
@@ -486,18 +487,41 @@ async function sendChatMessage(
   log: Logger,
 ): Promise<void> {
   const chatClient = await getChatClient();
+  // Lift any PSD_AGENT_RICH_V1 envelope out of the reply before truncating —
+  // the sentinels are way past the 4096 ceiling when the envelope is real,
+  // and we want the card payload to survive intact. Mirrors the
+  // agent-router behaviour so scheduled tasks (morning brief etc.) can
+  // deliver cards/charts too.
+  const { envelope, remaining, malformed } = extractRichEnvelope(text);
+  if (malformed) {
+    log.warn('rich_envelope_malformed — falling back to plain text', {
+      space: spaceName,
+      preview: text.slice(0, 200),
+    });
+  }
+
   const maxLength = 4096;
+  const proseSource = envelope ? remaining || envelope.textFallback || 'Rich response' : remaining || text;
   const truncated =
-    text.length > maxLength
-      ? text.substring(0, maxLength - 50) + '\n\n_(Response truncated)_'
-      : text;
+    proseSource.length > maxLength
+      ? proseSource.substring(0, maxLength - 50) + '\n\n_(Response truncated)_'
+      : proseSource;
+
+  const requestBody: Record<string, unknown> = { text: truncated };
+  if (envelope) {
+    if (envelope.cardsV2) requestBody.cardsV2 = envelope.cardsV2;
+    if (envelope.accessoryWidgets) requestBody.accessoryWidgets = envelope.accessoryWidgets;
+  }
+
   await chatClient.spaces.messages.create({
     parent: spaceName,
-    requestBody: { text: truncated },
+    requestBody,
   });
   log.info('Scheduled response sent to Google Chat', {
     space: spaceName,
     responseLength: truncated.length,
+    hasCards: !!envelope?.cardsV2,
+    hasAccessoryWidgets: !!envelope?.accessoryWidgets,
   });
 }
 

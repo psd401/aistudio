@@ -59,6 +59,7 @@ import * as crypto from 'crypto';
 import * as chatPkg from '@googleapis/chat';
 import { Agent as UndiciAgent, fetch as undiciFetch } from 'undici';
 import { classifyTopic, isPrivateMessage, isoWeek, type Topic } from './topic-classifier';
+import { extractRichEnvelope } from './rich-envelope';
 
 // ---------------------------------------------------------------------------
 // Structured logging (Lambda-compatible, no console.* per CLAUDE.md exception)
@@ -237,6 +238,29 @@ interface GoogleChatEvent {
     };
     createTime: string;
   };
+  /**
+   * Populated on CARD_CLICKED events. Carries the function name + parameters
+   * configured on the button's onClick.action. Our convention: every card
+   * button emitted by the chat-card skill sets function="psd-agent" and
+   * encodes the intent + any params as the parameters[] list. The Lambda
+   * synthesizes a user message from these and routes through the normal
+   * agent path so the agent decides the follow-up.
+   */
+  action?: {
+    actionMethodName?: string;
+    function?: string;
+    parameters?: Array<{ key: string; value: string }>;
+  };
+  /**
+   * On CARD_CLICKED events, the user who clicked. The shape mirrors
+   * message.sender so domain validation can reuse the same accessor.
+   */
+  user?: {
+    name: string;
+    displayName: string;
+    email: string;
+    type: 'HUMAN' | 'BOT';
+  };
 }
 
 /**
@@ -306,6 +330,29 @@ function normalizeChatEvent(raw: Record<string, unknown>): GoogleChatEvent {
     };
   }
 
+  // CARD_CLICKED (button on a card the agent posted). Google's common-event
+  // shape names this `buttonClickedPayload`. We mirror legacy fields so the
+  // CARD_CLICKED handler can read message/space/user/action through the same
+  // accessors as MESSAGE.
+  const buttonPayload = chat.buttonClickedPayload as
+    | {
+        space?: GoogleChatEvent['space'];
+        message?: GoogleChatEvent['message'];
+        action?: GoogleChatEvent['action'];
+      }
+    | undefined;
+  if (buttonPayload?.space && buttonPayload?.action) {
+    const user = chat.user as GoogleChatEvent['user'] | undefined;
+    return {
+      type: 'CARD_CLICKED',
+      eventTime,
+      space: buttonPayload.space,
+      message: buttonPayload.message,
+      action: buttonPayload.action,
+      user,
+    };
+  }
+
   // Unknown common-event variant; mark unspecified and let caller skip it.
   return {
     type: 'TYPE_UNSPECIFIED' as GoogleChatEvent['type'],
@@ -313,6 +360,10 @@ function normalizeChatEvent(raw: Record<string, unknown>): GoogleChatEvent {
     space: { name: '', type: 'TYPE_UNSPECIFIED' },
   };
 }
+
+// Rich-output envelope helper extracted to its own module so the Cron
+// Lambda can mirror the same logic and we can unit-test it independently.
+// Keep behaviour in lockstep with infra/agent-image/chat_format.py.
 
 interface AgentUser {
   googleIdentity: string;
@@ -1249,7 +1300,31 @@ async function sendGoogleChatResponse(
 
   const chatClient = cachedChatClient;
 
-  const messageBody: Record<string, string | Record<string, string>> = { text };
+  // Pull a rich-output envelope out of the agent reply, if one is present.
+  // The envelope carries cardsV2 / accessoryWidgets the chat-card / chat-chart
+  // skills produced. Remaining prose becomes the message's `text` field
+  // (notification preview + fallback for clients that don't render cards).
+  const { envelope, remaining, malformed } = extractRichEnvelope(text);
+  if (malformed) {
+    log.warn('rich_envelope_malformed — sending plain text', {
+      space: spaceName,
+      preview: text.slice(0, 200),
+    });
+  }
+
+  const messageBody: Record<string, unknown> = {};
+  if (envelope) {
+    if (envelope.cardsV2) messageBody.cardsV2 = envelope.cardsV2;
+    if (envelope.accessoryWidgets) messageBody.accessoryWidgets = envelope.accessoryWidgets;
+    if (envelope.actionResponse) messageBody.actionResponse = envelope.actionResponse;
+    // Google Chat requires `text` non-empty for notification previews, even
+    // when cardsV2 carries the visible payload. Prefer the agent's prose,
+    // then the explicit textFallback, then a generic placeholder.
+    const fallback = remaining || envelope.textFallback || 'Rich response';
+    messageBody.text = fallback;
+  } else {
+    messageBody.text = remaining || text;
+  }
   if (threadName) {
     messageBody.thread = { name: threadName };
   }
@@ -1262,6 +1337,8 @@ async function sendGoogleChatResponse(
   log.info('Response sent to Google Chat', {
     space: spaceName,
     responseLength: text.length,
+    hasCards: !!envelope?.cardsV2,
+    hasAccessoryWidgets: !!envelope?.accessoryWidgets,
   });
 }
 
@@ -1725,6 +1802,55 @@ async function processRecord(
     });
     // Rethrow so SQS marks as failed and retries/DLQs the message
     throw error;
+  }
+
+  // CARD_CLICKED events: a user clicked a button on a card the agent posted.
+  // Convert the action.parameters[] into a synthesised user message and fall
+  // through to the normal MESSAGE handling so the agent decides the follow-up
+  // (same auth checks, same allowlist, same session continuity via thread).
+  // This is the load-bearing piece of Phase 1 interactivity — without it,
+  // every button click would dead-end at "ignored event".
+  if (chatEvent.type === 'CARD_CLICKED') {
+    const action = chatEvent.action ?? {};
+    const params = action.parameters ?? [];
+    const intentParam = params.find((p) => p.key === 'intent');
+    const intent = intentParam?.value ?? action.actionMethodName ?? 'unspecified';
+    const otherParams = params
+      .filter((p) => p.key !== 'intent')
+      .map((p) => `${p.key}=${p.value}`)
+      .join(' ');
+    const synthesisedText = otherParams
+      ? `[button] intent=${intent} ${otherParams}`
+      : `[button] intent=${intent}`;
+    log.info('CARD_CLICKED — synthesising user message', {
+      intent,
+      paramCount: params.length,
+      space: chatEvent.space?.name,
+    });
+    // Mutate the event in place so downstream code (which only knows about
+    // MESSAGE) sees a normal message it can process. The synthesised payload
+    // is intentionally terse — the agent should already have context about
+    // what the button means from its own prior turn that emitted the card.
+    chatEvent = {
+      ...chatEvent,
+      type: 'MESSAGE',
+      message: {
+        name: chatEvent.message?.name ?? '',
+        text: synthesisedText,
+        argumentText: synthesisedText,
+        sender:
+          chatEvent.user ??
+          chatEvent.message?.sender ??
+          ({
+            name: '',
+            displayName: '',
+            email: '',
+            type: 'HUMAN',
+          } as NonNullable<GoogleChatEvent['message']>['sender']),
+        thread: chatEvent.message?.thread,
+        createTime: chatEvent.eventTime,
+      },
+    };
   }
 
   // Only process MESSAGE events

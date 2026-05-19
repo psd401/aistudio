@@ -1,0 +1,32 @@
+# Keep build context small + free of local-machine artifacts.
+#
+# Why this exists: chat-chart's render_local.py was being executed during
+# local smoke tests on macOS, which created an `__pycache__/` next to it
+# (Python's bytecode cache, tied to the dev machine's Python version). That
+# directory got COPYed into the Docker image at /opt/psd-skills/chat-chart/,
+# carrying macOS extended attributes (com.apple.provenance, etc.) into the
+# layer. AgentCore's snapshotter failed to mount the resulting overlay
+# ("Failed to mount overlay: No such file or directory") and every microVM
+# boot failed. Ignoring these patterns at build time keeps the image
+# byte-clean regardless of what the developer did locally.
+
+# Python bytecode caches
+__pycache__/
+*.pyc
+*.pyo
+
+# Node-side scratch
+node_modules/
+
+# macOS Finder metadata
+.DS_Store
+*.icloud
+
+# Editor / IDE noise
+.vscode/
+.idea/
+*.swp
+
+# Local-only test scratch
+test_*.py
+*.test.ts
