@@ -118,6 +118,121 @@ MAX_REQ_CHUNK_LOG = 20000
 MAX_RESP_CHUNKS_LOGGED = 60
 # Max bytes per response chunk in the log.
 MAX_RESP_CHUNK_BYTES = 800
+# Detector thresholds for the "model bailed after a tool result" failure.
+# Two conditions trigger rescue:
+#   1. Trivial ack: trimmed model output < 20 chars (e.g. "Done.", "👍").
+#   2. Disproportionate abandonment: tool result >= MIN_TOOL_LEN_FOR_RATIO
+#      chars AND model output < min(RATIO_CAP_CHARS, RATIO_FRACTION * tool_len).
+#      Catches cases like the 2026-05-15 Morning Brief where the model
+#      received a 3446-char rendered brief but replied with 45 chars of
+#      hallucinated "delivered" text. Ratio fires only when the tool result
+#      is substantial — small tool results commonly get legitimate short
+#      acks, and we don't want to dump 200 chars on top of a 4-char "ok".
+EMPTY_RELAY_LIMIT = 20
+MIN_TOOL_LEN_FOR_RATIO = 1500
+RATIO_FRACTION = 0.05
+RATIO_CAP_CHARS = 150
+
+# Graceful synthesised reply when the model produces zero content in
+# response to a *user* message (different failure mode from the post-tool
+# silence — there's no tool output we could relay verbatim, so we just
+# tell the user we dropped the turn and ask them to try again).
+EMPTY_USER_MSG_FALLBACK = (
+    "Sorry — I dropped that turn and didn't produce a reply. "
+    "Can you say that again or rephrase?"
+)
+
+
+def _extract_last_tool_text(parsed) -> Optional[str]:
+    """Return the trailing tool message's text content, or None if the
+    last message isn't a tool result. Used to detect (and rescue) the
+    post-tool empty-relay failure mode."""
+    if not isinstance(parsed, dict):
+        return None
+    messages = parsed.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return None
+    last = messages[-1]
+    if not isinstance(last, dict) or last.get("role") != "tool":
+        return None
+    content = last.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                parts.append(block.get("text", ""))
+            elif isinstance(block, str):
+                parts.append(block)
+        return "".join(parts)
+    return None
+
+
+def _last_message_role(parsed) -> Optional[str]:
+    """Return the role of the trailing message in the request, or None.
+    Used to discriminate empty-response failure modes (post-tool silence
+    vs the model going silent when the user just spoke)."""
+    if not isinstance(parsed, dict):
+        return None
+    messages = parsed.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return None
+    last = messages[-1]
+    if not isinstance(last, dict):
+        return None
+    role = last.get("role")
+    return role if isinstance(role, str) else None
+
+
+def _synthesize_relay_chunks(tool_text: str, model_name: Optional[str],
+                             streaming: bool) -> list:
+    """Build response chunks that relay `tool_text` verbatim as if the
+    model had produced it. Mirrors the SSE / JSON shape OpenClaw and the
+    harness adapter already parse. Synthesis is the last-resort rescue
+    path when retries don't dislodge the model from an empty-relay turn."""
+    msg_id = f"chatcmpl-rescue-{int(time.time() * 1000)}"
+    created = int(time.time())
+    model = model_name or "rescue"
+    if streaming:
+        delta_chunk = {
+            "id": msg_id,
+            "model": model,
+            "created": created,
+            "choices": [{
+                "index": 0,
+                "delta": {"role": "assistant", "content": tool_text},
+                "finish_reason": None,
+            }],
+        }
+        stop_chunk = {
+            "id": msg_id,
+            "model": model,
+            "created": created,
+            "choices": [{
+                "index": 0,
+                "delta": {},
+                "finish_reason": "stop",
+            }],
+        }
+        sse = (
+            f"data: {json.dumps(delta_chunk, ensure_ascii=False)}\n\n"
+            f"data: {json.dumps(stop_chunk, ensure_ascii=False)}\n\n"
+            "data: [DONE]\n\n"
+        )
+        return [sse.encode("utf-8")]
+    # Non-streaming JSON body.
+    body = {
+        "id": msg_id,
+        "model": model,
+        "created": created,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": tool_text},
+            "finish_reason": "stop",
+        }],
+    }
+    return [json.dumps(body, ensure_ascii=False).encode("utf-8")]
 
 
 async def handle_health(_request: web.Request) -> web.Response:
@@ -238,7 +353,19 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
 
     timeout = ClientTimeout(total=300, sock_read=300, sock_connect=30)
 
-    async def fetch_upstream(attempt_label: str):
+    # Capture the last tool-result text so we can detect the "model bailed
+    # after tool result" signature and synthesize a verbatim relay if all
+    # retries fail. See is_retryable_failure / rescue logic below.
+    last_tool_text: Optional[str] = _extract_last_tool_text(parsed)
+    # Also capture the last message role so we can distinguish two empty-
+    # turn failure modes: (a) silence after a tool result — rescue by
+    # relaying the tool text; (b) silence after a user message — rescue
+    # by sending a graceful "try again" reply. The 2026-05-19 incident
+    # was case (b): user accused the agent of merging a PR autonomously
+    # and the model produced zero chars / finish=stop / no tool events.
+    last_role: Optional[str] = _last_message_role(parsed)
+
+    async def fetch_upstream(attempt_label: str, body_override: Optional[bytes] = None):
         """One upstream fetch. Buffers the whole body (full headers + all
         chunks) so we can inspect the response and decide whether to retry
         before committing it to the client.
@@ -247,9 +374,10 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
         `content_text` is the reassembled assistant delta text (from SSE `data:`
         events when streaming), used to detect empty/degenerate outputs.
         """
+        body_to_send = body_override if body_override is not None else req_body
         async with ClientSession(timeout=timeout) as session:
             async with session.request(
-                request.method, url, data=req_body, headers=fwd_headers,
+                request.method, url, data=body_to_send, headers=fwd_headers,
                 allow_redirects=False,
             ) as upstream:
                 status = upstream.status
@@ -308,38 +436,159 @@ async def handle_proxy(request: web.Request) -> web.StreamResponse:
     def is_retryable_failure(status: int, content: str, finish: Optional[str]) -> Optional[str]:
         """Classify the upstream response. Return a reason-string if the
         response should be retried, else None. Only retry when the upstream
-        returned 200 but the completion was empty or obviously degenerate —
-        provider-level protocol errors (4xx/5xx) should surface unmodified."""
+        returned 200 but the completion was empty / obviously degenerate /
+        an empty relay after a tool result — provider-level protocol errors
+        (4xx/5xx) should surface unmodified.
+
+        `empty_post_tool` is the specific failure mode the user hit on the
+        2026-05-14 Morning Brief: model received a 4.6KB tool result, then
+        ended the turn with effectively no user-visible text. We detect by
+        (a) `finish=stop`, (b) trimmed content shorter than `EMPTY_RELAY_LIMIT`,
+        (c) the trailing request message was `role=tool`. The trim length
+        excludes thin acks ("Done.", " ", "👍") but lets a real summary pass.
+        """
         if status != 200:
             return None
-        if not content and finish in ("stop", "length"):
-            return "empty_completion"
-        # Degeneracy: the tail is a single-character repetition (e.g. "!!!!!")
+        # Degeneracy: the tail is a single-character repetition (e.g. "!!!!!").
+        # Check this BEFORE the empty-content branch so a long degenerate
+        # reply doesn't get reclassified as empty_completion on retry.
         if content and len(content) >= 80 and len(set(content[-80:])) <= 2:
             return "degenerate_repetition"
+        # Empty / near-empty content: discriminate by what the model was
+        # responding to. Post-tool silence is rescued by verbatim relay
+        # of the tool text; post-user silence is rescued by a graceful
+        # "try again" reply (no tool to relay).
+        if finish == "stop" and last_tool_text:
+            stripped_len = len(content.strip())
+            tool_len = len(last_tool_text)
+            # Case 1: trivial ack.
+            if stripped_len < EMPTY_RELAY_LIMIT:
+                return "empty_post_tool_relay"
+            # Case 2: disproportionate abandonment of substantial tool result.
+            if tool_len >= MIN_TOOL_LEN_FOR_RATIO:
+                ratio_limit = min(RATIO_CAP_CHARS, int(RATIO_FRACTION * tool_len))
+                if stripped_len < ratio_limit:
+                    return "empty_post_tool_relay"
+        if finish == "stop" and last_role == "user" and not content.strip():
+            # Model produced zero content in reply to a user message. This
+            # is the catastrophic empty-turn case — the user said something
+            # and got nothing back. Always retry.
+            return "empty_post_user_msg"
+        # Generic empty-completion fallback for cases the above didn't catch
+        # (no last_tool_text AND last_role != "user", or finish=length, etc.).
+        if not content and finish in ("stop", "length"):
+            return "empty_completion"
         return None
+
+    def build_retry_body(failure_mode: str) -> bytes:
+        """Reserialize the request with a system reminder appended,
+        tailored to the failure mode. Only safe to call when `parsed`
+        is a dict with a messages array."""
+        if not (isinstance(parsed, dict) and isinstance(parsed.get("messages"), list)):
+            return req_body or b""
+        if failure_mode == "empty_post_tool_relay":
+            reminder = (
+                "Your previous attempt produced no user-visible text after a "
+                "tool result. The user cannot see tool output directly. "
+                "Produce the user-facing response now, relaying or "
+                "summarizing the tool result so the user sees the answer."
+            )
+        elif failure_mode == "empty_post_user_msg":
+            reminder = (
+                "Your previous attempt produced no reply to the user's "
+                "message. The user is waiting for a response. Even a single "
+                "short sentence acknowledging what they said is better than "
+                "silence. Reply now."
+            )
+        else:
+            # Generic nudge for empty_completion / other modes; harmless
+            # to include even if the model has nothing extra to say.
+            reminder = (
+                "Your previous attempt produced no user-visible text. "
+                "Produce a reply now."
+            )
+        new_parsed = dict(parsed)
+        new_messages = list(parsed["messages"])
+        new_messages.append({"role": "system", "content": reminder})
+        new_parsed["messages"] = new_messages
+        return json.dumps(new_parsed, ensure_ascii=False).encode("utf-8")
 
     try:
         # First attempt.
         status, headers, chunks, content, finish = await fetch_upstream("first")
         reason = is_retryable_failure(status, content, finish)
-        if reason:
+        retry_attempts = 0
+        # Up to 2 retries (3 total upstream calls). Stop as soon as one
+        # succeeds. The retry body carries the empty-relay reminder only
+        # for the post-tool case; other failures retry with the original
+        # body since the cause is upstream-side.
+        while reason is not None and retry_attempts < 2:
+            retry_attempts += 1
+            # Inject a tailored reminder for the two empty-turn modes;
+            # let other failures (degenerate_repetition, empty_completion
+            # with no last-message context) retry against the same body
+            # since the cause is upstream-side.
+            retry_body = (
+                build_retry_body(reason)
+                if reason in ("empty_post_tool_relay", "empty_post_user_msg")
+                else None
+            )
             log.warning(j("retrying_on_failure", req_id=req_id, reason=reason,
-                          first_content_len=len(content), first_finish=finish))
-            # One retry. We re-use the repaired request body verbatim.
-            status2, headers2, chunks2, content2, finish2 = await fetch_upstream("retry")
-            reason2 = is_retryable_failure(status2, content2, finish2)
-            if reason2 is None:
-                # Retry succeeded. Use its chunks.
-                status, headers, chunks = status2, headers2, chunks2
+                          attempt=retry_attempts,
+                          first_content_len=len(content), first_finish=finish,
+                          inject_reminder=bool(retry_body)))
+            status_r, headers_r, chunks_r, content_r, finish_r = await fetch_upstream(
+                f"retry{retry_attempts}", body_override=retry_body
+            )
+            reason_r = is_retryable_failure(status_r, content_r, finish_r)
+            # Always adopt the latest attempt's response — if it succeeds we
+            # use it directly; if it fails we still prefer it as the most
+            # recent attempt before any rescue synthesis.
+            status, headers, chunks, content, finish = (
+                status_r, headers_r, chunks_r, content_r, finish_r
+            )
+            if reason_r is None:
                 log.info(j("retry_succeeded", req_id=req_id,
-                           retry_content_len=len(content2), retry_finish=finish2))
-            else:
-                log.warning(j("retry_also_failed", req_id=req_id,
-                              retry_reason=reason2, retry_content_len=len(content2)))
-                # Fall through: forward the retry's response (same shape, same failure);
-                # the harness adapter will surface its fail-loud message.
-                status, headers, chunks = status2, headers2, chunks2
+                           attempt=retry_attempts,
+                           retry_content_len=len(content_r),
+                           retry_finish=finish_r))
+                reason = None
+                break
+            reason = reason_r
+            log.warning(j("retry_also_failed", req_id=req_id,
+                          attempt=retry_attempts,
+                          retry_reason=reason_r,
+                          retry_content_len=len(content_r)))
+
+        # Rescue synthesis: if all retries left us with an empty-turn
+        # signature, replace the response chunks with synthesised text.
+        # The harness adapter will see real assistant content instead of
+        # an empty final, but still writes an empty_response failure
+        # record so we can dashboard rescue rate.
+        rescue_text: Optional[str] = None
+        rescue_label: Optional[str] = None
+        if reason == "empty_post_tool_relay" and last_tool_text:
+            rescue_text = last_tool_text
+            rescue_label = "rescued_from_tool_result"
+        elif reason == "empty_post_user_msg":
+            rescue_text = EMPTY_USER_MSG_FALLBACK
+            rescue_label = "rescued_from_user_msg"
+        if rescue_text is not None:
+            is_streaming = bool(parsed and parsed.get("stream"))
+            chunks = _synthesize_relay_chunks(
+                tool_text=rescue_text,
+                model_name=(parsed or {}).get("model") if isinstance(parsed, dict) else None,
+                streaming=is_streaming,
+            )
+            headers = dict(headers)
+            headers["Content-Type"] = (
+                "text/event-stream" if is_streaming else "application/json"
+            )
+            status = 200
+            log.warning(j(rescue_label,
+                          req_id=req_id,
+                          synth_text_len=len(rescue_text),
+                          retries_attempted=retry_attempts))
 
         # Forward the (possibly retried) response to the client.
         resp = web.StreamResponse(status=status, headers=headers)
