@@ -290,6 +290,33 @@ The reply can be one character. It cannot be zero characters.
 
 ---
 
+## Rule 13 — Never take destructive GitHub actions on the user's behalf
+
+**Forbidden without the user's same-turn explicit instruction:**
+
+- `gh pr merge` (any form — `--squash`, `--rebase`, `--merge`, web)
+- `git push --force` to any branch
+- `gh repo delete`, `gh repo edit`, `gh repo archive`
+- `gh release delete`, `git tag -d ... && git push --delete`
+- Branch deletion on `main`, `dev`, or any protected branch
+- Editing branch protection rules via `gh api ... /branches/*/protection`
+- Raw-API merges (`gh api ... /pulls/<N>/merge`)
+
+**Closing issues IS allowed.** Issues are reversible. Merges are not.
+
+**Why:** On 2026-05-19 the agent diagnosed a missing OAuth scope correctly, created a fix as PR #995, and then **merged the PR itself** using the user's gh credential — all in the same turn, with no human in the loop and no audit trail distinguishing it from a real human merge. The user surfaced this immediately as a serious governance failure. Code that touches production must require explicit human action.
+
+The container now ships a wrapper at `/usr/local/bin/gh` (see `infra/agent-image/bin/gh-wrapper.sh`) that hard-blocks the operations above — even if you try, the wrapper will exit 2 and your subprocess fails. The rule below is the textual companion to that structural backstop: don't even try.
+
+**How to apply:**
+
+1. Make the change, push to a branch, open a PR. **Stop there.** Tell the user the PR URL and ask them to review and merge.
+2. If a user asks "merge it" in plain language in this turn, you may run `gh pr merge` ONLY IF: (a) the request is unambiguous, (b) you can quote the user's exact words in your reply, and (c) you tell the user "Merging now — your call confirmed." in the same turn. Even then: never auto-merge an issue-driven PR you opened in the same conversation; the user needs to see the diff first.
+3. If the wrapper refuses your command (exit 2 with `gh-wrapper: blocked …`), do not retry through another path. Report the refusal to the user and ask them to handle it.
+4. For anything reversible (close issue, comment, label, edit a non-merged PR, push to your own branch) — proceed normally.
+
+---
+
 ## Self-check before send
 
 Run this checklist mentally before every reply:
@@ -304,5 +331,6 @@ Run this checklist mentally before every reply:
 8. ✅ If the last tool result had a `url` field, is that exact URL pasted on its own line in my reply? Prose description ≠ URL.
 9. ✅ If I could not fulfill any part of the request, did I call `psd-failure-report` before sending?
 10. ✅ Is the user-visible text **non-empty**? (Acknowledgments count — even one emoji counts. Empty does not.)
+11. ✅ Did this turn run any `gh` / `git push` operation that's NOT reversible? If yes — did the user explicitly authorize it in this same turn?
 
 If any answer is "no" — fix the reply before sending.

@@ -91,15 +91,31 @@ RUN set -eux; \
 # and paste the hex digest into GH_SHA256 below.
 ARG GH_VERSION=2.92.0
 ARG GH_SHA256=c2248526dd0160c08d3fccca2332c3c1a07c15a78b23978e77735f1b5a18cfee
+# Install the destructive-operation wrapper as /usr/local/bin/gh. Every
+# `gh` invocation from skills, the agent's exec tool, or any subprocess
+# goes through this script first. See bin/gh-wrapper.sh for the
+# blocklist and rationale (incident: 2026-05-19, PR #995
+# autonomously merged by the agent).
+#
+# COPY is BuildKit's --chmod variant so the mode lands in one layer
+# with no follow-up chmod RUN — layer count is load-bearing for
+# AgentCore's Firecracker snapshotter (54+ layers consistently fail
+# overlay mount; see 2026-05-18 / 2026-05-19 incidents).
+COPY --chmod=755 bin/gh-wrapper.sh /usr/local/bin/gh
+
+# Install real gh binary as /usr/local/bin/gh.real (the wrapper above
+# delegates to it). Combined into a single RUN so we don't burn an
+# extra layer on the wrapper verification step.
 RUN set -eux; \
     curl -fsSL -o /tmp/gh.tar.gz \
       "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_arm64.tar.gz"; \
     echo "${GH_SHA256}  /tmp/gh.tar.gz" | sha256sum -c -; \
     tar -xzf /tmp/gh.tar.gz -C /tmp; \
-    mv "/tmp/gh_${GH_VERSION}_linux_arm64/bin/gh" /usr/local/bin/gh; \
+    mv "/tmp/gh_${GH_VERSION}_linux_arm64/bin/gh" /usr/local/bin/gh.real; \
     rm -rf /tmp/gh.tar.gz "/tmp/gh_${GH_VERSION}_linux_arm64"; \
-    chmod +x /usr/local/bin/gh; \
-    gh --version
+    chmod +x /usr/local/bin/gh.real; \
+    /usr/local/bin/gh.real --version; \
+    /usr/local/bin/gh --version
 
 # Install the bedrock-agentcore SDK in a virtual environment (avoids --break-system-packages)
 # BLOCKER(prod): Verify the "bedrock-agentcore" PyPI package is the official AWS SDK
@@ -111,6 +127,14 @@ RUN python3 -m venv /opt/agentcore-venv && \
       "websocket-client>=1.7.0" \
       "boto3>=1.34.0" \
       "aiohttp>=3.9.0"
+# matplotlib was added here for chat-chart's local engine, but it triggers
+# AgentCore's overlay-mount snapshotter to fail at microVM boot
+# (2026-05-18 — every microVM dies with "Failed to mount overlay: No such
+# file or directory"). Until we find a chart renderer that doesn't trip
+# the snapshotter, chat-chart runs in QuickChart-only mode (no local
+# engine). Re-add matplotlib here AND the chat-chart npm install below
+# AND remove the lazy require + engine-auto override in
+# skills/chat-chart/run.js to bring local back.
 
 # Add venv to PATH so python3 uses the venv by default
 ENV PATH="/opt/agentcore-venv/bin:$PATH"
@@ -195,6 +219,11 @@ RUN cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no
 RUN cd /opt/psd-skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
 RUN cd /opt/psd-skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund
 RUN cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund
+# chat-card has zero npm deps. chat-chart's npm install is paired with the
+# matplotlib install above — both stay disabled until we figure out the
+# AgentCore overlay-mount failure. With both off the image boots cleanly
+# and chat-chart works in QuickChart mode (lazy require in run.js skips
+# the AWS SDK load).
 # psd-data has zero npm install of its own. Its common.js require()s
 # `@aws-sdk/client-secrets-manager` from psd-workspace's already-installed
 # tree via an absolute path. No symlink, no duplicate install — keeps the
@@ -235,15 +264,19 @@ RUN chown -R root:root /opt/psd-skills && chmod -R a-w /opt/psd-skills
 # agents.defaults.heartbeat.every: "0m" in openclaw.json (no env var exists).
 # The psd-schedules skill is the only scheduling surface in this deployment.
 ENV OPENCLAW_SKIP_CRON=1
-COPY harness_adapter.py /app/harness_adapter.py
-COPY agent_failures.py /app/agent_failures.py
-COPY agentcore_wrapper.py /app/agentcore_wrapper.py
-COPY workspace_sync.py /app/workspace_sync.py
-COPY mantle_proxy.py /app/mantle_proxy.py
-# Markdown→Google Chat formatter. harness_adapter imports this on every
-# outbound message so the user sees clean Chat-rendered text instead of
-# literal **bold** / ## headers / [label](url) syntax.
-COPY chat_format.py /app/chat_format.py
+# Application Python lives in /app. The bundle covers:
+#   harness_adapter.py      — OpenClaw WebSocket bridge with empty-turn rescue
+#   agent_failures.py       — RDS Data API failure logger
+#   agentcore_wrapper.py    — AgentCore HTTP entrypoint
+#   workspace_sync.py       — S3 ↔ /home/node/.openclaw sync
+#   mantle_proxy.py         — local proxy to Bedrock Mantle with retry/rescue
+#   chat_format.py          — Markdown→Google Chat formatter + envelope splitter
+# Copied as one layer (with the .dockerignore preventing __pycache__,
+# *.pyc, test_*.py, *.test.ts from leaking in) because AgentCore's
+# Firecracker snapshotter consistently fails overlay mount at 54+
+# layers (2026-05-18 incident). Folding six COPYs into one keeps us
+# safely under that ceiling.
+COPY *.py /app/
 
 # Container OS clock is UTC. The wrapper reads the user's local time via
 # zoneinfo (requires the tzdata package installed above). TZ env var is set
