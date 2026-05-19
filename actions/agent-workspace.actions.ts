@@ -38,6 +38,10 @@ const SCOPES_BY_KIND: Record<"agent_account" | "user_account", string[]> = {
     "https://www.googleapis.com/auth/meetings.space.created",
     "https://www.googleapis.com/auth/chat.messages",
     "https://www.googleapis.com/auth/chat.spaces",
+    // People API directory scope — enables resolving user IDs to names
+    // for Chat senders and calendar attendees (listDirectoryPeople,
+    // searchDirectoryPeople, getBatchGet).
+    "https://www.googleapis.com/auth/directory.readonly",
     "openid",
     "email",
     "profile",
@@ -56,6 +60,9 @@ const SCOPES_BY_KIND: Record<"agent_account" | "user_account", string[]> = {
     // Drive scoped to files the app creates or the user explicitly opens
     // with the app — narrowest possible Drive grant.
     "https://www.googleapis.com/auth/drive.file",
+    // People API directory scope — enables resolving user IDs to names
+    // for Chat senders and calendar attendees.
+    "https://www.googleapis.com/auth/directory.readonly",
     "openid",
     "email",
     "profile",
