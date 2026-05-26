@@ -163,20 +163,31 @@ Single-selection dropdown.
   "label": "Output Format",
   "field_type": "select",
   "position": 2,
-  "options": {
-    "choices": [
-      { "value": "summary", "label": "Summary" },
-      { "value": "bullet_points", "label": "Bullet Points" },
-      { "value": "detailed", "label": "Detailed Analysis" }
-    ],
-    "default": "summary"
-  }
+  "options": [
+    { "value": "summary", "label": "Summary" },
+    { "value": "bullet_points", "label": "Bullet Points" },
+    { "value": "detailed", "label": "Detailed Analysis" }
+  ]
 }
 ```
 
-**Options:**
-- `choices` (array): Array of `{ value, label }` objects
-- `default` (string): Default selected value
+**`options` is a raw array** of `{ label, value }` objects — NOT an object with a `choices` key. The field editor (`input-field-editor.tsx`) only recognizes two shapes:
+
+1. **Recommended (label + value preserved):**
+   ```json
+   "options": [
+     { "value": "summary", "label": "Summary" },
+     { "value": "detailed", "label": "Detailed Analysis" }
+   ]
+   ```
+
+2. **Compact (label = value):** an object with a `values` array of strings.
+   ```json
+   "options": { "values": ["summary", "detailed"] }
+   ```
+   When this form is used, the label is set equal to the value — so use the array form above if you want display labels to differ from underlying values.
+
+**Not currently honored by the field editor:** `default`, `required` inside `options`, and any other wrapper keys (including `choices`). They will be dropped on import. File a separate issue if you need first-class support for defaults or per-field required flags on select/multi_select.
 
 ### `multi_select`
 Multiple-selection checkboxes or multi-select dropdown.
@@ -187,22 +198,15 @@ Multiple-selection checkboxes or multi-select dropdown.
   "label": "Analysis Types",
   "field_type": "multi_select",
   "position": 3,
-  "options": {
-    "choices": [
-      { "value": "sentiment", "label": "Sentiment Analysis" },
-      { "value": "entities", "label": "Entity Extraction" },
-      { "value": "keywords", "label": "Keyword Extraction" }
-    ],
-    "minSelections": 1,
-    "maxSelections": 3
-  }
+  "options": [
+    { "value": "sentiment", "label": "Sentiment Analysis" },
+    { "value": "entities", "label": "Entity Extraction" },
+    { "value": "keywords", "label": "Keyword Extraction" }
+  ]
 }
 ```
 
-**Options:**
-- `choices` (array): Array of `{ value, label }` objects
-- `minSelections` (number): Minimum required selections
-- `maxSelections` (number): Maximum allowed selections
+Same shape rules as `select` above. The field editor accepts the raw `{ label, value }` array (preferred) or the compact `{ "values": [...] }` form. `minSelections` and `maxSelections` are not currently read by the field editor and are dropped on import.
 
 ### `file_upload`
 File upload input.
@@ -464,14 +468,11 @@ Document analysis with extraction, analysis, and recommendations.
           "label": "Output Format",
           "field_type": "select",
           "position": 1,
-          "options": {
-            "choices": [
-              { "value": "executive_summary", "label": "Executive Summary" },
-              { "value": "detailed_report", "label": "Detailed Report" },
-              { "value": "action_items", "label": "Action Items Only" }
-            ],
-            "default": "executive_summary"
-          }
+          "options": [
+            { "value": "executive_summary", "label": "Executive Summary" },
+            { "value": "detailed_report", "label": "Detailed Report" },
+            { "value": "action_items", "label": "Action Items Only" }
+          ]
         }
       ]
     }
@@ -597,29 +598,23 @@ Demonstrates all available input field types.
           "label": "Category",
           "field_type": "select",
           "position": 2,
-          "options": {
-            "choices": [
-              { "value": "technical", "label": "Technical" },
-              { "value": "business", "label": "Business" },
-              { "value": "creative", "label": "Creative" }
-            ],
-            "default": "technical"
-          }
+          "options": [
+            { "value": "technical", "label": "Technical" },
+            { "value": "business", "label": "Business" },
+            { "value": "creative", "label": "Creative" }
+          ]
         },
         {
           "name": "features",
           "label": "Features Required",
           "field_type": "multi_select",
           "position": 3,
-          "options": {
-            "choices": [
-              { "value": "fast", "label": "Fast Processing" },
-              { "value": "detailed", "label": "Detailed Output" },
-              { "value": "summary", "label": "Include Summary" },
-              { "value": "examples", "label": "Include Examples" }
-            ],
-            "minSelections": 1
-          }
+          "options": [
+            { "value": "fast", "label": "Fast Processing" },
+            { "value": "detailed", "label": "Detailed Output" },
+            { "value": "summary", "label": "Include Summary" },
+            { "value": "examples", "label": "Include Examples" }
+          ]
         },
         {
           "name": "uploaded_file",
@@ -714,13 +709,11 @@ Array of enabled tool names for the assistant.
       "label": "Target Style",
       "field_type": "select",
       "position": 1,
-      "options": {
-        "choices": [
-          { "value": "formal", "label": "Formal" },
-          { "value": "casual", "label": "Casual" },
-          { "value": "technical", "label": "Technical" }
-        ]
-      }
+      "options": [
+        { "value": "formal", "label": "Formal" },
+        { "value": "casual", "label": "Casual" },
+        { "value": "technical", "label": "Technical" }
+      ]
     }
   ]
 }
@@ -767,7 +760,7 @@ Before importing, verify:
 - [ ] Each field has `name`, `label`, `field_type`, `position`
 - [ ] `field_type` is one of: `short_text`, `long_text`, `select`, `multi_select`, `file_upload`
 - [ ] `position` values are sequential starting from 0
-- [ ] Select/multi-select fields have `options.choices` array
+- [ ] Select/multi-select fields have `options` as a raw array of `{ value, label }` objects (NOT wrapped in a `choices` key), or alternatively `options: { "values": [...] }` for label-equals-value cases
 - [ ] Field `name` values match variable references in prompts
 
 ### Variables
