@@ -211,9 +211,9 @@ export async function processMessagesWithAttachments(
             partData as AttachmentContent,
             attachmentIndex++
           );
-          
+
           attachmentReferences.push(metadata);
-          
+
           // Replace with lightweight S3 reference for Lambda reconstruction
           lightweightParts.push({
             type: 'file' as const,
@@ -223,6 +223,28 @@ export async function processMessagesWithAttachments(
             s3Key: metadata.s3Key,
             attachmentId: metadata.attachmentId
           } as any); // eslint-disable-line @typescript-eslint/no-explicit-any
+        } else if (
+          partData.type === 'file' &&
+          typeof partData.url === 'string' &&
+          partData.url.startsWith('data:')
+        ) {
+          // toCreateMessage wraps image attachments as type:"file" with a url property containing
+          // the base64 data URL. It hardcodes mediaType:"image/png" regardless of actual format.
+          // Extract the correct media type from the data URL prefix so providers receive the
+          // right MIME type (e.g. image/jpeg for phone photos rather than image/png).
+          const actualMediaType = extractDataUrlMediaType(partData.url);
+          if (actualMediaType && actualMediaType !== partData.mediaType) {
+            log.info('Correcting mediaType for file part from data URL', {
+              detected: actualMediaType,
+              declared: partData.mediaType,
+            });
+            lightweightParts.push({
+              ...part,
+              mediaType: actualMediaType,
+            } as any); // eslint-disable-line @typescript-eslint/no-explicit-any
+          } else {
+            lightweightParts.push(part);
+          }
         } else {
           // Keep text and other parts as-is
           lightweightParts.push(part);
@@ -287,4 +309,13 @@ export async function reconstructMessagesWithAttachments(
 
 function sanitizeFileName(name: string): string {
   return name.replace(/[^\d.A-Za-z-]/g, '_').substring(0, 255);
+}
+
+/**
+ * Extract media type from a data URL (e.g. "data:image/jpeg;base64,..." → "image/jpeg").
+ * Returns null when the input is not a valid data URL.
+ */
+function extractDataUrlMediaType(url: string): string | null {
+  const match = /^data:([^;,]+)[;,]/.exec(url);
+  return match ? match[1] : null;
 }
