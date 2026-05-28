@@ -359,13 +359,18 @@ export class OfficeProcessor implements DocumentProcessor {
     return this.convertTextToMarkdown(content.text);
   }
 
+  // Row cap per sheet: keeps the markdown payload well within API route body limits.
+  // A typical row at 20 columns is ~200 bytes; 500 rows ≈ 100 KB per sheet, safe
+  // even with several sheets and a generous multiplier for wide/dense data.
+  private static readonly MAX_ROWS_PER_SHEET = 500;
+
   private convertXlsxToMarkdown(content: any): string {
     let markdown = '# Spreadsheet Data\n\n';
-    
+
     if (content.sheets) {
       content.sheets.forEach((sheet: any) => {
         markdown += `## ${sheet.name}\n\n`;
-        
+
         if (sheet.json && sheet.json.length > 0) {
           // Convert JSON to markdown table
           const rows = sheet.json as any[][];
@@ -374,18 +379,24 @@ export class OfficeProcessor implements DocumentProcessor {
             const headers = rows[0];
             markdown += '| ' + headers.join(' | ') + ' |\n';
             markdown += '| ' + headers.map(() => '---').join(' | ') + ' |\n';
-            
-            // Include all data rows for complete AI context
-            // Use array.map().join() for better performance with large datasets
-            const dataRows = rows.slice(1);
+
+            const allDataRows = rows.slice(1);
+            const truncated = allDataRows.length > OfficeProcessor.MAX_ROWS_PER_SHEET;
+            const dataRows = truncated
+              ? allDataRows.slice(0, OfficeProcessor.MAX_ROWS_PER_SHEET)
+              : allDataRows;
             markdown += dataRows.map((row: any[]) => '| ' + row.join(' | ') + ' |\n').join('');
+
+            if (truncated) {
+              markdown += `\n> ⚠️ **Showing first ${OfficeProcessor.MAX_ROWS_PER_SHEET} of ${allDataRows.length} rows.** Upload a filtered version of this sheet to analyze the full dataset.\n`;
+            }
           }
         }
-        
+
         markdown += `\n**Sheet Stats:** ${sheet.rowCount} rows, ${sheet.columnCount} columns\n\n`;
       });
     }
-    
+
     return markdown;
   }
 

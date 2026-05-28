@@ -146,7 +146,36 @@ function ConversationRuntimeProvider({
       throwSessionExpired('Pre-send check: session unauthenticated, blocking chat request')
     }
 
-    const response = await fetch(input, init)
+    let response: Response
+    try {
+      response = await fetch(input, init)
+    } catch (networkError) {
+      // TCP-level failures (connection drop, ALB timeout, offline) arrive here as
+      // TypeError("Failed to fetch"). Show a friendly message instead of letting
+      // the raw browser error string propagate to the output area.
+      const isOffline = typeof navigator !== 'undefined' && !navigator.onLine
+      log.warn('Chat request failed at network level', {
+        error: networkError instanceof Error ? networkError.message : String(networkError),
+        offline: isOffline,
+      })
+      toast.error('Connection error', {
+        description: isOffline
+          ? 'You appear to be offline. Check your connection and try again.'
+          : 'The request could not reach the server. Check your connection or try again.',
+        duration: 8000,
+      })
+      throw networkError
+    }
+
+    // Handle request-body-too-large errors (413)
+    if (response.status === 413) {
+      log.warn('Chat request rejected — payload too large (413)')
+      toast.error('Message too large', {
+        description: 'The attached file or message content is too large to process. Try uploading a smaller file or splitting it into parts.',
+        duration: 10_000,
+      })
+      throw new Error('Request payload too large. Please reduce the size of attached files.')
+    }
 
     // Handle session expiry — 401 returned when JWT is invalid or Cognito token refresh
     // failed overnight. Without this handler the AI SDK runtime tries to parse
