@@ -166,7 +166,8 @@ function ConversationRuntimeProvider({
       try {
         const errorData = await response.clone().json()
         if (typeof errorData?.error === 'string') {
-          description = errorData.error
+          // Slice to prevent the server leaking internal details in long error messages
+          description = errorData.error.slice(0, 200)
         }
       } catch {
         // ignore parse failures — use generic description

@@ -311,11 +311,28 @@ function sanitizeFileName(name: string): string {
   return name.replace(/[^\d.A-Za-z-]/g, '_').substring(0, 255);
 }
 
+// Allowlist of image MIME types that Nexus vision adapters are known to produce.
+// We only forward types on this list to AI providers so a crafted data URL cannot
+// inject arbitrary strings into provider API requests or server logs.
+const ALLOWED_IMAGE_MEDIA_TYPES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+  'image/bmp',
+  'image/tiff',
+]);
+
 /**
  * Extract media type from a data URL (e.g. "data:image/jpeg;base64,..." → "image/jpeg").
- * Returns null when the input is not a valid data URL.
+ * Returns null when the input is not a valid data URL or the extracted type is not
+ * in the allowlist of supported image MIME types.
+ * CRLF characters are excluded from the capture group to prevent log/header injection.
  */
 function extractDataUrlMediaType(url: string): string | null {
-  const match = /^data:([^;,]+)[;,]/.exec(url);
-  return match ? match[1] : null;
+  // Exclude ;,\r\n from the captured segment to prevent header/log injection
+  const match = /^data:([^;,\r\n]+)[;,]/.exec(url);
+  if (!match) return null;
+  const mediaType = match[1].toLowerCase().trim();
+  return ALLOWED_IMAGE_MEDIA_TYPES.has(mediaType) ? mediaType : null;
 }
