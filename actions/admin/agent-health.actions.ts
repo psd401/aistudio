@@ -6,10 +6,11 @@ import type { ActionState } from "@/types"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { stripJsonQuotes, pgTimestampAsText } from "@/lib/db/drizzle-helpers"
-import { sql, desc, eq } from "drizzle-orm"
+import { and, desc, eq, gte, isNotNull, sql } from "drizzle-orm"
 import { agentHealthSnapshots } from "@/lib/db/schema/tables/agent-health-snapshots"
 import { agentPatterns } from "@/lib/db/schema/tables/agent-patterns"
 import { agentHealthScanRuns } from "@/lib/db/schema/tables/agent-health-scan-runs"
+import { agentMessages } from "@/lib/db/schema/tables/agent-messages"
 import { agentPatternScanRuns } from "@/lib/db/schema/tables/agent-pattern-scan-runs"
 
 export interface AgentHealthRow {
@@ -319,6 +320,117 @@ export async function getAgentPatterns(
       context: "getAgentPatterns",
       requestId,
       operation: "getAgentPatterns",
+    })
+  }
+}
+
+export interface RawSignalRow {
+  topic: string
+  signalCount: number
+  uniqueUsers: number
+  lastSeenAt: string
+}
+
+export interface RawSignalsEnvelope {
+  rows: RawSignalRow[]
+  daysBack: number
+  totalMessages: number
+  classifiedMessages: number
+  unclassifiedMessages: number
+}
+
+/**
+ * Raw signal volume by topic over the last N days, straight from
+ * agent_messages.topic. Bypasses the pattern scanner's suppression
+ * threshold so admins can see what the topic classifier actually
+ * catches in real traffic — useful for tuning the classifier's
+ * keyword patterns and for sanity-checking the Patterns panel when
+ * it's empty.
+ *
+ * Returns both per-topic counts AND the unclassified count so admins
+ * can see classifier coverage rate. Privacy: per-topic counts cross
+ * many users; we don't return per-user counts (would defeat the
+ * cross-building privacy guarantee).
+ */
+export async function getAgentRawSignals(
+  daysBack = 7,
+): Promise<ActionState<RawSignalsEnvelope>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("getAgentRawSignals")
+  const log = createLogger({ requestId, action: "getAgentRawSignals" })
+
+  try {
+    await requireRole("administrator")
+    const safeDays = Math.min(Math.max(1, daysBack), 90)
+    const cutoff = new Date(Date.now() - safeDays * 86400_000)
+
+    const [perTopic, totals] = await Promise.all([
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              topic: agentMessages.topic,
+              signalCount: sql<number>`COUNT(*)::int`,
+              uniqueUsers: sql<number>`COUNT(DISTINCT ${agentMessages.userId})::int`,
+              lastSeenAt: sql<string>`MAX(${agentMessages.createdAt})::text`,
+            })
+            .from(agentMessages)
+            .where(
+              and(
+                gte(agentMessages.createdAt, cutoff),
+                isNotNull(agentMessages.topic),
+              ),
+            )
+            .groupBy(agentMessages.topic)
+            .orderBy(desc(sql`COUNT(*)`))
+            .limit(50),
+        "agentMessages.rawSignalsByTopic",
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .select({
+              total: sql<number>`COUNT(*)::int`,
+              classified: sql<number>`COUNT(${agentMessages.topic})::int`,
+            })
+            .from(agentMessages)
+            .where(gte(agentMessages.createdAt, cutoff)),
+        "agentMessages.signalsCoverage",
+      ),
+    ])
+
+    const total = totals[0]?.total ?? 0
+    const classified = totals[0]?.classified ?? 0
+
+    const rows: RawSignalRow[] = perTopic
+      .filter((r) => r.topic !== null)
+      .map((r) => ({
+        topic: r.topic ?? "(null)",
+        signalCount: Number(r.signalCount),
+        uniqueUsers: Number(r.uniqueUsers),
+        lastSeenAt: r.lastSeenAt,
+      }))
+
+    timer({ status: "success" })
+    log.info("Raw signals loaded", {
+      topicsFound: rows.length,
+      daysBack: safeDays,
+      total,
+      classified,
+    })
+    return createSuccess({
+      rows,
+      daysBack: safeDays,
+      totalMessages: total,
+      classifiedMessages: classified,
+      unclassifiedMessages: total - classified,
+    })
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to load raw signals", {
+      context: "getAgentRawSignals",
+      requestId,
+      operation: "getAgentRawSignals",
     })
   }
 }

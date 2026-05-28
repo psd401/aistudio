@@ -1,0 +1,21 @@
+{
+  "name": "agent-triage-digest",
+  "version": "1.0.0",
+  "description": "Daily digest Lambda for email triage. Invoked per-user via EventBridge Scheduler at the user's configured digest time; renders a Chat card summarising the last 24h of classifications.",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "prebuild": "rm -rf dist"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/client-secrets-manager": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@googleapis/chat": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

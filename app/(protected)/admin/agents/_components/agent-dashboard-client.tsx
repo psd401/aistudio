@@ -27,6 +27,8 @@ import { SkillsListClient } from "../skills/_components/skills-list-client"
 import { CredentialsClient } from "../credentials/_components/credentials-client"
 import { AgentWorkspaceTable } from "./agent-workspace-table"
 import { AgentFailuresClient } from "./agent-failures-client"
+import { AgentTriageTable } from "./agent-triage-table"
+import { AgentConversationsTab } from "./agent-conversations"
 
 import {
   getAgentTelemetryStats,
@@ -46,14 +48,20 @@ import {
 import {
   getAgentHealthSummary,
   getAgentPatterns,
+  getAgentRawSignals,
   type AgentHealthSummary,
   type AgentPatternsEnvelope,
+  type RawSignalsEnvelope,
 } from "@/actions/admin/agent-health.actions"
 import {
   getAgentCostSummary,
   type AgentCostSummary,
   type CostDateRange,
 } from "@/actions/admin/agent-cost.actions"
+import {
+  getTriageSummaryList,
+  type TriageSummaryRow,
+} from "@/actions/admin/agent-triage.actions"
 
 type DashboardTab =
   | "usage"
@@ -67,6 +75,8 @@ type DashboardTab =
   | "credentials"
   | "workspace"
   | "failures"
+  | "triage"
+  | "conversations"
 
 /**
  * Map telemetry date range to Cost Explorer range.
@@ -86,6 +96,8 @@ interface LoaderSetters {
   setHealthSummary: (v: AgentHealthSummary | null) => void
   setCostSummary: (v: AgentCostSummary | null) => void
   setPatterns: (v: AgentPatternsEnvelope) => void
+  setRawSignals: (v: RawSignalsEnvelope | null) => void
+  setTriageList: (v: TriageSummaryRow[]) => void
 }
 
 interface LoaderContext extends LoaderSetters {
@@ -154,19 +166,39 @@ function buildLoaders(
       }
     },
     patterns: async () => {
-      const r = await getAgentPatterns()
-      if (r.isSuccess && r.data) {
-        ctx.setPatterns(r.data)
+      // Load detected patterns + raw signals in parallel — the raw signal
+      // counts let admins see classifier coverage even when zero patterns
+      // cross the suppression threshold.
+      const [p, rs] = await Promise.all([
+        getAgentPatterns(),
+        getAgentRawSignals(7),
+      ])
+      if (p.isSuccess && p.data) {
+        ctx.setPatterns(p.data)
+      } else if (!p.isSuccess) {
+        ctx.showError("patterns", p.message)
+      }
+      if (rs.isSuccess && rs.data) {
+        ctx.setRawSignals(rs.data)
       } else {
-        ctx.showError("patterns", r.message)
+        ctx.setRawSignals(null)
       }
     },
-    // Skills, credentials, and workspace tabs are self-contained — their client
-    // components handle their own loading. No work needed from the dashboard loader.
+    triage: async () => {
+      const r = await getTriageSummaryList()
+      if (r.isSuccess && r.data) {
+        ctx.setTriageList(r.data)
+      } else {
+        ctx.showError("triage", r.message)
+      }
+    },
+    // Skills, credentials, workspace, failures, and conversations tabs are
+    // self-contained — their client components handle their own loading.
     skills: async () => {},
     credentials: async () => {},
     workspace: async () => {},
     failures: async () => {},
+    conversations: async () => {},
   }
 }
 
@@ -240,6 +272,8 @@ function DashboardTabs({
   healthSummary,
   costSummary,
   patterns,
+  rawSignals,
+  triageList,
 }: {
   activeTab: DashboardTab
   onTabChange: (tab: string) => void
@@ -253,6 +287,8 @@ function DashboardTabs({
   healthSummary: AgentHealthSummary | null
   costSummary: AgentCostSummary | null
   patterns: AgentPatternsEnvelope
+  rawSignals: RawSignalsEnvelope | null
+  triageList: TriageSummaryRow[]
 }) {
   return (
     <Tabs value={activeTab} onValueChange={onTabChange}>
@@ -268,6 +304,8 @@ function DashboardTabs({
         <TabsTrigger value="skills">Skills</TabsTrigger>
         <TabsTrigger value="credentials">Credentials</TabsTrigger>
         <TabsTrigger value="workspace">Workspace</TabsTrigger>
+        <TabsTrigger value="triage">Triage</TabsTrigger>
+        <TabsTrigger value="conversations">Conversations</TabsTrigger>
       </TabsList>
 
       <TabsContent value="usage" className="mt-4 space-y-6">
@@ -301,7 +339,7 @@ function DashboardTabs({
       </TabsContent>
 
       <TabsContent value="patterns" className="mt-4">
-        <AgentPatternsTable data={patterns} loading={tabLoading} />
+        <AgentPatternsTable data={patterns} rawSignals={rawSignals} loading={tabLoading} />
       </TabsContent>
 
       <TabsContent value="skills" className="mt-4">
@@ -318,6 +356,14 @@ function DashboardTabs({
 
       <TabsContent value="failures" className="mt-4">
         <AgentFailuresClient />
+      </TabsContent>
+
+      <TabsContent value="triage" className="mt-4">
+        <AgentTriageTable data={triageList} loading={tabLoading} />
+      </TabsContent>
+
+      <TabsContent value="conversations" className="mt-4">
+        <AgentConversationsTab />
       </TabsContent>
     </Tabs>
   )
@@ -340,6 +386,8 @@ export function AgentDashboardClient() {
     rows: [],
     lastScan: null,
   })
+  const [rawSignals, setRawSignals] = useState<RawSignalsEnvelope | null>(null)
+  const [triageList, setTriageList] = useState<TriageSummaryRow[]>([])
   const [tabLoading, setTabLoading] = useState(false)
 
   // Request version counter — prevents stale responses from overwriting
@@ -378,6 +426,7 @@ export function AgentDashboardClient() {
     () => buildLoaders({
       setDailyUsage, setModelBreakdown, setUserUsage, setGuardrailEvents,
       setFeedbackList, setHealthSummary, setCostSummary, setPatterns,
+      setRawSignals, setTriageList,
       showError,
     }),
     [showError]
@@ -474,6 +523,8 @@ export function AgentDashboardClient() {
         healthSummary={healthSummary}
         costSummary={costSummary}
         patterns={patterns}
+        rawSignals={rawSignals}
+        triageList={triageList}
       />
     </div>
   )

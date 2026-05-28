@@ -15,7 +15,13 @@
 // Fixed taxonomy. Must remain stable over time so longitudinal patterns are
 // comparable. Additions are acceptable; renames/deletions break historical
 // signal data. Keep labels broad enough to avoid proxying individual users.
+//
+// First-match-wins in TAXONOMY order, so list the most specific buckets
+// first (K-12 admin) and the catch-all categories last (general code/help).
+// Otherwise "the principal asked about the curriculum budget" gets caught
+// by `budget-inquiry` instead of the more specific `curriculum-request`.
 export const TAXONOMY = [
+  // ──────────── K-12 admin (original taxonomy, most specific) ────────────
   'attendance-policy',
   'curriculum-request',
   'behavior-support',
@@ -26,6 +32,18 @@ export const TAXONOMY = [
   'professional-development',
   'parent-communication',
   'scheduling-conflict',
+  // ──────────── Communication + workflow ────────────
+  'email-triage',
+  'meeting-prep',
+  'document-drafting',
+  'task-planning',
+  // ──────────── Tech ops + agent platform ────────────
+  'agent-platform-ops',
+  'skill-development',
+  'data-engineering',
+  'ai-model-discussion',
+  'general-development',
+  'incident-response',
 ] as const;
 
 export type Topic = (typeof TAXONOMY)[number];
@@ -116,7 +134,117 @@ const KEYWORDS: Record<Topic, RegExp[]> = {
     /\bconflict/i,
     /\breschedule/i,
     /\bovertime\b/i,
-    /\bmeeting/i,
+  ],
+  // ──────────── Communication + workflow ────────────
+  'email-triage': [
+    /\btriag/i,
+    /\binbox\b/i,
+    /\bgmail\b/i,
+    /\bemail (rule|filter|label|sort|cleanup)/i,
+    /\b@psd\/(important|later|news|task)\b/i,
+  ],
+  'meeting-prep': [
+    /\bmeeting\b/i,
+    /\bagenda\b/i,
+    /\bone[- ]on[- ]one\b/i,
+    /\b1:1\b/,
+    /\bstandup\b/i,
+    /\bretrospective\b/i,
+    /\bkick[- ]?off\b/i,
+  ],
+  'document-drafting': [
+    /\bdraft (a|an|the|me|some)\b/i,
+    /\bwrite (a|an|the|me|some)\b/i,
+    /\bmemo\b/i,
+    /\bproposal\b/i,
+    /\bnewsletter\b/i,
+    /\bsummariz/i,
+    /\boutline\b/i,
+    /\bsop\b/i,
+  ],
+  'task-planning': [
+    /\btask\b/i,
+    /\bto[- ]?do\b/i,
+    /\bbacklog\b/i,
+    /\bsprint\b/i,
+    /\bmilestone\b/i,
+    /\bplan(ning)?\b/i,
+    /\broadmap\b/i,
+    /\bdeadline\b/i,
+  ],
+  // ──────────── Tech ops + agent platform ────────────
+  'agent-platform-ops': [
+    /\bagentcore\b/i,
+    /\bopenclaw\b/i,
+    /\bbedrock\b/i,
+    /\bcdk\b/i,
+    /\bcloudformation\b/i,
+    /\bdeploy/i,
+    /\blambda\b/i,
+    /\becr\b/i,
+    /\bdocker\b/i,
+    /\bIAM\b/i,
+    /\bsecrets manager\b/i,
+  ],
+  'skill-development': [
+    /\bskill (build|develop|register|deploy)/i,
+    /\bbundled skill/i,
+    /\bSKILL\.md\b/i,
+    /\bharness\b/i,
+    /\btool (catalog|registr|definition)/i,
+    /\bMCP server\b/i,
+  ],
+  'data-engineering': [
+    /\bmigration\b/i,
+    /\bschema\b/i,
+    /\bpostgres/i,
+    /\baurora\b/i,
+    /\bdynamodb\b/i,
+    /\bdrizzle\b/i,
+    /\bquery (performance|plan|optimization)/i,
+    /\bindex (creation|tuning|missing)/i,
+  ],
+  'ai-model-discussion': [
+    /\bclaude\b/i,
+    /\bgpt[- ]?[0-9]?\b/i,
+    /\bllm\b/i,
+    /\bopen ?ai\b/i,
+    /\banthropic\b/i,
+    /\bnova micro\b/i,
+    /\bsonnet\b/i,
+    /\bhaiku\b/i,
+    /\bopus\b/i,
+    /\bmodel (selection|swap|choice|comparison)/i,
+    /\btoken usage\b/i,
+    /\bprompt (engineering|tuning|template)/i,
+  ],
+  'general-development': [
+    /\brefactor\b/i,
+    /\btypecheck\b/i,
+    /\bunit test\b/i,
+    /\bpull request\b/i,
+    /\bcommit\b/i,
+    /\bbranch\b/i,
+    /\bgit\b/i,
+    /\bnpm\b/i,
+    /\bbun\b/i,
+    /\beslint\b/i,
+    /\bfix (the|a|that|this|my)\b/i,
+    /\bbug\b/i,
+    /\bdebug/i,
+    /\berror\b/i,
+    /\bstack trace\b/i,
+  ],
+  'incident-response': [
+    /\bincident\b/i,
+    /\boutage\b/i,
+    /\bpostmortem\b/i,
+    /\bpost[- ]mortem\b/i,
+    /\b(p0|p1|sev[- ]?\d)\b/i,
+    /\brollback\b/i,
+    /\bhotfix\b/i,
+    /\b5xx\b/i,
+    /\bcloudwatch alarm/i,
   ],
 };
 

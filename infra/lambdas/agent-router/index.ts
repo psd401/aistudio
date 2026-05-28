@@ -1101,7 +1101,27 @@ async function invokeAgentCore(
     /** Ephemeral thread context for cross-user invocations */
     threadContext?: string;
   }
-): Promise<{ response: string; inputTokens: number; outputTokens: number; model: string | null }> {
+): Promise<{
+  response: string;
+  inputTokens: number;
+  outputTokens: number;
+  model: string | null;
+  /** Wall-clock ms reported by the harness from chat.send to final. */
+  latencyMs: number;
+  /** Per-turn message log (role + content_text). Empty when harness doesn't surface it. */
+  messages: Array<{ role: string; content: string }>;
+  /** Per-turn tool calls. Empty when harness doesn't surface them. */
+  toolCalls: Array<{
+    name: string;
+    args: unknown;
+    result: unknown;
+    status: 'success' | 'error' | 'timeout';
+    error_text: string | null;
+    duration_ms: number;
+    started_at: string;
+    finished_at: string;
+  }>;
+}> {
   // Resolve the AgentCore Runtime ID — check env var, then module-level cache,
   // then SSM. Cached at module scope with TTL to avoid redundant SSM API calls
   // on every invocation (~5–20ms + cost per call).
@@ -1138,6 +1158,9 @@ async function invokeAgentCore(
       inputTokens: 0,
       outputTokens: 0,
       model: null,
+      latencyMs: 0,
+      messages: [],
+      toolCalls: [],
     };
   }
 
@@ -1211,20 +1234,24 @@ async function invokeAgentCore(
 
       if (response.status === 503 || response.status === 429) {
         return {
-          response:
-            "I'm temporarily busy. Please try again in a moment.",
+          response: "I'm temporarily busy. Please try again in a moment.",
           inputTokens: 0,
           outputTokens: 0,
           model: null,
+          latencyMs: 0,
+          messages: [],
+          toolCalls: [],
         };
       }
 
       return {
-        response:
-          'I encountered an error processing your message. Please try again.',
+        response: 'I encountered an error processing your message. Please try again.',
         inputTokens: 0,
         outputTokens: 0,
         model: null,
+        latencyMs: 0,
+        messages: [],
+        toolCalls: [],
       };
     }
 
@@ -1242,11 +1269,50 @@ async function invokeAgentCore(
     const result = (responseBody.result as string) || 'No response from agent.';
     const metadata = (responseBody.metadata as Record<string, unknown>) || {};
 
+    // Best-effort coercion — the harness MAY surface these fields, but
+    // each defaults safely when missing so older harness versions don't
+    // break the writer.
+    const rawMessages = (metadata.messages as unknown) ?? [];
+    const messages = Array.isArray(rawMessages)
+      ? (rawMessages as Array<Record<string, unknown>>)
+          .map((m) => ({
+            role: typeof m.role === 'string' ? m.role : 'assistant',
+            content: typeof m.content === 'string' ? m.content : '',
+          }))
+          .filter((m) => m.content.length > 0)
+      : [];
+    const rawToolCalls = (metadata.tool_calls as unknown) ?? [];
+    type RawToolCall = Record<string, unknown>;
+    const toolCalls = Array.isArray(rawToolCalls)
+      ? (rawToolCalls as RawToolCall[]).map((t) => ({
+          name: typeof t.name === 'string' ? t.name : 'unknown',
+          args: t.args ?? null,
+          result: t.result ?? null,
+          status:
+            t.status === 'success' || t.status === 'error' || t.status === 'timeout'
+              ? (t.status as 'success' | 'error' | 'timeout')
+              : 'success',
+          error_text: typeof t.error_text === 'string' ? t.error_text : null,
+          duration_ms: typeof t.duration_ms === 'number' ? t.duration_ms : 0,
+          started_at:
+            typeof t.started_at === 'string'
+              ? t.started_at
+              : new Date().toISOString(),
+          finished_at:
+            typeof t.finished_at === 'string'
+              ? t.finished_at
+              : new Date().toISOString(),
+        }))
+      : [];
+
     return {
       response: result,
       inputTokens: (metadata.input_tokens as number) || 0,
       outputTokens: (metadata.output_tokens as number) || 0,
       model: (metadata.model as string) || 'kimi-k2.5',
+      latencyMs: (metadata.latency_ms as number) || 0,
+      messages,
+      toolCalls,
     };
   } catch (error) {
     log.error('AgentCore invocation error', {
@@ -1258,6 +1324,9 @@ async function invokeAgentCore(
       inputTokens: 0,
       outputTokens: 0,
       model: null,
+      latencyMs: 0,
+      messages: [],
+      toolCalls: [],
     };
   }
 }
@@ -1346,6 +1415,37 @@ async function sendGoogleChatResponse(
 // Telemetry
 // ---------------------------------------------------------------------------
 
+/** Content text cap before truncation — 64KB matches the migration. */
+const CONTENT_CHAR_CAP = 64_000;
+/** Stringified JSON cap for tool args/result — 16KB matches the migration. */
+const TOOL_JSON_CHAR_CAP = 16_000;
+
+function truncateContent(text: string): { value: string; truncated: boolean } {
+  if (text.length <= CONTENT_CHAR_CAP) return { value: text, truncated: false };
+  return { value: text.slice(0, CONTENT_CHAR_CAP), truncated: true };
+}
+
+/**
+ * Encode `value` as a JSON string for storage in a jsonb column. postgres.js
+ * has a `sql.json()` helper but it expects a typed JSONValue and we're
+ * working with `unknown` from the harness — easier to stringify ourselves
+ * and let postgres.js pass it through verbatim into the jsonb column.
+ */
+function truncateJsonValue(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  let s: string;
+  try {
+    s = JSON.stringify(value);
+  } catch {
+    return JSON.stringify({ _truncated: true, error: 'JSON.stringify failed' });
+  }
+  if (s.length <= TOOL_JSON_CHAR_CAP) return s;
+  return JSON.stringify({
+    _truncated: true,
+    preview: s.slice(0, TOOL_JSON_CHAR_CAP - 32),
+  });
+}
+
 async function logTelemetry(
   params: {
     userId: string;
@@ -1362,6 +1462,19 @@ async function logTelemetry(
     agentOwnerId?: string;
     /** Fixed-taxonomy topic label from the classifier; null when [private], unclassified, or classifier disabled */
     topic?: Topic | null;
+    /** Per-turn message log for the deep-telemetry Conversations tab. */
+    messages?: Array<{ role: string; content: string }>;
+    /** Per-turn tool invocations for the Conversations timeline. */
+    toolCalls?: Array<{
+      name: string;
+      args: unknown;
+      result: unknown;
+      status: 'success' | 'error' | 'timeout';
+      error_text: string | null;
+      duration_ms: number;
+      started_at: string;
+      finished_at: string;
+    }>;
   },
   log: ReturnType<typeof createLogger>
 ): Promise<void> {
@@ -1377,23 +1490,18 @@ async function logTelemetry(
     const agentOwnerId = params.agentOwnerId ?? null;
     const topic = params.topic ?? null;
 
-    // Run both telemetry writes in parallel — they're independent.
-    // Uses direct PostgreSQL (postgres.js) consistent with the rest of the app,
-    // instead of RDS Data API which adds ~100-300ms latency per call.
-    await Promise.all([
-      // Insert message-level telemetry
-      // invoked_by and agent_owner_id are NULL for normal (owner) invocations
-      sql`INSERT INTO agent_messages
+    // Insert agent_messages first to get the id, then fan out to the
+    // deep-telemetry tables. The session upsert is independent and can
+    // run in parallel with the message insert.
+    const [messageRow] = await Promise.all([
+      sql<{ id: number }[]>`INSERT INTO agent_messages
           (user_id, session_id, model, input_tokens, output_tokens,
            latency_ms, guardrail_blocked, space_name, invoked_by, agent_owner_id, topic, created_at)
           VALUES (${params.userId}, ${params.sessionId}, ${params.model},
                   ${params.inputTokens}, ${params.outputTokens},
                   ${params.latencyMs}, ${params.guardrailBlocked},
-                  ${params.spaceName}, ${invokedBy}, ${agentOwnerId}, ${topic}, NOW())`,
-
-      // Upsert session-level aggregates — creates the session row on first message,
-      // increments counters on subsequent messages. Uses ON CONFLICT on session_id
-      // unique constraint to achieve idempotent upserts.
+                  ${params.spaceName}, ${invokedBy}, ${agentOwnerId}, ${topic}, NOW())
+          RETURNING id`,
       sql`INSERT INTO agent_sessions
           (user_id, session_id, session_start, total_messages, total_tokens, created_at, updated_at)
           VALUES (${params.userId}, ${params.sessionId}, NOW(), 1, ${totalTokens}, NOW(), NOW())
@@ -1402,6 +1510,74 @@ async function logTelemetry(
             total_tokens = agent_sessions.total_tokens + EXCLUDED.total_tokens,
             session_end = NOW()`,
     ]);
+    const messageId = messageRow[0]?.id;
+
+    // Deep telemetry — content + tool invocations. Both are
+    // best-effort: failure here logs but doesn't surface to the user.
+    // Empty arrays are normal for sessions whose harness doesn't surface
+    // the data yet.
+    //
+    // Hard cap on rows per turn to prevent a misbehaving harness from
+    // firing thousands of parallel INSERTs and exhausting the Aurora
+    // connection pool. 200 messages + 200 tool calls is already generous;
+    // normal turns have <10 of each.
+    const MAX_MESSAGES_PER_TURN = 200;
+    const MAX_TOOLS_PER_TURN = 200;
+    const writes: Promise<unknown>[] = [];
+    if (messageId && params.messages && params.messages.length > 0) {
+      const cappedMessages = params.messages.slice(0, MAX_MESSAGES_PER_TURN);
+      if (params.messages.length > MAX_MESSAGES_PER_TURN) {
+        log.warn('Deep telemetry message cap hit — truncating', {
+          actual: params.messages.length,
+          cap: MAX_MESSAGES_PER_TURN,
+          sessionId: params.sessionId,
+        });
+      }
+      for (const m of cappedMessages) {
+        const { value, truncated } = truncateContent(m.content);
+        writes.push(
+          sql`INSERT INTO agent_message_content
+              (message_id, session_id, user_email, role, content_text, content_truncated, created_at)
+              VALUES (${messageId}, ${params.sessionId}, ${params.userId},
+                      ${m.role}, ${value}, ${truncated}, NOW())`,
+        );
+      }
+    }
+    if (messageId && params.toolCalls && params.toolCalls.length > 0) {
+      const cappedToolCalls = params.toolCalls.slice(0, MAX_TOOLS_PER_TURN);
+      if (params.toolCalls.length > MAX_TOOLS_PER_TURN) {
+        log.warn('Deep telemetry tool-call cap hit — truncating', {
+          actual: params.toolCalls.length,
+          cap: MAX_TOOLS_PER_TURN,
+          sessionId: params.sessionId,
+        });
+      }
+      for (const t of cappedToolCalls) {
+        writes.push(
+          sql`INSERT INTO agent_tool_invocations
+              (message_id, session_id, user_email, tool_name, tool_args,
+               tool_result, status, error_text, duration_ms, started_at, finished_at, created_at)
+              VALUES (${messageId}, ${params.sessionId}, ${params.userId},
+                      ${t.name},
+                      ${truncateJsonValue(t.args)}::jsonb,
+                      ${truncateJsonValue(t.result)}::jsonb,
+                      ${t.status}, ${t.error_text}, ${t.duration_ms},
+                      ${t.started_at}, ${t.finished_at}, NOW())`,
+        );
+      }
+    }
+    if (writes.length > 0) {
+      try {
+        await Promise.all(writes);
+      } catch (deepErr) {
+        log.error('Failed to write deep telemetry rows', {
+          error: deepErr instanceof Error ? deepErr.message : String(deepErr),
+          messageId,
+          contentCount: params.messages?.length ?? 0,
+          toolCount: params.toolCalls?.length ?? 0,
+        });
+      }
+    }
   } catch (error) {
     // Telemetry failure should not affect user experience
     log.error('Failed to write telemetry', {
@@ -2292,7 +2468,12 @@ async function processRecord(
       //   agentOwnerId = whose agent was consulted (resource consumption attribution)
       // This means "messages by userId" includes both self-sent and cross-user-initiated.
       // To query "messages consuming X's agent resources", filter by agentOwnerId.
-      const latencyMs = Date.now() - startTime;
+      // Prefer the harness-reported latency_ms (covers exactly chat.send →
+      // final) over the router-wall-clock — they only differ by a few ms
+      // but the harness number is what we want in the dashboard.
+      const latencyMs = agentResult.latencyMs > 0
+        ? agentResult.latencyMs
+        : Date.now() - startTime;
       await logTelemetry(
         {
           userId: senderEmail,
@@ -2306,6 +2487,8 @@ async function processRecord(
           invokedBy: senderEmail,
           agentOwnerId: targetUser.email,
           topic,
+          messages: agentResult.messages,
+          toolCalls: agentResult.toolCalls,
         },
         log
       );
@@ -2403,7 +2586,11 @@ async function processRecord(
   await sendGoogleChatResponse(spaceName, threadName, finalResponse, log);
 
   // Step 7: Log telemetry
-  const latencyMs = Date.now() - startTime;
+  // Prefer the harness-reported latency_ms when available so the dashboard
+  // shows chat.send → final, not the entire router execution.
+  const latencyMs = agentResult.latencyMs > 0
+    ? agentResult.latencyMs
+    : Date.now() - startTime;
   await logTelemetry(
     {
       userId: senderEmail,
@@ -2418,6 +2605,8 @@ async function processRecord(
       guardrailBlocked: guardrailResult.wouldHaveBlocked,
       spaceName,
       topic,
+      messages: agentResult.messages,
+      toolCalls: agentResult.toolCalls,
     },
     log
   );

@@ -1,0 +1,11 @@
+{
+  "name": "psd-email-triage",
+  "version": "1.0.0",
+  "description": "OpenClaw skill — agent-facing CLI for the smart email triage feature. Configures per-user rules, escalation, digest, labels in Gmail, and reads/writes the triage state in DynamoDB.",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/lib-dynamodb": "^3.0.0",
+    "@aws-sdk/client-scheduler": "^3.0.0"
+  }
+}

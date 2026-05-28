@@ -1,0 +1,19 @@
+{
+  "name": "agent-telemetry-prune",
+  "version": "1.0.0",
+  "description": "Daily retention sweep — deletes agent_message_content and agent_tool_invocations rows older than RETENTION_DAYS (default 90).",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "prebuild": "rm -rf dist"
+  },
+  "dependencies": {
+    "@aws-sdk/client-secrets-manager": "^3.0.0",
+    "postgres": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.145",
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

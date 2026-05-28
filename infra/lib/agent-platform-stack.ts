@@ -24,6 +24,8 @@ import * as apigwv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations'
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as customResources from 'aws-cdk-lib/custom-resources';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as crypto from 'crypto';
 import { execSync } from 'child_process';
 // ALPHA CDK CONSTRUCT: @aws-cdk/aws-bedrock-agentcore-alpha has no API stability
 // guarantee and may introduce breaking changes on any release. Version is pinned
@@ -94,6 +96,8 @@ export class AgentPlatformStack extends cdk.Stack {
   /** DynamoDB table for Chat message idempotency (dedup of retries) */
   public readonly messageDedupTable: dynamodb.Table;
   public readonly sessionLocksTable: dynamodb.Table;
+  /** DynamoDB table for per-user email triage state (Phase 1 of email triage feature) */
+  public readonly triageTable: dynamodb.Table;
   /** IAM user that owns the Bedrock API key (service-specific credential) */
   public readonly bedrockApiUser: iam.User;
   /** Secrets Manager secret carrying the Bedrock API key for Mantle auth */
@@ -119,6 +123,13 @@ export class AgentPlatformStack extends cdk.Stack {
     super(scope, id, props);
 
     const { environment, config } = props;
+
+    // Lambda function names as constants — referenced by both the
+    // runtimeEnvVars block (line ~1167) and the Lambda definitions below.
+    // Prevents silent breakage if a function name ever changes.
+    const triageDigestFunctionName = `psd-agent-triage-digest-${environment}`;
+    const cronFunctionName = `psd-agent-cron-${environment}`;
+    const skillBuilderFunctionName = `psd-agent-skill-builder-${environment}`;
 
     // Validate required ARN props at synth time to surface errors early
     // rather than waiting for opaque CloudFormation deploy-time failures.
@@ -320,6 +331,47 @@ export class AgentPlatformStack extends cdk.Stack {
     });
     cdk.Tags.of(this.sessionLocksTable).add('Environment', environment);
     cdk.Tags.of(this.sessionLocksTable).add('ManagedBy', 'cdk');
+
+    // 4c-bis. Email Triage table — per-user state for the smart email
+    // triage feature (Phase 1). One row per user; the row exists whether
+    // or not the user has opted in (created lazily on first enable).
+    //
+    // Attributes (not enforced at the table level, but the consumer
+    // expects):
+    //   userEmail            string  (PK)
+    //   enabled              bool
+    //   enabledAt/disabledAt ISO ts
+    //   classifierStartHistoryId string  (Gmail history cursor at enable)
+    //   lastHistoryId        string  (cursor, updated every poll)
+    //   lastPollAt           ISO ts
+    //   labels               map<key,string>   (e.g. important → "@psd/Important")
+    //   labelIdsByKey        map<key,string>   (Gmail label IDs, cached)
+    //   rules                map<…>
+    //   escalation           map<…>
+    //   digestEnabled        bool
+    //   digestTime           "HH:MM"
+    //   digestTz             IANA tz
+    //   digestScheduleArn    string  (EventBridge Scheduler entry, for delete)
+    //   recentDecisions      list<map> (rolling 20)
+    //   recentCorrections    list<map> (rolling 20)
+    //   learnedPatterns      list<map> (populated in Phase 2)
+    //
+    // PITR ON: rules are user-curated and learned patterns accumulate over
+    // weeks — losing them on accidental table deletion would be a real
+    // regression. Pay-per-request keeps cost negligible at single-user
+    // scale and elastic for the planned 1000-user rollout.
+    this.triageTable = new dynamodb.Table(this, 'AgentEmailTriageTable', {
+      tableName: `psd-agent-triage-${environment}`,
+      partitionKey: { name: 'userEmail', type: dynamodb.AttributeType.STRING },
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      encryption: dynamodb.TableEncryption.AWS_MANAGED,
+      pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: true },
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(this.triageTable).add('Environment', environment);
+    cdk.Tags.of(this.triageTable).add('ManagedBy', 'cdk');
 
     // 4d. Inter-Agent Communication table — tracks agent-to-agent messages
     // for rate limiting and anti-loop detection. Uses TTL for automatic cleanup.
@@ -799,6 +851,9 @@ export class AgentPlatformStack extends cdk.Stack {
         `${this.signalsTable.tableArn}/index/*`,
         schedulesTable.tableArn,
         `${schedulesTable.tableArn}/index/*`,
+        // Email triage state (Phase 1) — agent skill reads/writes per-user
+        // rules, label IDs, escalation lists, and recent decisions/corrections.
+        this.triageTable.tableArn,
       ],
     }));
 
@@ -940,7 +995,7 @@ export class AgentPlatformStack extends cdk.Stack {
       effect: iam.Effect.ALLOW,
       actions: ['lambda:InvokeFunction'],
       resources: [
-        `arn:aws:lambda:${this.region}:${this.account}:function:psd-agent-skill-builder-${environment}`,
+        `arn:aws:lambda:${this.region}:${this.account}:function:${skillBuilderFunctionName}`,
       ],
     }));
 
@@ -1091,7 +1146,7 @@ export class AgentPlatformStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
         resources: [
-          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/psd-agent-cron-${environment}:*`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${cronFunctionName}:*`,
         ],
       }),
     );
@@ -1122,15 +1177,17 @@ export class AgentPlatformStack extends cdk.Stack {
       USERS_TABLE: this.usersTable.tableName,
       SIGNALS_TABLE: this.signalsTable.tableName,
       SCHEDULES_TABLE: schedulesTable.tableName,
+      TRIAGE_TABLE: this.triageTable.tableName,
       EVENTBRIDGE_SCHEDULE_GROUP: `psd-agent-${environment}`,
-      CRON_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:psd-agent-cron-${environment}`,
+      CRON_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:${cronFunctionName}`,
+      TRIAGE_DIGEST_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:${triageDigestFunctionName}`,
       EVENTBRIDGE_ROLE_ARN: `arn:aws:iam::${this.account}:role/psd-agent-scheduler-invoke-${environment}`,
       GUARDRAIL_ARN: props.guardrailArn,
       DATABASE_RESOURCE_ARN: props.databaseResourceArn,
       DATABASE_SECRET_ARN: props.databaseSecretArn,
       DATABASE_NAME: props.databaseName ?? 'aistudio',
       BEDROCK_API_KEY_SECRET_ARN: this.bedrockApiKeySecret.secretArn,
-      SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:psd-agent-skill-builder-${environment}`,
+      SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:${skillBuilderFunctionName}`,
       GOOGLE_OAUTH_CLIENT_SECRET_ID: googleOAuthClientSecret.secretName,
       AGENT_INTERNAL_API_KEY_SECRET_ID: agentInternalApiKeySecret.secretName,
       APP_BASE_URL: props.appBaseUrl ?? '',
@@ -1261,7 +1318,7 @@ export class AgentPlatformStack extends cdk.Stack {
     });
 
     const skillBuilderLogGroup = new logs.LogGroup(this, 'SkillBuilderLogGroup', {
-      logGroupName: `/aws/lambda/psd-agent-skill-builder-${environment}`,
+      logGroupName: `/aws/lambda/${skillBuilderFunctionName}`,
       retention: config.monitoring.logRetention,
       removalPolicy: environment === 'prod'
         ? cdk.RemovalPolicy.RETAIN
@@ -1271,7 +1328,7 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(skillBuilderLogGroup).add('ManagedBy', 'cdk');
 
     const skillBuilderLambda = new lambda.Function(this, 'SkillBuilderLambda', {
-      functionName: `psd-agent-skill-builder-${environment}`,
+      functionName: skillBuilderFunctionName,
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
@@ -1344,7 +1401,7 @@ export class AgentPlatformStack extends cdk.Stack {
     // between a schedule row and an EventBridge Scheduler entry.
 
     const cronLogGroup = new logs.LogGroup(this, 'CronLogGroup', {
-      logGroupName: `/aws/lambda/psd-agent-cron-${environment}`,
+      logGroupName: `/aws/lambda/${cronFunctionName}`,
       retention: config.monitoring.logRetention,
       removalPolicy: environment === 'prod'
         ? cdk.RemovalPolicy.RETAIN
@@ -1354,7 +1411,7 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(cronLogGroup).add('ManagedBy', 'cdk');
 
     const cronLambda = new lambda.Function(this, 'CronLambda', {
-      functionName: `psd-agent-cron-${environment}`,
+      functionName: cronFunctionName,
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
@@ -1510,6 +1567,330 @@ export class AgentPlatformStack extends cdk.Stack {
         },
       },
     }));
+
+    // =====================================================================
+    // 7d. Email Triage Classifier Lambda — psd-agent-triage-poll
+    // =====================================================================
+    // Polls Gmail history for opted-in users every 5 minutes. For each
+    // new message: deterministic rules → maybe Nova Micro fallback →
+    // apply Gmail label → maybe Chat escalation. For each user-driven
+    // label change: record as training signal.
+    // See docs/operations/email-triage.md.
+    //
+    // 5-minute polling is the load-bearing primitive for Phase 1. Phase 2
+    // (#996) adds Gmail push subscriptions for sub-minute escalation
+    // latency; polling stays as the fallback there.
+    const triagePollRole = ServiceRoleFactory.createLambdaRole(this, 'TriagePollLambdaRole', {
+      functionName: 'psd-agent-triage-poll',
+      environment,
+      region: this.region,
+      account: this.account,
+      vpcEnabled: false,
+      // ServiceRoleFactory grants base DynamoDB CRUD on the named tables;
+      // the additional resources policy below covers per-user OAuth
+      // secrets and Bedrock invocation.
+      dynamodbTables: [this.usersTable.tableName, this.triageTable.tableName],
+      additionalPolicies: [
+        // Per-user OAuth refresh tokens + the shared OAuth client creds.
+        // Wildcard on per-user path because we evaluate every opted-in
+        // user each tick and don't know the set in advance.
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'WorkspaceTokenRead',
+            effect: iam.Effect.ALLOW,
+            actions: ['secretsmanager:GetSecretValue'],
+            resources: [
+              `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent-creds/${environment}/user/*`,
+              `arn:aws:secretsmanager:${this.region}:${this.account}:secret:psd-agent/${environment}/google-oauth-client-*`,
+              this.googleCredentialsSecret.secretArn,
+            ],
+          })],
+        }),
+        // Bedrock Nova Micro for the LLM fallback path.
+        //
+        // Cross-region inference profiles (`us.*` prefix) route the actual
+        // model invocation to whichever underlying region has capacity —
+        // observed us-west-2 in production (2026-05-22 incident: every
+        // call returned 403 because the policy only granted us-east-1).
+        // Use wildcard region on the foundation-model resource so the
+        // inference profile's downstream invocations are authorised
+        // regardless of where AWS routes them. Inference-profile resource
+        // stays scoped to this region/account because the profile itself
+        // is regional.
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'BedrockNovaMicroInvoke',
+            effect: iam.Effect.ALLOW,
+            actions: ['bedrock:InvokeModel', 'bedrock:Converse'],
+            resources: [
+              `arn:aws:bedrock:*::foundation-model/amazon.nova-micro-v1:0`,
+              `arn:aws:bedrock:*::foundation-model/us.amazon.nova-micro-v1:0`,
+              `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.amazon.nova-micro-v1:0`,
+              // Haiku as the documented fallback if Nova Micro quality is poor —
+              // grant now so swap-in doesn't require an IAM change. Same
+              // cross-region wildcard for the same reason as nova-micro.
+              `arn:aws:bedrock:*::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0`,
+              `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/us.anthropic.claude-3-5-haiku-20241022-v1:0`,
+            ],
+          })],
+        }),
+        // AgentCore Runtime invocation — Phase 1.5 @psd/Task gesture
+        // hands off to the user's agent (per their MEMORY.md
+        // instructions + skills) to create a task in their preferred
+        // task system. Scoped to all runtimes in the account/region;
+        // the per-runtime ID is set via env var.
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'AgentCoreInvokeForTasks',
+            effect: iam.Effect.ALLOW,
+            actions: [
+              'bedrock-agentcore:InvokeAgentRuntime',
+              'bedrock-agentcore:InvokeAgentRuntimeForUser',
+            ],
+            resources: [
+              `arn:aws:bedrock-agentcore:${this.region}:${this.account}:runtime/*`,
+            ],
+          })],
+        }),
+        // SSM Parameter Store — same pattern the cron Lambda uses to
+        // resolve the AgentCore Runtime ID at runtime rather than
+        // pinning at deploy time.
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'SSMParameterReadForRuntimeId',
+            effect: iam.Effect.ALLOW,
+            actions: ['ssm:GetParameter', 'ssm:GetParameters'],
+            resources: [
+              `arn:aws:ssm:${this.region}:${this.account}:parameter/aistudio/${environment}/*`,
+            ],
+          })],
+        }),
+      ],
+    });
+
+    const triagePollLogGroup = new logs.LogGroup(this, 'TriagePollLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-triage-poll-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(triagePollLogGroup).add('Environment', environment);
+    cdk.Tags.of(triagePollLogGroup).add('ManagedBy', 'cdk');
+
+    triagePollRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'TriagePollLogsCorrectArn',
+      effect: iam.Effect.ALLOW,
+      actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+      resources: [
+        `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/psd-agent-triage-poll-${environment}:*`,
+      ],
+    }));
+
+    // Read MEMORY.md from each user's S3 workspace prefix.
+    triagePollRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'TriagePollReadWorkspaceMemory',
+      effect: iam.Effect.ALLOW,
+      actions: ['s3:GetObject'],
+      resources: [`${this.workspaceBucket.bucketArn}/*/MEMORY.md`],
+    }));
+
+    const triagePollLambda = new lambda.Function(this, 'TriagePollLambda', {
+      functionName: `psd-agent-triage-poll-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-triage-poll'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-triage-poll');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install',
+                'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: 1024,
+      // 4.5 minutes — 30s safety margin below the 5-minute EventBridge
+      // schedule interval. With reservedConcurrentExecutions=1, an
+      // invocation that hits the full timeout would silently drop the
+      // next scheduled firing (no retry, no DLQ). The 30s gap ensures
+      // the next invocation can start cleanly.
+      timeout: cdk.Duration.seconds(270),
+      role: triagePollRole,
+      logGroup: triagePollLogGroup,
+      environment: {
+        ENVIRONMENT: environment,
+        TRIAGE_TABLE: this.triageTable.tableName,
+        USERS_TABLE: this.usersTable.tableName,
+        GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,
+        // Lambda reads <prefix>/MEMORY.md from this bucket to extract the
+        // user's task-creation instructions and embed them in the
+        // AgentCore prompt verbatim.
+        WORKSPACE_BUCKET: this.workspaceBucket.bucketName,
+        TRIAGE_USER_BATCH: '10',
+        // Override knob — set to 'us.anthropic.claude-3-5-haiku-...' to
+        // fall back from Nova Micro without redeploy.
+        TRIAGE_LLM_MODEL_ID: 'us.amazon.nova-micro-v1:0',
+        // AGENTCORE_RUNTIME_ID intentionally NOT set — resolved from SSM
+        // at runtime (same pattern as router/cron Lambdas). The runtime
+        // resource is created conditionally on `--context agentImageTag`
+        // so we can't reliably build the env var at deploy time.
+        // The Lambda's agentcore.ts module does the SSM lookup on cold
+        // start, caches the result, and uses it for @psd/Task gestures.
+        AWS_ACCOUNT: this.account,
+      },
+      architecture: lambda.Architecture.ARM_64,
+      // Hard concurrency cap of 1 — the Lambda processes a per-user
+      // history cursor in DDB without read-modify-write locking, so two
+      // concurrent invocations would re-process the same labelsAdded
+      // events and duplicate downstream side-effects (#duplicate-task
+      // bug observed 2026-05-22). With a 5-minute schedule and ~2-minute
+      // typical invocations this is safe; if an invocation runs long
+      // EventBridge skips the next firing rather than queuing.
+      reservedConcurrentExecutions: 1,
+    });
+    cdk.Tags.of(triagePollLambda).add('Environment', environment);
+    cdk.Tags.of(triagePollLambda).add('ManagedBy', 'cdk');
+
+    // EventBridge Rule fires the poller every 5 minutes. Rule (not
+    // Scheduler) is the right primitive for a global fixed cadence —
+    // simpler IAM + no per-invocation payload.
+    const triagePollRule = new events.Rule(this, 'TriagePollRule', {
+      ruleName: `psd-agent-triage-poll-${environment}`,
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+      description: 'Every-5-minute trigger for the email triage classifier',
+    });
+    triagePollRule.addTarget(new eventsTargets.LambdaFunction(triagePollLambda));
+    cdk.Tags.of(triagePollRule).add('Environment', environment);
+    cdk.Tags.of(triagePollRule).add('ManagedBy', 'cdk');
+
+    // =====================================================================
+    // 7e. Triage Digest Lambda — psd-agent-triage-digest
+    // =====================================================================
+    // Per-user, invoked by EventBridge Scheduler at the user's configured
+    // digestTime. Renders a Chat card summarising last 24h of decisions.
+    // No LLM call — templated. Failure does not cascade.
+    const triageDigestRole = ServiceRoleFactory.createLambdaRole(this, 'TriageDigestLambdaRole', {
+      functionName: 'psd-agent-triage-digest',
+      environment,
+      region: this.region,
+      account: this.account,
+      vpcEnabled: false,
+      dynamodbTables: [this.triageTable.tableName],
+      additionalPolicies: [
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'GoogleChatCredsRead',
+            effect: iam.Effect.ALLOW,
+            actions: ['secretsmanager:GetSecretValue'],
+            resources: [this.googleCredentialsSecret.secretArn],
+          })],
+        }),
+      ],
+    });
+
+    const triageDigestLogGroup = new logs.LogGroup(this, 'TriageDigestLogGroup', {
+      logGroupName: `/aws/lambda/${triageDigestFunctionName}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+    cdk.Tags.of(triageDigestLogGroup).add('Environment', environment);
+    cdk.Tags.of(triageDigestLogGroup).add('ManagedBy', 'cdk');
+
+    triageDigestRole.addToPolicy(new iam.PolicyStatement({
+      sid: 'TriageDigestLogsCorrectArn',
+      effect: iam.Effect.ALLOW,
+      actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
+      resources: [
+        `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${triageDigestFunctionName}:*`,
+      ],
+    }));
+
+    const triageDigestLambda = new lambda.Function(this, 'TriageDigestLambda', {
+      functionName: triageDigestFunctionName,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-triage-digest'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-triage-digest');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install',
+                'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: 512,
+      timeout: cdk.Duration.minutes(2),
+      role: triageDigestRole,
+      logGroup: triageDigestLogGroup,
+      environment: {
+        ENVIRONMENT: environment,
+        TRIAGE_TABLE: this.triageTable.tableName,
+        GOOGLE_CREDENTIALS_SECRET_ARN: this.googleCredentialsSecret.secretArn,
+      },
+      architecture: lambda.Architecture.ARM_64,
+    });
+    cdk.Tags.of(triageDigestLambda).add('Environment', environment);
+    cdk.Tags.of(triageDigestLambda).add('ManagedBy', 'cdk');
+
+    // The digest Lambda is invoked by per-user EventBridge Scheduler
+    // entries created by the agent skill. Grant the scheduler invoke
+    // role permission to call this Lambda (same role already covers
+    // the cron Lambda) so the skill's CreateSchedule calls succeed.
+    triageDigestLambda.grantInvoke(schedulerInvokeRole);
 
     // =====================================================================
     // 8. SQS Queue — Google Chat Pub/Sub Inbound
@@ -2245,8 +2626,12 @@ export class AgentPlatformStack extends cdk.Stack {
         DATABASE_HOST: props.databaseHost,
         DATABASE_SECRET_ARN: props.databaseSecretArn,
         DATABASE_NAME: props.databaseName ?? 'aistudio',
-        MIN_SIGNALS: '3',
-        MIN_BUILDINGS: '2',
+        // Privacy suppression thresholds — patterns are only emitted when
+        // they meet these floors. Production keeps the privacy floor at
+        // 3 signals across 2 buildings; dev drops it to 1/1 so every
+        // classified signal surfaces immediately for development.
+        MIN_SIGNALS: environment === 'prod' ? '3' : '1',
+        MIN_BUILDINGS: environment === 'prod' ? '2' : '1',
         SPIKE_RATIO: '2.0',
         ROLLING_WEEKS: '4',
       },
@@ -2259,6 +2644,303 @@ export class AgentPlatformStack extends cdk.Stack {
       description: 'Weekly cross-building topic convergence scan',
       schedule: events.Schedule.cron({ minute: '0', hour: '23', weekDay: 'SUN' }),
       targets: [new eventsTargets.LambdaFunction(patternLambda)],
+    });
+
+    // =====================================================================
+    // 9b. Telemetry Retention Sweep Lambda — agent-telemetry-prune
+    // =====================================================================
+    // Deletes rows from agent_message_content + agent_tool_invocations older
+    // than RETENTION_DAYS (default 90) to bound the privacy + disk blast
+    // radius of the deep-telemetry tables. Aggregated summaries in
+    // agent_messages stay forever — only the bulky content/tool-call data
+    // is pruned. Daily, 04:00 UTC.
+    // vpcEnabled: false — VPC access added manually via managed policy below
+    // to avoid ServiceRoleFactory's policy validator flagging the ec2 ENI
+    // wildcard resources required for VPC-attached Lambdas. Same workaround
+    // as the pattern-scanner Lambda above.
+    const pruneLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'AgentTelemetryPruneRole', {
+      functionName: 'psd-agent-telemetry-prune',
+      environment,
+      region: this.region,
+      account: this.account,
+      vpcEnabled: false,
+      additionalPolicies: [
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'AuroraConnect',
+            effect: iam.Effect.ALLOW,
+            actions: ['secretsmanager:GetSecretValue'],
+            resources: [props.databaseSecretArn],
+          })],
+        }),
+      ],
+    });
+    pruneLambdaRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+    );
+
+    const pruneLogGroup = new logs.LogGroup(this, 'AgentTelemetryPruneLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-telemetry-prune-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+
+    const pruneLambda = new lambda.Function(this, 'AgentTelemetryPruneLambda', {
+      functionName: `psd-agent-telemetry-prune-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-telemetry-prune'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-telemetry-prune');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: 512,
+      timeout: cdk.Duration.minutes(10),
+      architecture: lambda.Architecture.ARM_64,
+      role: pruneLambdaRole,
+      logGroup: pruneLogGroup,
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      environment: {
+        ENVIRONMENT: environment,
+        DATABASE_HOST: props.databaseHost,
+        DATABASE_SECRET_ARN: props.databaseSecretArn,
+        DATABASE_NAME: props.databaseName ?? 'aistudio',
+        RETENTION_DAYS: '90',
+        PRUNE_BATCH: '5000',
+      },
+    });
+    cdk.Tags.of(pruneLambda).add('Environment', environment);
+    cdk.Tags.of(pruneLambda).add('ManagedBy', 'cdk');
+
+    const pruneSchedule = new events.Rule(this, 'AgentTelemetryPruneSchedule', {
+      description: 'Daily 04:00 UTC — prune agent_message_content + agent_tool_invocations older than 90 days',
+      schedule: events.Schedule.cron({ minute: '0', hour: '4' }),
+      targets: [new eventsTargets.LambdaFunction(pruneLambda)],
+    });
+    cdk.Tags.of(pruneSchedule).add('Environment', environment);
+    cdk.Tags.of(pruneSchedule).add('ManagedBy', 'cdk');
+
+    // =====================================================================
+    // 9c. Bundled-Skill Initializer Lambda + Custom Resource
+    // =====================================================================
+    // On every deploy, walk infra/agent-image/skills/* SKILL.md frontmatter
+    // and UPSERT each skill into psd_agent_skills with scope=shared so the
+    // /admin/agents Skills tab shows the real bundled skills, not just
+    // greetings-demo. Idempotent: same manifest = no DB churn; image
+    // updates bump the s3_key → version increments.
+
+    const bundledSkillsDir = path.join(__dirname, '..', 'agent-image', 'skills');
+    interface BundledSkillManifestEntry {
+      name: string;
+      summary: string;
+      description?: string;
+      sourceHash: string;
+      imageTag: string;
+    }
+    const bundledSkillsManifest: BundledSkillManifestEntry[] = (() => {
+      if (!fs.existsSync(bundledSkillsDir)) return [];
+      const out: BundledSkillManifestEntry[] = [];
+      for (const entry of fs.readdirSync(bundledSkillsDir)) {
+        const skillMdPath = path.join(bundledSkillsDir, entry, 'SKILL.md');
+        if (!fs.existsSync(skillMdPath)) continue;
+        const raw = fs.readFileSync(skillMdPath, 'utf8');
+        const fm = raw.match(/^---\n([\s\S]*?)\n---/);
+        if (!fm) continue;
+        const lines = fm[1].split('\n');
+        let name = '';
+        let summary = '';
+        let description = '';
+        for (const line of lines) {
+          const m = line.match(/^(name|summary|description):\s*(.*)$/);
+          if (!m) continue;
+          if (m[1] === 'name') name = m[2].trim();
+          else if (m[1] === 'summary') summary = m[2].trim();
+          else if (m[1] === 'description') description = m[2].trim();
+        }
+        if (!name) continue;
+        const sourceHash = crypto.createHash('sha256').update(raw).digest('hex');
+        out.push({
+          name,
+          summary: summary || `Bundled skill: ${name}`,
+          description,
+          sourceHash,
+          // Resolved by the lambda at invoke time via env var
+          imageTag: 'unknown',
+        });
+      }
+      return out;
+    })();
+
+    // vpcEnabled: false — VPC access added manually via managed policy below
+    // to avoid ServiceRoleFactory's wildcard-ENI policy validator. Same
+    // pattern as the pattern-scanner + telemetry-prune Lambdas.
+    const skillInitLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'AgentSkillInitializerRole', {
+      functionName: 'psd-agent-skill-initializer',
+      environment,
+      region: this.region,
+      account: this.account,
+      vpcEnabled: false,
+      additionalPolicies: [
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'AuroraConnect',
+            effect: iam.Effect.ALLOW,
+            actions: ['secretsmanager:GetSecretValue'],
+            resources: [props.databaseSecretArn],
+          })],
+        }),
+      ],
+    });
+    skillInitLambdaRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+    );
+
+    const skillInitLogGroup = new logs.LogGroup(this, 'AgentSkillInitializerLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-skill-initializer-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+
+    const skillInitLambda = new lambda.Function(this, 'AgentSkillInitializerLambda', {
+      functionName: `psd-agent-skill-initializer-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-skill-initializer'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-skill-initializer');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: 512,
+      timeout: cdk.Duration.minutes(2),
+      architecture: lambda.Architecture.ARM_64,
+      role: skillInitLambdaRole,
+      logGroup: skillInitLogGroup,
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      environment: {
+        ENVIRONMENT: environment,
+        DATABASE_HOST: props.databaseHost,
+        DATABASE_SECRET_ARN: props.databaseSecretArn,
+        DATABASE_NAME: props.databaseName ?? 'aistudio',
+      },
+    });
+    cdk.Tags.of(skillInitLambda).add('Environment', environment);
+    cdk.Tags.of(skillInitLambda).add('ManagedBy', 'cdk');
+
+    // Trigger string forces the Custom Resource to re-fire on every deploy
+    // so manifest updates land even when the Lambda code hash is unchanged.
+    const skillInitTrigger = bundledSkillsManifest
+      .map((s) => `${s.name}:${s.sourceHash.slice(0, 8)}`)
+      .sort()
+      .join(',');
+
+    const agentImageTagContext = this.node.tryGetContext('agentImageTag') ?? 'unset';
+
+    new customResources.AwsCustomResource(this, 'AgentSkillInitializerCR', {
+      onCreate: {
+        service: 'Lambda',
+        action: 'invoke',
+        parameters: {
+          FunctionName: skillInitLambda.functionName,
+          Payload: JSON.stringify({
+            RequestType: 'Create',
+            ResourceProperties: {
+              skills: bundledSkillsManifest,
+              imageTag: agentImageTagContext,
+              trigger: skillInitTrigger,
+            },
+          }),
+        },
+        physicalResourceId: customResources.PhysicalResourceId.of('agent-skill-initializer'),
+      },
+      onUpdate: {
+        service: 'Lambda',
+        action: 'invoke',
+        parameters: {
+          FunctionName: skillInitLambda.functionName,
+          Payload: JSON.stringify({
+            RequestType: 'Update',
+            ResourceProperties: {
+              skills: bundledSkillsManifest,
+              imageTag: agentImageTagContext,
+              trigger: skillInitTrigger,
+            },
+          }),
+        },
+        physicalResourceId: customResources.PhysicalResourceId.of('agent-skill-initializer'),
+      },
+      // No onDelete — bundled skills stay in the DB if the stack is destroyed.
+      // An admin can clean up via the Skills tab if they want a wipe.
+      policy: customResources.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ['lambda:InvokeFunction'],
+          resources: [skillInitLambda.functionArn],
+        }),
+      ]),
+      installLatestAwsSdk: false,
     });
 
     // =====================================================================

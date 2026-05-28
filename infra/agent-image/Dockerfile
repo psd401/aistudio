@@ -219,11 +219,16 @@ RUN cd /opt/psd-skills/psd-skills-meta && npm install --omit=dev --no-audit --no
 RUN cd /opt/psd-skills/psd-workspace && npm install --omit=dev --no-audit --no-fund
 RUN cd /opt/psd-skills/psd-image-gen && npm install --omit=dev --no-audit --no-fund
 RUN cd /opt/psd-skills/psd-failure-report && npm install --omit=dev --no-audit --no-fund
+RUN cd /opt/psd-skills/psd-email-triage && npm install --omit=dev --no-audit --no-fund
 # chat-card has zero npm deps. chat-chart's npm install is paired with the
 # matplotlib install above — both stay disabled until we figure out the
 # AgentCore overlay-mount failure. With both off the image boots cleanly
 # and chat-chart works in QuickChart mode (lazy require in run.js skips
 # the AWS SDK load).
+# psd-email-triage (Phase 1 email triage) has three @aws-sdk/* deps for
+# DynamoDB + EventBridge Scheduler; the npm install adds one layer (we
+# were at 49, target 50 — well under the 54-layer Firecracker ceiling
+# from the 2026-05-18 incident).
 # psd-data has zero npm install of its own. Its common.js require()s
 # `@aws-sdk/client-secrets-manager` from psd-workspace's already-installed
 # tree via an absolute path. No symlink, no duplicate install — keeps the

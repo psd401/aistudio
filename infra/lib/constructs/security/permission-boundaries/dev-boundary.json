@@ -123,6 +123,7 @@
     },
     {
       "Sid": "DenyRegionRestriction",
+      "_comment": "Bedrock actions are in NotAction because cross-region inference profiles route invocations to arbitrary regions. Model access is scoped by per-Lambda resource policies, not by this boundary.",
       "Effect": "Deny",
       "NotAction": [
         "iam:*",
@@ -130,7 +131,11 @@
         "route53:*",
         "cloudfront:*",
         "globalaccelerator:*",
-        "s3:*"
+        "s3:*",
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+        "bedrock:Converse",
+        "bedrock:ConverseStream"
       ],
       "Resource": "*",
       "Condition": {

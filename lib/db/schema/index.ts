@@ -145,6 +145,8 @@ export * from "./tables/agent-patterns";
 export * from "./tables/agent-failures";
 export * from "./tables/agent-pattern-scan-runs";
 export * from "./tables/agent-health-scan-runs";
+export * from "./tables/agent-message-content";
+export * from "./tables/agent-tool-invocations";
 
 // ============================================
 // Agent Skills Platform (#910)
