@@ -360,16 +360,13 @@ export class OfficeProcessor implements DocumentProcessor {
     return this.convertTextToMarkdown(content.text);
   }
 
-  // Row cap per sheet: keeps the markdown payload well within API route body limits.
-  // A typical row at 20 columns is ~200 bytes; 500 rows ≈ 100 KB per sheet, safe
-  // even with several sheets and a generous multiplier for wide/dense data.
+  // Cap rows per sheet so the Markdown payload stays within API route body limits.
   private static readonly MAX_ROWS_PER_SHEET = 500;
 
-  // Escape a spreadsheet cell value for safe embedding in a Markdown table cell.
-  // Pipe characters split columns; newlines break the row out of the table.
   private static escapeMdTableCell(value: unknown): string {
     return String(value ?? '')
       .replace(/[\r\n]+/g, ' ')
+      .replace(/\\/g, '\\\\')
       .replace(/\|/g, '\\|');
   }
 
@@ -390,7 +387,6 @@ export class OfficeProcessor implements DocumentProcessor {
           // Convert JSON to markdown table
           const rows = sheet.json as any[][];
           if (rows.length > 0) {
-            // Header row — escape pipe/newline in column names
             const headers = rows[0];
             markdown += '| ' + headers.map(OfficeProcessor.escapeMdTableCell).join(' | ') + ' |\n';
             markdown += '| ' + headers.map(() => '---').join(' | ') + ' |\n';
