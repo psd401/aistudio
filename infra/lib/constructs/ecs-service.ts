@@ -403,6 +403,33 @@ export class EcsServiceConstruct extends Construct {
                 `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/AIStudio-*-${environment}`,
               ],
             }),
+            // Agent platform tables (psd-agent-*-<env>) — the admin
+            // dashboard's Triage tab scans psd-agent-triage-<env>. Other
+            // agent platform tables (users, signals, skills) are admin
+            // read-only too. Update/Put limited to triage so the admin
+            // Pause/Reset actions in /admin/agents/[userEmail]/triage
+            // can write back; everything else is read-only.
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'dynamodb:GetItem',
+                'dynamodb:Query',
+                'dynamodb:Scan',
+              ],
+              resources: [
+                `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/psd-agent-*-${environment}`,
+              ],
+            }),
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: [
+                'dynamodb:UpdateItem',
+                'dynamodb:DeleteItem',
+              ],
+              resources: [
+                `arn:aws:dynamodb:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:table/psd-agent-triage-${environment}`,
+              ],
+            }),
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
               actions: [

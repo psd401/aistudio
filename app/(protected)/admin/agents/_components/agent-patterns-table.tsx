@@ -58,19 +58,50 @@ export function AgentPatternsTable({ data, loading = false }: Props) {
           </div>
         )}
         {rows.length === 0 ? (
-          <div className="h-40 flex flex-col items-center justify-center gap-2 text-sm">
-            <div className="text-muted-foreground">
-              {lastScan
-                ? "Scanner ran but no patterns met the suppression threshold."
-                : "Pattern scanner has not run yet."}
-            </div>
-            <div className="text-xs text-muted-foreground max-w-md text-center">
-              Scanner runs Sundays 23:00 UTC. Patterns are suppressed below 3
-              signals / 2 buildings (privacy guarantee). If{" "}
-              <code className="text-[11px]">agent_pattern_scan_runs</code>{" "}
-              stays empty despite agent_messages activity, the Lambda is
-              likely failing silently — check CloudWatch logs.
-            </div>
+          <div className="h-44 flex flex-col items-center justify-center gap-2 text-sm">
+            {!lastScan && (
+              <>
+                <div className="text-muted-foreground">
+                  Pattern scanner has not run yet.
+                </div>
+                <div className="text-xs text-muted-foreground max-w-md text-center">
+                  Scanner is scheduled for Sundays 23:00 UTC via EventBridge.
+                  If <code className="text-[11px]">agent_pattern_scan_runs</code>{" "}
+                  stays empty after the next Sunday, check the Lambda&apos;s
+                  CloudWatch logs.
+                </div>
+              </>
+            )}
+            {lastScan && lastScan.signalsTotal === 0 && (
+              <>
+                <div className="text-muted-foreground">
+                  Scanner ran cleanly but the signal store was empty.
+                </div>
+                <div className="text-xs text-muted-foreground max-w-lg text-center">
+                  The topic classifier produced no signals from recent agent
+                  traffic. This means the K-12 admin keyword taxonomy in{" "}
+                  <code className="text-[11px]">topic-classifier.ts</code>{" "}
+                  didn&apos;t match any messages — typical when most traffic is
+                  developer / system testing rather than school operations.
+                  Expand the keyword patterns to broaden coverage, or wait
+                  until production K-12 traffic builds up.
+                </div>
+              </>
+            )}
+            {lastScan && lastScan.signalsTotal > 0 && (
+              <>
+                <div className="text-muted-foreground">
+                  Scanner ran. {lastScan.signalsTotal} signals classified but
+                  no cross-building patterns met the 3-signal / 2-building
+                  suppression threshold.
+                </div>
+                <div className="text-xs text-muted-foreground max-w-md text-center">
+                  Privacy floor — patterns only surface when at least 3 signals
+                  span at least 2 buildings in the same week. Below that we
+                  consider them potentially identifying.
+                </div>
+              </>
+            )}
           </div>
         ) : (
           <Table>

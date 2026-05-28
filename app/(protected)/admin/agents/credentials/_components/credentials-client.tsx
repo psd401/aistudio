@@ -33,12 +33,28 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { IconRefresh, IconCheck, IconX, IconLock, IconPlus } from "@tabler/icons-react"
 import {
   getCredentialReads,
   getCredentialRequests,
   getCredentialAuditLog,
   resolveCredentialRequest,
+  provisionCredentialFromRequest,
   provisionSharedSecret,
   type CredentialReadRow,
   type CredentialRequestRow,
@@ -52,6 +68,12 @@ export function CredentialsClient() {
   const [requests, setRequests] = useState<CredentialRequestRow[]>([])
   const [auditLog, setAuditLog] = useState<CredentialAuditRow[]>([])
   const [loading, setLoading] = useState(true)
+  // Provision-from-request dialog state — opens when admin clicks ✓ on a
+  // pending request. Forces secret+scope entry before flipping the row.
+  const [provisionRequest, setProvisionRequest] = useState<CredentialRequestRow | null>(null)
+  const [provisionValue, setProvisionValue] = useState("")
+  const [provisionScope, setProvisionScope] = useState<"shared" | "user">("shared")
+  const [provisionBusy, setProvisionBusy] = useState(false)
 
   const loadAll = useCallback(async () => {
     setLoading(true)
@@ -88,6 +110,57 @@ export function CredentialsClient() {
     }
   }
 
+  const openProvisionDialog = (request: CredentialRequestRow) => {
+    setProvisionRequest(request)
+    setProvisionValue("")
+    setProvisionScope("shared")
+  }
+
+  const closeProvisionDialog = () => {
+    if (provisionBusy) return
+    setProvisionRequest(null)
+    setProvisionValue("")
+    setProvisionScope("shared")
+  }
+
+  const handleProvisionFromRequest = async () => {
+    if (!provisionRequest) return
+    if (!provisionValue.trim()) {
+      toast({
+        title: "Secret value required",
+        description: "Paste the secret value before provisioning.",
+        variant: "destructive",
+      })
+      return
+    }
+    setProvisionBusy(true)
+    try {
+      const result = await provisionCredentialFromRequest(
+        provisionRequest.id,
+        provisionValue,
+        provisionScope,
+      )
+      if (result.isSuccess) {
+        toast({
+          title: result.data?.action === "rotated" ? "Secret rotated" : "Secret provisioned",
+          description: result.message,
+        })
+        setProvisionRequest(null)
+        setProvisionValue("")
+        setProvisionScope("shared")
+        loadAll()
+      } else {
+        toast({
+          title: "Provisioning failed",
+          description: result.message || "Could not provision secret.",
+          variant: "destructive",
+        })
+      }
+    } finally {
+      setProvisionBusy(false)
+    }
+  }
+
   const pendingCount = requests.filter((r) => r.status === "pending").length
 
   return (
@@ -113,7 +186,12 @@ export function CredentialsClient() {
         </TabsList>
 
         <TabsContent value="requests" className="mt-4">
-          <RequestsTable requests={requests} loading={loading} onResolve={handleResolve} />
+          <RequestsTable
+            requests={requests}
+            loading={loading}
+            onResolve={handleResolve}
+            onProvision={openProvisionDialog}
+          />
         </TabsContent>
 
         <TabsContent value="provision" className="mt-4">
@@ -128,6 +206,82 @@ export function CredentialsClient() {
           <AuditTable auditLog={auditLog} loading={loading} />
         </TabsContent>
       </Tabs>
+
+      <Dialog
+        open={provisionRequest !== null}
+        onOpenChange={(open) => {
+          if (!open) closeProvisionDialog()
+        }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Provision credential</DialogTitle>
+            <DialogDescription>
+              Pastes the secret value into AWS Secrets Manager and marks the
+              request fulfilled in one step. The value is never logged or
+              persisted in the database; only the audit metadata is.
+            </DialogDescription>
+          </DialogHeader>
+          {provisionRequest && (
+            <div className="space-y-3 text-sm">
+              <div className="grid grid-cols-[120px_1fr] gap-y-1.5">
+                <div className="text-muted-foreground">Credential</div>
+                <div className="font-mono">{provisionRequest.credentialName}</div>
+                <div className="text-muted-foreground">Requested by</div>
+                <div>{provisionRequest.requestedBy}</div>
+                <div className="text-muted-foreground">Skill</div>
+                <div>{provisionRequest.skillContext || "—"}</div>
+                <div className="text-muted-foreground">Reason</div>
+                <div className="text-xs">{provisionRequest.reason}</div>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="provision-scope">Scope</Label>
+                <Select
+                  value={provisionScope}
+                  onValueChange={(v) => setProvisionScope(v as "shared" | "user")}
+                >
+                  <SelectTrigger id="provision-scope">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="shared">
+                      shared — psd-agent-creds/&lt;env&gt;/shared/{provisionRequest.credentialName}
+                    </SelectItem>
+                    <SelectItem value="user">
+                      user — psd-agent-creds/&lt;env&gt;/user/{provisionRequest.requestedBy}/{provisionRequest.credentialName}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </div>
+              <div className="space-y-1.5">
+                <Label htmlFor="provision-value">Secret value</Label>
+                <Textarea
+                  id="provision-value"
+                  value={provisionValue}
+                  onChange={(e) => setProvisionValue(e.target.value)}
+                  rows={5}
+                  placeholder="Paste the secret value here (will be written to AWS Secrets Manager)"
+                  spellCheck={false}
+                  autoComplete="off"
+                  data-1p-ignore
+                />
+                <p className="text-xs text-muted-foreground">
+                  The value is sent directly to AWS Secrets Manager. Don&apos;t
+                  paste descriptions or labels — only the raw secret.
+                </p>
+              </div>
+            </div>
+          )}
+          <DialogFooter>
+            <Button variant="outline" onClick={closeProvisionDialog} disabled={provisionBusy}>
+              Cancel
+            </Button>
+            <Button onClick={handleProvisionFromRequest} disabled={provisionBusy}>
+              {provisionBusy ? "Provisioning…" : "Provision + mark fulfilled"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }
@@ -254,11 +408,12 @@ function ProvisionForm({ onSuccess }: { onSuccess: () => void }) {
 }
 
 function RequestsTable({
-  requests, loading, onResolve,
+  requests, loading, onResolve, onProvision,
 }: {
   requests: CredentialRequestRow[]
   loading: boolean
   onResolve: (id: number, status: "fulfilled" | "rejected") => void
+  onProvision: (request: CredentialRequestRow) => void
 }) {
   return (
     <div className="rounded-md border">
@@ -318,12 +473,13 @@ function RequestsTable({
                   {req.status === "pending" && (
                     <div className="flex gap-1">
                       <Button
-                        size="icon"
-                        variant="ghost"
-                        onClick={() => onResolve(req.id, "fulfilled")}
-                        title="Mark as fulfilled"
+                        size="sm"
+                        variant="default"
+                        onClick={() => onProvision(req)}
+                        title="Provision secret + mark fulfilled"
                       >
-                        <IconCheck className="h-4 w-4" />
+                        <IconCheck className="h-4 w-4 mr-1" />
+                        Provision
                       </Button>
                       <Button
                         size="icon"

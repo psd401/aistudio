@@ -147,7 +147,11 @@
         "route53:*",
         "cloudfront:*",
         "globalaccelerator:*",
-        "s3:*"
+        "s3:*",
+        "bedrock:InvokeModel",
+        "bedrock:InvokeModelWithResponseStream",
+        "bedrock:Converse",
+        "bedrock:ConverseStream"
       ],
       "Resource": "*",
       "Condition": {

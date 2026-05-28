@@ -92,9 +92,25 @@ export function AgentCostView({ data, loading = false }: Props) {
           <CardTitle className="text-base">Daily spend (Cost Explorer, costCenter=ai-agents)</CardTitle>
         </CardHeader>
         <CardContent>
-          {data.daily.length === 0 ? (
-            <div className="h-32 flex items-center justify-center text-muted-foreground text-sm">
-              No billed activity in window.
+          {data.daily.length === 0 || data.totalUsd === 0 ? (
+            <div className="h-40 flex flex-col items-center justify-center gap-2 text-sm">
+              <div className="text-muted-foreground">No billed activity in window.</div>
+              <div className="text-xs text-muted-foreground max-w-lg text-center">
+                If you expect spend here, the most common cause is that{" "}
+                <code className="text-[11px]">costCenter</code> is not yet
+                activated as a cost-allocation tag. The IAM role IS tagged, but
+                AWS requires manual activation in{" "}
+                <a
+                  className="underline"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  href="https://us-east-1.console.aws.amazon.com/billing/home#/tags"
+                >
+                  Billing → Cost allocation tags
+                </a>
+                . Activate <code className="text-[11px]">costCenter</code>; new
+                spend appears in Cost Explorer ~24h later.
+              </div>
             </div>
           ) : (
             <div className="h-64">
