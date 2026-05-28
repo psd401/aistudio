@@ -127,8 +127,14 @@ export async function getTriageSummaryList(): Promise<
           TableName: TRIAGE_TABLE,
           ExclusiveStartKey: lastKey,
           // Only fetch fields needed for TriageSummaryRow — avoids pulling
-          // large recentDecisions / learnedPatterns arrays for every row.
-          ProjectionExpression: "userEmail, enabled, enabledAt, disabledAt, lastPollAt, digestEnabled, rules, escalation, recentDecisions, learnedPatterns",
+          // bulky JSONB blobs that we don't surface in the list view.
+          // `rules` is a DynamoDB RESERVED KEYWORD — must be aliased via
+          // ExpressionAttributeNames or the entire Scan returns
+          // ValidationException and the action returns an empty list. Bug
+          // 2026-05-28: this aliasing was missing on first ship and the
+          // Triage tab silently showed no users despite a populated table.
+          ProjectionExpression: "userEmail, enabled, enabledAt, disabledAt, lastPollAt, digestEnabled, #rules, escalation, recentDecisions, learnedPatterns",
+          ExpressionAttributeNames: { "#rules": "rules" },
         }),
       )
       for (const item of (resp.Items ?? []) as Array<{

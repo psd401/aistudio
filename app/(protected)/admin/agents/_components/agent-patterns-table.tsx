@@ -14,15 +14,23 @@ import {
 import type {
   AgentPatternRow,
   AgentPatternsEnvelope,
+  RawSignalsEnvelope,
 } from "@/actions/admin/agent-health.actions"
 import { formatDate } from "@/lib/date-utils"
 
 interface Props {
   data: AgentPatternsEnvelope
+  /**
+   * Raw per-topic signal counts straight from agent_messages.topic
+   * — bypasses the suppression threshold so admins can see what the
+   * classifier actually catches in real traffic. Optional so the
+   * component still renders if the loader fails / not yet wired.
+   */
+  rawSignals?: RawSignalsEnvelope | null
   loading?: boolean
 }
 
-export function AgentPatternsTable({ data, loading = false }: Props) {
+export function AgentPatternsTable({ data, rawSignals = null, loading = false }: Props) {
   const rows: AgentPatternRow[] = data.rows
   const lastScan = data.lastScan
   if (loading) {
@@ -147,6 +155,68 @@ export function AgentPatternsTable({ data, loading = false }: Props) {
           </Table>
         )}
       </CardContent>
+      {rawSignals && <RawSignalsSection signals={rawSignals} />}
     </Card>
+  )
+}
+
+function RawSignalsSection({ signals }: { signals: RawSignalsEnvelope }) {
+  const coveragePct = signals.totalMessages > 0
+    ? Math.round((signals.classifiedMessages / signals.totalMessages) * 100)
+    : 0
+
+  return (
+    <div className="border-t mx-6 pt-4 pb-6 space-y-3">
+      <div className="flex items-center justify-between">
+        <div>
+          <h3 className="text-sm font-medium">Raw signal volume (last {signals.daysBack}d)</h3>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            Per-topic counts straight from <code className="text-[11px]">agent_messages.topic</code>
+            {" "}— bypasses the suppression threshold. Useful for tuning the
+            classifier when the panel above is empty.
+          </p>
+        </div>
+        <div className="text-xs text-muted-foreground text-right">
+          <div>
+            <span className="font-semibold text-foreground">{signals.classifiedMessages}</span> / {signals.totalMessages} classified ({coveragePct}%)
+          </div>
+          <div className="text-[11px]">
+            {signals.unclassifiedMessages} unclassified
+          </div>
+        </div>
+      </div>
+      {signals.rows.length === 0 ? (
+        <div className="text-xs text-muted-foreground italic">
+          No classified signals in this window. Either no agent traffic, or
+          the <code className="text-[11px]">topic-classifier.ts</code> patterns
+          didn&apos;t match the message content.
+        </div>
+      ) : (
+        <Table>
+          <TableHeader>
+            <TableRow>
+              <TableHead>Topic</TableHead>
+              <TableHead className="text-right">Signals</TableHead>
+              <TableHead className="text-right">Unique users</TableHead>
+              <TableHead>Last seen</TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {signals.rows.map((r) => (
+              <TableRow key={r.topic}>
+                <TableCell className="text-sm font-medium">{r.topic}</TableCell>
+                <TableCell className="text-right">{r.signalCount}</TableCell>
+                <TableCell className="text-right text-muted-foreground">
+                  {r.uniqueUsers}
+                </TableCell>
+                <TableCell className="text-xs text-muted-foreground">
+                  {formatDate(r.lastSeenAt, true)}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      )}
+    </div>
   )
 }

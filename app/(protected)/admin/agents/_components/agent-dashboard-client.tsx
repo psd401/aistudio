@@ -48,8 +48,10 @@ import {
 import {
   getAgentHealthSummary,
   getAgentPatterns,
+  getAgentRawSignals,
   type AgentHealthSummary,
   type AgentPatternsEnvelope,
+  type RawSignalsEnvelope,
 } from "@/actions/admin/agent-health.actions"
 import {
   getAgentCostSummary,
@@ -94,6 +96,7 @@ interface LoaderSetters {
   setHealthSummary: (v: AgentHealthSummary | null) => void
   setCostSummary: (v: AgentCostSummary | null) => void
   setPatterns: (v: AgentPatternsEnvelope) => void
+  setRawSignals: (v: RawSignalsEnvelope | null) => void
   setTriageList: (v: TriageSummaryRow[]) => void
 }
 
@@ -163,11 +166,22 @@ function buildLoaders(
       }
     },
     patterns: async () => {
-      const r = await getAgentPatterns()
-      if (r.isSuccess && r.data) {
-        ctx.setPatterns(r.data)
+      // Load detected patterns + raw signals in parallel — the raw signal
+      // counts let admins see classifier coverage even when zero patterns
+      // cross the suppression threshold.
+      const [p, rs] = await Promise.all([
+        getAgentPatterns(),
+        getAgentRawSignals(7),
+      ])
+      if (p.isSuccess && p.data) {
+        ctx.setPatterns(p.data)
+      } else if (!p.isSuccess) {
+        ctx.showError("patterns", p.message)
+      }
+      if (rs.isSuccess && rs.data) {
+        ctx.setRawSignals(rs.data)
       } else {
-        ctx.showError("patterns", r.message)
+        ctx.setRawSignals(null)
       }
     },
     triage: async () => {
@@ -258,6 +272,7 @@ function DashboardTabs({
   healthSummary,
   costSummary,
   patterns,
+  rawSignals,
   triageList,
 }: {
   activeTab: DashboardTab
@@ -272,6 +287,7 @@ function DashboardTabs({
   healthSummary: AgentHealthSummary | null
   costSummary: AgentCostSummary | null
   patterns: AgentPatternsEnvelope
+  rawSignals: RawSignalsEnvelope | null
   triageList: TriageSummaryRow[]
 }) {
   return (
@@ -323,7 +339,7 @@ function DashboardTabs({
       </TabsContent>
 
       <TabsContent value="patterns" className="mt-4">
-        <AgentPatternsTable data={patterns} loading={tabLoading} />
+        <AgentPatternsTable data={patterns} rawSignals={rawSignals} loading={tabLoading} />
       </TabsContent>
 
       <TabsContent value="skills" className="mt-4">
@@ -370,6 +386,7 @@ export function AgentDashboardClient() {
     rows: [],
     lastScan: null,
   })
+  const [rawSignals, setRawSignals] = useState<RawSignalsEnvelope | null>(null)
   const [triageList, setTriageList] = useState<TriageSummaryRow[]>([])
   const [tabLoading, setTabLoading] = useState(false)
 
@@ -409,7 +426,7 @@ export function AgentDashboardClient() {
     () => buildLoaders({
       setDailyUsage, setModelBreakdown, setUserUsage, setGuardrailEvents,
       setFeedbackList, setHealthSummary, setCostSummary, setPatterns,
-      setTriageList,
+      setRawSignals, setTriageList,
       showError,
     }),
     [showError]
@@ -506,6 +523,7 @@ export function AgentDashboardClient() {
         healthSummary={healthSummary}
         costSummary={costSummary}
         patterns={patterns}
+        rawSignals={rawSignals}
         triageList={triageList}
       />
     </div>

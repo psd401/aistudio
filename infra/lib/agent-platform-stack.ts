@@ -2626,8 +2626,12 @@ export class AgentPlatformStack extends cdk.Stack {
         DATABASE_HOST: props.databaseHost,
         DATABASE_SECRET_ARN: props.databaseSecretArn,
         DATABASE_NAME: props.databaseName ?? 'aistudio',
-        MIN_SIGNALS: '3',
-        MIN_BUILDINGS: '2',
+        // Privacy suppression thresholds — patterns are only emitted when
+        // they meet these floors. Production keeps the privacy floor at
+        // 3 signals across 2 buildings; dev drops it to 1/1 so every
+        // classified signal surfaces immediately for development.
+        MIN_SIGNALS: environment === 'prod' ? '3' : '1',
+        MIN_BUILDINGS: environment === 'prod' ? '2' : '1',
         SPIKE_RATIO: '2.0',
         ROLLING_WEEKS: '4',
       },
