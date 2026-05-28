@@ -120,8 +120,10 @@ export async function listAgentConversations(
     )
 
     // Tool-call counts in one extra query, then merge.
+    // Use Object.create(null) to avoid prototype pollution from DB-sourced
+    // sessionId keys (see docs/guides/silent-failure-patterns.md).
     const sessionIds = rows.map((r) => r.sessionId)
-    let toolCounts: Record<string, number> = {}
+    const toolCounts: Record<string, number> = Object.create(null)
     if (sessionIds.length > 0) {
       const toolRows = await executeQuery(
         (db) =>
@@ -135,7 +137,7 @@ export async function listAgentConversations(
             .groupBy(agentToolInvocations.sessionId),
         "agentConversations.toolCounts",
       )
-      toolCounts = Object.fromEntries(toolRows.map((r) => [r.sessionId, r.count]))
+      for (const r of toolRows) toolCounts[r.sessionId] = r.count
     }
 
     const items: ConversationListItem[] = rows.map((r) => ({

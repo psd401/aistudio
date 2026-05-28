@@ -12,6 +12,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
   DynamoDBDocumentClient,
   GetCommand,
+  QueryCommand,
   ScanCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
@@ -104,28 +105,44 @@ export async function getUserProfile(email: string): Promise<UserProfile | null>
   if (!USERS_TABLE) return null;
   const cached = profileCache.get(email);
   if (cached && Date.now() - cached.t < PROFILE_TTL_MS) return cached.profile;
-  // Paginate the scan — DynamoDB applies FilterExpression AFTER the
-  // page read, so a Limit:1 with a filter often returns 0 items even
-  // when the table contains a match (bug 2026-05-22: hagelk's row was
-  // past the first scan page). Iterate pages until we find a match.
+  // Use the email-index GSI (same as agent-router's resolveUserByEmailPrefix)
+  // instead of a full-table Scan. O(1) vs O(N) and avoids the multi-page
+  // pagination bug that hit Scan on 2026-05-22.
   const lowered = email.toLowerCase();
-  let lastKey: Record<string, unknown> | undefined;
   let item: UserProfile | undefined;
-  do {
+  try {
     const resp = await ddb().send(
-      new ScanCommand({
+      new QueryCommand({
         TableName: USERS_TABLE,
-        FilterExpression: "email = :e",
+        IndexName: "email-index",
+        KeyConditionExpression: "email = :e",
         ExpressionAttributeValues: { ":e": lowered },
-        ExclusiveStartKey: lastKey,
+        Limit: 1,
       }),
     );
     if (resp.Items && resp.Items.length > 0) {
       item = resp.Items[0] as UserProfile;
-      break;
     }
-    lastKey = resp.LastEvaluatedKey;
-  } while (lastKey);
+  } catch {
+    // Fall back to Scan if GSI doesn't exist (e.g., local dev). This
+    // preserves backward compatibility while preferring the fast path.
+    let lastKey: Record<string, unknown> | undefined;
+    do {
+      const resp = await ddb().send(
+        new ScanCommand({
+          TableName: USERS_TABLE,
+          FilterExpression: "email = :e",
+          ExpressionAttributeValues: { ":e": lowered },
+          ExclusiveStartKey: lastKey,
+        }),
+      );
+      if (resp.Items && resp.Items.length > 0) {
+        item = resp.Items[0] as UserProfile;
+        break;
+      }
+      lastKey = resp.LastEvaluatedKey;
+    } while (lastKey);
+  }
   const profile = item
     ? {
         googleIdentity: item.googleIdentity,
@@ -156,6 +173,7 @@ export async function claimTaskGesture(
   userEmail: string,
   messageId: string,
   ttlMinutes = 30,
+  _depth = 0,
 ): Promise<boolean> {
   const nowIso = new Date().toISOString();
   const ttlCutoffIso = new Date(Date.now() - ttlMinutes * 60_000).toISOString();
@@ -181,7 +199,10 @@ export async function claimTaskGesture(
       return false;
     }
     // The claims map doesn't exist yet — initialize it then retry.
+    // Depth guard prevents infinite recursion if the init + retry
+    // both fail for an unexpected reason.
     if (
+      _depth < 1 &&
       (err as { name?: string }).name === "ValidationException" &&
       String((err as Error).message).includes("document path")
     ) {
@@ -194,7 +215,7 @@ export async function claimTaskGesture(
           ExpressionAttributeValues: { ":empty": {} },
         }),
       );
-      return claimTaskGesture(userEmail, messageId, ttlMinutes);
+      return claimTaskGesture(userEmail, messageId, ttlMinutes, _depth + 1);
     }
     throw err;
   }

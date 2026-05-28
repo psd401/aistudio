@@ -37,6 +37,17 @@ import {
 } from "@/actions/admin/agent-conversations.actions"
 import { formatDate } from "@/lib/date-utils"
 
+/**
+ * Strip Unicode control characters (except common whitespace) that could
+ * corrupt the display. React's JSX escaping prevents XSS, but control
+ * chars can cause invisible rendering artifacts in the conversation viewer.
+ */
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHAR_RE = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F\u200B-\u200F\uFEFF]/g
+function sanitizeDisplayText(text: string): string {
+  return text.replace(CONTROL_CHAR_RE, "")
+}
+
 const DAYS_OPTIONS = [
   { value: "1", label: "Last 24h" },
   { value: "7", label: "Last 7 days" },
@@ -302,7 +313,7 @@ function ConversationDetailView({ detail }: { detail: ConversationDetail }) {
                 {m.role}
               </Badge>
               <pre className="text-xs whitespace-pre-wrap break-words bg-muted/40 rounded p-2">
-                {m.contentText}
+                {sanitizeDisplayText(m.contentText)}
                 {m.contentTruncated && (
                   <span className="text-muted-foreground">… [truncated]</span>
                 )}
@@ -335,7 +346,7 @@ function ConversationDetailView({ detail }: { detail: ConversationDetail }) {
                   </summary>
                   {t.errorText && (
                     <pre className="mt-2 text-xs text-destructive whitespace-pre-wrap">
-                      {t.errorText}
+                      {sanitizeDisplayText(t.errorText)}
                     </pre>
                   )}
                   {t.toolArgs && (
