@@ -2650,12 +2650,16 @@ export class AgentPlatformStack extends cdk.Stack {
     // radius of the deep-telemetry tables. Aggregated summaries in
     // agent_messages stay forever — only the bulky content/tool-call data
     // is pruned. Daily, 04:00 UTC.
+    // vpcEnabled: false — VPC access added manually via managed policy below
+    // to avoid ServiceRoleFactory's policy validator flagging the ec2 ENI
+    // wildcard resources required for VPC-attached Lambdas. Same workaround
+    // as the pattern-scanner Lambda above.
     const pruneLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'AgentTelemetryPruneRole', {
       functionName: 'psd-agent-telemetry-prune',
       environment,
       region: this.region,
       account: this.account,
-      vpcEnabled: true,
+      vpcEnabled: false,
       additionalPolicies: [
         new iam.PolicyDocument({
           statements: [new iam.PolicyStatement({
@@ -2667,6 +2671,9 @@ export class AgentPlatformStack extends cdk.Stack {
         }),
       ],
     });
+    pruneLambdaRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+    );
 
     const pruneLogGroup = new logs.LogGroup(this, 'AgentTelemetryPruneLogGroup', {
       logGroupName: `/aws/lambda/psd-agent-telemetry-prune-${environment}`,
@@ -2792,12 +2799,15 @@ export class AgentPlatformStack extends cdk.Stack {
       return out;
     })();
 
+    // vpcEnabled: false — VPC access added manually via managed policy below
+    // to avoid ServiceRoleFactory's wildcard-ENI policy validator. Same
+    // pattern as the pattern-scanner + telemetry-prune Lambdas.
     const skillInitLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'AgentSkillInitializerRole', {
       functionName: 'psd-agent-skill-initializer',
       environment,
       region: this.region,
       account: this.account,
-      vpcEnabled: true,
+      vpcEnabled: false,
       additionalPolicies: [
         new iam.PolicyDocument({
           statements: [new iam.PolicyStatement({
@@ -2809,6 +2819,9 @@ export class AgentPlatformStack extends cdk.Stack {
         }),
       ],
     });
+    skillInitLambdaRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+    );
 
     const skillInitLogGroup = new logs.LogGroup(this, 'AgentSkillInitializerLogGroup', {
       logGroupName: `/aws/lambda/psd-agent-skill-initializer-${environment}`,
