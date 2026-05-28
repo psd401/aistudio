@@ -107,6 +107,10 @@ describe('sanitizeOptionLabel', () => {
     it('returns empty string for a pure script payload', () => {
       expect(sanitizeOptionLabel('<script>xss()</script>')).toBe('')
     })
+
+    it('strips script blocks with non-standard closing tag attributes', () => {
+      expect(sanitizeOptionLabel('<script>xss()</script bar>')).toBe('')
+    })
   })
 
   describe('does not corrupt legitimate labels (false-positive guards)', () => {
