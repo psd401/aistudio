@@ -1,6 +1,6 @@
 // Tests for sanitizeOptionLabel — covers previously-blocked punctuation, XSS vectors, and false-positive guards.
 
-import { sanitizeOptionLabel } from '../assistant-architect-streaming'
+import { sanitizeOptionLabel } from '@/lib/utils/sanitize-option-label'
 
 describe('sanitizeOptionLabel', () => {
   describe('allows common punctuation that was previously blocked', () => {
