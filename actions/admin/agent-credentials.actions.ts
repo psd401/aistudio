@@ -533,6 +533,12 @@ export async function provisionCredentialFromRequest(
   } catch (error) {
     if (isRedirectError(error)) throw error
     timer({ status: "error" })
+    // NOTE: Partial consistency window — if the DB transaction threw after
+    // the Secrets Manager write succeeded, the secret exists in AWS but the
+    // request row is still 'pending'. This is safe: a retry will hit the
+    // PutSecretValueCommand path (rotation), overwrite the value, and the
+    // DB transaction will succeed on the second attempt. The audit trail
+    // will only record the successful attempt.
     return handleError(error, "Failed to provision credential from request", {
       context: "provisionCredentialFromRequest",
       requestId: rid,

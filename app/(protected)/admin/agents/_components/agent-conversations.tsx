@@ -305,8 +305,8 @@ function ConversationDetailView({ detail }: { detail: ConversationDetail }) {
               No content captured for this turn (pre-rollout).
             </div>
           )}
-          {turn.messages.map((m) => (
-            <div key={`${m.createdAt}-${m.role}`} className="space-y-1">
+          {turn.messages.map((m, mi) => (
+            <div key={`${turn.messageId}-msg-${mi}`} className="space-y-1">
               <Badge
                 variant={m.role === "user" ? "default" : "secondary"}
                 className="text-[10px] py-0"
@@ -326,8 +326,8 @@ function ConversationDetailView({ detail }: { detail: ConversationDetail }) {
               <div className="text-xs font-medium text-muted-foreground">
                 Tool calls
               </div>
-              {turn.tools.map((t) => (
-                <details key={`${t.startedAt}-${t.toolName}`} className="text-xs border rounded p-2">
+              {turn.tools.map((t, ti) => (
+                <details key={`${turn.messageId}-tool-${ti}`} className="text-xs border rounded p-2">
                   <summary className="cursor-pointer flex items-center gap-2">
                     <Badge variant="outline" className="text-[10px] py-0">
                       {t.toolName}

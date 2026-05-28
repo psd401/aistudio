@@ -93,14 +93,14 @@ export function CredentialsClient() {
   }, [])
 
   useEffect(() => {
-    loadAll()
+    void loadAll()
   }, [loadAll])
 
   const handleResolve = async (id: number, status: "fulfilled" | "rejected") => {
     const result = await resolveCredentialRequest(id, status)
     if (result.isSuccess) {
       toast({ title: `Request ${status}` })
-      loadAll()
+      void loadAll()
     } else {
       toast({
         title: "Error",
@@ -148,7 +148,7 @@ export function CredentialsClient() {
         setProvisionRequest(null)
         setProvisionValue("")
         setProvisionScope("shared")
-        loadAll()
+        void loadAll()
       } else {
         toast({
           title: "Provisioning failed",
