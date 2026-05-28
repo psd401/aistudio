@@ -87,10 +87,16 @@ function sanitizeImagePath(imagePath: string | null): string | null {
 }
 
 /**
- * Sanitize option labels to prevent XSS attacks.
- * Uses a deny-list approach to strip actual XSS vectors while allowing
- * common punctuation (colons, slashes, ampersands, quotes, etc.) that
- * appear in real-world SOP and curriculum dropdown options.
+ * Sanitize an option label or value to prevent XSS and prompt injection.
+ *
+ * Uses a deny-list approach: strips HTML tags, javascript: protocol, and
+ * inline event handlers, while allowing all other characters (colons, slashes,
+ * ampersands, quotes, etc.) that appear in real-world SOP/curriculum options.
+ *
+ * SAFETY SCOPE: output is safe for React text-node rendering only.
+ * Do NOT use the return value in dangerouslySetInnerHTML, href, src, or action
+ * attributes without additional validation — nested/malformed tags and data:
+ * URIs are not fully stripped by this function.
  */
 export function sanitizeOptionLabel(label: string): string {
   if (!label || typeof label !== 'string') return ''
@@ -1024,13 +1030,14 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
                                   }))
                                 }
                               }
-                              // Sanitize option labels and filter out invalid ones
+                              // Sanitize both label and value to block XSS and prompt injection
                               const sanitizedOptions = options
                                 .map(opt => ({
                                   ...opt,
-                                  label: sanitizeOptionLabel(opt.label)
+                                  label: sanitizeOptionLabel(opt.label),
+                                  value: sanitizeOptionLabel(opt.value ?? opt.label)
                                 }))
-                                .filter(opt => opt.label !== '')
+                                .filter(opt => opt.label !== '' && opt.value !== '')
 
                               return sanitizedOptions.map(option => (
                                 <SelectItem key={option.value} value={option.value}>
