@@ -41,6 +41,8 @@ const ConnectorToolsSchema = z.record(z.string(), z.object({
   serverName: z.string(),
 }))
 
+const ModelErrorSchema = z.object({ error: z.string().max(300) })
+
 // Loading spinner component for Suspense fallback
 function NexusLoadingSpinner() {
   return (
@@ -150,6 +152,10 @@ function ConversationRuntimeProvider({
     try {
       response = await fetch(input, init)
     } catch (networkError) {
+      // Intentional cancellation (stop button, navigation) — don't toast.
+      if (networkError instanceof Error && networkError.name === 'AbortError') {
+        throw networkError
+      }
       // TCP-level failures (connection drop, ALB timeout, offline) arrive here as
       // TypeError("Failed to fetch"). Show a friendly message instead of letting
       // the raw browser error string propagate to the output area.
@@ -212,9 +218,6 @@ function ConversationRuntimeProvider({
       try {
         const clonedResponse = response.clone()
         const rawData: unknown = await clonedResponse.json()
-        // Validate shape before trusting server-controlled string (security: unvalidated
-        // server text must not flow directly into rendered UI components).
-        const ModelErrorSchema = z.object({ error: z.string().max(300) })
         const parsed = ModelErrorSchema.safeParse(rawData)
         toast.error('Model Unavailable', {
           description: parsed.success
