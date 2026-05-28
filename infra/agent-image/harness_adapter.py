@@ -439,6 +439,23 @@ class OpenClawAdapter(HarnessAdapter):
                         raw_event_samples.append(raw[:600] if isinstance(raw, str) else str(raw)[:600])
 
                     if mtype == "event" and mevent == "agent":
+                        # DIAGNOSTIC (remove after schema discovery): log the
+                        # first occurrence of each unique `stream` value with
+                        # a payload sample so we can see what OpenClaw
+                        # actually emits for model id / token usage / tool
+                        # calls. The speculative field-name extraction below
+                        # produced model=unknown + 0 tool_calls in initial
+                        # runs (2026-05-28).
+                        _stream_val = (msg.get("payload", {}) or {}).get("stream")
+                        if isinstance(_stream_val, str):
+                            _diag_key = f"_seen_stream::{_stream_val}"
+                            if _diag_key not in event_counts:
+                                event_counts[_diag_key] = 1
+                                logger.info(
+                                    "openclaw_event_sample stream=%s payload=%s",
+                                    _stream_val,
+                                    json.dumps(msg.get("payload", {}))[:1500],
+                                )
                         # Agent events carry streaming content per OpenClaw's
                         # AgentEventSchema: {runId, seq, stream, ts, data}.
                         # We extract:
@@ -578,6 +595,15 @@ class OpenClawAdapter(HarnessAdapter):
                             break
 
                     elif mtype == "res" and msg.get("id") == chat_id:
+                        # DIAGNOSTIC (remove after schema discovery): dump
+                        # the final res payload so we can see if usage /
+                        # model lives here vs on agent events.
+                        if "_seen_chat_res" not in event_counts:
+                            event_counts["_seen_chat_res"] = 1
+                            logger.info(
+                                "openclaw_chat_res_sample payload=%s",
+                                json.dumps(msg.get("payload", {}))[:1500],
+                            )
                         if not msg.get("ok"):
                             error = msg.get("error", {})
                             logger.error("chat.send error: %s", json.dumps(error)[:500])
