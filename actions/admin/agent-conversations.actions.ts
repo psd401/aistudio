@@ -252,7 +252,7 @@ export async function getAgentConversationDetail(
         errorText: t.errorText,
         durationMs: t.durationMs,
         startedAt: t.startedAt.toISOString(),
-        finishedAt: t.finishedAt.toISOString(),
+        finishedAt: t.finishedAt?.toISOString() ?? t.startedAt.toISOString(),
         toolArgs: t.toolArgs ?? null,
         toolResult: t.toolResult ?? null,
       })

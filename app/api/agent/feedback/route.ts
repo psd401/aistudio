@@ -66,7 +66,7 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     }
 
     const body = (await req.json().catch(() => null)) as FeedbackBody | null
-    if (!body || !body.userId || typeof body.messageId !== "number" || typeof body.thumbsUp !== "boolean") {
+    if (!body || typeof body.userId !== "string" || !body.userId || typeof body.messageId !== "number" || typeof body.thumbsUp !== "boolean") {
       return NextResponse.json(
         { error: "Body must be { userId: string, messageId: number, thumbsUp: boolean }" },
         { status: 400 },

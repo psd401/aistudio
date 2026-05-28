@@ -361,10 +361,15 @@ export async function provisionCredentialFromRequest(
   const rid = generateRequestId()
   const timer = startTimer("provisionCredentialFromRequest")
   const log = createLogger({ requestId: rid, action: "provisionCredentialFromRequest" })
+  // Track whether the Secrets Manager write succeeded for partial-consistency detection
+  let smWriteSucceeded = false
+  let secretIdForErrorLog = ""
+  let adminUserIdForErrorLog: number | string = ""
 
   try {
     const currentUser = await requireRole("administrator")
     const adminUserId = currentUser.user.id
+    adminUserIdForErrorLog = adminUserId
 
     // Step 1: Load the request row.
     const rows = await executeQuery(
@@ -414,6 +419,7 @@ export async function provisionCredentialFromRequest(
       scope === "user"
         ? `psd-agent-creds/${environment}/user/${request.requestedBy}/${request.credentialName}`
         : `psd-agent-creds/${environment}/shared/${request.credentialName}`
+    secretIdForErrorLog = secretId
 
     log.info("Provisioning credential from request", {
       requestId,
@@ -452,6 +458,7 @@ export async function provisionCredentialFromRequest(
         )
         await client.send(new TagResourceCommand({ SecretId: secretId, Tags: tags }))
         action = "rotated"
+        smWriteSucceeded = true
         log.info("Secret rotated", { secretId })
       } catch (putError) {
         if (!(putError instanceof ResourceNotFoundException)) throw putError
@@ -465,6 +472,7 @@ export async function provisionCredentialFromRequest(
             }),
           )
           action = "created"
+          smWriteSucceeded = true
           log.info("Secret created", { secretId })
         } catch (createError: unknown) {
           if (!(createError instanceof Error) || createError.name !== "ResourceExistsException") {
@@ -475,6 +483,7 @@ export async function provisionCredentialFromRequest(
           )
           await client.send(new TagResourceCommand({ SecretId: secretId, Tags: tags }))
           action = "rotated"
+          smWriteSucceeded = true
           log.info("Secret rotated (race recovery)", { secretId })
         }
       }
@@ -533,12 +542,20 @@ export async function provisionCredentialFromRequest(
   } catch (error) {
     if (isRedirectError(error)) throw error
     timer({ status: "error" })
-    // NOTE: Partial consistency window — if the DB transaction threw after
+    // Partial consistency window — if the DB transaction threw after
     // the Secrets Manager write succeeded, the secret exists in AWS but the
-    // request row is still 'pending'. This is safe: a retry will hit the
-    // PutSecretValueCommand path (rotation), overwrite the value, and the
-    // DB transaction will succeed on the second attempt. The audit trail
-    // will only record the successful attempt.
+    // request row is still 'pending'. A retry will hit the
+    // PutSecretValueCommand path (rotation) and succeed. Emit a structured
+    // error so CloudWatch Alarms can detect this state.
+    if (smWriteSucceeded) {
+      log.error("PARTIAL_CONSISTENCY: Secrets Manager write succeeded but DB transaction failed", {
+        secretId: secretIdForErrorLog,
+        requestId,
+        scope,
+        adminUserId: adminUserIdForErrorLog,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
     return handleError(error, "Failed to provision credential from request", {
       context: "provisionCredentialFromRequest",
       requestId: rid,

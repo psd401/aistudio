@@ -124,6 +124,13 @@ export class AgentPlatformStack extends cdk.Stack {
 
     const { environment, config } = props;
 
+    // Lambda function names as constants — referenced by both the
+    // runtimeEnvVars block (line ~1167) and the Lambda definitions below.
+    // Prevents silent breakage if a function name ever changes.
+    const triageDigestFunctionName = `psd-agent-triage-digest-${environment}`;
+    const cronFunctionName = `psd-agent-cron-${environment}`;
+    const skillBuilderFunctionName = `psd-agent-skill-builder-${environment}`;
+
     // Validate required ARN props at synth time to surface errors early
     // rather than waiting for opaque CloudFormation deploy-time failures.
     if (!props.guardrailArn) {
@@ -988,7 +995,7 @@ export class AgentPlatformStack extends cdk.Stack {
       effect: iam.Effect.ALLOW,
       actions: ['lambda:InvokeFunction'],
       resources: [
-        `arn:aws:lambda:${this.region}:${this.account}:function:psd-agent-skill-builder-${environment}`,
+        `arn:aws:lambda:${this.region}:${this.account}:function:${skillBuilderFunctionName}`,
       ],
     }));
 
@@ -1139,7 +1146,7 @@ export class AgentPlatformStack extends cdk.Stack {
         effect: iam.Effect.ALLOW,
         actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
         resources: [
-          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/psd-agent-cron-${environment}:*`,
+          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${cronFunctionName}:*`,
         ],
       }),
     );
@@ -1172,18 +1179,15 @@ export class AgentPlatformStack extends cdk.Stack {
       SCHEDULES_TABLE: schedulesTable.tableName,
       TRIAGE_TABLE: this.triageTable.tableName,
       EVENTBRIDGE_SCHEDULE_GROUP: `psd-agent-${environment}`,
-      CRON_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:psd-agent-cron-${environment}`,
-      // Digest target for the psd-email-triage skill's `digest.*`
-      // subcommands — constructed by naming convention so we don't have
-      // to forward-declare the Lambda above this env-vars block.
-      TRIAGE_DIGEST_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:psd-agent-triage-digest-${environment}`,
+      CRON_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:${cronFunctionName}`,
+      TRIAGE_DIGEST_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:${triageDigestFunctionName}`,
       EVENTBRIDGE_ROLE_ARN: `arn:aws:iam::${this.account}:role/psd-agent-scheduler-invoke-${environment}`,
       GUARDRAIL_ARN: props.guardrailArn,
       DATABASE_RESOURCE_ARN: props.databaseResourceArn,
       DATABASE_SECRET_ARN: props.databaseSecretArn,
       DATABASE_NAME: props.databaseName ?? 'aistudio',
       BEDROCK_API_KEY_SECRET_ARN: this.bedrockApiKeySecret.secretArn,
-      SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:psd-agent-skill-builder-${environment}`,
+      SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${this.region}:${this.account}:function:${skillBuilderFunctionName}`,
       GOOGLE_OAUTH_CLIENT_SECRET_ID: googleOAuthClientSecret.secretName,
       AGENT_INTERNAL_API_KEY_SECRET_ID: agentInternalApiKeySecret.secretName,
       APP_BASE_URL: props.appBaseUrl ?? '',
@@ -1314,7 +1318,7 @@ export class AgentPlatformStack extends cdk.Stack {
     });
 
     const skillBuilderLogGroup = new logs.LogGroup(this, 'SkillBuilderLogGroup', {
-      logGroupName: `/aws/lambda/psd-agent-skill-builder-${environment}`,
+      logGroupName: `/aws/lambda/${skillBuilderFunctionName}`,
       retention: config.monitoring.logRetention,
       removalPolicy: environment === 'prod'
         ? cdk.RemovalPolicy.RETAIN
@@ -1324,7 +1328,7 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(skillBuilderLogGroup).add('ManagedBy', 'cdk');
 
     const skillBuilderLambda = new lambda.Function(this, 'SkillBuilderLambda', {
-      functionName: `psd-agent-skill-builder-${environment}`,
+      functionName: skillBuilderFunctionName,
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
@@ -1397,7 +1401,7 @@ export class AgentPlatformStack extends cdk.Stack {
     // between a schedule row and an EventBridge Scheduler entry.
 
     const cronLogGroup = new logs.LogGroup(this, 'CronLogGroup', {
-      logGroupName: `/aws/lambda/psd-agent-cron-${environment}`,
+      logGroupName: `/aws/lambda/${cronFunctionName}`,
       retention: config.monitoring.logRetention,
       removalPolicy: environment === 'prod'
         ? cdk.RemovalPolicy.RETAIN
@@ -1407,7 +1411,7 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(cronLogGroup).add('ManagedBy', 'cdk');
 
     const cronLambda = new lambda.Function(this, 'CronLambda', {
-      functionName: `psd-agent-cron-${environment}`,
+      functionName: cronFunctionName,
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(
@@ -1811,7 +1815,7 @@ export class AgentPlatformStack extends cdk.Stack {
     });
 
     const triageDigestLogGroup = new logs.LogGroup(this, 'TriageDigestLogGroup', {
-      logGroupName: `/aws/lambda/psd-agent-triage-digest-${environment}`,
+      logGroupName: `/aws/lambda/${triageDigestFunctionName}`,
       retention: config.monitoring.logRetention,
       removalPolicy: environment === 'prod'
         ? cdk.RemovalPolicy.RETAIN
@@ -1825,12 +1829,12 @@ export class AgentPlatformStack extends cdk.Stack {
       effect: iam.Effect.ALLOW,
       actions: ['logs:CreateLogStream', 'logs:PutLogEvents'],
       resources: [
-        `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/psd-agent-triage-digest-${environment}:*`,
+        `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/lambda/${triageDigestFunctionName}:*`,
       ],
     }));
 
     const triageDigestLambda = new lambda.Function(this, 'TriageDigestLambda', {
-      functionName: `psd-agent-triage-digest-${environment}`,
+      functionName: triageDigestFunctionName,
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'index.handler',
       code: lambda.Code.fromAsset(

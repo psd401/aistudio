@@ -30,6 +30,9 @@ export const agentMessageContent = pgTable(
       .notNull()
       .references(() => agentMessages.id, { onDelete: "cascade" }),
     sessionId: varchar("session_id", { length: 512 }).notNull(),
+    /** Stores the user's email address. Named `user_email` (vs. `user_id` in
+     *  the parent `agent_messages` table) to clarify the value is an email,
+     *  not a UUID — the legacy `user_id` column also stores email. */
     userEmail: varchar("user_email", { length: 255 }).notNull(),
     role: varchar("role", { length: 16 }).notNull(),
     contentText: text("content_text").notNull(),
