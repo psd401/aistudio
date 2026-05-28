@@ -24,6 +24,8 @@ import * as apigwv2Integrations from 'aws-cdk-lib/aws-apigatewayv2-integrations'
 import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as customResources from 'aws-cdk-lib/custom-resources';
 import * as path from 'path';
+import * as fs from 'fs';
+import * as crypto from 'crypto';
 import { execSync } from 'child_process';
 // ALPHA CDK CONSTRUCT: @aws-cdk/aws-bedrock-agentcore-alpha has no API stability
 // guarantee and may introduce breaking changes on any release. Version is pinned
@@ -2733,6 +2735,194 @@ export class AgentPlatformStack extends cdk.Stack {
       description: 'Daily 04:00 UTC — prune agent_message_content + agent_tool_invocations older than 90 days',
       schedule: events.Schedule.cron({ minute: '0', hour: '4' }),
       targets: [new eventsTargets.LambdaFunction(pruneLambda)],
+    });
+
+    // =====================================================================
+    // 9c. Bundled-Skill Initializer Lambda + Custom Resource
+    // =====================================================================
+    // On every deploy, walk infra/agent-image/skills/* SKILL.md frontmatter
+    // and UPSERT each skill into psd_agent_skills with scope=shared so the
+    // /admin/agents Skills tab shows the real bundled skills, not just
+    // greetings-demo. Idempotent: same manifest = no DB churn; image
+    // updates bump the s3_key → version increments.
+
+    const bundledSkillsDir = path.join(__dirname, '..', 'agent-image', 'skills');
+    interface BundledSkillManifestEntry {
+      name: string;
+      summary: string;
+      description?: string;
+      sourceHash: string;
+      imageTag: string;
+    }
+    const bundledSkillsManifest: BundledSkillManifestEntry[] = (() => {
+      if (!fs.existsSync(bundledSkillsDir)) return [];
+      const out: BundledSkillManifestEntry[] = [];
+      for (const entry of fs.readdirSync(bundledSkillsDir)) {
+        const skillMdPath = path.join(bundledSkillsDir, entry, 'SKILL.md');
+        if (!fs.existsSync(skillMdPath)) continue;
+        const raw = fs.readFileSync(skillMdPath, 'utf8');
+        const fm = raw.match(/^---\n([\s\S]*?)\n---/);
+        if (!fm) continue;
+        const lines = fm[1].split('\n');
+        let name = '';
+        let summary = '';
+        let description = '';
+        for (const line of lines) {
+          const m = line.match(/^(name|summary|description):\s*(.*)$/);
+          if (!m) continue;
+          if (m[1] === 'name') name = m[2].trim();
+          else if (m[1] === 'summary') summary = m[2].trim();
+          else if (m[1] === 'description') description = m[2].trim();
+        }
+        if (!name) continue;
+        const sourceHash = crypto.createHash('sha256').update(raw).digest('hex');
+        out.push({
+          name,
+          summary: summary || `Bundled skill: ${name}`,
+          description,
+          sourceHash,
+          // Resolved by the lambda at invoke time via env var
+          imageTag: 'unknown',
+        });
+      }
+      return out;
+    })();
+
+    const skillInitLambdaRole = ServiceRoleFactory.createLambdaRole(this, 'AgentSkillInitializerRole', {
+      functionName: 'psd-agent-skill-initializer',
+      environment,
+      region: this.region,
+      account: this.account,
+      vpcEnabled: false,
+      additionalPolicies: [
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'AuroraConnect',
+            effect: iam.Effect.ALLOW,
+            actions: ['secretsmanager:GetSecretValue'],
+            resources: [props.databaseSecretArn],
+          })],
+        }),
+      ],
+    });
+    skillInitLambdaRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+    );
+
+    const skillInitLogGroup = new logs.LogGroup(this, 'AgentSkillInitializerLogGroup', {
+      logGroupName: `/aws/lambda/psd-agent-skill-initializer-${environment}`,
+      retention: config.monitoring.logRetention,
+      removalPolicy: environment === 'prod'
+        ? cdk.RemovalPolicy.RETAIN
+        : cdk.RemovalPolicy.DESTROY,
+    });
+
+    const skillInitLambda = new lambda.Function(this, 'AgentSkillInitializerLambda', {
+      functionName: `psd-agent-skill-initializer-${environment}`,
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '..', 'lambdas', 'agent-skill-initializer'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'agent-skill-initializer');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
+      memorySize: 512,
+      timeout: cdk.Duration.minutes(2),
+      architecture: lambda.Architecture.ARM_64,
+      role: skillInitLambdaRole,
+      logGroup: skillInitLogGroup,
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      environment: {
+        ENVIRONMENT: environment,
+        DATABASE_HOST: props.databaseHost,
+        DATABASE_SECRET_ARN: props.databaseSecretArn,
+        DATABASE_NAME: props.databaseName ?? 'aistudio',
+      },
+    });
+    cdk.Tags.of(skillInitLambda).add('Environment', environment);
+    cdk.Tags.of(skillInitLambda).add('ManagedBy', 'cdk');
+
+    // Trigger string forces the Custom Resource to re-fire on every deploy
+    // so manifest updates land even when the Lambda code hash is unchanged.
+    const skillInitTrigger = bundledSkillsManifest
+      .map((s) => `${s.name}:${s.sourceHash.slice(0, 8)}`)
+      .sort()
+      .join(',');
+
+    const agentImageTagContext = this.node.tryGetContext('agentImageTag') ?? 'unset';
+
+    new customResources.AwsCustomResource(this, 'AgentSkillInitializerCR', {
+      onCreate: {
+        service: 'Lambda',
+        action: 'invoke',
+        parameters: {
+          FunctionName: skillInitLambda.functionName,
+          Payload: JSON.stringify({
+            RequestType: 'Create',
+            ResourceProperties: {
+              skills: bundledSkillsManifest,
+              imageTag: agentImageTagContext,
+              trigger: skillInitTrigger,
+            },
+          }),
+        },
+        physicalResourceId: customResources.PhysicalResourceId.of('agent-skill-initializer'),
+      },
+      onUpdate: {
+        service: 'Lambda',
+        action: 'invoke',
+        parameters: {
+          FunctionName: skillInitLambda.functionName,
+          Payload: JSON.stringify({
+            RequestType: 'Update',
+            ResourceProperties: {
+              skills: bundledSkillsManifest,
+              imageTag: agentImageTagContext,
+              trigger: skillInitTrigger,
+            },
+          }),
+        },
+        physicalResourceId: customResources.PhysicalResourceId.of('agent-skill-initializer'),
+      },
+      // No onDelete — bundled skills stay in the DB if the stack is destroyed.
+      // An admin can clean up via the Skills tab if they want a wipe.
+      policy: customResources.AwsCustomResourcePolicy.fromStatements([
+        new iam.PolicyStatement({
+          actions: ['lambda:InvokeFunction'],
+          resources: [skillInitLambda.functionArn],
+        }),
+      ]),
+      installLatestAwsSdk: false,
     });
 
     // =====================================================================

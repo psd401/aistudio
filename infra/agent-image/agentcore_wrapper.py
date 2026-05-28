@@ -494,18 +494,49 @@ def main():
                 elapsed = int(time.time() - invocation_start)
                 yield {"type": "heartbeat", "elapsed_s": elapsed}
 
-        logger.info(
-            "Invocation complete: session=%s response_length=%d elapsed_s=%d",
-            session_id, len(result), int(time.time() - invocation_start),
-        )
-
-        yield {
-            "result": result,
-            "metadata": {
+        # Adapter contract: TurnResult preferred; legacy str still
+        # accepted so older adapters keep working during a phased rollout.
+        if isinstance(result, str):
+            reply_text = result
+            metadata: dict = {
                 "session_id": session_id,
                 "user_id": user_email,
                 "model": model_override or "default",
-            },
+            }
+        else:
+            reply_text = result.text or ""
+            metadata = {
+                "session_id": session_id,
+                "user_id": user_email,
+                # Real values when the harness surfaces them; fall through
+                # to the override or "default" so the router's coalesce
+                # logic still has something sane.
+                "model": result.model or model_override or "default",
+                "input_tokens": result.tokens_in,
+                "output_tokens": result.tokens_out,
+                "latency_ms": result.latency_ms,
+                # Deep-telemetry payload: per-turn messages + tool calls.
+                # The router reads these and inserts into
+                # agent_message_content + agent_tool_invocations.
+                "messages": result.messages,
+                "tool_calls": result.tool_calls,
+            }
+
+        logger.info(
+            "Invocation complete: session=%s response_length=%d elapsed_s=%d "
+            "model=%s tokens_in=%s tokens_out=%s tool_calls=%d",
+            session_id,
+            len(reply_text),
+            int(time.time() - invocation_start),
+            metadata.get("model"),
+            metadata.get("input_tokens"),
+            metadata.get("output_tokens"),
+            len(metadata.get("tool_calls") or []),
+        )
+
+        yield {
+            "result": reply_text,
+            "metadata": metadata,
         }
 
     logger.info(

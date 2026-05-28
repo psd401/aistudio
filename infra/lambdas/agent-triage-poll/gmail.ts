@@ -175,15 +175,22 @@ export async function getMessageFullBody(
   return body.slice(0, maxChars);
 }
 
+/**
+ * Walk MIME parts for a text/plain body. We deliberately do NOT decode
+ * text/html ourselves — naive HTML stripping is a known source of
+ * sanitization bugs (CodeQL flagged it in prior iterations) and the
+ * downstream consumer (LLM prompt) doesn't render HTML anyway. When
+ * only HTML is available, callers fall back to Gmail's `snippet` field
+ * which Gmail already extracts as plain text.
+ */
 function extractPlainText(part: MessagePart | undefined): string | null {
   if (!part) return null;
-  // Single-part text — decode if it matches text/*.
-  if (part.body?.data && (!part.mimeType || part.mimeType.startsWith("text/"))) {
-    const decoded = decodeBase64Url(part.body.data);
-    if (part.mimeType === "text/html") return stripHtml(decoded);
-    return decoded;
+  if (
+    part.body?.data &&
+    (!part.mimeType || part.mimeType === "text/plain")
+  ) {
+    return decodeBase64Url(part.body.data);
   }
-  // Multipart — walk children, prefer text/plain.
   if (part.parts) {
     const plain = part.parts.find((p) => p.mimeType === "text/plain");
     if (plain?.body?.data) return decodeBase64Url(plain.body.data);
@@ -198,21 +205,6 @@ function extractPlainText(part: MessagePart | undefined): string | null {
 function decodeBase64Url(data: string): string {
   const b64 = data.replace(/-/g, "+").replace(/_/g, "/");
   return Buffer.from(b64, "base64").toString("utf8");
-}
-
-function stripHtml(html: string): string {
-  return html
-    .replace(/<style[\s\S]*?<\/style>/gi, "")
-    .replace(/<script[\s\S]*?<\/script>/gi, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/\s+/g, " ")
-    .trim();
 }
 
 /** Pull `From` header → bare email; falls back to the raw header value. */

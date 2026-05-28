@@ -6,6 +6,7 @@ without changing the AgentCore wrapper. Each adapter implements the same interfa
 """
 
 import abc
+import dataclasses
 import json
 import logging
 import os
@@ -13,12 +14,39 @@ import subprocess
 import sys
 import time
 import uuid
-from typing import Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Union
 
 from agent_failures import record_failure
 from chat_format import markdown_to_chat
 
 logger = logging.getLogger("harness_adapter")
+
+
+@dataclasses.dataclass
+class TurnResult:
+    """Structured result of a single agent turn.
+
+    Replaces the old `process() -> str` contract so the wrapper can pass
+    real model / token / latency / tool metadata down to the router
+    Lambda, which writes:
+      - agent_messages (model, input_tokens, output_tokens, latency_ms)
+      - agent_message_content (per-turn role/content rows)
+      - agent_tool_invocations (per-turn tool calls with args + result)
+
+    `text` is the user-visible reply (already passed through
+    chat_format markdown→Chat-subset). Empty zero/None values are
+    acceptable when the harness doesn't surface the data — the writer
+    coalesces gracefully.
+    """
+
+    text: str
+    model: Optional[str] = None
+    tokens_in: int = 0
+    tokens_out: int = 0
+    latency_ms: int = 0
+    messages: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
+    tool_calls: List[Dict[str, Any]] = dataclasses.field(default_factory=list)
 
 
 def _format_for_chat(text: str) -> str:
@@ -44,8 +72,15 @@ class HarnessAdapter(abc.ABC):
     """Abstract base class for agent harness adapters."""
 
     @abc.abstractmethod
-    def process(self, message: str, session_id: str, model_override: Optional[str] = None) -> str:
-        """Send a message to the harness and return the response."""
+    def process(
+        self,
+        message: str,
+        session_id: str,
+        model_override: Optional[str] = None,
+    ) -> Union[str, TurnResult]:
+        """Send a message to the harness and return either a plain string
+        (legacy contract) or a TurnResult (preferred). Wrapper accepts
+        both."""
 
     @abc.abstractmethod
     def configure(self, config: dict) -> None:
@@ -163,11 +198,21 @@ class OpenClawAdapter(HarnessAdapter):
             f"OpenClaw gateway did not become ready within {timeout}s"
         )
 
-    def process(self, message: str, session_id: str, model_override: Optional[str] = None) -> str:
-        """Send a message to OpenClaw via WebSocket and return the response.
+    def process(
+        self,
+        message: str,
+        session_id: str,
+        model_override: Optional[str] = None,
+    ) -> TurnResult:
+        """Send a message to OpenClaw via WebSocket and return a TurnResult.
 
         Uses the native OpenClaw gateway WebSocket protocol:
         connect.challenge → connect (auth) → chat.send → collect chat events
+
+        Captures (best-effort) the real model id, token usage, tool calls,
+        and latency from the event stream so the router Lambda can write
+        proper telemetry into agent_messages + agent_message_content +
+        agent_tool_invocations.
         """
         if not self._ready:
             raise RuntimeError(
@@ -175,11 +220,26 @@ class OpenClawAdapter(HarnessAdapter):
                 "must be called before process()"
             )
 
+        # Track metadata across the whole turn. The user message is the
+        # first content entry; we'll append assistant + tool entries as
+        # the event stream completes.
+        observed_model: Optional[str] = model_override
+        tokens_in = 0
+        tokens_out = 0
+        tool_calls: List[Dict[str, Any]] = []
+        tool_starts: Dict[str, Dict[str, Any]] = {}
+        messages_log: List[Dict[str, Any]] = [
+            {"role": "user", "content": message}
+        ]
+
         try:
             import websocket  # websocket-client library
         except ImportError:
             logger.error("websocket-client not installed, falling back to error")
-            return "Agent communication library not available. Please contact an administrator."
+            return TurnResult(
+                text="Agent communication library not available. Please contact an administrator.",
+                model=observed_model,
+            )
 
         gateway_token = self.GATEWAY_TOKEN
         ws_url = f"ws://127.0.0.1:{self._gateway_port}"
@@ -200,7 +260,10 @@ class OpenClawAdapter(HarnessAdapter):
 
         if ws is None:
             logger.error("Failed to connect to gateway after 3 attempts: %s", last_error)
-            return f"I'm temporarily unable to respond. Error: {str(last_error)[:100]}"
+            return TurnResult(
+                text=f"I'm temporarily unable to respond. Error: {str(last_error)[:100]}",
+                model=observed_model,
+            )
 
         try:
 
@@ -239,7 +302,10 @@ class OpenClawAdapter(HarnessAdapter):
                         break
 
                 if not connect_resp.get("ok"):
-                    return f"[WS_AUTH_FAIL] {json.dumps(connect_resp)[:800]}"
+                    return TurnResult(
+                        text=f"[WS_AUTH_FAIL] {json.dumps(connect_resp)[:800]}",
+                        model=observed_model,
+                    )
 
                 # Diagnostic: ask the gateway what tools are actually
                 # wired for the default agent. If the model says "let me
@@ -286,6 +352,10 @@ class OpenClawAdapter(HarnessAdapter):
                 # AgentCore runtime gives us a stable per-user session_id;
                 # use it directly.
                 chat_id = str(uuid.uuid4())
+                # Latency clock starts the instant we hand the message to
+                # the gateway. final_state event stops it. Captured before
+                # ws.send so we don't count our own serialization.
+                chat_send_at = time.time()
                 ws.send(json.dumps({
                     "type": "req",
                     "id": chat_id,
@@ -371,13 +441,35 @@ class OpenClawAdapter(HarnessAdapter):
                     if mtype == "event" and mevent == "agent":
                         # Agent events carry streaming content per OpenClaw's
                         # AgentEventSchema: {runId, seq, stream, ts, data}.
-                        # stream="assistant" holds model output; stream=
-                        # "thinking" is reasoning which we intentionally drop
-                        # from user-facing replies. Tool events are ignored
-                        # here — they surface via their own channel.
+                        # We extract:
+                        #   stream="assistant" → accumulate the user-visible
+                        #     reply (drops markdown formatting later via
+                        #     chat_format).
+                        #   stream="thinking" → drop (reasoning isn't shown
+                        #     to the user and isn't useful for telemetry).
+                        #   stream="tool_call" / stream="tool_result" →
+                        #     record into tool_calls for the Conversations
+                        #     dashboard tab.
+                        # Also opportunistically capture `model` whenever
+                        # the harness reports it on any event so we can
+                        # surface the real model id in agent_messages.
                         agent_payload = msg.get("payload", {})
                         stream = agent_payload.get("stream")
                         data = agent_payload.get("data", {})
+                        if isinstance(data, dict):
+                            model_hint = data.get("model") or data.get("modelId")
+                            if isinstance(model_hint, str) and model_hint:
+                                observed_model = model_hint
+                            # Token usage may appear on a 'usage' field on
+                            # the final assistant event in newer builds.
+                            usage = data.get("usage")
+                            if isinstance(usage, dict):
+                                ti = usage.get("input_tokens") or usage.get("prompt_tokens")
+                                to = usage.get("output_tokens") or usage.get("completion_tokens")
+                                if isinstance(ti, int):
+                                    tokens_in = max(tokens_in, ti)
+                                if isinstance(to, int):
+                                    tokens_out = max(tokens_out, to)
                         if stream == "assistant" and isinstance(data, dict):
                             delta = (
                                 data.get("delta")
@@ -387,6 +479,51 @@ class OpenClawAdapter(HarnessAdapter):
                             )
                             if isinstance(delta, str) and delta:
                                 agent_assistant_accum += delta
+                        elif stream == "tool_call" and isinstance(data, dict):
+                            tool_id = (
+                                data.get("id")
+                                or data.get("toolCallId")
+                                or data.get("callId")
+                                or str(uuid.uuid4())
+                            )
+                            tool_starts[tool_id] = {
+                                "name": data.get("name") or data.get("tool") or "unknown",
+                                "args": data.get("arguments") or data.get("args") or data.get("input"),
+                                "started_at": time.time(),
+                            }
+                        elif stream == "tool_result" and isinstance(data, dict):
+                            tool_id = (
+                                data.get("id")
+                                or data.get("toolCallId")
+                                or data.get("callId")
+                                or ""
+                            )
+                            start = tool_starts.pop(tool_id, None)
+                            now = time.time()
+                            started_at = start["started_at"] if start else now
+                            entry = {
+                                "name": (start or {}).get("name")
+                                or data.get("name")
+                                or "unknown",
+                                "args": (start or {}).get("args"),
+                                "result": data.get("result")
+                                or data.get("output")
+                                or data.get("content"),
+                                "status": data.get("status")
+                                or ("error" if data.get("error") else "success"),
+                                "error_text": (
+                                    str(data.get("error"))[:2000]
+                                    if data.get("error") else None
+                                ),
+                                "duration_ms": int(max(0, (now - started_at) * 1000)),
+                                "started_at": datetime.fromtimestamp(
+                                    started_at, tz=timezone.utc
+                                ).isoformat(),
+                                "finished_at": datetime.fromtimestamp(
+                                    now, tz=timezone.utc
+                                ).isoformat(),
+                            }
+                            tool_calls.append(entry)
 
                     elif mtype == "event" and mevent == "chat":
                         payload = msg.get("payload", {})
@@ -421,7 +558,20 @@ class OpenClawAdapter(HarnessAdapter):
                                 payload.get("errorMessage", "unknown"),
                                 json.dumps(payload)[:800],
                             )
-                            return _format_for_chat(response_text) if response_text else "I encountered an error processing your message."
+                            err_text = (
+                                _format_for_chat(response_text)
+                                if response_text
+                                else "I encountered an error processing your message."
+                            )
+                            return TurnResult(
+                                text=err_text,
+                                model=observed_model,
+                                tokens_in=tokens_in,
+                                tokens_out=tokens_out,
+                                latency_ms=int((time.time() - chat_send_at) * 1000),
+                                messages=messages_log,
+                                tool_calls=tool_calls,
+                            )
 
                         elif state == "aborted":
                             logger.warning("chat aborted: payload=%s", json.dumps(payload)[:500])
@@ -431,8 +581,27 @@ class OpenClawAdapter(HarnessAdapter):
                         if not msg.get("ok"):
                             error = msg.get("error", {})
                             logger.error("chat.send error: %s", json.dumps(error)[:500])
-                            return "I encountered an error processing your message."
-                        status = msg.get("payload", {}).get("status")
+                            return TurnResult(
+                                text="I encountered an error processing your message.",
+                                model=observed_model,
+                                latency_ms=int((time.time() - chat_send_at) * 1000),
+                                messages=messages_log,
+                                tool_calls=tool_calls,
+                            )
+                        res_payload = msg.get("payload", {})
+                        # Final res may carry the authoritative usage object.
+                        usage = res_payload.get("usage")
+                        if isinstance(usage, dict):
+                            ti = usage.get("input_tokens") or usage.get("prompt_tokens")
+                            to = usage.get("output_tokens") or usage.get("completion_tokens")
+                            if isinstance(ti, int):
+                                tokens_in = max(tokens_in, ti)
+                            if isinstance(to, int):
+                                tokens_out = max(tokens_out, to)
+                        model_field = res_payload.get("model") or res_payload.get("modelId")
+                        if isinstance(model_field, str) and model_field:
+                            observed_model = model_field
+                        status = res_payload.get("status")
                         if status in {"started", "accepted"}:
                             continue
                         if status in {"final", "done"}:
@@ -454,12 +623,31 @@ class OpenClawAdapter(HarnessAdapter):
                 model=model_override,
                 context={"phase": "websocket"},
             )
-            return "I'm temporarily unable to respond. The agent process may be restarting."
+            return TurnResult(
+                text="I'm temporarily unable to respond. The agent process may be restarting.",
+                model=observed_model,
+                messages=messages_log,
+                tool_calls=tool_calls,
+            )
+
+        latency_ms = int((time.time() - chat_send_at) * 1000)
+
+        def _result(text: str) -> TurnResult:
+            assistant = text or ""
+            log = list(messages_log)
+            if assistant:
+                log.append({"role": "assistant", "content": assistant})
+            return TurnResult(
+                text=assistant,
+                model=observed_model,
+                tokens_in=tokens_in,
+                tokens_out=tokens_out,
+                latency_ms=latency_ms,
+                messages=log,
+                tool_calls=tool_calls,
+            )
 
         if not got_final:
-            # Deadline hit but the agent may have already streamed a full
-            # response via event:agent. Prefer partial content over the
-            # "stalled" apology when we have something to show.
             if not response_text and agent_assistant_accum:
                 response_text = agent_assistant_accum
             logger.error(
@@ -475,7 +663,7 @@ class OpenClawAdapter(HarnessAdapter):
                 raw_event_samples[0] if raw_event_samples else "",
             )
             if response_text:
-                return _format_for_chat(response_text.strip())
+                return _result(_format_for_chat(response_text.strip()))
             record_failure(
                 source="harness",
                 severity="error",
@@ -485,7 +673,7 @@ class OpenClawAdapter(HarnessAdapter):
                     f"(last_state={last_state})"
                 ),
                 session_id=session_id,
-                model=model_override,
+                model=observed_model or model_override,
                 context={
                     "phase": "deadline",
                     "last_state": last_state,
@@ -493,22 +681,26 @@ class OpenClawAdapter(HarnessAdapter):
                     "first_events": first_event_types,
                 },
             )
-            return (
+            return _result(
                 "I wasn't able to finish responding in time — the agent "
                 "stalled. Please try again in a moment."
             )
 
-        # Happy path: still log the event summary so we can audit whether
-        # tool_call / tool_result / thinking events ever flowed for this turn.
         logger.info(
-            "chat turn ok: resp_len=%d last_state=%s event_counts=%s",
+            "chat turn ok: resp_len=%d last_state=%s event_counts=%s "
+            "model=%s tokens_in=%d tokens_out=%d latency_ms=%d tool_calls=%d",
             len(response_text),
             last_state,
             json.dumps(event_counts),
+            observed_model or "unknown",
+            tokens_in,
+            tokens_out,
+            latency_ms,
+            len(tool_calls),
         )
 
         if response_text.strip():
-            return _format_for_chat(response_text.strip())
+            return _result(_format_for_chat(response_text.strip()))
         record_failure(
             source="harness",
             severity="empty_response",
@@ -517,14 +709,14 @@ class OpenClawAdapter(HarnessAdapter):
                 "Agent reached final state but produced no user-visible text"
             ),
             session_id=session_id,
-            model=model_override,
+            model=observed_model or model_override,
             context={
                 "last_state": last_state,
                 "event_counts": event_counts,
                 "first_events": first_event_types,
             },
         )
-        return "I processed your message but had no response."
+        return _result("I processed your message but had no response.")
 
     @staticmethod
     def _extract_text(content) -> str:

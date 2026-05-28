@@ -29,7 +29,6 @@ const {
   CreateScheduleCommand,
   UpdateScheduleCommand,
   DeleteScheduleCommand,
-  GetScheduleCommand,
 } = require('@aws-sdk/client-scheduler');
 
 // Reuse the per-user OAuth machinery from psd-workspace. Absolute

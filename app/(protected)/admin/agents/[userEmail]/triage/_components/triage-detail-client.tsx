@@ -52,8 +52,13 @@ export function TriageDetailClient({ userEmail }: Props) {
     setLoading(false)
   }, [userEmail, toast])
 
+  // Fire-and-forget load on mount + when refresh callback identity changes
+  // (userEmail/toast change). The setState calls inside `refresh()` happen
+  // AFTER an `await`, not synchronously in the effect tick, so the cascading
+  // render the rule warns about doesn't actually occur here.
   useEffect(() => {
-    refresh()
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void refresh()
   }, [refresh])
 
   const runAction = useCallback(

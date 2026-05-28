@@ -47,7 +47,6 @@ import {
   claimTaskGesture,
   releaseTaskGestureClaim,
   getGoogleIdentityForEmail,
-  getTriageRow,
   getUserProfile,
   listEnabledUsers,
   recordPollResult,
@@ -521,24 +520,18 @@ function detectCorrection(
   if (!prior) return null;
 
   const inboxAdded = evt.labelIds.includes("INBOX");
-  const inboxRemoved = false; // labelsRemoved branch handles this, but we
-                              // don't have a clean way to tell here — the
-                              // shared handler treats both branches the
-                              // same. Phase 2 splits them properly.
+  // NOTE: detecting INBOX removal would require knowing whether this
+  // event came from labelsAdded or labelsRemoved. The current caller
+  // mixes both branches together, so we can only catch the
+  // archive→inbox direction (user un-archived something we classified
+  // as later/news). Catching the inbox→archive direction needs the
+  // caller to split the two branches first.
 
   if (prior.label !== "important" && inboxAdded) {
     return {
       messageId: evt.message.id,
       fromLabel: prior.label,
       toLabel: "inbox",
-      ts: new Date().toISOString(),
-    };
-  }
-  if (prior.label === "important" && inboxRemoved) {
-    return {
-      messageId: evt.message.id,
-      fromLabel: prior.label,
-      toLabel: "later",
       ts: new Date().toISOString(),
     };
   }
