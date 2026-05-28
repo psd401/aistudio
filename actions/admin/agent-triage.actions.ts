@@ -22,7 +22,7 @@ import {
 
 import { requireRole } from "@/lib/auth/role-helpers"
 import { handleError, createSuccess } from "@/lib/error-utils"
-import { createLogger, generateRequestId } from "@/lib/logger"
+import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import type { ActionState } from "@/types"
 
 const REGION = process.env.AWS_REGION ?? "us-east-1"
@@ -108,6 +108,7 @@ export async function getTriageSummaryList(): Promise<
   ActionState<TriageSummaryRow[]>
 > {
   const requestId = generateRequestId()
+  const timer = startTimer("getTriageSummaryList")
   const log = createLogger({ requestId, action: "getTriageSummaryList" })
   try {
     await requireRole("administrator")
@@ -189,8 +190,10 @@ export async function getTriageSummaryList(): Promise<
 
     // Sort newest enable first so admin sees most recent setup at top.
     rows.sort((a, b) => (b.enabledAt ?? "").localeCompare(a.enabledAt ?? ""))
+    timer({ status: "success" })
     return createSuccess(rows, `Found ${rows.length} triage rows`)
   } catch (error) {
+    timer({ status: "error" })
     return handleError(error, "Failed to list triage rows", {
       context: "getTriageSummaryList",
       requestId,
@@ -203,10 +206,11 @@ export async function getTriageState(
   userEmail: string,
 ): Promise<ActionState<TriageStateSummary | null>> {
   const requestId = generateRequestId()
+  const timer = startTimer("getTriageState")
   const log = createLogger({ requestId, action: "getTriageState" })
   try {
     await requireRole("administrator")
-    log.info("Fetching triage state", { userEmail })
+    log.info("Fetching triage state", sanitizeForLogging({ userEmail }))
 
     const resp = await ddb().send(
       // @ts-expect-error — nested @smithy/types version mismatch (see above).
@@ -271,8 +275,10 @@ export async function getTriageState(
       recentCorrections: (row.recentCorrections ?? []).slice(-20).reverse(),
     }
 
+    timer({ status: "success" })
     return createSuccess(summary, "Triage state retrieved")
   } catch (error) {
+    timer({ status: "error" })
     return handleError(error, "Failed to fetch triage state", {
       context: "getTriageState",
       requestId,
@@ -288,24 +294,37 @@ export async function getTriageState(
  */
 export async function pauseTriage(userEmail: string): Promise<ActionState<void>> {
   const requestId = generateRequestId()
+  const timer = startTimer("pauseTriage")
   const log = createLogger({ requestId, action: "pauseTriage" })
   try {
     await requireRole("administrator")
-    log.warn("Admin pausing user's triage", { userEmail })
+    log.warn("Admin pausing user's triage", sanitizeForLogging({ userEmail }))
     await ddb().send(
       // @ts-expect-error — nested @smithy/types version mismatch (see above).
       new UpdateCommand({
         TableName: TRIAGE_TABLE,
         Key: { userEmail: userEmail.toLowerCase() },
         UpdateExpression: "SET enabled = :f, disabledAt = :now, adminPausedAt = :now",
+        ConditionExpression: "attribute_exists(userEmail)",
         ExpressionAttributeValues: {
           ":f": false,
           ":now": new Date().toISOString(),
         },
       }),
     )
+    timer({ status: "success" })
     return createSuccess(undefined, `Paused triage for ${userEmail}`)
   } catch (error) {
+    // ConditionalCheckFailed means the user doesn't have a triage row
+    if ((error as { name?: string }).name === "ConditionalCheckFailedException") {
+      timer({ status: "error" })
+      return handleError(
+        error as Error,
+        `No triage row found for ${userEmail} — user may not have opted in yet.`,
+        { context: "pauseTriage", requestId, operation: "pauseTriage" },
+      )
+    }
+    timer({ status: "error" })
     return handleError(error, "Failed to pause triage", {
       context: "pauseTriage",
       requestId,
@@ -324,10 +343,11 @@ export async function resetLearnedPatterns(
   userEmail: string,
 ): Promise<ActionState<void>> {
   const requestId = generateRequestId()
+  const timer = startTimer("resetLearnedPatterns")
   const log = createLogger({ requestId, action: "resetLearnedPatterns" })
   try {
     await requireRole("administrator")
-    log.warn("Admin resetting learned patterns", { userEmail })
+    log.warn("Admin resetting learned patterns", sanitizeForLogging({ userEmail }))
     await ddb().send(
       // @ts-expect-error — nested @smithy/types version mismatch (see above).
       new UpdateCommand({
@@ -335,14 +355,25 @@ export async function resetLearnedPatterns(
         Key: { userEmail: userEmail.toLowerCase() },
         UpdateExpression:
           "SET learnedPatterns = :empty, recentCorrections = :empty, adminResetAt = :now",
+        ConditionExpression: "attribute_exists(userEmail)",
         ExpressionAttributeValues: {
           ":empty": [],
           ":now": new Date().toISOString(),
         },
       }),
     )
+    timer({ status: "success" })
     return createSuccess(undefined, `Cleared learned patterns for ${userEmail}`)
   } catch (error) {
+    if ((error as { name?: string }).name === "ConditionalCheckFailedException") {
+      timer({ status: "error" })
+      return handleError(
+        error as Error,
+        `No triage row found for ${userEmail} — user may not have opted in yet.`,
+        { context: "resetLearnedPatterns", requestId, operation: "resetLearnedPatterns" },
+      )
+    }
+    timer({ status: "error" })
     return handleError(error, "Failed to reset learned patterns", {
       context: "resetLearnedPatterns",
       requestId,
@@ -363,10 +394,11 @@ export async function forceReonboard(
   userEmail: string,
 ): Promise<ActionState<void>> {
   const requestId = generateRequestId()
+  const timer = startTimer("forceReonboard")
   const log = createLogger({ requestId, action: "forceReonboard" })
   try {
     await requireRole("administrator")
-    log.warn("Admin forcing re-onboard (delete row)", { userEmail })
+    log.warn("Admin forcing re-onboard (delete row)", sanitizeForLogging({ userEmail }))
     await ddb().send(
       // @ts-expect-error — nested @smithy/types version mismatch (see above).
       new DeleteCommand({
@@ -374,11 +406,13 @@ export async function forceReonboard(
         Key: { userEmail: userEmail.toLowerCase() },
       }),
     )
+    timer({ status: "success" })
     return createSuccess(
       undefined,
       `Deleted triage row for ${userEmail}. Gmail labels and digest schedule are NOT deleted — user can clean those up via 'disable --forget' from chat.`,
     )
   } catch (error) {
+    timer({ status: "error" })
     return handleError(error, "Failed to force re-onboard", {
       context: "forceReonboard",
       requestId,

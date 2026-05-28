@@ -28,6 +28,8 @@ CREATE TABLE IF NOT EXISTS agent_message_content (
   created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
+CREATE INDEX IF NOT EXISTS idx_agent_message_content_message_id
+  ON agent_message_content (message_id);
 CREATE INDEX IF NOT EXISTS idx_agent_message_content_session
   ON agent_message_content (session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_agent_message_content_user
@@ -54,6 +56,8 @@ CREATE TABLE IF NOT EXISTS agent_tool_invocations (
   created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
+CREATE INDEX IF NOT EXISTS idx_agent_tool_invocations_message_id
+  ON agent_tool_invocations (message_id);
 CREATE INDEX IF NOT EXISTS idx_agent_tool_invocations_tool
   ON agent_tool_invocations (tool_name, started_at);
 CREATE INDEX IF NOT EXISTS idx_agent_tool_invocations_session

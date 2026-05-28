@@ -110,7 +110,12 @@ export const handler: Handler<DigestEvent, void> = async (event) => {
     return;
   }
   if (!triage.dmSpaceName) {
-    log("WARN", "no_dm_space", { user: userEmail });
+    // The enable flow doesn't populate dmSpaceName; it gets backfilled
+    // on the first escalation or task gesture in the poll Lambda.
+    // If it's still missing here, the user hasn't had an escalation
+    // yet. Skip digest rather than fail — next poll escalation will
+    // backfill the DM space and future digests will work.
+    log("WARN", "no_dm_space_skipping_digest", { user: userEmail });
     return;
   }
   if (triage.digestEnabled === false) {

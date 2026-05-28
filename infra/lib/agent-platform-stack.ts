@@ -1570,9 +1570,8 @@ export class AgentPlatformStack extends cdk.Stack {
     // Polls Gmail history for opted-in users every 5 minutes. For each
     // new message: deterministic rules → maybe Nova Micro fallback →
     // apply Gmail label → maybe Chat escalation. For each user-driven
-    // label change: record as training signal. See plan in
-    // /Users/hagelk/.claude/plans/everything-is-good-to-graceful-twilight.md
-    // and docs/operations/email-triage.md.
+    // label change: record as training signal.
+    // See docs/operations/email-triage.md.
     //
     // 5-minute polling is the load-bearing primitive for Phase 1. Phase 2
     // (#996) adds Gmail push subscriptions for sub-minute escalation
@@ -1732,9 +1731,10 @@ export class AgentPlatformStack extends cdk.Stack {
         },
       ),
       memorySize: 1024,
-      // 5 minutes — we batch up to 1000 users per tick and need
-      // headroom for slow Gmail / Bedrock calls. Phase 2 fans out
-      // wide enough to drop this to ~2 minutes.
+      // 5 minutes — processes enabled users in parallel batches of
+      // TRIAGE_USER_BATCH (10). At ~90s per user for task gestures
+      // and <1s for classify-only, the budget handles the current
+      // rollout size. Phase 2 will fan out wider to reduce this.
       timeout: cdk.Duration.minutes(5),
       role: triagePollRole,
       logGroup: triagePollLogGroup,
@@ -2650,7 +2650,7 @@ export class AgentPlatformStack extends cdk.Stack {
       environment,
       region: this.region,
       account: this.account,
-      vpcEnabled: false,
+      vpcEnabled: true,
       additionalPolicies: [
         new iam.PolicyDocument({
           statements: [new iam.PolicyStatement({
@@ -2662,9 +2662,6 @@ export class AgentPlatformStack extends cdk.Stack {
         }),
       ],
     });
-    pruneLambdaRole.addManagedPolicy(
-      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
-    );
 
     const pruneLogGroup = new logs.LogGroup(this, 'AgentTelemetryPruneLogGroup', {
       logGroupName: `/aws/lambda/psd-agent-telemetry-prune-${environment}`,
@@ -2731,11 +2728,13 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(pruneLambda).add('Environment', environment);
     cdk.Tags.of(pruneLambda).add('ManagedBy', 'cdk');
 
-    new events.Rule(this, 'AgentTelemetryPruneSchedule', {
+    const pruneSchedule = new events.Rule(this, 'AgentTelemetryPruneSchedule', {
       description: 'Daily 04:00 UTC — prune agent_message_content + agent_tool_invocations older than 90 days',
       schedule: events.Schedule.cron({ minute: '0', hour: '4' }),
       targets: [new eventsTargets.LambdaFunction(pruneLambda)],
     });
+    cdk.Tags.of(pruneSchedule).add('Environment', environment);
+    cdk.Tags.of(pruneSchedule).add('ManagedBy', 'cdk');
 
     // =====================================================================
     // 9c. Bundled-Skill Initializer Lambda + Custom Resource

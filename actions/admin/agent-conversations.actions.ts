@@ -13,11 +13,11 @@
  * the blast radius is bounded.
  */
 
-import { and, desc, eq, gte, sql } from "drizzle-orm"
+import { and, desc, eq, gte, inArray, sql } from "drizzle-orm"
 
 import { requireRole } from "@/lib/auth/role-helpers"
 import { handleError, createSuccess } from "@/lib/error-utils"
-import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
+import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { agentMessages } from "@/lib/db/schema/tables/agent-messages"
 import { agentMessageContent } from "@/lib/db/schema/tables/agent-message-content"
@@ -133,7 +133,12 @@ export async function listAgentConversations(
               count: sql<number>`COUNT(*)::int`,
             })
             .from(agentToolInvocations)
-            .where(gte(agentToolInvocations.startedAt, cutoff))
+            .where(
+              and(
+                gte(agentToolInvocations.startedAt, cutoff),
+                inArray(agentToolInvocations.sessionId, sessionIds),
+              ),
+            )
             .groupBy(agentToolInvocations.sessionId),
         "agentConversations.toolCounts",
       )
@@ -197,24 +202,28 @@ export async function getAgentConversationDetail(
       return createSuccess(null, "Session not found")
     }
 
-    const contentRows = await executeQuery(
-      (db) =>
-        db
-          .select()
-          .from(agentMessageContent)
-          .where(eq(agentMessageContent.sessionId, sessionId))
-          .orderBy(agentMessageContent.createdAt),
-      "agentConversations.detail.content",
-    )
-    const toolRows = await executeQuery(
-      (db) =>
-        db
-          .select()
-          .from(agentToolInvocations)
-          .where(eq(agentToolInvocations.sessionId, sessionId))
-          .orderBy(agentToolInvocations.startedAt),
-      "agentConversations.detail.tools",
-    )
+    // Content + tool queries are independent — run in parallel to cut
+    // latency by ~2x (both keyed by sessionId, no dependency).
+    const [contentRows, toolRows] = await Promise.all([
+      executeQuery(
+        (db) =>
+          db
+            .select()
+            .from(agentMessageContent)
+            .where(eq(agentMessageContent.sessionId, sessionId))
+            .orderBy(agentMessageContent.createdAt),
+        "agentConversations.detail.content",
+      ),
+      executeQuery(
+        (db) =>
+          db
+            .select()
+            .from(agentToolInvocations)
+            .where(eq(agentToolInvocations.sessionId, sessionId))
+            .orderBy(agentToolInvocations.startedAt),
+        "agentConversations.detail.tools",
+      ),
+    ])
 
     // Group by messageId so the UI can render per-turn nicely.
     const byMessage = new Map<number, { messages: ConversationDetailMessage[]; tools: ConversationDetailTool[] }>()
@@ -263,10 +272,10 @@ export async function getAgentConversationDetail(
     }
 
     timer({ status: "success" })
-    log.info("Fetched conversation detail", {
+    log.info("Fetched conversation detail", sanitizeForLogging({
       sessionId,
       turns: detail.turns.length,
-    })
+    }))
     return createSuccess(detail)
   } catch (error) {
     timer({ status: "error" })

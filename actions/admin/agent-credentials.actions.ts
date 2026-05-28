@@ -4,8 +4,8 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { handleError, createSuccess } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
 import { requireRole } from "@/lib/auth/role-helpers"
-import { executeQuery } from "@/lib/db/drizzle-client"
-import { desc, eq } from "drizzle-orm"
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client"
+import { and, desc, eq } from "drizzle-orm"
 import { isRedirectError } from "next/dist/client/components/redirect-error"
 import { psdAgentCredentialsAudit } from "@/lib/db/schema/tables/agent-credentials-audit"
 import { psdAgentCredentialReads } from "@/lib/db/schema/tables/agent-credential-reads"
@@ -293,6 +293,10 @@ export async function logCredentialProvisioningAction(
 
 // Lowercase alphanumeric, hyphens, and underscores; must start with a letter (1-128 chars)
 const CREDENTIAL_NAME_RE = /^[a-z][\d_a-z-]{0,127}$/
+// Sanitize requestedBy for safe inclusion in Secrets Manager paths — prevent
+// directory traversal (e.g. `attacker@x.com/../shared`). Only allow
+// characters that appear in email addresses + reasonable identifiers.
+const SAFE_PATH_SEGMENT_RE = /^[\w.@-]+$/
 
 // Module-scoped client — reuses the HTTP connection pool across calls
 let _smClient: InstanceType<typeof import("@aws-sdk/client-secrets-manager").SecretsManagerClient> | null = null
@@ -396,6 +400,15 @@ export async function provisionCredentialFromRequest(
     )
     if (validationError) return validationError
 
+    // Validate requestedBy to prevent directory traversal in the secret path
+    if (!SAFE_PATH_SEGMENT_RE.test(request.requestedBy)) {
+      return handleError(
+        new Error("Invalid requestedBy"),
+        "The requesting user's identifier contains invalid characters.",
+        { context: "provisionCredentialFromRequest", requestId: rid, operation: "provisionCredentialFromRequest" },
+      )
+    }
+
     const environment = process.env.ENVIRONMENT ?? process.env.DEPLOY_ENVIRONMENT ?? "dev"
     const secretId =
       scope === "user"
@@ -424,14 +437,14 @@ export async function provisionCredentialFromRequest(
         ResourceNotFoundException,
       } = await import("@aws-sdk/client-secrets-manager")
       const client = await getProvisionSecretsClient()
+      // Tags must align with the ECS task role's TagKeys condition
+      // (Environment, ManagedBy, OwnerEmail) — see ecs-service.ts.
+      // Extra tags like costCenter/requestedBy/scope would cause
+      // AccessDenied from the IAM boundary.
       const tags = [
         { Key: "Environment", Value: environment },
         { Key: "ManagedBy", Value: "aistudio" },
-        { Key: "costCenter", Value: "ai-agents" },
-        { Key: "requestedBy", Value: request.requestedBy },
-        ...(scope === "user"
-          ? [{ Key: "scope", Value: "user" }]
-          : [{ Key: "scope", Value: "shared" }]),
+        { Key: "OwnerEmail", Value: request.requestedBy },
       ]
       try {
         await client.send(
@@ -467,12 +480,13 @@ export async function provisionCredentialFromRequest(
       }
     }
 
-    // Step 3 + 4: flip request to fulfilled + write audit entry. Best-
-    // effort if the audit insert fails; the row update is the
-    // load-bearing one.
-    await executeQuery(
-      (db) =>
-        db
+    // Step 3 + 4: atomically flip request to fulfilled + write audit
+    // entry. The WHERE includes status='pending' so a concurrent admin
+    // clicking the same button gets a clean "already fulfilled" error
+    // instead of silently overwriting the secret.
+    const updated = await executeTransaction(
+      async (tx) => {
+        const result = await tx
           .update(psdAgentCredentialRequests)
           .set({
             status: "fulfilled",
@@ -480,20 +494,34 @@ export async function provisionCredentialFromRequest(
             resolvedAt: new Date(),
             updatedAt: new Date(),
           })
-          .where(eq(psdAgentCredentialRequests.id, requestId)),
-      "agentCredentials.markFulfilled",
-    )
-    await executeQuery(
-      (db) =>
-        db.insert(psdAgentCredentialsAudit).values({
+          .where(
+            and(
+              eq(psdAgentCredentialRequests.id, requestId),
+              eq(psdAgentCredentialRequests.status, "pending"),
+            ),
+          )
+          .returning({ id: psdAgentCredentialRequests.id })
+        if (result.length === 0) {
+          throw new Error("Request is no longer pending — another admin may have already provisioned it.")
+        }
+        await tx.insert(psdAgentCredentialsAudit).values({
           credentialName: request.credentialName,
           scope,
           action,
           actorUserId: adminUserId,
           details: { secretId, requestId, requestedBy: request.requestedBy },
-        }),
-      "agentCredentials.provisionAuditFromRequest",
+        })
+        return result
+      },
+      "agentCredentials.fulfillAndAudit",
     )
+    if (updated.length === 0) {
+      return handleError(
+        new Error("Concurrent provisioning"),
+        "Request was already fulfilled by another admin. Reload and verify.",
+        { context: "provisionCredentialFromRequest", requestId: rid, operation: "provisionCredentialFromRequest" },
+      )
+    }
 
     timer({ status: "success" })
     return createSuccess(

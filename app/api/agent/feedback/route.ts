@@ -19,7 +19,6 @@
 import { NextRequest, NextResponse } from "next/server"
 import { createLogger, generateRequestId, sanitizeForLogging } from "@/lib/logger"
 import { executeQuery } from "@/lib/db/drizzle-client"
-import { sql } from "drizzle-orm"
 import { agentFeedback } from "@/lib/db/schema/tables/agent-feedback"
 import { getSecretString } from "@/lib/agent-workspace/secrets-manager"
 import { timingSafeEqual } from "node:crypto"
@@ -87,7 +86,6 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
             target: [agentFeedback.userId, agentFeedback.messageId],
             set: {
               thumbsUp: body.thumbsUp!,
-              createdAt: sql`NOW()`,
             },
           }),
       "agentFeedback.insertOrUpdate",

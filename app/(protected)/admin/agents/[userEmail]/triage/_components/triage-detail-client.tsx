@@ -75,7 +75,7 @@ export function TriageDetailClient({ userEmail }: Props) {
       setDialog(null)
       if (r.isSuccess) {
         toast({ title: "Success", description: r.message })
-        refresh()
+        void refresh()
       } else {
         toast({
           title: "Failed",

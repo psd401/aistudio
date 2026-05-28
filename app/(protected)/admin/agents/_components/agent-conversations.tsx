@@ -61,6 +61,7 @@ export function AgentConversationsTab() {
   const [loading, setLoading] = useState(true)
   const [days, setDays] = useState<string>("7")
   const [userFilter, setUserFilter] = useState("")
+  const [activeUserFilter, setActiveUserFilter] = useState("")
   const [selectedSession, setSelectedSession] = useState<string | null>(null)
   const [detail, setDetail] = useState<ConversationDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
@@ -70,7 +71,7 @@ export function AgentConversationsTab() {
     try {
       const r = await listAgentConversations(
         Number(days),
-        userFilter.trim() || undefined,
+        activeUserFilter.trim() || undefined,
       )
       if (r.isSuccess && r.data) {
         setItems(r.data)
@@ -84,10 +85,10 @@ export function AgentConversationsTab() {
     } finally {
       setLoading(false)
     }
-  }, [days, userFilter, toast])
+  }, [days, activeUserFilter, toast])
 
   useEffect(() => {
-    load()
+    void load()
   }, [load])
 
   const openSession = useCallback(
@@ -145,10 +146,10 @@ export function AgentConversationsTab() {
               value={userFilter}
               onChange={(e) => setUserFilter(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter") load()
+                if (e.key === "Enter") setActiveUserFilter(userFilter)
               }}
             />
-            <Button variant="outline" size="sm" onClick={load}>
+            <Button variant="outline" size="sm" onClick={() => setActiveUserFilter(userFilter)}>
               Apply
             </Button>
           </div>
@@ -304,8 +305,8 @@ function ConversationDetailView({ detail }: { detail: ConversationDetail }) {
               No content captured for this turn (pre-rollout).
             </div>
           )}
-          {turn.messages.map((m, mi) => (
-            <div key={mi} className="space-y-1">
+          {turn.messages.map((m) => (
+            <div key={`${m.createdAt}-${m.role}`} className="space-y-1">
               <Badge
                 variant={m.role === "user" ? "default" : "secondary"}
                 className="text-[10px] py-0"
@@ -325,8 +326,8 @@ function ConversationDetailView({ detail }: { detail: ConversationDetail }) {
               <div className="text-xs font-medium text-muted-foreground">
                 Tool calls
               </div>
-              {turn.tools.map((t, ti) => (
-                <details key={ti} className="text-xs border rounded p-2">
+              {turn.tools.map((t) => (
+                <details key={`${t.startedAt}-${t.toolName}`} className="text-xs border rounded p-2">
                   <summary className="cursor-pointer flex items-center gap-2">
                     <Badge variant="outline" className="text-[10px] py-0">
                       {t.toolName}

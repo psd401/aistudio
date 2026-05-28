@@ -4,8 +4,6 @@ Smart email triage for the PSD AI Agent. Phase 1 — agent-native opt-in,
 per-user rules, Gmail labels, Bedrock Nova Micro fallback classifier,
 Chat escalations, daily digest, admin sub-page.
 
-Plan: `/Users/hagelk/.claude/plans/everything-is-good-to-graceful-twilight.md`
-
 Phase 2 tracker: <https://github.com/psd401/aistudio/issues/996>
 
 ---

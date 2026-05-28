@@ -437,30 +437,49 @@ async function classifyAndLabel(
   // Step 3: maybe escalate to Chat.
   let escalated = false;
   const esc = shouldEscalate(result.label, features, row.escalation);
-  if (esc.escalate && row.dmSpaceName) {
-    try {
-      await postEscalation({
-        dmSpaceName: row.dmSpaceName,
-        userEmail: row.userEmail,
-        label: result.label,
-        message: {
-          id: msgRef.id,
-          threadId: msgRef.threadId,
-          fromEmail: features.fromEmail,
-          subject: features.subject,
-          snippet: meta.snippet ?? "",
-          internalDate: meta.internalDate ?? "",
-          labelIds: meta.labelIds ?? [],
-        },
-        reason: esc.reason,
-      });
-      escalated = true;
-    } catch (err) {
-      log("ERROR", "escalation_failed", {
-        user: row.userEmail,
-        messageId: msgRef.id,
-        err: err instanceof Error ? err.message : String(err),
-      });
+  if (esc.escalate) {
+    // Resolve the DM space lazily — enable flow doesn't populate it,
+    // so the first escalation for a new user triggers the lookup and
+    // backfills the row for subsequent calls.
+    let dmSpace = row.dmSpaceName;
+    if (!dmSpace) {
+      const gid = await getGoogleIdentityForEmail(row.userEmail);
+      if (gid) {
+        dmSpace = await resolveDmSpace(gid) ?? undefined;
+        if (dmSpace) {
+          await backfillDmSpaceName(row.userEmail, dmSpace);
+          log("INFO", "dm_space_backfilled_escalation", {
+            user: row.userEmail,
+            space: dmSpace,
+          });
+        }
+      }
+    }
+    if (dmSpace) {
+      try {
+        await postEscalation({
+          dmSpaceName: dmSpace,
+          userEmail: row.userEmail,
+          label: result.label,
+          message: {
+            id: msgRef.id,
+            threadId: msgRef.threadId,
+            fromEmail: features.fromEmail,
+            subject: features.subject,
+            snippet: meta.snippet ?? "",
+            internalDate: meta.internalDate ?? "",
+            labelIds: meta.labelIds ?? [],
+          },
+          reason: esc.reason,
+        });
+        escalated = true;
+      } catch (err) {
+        log("ERROR", "escalation_failed", {
+          user: row.userEmail,
+          messageId: msgRef.id,
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
   }
 
@@ -514,20 +533,17 @@ function detectCorrection(
     message: { id: string; labelIds?: string[] };
     labelIds: string[];
   },
-  _direction: "added" | "removed",
+  direction: "added" | "removed",
 ): CorrectionRecord | null {
   const prior = (row.recentDecisions ?? []).find((d) => d.messageId === evt.message.id);
   if (!prior) return null;
 
-  const inboxAdded = evt.labelIds.includes("INBOX");
-  // NOTE: detecting INBOX removal would require knowing whether this
-  // event came from labelsAdded or labelsRemoved. The current caller
-  // mixes both branches together, so we can only catch the
-  // archive→inbox direction (user un-archived something we classified
-  // as later/news). Catching the inbox→archive direction needs the
-  // caller to split the two branches first.
+  const inboxInEvent = evt.labelIds.includes("INBOX");
 
-  if (prior.label !== "important" && inboxAdded) {
+  // Direction "added" + INBOX in labelIds = user moved message back to
+  // inbox (un-archived) after we classified it as later/news → we got
+  // it wrong, they DID want to see it.
+  if (direction === "added" && inboxInEvent && prior.label !== "important") {
     return {
       messageId: evt.message.id,
       fromLabel: prior.label,
@@ -535,6 +551,19 @@ function detectCorrection(
       ts: new Date().toISOString(),
     };
   }
+
+  // Direction "removed" + INBOX in labelIds = user archived a message
+  // we classified as "important" → we got it wrong, they didn't want
+  // to see it. Previously this branch was dead (hardcoded false).
+  if (direction === "removed" && inboxInEvent && prior.label === "important") {
+    return {
+      messageId: evt.message.id,
+      fromLabel: prior.label,
+      toLabel: "archived",
+      ts: new Date().toISOString(),
+    };
+  }
+
   return null;
 }
 

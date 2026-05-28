@@ -364,6 +364,8 @@ export async function recordTaskCreated(
   taskRef: string,
   ts: string,
 ): Promise<void> {
+  const RECENT_MAX = 20;
+  // Append the new entry.
   await ddb().send(
     new UpdateCommand({
       TableName: TABLE,
@@ -376,6 +378,23 @@ export async function recordTaskCreated(
       },
     }),
   );
+  // Trim to keep at most RECENT_MAX entries (same rolling-window pattern
+  // as recentDecisions/recentCorrections in recordPollResult).
+  const row = await getTriageRow(userEmail);
+  if (row) {
+    const current = (row as unknown as { recentTaskCreations?: unknown[] }).recentTaskCreations ?? [];
+    if (current.length > RECENT_MAX) {
+      const trimmed = current.slice(-RECENT_MAX);
+      await ddb().send(
+        new UpdateCommand({
+          TableName: TABLE,
+          Key: { userEmail },
+          UpdateExpression: "SET recentTaskCreations = :t",
+          ExpressionAttributeValues: { ":t": trimmed },
+        }),
+      );
+    }
+  }
 }
 
 /**
