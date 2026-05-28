@@ -165,7 +165,8 @@ export class OfficeProcessor implements DocumentProcessor {
       // Convert to JSON for structured data
       const json = XLSX.utils.sheet_to_json(sheet, { header: 1 });
       
-      combinedText += `\n\n## Sheet: ${sheetName}\n${csv}`;
+      const safeSheetName = OfficeProcessor.sanitizeSheetName(sheetName);
+      combinedText += `\n\n## Sheet: ${safeSheetName}\n${csv}`;
       
       sheetData.push({
         name: sheetName,
@@ -364,20 +365,34 @@ export class OfficeProcessor implements DocumentProcessor {
   // even with several sheets and a generous multiplier for wide/dense data.
   private static readonly MAX_ROWS_PER_SHEET = 500;
 
+  // Escape a spreadsheet cell value for safe embedding in a Markdown table cell.
+  // Pipe characters split columns; newlines break the row out of the table.
+  private static escapeMdTableCell(value: unknown): string {
+    return String(value ?? '')
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/\|/g, '\\|');
+  }
+
+  // Sanitize a sheet name before interpolating into a Markdown heading.
+  private static sanitizeSheetName(name: string): string {
+    return name.replace(/[\r\n|#`]/g, ' ').trim() || 'Sheet';
+  }
+
   private convertXlsxToMarkdown(content: any): string {
     let markdown = '# Spreadsheet Data\n\n';
 
     if (content.sheets) {
       content.sheets.forEach((sheet: any) => {
-        markdown += `## ${sheet.name}\n\n`;
+        const safeSheetName = OfficeProcessor.sanitizeSheetName(String(sheet.name ?? ''));
+        markdown += `## ${safeSheetName}\n\n`;
 
         if (sheet.json && sheet.json.length > 0) {
           // Convert JSON to markdown table
           const rows = sheet.json as any[][];
           if (rows.length > 0) {
-            // Header row
+            // Header row — escape pipe/newline in column names
             const headers = rows[0];
-            markdown += '| ' + headers.join(' | ') + ' |\n';
+            markdown += '| ' + headers.map(OfficeProcessor.escapeMdTableCell).join(' | ') + ' |\n';
             markdown += '| ' + headers.map(() => '---').join(' | ') + ' |\n';
 
             const allDataRows = rows.slice(1);
@@ -385,7 +400,9 @@ export class OfficeProcessor implements DocumentProcessor {
             const dataRows = truncated
               ? allDataRows.slice(0, OfficeProcessor.MAX_ROWS_PER_SHEET)
               : allDataRows;
-            markdown += dataRows.map((row: any[]) => '| ' + row.join(' | ') + ' |\n').join('');
+            markdown += dataRows
+              .map((row: any[]) => '| ' + row.map(OfficeProcessor.escapeMdTableCell).join(' | ') + ' |\n')
+              .join('');
 
             if (truncated) {
               markdown += `\n> ⚠️ **Showing first ${OfficeProcessor.MAX_ROWS_PER_SHEET} of ${allDataRows.length} rows.** Upload a filtered version of this sheet to analyze the full dataset.\n`;

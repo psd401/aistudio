@@ -211,9 +211,15 @@ function ConversationRuntimeProvider({
     if (response.status === 404) {
       try {
         const clonedResponse = response.clone()
-        const errorData = await clonedResponse.json()
+        const rawData: unknown = await clonedResponse.json()
+        // Validate shape before trusting server-controlled string (security: unvalidated
+        // server text must not flow directly into rendered UI components).
+        const ModelErrorSchema = z.object({ error: z.string().max(300) })
+        const parsed = ModelErrorSchema.safeParse(rawData)
         toast.error('Model Unavailable', {
-          description: errorData.error || 'The selected model is no longer available. Please choose a different model.',
+          description: parsed.success
+            ? parsed.data.error
+            : 'The selected model is no longer available. Please choose a different model.',
           duration: 8000
         })
         log.warn('Selected model not found on server')
