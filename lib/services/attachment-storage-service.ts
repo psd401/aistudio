@@ -234,7 +234,7 @@ export async function processMessagesWithAttachments(
           // right MIME type (e.g. image/jpeg for phone photos rather than image/png).
           const actualMediaType = extractDataUrlMediaType(partData.url);
           if (actualMediaType && actualMediaType !== partData.mediaType) {
-            log.info('Correcting mediaType for file part from data URL', {
+            log.debug('Correcting mediaType for file part from data URL', {
               detected: actualMediaType,
               declared: partData.mediaType,
             });

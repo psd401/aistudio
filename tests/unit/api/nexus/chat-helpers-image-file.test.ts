@@ -95,7 +95,7 @@ describe('extractUserContent — file-type image parts (Issue #940)', () => {
     expect(parts[1]).toEqual({ type: 'image', metadata: { hasImage: true } });
   });
 
-  it('returns empty parts for attachment-only messages (no text)', () => {
+  it('serializes image part for attachment-only messages (no text)', () => {
     // An image-only message with no text should save the image part to DB
     const message = {
       id: 'msg1',
