@@ -86,7 +86,13 @@ export interface DecisionRecord {
 export interface CorrectionRecord {
   messageId: string;
   fromLabel: Label;
-  toLabel: Label | "inbox";
+  /**
+   * Where the user moved the message:
+   *   "inbox"    — un-archived (added INBOX back) something we labelled later/news
+   *   "archived" — archived (removed INBOX) something we labelled important
+   *   Label      — directly re-labelled to one of our three slots
+   */
+  toLabel: Label | "inbox" | "archived";
   ts: string;
 }
 
