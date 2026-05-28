@@ -90,10 +90,15 @@ function sanitizeImagePath(imagePath: string | null): string | null {
 export function sanitizeOptionLabel(label: string): string {
   if (!label || typeof label !== 'string') return ''
   return label
-    .replace(/<(?:script|style)\b[^>]*>[\s\S]*?<\/(?:script|style)>/gi, '')
+    // Strip script/style blocks including content; \s* handles </script > with space before >
+    .replace(/<(?:script|style)\b[^>]*>[\s\S]*?<\/(?:script|style)\s*>/gi, '')
+    // Strip remaining script/style fragments (unclosed or malformed tags)
+    .replace(/<\/?(?:script|style)\b[^>]*/gi, '')
+    // Strip other HTML tags (valid tag name required so math operators like a < b are safe)
     .replace(/<\/?[a-zA-Z][a-zA-Z0-9]*\b[^>]*>/g, '')
     .replace(/(?:javascript|vbscript|data):/gi, '')
-    .replace(/\bon(?:click|dblclick|mouse(?:down|up|over|move|out|enter|leave)|key(?:down|up|press)|load|unload|error|focus|blur|change|submit|reset|select|input|scroll|resize|drag(?:start|end|enter|leave|over|drop)?|touch(?:start|end|move|cancel)?|pointer(?:down|up|move|cancel|over|out|enter|leave)?)\s*=\S*/gi, '')
+    // \s*=\s*\S* consumes optional whitespace on both sides of = to strip full handler expression
+    .replace(/\bon(?:click|dblclick|mouse(?:down|up|over|move|out|enter|leave)|key(?:down|up|press)|load|unload|error|focus|blur|change|submit|reset|select|input|scroll|resize|drag(?:start|end|enter|leave|over|drop)?|touch(?:start|end|move|cancel)?|pointer(?:down|up|move|cancel|over|out|enter|leave)?)\s*=\s*\S*/gi, '')
     .trim()
 }
 
