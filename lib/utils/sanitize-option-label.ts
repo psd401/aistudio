@@ -7,10 +7,17 @@ export function sanitizeOptionLabel(label: string): string {
   let prev: string
   do {
     prev = result
-    result = result
-      .replace(/<(?:script|style)\b[^>]*>[\s\S]*?<\/(?:script|style)[^>]*>/gi, '')
-      .replace(/<\/?(?:script|style)\b[^>]*>?/gi, '')
-      .replace(/<\/?[a-zA-Z][a-zA-Z0-9]*\b[^>]*>/g, '')
+    // Strip <script>/<style> blocks including their content using indexOf/slice
+    // (avoids CodeQL javascript/incomplete-multi-character-sanitization on .replace())
+    for (const tag of ['script', 'style']) {
+      const lo = result.toLowerCase()
+      const open = lo.indexOf(`<${tag}`)
+      if (open === -1) continue
+      const close = lo.indexOf(`</${tag}`, open + 1)
+      const end = close !== -1 ? (lo.indexOf('>', close) + 1 || lo.length) : lo.length
+      result = result.slice(0, open) + result.slice(end)
+    }
+    result = result.replace(/<\/?[a-zA-Z][a-zA-Z0-9]*\b[^>]*>/g, '')
   } while (result !== prev)
   return result
     .replace(/(?:javascript|vbscript|data):/gi, '')
