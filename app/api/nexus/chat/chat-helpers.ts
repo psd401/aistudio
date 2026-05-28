@@ -132,6 +132,18 @@ function processMessagePart(
   if (typedPart.type === 'image' && typedPart.image) {
     return { content: '', serialized: { type: 'image', metadata: { hasImage: true } } };
   }
+  // toCreateMessage converts image attachments to type:"file" parts with a url property.
+  // Detect these by checking mediaType or the data URL prefix so they are saved to the DB.
+  if (typedPart.type === 'file') {
+    const mediaType = typedPart.mediaType as string | undefined;
+    const url = typedPart.url as string | undefined;
+    if (
+      (typeof mediaType === 'string' && mediaType.startsWith('image/')) ||
+      (typeof url === 'string' && url.startsWith('data:image/'))
+    ) {
+      return { content: '', serialized: { type: 'image', metadata: { hasImage: true } } };
+    }
+  }
   return null;
 }
 
