@@ -87,13 +87,19 @@ function sanitizeImagePath(imagePath: string | null): string | null {
 }
 
 /**
- * Sanitize option labels to prevent XSS attacks
- * @param label - The option label from the database
- * @returns Sanitized label or empty string if invalid
+ * Sanitize option labels to prevent XSS attacks.
+ * Uses a deny-list approach to strip actual XSS vectors while allowing
+ * common punctuation (colons, slashes, ampersands, quotes, etc.) that
+ * appear in real-world SOP and curriculum dropdown options.
  */
-function sanitizeOptionLabel(label: string): string {
-  const SAFE_LABEL_REGEX = /^[\s\w(),.-]+$/
-  return SAFE_LABEL_REGEX.test(label) ? label.trim() : ''
+export function sanitizeOptionLabel(label: string): string {
+  if (!label || typeof label !== 'string') return ''
+  const sanitized = label
+    .replace(/<[^>]*>/g, '')       // strip HTML tags
+    .replace(/javascript:/gi, '')  // strip JS protocol
+    .replace(/on\w+\s*=/gi, '')    // strip inline event handlers
+    .trim()
+  return sanitized
 }
 
 interface AssistantArchitectStreamingProps {
