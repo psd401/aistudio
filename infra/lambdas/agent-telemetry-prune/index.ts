@@ -19,6 +19,7 @@
  *                            Aurora's locking ceiling.
  */
 
+import type { ScheduledHandler } from "aws-lambda"
 import {
   SecretsManagerClient,
   GetSecretValueCommand,
@@ -82,7 +83,19 @@ async function pruneTable(
   const SAFETY_CAP = 1_000_000
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    if (deleted >= SAFETY_CAP) break
+    if (deleted >= SAFETY_CAP) {
+      // eslint-disable-next-line no-console
+      console.log(JSON.stringify({
+        level: "WARN",
+        logger: "agent-telemetry-prune",
+        evt: "safety_cap_hit",
+        table,
+        deleted,
+        safetyCap: SAFETY_CAP,
+        message: "Daily prune may be falling behind — SAFETY_CAP reached before table was fully swept",
+      }))
+      break
+    }
     const rows = await sql<{ id: number }[]>`
       DELETE FROM ${sql(table)}
       WHERE id IN (
@@ -99,7 +112,10 @@ async function pruneTable(
   return { deleted, batches }
 }
 
-export const handler = async (): Promise<PruneResult> => {
+// ScheduledHandler requires Promise<void> but we return PruneResult for
+// CloudWatch structured logging. Lambda runtime accepts any return value —
+// EventBridge scheduled invocations don't read the response payload.
+export const handler = async (_event: Parameters<ScheduledHandler>[0]): Promise<PruneResult> => {
   const cutoff = new Date(Date.now() - RETENTION_DAYS * 86400_000)
   const cutoffIso = cutoff.toISOString()
   // eslint-disable-next-line no-console

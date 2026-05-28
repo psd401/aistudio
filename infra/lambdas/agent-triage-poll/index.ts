@@ -192,12 +192,16 @@ async function processUser(row: TriageRow): Promise<void> {
       }
     }
 
-    // User-driven label changes → training signal.
-    for (const evt of [
-      ...(event.labelsAdded ?? []),
-      ...(event.labelsRemoved ?? []),
-    ]) {
-      const correction = detectCorrection(row, evt, event.labelsRemoved?.includes(evt) ? "removed" : "added");
+    // User-driven label changes → training signal. Iterate
+    // labelsAdded and labelsRemoved separately instead of combining
+    // into one array — avoids an O(N²) .includes() check and makes
+    // the direction unambiguous.
+    for (const evt of event.labelsAdded ?? []) {
+      const correction = detectCorrection(row, evt, "added");
+      if (correction) newCorrections.push(correction);
+    }
+    for (const evt of event.labelsRemoved ?? []) {
+      const correction = detectCorrection(row, evt, "removed");
       if (correction) newCorrections.push(correction);
     }
 

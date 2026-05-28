@@ -43,6 +43,7 @@ export const agentToolInvocations = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
+    index("idx_agent_tool_invocations_message_id").on(table.messageId),
     index("idx_agent_tool_invocations_tool").on(table.toolName, table.startedAt),
     index("idx_agent_tool_invocations_session").on(table.sessionId, table.startedAt),
     index("idx_agent_tool_invocations_user").on(table.userEmail, table.startedAt),

@@ -34,7 +34,7 @@ export interface ConversationListItem {
   totalInputTokens: number
   totalOutputTokens: number
   models: string[]
-  hasError: boolean
+  hasGuardrailBlock: boolean
 }
 
 export interface ConversationDetailMessage {
@@ -109,7 +109,7 @@ export async function listAgentConversations(
             totalInputTokens: sql<number>`COALESCE(SUM(${agentMessages.inputTokens}), 0)::int`,
             totalOutputTokens: sql<number>`COALESCE(SUM(${agentMessages.outputTokens}), 0)::int`,
             models: sql<string[]>`array_remove(array_agg(DISTINCT ${agentMessages.model}), NULL)`,
-            hasError: sql<boolean>`bool_or(${agentMessages.guardrailBlocked})`,
+            hasGuardrailBlock: sql<boolean>`bool_or(${agentMessages.guardrailBlocked})`,
           })
           .from(agentMessages)
           .where(conditions)
@@ -155,7 +155,7 @@ export async function listAgentConversations(
       totalInputTokens: r.totalInputTokens,
       totalOutputTokens: r.totalOutputTokens,
       models: r.models ?? [],
-      hasError: r.hasError ?? false,
+      hasGuardrailBlock: r.hasGuardrailBlock ?? false,
     }))
 
     timer({ status: "success" })
@@ -204,6 +204,10 @@ export async function getAgentConversationDetail(
 
     // Content + tool queries are independent — run in parallel to cut
     // latency by ~2x (both keyed by sessionId, no dependency).
+    // Limits prevent an extremely long session (500+ turns at 64KB/row)
+    // from pulling 32MB+ into ECS memory.
+    const CONTENT_LIMIT = 500
+    const TOOL_LIMIT = 1000
     const [contentRows, toolRows] = await Promise.all([
       executeQuery(
         (db) =>
@@ -211,7 +215,8 @@ export async function getAgentConversationDetail(
             .select()
             .from(agentMessageContent)
             .where(eq(agentMessageContent.sessionId, sessionId))
-            .orderBy(agentMessageContent.createdAt),
+            .orderBy(agentMessageContent.createdAt)
+            .limit(CONTENT_LIMIT),
         "agentConversations.detail.content",
       ),
       executeQuery(
@@ -220,7 +225,8 @@ export async function getAgentConversationDetail(
             .select()
             .from(agentToolInvocations)
             .where(eq(agentToolInvocations.sessionId, sessionId))
-            .orderBy(agentToolInvocations.startedAt),
+            .orderBy(agentToolInvocations.startedAt)
+            .limit(TOOL_LIMIT),
         "agentConversations.detail.tools",
       ),
     ])

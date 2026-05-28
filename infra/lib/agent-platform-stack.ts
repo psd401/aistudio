@@ -1731,11 +1731,12 @@ export class AgentPlatformStack extends cdk.Stack {
         },
       ),
       memorySize: 1024,
-      // 5 minutes — processes enabled users in parallel batches of
-      // TRIAGE_USER_BATCH (10). At ~90s per user for task gestures
-      // and <1s for classify-only, the budget handles the current
-      // rollout size. Phase 2 will fan out wider to reduce this.
-      timeout: cdk.Duration.minutes(5),
+      // 4.5 minutes — 30s safety margin below the 5-minute EventBridge
+      // schedule interval. With reservedConcurrentExecutions=1, an
+      // invocation that hits the full timeout would silently drop the
+      // next scheduled firing (no retry, no DLQ). The 30s gap ensures
+      // the next invocation can start cleanly.
+      timeout: cdk.Duration.seconds(270),
       role: triagePollRole,
       logGroup: triagePollLogGroup,
       environment: {
@@ -2792,7 +2793,7 @@ export class AgentPlatformStack extends cdk.Stack {
       environment,
       region: this.region,
       account: this.account,
-      vpcEnabled: false,
+      vpcEnabled: true,
       additionalPolicies: [
         new iam.PolicyDocument({
           statements: [new iam.PolicyStatement({
@@ -2804,9 +2805,6 @@ export class AgentPlatformStack extends cdk.Stack {
         }),
       ],
     });
-    skillInitLambdaRole.addManagedPolicy(
-      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
-    );
 
     const skillInitLogGroup = new logs.LogGroup(this, 'AgentSkillInitializerLogGroup', {
       logGroupName: `/aws/lambda/psd-agent-skill-initializer-${environment}`,

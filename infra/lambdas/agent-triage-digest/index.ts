@@ -182,7 +182,7 @@ export const handler: Handler<DigestEvent, void> = async (event) => {
   try {
     await client.spaces.messages.create({
       parent: triage.dmSpaceName,
-      requestBody: requestBody as never,
+      requestBody,
     });
     log("INFO", "digest_posted", {
       user: userEmail,

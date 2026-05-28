@@ -126,6 +126,9 @@ export async function getTriageSummaryList(): Promise<
         new ScanCommand({
           TableName: TRIAGE_TABLE,
           ExclusiveStartKey: lastKey,
+          // Only fetch fields needed for TriageSummaryRow — avoids pulling
+          // large recentDecisions / learnedPatterns arrays for every row.
+          ProjectionExpression: "userEmail, enabled, enabledAt, disabledAt, lastPollAt, digestEnabled, rules, escalation, recentDecisions, learnedPatterns",
         }),
       )
       for (const item of (resp.Items ?? []) as Array<{

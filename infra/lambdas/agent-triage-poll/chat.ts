@@ -186,7 +186,7 @@ export async function postEscalation(params: EscalationParams): Promise<void> {
   };
   await client.spaces.messages.create({
     parent: params.dmSpaceName,
-    requestBody: requestBody as never,
+    requestBody,
   });
 }
 
@@ -295,6 +295,6 @@ export async function postTaskOutcome(params: TaskOutcomeParams): Promise<void> 
   };
   await client.spaces.messages.create({
     parent: params.dmSpaceName,
-    requestBody: requestBody as never,
+    requestBody,
   });
 }

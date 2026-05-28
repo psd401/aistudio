@@ -37,6 +37,7 @@ export const agentMessageContent = pgTable(
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   },
   (table) => [
+    index("idx_agent_message_content_message_id").on(table.messageId),
     index("idx_agent_message_content_session").on(table.sessionId, table.createdAt),
     index("idx_agent_message_content_user").on(table.userEmail, table.createdAt),
     index("idx_agent_message_content_created_at").on(table.createdAt),

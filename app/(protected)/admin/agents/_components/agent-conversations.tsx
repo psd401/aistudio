@@ -206,7 +206,7 @@ export function AgentConversationsTab() {
                       )}
                     </TableCell>
                     <TableCell>
-                      {s.hasError ? (
+                      {s.hasGuardrailBlock ? (
                         <Badge variant="destructive">guardrail</Badge>
                       ) : (
                         <Badge variant="secondary">ok</Badge>

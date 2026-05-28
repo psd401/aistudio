@@ -1516,9 +1516,24 @@ async function logTelemetry(
     // best-effort: failure here logs but doesn't surface to the user.
     // Empty arrays are normal for sessions whose harness doesn't surface
     // the data yet.
+    //
+    // Hard cap on rows per turn to prevent a misbehaving harness from
+    // firing thousands of parallel INSERTs and exhausting the Aurora
+    // connection pool. 200 messages + 200 tool calls is already generous;
+    // normal turns have <10 of each.
+    const MAX_MESSAGES_PER_TURN = 200;
+    const MAX_TOOLS_PER_TURN = 200;
     const writes: Promise<unknown>[] = [];
     if (messageId && params.messages && params.messages.length > 0) {
-      for (const m of params.messages) {
+      const cappedMessages = params.messages.slice(0, MAX_MESSAGES_PER_TURN);
+      if (params.messages.length > MAX_MESSAGES_PER_TURN) {
+        log.warn('Deep telemetry message cap hit — truncating', {
+          actual: params.messages.length,
+          cap: MAX_MESSAGES_PER_TURN,
+          sessionId: params.sessionId,
+        });
+      }
+      for (const m of cappedMessages) {
         const { value, truncated } = truncateContent(m.content);
         writes.push(
           sql`INSERT INTO agent_message_content
@@ -1529,7 +1544,15 @@ async function logTelemetry(
       }
     }
     if (messageId && params.toolCalls && params.toolCalls.length > 0) {
-      for (const t of params.toolCalls) {
+      const cappedToolCalls = params.toolCalls.slice(0, MAX_TOOLS_PER_TURN);
+      if (params.toolCalls.length > MAX_TOOLS_PER_TURN) {
+        log.warn('Deep telemetry tool-call cap hit — truncating', {
+          actual: params.toolCalls.length,
+          cap: MAX_TOOLS_PER_TURN,
+          sessionId: params.sessionId,
+        });
+      }
+      for (const t of cappedToolCalls) {
         writes.push(
           sql`INSERT INTO agent_tool_invocations
               (message_id, session_id, user_email, tool_name, tool_args,
