@@ -86,6 +86,46 @@ describe('processMessagesWithAttachments — mediaType correction (Issue #940)',
     expect(filePart?.mediaType).toBe('image/png');
   });
 
+  it('ignores crafted data URL with CRLF injection in media type', async () => {
+    // CRLF in the media type segment could inject log lines or HTTP headers
+    const craftedDataUrl = 'data:image/jpeg\r\nX-Injected: value;base64,/9j/abc';
+    const messages = [
+      makeMessage([
+        { type: 'file', url: craftedDataUrl, mediaType: 'image/png' },
+      ]),
+    ];
+
+    const { lightweightMessages } = await processMessagesWithAttachments('conv-id', messages);
+
+    const filePart = lightweightMessages[0].parts?.find((p: unknown) => {
+      const part = p as Record<string, unknown>;
+      return part.type === 'file';
+    }) as Record<string, unknown> | undefined;
+
+    // CRLF breaks the regex match, so mediaType should remain unchanged
+    expect(filePart?.mediaType).toBe('image/png');
+  });
+
+  it('ignores crafted data URL with non-image MIME type', async () => {
+    // Only allowlisted image types should be extracted
+    const craftedDataUrl = 'data:text/html;base64,PHNjcmlwdD4=';
+    const messages = [
+      makeMessage([
+        { type: 'file', url: craftedDataUrl, mediaType: 'image/png' },
+      ]),
+    ];
+
+    const { lightweightMessages } = await processMessagesWithAttachments('conv-id', messages);
+
+    const filePart = lightweightMessages[0].parts?.find((p: unknown) => {
+      const part = p as Record<string, unknown>;
+      return part.type === 'file';
+    }) as Record<string, unknown> | undefined;
+
+    // Non-image type not in allowlist — mediaType should remain unchanged
+    expect(filePart?.mediaType).toBe('image/png');
+  });
+
   it('does not modify non-data-url file parts', async () => {
     const messages = [
       makeMessage([
