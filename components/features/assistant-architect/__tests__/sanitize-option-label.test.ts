@@ -1,16 +1,4 @@
-/**
- * Unit tests for sanitizeOptionLabel.
- *
- * The function was overly restrictive (allowlist regex) and silently dropped
- * any option label containing colons, slashes, ampersands, or other common
- * punctuation — causing SOP Creator dropdowns (ID 136) to render empty.
- *
- * The fix switches to a deny-list approach: strip actual XSS vectors and
- * allow all other characters.
- *
- * @see ../assistant-architect-streaming.tsx
- * @see https://github.com/psd401/aistudio/issues/938
- */
+// Tests for sanitizeOptionLabel — covers previously-blocked punctuation, XSS vectors, and false-positive guards.
 
 import { sanitizeOptionLabel } from '../assistant-architect-streaming'
 
@@ -84,7 +72,7 @@ describe('sanitizeOptionLabel', () => {
   })
 
   describe('strips XSS vectors', () => {
-    it('strips HTML tags', () => {
+    it('strips script blocks including their content', () => {
       expect(sanitizeOptionLabel('<script>alert(1)</script>Label')).toBe('Label')
     })
 
@@ -100,6 +88,10 @@ describe('sanitizeOptionLabel', () => {
       expect(sanitizeOptionLabel('JavaScript:void(0)')).toBe('void(0)')
     })
 
+    it('strips vbscript: protocol', () => {
+      expect(sanitizeOptionLabel('vbscript:MsgBox(1)')).toBe('MsgBox(1)')
+    })
+
     it('strips inline event handlers', () => {
       expect(sanitizeOptionLabel('onclick=alert(1) Label')).toBe('Label')
     })
@@ -112,8 +104,30 @@ describe('sanitizeOptionLabel', () => {
       expect(sanitizeOptionLabel('onclick = bad() Label')).toBe('Label')
     })
 
-    it('returns empty string for a pure HTML payload', () => {
+    it('returns empty string for a pure script payload', () => {
       expect(sanitizeOptionLabel('<script>xss()</script>')).toBe('')
+    })
+  })
+
+  describe('does not corrupt legitimate labels (false-positive guards)', () => {
+    it('preserves "connect = true"', () => {
+      expect(sanitizeOptionLabel('connect = true')).toBe('connect = true')
+    })
+
+    it('preserves "environment = prod"', () => {
+      expect(sanitizeOptionLabel('environment = prod')).toBe('environment = prod')
+    })
+
+    it('preserves "Onboarding = Formal Training"', () => {
+      expect(sanitizeOptionLabel('Onboarding = Formal Training')).toBe('Onboarding = Formal Training')
+    })
+
+    it('preserves "Once = Done"', () => {
+      expect(sanitizeOptionLabel('Once = Done')).toBe('Once = Done')
+    })
+
+    it('preserves labels with angle brackets that are not HTML tags', () => {
+      expect(sanitizeOptionLabel('if a < b and c > d')).toBe('if a < b and c > d')
     })
   })
 

@@ -86,26 +86,15 @@ function sanitizeImagePath(imagePath: string | null): string | null {
   return sanitized
 }
 
-/**
- * Sanitize an option label or value to prevent XSS and prompt injection.
- *
- * Uses a deny-list approach: strips HTML tags, javascript: protocol, and
- * inline event handlers, while allowing all other characters (colons, slashes,
- * ampersands, quotes, etc.) that appear in real-world SOP/curriculum options.
- *
- * SAFETY SCOPE: output is safe for React text-node rendering only.
- * Do NOT use the return value in dangerouslySetInnerHTML, href, src, or action
- * attributes without additional validation — nested/malformed tags and data:
- * URIs are not fully stripped by this function.
- */
+/** Sanitize an option label/value for React text-node rendering and AI prompt substitution. SAFETY SCOPE: safe for text nodes only — do NOT use in dangerouslySetInnerHTML, href, src, or action attributes. */
 export function sanitizeOptionLabel(label: string): string {
   if (!label || typeof label !== 'string') return ''
-  const sanitized = label
-    .replace(/<[^>]*>/g, '')       // strip HTML tags
-    .replace(/javascript:/gi, '')  // strip JS protocol
-    .replace(/on\w+\s*=/gi, '')    // strip inline event handlers
+  return label
+    .replace(/<(?:script|style)\b[^>]*>[\s\S]*?<\/(?:script|style)>/gi, '')
+    .replace(/<\/?[a-zA-Z][a-zA-Z0-9]*\b[^>]*>/g, '')
+    .replace(/(?:javascript|vbscript|data):/gi, '')
+    .replace(/\bon(?:click|dblclick|mouse(?:down|up|over|move|out|enter|leave)|key(?:down|up|press)|load|unload|error|focus|blur|change|submit|reset|select|input|scroll|resize|drag(?:start|end|enter|leave|over|drop)?|touch(?:start|end|move|cancel)?|pointer(?:down|up|move|cancel|over|out|enter|leave)?)\s*=\S*/gi, '')
     .trim()
-  return sanitized
 }
 
 interface AssistantArchitectStreamingProps {
