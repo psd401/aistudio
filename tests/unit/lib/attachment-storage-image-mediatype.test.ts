@@ -7,17 +7,10 @@
  */
 import { describe, it, expect } from '@jest/globals';
 
-// Auto-mock the AWS SDK S3 client so we don't need real credentials.
-// No factory needed — the tests exercise the data-URL mediaType-correction
-// branch which never calls S3; only the module-level `new S3Client({})`
-// needs to succeed, which the automatic mock handles.
-// Uses global jest (not imported) so SWC can hoist this call above all imports.
-jest.mock('@aws-sdk/client-s3');
-
-// Must set env before importing the module
-process.env.DOCUMENTS_BUCKET_NAME = 'test-documents-bucket';
-process.env.NODE_ENV = 'test';
-
+// No jest.mock needed: every test case exercises the data-URL mediaType-correction
+// branch or the passthrough path — neither invokes s3Client.send(). The module-level
+// `new S3Client({})` succeeds in Node because AWS SDK v3 does not validate credentials
+// at construction time, only at request time.
 import { processMessagesWithAttachments } from '@/lib/services/attachment-storage-service';
 import type { UIMessage } from 'ai';
 
