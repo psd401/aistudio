@@ -109,15 +109,19 @@ export function ToolsPopover({
       .then(tools => {
         setAvailableTools(tools)
 
-        // Remove any enabled tools that are no longer available
         const availableToolNames = tools.map(t => t.name)
         const currentEnabledTools = enabledToolsRef.current
         const validEnabledTools = currentEnabledTools.filter(tool =>
           availableToolNames.includes(tool)
         )
+
         if (validEnabledTools.length !== currentEnabledTools.length) {
-            onToolsChangeRef.current(validEnabledTools)
-          }
+          // Some previously-enabled tools are no longer available for this model
+          onToolsChangeRef.current(validEnabledTools)
+        } else if (currentEnabledTools.length === 0 && availableToolNames.includes('webSearch')) {
+          // No tools enabled yet — auto-enable web search for models that support it
+          onToolsChangeRef.current(['webSearch'])
+        }
       })
       .finally(() => { setIsLoading(false) })
   }, [selectedModelId])
