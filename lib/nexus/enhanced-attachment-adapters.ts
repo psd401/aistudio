@@ -67,9 +67,9 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
     { pattern: 'processing timeout', message: 'Processing timed out.' },
     { pattern: 'network error during upload', message: 'Network error during upload.' },
     { pattern: 'failed to check processing status', message: 'Could not check processing status.' },
-    // Scanned/image-only PDFs cannot be processed without OCR
-    { pattern: 'scanned pdf', message: 'This PDF appears to be scanned (image-only) and cannot be read. Please upload a text-based PDF.' },
-    { pattern: 'may need ocr', message: 'This PDF appears to be scanned (image-only) and cannot be read. Please upload a text-based PDF.' },
+    // Scanned/image-only PDFs cannot be processed without OCR.
+    // Pattern is intentionally specific to avoid accidental overlap with future errors.
+    { pattern: 'scanned pdf detected', message: 'This PDF appears to be scanned (image-only) and cannot be read. Please upload a text-based PDF.' },
     // Intentionally broad catch-all for server-side failures. New error categories
     // that deserve their own message should be added as specific entries above this one.
     { pattern: 'server processing failed', message: 'Server processing failed.' },

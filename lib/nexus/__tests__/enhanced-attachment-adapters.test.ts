@@ -314,18 +314,18 @@ describe('HybridDocumentAdapter', () => {
       expect(result).toBe('An unexpected error occurred during processing.');
     });
 
-    it('should return scanned-PDF message for "scanned pdf" pattern', () => {
+    it('should return scanned-PDF message for "scanned pdf detected" pattern', () => {
       const result = HybridDocumentAdapter.toSafeErrorMessage(
         'Scanned PDF detected - no text content extractable, may need OCR'
       );
       expect(result).toBe('This PDF appears to be scanned (image-only) and cannot be read. Please upload a text-based PDF.');
     });
 
-    it('should return scanned-PDF message for "may need ocr" pattern', () => {
+    it('should NOT match scanned-PDF message for generic "may need OCR" phrases (avoids broad matching)', () => {
       const result = HybridDocumentAdapter.toSafeErrorMessage(
-        'No text content extracted from PDF - may need OCR'
+        'Some unrelated error that mentions OCR processing pipeline'
       );
-      expect(result).toBe('This PDF appears to be scanned (image-only) and cannot be read. Please upload a text-based PDF.');
+      expect(result).toBe('An unexpected error occurred during processing.');
     });
   });
 });
