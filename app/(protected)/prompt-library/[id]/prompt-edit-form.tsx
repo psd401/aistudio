@@ -144,6 +144,7 @@ export function PromptEditForm({
                 selectedModel={selectedModel}
                 enabledTools={enabledTools}
                 onToolsChange={onToolsChange}
+                disableAutoEnable
               />
               <MCPPopover
                 enabledConnectors={enabledConnectors}

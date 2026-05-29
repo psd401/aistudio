@@ -1,13 +1,4 @@
-/**
- * Tests for ToolsPopover auto-enable web search behavior.
- *
- * Covers:
- * - Auto-enables webSearch when model supports it and no tools are enabled
- * - Does NOT auto-enable when model doesn't support webSearch
- * - Does NOT auto-enable when user already has tools enabled
- * - Preserves valid enabled tools when switching to a model that supports a subset
- * - Clears invalid tools when the new model doesn't support them (no auto-enable)
- */
+// Tests for ToolsPopover auto-enable web search behavior
 
 import React from 'react'
 import { render, act, waitFor } from '@testing-library/react'
@@ -146,8 +137,10 @@ describe('ToolsPopover — auto-enable web search', () => {
     expect(onToolsChange).not.toHaveBeenCalled()
   })
 
-  it('removes invalid tools when switching models, without auto-enabling webSearch', async () => {
-    // User had codeInterpreter enabled; new model only supports webSearch
+  it('removes invalid tools when switching models and auto-enables webSearch when result is empty', async () => {
+    // User had codeInterpreter enabled; new model only supports webSearch.
+    // After stripping, the user ends up with no tools through no deliberate action —
+    // webSearch should be offered as a sensible default.
     mockGetAvailableTools.mockResolvedValue([WEB_SEARCH_TOOL])
     const onToolsChange = jest.fn()
 
@@ -160,12 +153,49 @@ describe('ToolsPopover — auto-enable web search', () => {
     )
 
     await waitFor(() => {
-      // Should strip the invalid tool but not auto-add webSearch
-      expect(onToolsChange).toHaveBeenCalledWith([])
+      expect(onToolsChange).toHaveBeenCalledWith(['webSearch'])
+    })
+  })
+
+  it('does NOT auto-enable webSearch when disableAutoEnable is true', async () => {
+    // Prompt library forms pass disableAutoEnable to prevent implicit tool persistence
+    mockGetAvailableTools.mockResolvedValue([WEB_SEARCH_TOOL])
+    const onToolsChange = jest.fn()
+
+    render(
+      <ToolsPopover
+        selectedModel={makeModel('gpt-5')}
+        enabledTools={[]}
+        onToolsChange={onToolsChange}
+        disableAutoEnable
+      />
+    )
+
+    await act(async () => {
+      await Promise.resolve()
     })
 
-    // Must NOT have been called with webSearch
-    expect(onToolsChange).not.toHaveBeenCalledWith(['webSearch'])
+    expect(onToolsChange).not.toHaveBeenCalled()
+  })
+
+  it('does not call onToolsChange when webSearch is already enabled', async () => {
+    // Guard against redundant auto-enable if the effect re-fires while webSearch is active
+    mockGetAvailableTools.mockResolvedValue([WEB_SEARCH_TOOL])
+    const onToolsChange = jest.fn()
+
+    render(
+      <ToolsPopover
+        selectedModel={makeModel('gpt-5')}
+        enabledTools={['webSearch']}
+        onToolsChange={onToolsChange}
+      />
+    )
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(onToolsChange).not.toHaveBeenCalled()
   })
 
   it('does nothing when no model is selected', async () => {
