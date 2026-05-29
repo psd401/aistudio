@@ -33,8 +33,7 @@
     "types": [
       "react",
       "react-dom",
-      "node",
-      "jest"
+      "node"
     ]
   },
   "include": [
