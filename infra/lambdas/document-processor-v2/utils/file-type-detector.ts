@@ -146,17 +146,23 @@ export class FileTypeDetector {
       };
     }
 
-    const header = Array.from(buffer.slice(0, 4));
-
-    // Check for PDF signature
-    if (this.arraysEqual(header, this.MAGIC_NUMBERS.pdf)) {
+    // PDF spec (ISO 32000-1:2008 §7.5.2) allows the %PDF header anywhere
+    // within the first 1024 bytes, so scan rather than checking byte 0 only.
+    const scanLength = Math.min(buffer.length, 1024);
+    const pdfSig = Buffer.from(this.MAGIC_NUMBERS.pdf);
+    const pdfOffset = buffer.indexOf(pdfSig, 0);
+    if (pdfOffset !== -1 && pdfOffset < scanLength) {
       return {
         detectedType: 'pdf',
         confidence: 'high',
         method: 'magic-number',
-        reason: 'PDF magic number detected (%PDF)'
+        reason: pdfOffset === 0
+          ? 'PDF magic number detected (%PDF)'
+          : `PDF magic number detected (%PDF) at byte offset ${pdfOffset}`
       };
     }
+
+    const header = Array.from(buffer.slice(0, 4));
 
     // Check for ZIP signatures (Office files)
     const isZip = this.arraysEqual(header, this.MAGIC_NUMBERS.zip) ||
