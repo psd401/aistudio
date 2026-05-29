@@ -42,6 +42,17 @@ function sanitizeHTML(html: string): string {
   return sanitized;
 }
 
+interface XlsxSheetData {
+  name: unknown;
+  json: unknown[][];
+  rowCount: number;
+  columnCount: number;
+}
+
+interface XlsxContent {
+  sheets?: XlsxSheetData[];
+}
+
 export class OfficeProcessor implements DocumentProcessor {
   constructor(
     private documentType: 'docx' | 'xlsx' | 'pptx',
@@ -372,20 +383,22 @@ export class OfficeProcessor implements DocumentProcessor {
 
   // Sanitize a sheet name before interpolating into a Markdown heading.
   private static sanitizeSheetName(name: string): string {
-    return name.replace(/[\r\n|#`]/g, ' ').trim() || 'Sheet';
+    return name
+      .replace(/\\/g, '\\\\')
+      .replace(/[\r\n|#`]/g, ' ')
+      .trim() || 'Sheet';
   }
 
-  private convertXlsxToMarkdown(content: any): string {
+  private convertXlsxToMarkdown(content: XlsxContent): string {
     let markdown = '# Spreadsheet Data\n\n';
 
     if (content.sheets) {
-      content.sheets.forEach((sheet: any) => {
+      content.sheets.forEach((sheet: XlsxSheetData) => {
         const safeSheetName = OfficeProcessor.sanitizeSheetName(String(sheet.name ?? ''));
         markdown += `## ${safeSheetName}\n\n`;
 
         if (sheet.json && sheet.json.length > 0) {
-          // Convert JSON to markdown table
-          const rows = sheet.json as any[][];
+          const rows = sheet.json;
           if (rows.length > 0) {
             const headers = rows[0];
             markdown += '| ' + headers.map(OfficeProcessor.escapeMdTableCell).join(' | ') + ' |\n';
@@ -397,7 +410,7 @@ export class OfficeProcessor implements DocumentProcessor {
               ? allDataRows.slice(0, OfficeProcessor.MAX_ROWS_PER_SHEET)
               : allDataRows;
             markdown += dataRows
-              .map((row: any[]) => '| ' + row.map(OfficeProcessor.escapeMdTableCell).join(' | ') + ' |\n')
+              .map((row: unknown[]) => '| ' + row.map(OfficeProcessor.escapeMdTableCell).join(' | ') + ' |\n')
               .join('');
 
             if (truncated) {
