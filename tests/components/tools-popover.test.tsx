@@ -157,6 +157,24 @@ describe('ToolsPopover — auto-enable web search', () => {
     })
   })
 
+  it('removes invalid tools when switching models and calls onToolsChange([]) when webSearch is not available', async () => {
+    // Covers the finalTools = validEnabledTools = [] path (strip fires but supportsWebSearch is false)
+    mockGetAvailableTools.mockResolvedValue([])
+    const onToolsChange = jest.fn()
+
+    render(
+      <ToolsPopover
+        selectedModel={makeModel('limited-model')}
+        enabledTools={['codeInterpreter']}
+        onToolsChange={onToolsChange}
+      />
+    )
+
+    await waitFor(() => {
+      expect(onToolsChange).toHaveBeenCalledWith([])
+    })
+  })
+
   it('does NOT auto-enable webSearch when disableAutoEnable is true', async () => {
     // Prompt library forms pass disableAutoEnable to prevent implicit tool persistence
     mockGetAvailableTools.mockResolvedValue([WEB_SEARCH_TOOL])
