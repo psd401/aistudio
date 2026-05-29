@@ -5,7 +5,7 @@
  * mediaType for type:"file" image parts produced by toCreateMessage, which
  * hardcodes "image/png" regardless of the actual image format.
  */
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect, jest } from '@jest/globals';
 
 // Auto-mock the AWS SDK S3 client so we don't need real credentials.
 // No factory needed — the tests exercise the data-URL mediaType-correction
