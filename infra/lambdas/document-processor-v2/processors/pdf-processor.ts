@@ -8,6 +8,10 @@ import pdfParse from 'pdf-parse';
 import { createLambdaLogger } from '../utils/lambda-logger';
 import { sanitizeTextWithMetrics } from '../../../../lib/utils/text-sanitizer';
 
+// Single source of truth for the scanned-PDF sentinel so the throw and the
+// catch in process() stay in sync, and downstream pattern-matchers remain stable.
+const SCANNED_PDF_SENTINEL = 'Scanned PDF detected - no text content extractable, may need OCR';
+
 export class PDFProcessor implements DocumentProcessor {
   constructor(private config: ProcessorConfig) {}
 
@@ -38,7 +42,7 @@ export class PDFProcessor implements DocumentProcessor {
       if (!extractionResult.text || extractionResult.text.trim().length === 0) {
         // Emit a distinct message so client-side SAFE_ERROR_MAP can surface
         // a user-friendly explanation rather than a generic "Server processing failed".
-        throw new Error('Scanned PDF detected - no text content extractable, may need OCR');
+        throw new Error(SCANNED_PDF_SENTINEL);
       }
 
       await onProgress?.('post_processing', 70);
@@ -79,10 +83,7 @@ export class PDFProcessor implements DocumentProcessor {
     } catch (error) {
       // Rethrow the scanned-PDF sentinel so the caller can store it verbatim
       // in the job record; the generic catch is only for unexpected failures.
-      if (error instanceof Error && (
-        error.message.includes('may need OCR') ||
-        error.message.includes('Scanned PDF')
-      )) {
+      if (error instanceof Error && error.message === SCANNED_PDF_SENTINEL) {
         throw error;
       }
       logger.error('Error during PDF post-processing', error);

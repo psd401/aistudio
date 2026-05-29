@@ -497,7 +497,7 @@ Please try re-uploading. If the issue persists, contact support.`
       const scanBytes = new Uint8Array(buffer, 0, scanLength);
       const PDF_SIGNATURE = [0x25, 0x50, 0x44, 0x46]; // %PDF
       const pdfOffset = HybridDocumentAdapter.findByteSequence(scanBytes, PDF_SIGNATURE);
-      if (pdfOffset !== -1) {
+      if (pdfOffset !== -1 && ext === 'pdf') {
         log.debug('PDF magic bytes found', { fileName: file.name, offset: pdfOffset });
         return true;
       }

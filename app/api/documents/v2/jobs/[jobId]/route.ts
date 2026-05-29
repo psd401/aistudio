@@ -15,7 +15,7 @@ function sanitizeJobError(errorMessage: string | undefined | null): string | und
   for (const { pattern, message } of JOB_ERROR_MAP) {
     if (lower.includes(pattern)) return message;
   }
-  return errorMessage;
+  return 'Document processing failed. Please try again.';
 }
 
 export async function GET(

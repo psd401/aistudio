@@ -146,31 +146,17 @@ export class FileTypeDetector {
       };
     }
 
-    // PDF spec (ISO 32000-1:2008 §7.5.2) allows the %PDF header anywhere
-    // within the first 1024 bytes, so scan rather than checking byte 0 only.
-    const scanLength = Math.min(buffer.length, 1024);
-    const pdfSig = Buffer.from(this.MAGIC_NUMBERS.pdf);
-    const pdfOffset = buffer.indexOf(pdfSig, 0);
-    if (pdfOffset !== -1 && pdfOffset < scanLength) {
-      return {
-        detectedType: 'pdf',
-        confidence: 'high',
-        method: 'magic-number',
-        reason: pdfOffset === 0
-          ? 'PDF magic number detected (%PDF)'
-          : `PDF magic number detected (%PDF) at byte offset ${pdfOffset}`
-      };
-    }
-
     const header = Array.from(buffer.slice(0, 4));
 
-    // Check for ZIP signatures (Office files)
+    // Check ZIP-based Office formats first (signature is always at byte 0).
+    // This MUST precede the relaxed PDF scan: OOXML files (ZIP at byte 0) can
+    // contain literal "%PDF" early in the archive (e.g. embedded PDF objects),
+    // which would otherwise be misclassified as PDF before ZIP is inspected.
     const isZip = this.arraysEqual(header, this.MAGIC_NUMBERS.zip) ||
                   this.arraysEqual(header, this.MAGIC_NUMBERS.zipEmpty) ||
                   this.arraysEqual(header, this.MAGIC_NUMBERS.zipSpanned);
 
     if (isZip) {
-      // For ZIP files, we need to inspect content to determine Office type
       const officeType = this.detectOfficeTypeFromZip(buffer, fileName);
       if (officeType !== 'unknown') {
         return {
@@ -186,6 +172,23 @@ export class FileTypeDetector {
         confidence: 'medium',
         method: 'magic-number',
         reason: 'ZIP archive detected but unable to determine Office document type'
+      };
+    }
+
+    // PDF spec (ISO 32000-1:2008 §7.5.2) allows %PDF anywhere in the first
+    // 1024 bytes.  Slice to scanLength before calling indexOf so the search
+    // is bounded — avoids scanning hundreds of MB for large non-PDF files.
+    const scanLength = Math.min(buffer.length, 1024);
+    const pdfSig = Buffer.from(this.MAGIC_NUMBERS.pdf);
+    const pdfOffset = buffer.subarray(0, scanLength).indexOf(pdfSig);
+    if (pdfOffset !== -1) {
+      return {
+        detectedType: 'pdf',
+        confidence: 'high',
+        method: 'magic-number',
+        reason: pdfOffset === 0
+          ? 'PDF magic number detected (%PDF)'
+          : `PDF magic number detected (%PDF) at byte offset ${pdfOffset}`
       };
     }
 
