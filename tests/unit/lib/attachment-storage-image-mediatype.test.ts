@@ -5,15 +5,20 @@
  * mediaType for type:"file" image parts produced by toCreateMessage, which
  * hardcodes "image/png" regardless of the actual image format.
  */
-import { describe, it, expect } from '@jest/globals';
+import { describe, it, expect, jest } from '@jest/globals';
+
+// Extract mock functions with mock* prefix — required by babel-plugin-jest-hoist
+// so they can be referenced inside jest.mock() factory functions.
+const mockS3Send = jest.fn().mockResolvedValue({});
+const mockS3Client = jest.fn().mockImplementation(() => ({ send: mockS3Send }));
+const mockPutObjectCommand = jest.fn();
+const mockGetObjectCommand = jest.fn();
 
 // Mock the AWS SDK S3 client so we don't need real credentials
 jest.mock('@aws-sdk/client-s3', () => ({
-  S3Client: jest.fn().mockImplementation(() => ({
-    send: jest.fn().mockResolvedValue({}),
-  })),
-  PutObjectCommand: jest.fn(),
-  GetObjectCommand: jest.fn(),
+  S3Client: mockS3Client,
+  PutObjectCommand: mockPutObjectCommand,
+  GetObjectCommand: mockGetObjectCommand,
 }));
 
 // Must set env before importing the module
