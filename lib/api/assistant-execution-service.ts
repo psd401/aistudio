@@ -919,6 +919,15 @@ function substituteVariables(
   allPrompts: ChainPrompt[],
   currentPromptPosition: number
 ): string {
+  // Reject oversized raw content before decode — decoded text is always shorter, but
+  // we guard the raw length too so the limit cannot be bypassed via escape sequences.
+  if (content.length > MAX_PROMPT_CONTENT_SIZE) {
+    throw ErrorFactories.validationFailed([{
+      field: "content",
+      message: `Prompt content exceeds maximum size of ${MAX_PROMPT_CONTENT_SIZE} characters`,
+    }])
+  }
+
   // Decode MDXEditor Markdown serializer escapes (\$ \{ \} \_ &#x24; &#36;) so the
   // variable-substitution regex can match ${...} placeholders in content that was saved
   // before this fix or re-encoded by the editor after a save.
