@@ -20,7 +20,7 @@ export function sanitizeOptionLabel(label: string): string {
     result = result.replace(/<\/?[a-zA-Z][a-zA-Z0-9]*\b[^>]*>/g, '')
   } while (result !== prev)
   return result
-    .replace(/(?:javascript|vbscript|data):/gi, '')
+    .replace(/(?:javascript|vbscript):/gi, '')
     .replace(/\bon(?:click|dblclick|mouse(?:down|up|over|move|out|enter|leave)|key(?:down|up|press)|load|unload|error|focus|blur|change|submit|reset|select|input|scroll|resize|drag(?:start|end|enter|leave|over|drop)?|touch(?:start|end|move|cancel)?|pointer(?:down|up|move|cancel|over|out|enter|leave)?)\s*=\s*\S*/gi, '')
     .trim()
 }

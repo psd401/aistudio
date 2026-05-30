@@ -87,8 +87,6 @@ function sanitizeImagePath(imagePath: string | null): string | null {
   return sanitized
 }
 
-export { sanitizeOptionLabel }
-
 interface AssistantArchitectStreamingProps {
   tool: AssistantArchitectWithRelations
 }

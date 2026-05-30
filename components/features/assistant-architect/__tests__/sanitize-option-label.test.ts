@@ -133,6 +133,10 @@ describe('sanitizeOptionLabel', () => {
     it('preserves labels with angle brackets that are not HTML tags', () => {
       expect(sanitizeOptionLabel('if a < b and c > d')).toBe('if a < b and c > d')
     })
+
+    it('preserves "data:" in plain text (not a dangerous URI scheme in React text nodes)', () => {
+      expect(sanitizeOptionLabel('Raw Data: export format')).toBe('Raw Data: export format')
+    })
   })
 
   describe('handles edge cases', () => {
