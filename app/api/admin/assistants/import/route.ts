@@ -127,7 +127,7 @@ export async function POST(request: NextRequest) {
             modelId,
             position: prompt.position,
             parallelGroup: prompt.parallel_group,
-            inputMapping: prompt.input_mapping as Record<string, string> || null,
+            inputMapping: null, // Don't import source-system prompt IDs — they reference IDs that don't exist in this system and would silently resolve to wrong prompts
             timeoutSeconds: prompt.timeout_seconds,
           })
         }

@@ -1,4 +1,5 @@
 import { describe, it, expect } from '@jest/globals'
+import { decodeMdxEditorEscapes } from '@/lib/utils/text-sanitizer'
 
 /**
  * Unit tests for variable substitution in assistant-execution-service.ts
@@ -238,5 +239,92 @@ describe('Variable Substitution Logic (substituteVariables)', () => {
       expect(matches[0][1]).toBe("start")
       expect(matches[1][1]).toBe("end")
     })
+  })
+})
+
+describe('decodeMdxEditorEscapes', () => {
+  it('decodes backslash-escaped dollar sign', () => {
+    expect(decodeMdxEditorEscapes('\\${student_name}')).toBe('${student_name}')
+  })
+
+  it('decodes backslash-escaped curly braces', () => {
+    expect(decodeMdxEditorEscapes('$\\{name\\}')).toBe('${name}')
+  })
+
+  it('decodes backslash-escaped underscore', () => {
+    expect(decodeMdxEditorEscapes('${student\\_name}')).toBe('${student_name}')
+  })
+
+  it('decodes HTML entity &#x24; for dollar sign', () => {
+    expect(decodeMdxEditorEscapes('&#x24;{student_name}')).toBe('${student_name}')
+  })
+
+  it('decodes HTML entity &#36; for dollar sign', () => {
+    expect(decodeMdxEditorEscapes('&#36;{student_name}')).toBe('${student_name}')
+  })
+
+  it('decodes fully escaped MDXEditor output so regex matches', () => {
+    const escaped = '\\$\\{student\\_name\\}'
+    const decoded = decodeMdxEditorEscapes(escaped)
+    const regex = /\${([\w-]+)}|{{([\w-]+)}}/g
+    const matches = Array.from(decoded.matchAll(regex))
+    expect(matches).toHaveLength(1)
+    expect(matches[0][1]).toBe('student_name')
+  })
+
+  it('is idempotent — decoding already-decoded content is a no-op', () => {
+    const clean = '${student_name}'
+    expect(decodeMdxEditorEscapes(clean)).toBe(clean)
+  })
+
+  it('handles empty string', () => {
+    expect(decodeMdxEditorEscapes('')).toBe('')
+  })
+
+  it('handles content with no escapes', () => {
+    const plain = 'Hello world, no variables here.'
+    expect(decodeMdxEditorEscapes(plain)).toBe(plain)
+  })
+
+  it('decodes multiple escaped variables in a single pass', () => {
+    const escaped = '\\${first} and \\${second}'
+    const decoded = decodeMdxEditorEscapes(escaped)
+    expect(decoded).toBe('${first} and ${second}')
+    const regex = /\${([\w-]+)}|{{([\w-]+)}}/g
+    expect(Array.from(decoded.matchAll(regex))).toHaveLength(2)
+  })
+})
+
+describe('Import stale inputMapping safety', () => {
+  it('documents that Path 1 inputMapping can resolve to wrong prompt in destination system', () => {
+    // When an assistant is imported from system A to system B:
+    // - Source: prompt with ID 5 = "Intro Prompt" (inputMapping references prompt_5.output)
+    // - Destination: prompt with ID 5 = some COMPLETELY DIFFERENT prompt in another assistant
+    // Path 1 would call previousOutputs.get(5) and return the wrong prompt's output.
+    // Fix: import route sets inputMapping: null so Path 1 is never invoked for imports.
+
+    const staleMapping = { result: 'prompt_5.output' }
+    // Simulating destination system: prompt ID 5 belongs to a different assistant
+    const previousOutputs = new Map([[5, 'WRONG OUTPUT from unrelated prompt']])
+
+    const promptMatch = staleMapping.result.match(/^prompt_(\d+)\.output$/)
+    expect(promptMatch).not.toBeNull()
+
+    const promptId = Number.parseInt(promptMatch![1], 10)
+    const output = previousOutputs.get(promptId)
+    // This demonstrates the bug: stale ID 5 resolves to the WRONG prompt's output
+    expect(output).toBe('WRONG OUTPUT from unrelated prompt')
+  })
+
+  it('documents that null inputMapping safely falls through to Path 2 resolution', () => {
+    const mapping: Record<string, string> = {}  // null inputMapping means empty object in runtime
+    const varName = 'student_name'
+
+    // Path 1 is skipped when mapping[varName] is falsy
+    expect(mapping[varName]).toBeFalsy()
+
+    // Path 2 correctly resolves from user inputs
+    const inputs = { student_name: 'Alice' }
+    expect(inputs[varName as keyof typeof inputs]).toBe('Alice')
   })
 })

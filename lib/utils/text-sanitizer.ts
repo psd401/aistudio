@@ -228,6 +228,35 @@ export function decodeHtmlEntities(text: string): string {
 }
 
 /**
+ * Decodes MDXEditor's Markdown serialization escapes in a single-pass replacement.
+ *
+ * MDXEditor (via its Lexical-based Markdown serializer) backslash-escapes characters
+ * that have special meaning in Markdown/MDX: \$ \{ \} \_ as well as occasionally
+ * HTML-encoding the dollar sign as &#x24; or &#36;. Without decoding, the
+ * variable-substitution regex (/\${[\w-]+}/g) cannot match stored prompt content.
+ *
+ * Uses a single regex pass to avoid double-decoding edge cases.
+ * Idempotent: calling it on already-decoded content is safe.
+ */
+export function decodeMdxEditorEscapes(text: string): string {
+  if (typeof text !== 'string') return '';
+  return text.replace(
+    /&#x24;|&#36;|\\\$|\\\{|\\\}|\\_/g,
+    (match) => {
+      switch (match) {
+        case '&#x24;': return '$';
+        case '&#36;': return '$';
+        case '\\$': return '$';
+        case '\\{': return '{';
+        case '\\}': return '}';
+        case '\\_': return '_';
+        default: return match;
+      }
+    }
+  );
+}
+
+/**
  * Recursively decodes HTML entities in all string values within an object.
  * Traverses plain objects and arrays, returning a new structure (no mutation).
  * Only decodes string values — object keys and non-string primitives are unchanged.

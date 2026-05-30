@@ -22,6 +22,7 @@ import { createRepositoryTools } from "@/lib/tools/repository-tools"
 import type { StreamRequest } from "@/lib/streaming/types"
 import { ContentSafetyBlockedError } from "@/lib/streaming/types"
 import { storeExecutionEvent } from "@/lib/assistant-architect/event-storage"
+import { decodeMdxEditorEscapes } from "@/lib/utils/text-sanitizer"
 
 // ============================================
 // Constants
@@ -918,7 +919,12 @@ function substituteVariables(
   allPrompts: ChainPrompt[],
   currentPromptPosition: number
 ): string {
-  if (content.length > MAX_PROMPT_CONTENT_SIZE) {
+  // Decode MDXEditor Markdown serializer escapes (\$ \{ \} \_ &#x24; &#36;) so the
+  // variable-substitution regex can match ${...} placeholders in content that was saved
+  // before this fix or re-encoded by the editor after a save.
+  const decoded = decodeMdxEditorEscapes(content)
+
+  if (decoded.length > MAX_PROMPT_CONTENT_SIZE) {
     throw ErrorFactories.validationFailed([{
       field: "content",
       message: `Prompt content exceeds maximum size of ${MAX_PROMPT_CONTENT_SIZE} characters`,
@@ -926,7 +932,7 @@ function substituteVariables(
   }
 
   // Updated regex: [\w-]+ to match hyphenated slugified names (regression from #685)
-  const placeholderMatches = content.match(/\${([\w-]+)}|{{([\w-]+)}}/g)
+  const placeholderMatches = decoded.match(/\${([\w-]+)}|{{([\w-]+)}}/g)
   const placeholderCount = placeholderMatches ? placeholderMatches.length : 0
 
   if (placeholderCount > MAX_VARIABLE_REPLACEMENTS) {
@@ -957,7 +963,7 @@ function substituteVariables(
     }
   }
 
-  return content.replace(/\${([\w-]+)}|{{([\w-]+)}}/g, (match, dollarVar, braceVar) => {
+  return decoded.replace(/\${([\w-]+)}|{{([\w-]+)}}/g, (match, dollarVar, braceVar) => {
     const varName = dollarVar || braceVar
 
     // Path 1: Explicit inputMapping (backward compatible)
