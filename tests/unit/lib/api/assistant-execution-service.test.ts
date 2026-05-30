@@ -263,6 +263,23 @@ describe('decodeMdxEditorEscapes', () => {
     expect(decodeMdxEditorEscapes('&#36;{student_name}')).toBe('${student_name}')
   })
 
+  it('decodes doubly-encoded HTML entity &amp;#x24; for dollar sign', () => {
+    expect(decodeMdxEditorEscapes('&amp;#x24;{student_name}')).toBe('${student_name}')
+  })
+
+  it('decodes doubly-encoded HTML entity &amp;#36; for dollar sign', () => {
+    expect(decodeMdxEditorEscapes('&amp;#36;{student_name}')).toBe('${student_name}')
+  })
+
+  it('doubly-encoded form is matchable by variable-substitution regex after decode', () => {
+    const escaped = '&amp;#x24;{student_name}'
+    const decoded = decodeMdxEditorEscapes(escaped)
+    const regex = /\${([\w-]+)}|{{([\w-]+)}}/g
+    const matches = Array.from(decoded.matchAll(regex))
+    expect(matches).toHaveLength(1)
+    expect(matches[0][1]).toBe('student_name')
+  })
+
   it('decodes fully escaped MDXEditor output so regex matches', () => {
     const escaped = '\\$\\{student\\_name\\}'
     const decoded = decodeMdxEditorEscapes(escaped)

@@ -919,8 +919,6 @@ function substituteVariables(
   allPrompts: ChainPrompt[],
   currentPromptPosition: number
 ): string {
-  // Reject oversized raw content before decode — decoded text is always shorter, but
-  // we guard the raw length too so the limit cannot be bypassed via escape sequences.
   if (content.length > MAX_PROMPT_CONTENT_SIZE) {
     throw ErrorFactories.validationFailed([{
       field: "content",
@@ -928,17 +926,8 @@ function substituteVariables(
     }])
   }
 
-  // Decode MDXEditor Markdown serializer escapes (\$ \{ \} \_ &#x24; &#36;) so the
-  // variable-substitution regex can match ${...} placeholders in content that was saved
-  // before this fix or re-encoded by the editor after a save.
+  // Decode MDXEditor escapes (\$ \{ \_ &#x24; &amp;#x24;) so the variable regex can match stored content.
   const decoded = decodeMdxEditorEscapes(content)
-
-  if (decoded.length > MAX_PROMPT_CONTENT_SIZE) {
-    throw ErrorFactories.validationFailed([{
-      field: "content",
-      message: `Prompt content exceeds maximum size of ${MAX_PROMPT_CONTENT_SIZE} characters`,
-    }])
-  }
 
   // Updated regex: [\w-]+ to match hyphenated slugified names (regression from #685)
   const placeholderMatches = decoded.match(/\${([\w-]+)}|{{([\w-]+)}}/g)
