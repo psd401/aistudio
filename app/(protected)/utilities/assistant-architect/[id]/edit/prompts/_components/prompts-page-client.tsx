@@ -648,7 +648,7 @@ function usePromptHandlers({
         repositoryIds: form.useExternalKnowledge && form.selectedRepositoryIds.length > 0
           ? form.selectedRepositoryIds.filter(id => id !== undefined && id !== null) : [],
         enabledTools: form.enabledTools,
-        inputMapping: null, // Clear any stale source-system prompt ID mappings (e.g. from import)
+        inputMapping: null, // inputMapping only holds source-system auto-increment IDs (prompt_N.output refs); no UI path creates it, so clearing on every save is safe
       })
       if (result.isSuccess) {
         toast.success("Prompt updated successfully")
