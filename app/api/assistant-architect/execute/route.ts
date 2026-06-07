@@ -1329,7 +1329,7 @@ function substituteVariables(
   const decodedContent = decodeMdxEditorEscapes(content);
 
   // Count variable placeholders to prevent DoS via excessive replacements
-  const placeholderMatches = decodedContent.match(/\${(\w+)}|{{(\w+)}}/g);
+  const placeholderMatches = decodedContent.match(/\${([\w-]+)}|{{([\w-]+)}}/g);
   const placeholderCount = placeholderMatches ? placeholderMatches.length : 0;
 
   if (placeholderCount > MAX_VARIABLE_REPLACEMENTS) {
@@ -1339,8 +1339,8 @@ function substituteVariables(
     }]);
   }
 
-  // Match both ${variable} and {{variable}} patterns
-  return decodedContent.replace(/\${(\w+)}|{{(\w+)}}/g, (match, dollarVar, braceVar) => {
+  // Match both ${variable} and {{variable}} patterns ([\w-]+ matches hyphenated slugs like ${student-name})
+  return decodedContent.replace(/\${([\w-]+)}|{{([\w-]+)}}/g, (match, dollarVar, braceVar) => {
     const varName = dollarVar || braceVar;
 
     // 1. Check if there's an input mapping for this variable

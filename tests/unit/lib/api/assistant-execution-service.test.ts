@@ -312,6 +312,32 @@ describe('decodeMdxEditorEscapes', () => {
   })
 })
 
+describe('decode + substitute integration', () => {
+  const substitute = (content: string, vars: Record<string, string>): string => {
+    const decoded = decodeMdxEditorEscapes(content)
+    return decoded.replace(/\${([\w-]+)}|{{([\w-]+)}}/g, (match, dollarVar, braceVar) => {
+      const varName = dollarVar || braceVar
+      return varName in vars ? vars[varName] : match
+    })
+  }
+
+  it('resolves a backslash-escaped variable after decode', () => {
+    expect(substitute('Hello \\${name}!', { name: 'Alice' })).toBe('Hello Alice!')
+  })
+
+  it('resolves an HTML-entity-encoded variable after decode', () => {
+    expect(substitute('&#x24;{student_name}', { student_name: 'Bob' })).toBe('Bob')
+  })
+
+  it('resolves a hyphenated variable name', () => {
+    expect(substitute('${student-name}', { 'student-name': 'Carol' })).toBe('Carol')
+  })
+
+  it('leaves unmatched variables unchanged', () => {
+    expect(substitute('${name}', {})).toBe('${name}')
+  })
+})
+
 describe('Import stale inputMapping safety', () => {
   it('documents that Path 1 inputMapping can resolve to wrong prompt in destination system', () => {
     // When an assistant is imported from system A to system B:
