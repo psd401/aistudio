@@ -58,23 +58,31 @@ function safeParseJsonArray(value: unknown, fallback: string[] = []): string[] {
 export function useFilteredModels({
   models,
   requiredCapabilities = [],
+  anyOfCapabilities = [],
   allowedRoles = [],
   userRoles = [],
   searchQuery = "",
   hideRoleRestricted = false,
   hideCapabilityMissing = false
 }: UseFilteredModelsOptions): UseFilteredModelsResult {
-  
+
   const result = useMemo(() => {
     let filteredModels: FilteredModel[] = models.map(model => {
       // Safely parse capabilities
       const modelCapabilities = safeParseJsonArray(model.capabilities, [])
 
-      // Check capability requirements
+      // Check required capabilities (AND logic — all must be present)
       const missingCapabilities = requiredCapabilities.filter(
         cap => !modelCapabilities.includes(cap)
       )
-      const matchesCapabilities = missingCapabilities.length === 0
+      const matchesRequiredCapabilities = missingCapabilities.length === 0
+
+      // Check anyOf capabilities (OR logic — at least one must be present)
+      const matchesAnyOfCapabilities =
+        anyOfCapabilities.length === 0 ||
+        anyOfCapabilities.some(cap => modelCapabilities.includes(cap))
+
+      const matchesCapabilities = matchesRequiredCapabilities && matchesAnyOfCapabilities
 
       // Safely parse allowed roles for the model
       const modelAllowedRoles = safeParseJsonArray(model.allowedRoles, [])
@@ -99,13 +107,21 @@ export function useFilteredModels({
         accessDeniedReason = `Your role doesn't have access to this feature`
       }
 
+      // For UI feedback, report both AND-missing and anyOf-missing capabilities
+      const allMissingCapabilities = [
+        ...missingCapabilities,
+        ...(anyOfCapabilities.length > 0 && !matchesAnyOfCapabilities
+          ? [`one of: ${anyOfCapabilities.join(', ')}`]
+          : [])
+      ]
+
       return {
         ...model,
         isAccessible,
         accessDeniedReason,
         matchesCapabilities,
         hasRoleAccess,
-        missingCapabilities: missingCapabilities.length > 0 ? missingCapabilities : undefined
+        missingCapabilities: allMissingCapabilities.length > 0 ? allMissingCapabilities : undefined
       } as FilteredModel
     })
 
@@ -161,7 +177,7 @@ export function useFilteredModels({
       totalCount,
       accessibleCount
     }
-  }, [models, requiredCapabilities, allowedRoles, userRoles, searchQuery, hideRoleRestricted, hideCapabilityMissing])
+  }, [models, requiredCapabilities, anyOfCapabilities, allowedRoles, userRoles, searchQuery, hideRoleRestricted, hideCapabilityMissing])
 
   return result
 }

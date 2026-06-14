@@ -11,21 +11,38 @@ import type { DualStreamEvent } from "@/lib/compare/dual-stream-merger"
 
 const log = createLogger({ module: 'model-compare' })
 
-// Note: This component now uses native streaming instead of polling
-// The backend streams both model responses in parallel via Server-Sent Events
+/** Detect whether a model has the image_generation capability */
+function isImageModel(model: { capabilities?: string | string[] | null } | null): boolean {
+  if (!model?.capabilities) return false
+  try {
+    const caps = typeof model.capabilities === 'string'
+      ? JSON.parse(model.capabilities)
+      : model.capabilities
+    return Array.isArray(caps) && caps.includes('image_generation')
+  } catch {
+    return false
+  }
+}
+
+// Note: This component uses native streaming via Server-Sent Events
+// Both text and image generation models are supported
 
 export function ModelCompare() {
-  // Use shared model management hooks
+  // Use shared model management hooks (prefer chat models for auto-selection)
   const model1State = useModelsWithPersistence('compareModel1', ['chat'])
   const model2State = useModelsWithPersistence('compareModel2', ['chat'])
 
   const [prompt, setPrompt] = useState("")
   const [model1Response, setModel1Response] = useState("")
   const [model2Response, setModel2Response] = useState("")
+  const [model1ImageUrl, setModel1ImageUrl] = useState<string | undefined>()
+  const [model2ImageUrl, setModel2ImageUrl] = useState<string | undefined>()
   const [isStreaming, setIsStreaming] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
   const [model1Complete, setModel1Complete] = useState(false)
   const [model2Complete, setModel2Complete] = useState(false)
+  const [model1Error, setModel1Error] = useState<string | undefined>()
+  const [model2Error, setModel2Error] = useState<string | undefined>()
   const { toast } = useToast()
 
   // Track active stream reader for cleanup
@@ -62,6 +79,10 @@ export function ModelCompare() {
     // Clear previous responses and start processing
     setModel1Response("")
     setModel2Response("")
+    setModel1ImageUrl(undefined)
+    setModel2ImageUrl(undefined)
+    setModel1Error(undefined)
+    setModel2Error(undefined)
     setModel1Complete(false)
     setModel2Complete(false)
     setIsLoading(true)
@@ -143,11 +164,11 @@ export function ModelCompare() {
                 if (data.modelId === 'model1') {
                   if (data.type === 'content' && data.chunk) {
                     setModel1Response(prev => prev + data.chunk)
+                  } else if (data.type === 'image' && data.imageUrl) {
+                    setModel1ImageUrl(data.imageUrl)
                   } else if (data.type === 'finish') {
                     setModel1Complete(true)
                   } else if (data.type === 'warning') {
-                    // Mark complete defensively — warning is always followed by finish,
-                    // but don't rely on that sequence in case the finish is dropped.
                     setModel1Complete(true)
                     toast({
                       title: `${model1State.selectedModel?.name ?? 'First model'} unavailable`,
@@ -155,6 +176,7 @@ export function ModelCompare() {
                     })
                   } else if (data.type === 'error') {
                     setModel1Complete(true)
+                    setModel1Error(data.error)
                     toast({
                       title: `${model1State.selectedModel?.name ?? 'First model'} failed`,
                       description: data.error ?? "Failed to generate response",
@@ -164,11 +186,11 @@ export function ModelCompare() {
                 } else if (data.modelId === 'model2') {
                   if (data.type === 'content' && data.chunk) {
                     setModel2Response(prev => prev + data.chunk)
+                  } else if (data.type === 'image' && data.imageUrl) {
+                    setModel2ImageUrl(data.imageUrl)
                   } else if (data.type === 'finish') {
                     setModel2Complete(true)
                   } else if (data.type === 'warning') {
-                    // Mark complete defensively — warning is always followed by finish,
-                    // but don't rely on that sequence in case the finish is dropped.
                     setModel2Complete(true)
                     toast({
                       title: `${model2State.selectedModel?.name ?? 'Second model'} unavailable`,
@@ -176,6 +198,7 @@ export function ModelCompare() {
                     })
                   } else if (data.type === 'error') {
                     setModel2Complete(true)
+                    setModel2Error(data.error)
                     toast({
                       title: `${model2State.selectedModel?.name ?? 'Second model'} failed`,
                       description: data.error ?? "Failed to generate response",
@@ -231,6 +254,10 @@ export function ModelCompare() {
 
     setModel1Response("")
     setModel2Response("")
+    setModel1ImageUrl(undefined)
+    setModel2ImageUrl(undefined)
+    setModel1Error(undefined)
+    setModel2Error(undefined)
     setPrompt("")
     setIsStreaming(false)
     setIsLoading(false)
@@ -249,10 +276,6 @@ export function ModelCompare() {
 
     setIsStreaming(false)
     setIsLoading(false)
-    // Reset to false so the next comparison starts clean. The defensive
-    // setModel1/2Complete(true) at the end of the stream loop only runs
-    // on the natural-completion path — it won't fire here because
-    // reader.cancel() above breaks the while(true) loop.
     setModel1Complete(false)
     setModel2Complete(false)
   }, [])
@@ -267,6 +290,12 @@ export function ModelCompare() {
       }
     }
   }, [])
+
+  const hasResponses =
+    model1Response.length > 0 ||
+    model2Response.length > 0 ||
+    !!model1ImageUrl ||
+    !!model2ImageUrl
 
   return (
     <div className="flex h-full flex-col">
@@ -291,7 +320,7 @@ export function ModelCompare() {
           onSubmit={handleSubmit}
           isLoading={isLoading}
           onNewComparison={handleNewComparison}
-          hasResponses={model1Response.length > 0 || model2Response.length > 0}
+          hasResponses={hasResponses}
         />
 
         <div className="flex-1 overflow-hidden">
@@ -299,14 +328,18 @@ export function ModelCompare() {
             model1={{
               model: model1State.selectedModel,
               response: model1Response,
+              imageUrl: model1ImageUrl,
+              isImageModel: isImageModel(model1State.selectedModel),
               status: isStreaming && !model1Complete ? 'streaming' : 'ready',
-              error: undefined
+              error: model1Error
             }}
             model2={{
               model: model2State.selectedModel,
               response: model2Response,
+              imageUrl: model2ImageUrl,
+              isImageModel: isImageModel(model2State.selectedModel),
               status: isStreaming && !model2Complete ? 'streaming' : 'ready',
-              error: undefined
+              error: model2Error
             }}
             onStopModel1={handleStopStreaming}
             onStopModel2={handleStopStreaming}
