@@ -263,6 +263,23 @@ describe('normalizeMultiStepMessages', () => {
     expect(normalizeMultiStepMessages([])).toEqual([]);
   });
 
+  it('does NOT split when parts use native tool-call format (no state field)', () => {
+    // Native AI SDK tool-call parts (type: 'tool-call', no `state` field) must not be
+    // mistaken for static-format resolved tool parts. A tool literally named "call"
+    // also produces type: 'tool-call' in static format BUT carries a `state` field —
+    // the discriminator is `'state' in p`, not `p.type !== 'tool-call'`.
+    const messages = [
+      makeMsg('a1', 'assistant', [
+        { type: 'tool-call', toolCallId: 'tc1', toolName: 'query_db', args: {} }, // native, no state
+        { type: 'text', text: 'calling tool...' },
+      ]),
+    ];
+
+    const result = normalizeMultiStepMessages(messages as UIMessage[]);
+    // No split because native 'tool-call' parts have no `state` field
+    expect(result).toHaveLength(1);
+  });
+
   it('gives split text message a distinct ID to avoid key conflicts', () => {
     const messages = [
       makeMsg('msg-abc', 'assistant', [

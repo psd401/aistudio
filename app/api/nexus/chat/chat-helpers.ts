@@ -511,7 +511,7 @@ export async function saveConversationSteps(params: {
       .set({
         messageCount: sql`${nexusConversations.messageCount} + ${savedCount}`,
         totalTokens: sql`${nexusConversations.totalTokens} + ${usage?.totalTokens ?? 0}`,
-        lastMessageAt: new Date(baseTime.getTime() + (rowsToInsert[rowsToInsert.length - 1]?.stepIndex ?? 0)),
+        lastMessageAt: new Date(baseTime.getTime() + rowsToInsert[rowsToInsert.length - 1].stepIndex),
         updatedAt: baseTime,
       })
       .where(eq(nexusConversations.id, conversationId));

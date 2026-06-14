@@ -551,14 +551,15 @@ export function normalizeMultiStepMessages(messages: StreamRequest['messages']):
 
     const parts = msg.parts as AnyPart[];
     // At this point in the pipeline, messages have passed through convertContentToParts so
-    // tool parts use the static format type: 'tool-{toolName}' (e.g. 'tool-query_db').
-    // Exclude the literal string 'tool-call' (native AI SDK format) defensively —
-    // 'tool-call'.startsWith('tool-') is true, but native parts are unresolved and
-    // should never be split out as a separate turn.
+    // tool parts use the static format type: 'tool-{toolName}' and always carry a `state`
+    // field (e.g. 'tool-query_db' with state: 'output-available'). Native AI SDK parts
+    // use type: 'tool-call' and never have a `state` field. Using `'state' in p` as the
+    // discriminator is safer than `p.type !== 'tool-call'` because it handles tools named
+    // "call" correctly (their static format is also `type: 'tool-call'` but WITH state).
     const toolParts = parts.filter(p =>
       typeof p.type === 'string' &&
-      p.type !== 'tool-call' &&
-      (p.type as string).startsWith('tool-')
+      (p.type as string).startsWith('tool-') &&
+      'state' in p
     );
     const textParts = parts.filter(p => p.type === 'text');
 
