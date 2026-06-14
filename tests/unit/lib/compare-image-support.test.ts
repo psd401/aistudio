@@ -3,10 +3,21 @@
  *
  * Covers the new image event type in DualStreamEvent and the
  * mergeResponseGenerators function added for issue #939.
+ * Also validates URL safety checks for image events.
  */
 
 import { describe, it, expect } from '@jest/globals'
 import { mergeResponseGenerators, asyncGeneratorToStream, type DualStreamEvent } from '@/lib/compare/dual-stream-merger'
+
+/** Mirror of isSafeImageUrl from model-compare.tsx — tested independently */
+function isSafeImageUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === 'https:' && parsed.hostname.endsWith('.amazonaws.com')
+  } catch {
+    return false
+  }
+}
 
 // Helper: collect all bytes from a ReadableStream and decode as text
 async function collectStream(stream: ReadableStream<Uint8Array>): Promise<string> {
@@ -83,6 +94,31 @@ describe('DualStreamEvent - image type', () => {
     if (json.type === 'image') {
       expect(json.imageUrl).toBe('https://s3.example.com/images/abc123.png')
     }
+  })
+})
+
+describe('isSafeImageUrl — URL validation guard', () => {
+  it('accepts valid S3 HTTPS URLs', () => {
+    expect(isSafeImageUrl('https://my-bucket.s3.us-west-2.amazonaws.com/key.png?X-Amz-Signature=abc')).toBe(true)
+    expect(isSafeImageUrl('https://documents.s3.amazonaws.com/image.png')).toBe(true)
+  })
+
+  it('rejects javascript: URIs', () => {
+    expect(isSafeImageUrl('javascript:alert(1)')).toBe(false)
+  })
+
+  it('rejects http: (non-TLS) URLs', () => {
+    expect(isSafeImageUrl('http://my-bucket.s3.amazonaws.com/image.png')).toBe(false)
+  })
+
+  it('rejects non-S3 HTTPS URLs', () => {
+    expect(isSafeImageUrl('https://example.com/image.png')).toBe(false)
+    expect(isSafeImageUrl('https://evil.com/.amazonaws.com/image.png')).toBe(false)
+  })
+
+  it('rejects empty and malformed strings', () => {
+    expect(isSafeImageUrl('')).toBe(false)
+    expect(isSafeImageUrl('not-a-url')).toBe(false)
   })
 })
 

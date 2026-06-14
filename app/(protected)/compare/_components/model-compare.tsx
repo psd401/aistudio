@@ -24,6 +24,19 @@ function isImageModel(model: { capabilities?: string | string[] | null } | null)
   }
 }
 
+/**
+ * Validate that an imageUrl from an SSE event is a legitimate S3 HTTPS URL.
+ * Prevents javascript: URIs or http: URLs from being rendered in img/anchor tags.
+ */
+function isSafeImageUrl(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    return parsed.protocol === 'https:' && parsed.hostname.endsWith('.amazonaws.com')
+  } catch {
+    return false
+  }
+}
+
 // Note: This component uses native streaming via Server-Sent Events
 // Both text and image generation models are supported
 
@@ -165,7 +178,11 @@ export function ModelCompare() {
                   if (data.type === 'content' && data.chunk) {
                     setModel1Response(prev => prev + data.chunk)
                   } else if (data.type === 'image' && data.imageUrl) {
-                    setModel1ImageUrl(data.imageUrl)
+                    if (isSafeImageUrl(data.imageUrl)) {
+                      setModel1ImageUrl(data.imageUrl)
+                    } else {
+                      log.warn('Received unsafe imageUrl for model1, ignoring')
+                    }
                   } else if (data.type === 'finish') {
                     setModel1Complete(true)
                   } else if (data.type === 'warning') {
@@ -187,7 +204,11 @@ export function ModelCompare() {
                   if (data.type === 'content' && data.chunk) {
                     setModel2Response(prev => prev + data.chunk)
                   } else if (data.type === 'image' && data.imageUrl) {
-                    setModel2ImageUrl(data.imageUrl)
+                    if (isSafeImageUrl(data.imageUrl)) {
+                      setModel2ImageUrl(data.imageUrl)
+                    } else {
+                      log.warn('Received unsafe imageUrl for model2, ignoring')
+                    }
                   } else if (data.type === 'finish') {
                     setModel2Complete(true)
                   } else if (data.type === 'warning') {

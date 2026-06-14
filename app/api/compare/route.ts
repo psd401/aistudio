@@ -203,6 +203,23 @@ async function* createImageGenerator(
       });
     }
 
+    // Validate imageUrl is an HTTPS S3 URL before emitting to client.
+    // Guards against a compromised upstream provider returning a javascript: or
+    // http: URL that could be exploited when rendered in the browser.
+    const parsedUrl = (() => {
+      try { return new URL(result.imageUrl); } catch { return null; }
+    })();
+
+    if (!parsedUrl || parsedUrl.protocol !== 'https:' || !parsedUrl.hostname.endsWith('.amazonaws.com')) {
+      log.error(`Model ${slotNum} returned unexpected image URL origin, blocking emit`, {
+        comparisonId,
+        hostname: parsedUrl?.hostname ?? 'unparseable'
+      });
+      yield { modelId: modelSlot, type: 'error', error: 'Image generation failed. Please try again.' };
+      yield { modelId: modelSlot, type: 'finish', finishReason: 'error' };
+      return;
+    }
+
     yield { modelId: modelSlot, type: 'image', imageUrl: result.imageUrl };
     yield { modelId: modelSlot, type: 'finish', finishReason: 'stop' };
   } catch (error) {
