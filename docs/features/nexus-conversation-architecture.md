@@ -495,7 +495,7 @@ useEffect(() => {
 // The component doesn't remount, so useEffect only runs once
 ```
 
-### ❌ Pitfall 7: Consolidating multi-step MCP responses into a single DB row
+### ❌ Pitfall 6: Consolidating multi-step MCP responses into a single DB row
 
 When MCP connector tools are enabled, `streamText` runs with `maxSteps > 1`, producing multiple assistant→tool→assistant turns in one streaming call. Writing all steps into a single `nexus_messages` row causes `convertToModelMessages()` to produce consecutive user turns on reload, which Anthropic's API rejects.
 
@@ -511,7 +511,7 @@ await saveConversationSteps(conversationId, event.steps)
 
 Additionally, every tool-call part must carry `state: 'output-available'` and `input: Record<string,unknown>`. Without both fields the SDK emits `tool_use` with no paired `tool_result`, causing Anthropic to reject the next user turn. See `app/api/nexus/chat/chat-helpers.ts` and `docs/guides/silent-failure-patterns.md` for the full patterns.
 
-### ❌ Pitfall 6: Session object reference in useEffect deps
+### ❌ Pitfall 7: Session object reference in useEffect deps
 
 ```typescript
 // WRONG - new session object on every refetch triggers re-mount

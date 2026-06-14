@@ -470,7 +470,10 @@ export async function saveConversationSteps(params: {
     if (!hasToolCalls && !hasText) continue;
     const sanitizedContent = step.text ? sanitizeTextForDatabase(step.text) : '';
     const parts = buildAssistantParts(sanitizedContent, hasToolCalls ? step.toolCalls : undefined);
-    rowsToInsert.push({ sanitizedContent, parts, stepFinishReason, stepIndex: i, hasToolCalls, toolCallCount: step.toolCalls.length, hasText, isLastStep });
+    rowsToInsert.push({
+      sanitizedContent, parts, stepFinishReason, stepIndex: i,
+      hasToolCalls, toolCallCount: step.toolCalls.length, hasText, isLastStep,
+    });
   }
 
   if (rowsToInsert.length === 0) {
