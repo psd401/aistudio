@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 import { toast } from "sonner"
 import { createLogger } from "@/lib/client-logger"
 import { addChainPromptAction, deletePromptAction, updatePromptAction, getAssistantArchitectByIdAction, setPromptPositionsAction } from "@/actions/db/assistant-architect-actions"
+import { decodeMdxEditorEscapes } from "@/lib/utils/text-sanitizer"
 import { PlusIcon, Pencil, Trash2, Play, Globe, Code2, Image as ImageIcon } from "lucide-react"
 import {
   ReactFlow,
@@ -606,7 +607,7 @@ function usePromptHandlers({
       }
       const result = await addChainPromptAction(assistantId, {
         name: form.promptName,
-        content: form.promptContent,
+        content: decodeMdxEditorEscapes(form.promptContent),
         systemContext: form.systemContext || undefined,
         modelId: Number.parseInt(form.modelId),
         position: prompts.length,
@@ -641,12 +642,13 @@ function usePromptHandlers({
       }
       const result = await updatePromptAction(form.editingPrompt.id.toString(), {
         name: form.promptName,
-        content: form.promptContent,
+        content: decodeMdxEditorEscapes(form.promptContent),
         systemContext: form.systemContext || undefined,
         modelId: Number.parseInt(form.modelId),
         repositoryIds: form.useExternalKnowledge && form.selectedRepositoryIds.length > 0
           ? form.selectedRepositoryIds.filter(id => id !== undefined && id !== null) : [],
         enabledTools: form.enabledTools,
+        inputMapping: null, // inputMapping only holds source-system auto-increment IDs (prompt_N.output refs); no UI path creates it, so clearing on every save is safe
       })
       if (result.isSuccess) {
         toast.success("Prompt updated successfully")

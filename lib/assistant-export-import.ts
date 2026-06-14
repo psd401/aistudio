@@ -137,8 +137,15 @@ export function createExportFile(assistants: ExportedAssistant[]): ExportFormat 
   }
 }
 
+// Max values mirror the runtime limits in assistant-execution-service.ts
+const IMPORT_MAX_ASSISTANT_NAME_LENGTH = 255
+const IMPORT_MAX_PROMPT_CONTENT_LENGTH = 10_000_000
+const IMPORT_MAX_PROMPTS_PER_ASSISTANT = 20
+
 /**
- * Validates import file structure and version
+ * Validates import file structure, version, and per-field size limits.
+ * Size limits mirror the runtime guards in assistant-execution-service.ts so
+ * content that would be rejected at execution time is also rejected at import.
  */
 export function validateImportFile(data: unknown): { valid: boolean; error?: string } {
   if (!data || typeof data !== 'object' || data === null) {
@@ -166,8 +173,25 @@ export function validateImportFile(data: unknown): { valid: boolean; error?: str
       return { valid: false, error: "Invalid assistant: missing name" }
     }
 
+    if (assistant.name.length > IMPORT_MAX_ASSISTANT_NAME_LENGTH) {
+      return { valid: false, error: `Assistant name too long (max ${IMPORT_MAX_ASSISTANT_NAME_LENGTH} characters)` }
+    }
+
     if (!Array.isArray(assistant.prompts)) {
       return { valid: false, error: `Invalid assistant ${assistant.name}: missing prompts array` }
+    }
+
+    if ((assistant.prompts as unknown[]).length > IMPORT_MAX_PROMPTS_PER_ASSISTANT) {
+      return { valid: false, error: `Assistant ${assistant.name}: too many prompts (max ${IMPORT_MAX_PROMPTS_PER_ASSISTANT})` }
+    }
+
+    for (const prompt of assistant.prompts as Record<string, unknown>[]) {
+      if (typeof prompt.content === 'string' && prompt.content.length > IMPORT_MAX_PROMPT_CONTENT_LENGTH) {
+        return { valid: false, error: `Assistant ${assistant.name}: prompt content too large (max ${IMPORT_MAX_PROMPT_CONTENT_LENGTH} characters)` }
+      }
+      if (typeof prompt.system_context === 'string' && prompt.system_context.length > IMPORT_MAX_PROMPT_CONTENT_LENGTH) {
+        return { valid: false, error: `Assistant ${assistant.name}: prompt system_context too large (max ${IMPORT_MAX_PROMPT_CONTENT_LENGTH} characters)` }
+      }
     }
 
     if (!Array.isArray(assistant.input_fields)) {

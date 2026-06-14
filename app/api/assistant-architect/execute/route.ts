@@ -15,6 +15,7 @@ import { createRepositoryTools } from '@/lib/tools/repository-tools';
 import type { StreamRequest } from '@/lib/streaming/types';
 import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { storeExecutionEvent } from '@/lib/assistant-architect/event-storage';
+import { decodeMdxEditorEscapes } from '@/lib/utils/text-sanitizer';
 import { createConversation, updateConversation, getConversationById } from '@/lib/db/drizzle/nexus-conversations';
 import { createMessageWithStats, updateConversationStats } from '@/lib/db/drizzle/nexus-messages';
 import type { AssistantArchitectMessageMetadata } from '@/lib/db/types/jsonb';
@@ -1324,8 +1325,11 @@ function substituteVariables(
     }]);
   }
 
+  // Decode MDXEditor escapes (\$ \{ \_ &#x24; &amp;#x24;) so the variable regex can match stored content.
+  const decodedContent = decodeMdxEditorEscapes(content);
+
   // Count variable placeholders to prevent DoS via excessive replacements
-  const placeholderMatches = content.match(/\${(\w+)}|{{(\w+)}}/g);
+  const placeholderMatches = decodedContent.match(/\${([\w-]+)}|{{([\w-]+)}}/g);
   const placeholderCount = placeholderMatches ? placeholderMatches.length : 0;
 
   if (placeholderCount > MAX_VARIABLE_REPLACEMENTS) {
@@ -1335,8 +1339,8 @@ function substituteVariables(
     }]);
   }
 
-  // Match both ${variable} and {{variable}} patterns
-  return content.replace(/\${(\w+)}|{{(\w+)}}/g, (match, dollarVar, braceVar) => {
+  // Match both ${variable} and {{variable}} patterns ([\w-]+ matches hyphenated slugs like ${student-name})
+  return decodedContent.replace(/\${([\w-]+)}|{{([\w-]+)}}/g, (match, dollarVar, braceVar) => {
     const varName = dollarVar || braceVar;
 
     // 1. Check if there's an input mapping for this variable

@@ -9,6 +9,7 @@ import {
 import { resolveUserId } from "@/lib/auth/resolve-user"
 import { validateImportFile, mapModelsForImport, type ExportFormat } from "@/lib/assistant-export-import"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
+import { decodeMdxEditorEscapes } from "@/lib/utils/text-sanitizer"
 
 export async function POST(request: NextRequest) {
   const requestId = generateRequestId();
@@ -50,6 +51,14 @@ export async function POST(request: NextRequest) {
     if (file.size > 10 * 1024 * 1024) {
       return NextResponse.json(
         { isSuccess: false, message: "File too large. Maximum size is 10MB" },
+        { status: 400 }
+      )
+    }
+
+    // Verify MIME type — only accept JSON files
+    if (file.type && file.type !== 'application/json' && file.type !== 'text/json') {
+      return NextResponse.json(
+        { isSuccess: false, message: "Invalid file type. Only JSON files are accepted" },
         { status: 400 }
       )
     }
@@ -122,12 +131,14 @@ export async function POST(request: NextRequest) {
           await createChainPrompt({
             assistantArchitectId: assistantId,
             name: prompt.name,
-            content: prompt.content,
-            systemContext: prompt.system_context,
+            // Normalize MDXEditor escapes (\$ \{ \} \_ &#x24; &#36;) so imported content
+            // is stored in canonical form identical to what the UI produces.
+            content: decodeMdxEditorEscapes(prompt.content),
+            systemContext: prompt.system_context ? decodeMdxEditorEscapes(prompt.system_context) : prompt.system_context,
             modelId,
             position: prompt.position,
             parallelGroup: prompt.parallel_group,
-            inputMapping: prompt.input_mapping as Record<string, string> || null,
+            inputMapping: null, // Don't import source-system prompt IDs — they reference IDs that don't exist in this system and would silently resolve to wrong prompts
             timeoutSeconds: prompt.timeout_seconds,
           })
         }

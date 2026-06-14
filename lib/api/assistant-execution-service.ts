@@ -22,6 +22,7 @@ import { createRepositoryTools } from "@/lib/tools/repository-tools"
 import type { StreamRequest } from "@/lib/streaming/types"
 import { ContentSafetyBlockedError } from "@/lib/streaming/types"
 import { storeExecutionEvent } from "@/lib/assistant-architect/event-storage"
+import { decodeMdxEditorEscapes } from "@/lib/utils/text-sanitizer"
 
 // ============================================
 // Constants
@@ -925,8 +926,11 @@ function substituteVariables(
     }])
   }
 
+  // Decode MDXEditor escapes (\$ \{ \_ &#x24; &amp;#x24;) so the variable regex can match stored content.
+  const decoded = decodeMdxEditorEscapes(content)
+
   // Updated regex: [\w-]+ to match hyphenated slugified names (regression from #685)
-  const placeholderMatches = content.match(/\${([\w-]+)}|{{([\w-]+)}}/g)
+  const placeholderMatches = decoded.match(/\${([\w-]+)}|{{([\w-]+)}}/g)
   const placeholderCount = placeholderMatches ? placeholderMatches.length : 0
 
   if (placeholderCount > MAX_VARIABLE_REPLACEMENTS) {
@@ -957,7 +961,7 @@ function substituteVariables(
     }
   }
 
-  return content.replace(/\${([\w-]+)}|{{([\w-]+)}}/g, (match, dollarVar, braceVar) => {
+  return decoded.replace(/\${([\w-]+)}|{{([\w-]+)}}/g, (match, dollarVar, braceVar) => {
     const varName = dollarVar || braceVar
 
     // Path 1: Explicit inputMapping (backward compatible)
