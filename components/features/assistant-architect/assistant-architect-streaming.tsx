@@ -59,6 +59,7 @@ import {
 import { createSSEMonitor } from '@/lib/streaming/sse-monitoring'
 import { validateSSEEvent } from '@/lib/streaming/sse-event-schemas'
 import { processUnknownEvent } from '@/lib/streaming/graceful-degradation'
+import { sanitizeOptionLabel } from '@/lib/utils/sanitize-option-label'
 
 const log = createLogger({ moduleName: 'assistant-architect-streaming' })
 
@@ -84,16 +85,6 @@ function sanitizeImagePath(imagePath: string | null): string | null {
   }
 
   return sanitized
-}
-
-/**
- * Sanitize option labels to prevent XSS attacks
- * @param label - The option label from the database
- * @returns Sanitized label or empty string if invalid
- */
-function sanitizeOptionLabel(label: string): string {
-  const SAFE_LABEL_REGEX = /^[\s\w(),.-]+$/
-  return SAFE_LABEL_REGEX.test(label) ? label.trim() : ''
 }
 
 interface AssistantArchitectStreamingProps {
@@ -1018,13 +1009,14 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
                                   }))
                                 }
                               }
-                              // Sanitize option labels and filter out invalid ones
+                              // Sanitize both label and value to block XSS and prompt injection
                               const sanitizedOptions = options
                                 .map(opt => ({
                                   ...opt,
-                                  label: sanitizeOptionLabel(opt.label)
+                                  label: sanitizeOptionLabel(opt.label),
+                                  value: sanitizeOptionLabel(opt.value ?? opt.label)
                                 }))
-                                .filter(opt => opt.label !== '')
+                                .filter(opt => opt.label !== '' && opt.value !== '')
 
                               return sanitizedOptions.map(option => (
                                 <SelectItem key={option.value} value={option.value}>
