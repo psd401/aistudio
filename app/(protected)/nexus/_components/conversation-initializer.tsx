@@ -77,7 +77,7 @@ export function convertContentToParts(content?: ApiMessageContent): UIMessagePar
         // Prefer the stored state (added in Issue #977 fix) over derived state so
         // that output-error parts aren't silently downgraded to input-available.
         // Validate against the known enum to guard against corrupted JSONB values.
-        const rawState = (part as Record<string, unknown>).state
+        const rawState = (part as unknown as Record<string, unknown>).state
         const storedState = typeof rawState === 'string' && VALID_TOOL_STATES.has(rawState) ? rawState : undefined
         const isError = part.isError === true || storedState === 'output-error'
         const input = typeof args === 'object' && args !== null ? args as Record<string, unknown> : {}
