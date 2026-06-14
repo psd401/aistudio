@@ -36,6 +36,8 @@ import {
   saveUserMessage,
   convertMessagesToPartsFormat,
   saveAssistantMessage,
+  saveConversationSteps,
+  type StepData,
 } from './chat-helpers';
 
 import { eq, and } from 'drizzle-orm';
@@ -78,7 +80,8 @@ function createOnFinishCallback(params: {
     text,
     usage,
     finishReason,
-    toolCalls
+    toolCalls,
+    steps,
   }: {
     text: string;
     usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
@@ -89,16 +92,26 @@ function createOnFinishCallback(params: {
       args: Record<string, unknown>;
       result?: unknown;
     }>;
+    steps?: StepData[];
   }) => {
     log.info('Stream finished, saving assistant message', {
       conversationId,
       hasText: !!text,
       textLength: text?.length || 0,
-      toolCallCount: toolCalls?.length || 0
+      toolCallCount: toolCalls?.length || 0,
+      stepCount: steps?.length ?? 0,
     });
 
     try {
-      await saveAssistantMessage({ conversationId, text, usage, finishReason, toolCalls, dbModelId });
+      if (steps && steps.length > 1) {
+        // Multi-step agentic loop (MCP connectors): save each step as a separate
+        // assistant message to preserve the correct turn structure for replay.
+        // Consolidating into one message breaks convertToModelMessages — it cannot
+        // reconstruct multi-turn tool_use/tool_result pairs. (Issue #977)
+        await saveConversationSteps({ conversationId, steps, dbModelId, usage, finishReason });
+      } else {
+        await saveAssistantMessage({ conversationId, text, usage, finishReason, toolCalls, dbModelId });
+      }
     } catch (saveError) {
       log.error('Failed to save assistant message', { error: saveError, conversationId });
     }

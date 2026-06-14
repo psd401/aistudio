@@ -4,7 +4,7 @@
  */
 import { UIMessage } from 'ai';
 import { sql, eq } from 'drizzle-orm';
-import { executeQuery } from '@/lib/db/drizzle-client';
+import { executeQuery, executeTransaction } from '@/lib/db/drizzle-client';
 import { nexusConversations, nexusMessages } from '@/lib/db/schema';
 import { sanitizeTextForDatabase, decodeHtmlEntitiesDeep } from '@/lib/utils/text-sanitizer';
 import { safeJsonbStringify } from '@/lib/db/json-utils';
@@ -277,6 +277,24 @@ type AssistantPart = {
   argsText?: string;
   result?: unknown;
   isError?: boolean;
+  // AI SDK v6 UIMessage tool-part fields — required by convertToModelMessages to emit tool_result blocks
+  state?: 'input-available' | 'output-available' | 'output-error';
+  input?: Record<string, unknown>;
+};
+
+/** Tool call data for a single streaming step */
+export type StepToolCallData = {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  result?: unknown;
+};
+
+/** A single resolved streaming step, used for per-step message persistence */
+export type StepData = {
+  text: string;
+  toolCalls: StepToolCallData[];
+  finishReason: string;
 };
 
 /**
@@ -299,17 +317,24 @@ function buildAssistantParts(
       // which causes assistant-ui's append-only argsText check to fail when the conversation
       // is reloaded and argsText is recomputed from the parsed args object. (Issue #798)
       const decodedArgs = decodeHtmlEntitiesDeep(tc.args) as Record<string, unknown>;
+      // null when extraction missed the result (e.g. stream error before onFinish).
+      // UI tool components handle null with loading/fallback states — verified in
+      // web-search-ui.tsx, code-interpreter-ui.tsx, chart-visualization-ui.tsx.
+      const hasResult = tc.result != null;
       parts.push({
         type: 'tool-call',
         toolCallId: tc.toolCallId,
         toolName: tc.toolName,
         args: decodedArgs,
         argsText: JSON.stringify(decodedArgs),
-        // null when extraction missed the result (e.g. stream error before onFinish).
-        // UI tool components handle null with loading/fallback states — verified in
-        // web-search-ui.tsx, code-interpreter-ui.tsx, chart-visualization-ui.tsx.
         result: tc.result ?? null,
         isError: false,
+        // AI SDK v6 UIMessage schema fields required by convertToModelMessages to emit
+        // paired tool_result blocks when this conversation is reloaded and replayed.
+        // Without state+input, convertToModelMessages emits tool_use without tool_result,
+        // causing AI_MissingToolResultsError on follow-up messages. (Issue #977)
+        state: hasResult ? 'output-available' : 'input-available',
+        input: decodedArgs,
       });
     }
   }
@@ -402,4 +427,111 @@ export async function saveAssistantMessage(params: {
   });
 }
 
+/**
+ * Persist a multi-step tool-use response as separate per-step messages.
+ *
+ * When maxSteps > 1, the AI SDK runs an agentic loop where each step may
+ * produce tool calls. Consolidating all steps into one assistant message
+ * breaks conversation replay: convertToModelMessages cannot reconstruct
+ * the correct multi-turn (assistant→user→assistant) structure needed by
+ * Anthropic. Saving each step separately preserves that structure.
+ *
+ * Stats (messageCount, totalTokens) are updated once after all rows are
+ * inserted to avoid double-counting.
+ */
+export async function saveConversationSteps(params: {
+  conversationId: string;
+  steps: StepData[];
+  dbModelId: number;
+  usage?: { promptTokens?: number; completionTokens?: number; totalTokens?: number };
+  finishReason?: string;
+}): Promise<void> {
+  const { conversationId, steps, dbModelId, usage, finishReason } = params;
 
+  // Build all row data before opening a transaction (pure computation)
+  type RowData = {
+    sanitizedContent: string;
+    parts: AssistantPart[];
+    stepFinishReason: string;
+    stepIndex: number;
+    hasToolCalls: boolean;
+    toolCallCount: number;
+    hasText: boolean;
+    isLastStep: boolean;
+  };
+
+  const rowsToInsert: RowData[] = [];
+  for (let i = 0; i < steps.length; i++) {
+    const step = steps[i];
+    const isLastStep = i === steps.length - 1;
+    const stepFinishReason = isLastStep ? (finishReason ?? 'stop') : step.finishReason;
+    const hasToolCalls = step.toolCalls.length > 0;
+    const hasText = step.text.length > 0;
+    if (!hasToolCalls && !hasText) continue;
+    const sanitizedContent = step.text ? sanitizeTextForDatabase(step.text) : '';
+    const parts = buildAssistantParts(sanitizedContent, hasToolCalls ? step.toolCalls : undefined);
+    rowsToInsert.push({
+      sanitizedContent, parts, stepFinishReason, stepIndex: i,
+      hasToolCalls, toolCallCount: step.toolCalls.length, hasText, isLastStep,
+    });
+  }
+
+  if (rowsToInsert.length === 0) {
+    log.warn('No step messages had content to save', { conversationId });
+    return;
+  }
+
+  const savedCount = rowsToInsert.length;
+  // Base timestamp for this batch. Each step row gets createdAt = baseTime + stepIndex
+  // milliseconds so that ORDER BY created_at always returns steps in the correct
+  // agentic sequence. All rows sharing the same timestamp would produce a
+  // nondeterministic read order and break multi-turn replay. (Issue #977)
+  const baseTime = new Date();
+
+  // All inserts + stats update in a single transaction to prevent partial writes
+  await executeTransaction(async (tx) => {
+    for (const row of rowsToInsert) {
+      const createdAt = new Date(baseTime.getTime() + row.stepIndex);
+      await tx.insert(nexusMessages).values({
+        conversationId,
+        role: 'assistant',
+        content: row.sanitizedContent,
+        parts: sql`${safeJsonbStringify(row.parts)}::jsonb`,
+        modelId: dbModelId,
+        // Token usage not available per-step; real totals are aggregated at the
+        // conversation level in the stats update below.
+        tokenUsage: sql`${safeJsonbStringify({ promptTokens: 0, completionTokens: 0, totalTokens: 0 })}::jsonb`,
+        finishReason: row.stepFinishReason,
+        metadata: sql`${safeJsonbStringify({})}::jsonb`,
+        createdAt,
+        updatedAt: baseTime,
+      });
+    }
+    await tx.update(nexusConversations)
+      .set({
+        messageCount: sql`${nexusConversations.messageCount} + ${savedCount}`,
+        totalTokens: sql`${nexusConversations.totalTokens} + ${usage?.totalTokens ?? 0}`,
+        lastMessageAt: new Date(baseTime.getTime() + rowsToInsert[rowsToInsert.length - 1].stepIndex),
+        updatedAt: baseTime,
+      })
+      .where(eq(nexusConversations.id, conversationId));
+  }, 'saveConversationSteps');
+
+  for (const row of rowsToInsert) {
+    log.info('Saved step message', {
+      conversationId,
+      stepIndex: row.stepIndex,
+      isLastStep: row.isLastStep,
+      hasToolCalls: row.hasToolCalls,
+      toolCallCount: row.toolCallCount,
+      hasText: row.hasText,
+    });
+  }
+
+  log.info('Multi-step response saved', {
+    conversationId,
+    stepCount: steps.length,
+    savedCount,
+    totalTokens: usage?.totalTokens,
+  });
+}

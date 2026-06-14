@@ -5,7 +5,7 @@ import { getProviderAdapter, type ProviderCapabilities } from './provider-adapte
 import { CircuitBreaker, CircuitBreakerOpenError } from './circuit-breaker';
 import { getContentSafetyService, type ContentSafetyResult } from '@/lib/safety';
 import type { TokenMapping } from '@/lib/safety/types';
-import type { StreamRequest, StreamResponse, StreamConfig, StreamingProgress, TelemetrySpan, TelemetryConfig } from './types';
+import type { StreamRequest, StreamResponse, StreamConfig, StreamingProgress, TelemetrySpan, TelemetryConfig, StepCallbackData } from './types';
 import { ContentSafetyBlockedError } from './types';
 
 // Logger for PII transform debugging
@@ -245,7 +245,7 @@ interface InputSafetyCheckOptions {
  * Options for output content safety check
  */
 interface OutputSafetyCheckOptions {
-  data: { text: string; usage?: { promptTokens: number; completionTokens: number; totalTokens: number; reasoningTokens?: number; totalCost?: number }; finishReason: string };
+  data: { text: string; usage?: { promptTokens: number; completionTokens: number; totalTokens: number; reasoningTokens?: number; totalCost?: number }; finishReason: string; steps?: StepCallbackData[] };
   request: StreamRequest;
   contentSafetyService: ReturnType<typeof getContentSafetyService>;
   log: ReturnType<typeof createLogger>;
@@ -520,27 +520,90 @@ function validateAndCopyMessages(
 }
 
 /**
+ * Normalize assistant UIMessages so convertToModelMessages can produce the
+ * correct multi-turn structure required by Anthropic (and other providers).
+ *
+ * When MCP connectors are used with maxSteps > 1, all tool calls from every
+ * step may be consolidated into a single assistant UIMessage (both during live
+ * sessions and after conversation reload from the DB). If that message also
+ * contains a text part, convertToModelMessages emits the tool_use and text
+ * blocks in one assistant turn and then emits the tool_result blocks as a
+ * synthetic user turn — followed by the real user follow-up, creating two
+ * consecutive user turns which Anthropic rejects.
+ *
+ * Fix: split any assistant message that has BOTH resolved tool parts AND a
+ * text part into two separate UIMessages (tool-only first, text-only second).
+ * convertToModelMessages then produces the valid pattern:
+ *   assistant[tool_use…] → user[tool_result…] → assistant[text] → user[follow-up]
+ *
+ * This is safe for single-step responses too — splitting doesn't change the
+ * semantic meaning, it only separates concerns across turns.
+ */
+export function normalizeMultiStepMessages(messages: StreamRequest['messages']): StreamRequest['messages'] {
+  type AnyPart = Record<string, unknown>;
+  const normalized: StreamRequest['messages'] = [];
+
+  for (const msg of messages) {
+    if (msg.role !== 'assistant' || !Array.isArray(msg.parts) || msg.parts.length === 0) {
+      normalized.push(msg);
+      continue;
+    }
+
+    const parts = msg.parts as AnyPart[];
+    // At this point in the pipeline, messages have passed through convertContentToParts so
+    // tool parts use the static format type: 'tool-{toolName}' and always carry a `state`
+    // field (e.g. 'tool-query_db' with state: 'output-available'). Native AI SDK parts
+    // use type: 'tool-call' and never have a `state` field. Using `'state' in p` as the
+    // discriminator is safer than `p.type !== 'tool-call'` because it handles tools named
+    // "call" correctly (their static format is also `type: 'tool-call'` but WITH state).
+    const toolParts = parts.filter(p =>
+      typeof p.type === 'string' &&
+      (p.type as string).startsWith('tool-') &&
+      'state' in p
+    );
+    const textParts = parts.filter(p => p.type === 'text');
+
+    const hasResolvedTools = toolParts.some(p => p.state === 'output-available' || p.state === 'output-error');
+    const hasText = textParts.some(p => typeof p.text === 'string' && (p.text as string).length > 0);
+
+    if (hasResolvedTools && hasText) {
+      // Split: emit tool-only message first, then text-only message.
+      // Casting required because AnyPart[] is a narrower type than UIMessagePart[]
+      // but the structure is semantically valid for convertToModelMessages.
+      normalized.push({ ...msg, parts: toolParts as StreamRequest['messages'][0]['parts'] });
+      normalized.push({ ...msg, id: `${msg.id}-text`, parts: textParts as StreamRequest['messages'][0]['parts'] });
+    } else {
+      normalized.push(msg);
+    }
+  }
+
+  return normalized;
+}
+
+/**
  * Convert messages to model format with error handling
  */
 async function convertMessages(
   messages: StreamRequest['messages'],
   log: ReturnType<typeof createLogger>
 ) {
+  const normalizedMessages = normalizeMultiStepMessages(messages);
+
   log.info('Messages structure before conversion', {
-    messageCount: messages.length,
-    firstMessageRole: messages[0]?.role,
-    messageRoles: messages.map(m => m.role),
+    messageCount: normalizedMessages.length,
+    firstMessageRole: normalizedMessages[0]?.role,
+    messageRoles: normalizedMessages.map(m => m.role),
   });
 
   try {
-    return await convertToModelMessages(messages);
+    return await convertToModelMessages(normalizedMessages);
   } catch (conversionError) {
     const error = conversionError as Error;
     log.error('Failed to convert messages', {
       error: error.message,
       stack: error.stack,
-      messageCount: messages.length,
-      messageRoles: messages.map(m => m.role),
+      messageCount: normalizedMessages.length,
+      messageRoles: normalizedMessages.map(m => m.role),
     });
     throw new Error(`Message conversion failed: ${error.message}`);
   }
