@@ -2,7 +2,7 @@
 
 Bugs where code silently does the wrong thing instead of throwing. These are the hardest to catch in code review because they don't produce errors — they produce wrong results.
 
-Consolidated from ~8 learnings across database, AI SDK, streaming, and security categories.
+Consolidated from learnings across database, AI SDK, streaming, security, and API categories.
 
 ## Drizzle ORM
 
@@ -39,6 +39,29 @@ CREATE TRIGGER set_updated_at
 ```
 
 **Review rule:** Every new table with `updated_at` must have a trigger in the migration SQL.
+
+## Fetch / HTTP
+
+### `response.json().catch(() => fallback)` hides HTTP status codes
+
+Using `.catch()` on `.json()` as a fallback silently discards the HTTP status code and the actual error body. When an ALB returns 502/503 with an HTML body, `.json()` throws a parse error and the catch swallows all diagnostic signal — infra failures become indistinguishable from app errors.
+
+```typescript
+// WRONG — HTTP status code and error body are silently lost
+const data = await response.json().catch(() => ({ error: 'Upload failed' }))
+
+// CORRECT — check response.ok first, then parse with appropriate content-type handling
+if (!response.ok) {
+  const contentType = response.headers.get('content-type') ?? '';
+  const body = contentType.includes('application/json')
+    ? await response.json().catch(() => null)
+    : await response.text().catch(() => null);
+  throw new Error(`Request failed: HTTP ${response.status} — ${typeof body === 'object' && body !== null ? JSON.stringify(body) : (body ?? 'no body')}`);
+}
+const data = await response.json();
+```
+
+**Review rule:** Every `.json()` call on a fetch response must be preceded by a `response.ok` (or status code) check. Flag any `.catch(() => fallback)` on a `.json()` call as a potential diagnostic blackhole.
 
 ## AI SDK v6
 
@@ -80,6 +103,26 @@ const safeTitle = escapeHtml(toolInvocation.args.title)
 
 **Review rule:** Check what `execute()` actually returns. Sanitize at the render layer, not the execute layer.
 
+### `customFetch` must throw (not return) after showing a toast
+
+When a `customFetch` implementation shows a toast for an error response and then **returns** the response instead of throwing, the AI SDK `streamText` runtime receives a resolved promise and attempts to parse the non-streaming JSON error body as an SSE stream, producing a `TypeError`.
+
+```typescript
+// WRONG — AI SDK treats the resolved promise as a valid stream
+if (!response.ok) {
+  toast.error('Something went wrong');
+  return response; // SDK will try to parse HTML/JSON error body as SSE
+}
+
+// CORRECT — throw so the SDK never attempts stream parsing
+if (!response.ok) {
+  toast.error('Something went wrong');
+  throw new Error('Request failed'); // MUST throw — toast and throw are not mutually exclusive
+}
+```
+
+**Review rule:** Any `customFetch` with a non-2xx branch that returns instead of throwing will cause a `TypeError` in the SDK stream parser. Review all `customFetch` implementations for non-throwing error branches.
+
 ### In-place mutation of tool args
 
 Mutating AI SDK `args` in-place breaks `argsText` invariant in assistant-ui. Always return new objects from sanitization functions.
@@ -107,6 +150,95 @@ Only accepts `type: 'tool-call'` (dynamic format). Static formats like `tool-sho
 ```
 
 Also: HTML entities in tool args (e.g. `&amp;`) must be decoded at save boundary and at history load — `argsText` must match `JSON.stringify(args)` exactly or the append-only check fails.
+
+## AWS APIs
+
+### SNS Subject 100-char limit causes silent publish failures
+
+SNS `publish()` rejects subjects longer than 100 characters, but the SDK does not surface an error in normal success-path logging. Any dynamic Subject construction from variable-length arrays is a latent silent failure.
+
+```typescript
+// WRONG — joined categories can exceed 100 chars silently
+const subject = `Guardrail blocked: ${blockedCategories.join(', ')}`;
+await sns.publish({ TopicArn, Subject: subject, Message });
+
+// CORRECT — truncate before publishing
+const raw = `Guardrail blocked: ${blockedCategories.join(', ')}`;
+const subject = raw.length > 100 ? raw.slice(0, 97) + '...' : raw;
+await sns.publish({ TopicArn, Subject: subject, Message });
+```
+
+**Review rule:** Treat SNS Subject as a 100-char-max field. Flag any `array.join()` or template literal used as an SNS Subject without a length guard.
+
+### Bedrock guardrail assessment: check ALL sub-properties of SDK objects
+
+AWS SDK assessment objects often have multiple sub-properties. Iterating only one silently drops entire blocking categories from observability. For example, `WordPolicyAssessment` has both `customWords` and `managedWordLists` — PROFANITY is enforced via managed word lists and is invisible if only `customWords` is checked.
+
+```typescript
+// WRONG — misses PROFANITY (managed word list) blocks entirely
+wordPolicy?.customWords?.forEach(word => track(word));
+
+// CORRECT — covers both sub-properties
+wordPolicy?.customWords?.forEach(word => track(word));
+wordPolicy?.managedWordLists?.forEach(word => track(word));
+```
+
+**Review rule:** Before shipping any monitoring/extraction function that reads AWS SDK assessment objects, enumerate all properties of the relevant type via TypeDoc or SDK source. A missing sub-property silently drops an entire blocking category.
+
+## Caching
+
+### SWR cache: `null` return conflates not-found with error
+
+When a DB accessor returns `null` for both "row not found" and "DB error", a stale-while-revalidate cache cannot distinguish them. A background refresh that writes `null` back to the cache during a transient DB error silently overwrites valid cached state with a default/empty value.
+
+```typescript
+// WRONG — null from error overwrites cache; caller can't distinguish not-found from DB outage
+async function getSetting(key: string): Promise<Setting | null> {
+  try { return await db.query(...) } catch { return null }
+}
+
+// CORRECT — throw on error so SWR can retain stale cache; null = definitively not found
+async function getSetting(key: string): Promise<Setting | null> {
+  return await db.query(...) // throws on DB error; returns null only for missing rows
+}
+
+// In SWR refresh: on null/error, preserve existing cache rather than overwriting
+```
+
+**Generation counter pattern** — prevents a slow background refresh from overwriting cache with stale data after an explicit invalidation:
+
+```typescript
+let refreshGeneration = 0;
+
+async function refreshCache(key: string) {
+  const myGen = ++refreshGeneration;
+  const data = await fetchFreshData(key);
+  if (myGen !== refreshGeneration) return; // a newer refresh started; discard result
+  cache.set(key, data);
+}
+```
+
+**Review rule:** Before implementing SWR, audit the DB accessor's null semantics. If it returns null for errors, fix the accessor first. Background refresh callbacks must use a generation counter to avoid writing stale data after explicit cache invalidation.
+
+## Third-Party SDK Types
+
+### `@google/genai` SDK `Blob` is not the Web API `Blob`
+
+`@google/genai` defines its own `Blob` interface: `{ data: string; mimeType: string }` where `data` is base64-encoded. It is structurally incompatible with the browser/Node.js `Blob`. TypeScript may not catch the mismatch if the web `Blob` partially satisfies the structural check — the SDK silently receives an unusable object.
+
+```typescript
+// WRONG — web API Blob, silently fails inside the SDK
+await session.sendRealtimeInput({ audio: webBlob });
+
+// CORRECT — SDK Blob type: base64-encoded data with explicit mimeType
+const arrayBuffer = await webBlob.arrayBuffer();
+const base64 = Buffer.from(arrayBuffer).toString('base64');
+await session.sendRealtimeInput({
+  audio: { data: base64, mimeType: 'audio/pcm;rate=16000' }
+});
+```
+
+**Review rule:** When using `@google/genai`, any parameter typed as `Blob` is the SDK's custom type. Verify shapes directly in `node_modules/@google/genai/types.d.ts` before passing audio or binary data.
 
 ## Prototype Pollution
 
@@ -156,4 +288,4 @@ text.replace(/&amp;/g, '&').replace(/&#(\d+);/g, (_, n) => String.fromCharCode(+
 
 ---
 
-*Source: learnings from database, ai-sdk, streaming, security, and frontend categories (2026-02-18 through 2026-02-26)*
+*Source: learnings from database, ai-sdk, streaming, security, frontend, api-patterns, infrastructure, and monitoring categories (2026-02-18 through 2026-04-08)*

@@ -429,6 +429,12 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 - **Don't** use `{}` as an accumulator for model/user-controlled keys — use `Object.create(null)`
 - **Don't** use static tool-call format (`tool-show_chart`) with `fromThreadMessageLike` — use `type: 'tool-call'` dynamic format
 - **Don't** chain `.replace()` for HTML entity decoding — use single-pass regex (see `lib/utils/text-sanitizer.ts`)
+- **Don't** use `response.json().catch(() => fallback)` without checking `response.ok` first — hides HTTP status codes; infra errors (502/503) become indistinguishable from app errors
+- **Don't** return (without throwing) from `customFetch` after showing a toast for non-2xx responses — AI SDK will try to parse the error body as SSE and throw a `TypeError`
+- **Don't** construct SNS Subject from variable-length arrays without a 100-char truncation guard — silent publish failures with no SDK error surfaced
+- **Don't** return `null` from a DB accessor for both not-found and error in an SWR cache — cache cannot distinguish the two; DB errors silently overwrite valid cached state with defaults
+- **Don't** pass a Web API `Blob` to `@google/genai` SDK methods — the SDK expects `{ data: base64string, mimeType: string }`, not a `Blob` object
+- **Don't** assume AWS SDK assessment objects are flat — check ALL sub-properties (e.g., `wordPolicy.customWords` AND `wordPolicy.managedWordLists`); missing one drops an entire blocking category from observability
 
 ### React (see `docs/guides/react-patterns.md`)
 - **Don't** put `key` on Provider/context wrapper components
@@ -462,5 +468,5 @@ const role = ServiceRoleFactory.createLambdaRole(this, 'MyFunctionRole', {
 **Knowledge Base**: Stored in S3, retrieved during execution
 
 ---
-*Token-optimized for Claude Code efficiency. Last updated: January 2025*
+*Token-optimized for Claude Code efficiency. Last updated: May 2026*
 *Infrastructure optimized via Epic #372 - AWS Well-Architected Framework aligned*
