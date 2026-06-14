@@ -102,6 +102,16 @@ function ConversationRuntimeProvider({
   const sessionStatusRef = useRef(sessionStatus)
   sessionStatusRef.current = sessionStatus
 
+  // Track selectedModel via ref so the body() callback always reads the latest
+  // value without causing the transport to be recreated on every model change.
+  // Guards against the transient null state while models are loading from localStorage.
+  const selectedModelRef = useRef(selectedModel)
+  selectedModelRef.current = selectedModel
+
+  // Prevents the "Model not ready" toast from firing multiple times if body()
+  // is called in rapid succession before models finish loading.
+  const modelNotReadyToastShownRef = useRef(false)
+
   const historyAdapter = useMemo(
     () => createNexusHistoryAdapter(() => conversationIdRef.current),
     // eslint-disable-next-line react-hooks/exhaustive-deps -- intentionally stable; conversationId accessed via ref
@@ -230,13 +240,30 @@ function ConversationRuntimeProvider({
     transport: new AssistantChatTransport({
       api: '/api/nexus/chat',
       fetch: customFetch as typeof fetch,
-      body: () => selectedModel ? {
-        modelId: selectedModel.modelId,
-        provider: selectedModel.provider,
-        enabledTools,
-        enabledConnectors,
-        conversationId: conversationId || undefined
-      } : {}
+      body: () => {
+        const model = selectedModelRef.current
+        if (!model) {
+          // selectedModel is null — models haven't finished loading from localStorage.
+          // Throwing here prevents the runtime from sending an empty body which the
+          // server rejects with a 400 Zod validation error.
+          if (!modelNotReadyToastShownRef.current) {
+            modelNotReadyToastShownRef.current = true
+            toast.error('Model not ready', {
+              description: 'Please wait a moment for models to load, then try again.',
+              duration: 5000,
+            })
+            setTimeout(() => { modelNotReadyToastShownRef.current = false }, 5000)
+          }
+          throw new Error('No model selected — please wait for models to load')
+        }
+        return {
+          modelId: model.modelId,
+          provider: model.provider,
+          enabledTools,
+          enabledConnectors,
+          conversationId: conversationIdRef.current || undefined
+        }
+      }
     }),
     adapters: {
       attachments: attachmentAdapter,

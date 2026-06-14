@@ -119,10 +119,31 @@ export async function getOrCreateImageConversation(params: {
   imageProvider: string;
   modelId: string;
   userId: number;
+  requestId: string;
 }): Promise<{ conversationId: string; title: string } | { error: Response }> {
-  const { existingConversationId, imagePrompt, imageProvider, modelId, userId } = params;
+  const { existingConversationId, imagePrompt, imageProvider, modelId, userId, requestId } = params;
 
   if (existingConversationId) {
+    const owned = await executeQuery(
+      (db) => db
+        .select({ id: nexusConversations.id })
+        .from(nexusConversations)
+        .where(and(
+          eq(nexusConversations.id, existingConversationId),
+          eq(nexusConversations.userId, userId)
+        ))
+        .limit(1),
+      'verifyImageConversationOwnership'
+    );
+    if (!owned || owned.length === 0) {
+      log.warn('Image conversation ownership check failed — access denied', { existingConversationId, userId });
+      return {
+        error: new Response(
+          JSON.stringify({ error: 'Conversation not found or access denied', requestId }),
+          { status: 404, headers: { 'Content-Type': 'application/json' } }
+        )
+      };
+    }
     return { conversationId: existingConversationId, title: 'Image Generation' };
   }
 
