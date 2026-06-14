@@ -42,6 +42,17 @@ function sanitizeHTML(html: string): string {
   return sanitized;
 }
 
+interface XlsxSheetData {
+  name: unknown;
+  json: unknown[][];
+  rowCount: number;
+  columnCount: number;
+}
+
+interface XlsxContent {
+  sheets?: XlsxSheetData[];
+}
+
 export class OfficeProcessor implements DocumentProcessor {
   constructor(
     private documentType: 'docx' | 'xlsx' | 'pptx',
@@ -165,7 +176,8 @@ export class OfficeProcessor implements DocumentProcessor {
       // Convert to JSON for structured data
       const json = XLSX.utils.sheet_to_json(sheet, { header: 1 });
       
-      combinedText += `\n\n## Sheet: ${sheetName}\n${csv}`;
+      const safeSheetName = OfficeProcessor.sanitizeSheetName(sheetName);
+      combinedText += `\n\n## Sheet: ${safeSheetName}\n${csv}`;
       
       sheetData.push({
         name: sheetName,
@@ -359,33 +371,58 @@ export class OfficeProcessor implements DocumentProcessor {
     return this.convertTextToMarkdown(content.text);
   }
 
-  private convertXlsxToMarkdown(content: any): string {
+  // Cap rows per sheet so the Markdown payload stays within API route body limits.
+  private static readonly MAX_ROWS_PER_SHEET = 500;
+
+  private static escapeMdTableCell(value: unknown): string {
+    return String(value ?? '')
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/\\/g, '\\\\')
+      .replace(/\|/g, '\\|');
+  }
+
+  // Sanitize a sheet name before interpolating into a Markdown heading.
+  private static sanitizeSheetName(name: string): string {
+    return name
+      .replace(/\\/g, '\\\\')
+      .replace(/[\r\n|#`]/g, ' ')
+      .trim() || 'Sheet';
+  }
+
+  private convertXlsxToMarkdown(content: XlsxContent): string {
     let markdown = '# Spreadsheet Data\n\n';
-    
+
     if (content.sheets) {
-      content.sheets.forEach((sheet: any) => {
-        markdown += `## ${sheet.name}\n\n`;
-        
+      content.sheets.forEach((sheet: XlsxSheetData) => {
+        const safeSheetName = OfficeProcessor.sanitizeSheetName(String(sheet.name ?? ''));
+        markdown += `## ${safeSheetName}\n\n`;
+
         if (sheet.json && sheet.json.length > 0) {
-          // Convert JSON to markdown table
-          const rows = sheet.json as any[][];
+          const rows = sheet.json;
           if (rows.length > 0) {
-            // Header row
             const headers = rows[0];
-            markdown += '| ' + headers.join(' | ') + ' |\n';
+            markdown += '| ' + headers.map(OfficeProcessor.escapeMdTableCell).join(' | ') + ' |\n';
             markdown += '| ' + headers.map(() => '---').join(' | ') + ' |\n';
-            
-            // Include all data rows for complete AI context
-            // Use array.map().join() for better performance with large datasets
-            const dataRows = rows.slice(1);
-            markdown += dataRows.map((row: any[]) => '| ' + row.join(' | ') + ' |\n').join('');
+
+            const allDataRows = rows.slice(1);
+            const truncated = allDataRows.length > OfficeProcessor.MAX_ROWS_PER_SHEET;
+            const dataRows = truncated
+              ? allDataRows.slice(0, OfficeProcessor.MAX_ROWS_PER_SHEET)
+              : allDataRows;
+            markdown += dataRows
+              .map((row: unknown[]) => '| ' + row.map(OfficeProcessor.escapeMdTableCell).join(' | ') + ' |\n')
+              .join('');
+
+            if (truncated) {
+              markdown += `\n> ⚠️ **Showing first ${OfficeProcessor.MAX_ROWS_PER_SHEET} of ${allDataRows.length} rows.** Upload a filtered version of this sheet to analyze the full dataset.\n`;
+            }
           }
         }
-        
+
         markdown += `\n**Sheet Stats:** ${sheet.rowCount} rows, ${sheet.columnCount} columns\n\n`;
       });
     }
-    
+
     return markdown;
   }
 
