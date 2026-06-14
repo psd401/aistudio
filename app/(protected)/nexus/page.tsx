@@ -495,9 +495,15 @@ function NexusPageContent() {
     // Clear conversation ID and fallback state when switching models
     setConversationId(null);
     setConversationModelId(null);
-    // Force page reload to ensure clean state
+    // Navigate to a clean /nexus URL on model change. router.replace() performs
+    // a client-side navigation that re-renders but does NOT remount the page, so
+    // stableConversationId (captured in its useState initializer on first mount)
+    // remains set to the old ID, causing ConversationInitializer to keep loading
+    // the stale conversation. window.location.href forces a full page load so all
+    // component state is reset — equivalent to the previous reload() but targeting
+    // the clean URL without ?id=.
     if (model && selectedModel && model.modelId !== selectedModel.modelId) {
-      window.location.reload();
+      window.location.href = '/nexus';
     }
   }, [originalSetSelectedModel, selectedModel])
 

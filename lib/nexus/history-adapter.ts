@@ -29,14 +29,23 @@ type MessageData = {
   [key: string]: unknown
 }
 
+// Allow only https: image URLs to prevent javascript:/data: XSS via stored imageUrl values.
+const isSafeImageUrl = (url: string): boolean => {
+  try {
+    return new URL(url).protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 // Helper to convert a content part to text format
 // Handles text, image, and other part types by converting to displayable text
 const convertPartToText = (part: { type: string; text?: string; imageUrl?: string; [key: string]: unknown }): string => {
   if (part.type === 'text') {
     return part.text || ''
   }
-  if (part.type === 'image' && part.imageUrl) {
-    // Convert image parts to markdown image syntax
+  if (part.type === 'image' && part.imageUrl && isSafeImageUrl(part.imageUrl)) {
+    // Convert image parts to markdown image syntax (URL already validated as https: only)
     return `![Generated Image](${part.imageUrl})`
   }
   // Skip step-start, step-finish, and other control types
@@ -44,6 +53,19 @@ const convertPartToText = (part: { type: string; text?: string; imageUrl?: strin
     return ''
   }
   return ''
+}
+
+// Validated role set — guards against non-standard roles from partial writes or migrations.
+const VALID_ROLES = new Set(['user', 'assistant', 'system'] as const)
+type ValidRole = 'user' | 'assistant' | 'system'
+const safeRole = (role: string | undefined): ValidRole =>
+  VALID_ROLES.has(role as ValidRole) ? (role as ValidRole) : 'user'
+
+// Returns a valid Date if the value is parseable and finite, otherwise undefined.
+const safeDate = (value: string | Date | undefined): Date | undefined => {
+  if (!value) return undefined
+  const d = new Date(value)
+  return isFinite(d.getTime()) ? d : undefined
 }
 
 // JSON object type for tool arguments (matches assistant-ui's ReadonlyJSONObject)
@@ -65,71 +87,111 @@ type ContentPartLike =
     }
 
 // We'll use a simple implementation since ExportedMessageRepository.fromArray may not be accessible
-const createExportedMessageRepository = (messages: MessageData[]): ExportedMessageRepository => ({
-  messages: messages.map((msg, index) => {
-    // Ensure content is in the correct format for assistant-ui
-    // Content can include text parts and static tool parts for UI rendering
-    let content: ContentPartLike[] = []
+const createExportedMessageRepository = (messages: MessageData[]): ExportedMessageRepository => {
+  // Filter out null/undefined entries and messages with malformed IDs before processing.
+  // This guards against partially-persisted messages (e.g. from expired-session writes)
+  // that would cause fromThreadMessageLike to throw and crash the whole conversation load.
+  const validMessages = messages.filter(
+    (msg): msg is MessageData => msg != null && typeof msg.id === 'string'
+  )
 
-    if (Array.isArray(msg.content)) {
-      // Process each part - text becomes text, tool-call converts to static tool, images become markdown
-      const processedParts = msg.content
-        .map((part): ContentPartLike | null => {
-          const partData = part as { type: string; text?: string; imageUrl?: string; toolCallId?: string; toolName?: string; args?: unknown; argsText?: string; result?: unknown; isError?: boolean }
+  return {
+    messages: validMessages.map((msg, index) => {
+      // Ensure content is in the correct format for assistant-ui
+      // Content can include text parts and static tool parts for UI rendering
+      let content: ContentPartLike[] = []
 
-          if (partData.type === 'text') {
-            return { type: 'text', text: partData.text || '' }
-          }
-          if (partData.type === 'tool-call' && partData.toolName && partData.toolCallId) {
-            // Use tool-call format (not static tool-{name} format) so that
-            // fromThreadMessageLike processes it correctly. The static format
-            // (type: 'tool-show_chart') is not handled by fromThreadMessageLike's
-            // switch and throws "Unsupported assistant message part type". (Issue #798)
-            const args: JSONObject = (partData.args ?? {}) as JSONObject
+      if (Array.isArray(msg.content)) {
+        // Process each part - text becomes text, tool-call converts to static tool, images become markdown
+        const processedParts = msg.content
+          .map((part): ContentPartLike | null => {
+            const partData = part as { type: string; text?: string; imageUrl?: string; toolCallId?: string; toolName?: string; args?: unknown; argsText?: string; result?: unknown; isError?: boolean }
 
-            const toolPart: ContentPartLike = {
-              type: 'tool-call',
-              toolCallId: partData.toolCallId,
-              toolName: partData.toolName,
-              args,
-              argsText: JSON.stringify(args),
-              result: partData.result,
-              isError: partData.isError === true,
+            if (partData.type === 'text') {
+              return { type: 'text', text: partData.text || '' }
             }
-            return toolPart
-          }
-          if (partData.type === 'image' && partData.imageUrl) {
-            return { type: 'text', text: `![Generated Image](${partData.imageUrl})` }
-          }
-          // Skip step-start, step-finish, tool-result (legacy), and other control types
-          return null
-        })
-        .filter((part): part is ContentPartLike => part !== null)
+            if (partData.type === 'tool-call' && partData.toolName && partData.toolCallId) {
+              // Use tool-call format (not static tool-{name} format) so that
+              // fromThreadMessageLike processes it correctly. The static format
+              // (type: 'tool-show_chart') is not handled by fromThreadMessageLike's
+              // switch and throws "Unsupported assistant message part type". (Issue #798)
+              const args: JSONObject = (partData.args ?? {}) as JSONObject
 
-      content = processedParts
+              const toolPart: ContentPartLike = {
+                type: 'tool-call',
+                toolCallId: partData.toolCallId,
+                toolName: partData.toolName,
+                args,
+                argsText: JSON.stringify(args),
+                result: partData.result,
+                isError: partData.isError === true,
+              }
+              return toolPart
+            }
+            if (partData.type === 'image' && partData.imageUrl && isSafeImageUrl(partData.imageUrl)) {
+              return { type: 'text', text: `![Generated Image](${partData.imageUrl})` }
+            }
+            // Skip step-start, step-finish, tool-result (legacy), and other control types
+            return null
+          })
+          .filter((part): part is ContentPartLike => part !== null)
 
-      // Ensure at least one content part
-      if (content.length === 0) {
+        content = processedParts
+
+        // Ensure at least one content part
+        if (content.length === 0) {
+          content = [{ type: 'text', text: '' }]
+        }
+      } else if (typeof msg.content === 'string') {
+        content = [{ type: 'text', text: msg.content }]
+      } else {
         content = [{ type: 'text', text: '' }]
       }
-    } else if (typeof msg.content === 'string') {
-      content = [{ type: 'text', text: msg.content }]
-    } else {
-      content = [{ type: 'text', text: '' }]
-    }
 
-    return {
-      // Cast content to unknown to allow tool-result parts (assistant-ui handles them internally)
-      message: INTERNAL.fromThreadMessageLike({
-        id: msg.id,
-        role: msg.role,
-        content: content as unknown as string,  // Cast needed for tool-result parts
-        ...(msg.createdAt && { createdAt: new Date(msg.createdAt) }),
-      }, msg.id, { type: 'complete', reason: 'unknown' }),
-      parentId: index === 0 ? null : messages[index - 1]?.id || null
-    }
-  })
-})
+      // Validate role and createdAt before passing to fromThreadMessageLike.
+      // msg.role arrives from the DB and may be non-standard in partial-write scenarios;
+      // msg.createdAt may be an unparseable or extreme string — both must be sanitised.
+      const msgRole = safeRole(msg.role)
+      const msgDate = safeDate(msg.createdAt as string | Date | undefined)
+
+      try {
+        const converted = INTERNAL.fromThreadMessageLike({
+          id: msg.id,
+          role: msgRole,
+          content: content as unknown as string,  // Cast needed for tool-result parts
+          ...(msgDate && { createdAt: msgDate }),
+        }, msg.id, { type: 'complete', reason: 'unknown' })
+        // Guard against a falsy return (library contract is to throw, but defensive check
+        // prevents downstream crashes in withFormat.load which reads .message.id).
+        if (!converted) {
+          throw new Error('fromThreadMessageLike returned falsy')
+        }
+        return {
+          message: converted,
+          parentId: index === 0 ? null : validMessages[index - 1]?.id || null
+        }
+      } catch (error) {
+        // fromThreadMessageLike can throw when a message part structure is incompatible
+        // with the current runtime (e.g. image-gen message loaded under a chat runtime).
+        // Fall back to a safe placeholder so the rest of the conversation still loads.
+        log.warn('Failed to convert message, using placeholder', {
+          messageId: msg.id,
+          messageIndex: index,
+          // Truncate error message to avoid forwarding arbitrary content to logs (L-2)
+          error: error instanceof Error ? error.message.substring(0, 200) : String(error).substring(0, 200),
+        })
+        return {
+          message: INTERNAL.fromThreadMessageLike({
+            id: msg.id,
+            role: msgRole,
+            content: [{ type: 'text', text: '[Message could not be loaded]' }] as unknown as string,
+          }, msg.id, { type: 'complete', reason: 'unknown' }),
+          parentId: index === 0 ? null : validMessages[index - 1]?.id || null
+        }
+      }
+    })
+  }
+}
 
 // ExportedMessageRepositoryItem is not exported from the main module, so we'll define it based on the expected structure
 type ExportedMessageRepositoryItem = {
