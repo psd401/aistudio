@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useRef, useEffect } from "react"
+import { useState, useCallback, useRef, useEffect, useMemo } from "react"
 import { CompareInput } from "./compare-input"
 import { DualResponse } from "./dual-response"
 import { useToast } from "@/components/ui/use-toast"
@@ -8,6 +8,7 @@ import { useModelsWithPersistence } from "@/lib/hooks/use-models"
 import { PageBranding } from "@/components/ui/page-branding"
 import { createLogger } from "@/lib/client-logger"
 import type { DualStreamEvent } from "@/lib/compare/dual-stream-merger"
+import { isSafeImageUrl } from "@/lib/utils/image-validation"
 
 const log = createLogger({ module: 'model-compare' })
 
@@ -19,19 +20,6 @@ function isImageModel(model: { capabilities?: string | string[] | null } | null)
       ? JSON.parse(model.capabilities)
       : model.capabilities
     return Array.isArray(caps) && caps.includes('image_generation')
-  } catch {
-    return false
-  }
-}
-
-/**
- * Validate that an imageUrl from an SSE event is a legitimate S3 HTTPS URL.
- * Prevents javascript: URIs or http: URLs from being rendered in img/anchor tags.
- */
-function isSafeImageUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url)
-    return parsed.protocol === 'https:' && parsed.hostname.endsWith('.amazonaws.com')
   } catch {
     return false
   }
@@ -57,6 +45,10 @@ export function ModelCompare() {
   const [model1Error, setModel1Error] = useState<string | undefined>()
   const [model2Error, setModel2Error] = useState<string | undefined>()
   const { toast } = useToast()
+
+  // Memoize image model detection — isImageModel does JSON.parse on every call
+  const model1IsImage = useMemo(() => isImageModel(model1State.selectedModel), [model1State.selectedModel])
+  const model2IsImage = useMemo(() => isImageModel(model2State.selectedModel), [model2State.selectedModel])
 
   // Track active stream reader for cleanup
   const streamReaderRef = useRef<ReadableStreamDefaultReader<Uint8Array> | null>(null)
@@ -186,6 +178,9 @@ export function ModelCompare() {
                   } else if (data.type === 'finish') {
                     setModel1Complete(true)
                   } else if (data.type === 'warning') {
+                    // Mark complete before the finish event arrives — the generator
+                    // always emits finish after warning, but we don't rely on that
+                    // sequence in case the finish event is dropped mid-stream.
                     setModel1Complete(true)
                     toast({
                       title: `${model1State.selectedModel?.name ?? 'First model'} unavailable`,
@@ -193,12 +188,8 @@ export function ModelCompare() {
                     })
                   } else if (data.type === 'error') {
                     setModel1Complete(true)
+                    // Render error inline in the panel — toast was redundant and dismissed too quickly
                     setModel1Error(data.error)
-                    toast({
-                      title: `${model1State.selectedModel?.name ?? 'First model'} failed`,
-                      description: data.error ?? "Failed to generate response",
-                      variant: "destructive"
-                    })
                   }
                 } else if (data.modelId === 'model2') {
                   if (data.type === 'content' && data.chunk) {
@@ -212,6 +203,8 @@ export function ModelCompare() {
                   } else if (data.type === 'finish') {
                     setModel2Complete(true)
                   } else if (data.type === 'warning') {
+                    // Mark complete before the finish event arrives — same defensive
+                    // guard as the model1 warning handler above.
                     setModel2Complete(true)
                     toast({
                       title: `${model2State.selectedModel?.name ?? 'Second model'} unavailable`,
@@ -219,12 +212,8 @@ export function ModelCompare() {
                     })
                   } else if (data.type === 'error') {
                     setModel2Complete(true)
+                    // Render error inline in the panel — toast was redundant and dismissed too quickly
                     setModel2Error(data.error)
-                    toast({
-                      title: `${model2State.selectedModel?.name ?? 'Second model'} failed`,
-                      description: data.error ?? "Failed to generate response",
-                      variant: "destructive"
-                    })
                   }
                 }
               } catch (parseError) {
@@ -350,7 +339,7 @@ export function ModelCompare() {
               model: model1State.selectedModel,
               response: model1Response,
               imageUrl: model1ImageUrl,
-              isImageModel: isImageModel(model1State.selectedModel),
+              isImageModel: model1IsImage,
               status: isStreaming && !model1Complete ? 'streaming' : 'ready',
               error: model1Error
             }}
@@ -358,7 +347,7 @@ export function ModelCompare() {
               model: model2State.selectedModel,
               response: model2Response,
               imageUrl: model2ImageUrl,
-              isImageModel: isImageModel(model2State.selectedModel),
+              isImageModel: model2IsImage,
               status: isStreaming && !model2Complete ? 'streaming' : 'ready',
               error: model2Error
             }}

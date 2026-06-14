@@ -8,16 +8,7 @@
 
 import { describe, it, expect } from '@jest/globals'
 import { mergeResponseGenerators, asyncGeneratorToStream, type DualStreamEvent } from '@/lib/compare/dual-stream-merger'
-
-/** Mirror of isSafeImageUrl from model-compare.tsx — tested independently */
-function isSafeImageUrl(url: string): boolean {
-  try {
-    const parsed = new URL(url)
-    return parsed.protocol === 'https:' && parsed.hostname.endsWith('.amazonaws.com')
-  } catch {
-    return false
-  }
-}
+import { isSafeImageUrl } from '@/lib/utils/image-validation'
 
 // Helper: collect all bytes from a ReadableStream and decode as text
 async function collectStream(stream: ReadableStream<Uint8Array>): Promise<string> {
@@ -176,6 +167,8 @@ describe('mergeResponseGenerators', () => {
   })
 
   it('merges two image generators', async () => {
+    // Non-S3 URLs used as test fixtures — these would fail isSafeImageUrl in
+    // production; the merger passes URLs through without validating them.
     const url1 = 'https://example.com/img1.png'
     const url2 = 'https://example.com/img2.png'
 

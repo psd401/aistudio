@@ -12,7 +12,8 @@ import { hasCapability } from '@/lib/ai/capability-utils';
 import { generateImageForNexus } from '@/lib/ai/image-generation-service';
 import type { ImageGenerationError } from '@/lib/ai/image-generation-service';
 import { mergeResponseGenerators, asyncGeneratorToStream, type DualStreamEvent } from '@/lib/compare/dual-stream-merger';
-import { isTransientStreamError } from '@/lib/streaming/provider-adapters/base-adapter';
+import { isTransientStreamError } from '@/lib/streaming/provider-adapters/base-adapter'
+import { isSafeImageUrl } from '@/lib/utils/image-validation';
 
 // Allow streaming responses up to 5 minutes
 export const maxDuration = 300;
@@ -152,7 +153,10 @@ async function* createImageGenerator(
   log: ReturnType<typeof createLogger>
 ): AsyncGenerator<DualStreamEvent> {
   const slotNum = modelSlot === 'model1' ? 1 : 2;
-  const provider = String(modelConfig.provider) === 'google' ? 'google' : 'openai';
+  // Pass the provider through directly so generateImageForNexus can reject
+  // unsupported providers with a descriptive error instead of silently
+  // falling back to the OpenAI path for Bedrock, Azure, etc.
+  const provider = String(modelConfig.provider);
 
   try {
     log.info(`Model ${slotNum} image generation started`, {
@@ -203,17 +207,13 @@ async function* createImageGenerator(
       });
     }
 
-    // Validate imageUrl is an HTTPS S3 URL before emitting to client.
-    // Guards against a compromised upstream provider returning a javascript: or
-    // http: URL that could be exploited when rendered in the browser.
-    const parsedUrl = (() => {
-      try { return new URL(result.imageUrl); } catch { return null; }
-    })();
-
-    if (!parsedUrl || parsedUrl.protocol !== 'https:' || !parsedUrl.hostname.endsWith('.amazonaws.com')) {
+    // Validate imageUrl is an HTTPS S3 URL before emitting to client (shared
+    // guard from lib/utils/image-validation — same check runs client-side in
+    // model-compare.tsx before the URL is rendered).
+    if (!isSafeImageUrl(result.imageUrl)) {
       log.error(`Model ${slotNum} returned unexpected image URL origin, blocking emit`, {
         comparisonId,
-        hostname: parsedUrl?.hostname ?? 'unparseable'
+        imageUrl: result.imageUrl.slice(0, 80)
       });
       yield { modelId: modelSlot, type: 'error', error: 'Image generation failed. Please try again.' };
       yield { modelId: modelSlot, type: 'finish', finishReason: 'error' };

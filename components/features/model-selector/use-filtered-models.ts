@@ -108,9 +108,14 @@ export function useFilteredModels({
 
       let accessDeniedReason: string | undefined
       if (!matchesCapabilities) {
-        accessDeniedReason = allMissingCapabilities.length > 0
-          ? `Missing capabilities: ${allMissingCapabilities.join(', ')}`
-          : `Missing required capabilities`
+        if (missingCapabilities.length === 0 && anyOfCapabilities.length > 0 && !matchesAnyOfCapabilities) {
+          // Only the OR-capability check failed — use a cleaner message
+          accessDeniedReason = `Requires at least one of: ${anyOfCapabilities.join(', ')}`
+        } else if (allMissingCapabilities.length > 0) {
+          accessDeniedReason = `Missing capabilities: ${allMissingCapabilities.join(', ')}`
+        } else {
+          accessDeniedReason = `Missing required capabilities`
+        }
       } else if (!hasRoleAccess) {
         accessDeniedReason = `Requires role: ${modelAllowedRoles.join(' or ')}`
       } else if (!meetsAllowedRoles) {

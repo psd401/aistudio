@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ResponseDisplay } from "./response-display"
-import { IconPlayerStop, IconCopy, IconCheck, IconLoader2, IconDownload } from "@tabler/icons-react"
+import { IconPlayerStop, IconCopy, IconCheck, IconLoader2, IconExternalLink } from "@tabler/icons-react"
 import type { SelectAiModel } from "@/types"
 
 export interface ModelResponse {
@@ -65,15 +65,16 @@ export function DualResponse({
               </Button>
             )}
             {response.imageUrl && (
+              // The `download` attribute is ignored by browsers for cross-origin URLs
+              // (S3 presigned URLs). Open in a new tab instead of mislabelling as download.
               <a
                 href={response.imageUrl}
-                download
                 target="_blank"
                 rel="noopener noreferrer"
                 className="inline-flex items-center justify-center h-7 w-7 rounded-md hover:bg-accent hover:text-accent-foreground"
-                aria-label="Download generated image"
+                aria-label="Open generated image in new tab"
               >
-                <IconDownload className="h-3 w-3" />
+                <IconExternalLink className="h-3 w-3" />
               </a>
             )}
             {response.response && !response.imageUrl && (
@@ -119,6 +120,7 @@ export function DualResponse({
               <img
                 src={response.imageUrl}
                 alt="AI-generated result"
+                loading="lazy"
                 className="w-full rounded-md border border-border object-contain"
                 style={{ maxHeight: '600px' }}
               />
