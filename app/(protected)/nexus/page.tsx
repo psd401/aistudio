@@ -158,6 +158,24 @@ function ConversationRuntimeProvider({
       throwSessionExpired('Session expired during chat request — 401 from server')
     }
 
+    // Handle server errors (5xx) — throw so the AI SDK runtime can clean up.
+    // Without this, the SDK tries to parse a JSON error body as an SSE stream and
+    // crashes with an unhandled TypeError accessing .id on undefined message state.
+    if (response.status >= 500) {
+      let description = 'An error occurred. Please try again.'
+      try {
+        const errorData = await response.clone().json()
+        if (typeof errorData?.error === 'string') {
+          // Slice to prevent the server leaking internal details in long error messages
+          description = errorData.error.slice(0, 200)
+        }
+      } catch {
+        // ignore parse failures — use generic description
+      }
+      toast.error('Chat request failed', { description, duration: 8000 })
+      throw new Error(description)
+    }
+
     // Handle model-not-found errors (404)
     // Note: We show a toast but still return the 404 response to let the AI SDK runtime
     // handle cleanup. This provides dual feedback: user-friendly toast + runtime error handling.
