@@ -180,16 +180,28 @@ const createExportedMessageRepository = (messages: MessageData[]): ExportedMessa
           // Truncate error message to avoid forwarding arbitrary content to logs (L-2)
           error: error instanceof Error ? error.message.substring(0, 200) : String(error).substring(0, 200),
         })
-        return {
-          message: INTERNAL.fromThreadMessageLike({
-            id: msg.id,
-            role: msgRole,
-            content: [{ type: 'text', text: '[Message could not be loaded]' }] as unknown as string,
-          }, msg.id, { type: 'complete', reason: 'unknown' }),
-          parentId: index === 0 ? null : validMessages[index - 1]?.id || null
+        // Guard the fallback construction too — if INTERNAL.fromThreadMessageLike itself
+        // is the source of the failure (e.g. null dereference on msg.id), the same call
+        // with a static content array could throw again and escape the outer catch.
+        try {
+          return {
+            message: INTERNAL.fromThreadMessageLike({
+              id: msg.id,
+              role: msgRole,
+              content: [{ type: 'text', text: '[Message could not be loaded]' }] as unknown as string,
+            }, msg.id, { type: 'complete', reason: 'unknown' }),
+            parentId: index === 0 ? null : validMessages[index - 1]?.id || null
+          }
+        } catch (fallbackError) {
+          log.error('Fallback message construction failed, skipping message', {
+            messageId: msg.id,
+            messageIndex: index,
+            error: fallbackError instanceof Error ? fallbackError.message.substring(0, 200) : String(fallbackError).substring(0, 200),
+          })
+          return null
         }
       }
-    })
+    }).filter((item): item is NonNullable<typeof item> => item !== null)
   }
 }
 
