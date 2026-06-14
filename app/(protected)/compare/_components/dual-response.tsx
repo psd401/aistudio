@@ -115,10 +115,10 @@ export function DualResponse({
 
           {response.imageUrl && (
             <div className="space-y-2">
-              {/* eslint-disable-next-line @next/next/no-img-element */}
+              {/* Image rendered directly — Next.js Image component doesn't support external S3 domains without next.config allowlisting */}
               <img
                 src={response.imageUrl}
-                alt="Generated image"
+                alt="AI-generated result"
                 className="w-full rounded-md border border-border object-contain"
                 style={{ maxHeight: '600px' }}
               />

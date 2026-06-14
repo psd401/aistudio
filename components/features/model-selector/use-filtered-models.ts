@@ -98,22 +98,24 @@ export function useFilteredModels({
 
       const isAccessible = matchesCapabilities && hasRoleAccess && meetsAllowedRoles
 
-      let accessDeniedReason: string | undefined
-      if (!matchesCapabilities) {
-        accessDeniedReason = `Missing capabilities: ${missingCapabilities.join(', ')}`
-      } else if (!hasRoleAccess) {
-        accessDeniedReason = `Requires role: ${modelAllowedRoles.join(' or ')}`
-      } else if (!meetsAllowedRoles) {
-        accessDeniedReason = `Your role doesn't have access to this feature`
-      }
-
-      // For UI feedback, report both AND-missing and anyOf-missing capabilities
+      // Combine AND-missing and anyOf-missing capabilities for accurate UI feedback
       const allMissingCapabilities = [
         ...missingCapabilities,
         ...(anyOfCapabilities.length > 0 && !matchesAnyOfCapabilities
           ? [`one of: ${anyOfCapabilities.join(', ')}`]
           : [])
       ]
+
+      let accessDeniedReason: string | undefined
+      if (!matchesCapabilities) {
+        accessDeniedReason = allMissingCapabilities.length > 0
+          ? `Missing capabilities: ${allMissingCapabilities.join(', ')}`
+          : `Missing required capabilities`
+      } else if (!hasRoleAccess) {
+        accessDeniedReason = `Requires role: ${modelAllowedRoles.join(' or ')}`
+      } else if (!meetsAllowedRoles) {
+        accessDeniedReason = `Your role doesn't have access to this feature`
+      }
 
       return {
         ...model,
