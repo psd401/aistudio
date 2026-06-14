@@ -67,6 +67,9 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
     { pattern: 'processing timeout', message: 'Processing timed out.' },
     { pattern: 'network error during upload', message: 'Network error during upload.' },
     { pattern: 'failed to check processing status', message: 'Could not check processing status.' },
+    // Scanned/image-only PDFs cannot be processed without OCR.
+    // Pattern is intentionally specific to avoid accidental overlap with future errors.
+    { pattern: 'scanned pdf detected', message: 'This PDF appears to be scanned (image-only) and cannot be read. Please upload a text-based PDF.' },
     // Intentionally broad catch-all for server-side failures. New error categories
     // that deserve their own message should be added as specific entries above this one.
     { pattern: 'server processing failed', message: 'Server processing failed.' },
@@ -485,8 +488,23 @@ Please try re-uploading. If the issue persists, contact support.`
 
       // For binary formats, check magic bytes
       const buffer = await file.arrayBuffer();
-      const bytes = new Uint8Array(buffer).subarray(0, 8);
-      const header = Array.from(bytes)
+
+      // PDF spec (ISO 32000-1:2008 §7.5.2) permits the %PDF header anywhere
+      // within the first 1024 bytes.  Some print-to-PDF drivers and web exporters
+      // emit a leading \r\n or BOM before the signature, which would cause a
+      // byte-0 check to silently reject valid PDFs.
+      const scanLength = Math.min(buffer.byteLength, 1024);
+      const scanBytes = new Uint8Array(buffer, 0, scanLength);
+      const PDF_SIGNATURE = [0x25, 0x50, 0x44, 0x46]; // %PDF
+      const pdfOffset = HybridDocumentAdapter.findByteSequence(scanBytes, PDF_SIGNATURE);
+      if (pdfOffset !== -1 && ext === 'pdf') {
+        log.debug('PDF magic bytes found', { fileName: file.name, offset: pdfOffset });
+        return true;
+      }
+
+      // Office/OLE magic bytes are always at byte 0 per their specs
+      const headerBytes = new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 8));
+      const header = Array.from(headerBytes)
         .map(byte => byte.toString(16).padStart(2, '0'))
         .join('');
 
@@ -497,13 +515,9 @@ Please try re-uploading. If the issue persists, contact support.`
 
       // Check magic bytes for supported binary formats
       const magicBytes = {
-        pdf: '25504446',      // %PDF
         office: '504b0304',   // ZIP-based format (Office 2007+)
         ole: 'd0cf11e0',      // OLE format (Office 97-2003)
       };
-
-      // Check PDF
-      if (header.startsWith(magicBytes.pdf)) return true;
 
       // Check Office formats
       if (header.startsWith(magicBytes.office) || header.startsWith(magicBytes.ole)) {
@@ -533,7 +547,16 @@ Please try re-uploading. If the issue persists, contact support.`
     return name.replace(/[^\d.A-Za-z-]/g, '_').substring(0, 255);
   }
 
-   
+  private static findByteSequence(haystack: Uint8Array, needle: number[]): number {
+    outer: for (let i = 0; i <= haystack.length - needle.length; i++) {
+      for (let j = 0; j < needle.length; j++) {
+        if (haystack[i + j] !== needle[j]) continue outer;
+      }
+      return i;
+    }
+    return -1;
+  }
+
   async remove(_attachment: PendingAttachment): Promise<void> {
     // Cleanup if needed
   }

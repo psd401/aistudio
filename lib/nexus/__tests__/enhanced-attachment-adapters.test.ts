@@ -155,6 +155,52 @@ describe('HybridDocumentAdapter', () => {
         const result = await validateFileType(file);
         expect(result).toBe(false);
       });
+
+      it('should accept PDFs with leading \\r\\n before %PDF header (ISO 32000-1 §7.5.2)', async () => {
+        // Some print-to-PDF drivers emit \r\n before the %PDF signature.
+        // PDF spec allows the header anywhere within the first 1024 bytes.
+        const leading = new Uint8Array([0x0d, 0x0a]); // \r\n
+        const pdfSig = new Uint8Array([
+          0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34,
+          0x0a, 0x25, 0xe2, 0xe3, 0xcf, 0xd3, 0x0a
+        ]);
+        const combined = new Uint8Array(leading.length + pdfSig.length);
+        combined.set(leading, 0);
+        combined.set(pdfSig, leading.length);
+        const file = new File([combined], 'document.pdf', {
+          type: 'application/pdf',
+        });
+        const result = await validateFileType(file);
+        expect(result).toBe(true);
+      });
+
+      it('should accept PDFs with %PDF header at arbitrary offset within first 1024 bytes', async () => {
+        // 512 zero bytes followed by %PDF header
+        const prefix = new Uint8Array(512);
+        const pdfSig = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37]);
+        const combined = new Uint8Array(prefix.length + pdfSig.length);
+        combined.set(prefix, 0);
+        combined.set(pdfSig, prefix.length);
+        const file = new File([combined], 'offset.pdf', {
+          type: 'application/pdf',
+        });
+        const result = await validateFileType(file);
+        expect(result).toBe(true);
+      });
+
+      it('should reject PDFs whose %PDF header starts beyond the 1024-byte scan window', async () => {
+        // 1025 zero bytes, then %PDF — past the allowed scan region
+        const prefix = new Uint8Array(1025);
+        const pdfSig = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
+        const combined = new Uint8Array(prefix.length + pdfSig.length);
+        combined.set(prefix, 0);
+        combined.set(pdfSig, prefix.length);
+        const file = new File([combined], 'toolate.pdf', {
+          type: 'application/pdf',
+        });
+        const result = await validateFileType(file);
+        expect(result).toBe(false);
+      });
     });
 
     describe('Office files (magic bytes)', () => {
@@ -265,6 +311,20 @@ describe('HybridDocumentAdapter', () => {
 
     it('should return generic message for unknown code with no pattern match', () => {
       const result = HybridDocumentAdapter.toSafeErrorMessage('something completely unexpected');
+      expect(result).toBe('An unexpected error occurred during processing.');
+    });
+
+    it('should return scanned-PDF message for "scanned pdf detected" pattern', () => {
+      const result = HybridDocumentAdapter.toSafeErrorMessage(
+        'Scanned PDF detected - no text content extractable, may need OCR'
+      );
+      expect(result).toBe('This PDF appears to be scanned (image-only) and cannot be read. Please upload a text-based PDF.');
+    });
+
+    it('should NOT match scanned-PDF message for generic "may need OCR" phrases (avoids broad matching)', () => {
+      const result = HybridDocumentAdapter.toSafeErrorMessage(
+        'Some unrelated error that mentions OCR processing pipeline'
+      );
       expect(result).toBe('An unexpected error occurred during processing.');
     });
   });

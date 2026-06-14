@@ -8,6 +8,10 @@ import pdfParse from 'pdf-parse';
 import { createLambdaLogger } from '../utils/lambda-logger';
 import { sanitizeTextWithMetrics } from '../../../../lib/utils/text-sanitizer';
 
+// Single source of truth for the scanned-PDF sentinel so the throw and the
+// catch in process() stay in sync, and downstream pattern-matchers remain stable.
+const SCANNED_PDF_SENTINEL = 'Scanned PDF detected - no text content extractable, may need OCR';
+
 export class PDFProcessor implements DocumentProcessor {
   constructor(private config: ProcessorConfig) {}
 
@@ -24,14 +28,23 @@ export class PDFProcessor implements DocumentProcessor {
     
     await onProgress?.('parsing_pdf', 40);
     
+    // Separate the extraction try/catch from the "no text" check so that
+    // the scanned-PDF sentinel message is not swallowed by the outer catch.
+    let extractionResult: { text: string | null; pageCount: number };
     try {
-      // Use the exact same logic as the working file-processor
-      const extractionResult = await this.extractTextFromPDF(buffer);
-      
+      extractionResult = await this.extractTextFromPDF(buffer);
+    } catch (error) {
+      logger.error('Error extracting text from PDF with pdf-parse', error);
+      throw new Error('Failed to extract text from PDF');
+    }
+
+    try {
       if (!extractionResult.text || extractionResult.text.trim().length === 0) {
-        throw new Error('No text content extracted from PDF - may need OCR');
+        // Emit a distinct message so client-side SAFE_ERROR_MAP can surface
+        // a user-friendly explanation rather than a generic "Server processing failed".
+        throw new Error(SCANNED_PDF_SENTINEL);
       }
-      
+
       await onProgress?.('post_processing', 70);
       
       // Build result
@@ -68,7 +81,12 @@ export class PDFProcessor implements DocumentProcessor {
       return result;
       
     } catch (error) {
-      logger.error('Error extracting text from PDF with pdf-parse', error);
+      // Rethrow the scanned-PDF sentinel so the caller can store it verbatim
+      // in the job record; the generic catch is only for unexpected failures.
+      if (error instanceof Error && error.message === SCANNED_PDF_SENTINEL) {
+        throw error;
+      }
+      logger.error('Error during PDF post-processing', error);
       throw new Error('Failed to extract text from PDF');
     }
   }

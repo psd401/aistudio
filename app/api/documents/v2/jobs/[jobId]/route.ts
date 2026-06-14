@@ -3,6 +3,21 @@ import { getServerSession } from '@/lib/auth/server-session';
 import { getJobStatus, fetchResultFromS3 } from '@/lib/services/document-job-service';
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
+// Map internal Lambda error messages to user-facing strings so that
+// implementation details are not exposed in the API response.
+const JOB_ERROR_MAP: Array<{ pattern: string; message: string }> = [
+  { pattern: 'scanned pdf detected', message: 'This PDF appears to be scanned (image-only) and cannot be read. Please upload a text-based PDF.' },
+];
+
+function sanitizeJobError(errorMessage: string | undefined | null): string | undefined {
+  if (!errorMessage) return undefined;
+  const lower = errorMessage.toLowerCase();
+  for (const { pattern, message } of JOB_ERROR_MAP) {
+    if (lower.includes(pattern)) return message;
+  }
+  return 'Document processing failed. Please try again.';
+}
+
 export async function GET(
   req: NextRequest,
   { params }: { params: Promise<{ jobId: string }> }
@@ -44,7 +59,7 @@ export async function GET(
     }
     
     timer({ status: 'success' });
-    
+
     // Return job status with results if available
     return NextResponse.json({
       jobId: job.id,
@@ -52,7 +67,7 @@ export async function GET(
       progress: job.progress || 0,
       processingStage: job.processingStage,
       result: job.status === 'completed' ? result : null,
-      error: job.errorMessage,
+      error: sanitizeJobError(job.errorMessage),
       createdAt: job.createdAt,
       completedAt: job.completedAt,
       fileName: job.fileName,
