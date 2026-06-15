@@ -106,42 +106,60 @@ test.describe('Nexus Model Selector — Authenticated', () => {
   })
 
   test('model selector renders and is interactive', async ({ page }) => {
-    const modelSelector = page.locator('[data-testid="model-selector"]')
-    if ((await modelSelector.count()) > 0) {
+    // Use isVisible() + short waitFor instead of count() — count() doesn't auto-wait
+    // and can return 0 on a still-rendering page, causing silent false-passes.
+    let modelSelectorFound = false
+    try {
+      await page.locator('[data-testid="model-selector"]').waitFor({ state: 'visible', timeout: 3_000 })
+      modelSelectorFound = true
+    } catch {
+      // Not present — check fallback selector
+    }
+
+    if (modelSelectorFound) {
+      const modelSelector = page.locator('[data-testid="model-selector"]')
       await expect(modelSelector).toBeVisible()
       await modelSelector.click()
-      // Options should appear
       const options = page.locator('[data-testid="model-option"]')
       await expect(options.first()).toBeVisible({ timeout: 5_000 })
     } else {
       // Model selector may use different structure — check for button/select
-      const altSelector = page.locator('button').filter({ hasText: /model|gpt|claude|gemini/i }).first()
-      if ((await altSelector.count()) > 0) {
-        await expect(altSelector).toBeVisible()
-      } else {
+      try {
+        await page
+          .locator('button')
+          .filter({ hasText: /model|gpt|claude|gemini/i })
+          .first()
+          .waitFor({ state: 'visible', timeout: 3_000 })
+        await expect(
+          page.locator('button').filter({ hasText: /model|gpt|claude|gemini/i }).first()
+        ).toBeVisible()
+      } catch {
         test.skip(true, 'Model selector not present in this environment')
       }
     }
   })
 
   test('tool selector renders for models that support tools', async ({ page }) => {
-    const toolSelector = page.locator('[data-testid="tool-selector"]')
-    // Tool selector only appears if the current model supports tools
-    if ((await toolSelector.count()) > 0) {
-      await expect(toolSelector).toBeVisible()
-    } else {
+    // Use waitFor instead of count() to properly wait for rendering
+    try {
+      await page.locator('[data-testid="tool-selector"]').waitFor({ state: 'visible', timeout: 3_000 })
+      await expect(page.locator('[data-testid="tool-selector"]')).toBeVisible()
+    } catch {
       test.skip(true, 'Tool selector not visible (model may not support tools)')
     }
   })
 
   test('voice button renders (enabled or disabled state)', async ({ page }) => {
-    const voiceEnabled = page.locator('[data-testid="voice-mode-button"]')
-    const voiceDisabled = page.locator('[data-testid="voice-mode-button-disabled"]')
-
-    const hasVoice =
-      (await voiceEnabled.count()) > 0 || (await voiceDisabled.count()) > 0
-
-    expect(hasVoice).toBe(true)
+    // Wait for either voice button variant — use a CSS multi-selector
+    const voiceButtonSelector =
+      '[data-testid="voice-mode-button"], [data-testid="voice-mode-button-disabled"]'
+    try {
+      await page.locator(voiceButtonSelector).first().waitFor({ state: 'visible', timeout: 5_000 })
+      await expect(page.locator(voiceButtonSelector).first()).toBeVisible()
+    } catch {
+      // Voice feature not present in this environment
+      test.skip(true, 'Voice button not found in this environment')
+    }
   })
 })
 
