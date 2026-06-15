@@ -5,7 +5,7 @@
  * Dimension-agnostic vector type — the DB column enforces dimensions at INSERT/UPDATE time.
  */
 
-import { customType, integer, pgTable, serial, text, timestamp, varchar } from 'drizzle-orm/pg-core';
+import { customType, pgTable, serial, text, timestamp, varchar } from 'drizzle-orm/pg-core';
 
 function flexVector(columnName: string) {
   return customType<{ data: number[] | null; driverData: string | null }>({
