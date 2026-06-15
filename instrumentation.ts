@@ -77,11 +77,45 @@ async function warmupConnectionPool(): Promise<void> {
 }
 
 /**
+ * Sync the capability manifest to the database on startup.
+ *
+ * Issue #923 - registers code-managed capabilities (lib/capabilities/manifest.ts)
+ * so adding a capability requires only a manifest entry + restart, no SQL
+ * migration. The sync is idempotent and holds a per-transaction advisory lock so
+ * multiple replicas booting at once serialize safely. Non-blocking: failures are
+ * logged and never prevent server startup (the previous boot's rows remain).
+ */
+async function syncCapabilities(): Promise<void> {
+  const { createLogger } = await import("@/lib/logger");
+  const log = createLogger({
+    context: "instrumentation",
+    operation: "capabilitySync",
+  });
+
+  try {
+    const { syncCapabilityManifest } = await import("@/lib/capabilities/sync");
+    const result = await syncCapabilityManifest();
+    log.info("Capability manifest synced on startup", {
+      inserted: result.inserted.length,
+      updated: result.updated.length,
+      deactivated: result.deactivated.length,
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    // Don't fail startup on sync errors.
+    log.warn("Capability manifest sync failed on startup", {
+      error: errorMessage,
+    });
+  }
+}
+
+/**
  * Next.js instrumentation register function
  *
  * Called once when the Next.js server starts. Used to:
  * 1. Register shutdown handlers for graceful connection cleanup
  * 2. Warm up the database connection pool to avoid cold start latency
+ * 3. Sync the code capability manifest into the database (#923)
  *
  * Only runs in Node.js runtime (not Edge runtime or during builds).
  */
@@ -103,5 +137,12 @@ export async function register(): Promise<void> {
       });
     });
 
+    // Sync capability manifest (async, non-blocking). Runs after warmup so the
+    // pool is established; failures are logged inside syncCapabilities.
+    setImmediate(() => {
+      syncCapabilities().catch(() => {
+        // Errors already logged in syncCapabilities
+      });
+    });
   }
 }
