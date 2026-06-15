@@ -240,13 +240,14 @@ test.describe('Nexus API Error Handling — Authenticated', () => {
     expect(result.status).toBe(404)
   })
 
-  test('POST to /api/nexus/chat with another user\'s conversation returns 404', async ({
+  test('POST to /api/nexus/chat with non-existent conversationId returns 404', async ({
     page,
   }) => {
+    // This tests that a non-existent UUID is rejected — not a cross-user IDOR test.
+    // For real cross-user ownership verification see nexus-conversation-ownership.spec.ts.
     await page.goto('/nexus')
     await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 10_000 })
 
-    // A zero UUID cannot be owned by the current user
     const result = await page.evaluate(async () => {
       const res = await fetch('/api/nexus/chat', {
         method: 'POST',

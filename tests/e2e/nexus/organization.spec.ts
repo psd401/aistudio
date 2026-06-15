@@ -374,11 +374,15 @@ test.describe('Nexus Conversations API — Input Validation', () => {
 
     const result = await page.evaluate(async () => {
       const res = await fetch('/api/nexus/conversations?provider=evil%3Binjection')
-      return { status: res.status }
+      return { status: res.status, body: await res.json() }
     })
 
-    // Should return 200 (invalid provider is silently ignored per the whitelist logic)
+    // Invalid provider is silently ignored per whitelist logic — should return normal response
     expect(result.status).toBe(200)
+    // Verify response body is unaffected by the injected value (not corrupted or empty)
+    expect(Array.isArray(result.body.conversations)).toBe(true)
+    expect(result.body).toHaveProperty('pagination')
+    expect(typeof result.body.pagination.total).toBe('number')
   })
 
   test('extremely large limit is clamped to 500', async ({ page }) => {
