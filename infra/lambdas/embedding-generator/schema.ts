@@ -39,5 +39,8 @@ export const repositoryItems = pgTable('repository_items', {
 
 export const repositoryItemChunks = pgTable('repository_item_chunks', {
   id: serial('id').primaryKey(),
+  // READ-ONLY via Drizzle. Writes use db.execute(sql`...::vector`) because
+  // postgres.js does not coerce parameterised text values to the vector column
+  // type automatically — the explicit ::vector cast is required.
   embedding: flexVector('embedding'),
 });

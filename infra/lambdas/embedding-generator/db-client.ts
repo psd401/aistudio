@@ -29,7 +29,15 @@ async function resolveCredentials(): Promise<{ username: string; password: strin
     new GetSecretValueCommand({ SecretId: DATABASE_SECRET_ARN })
   );
   if (!res.SecretString) throw new Error('DATABASE_SECRET_ARN: missing SecretString');
-  return JSON.parse(res.SecretString) as { username: string; password: string };
+  const parsed = JSON.parse(res.SecretString) as Record<string, unknown>;
+  const { username, password } = parsed;
+  if (typeof username !== 'string' || !username) {
+    throw new Error('DATABASE_SECRET_ARN payload missing username');
+  }
+  if (typeof password !== 'string' || !password) {
+    throw new Error('DATABASE_SECRET_ARN payload missing password');
+  }
+  return { username, password };
 }
 
 export async function getDb(): Promise<DrizzleClient> {
@@ -43,7 +51,7 @@ export async function getDb(): Promise<DrizzleClient> {
     username: creds.username,
     password: creds.password,
     ssl: 'require',
-    max: 2,
+    max: 1, // SQS batchSize=1, one record per invocation
     idle_timeout: 20,
     connect_timeout: 10,
   });

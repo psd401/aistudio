@@ -269,6 +269,7 @@ export class ProcessingStack extends cdk.Stack {
       account: this.account,
       vpcEnabled: true,
       secrets: [databaseSecretArn],
+      sqsQueues: [this.embeddingQueue.queueArn],
     });
 
     const embeddingGeneratorSg = new ec2.SecurityGroup(this, 'EmbeddingGeneratorSg', {
@@ -291,6 +292,7 @@ export class ProcessingStack extends cdk.Stack {
         DATABASE_HOST: databaseHost,
         DATABASE_SECRET_ARN: databaseSecretArn,
         DATABASE_NAME: 'aistudio',
+        DATABASE_PORT: '5432',
         ENVIRONMENT: props.environment,
       },
       layers: [processingLayer],
