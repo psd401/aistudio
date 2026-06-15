@@ -16,7 +16,6 @@ import { sql } from 'drizzle-orm';
 import { getDb, closeDb } from './db-client';
 import { settings, repositoryItems, repositoryItemChunks } from './schema';
 
-// eslint-disable-next-line no-console
 const log = {
   info: (msg: string, meta?: Record<string, unknown>) =>
     process.stdout.write(JSON.stringify({ level: 'INFO', message: msg, ...meta }) + '\n'),
@@ -224,9 +223,8 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
 export async function handler(event: SQSEvent): Promise<void> {
   log.info(`Processing embedding requests: ${event.Records.length}`);
 
-  const embSettings = await getEmbeddingSettings();
-
   try {
+    const embSettings = await getEmbeddingSettings();
     for (const record of event.Records) {
       await processRecord(record, embSettings);
     }
