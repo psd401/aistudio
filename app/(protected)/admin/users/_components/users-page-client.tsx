@@ -417,7 +417,7 @@ export function UsersPageClient({
   )
 
   return (
-    <div className="p-6 space-y-6">
+    <div className="p-6 space-y-6" data-testid="user-management-page">
       {/* Header */}
       <div className="mb-6">
         <PageBranding />
