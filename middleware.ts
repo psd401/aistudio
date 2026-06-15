@@ -73,6 +73,11 @@ export default authMiddleware((req) => {
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('X-Frame-Options', 'DENY');
   response.headers.set('X-XSS-Protection', '1; mode=block');
+  // HSTS: force HTTPS for 1 year on all subdomains. Safe because all traffic
+  // terminates at the ALB as HTTPS — the app never receives plain HTTP.
+  response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  // Prevent Referer leaking URL path/params to cross-origin destinations.
+  response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
   
   return response;
 });
