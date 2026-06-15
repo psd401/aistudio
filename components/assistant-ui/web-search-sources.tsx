@@ -6,7 +6,9 @@ import { isSafeUrl } from '@/lib/utils'
 
 export const WebSearchSource: SourceMessagePartComponent = ({ url, title }) => {
   // Security: Only render http/https URLs to prevent XSS via javascript:, data:, etc.
-  if (!isSafeUrl(url)) {
+  // url is optional in assistant-ui's SourceMessagePartComponent props (v0.14+),
+  // so guard against undefined before validating — this also narrows url to string below.
+  if (!url || !isSafeUrl(url)) {
     return null
   }
 
