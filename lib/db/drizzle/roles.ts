@@ -10,10 +10,17 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, asc, inArray } from "drizzle-orm";
-import { executeQuery } from "@/lib/db/drizzle-client";
-import { roles, roleTools, tools } from "@/lib/db/schema";
+import { eq, and, asc } from "drizzle-orm";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
+import { roles, roleCapabilities } from "@/lib/db/schema";
 import { ErrorFactories } from "@/lib/error-utils";
+import {
+  getCapabilities,
+  getCapabilitiesByIds,
+  getRoleCapabilities,
+  assignCapabilityToRole,
+  removeCapabilityFromRole,
+} from "@/lib/db/drizzle/capabilities";
 
 // ============================================
 // Types
@@ -192,160 +199,91 @@ export async function deleteRole(id: number) {
 
 // ============================================
 // Role-Tool Assignment Operations
+//
+// Issue #923: the legacy `tools`/`role_tools` tables were renamed to
+// `capabilities`/`role_capabilities`. These functions keep their names and
+// signatures as a compat shim during the migration window (call-site rename is
+// workstream #6) and delegate to the capability accessors, which read/write the
+// new tables. The capability `id` space matches the legacy tool `id` space
+// (migration 079 backfills preserving ids), so downstream FK usage is unchanged.
 // ============================================
 
 /**
- * Get all tools assigned to a role
+ * Get all capabilities assigned to a role.
+ * @deprecated Prefer `getRoleCapabilities`. Retained as a compat shim (#923).
  */
 export async function getRoleTools(roleId: number) {
-  return executeQuery(
-    (db) =>
-      db
-        .select({
-          id: tools.id,
-          identifier: tools.identifier,
-          name: tools.name,
-          description: tools.description,
-          isActive: tools.isActive,
-          createdAt: tools.createdAt,
-          updatedAt: tools.updatedAt,
-        })
-        .from(tools)
-        .innerJoin(roleTools, eq(tools.id, roleTools.toolId))
-        .where(eq(roleTools.roleId, roleId))
-        .orderBy(asc(tools.name)),
-    "getRoleTools"
-  );
+  return getRoleCapabilities(roleId);
 }
 
 /**
- * Get all active tools (for tool selection UI)
+ * Get all active capabilities (for the capability/tool selection UI).
+ * @deprecated Prefer `getCapabilities({ activeOnly: true })`. Compat shim (#923).
  */
 export async function getTools() {
-  return executeQuery(
-    (db) =>
-      db
-        .select({
-          id: tools.id,
-          identifier: tools.identifier,
-          name: tools.name,
-          description: tools.description,
-          promptChainToolId: tools.promptChainToolId,
-          isActive: tools.isActive,
-          createdAt: tools.createdAt,
-          updatedAt: tools.updatedAt,
-        })
-        .from(tools)
-        .where(eq(tools.isActive, true))
-        .orderBy(asc(tools.name)),
-    "getTools"
-  );
+  return getCapabilities({ activeOnly: true });
 }
 
 /**
- * Get tools by their IDs
- * Returns a map of tool IDs to their identifiers for efficient lookup
+ * Get capabilities by their IDs. Returns a map of id -> identifier.
+ * @deprecated Prefer `getCapabilitiesByIds`. Compat shim (#923).
  */
 export async function getToolsByIds(
   toolIds: number[]
 ): Promise<Map<number, string>> {
-  if (toolIds.length === 0) {
-    return new Map();
-  }
-
-  const result = await executeQuery(
-    (db) =>
-      db
-        .select({
-          id: tools.id,
-          identifier: tools.identifier,
-        })
-        .from(tools)
-        .where(inArray(tools.id, toolIds)),
-    "getToolsByIds"
-  );
-
-  const toolsMap = new Map<number, string>();
-  for (const tool of result) {
-    toolsMap.set(tool.id, tool.identifier);
-  }
-  return toolsMap;
+  return getCapabilitiesByIds(toolIds);
 }
 
 /**
- * Assign a tool to a role
- * Idempotent operation - succeeds even if already assigned
- *
- * @param roleId - Role database ID
- * @param toolId - Tool database ID
- * @returns Always true (conflict means already assigned)
+ * Assign a capability to a role. Idempotent.
+ * @deprecated Prefer `assignCapabilityToRole`. Compat shim (#923).
  */
 export async function assignToolToRole(
   roleId: number,
   toolId: number
 ): Promise<boolean> {
-  await executeQuery(
-    (db) =>
-      db
-        .insert(roleTools)
-        .values({ roleId, toolId })
-        .onConflictDoNothing(),
-    "assignToolToRole"
-  );
-
-  return true; // Success (including if already assigned)
+  return assignCapabilityToRole(roleId, toolId);
 }
 
 /**
- * Remove a tool from a role
- *
- * @param roleId - Role database ID
- * @param toolId - Tool database ID
+ * Remove a capability from a role.
+ * @deprecated Prefer `removeCapabilityFromRole`. Compat shim (#923).
  */
 export async function removeToolFromRole(
   roleId: number,
   toolId: number
 ): Promise<boolean> {
-  const result = await executeQuery(
-    (db) =>
-      db
-        .delete(roleTools)
-        .where(and(eq(roleTools.roleId, roleId), eq(roleTools.toolId, toolId)))
-        .returning(),
-    "removeToolFromRole"
-  );
-
-  return result.length > 0;
+  return removeCapabilityFromRole(roleId, toolId);
 }
 
 /**
- * Set all tools for a role (replaces existing assignments)
+ * Set all capabilities for a role (replaces existing assignments).
+ * @deprecated Compat shim (#923) — writes to role_capabilities.
  *
  * @param roleId - Role database ID
- * @param toolIds - Array of tool database IDs
+ * @param toolIds - Array of capability database IDs
  */
 export async function setRoleTools(
   roleId: number,
   toolIds: number[]
 ): Promise<{ success: boolean }> {
-  return executeQuery(
-    (db) =>
-      db.transaction(async (tx) => {
-        // Delete existing tool assignments
-        await tx.delete(roleTools).where(eq(roleTools.roleId, roleId));
+  return executeTransaction(
+    async (tx) => {
+      await tx
+        .delete(roleCapabilities)
+        .where(eq(roleCapabilities.roleId, roleId));
 
-        // Insert new tool assignments
-        if (toolIds.length > 0) {
-          await tx.insert(roleTools).values(
-            toolIds.map((toolId) => ({
-              roleId,
-              toolId,
-            }))
-          );
-        }
+      if (toolIds.length > 0) {
+        await tx.insert(roleCapabilities).values(
+          toolIds.map((capabilityId) => ({
+            roleId,
+            capabilityId,
+          }))
+        );
+      }
 
-        return { success: true };
-      }),
+      return { success: true };
+    },
     "setRoleTools"
   );
 }

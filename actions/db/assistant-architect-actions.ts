@@ -56,7 +56,7 @@ import {
 } from "@/lib/db/drizzle";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
-import { tools, navigationItems, toolInputFields, chainPrompts, assistantArchitects, roleTools, userRoles, toolExecutions, promptResults } from "@/lib/db/schema";
+import { tools, navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities } from "@/lib/db/schema";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -495,6 +495,16 @@ export async function updateAssistantArchitectAction(
             .where(eq(tools.promptChainToolId, idInt)),
         "deactivateApprovedTool"
       );
+      // Issue #923: keep the renamed capabilities table in sync so the swapped
+      // hasToolAccess() read path also sees the deactivation.
+      await executeQuery(
+        (db) =>
+          db
+            .update(capabilities)
+            .set({ isActive: false, updatedAt: new Date() })
+            .where(eq(capabilities.promptChainToolId, idInt)),
+        "deactivateApprovedCapability"
+      );
     }
 
     // Build update data object with only provided fields
@@ -647,6 +657,16 @@ export async function deleteAssistantArchitectAction(
           .delete(tools)
           .where(eq(tools.promptChainToolId, idInt)),
       "deleteToolsByAssistantArchitect"
+    );
+
+    // Issue #923: also delete the renamed capability row (role_capabilities rows
+    // cascade via the FK ON DELETE CASCADE) so no orphan grant remains.
+    await executeQuery(
+      (db) =>
+        db
+          .delete(capabilities)
+          .where(eq(capabilities.promptChainToolId, idInt)),
+      "deleteCapabilitiesByAssistantArchitect"
     );
 
     // Delete from navigation_items
@@ -1503,7 +1523,8 @@ export async function approveAssistantArchitectAction(
     // Approve the assistant architect and create tool entry (transaction)
     const updatedTool = await drizzleApproveAssistantArchitect(idInt)
 
-    // Query for the tool ID that was just created
+    // Query for the tool ID that was just created (used for the navigation item,
+    // whose navigation_items.tool_id FK still references the legacy tools table).
     const [tool] = await executeQuery(
       (db) =>
         db
@@ -1514,12 +1535,32 @@ export async function approveAssistantArchitectAction(
       "getToolByPromptChainToolId"
     )
 
+    // Issue #923: role grants now target role_capabilities.capability_id, so we
+    // need the capability row's id (created in the same approval transaction).
+    // It may differ from the legacy tools.id, so fetch it explicitly rather than
+    // assuming they match.
+    const [capability] = await executeQuery(
+      (db) =>
+        db
+          .select({ id: capabilities.id })
+          .from(capabilities)
+          .where(eq(capabilities.promptChainToolId, idInt))
+          .limit(1),
+      "getCapabilityByPromptChainToolId"
+    )
+
     if (!tool) {
       log.error("Tool not created after approval", { assistantArchitectId: idInt })
       return { isSuccess: false, message: "Tool creation failed" }
     }
 
+    if (!capability) {
+      log.error("Capability not created after approval", { assistantArchitectId: idInt })
+      return { isSuccess: false, message: "Capability creation failed" }
+    }
+
     const finalToolId = tool.id
+    const finalCapabilityId = capability.id
 
     // Create navigation item if it doesn't exist
     const navLink = `/tools/assistant-architect/${id}`
@@ -1554,7 +1595,9 @@ export async function approveAssistantArchitectAction(
 
     for (const role of rolesToAssign) {
       if (role) {
-        await assignToolToRole(role.id, finalToolId)
+        // Issue #923: assignToolToRole now writes role_capabilities.capability_id,
+        // so pass the capability id (not the legacy tools.id).
+        await assignToolToRole(role.id, finalCapabilityId)
       }
     }
 
@@ -1645,15 +1688,16 @@ export async function getApprovedAssistantArchitectsAction(): Promise<
     }
     const currentUserId = currentUserResult.data.user.id
 
-    // Get all tools the user has access to via role assignments
+    // Get all capabilities the user has access to via role assignments
+    // (#923 — reads the renamed capabilities/role_capabilities tables).
     const userTools = await executeQuery(
       (db) =>
         db
-          .selectDistinct({ identifier: tools.identifier, promptChainToolId: tools.promptChainToolId })
-          .from(tools)
-          .innerJoin(roleTools, eq(tools.id, roleTools.toolId))
-          .innerJoin(userRoles, eq(roleTools.roleId, userRoles.roleId))
-          .where(and(eq(userRoles.userId, currentUserId), eq(tools.isActive, true))),
+          .selectDistinct({ identifier: capabilities.identifier, promptChainToolId: capabilities.promptChainToolId })
+          .from(capabilities)
+          .innerJoin(roleCapabilities, eq(capabilities.id, roleCapabilities.capabilityId))
+          .innerJoin(userRoles, eq(roleCapabilities.roleId, userRoles.roleId))
+          .where(and(eq(userRoles.userId, currentUserId), eq(capabilities.isActive, true))),
       "getUserAccessibleTools"
     )
 

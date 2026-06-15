@@ -51,6 +51,7 @@ import {
   toolExecutions,
   promptResults,
   tools,
+  capabilities,
   users,
 } from "@/lib/db/schema";
 import { ErrorFactories } from "@/lib/error-utils";
@@ -450,6 +451,26 @@ export async function approveAssistantArchitect(id: number) {
         })
         .onConflictDoNothing({
           target: tools.identifier,
+        });
+
+      // Issue #923: dual-write the capability row in the same transaction so the
+      // post-approval role grant (which now targets role_capabilities) and the
+      // hasToolAccess() read path (which now reads capabilities) stay consistent.
+      // AA-generated capabilities are source='manual' (admin-editable, like the
+      // legacy tool row). Drizzle setoff is skipped on conflict to preserve any
+      // admin edits made to an existing row.
+      await tx
+        .insert(capabilities)
+        .values({
+          identifier: toolIdentifier,
+          name: assistant.name,
+          description: assistant.description,
+          promptChainToolId: assistant.id,
+          isActive: true,
+          source: "manual",
+        })
+        .onConflictDoNothing({
+          target: capabilities.identifier,
         });
 
       return assistant;
