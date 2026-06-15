@@ -1,12 +1,14 @@
 {
   "name": "embedding-generator",
   "version": "1.0.0",
-  "description": "Lambda function for generating embeddings",
+  "description": "Lambda function for generating embeddings via postgres.js + Drizzle ORM",
   "main": "index.js",
   "dependencies": {
-    "@aws-sdk/client-rds-data": "^3.499.0",
     "@aws-sdk/client-bedrock-runtime": "^3.499.0",
-    "openai": "^4.28.0"
+    "@aws-sdk/client-secrets-manager": "^3.499.0",
+    "drizzle-orm": "^0.45.1",
+    "openai": "^4.28.0",
+    "postgres": "^3.4.3"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.134",
