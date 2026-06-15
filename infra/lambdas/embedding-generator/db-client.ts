@@ -14,8 +14,10 @@ import * as schema from './schema';
 
 const secretsClient = new SecretsManagerClient({});
 
-const DATABASE_HOST = process.env.DATABASE_HOST ?? '';
-const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN ?? '';
+const DATABASE_HOST = process.env.DATABASE_HOST;
+if (!DATABASE_HOST) throw new Error('DATABASE_HOST env var is required');
+const DATABASE_SECRET_ARN = process.env.DATABASE_SECRET_ARN;
+if (!DATABASE_SECRET_ARN) throw new Error('DATABASE_SECRET_ARN env var is required');
 const DATABASE_NAME = process.env.DATABASE_NAME ?? 'aistudio';
 const DATABASE_PORT = parseInt(process.env.DATABASE_PORT ?? '5432', 10);
 

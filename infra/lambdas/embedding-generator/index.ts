@@ -11,10 +11,9 @@
 import { SQSEvent, SQSRecord } from 'aws-lambda';
 import OpenAI from 'openai';
 import { BedrockRuntimeClient, InvokeModelCommand } from '@aws-sdk/client-bedrock-runtime';
-import { eq, inArray, or } from 'drizzle-orm';
-import { sql } from 'drizzle-orm';
+import { eq, inArray, or, sql } from 'drizzle-orm';
 import { getDb, closeDb } from './db-client';
-import { settings, repositoryItems, repositoryItemChunks } from './schema';
+import { settings, repositoryItems } from './schema';
 
 const log = {
   info: (msg: string, meta?: Record<string, unknown>) =>
@@ -211,10 +210,14 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
     const errorMessage = error instanceof Error ? error.message : String(error);
     log.error(`Failed to generate embeddings for item ${message.itemId}`, { error: errorMessage });
 
-    await db
-      .update(repositoryItems)
-      .set({ processingStatus: 'embedding_failed', processingError: errorMessage, updatedAt: new Date() })
-      .where(eq(repositoryItems.id, message.itemId));
+    try {
+      await db
+        .update(repositoryItems)
+        .set({ processingStatus: 'embedding_failed', processingError: errorMessage, updatedAt: new Date() })
+        .where(eq(repositoryItems.id, message.itemId));
+    } catch (dbError) {
+      log.error(`Failed to mark item ${message.itemId} as embedding_failed`, { error: String(dbError) });
+    }
 
     throw error;
   }
