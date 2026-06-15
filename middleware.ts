@@ -38,10 +38,17 @@ export default authMiddleware((req) => {
 
   // Create response with security headers
   let response: NextResponse;
+  // Track whether this is a passthrough (NextResponse.next()) response.
+  // next.config.mjs headers() applies to passthrough responses, so HSTS and
+  // Referrer-Policy are already set globally there. Only set them here on
+  // direct responses (401s, redirects) to avoid duplicate headers that violate
+  // RFC 6797 and could confuse security scanners.
+  let isPassthrough = false;
 
   // Allow public paths
   if (isPublicPath) {
     response = NextResponse.next();
+    isPassthrough = true;
   }
   // Allow static assets
   else if (
@@ -50,6 +57,7 @@ export default authMiddleware((req) => {
     nextUrl.pathname.match(/\.(jpg|jpeg|png|gif|ico|css|js)$/i)
   ) {
     response = NextResponse.next();
+    isPassthrough = true;
   }
   // Handle API routes differently - return 401 instead of redirecting
   else if (!isLoggedIn && nextUrl.pathname.startsWith("/api/")) {
@@ -64,6 +72,7 @@ export default authMiddleware((req) => {
   }
   else {
     response = NextResponse.next();
+    isPassthrough = true;
   }
 
   // Add security headers to all responses
@@ -73,12 +82,16 @@ export default authMiddleware((req) => {
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('X-Frame-Options', 'DENY');
   response.headers.set('X-XSS-Protection', '1; mode=block');
-  // HSTS: force HTTPS for 1 year on all subdomains. Safe because all traffic
-  // terminates at the ALB as HTTPS — the app never receives plain HTTP.
-  response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-  // Prevent Referer leaking URL path/params to cross-origin destinations.
-  response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
-  
+
+  // HSTS and Referrer-Policy: set only on direct responses (401s, redirects)
+  // where next.config.mjs headers() does not apply. The ALB terminates TLS;
+  // HSTS tells browsers to always use HTTPS when connecting to the ALB.
+  // Passthrough responses receive these headers from next.config.mjs headers().
+  if (!isPassthrough) {
+    response.headers.set('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    response.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
+  }
+
   return response;
 });
 
