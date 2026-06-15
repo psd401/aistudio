@@ -1,29 +1,34 @@
 "use server"
 
-import { RolesTable } from "./_components/roles-table"
+import { RolesPageClient } from "./_components/roles-page-client"
 import { requireRole } from "@/lib/auth/role-helpers"
-import { getRoles, getTools } from "@/lib/db/drizzle"
+import { getRoles, getTools, getCapabilities } from "@/lib/db/drizzle"
 import { PageBranding } from "@/components/ui/page-branding"
 
 export default async function RolesPage() {
   await requireRole("administrator");
 
-  // Fetch roles and tools from the database
-  const [roles, tools] = await Promise.all([
+  // Fetch roles, tools (legacy selection list), and capabilities.
+  const [roles, tools, capabilities] = await Promise.all([
     getRoles(),
-    getTools()
+    getTools(),
+    getCapabilities()
   ]);
 
   return (
     <div className="p-6">
       <div className="mb-6">
         <PageBranding />
-        <h1 className="text-2xl font-semibold text-gray-900">Role Management</h1>
+        <h1 className="text-2xl font-semibold text-gray-900">Role &amp; Capability Management</h1>
         <p className="text-sm text-muted-foreground mt-1">
-          Configure roles and their tool permissions
+          Configure roles, their capability permissions, and the capability registry
         </p>
       </div>
-      <RolesTable roles={roles || []} tools={tools || []} />
+      <RolesPageClient
+        roles={roles || []}
+        tools={tools || []}
+        capabilities={capabilities || []}
+      />
     </div>
   )
-} 
+}

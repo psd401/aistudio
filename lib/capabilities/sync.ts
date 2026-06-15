@@ -46,6 +46,48 @@ export interface CapabilitySyncResult {
   rolesGranted: number;
 }
 
+/** Transaction handle type as provided by executeTransaction. */
+type Tx = Parameters<Parameters<typeof executeTransaction>[0]>[0];
+
+/** Logger type used inside the sync. */
+type SyncLogger = ReturnType<typeof createLogger>;
+
+/**
+ * Grant a newly-inserted capability's manifest defaultRoles. Idempotent
+ * (ON CONFLICT DO NOTHING). Unknown role names are logged and skipped.
+ *
+ * @returns the number of role grants performed.
+ */
+async function grantDefaultRoles(
+  tx: Tx,
+  entry: CapabilityManifestEntry,
+  capabilityId: number,
+  roleIdByName: Map<string, number>,
+  log: SyncLogger
+): Promise<number> {
+  if (!entry.defaultRoles || entry.defaultRoles.length === 0) {
+    return 0;
+  }
+
+  let granted = 0;
+  for (const roleName of entry.defaultRoles) {
+    const roleId = roleIdByName.get(roleName);
+    if (roleId === undefined) {
+      log.warn("Manifest defaultRole not found; skipping grant", {
+        identifier: entry.identifier,
+        roleName,
+      });
+      continue;
+    }
+    await tx
+      .insert(roleCapabilities)
+      .values({ roleId, capabilityId })
+      .onConflictDoNothing();
+    granted += 1;
+  }
+  return granted;
+}
+
 /**
  * Sync the capability manifest into the database. Safe to call repeatedly.
  *
@@ -117,22 +159,14 @@ export async function syncCapabilityManifest(
             inserted.push(entry.identifier);
 
             // Apply defaultRoles ONLY on first insert.
-            if (row && entry.defaultRoles && entry.defaultRoles.length > 0) {
-              for (const roleName of entry.defaultRoles) {
-                const roleId = roleIdByName.get(roleName);
-                if (roleId === undefined) {
-                  log.warn("Manifest defaultRole not found; skipping grant", {
-                    identifier: entry.identifier,
-                    roleName,
-                  });
-                  continue;
-                }
-                await tx
-                  .insert(roleCapabilities)
-                  .values({ roleId, capabilityId: row.id })
-                  .onConflictDoNothing();
-                rolesGranted += 1;
-              }
+            if (row) {
+              rolesGranted += await grantDefaultRoles(
+                tx,
+                entry,
+                row.id,
+                roleIdByName,
+                log
+              );
             }
           } else {
             // UPDATE name/description/source; re-activate (manifest re-add).
