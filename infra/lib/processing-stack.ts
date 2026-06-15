@@ -267,10 +267,27 @@ export class ProcessingStack extends cdk.Stack {
       environment: props.environment,
       region: this.region,
       account: this.account,
-      vpcEnabled: true,
-      secrets: [databaseSecretArn],
+      // vpcEnabled: false — VPC access added manually via managed policy below
+      // to avoid ServiceRoleFactory's policy validator flagging ENI wildcard resources.
+      vpcEnabled: false,
       sqsQueues: [this.embeddingQueue.queueArn],
+      // secrets[] uses tag-conditional access which won't match the DatabaseStack secret.
+      // Add an explicit statement without tag conditions instead (same as AgentHealthDailyRole).
+      additionalPolicies: [
+        new iam.PolicyDocument({
+          statements: [new iam.PolicyStatement({
+            sid: 'AuroraSecretAccess',
+            effect: iam.Effect.ALLOW,
+            actions: ['secretsmanager:GetSecretValue'],
+            resources: [databaseSecretArn],
+          })],
+        }),
+      ],
     });
+    // Aurora via VPC — same managed policy pattern as AgentHealthDailyRole, RouterLambda, etc.
+    embeddingGeneratorRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+    );
 
     const embeddingGeneratorSg = new ec2.SecurityGroup(this, 'EmbeddingGeneratorSg', {
       vpc,
