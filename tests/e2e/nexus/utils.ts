@@ -1,41 +1,39 @@
 import { type Page } from '@playwright/test'
 
-/** Navigate to /nexus and verify we're not redirected to auth. */
+// Navigate to /nexus and wait for the shell; throws with a targeted error if redirected to auth.
 export async function gotoNexus(page: Page): Promise<void> {
   await page.goto('/nexus')
-  await page.waitForURL((url) => !url.pathname.includes('/auth/signin') && !url.pathname.includes('/sign-in'), {
-    timeout: 10_000,
-  })
-  await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 10_000 })
+  try {
+    await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 10_000 })
+  } catch {
+    const url = page.url()
+    if (url.includes('/auth/signin') || url.includes('/sign-in') || url.includes('/login')) {
+      throw new Error(`gotoNexus: unauthenticated — redirected to ${url}`)
+    }
+    throw new Error(`gotoNexus: nexus shell not found within 10s. Current URL: ${url}`)
+  }
 }
 
-/** Fill and send a message via the composer. */
+// Fill and send a message via the composer.
 export async function sendMessage(page: Page, message: string): Promise<void> {
   const input = page.locator('[aria-label="Message input"]')
   await input.fill(message)
   await page.locator('[aria-label="Send message"]').click()
 }
 
-/** Wait for the active streaming response to complete (stop button disappears). */
+// Wait for streaming to complete: stop button must appear then disappear.
+// If streaming finishes before this is called the try-block no-ops and we wait on hidden.
 export async function waitForStreamingComplete(page: Page, timeout = 60_000): Promise<void> {
-  await page.locator('[aria-label="Stop generating"]').waitFor({ state: 'hidden', timeout })
-}
-
-/** Extract the conversation ID from the current URL (/nexus/<id>). Returns null if not on a conversation URL. */
-export function getConversationIdFromUrl(page: Page): string | null {
-  const pathname = new URL(page.url()).pathname
-  const match = pathname.match(/^\/nexus\/(.+)$/)
-  return match ? match[1] : null
-}
-
-/** Check whether we have an authenticated session by looking for the nexus shell. */
-export async function isAuthenticated(page: Page): Promise<boolean> {
-  await page.goto('/nexus')
+  const stopBtn = page.locator('[aria-label="Stop generating"]')
   try {
-    await page.waitForURL((url) => !url.pathname.includes('/sign-in'), { timeout: 5_000 })
-    await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 5_000 })
-    return true
+    await stopBtn.waitFor({ state: 'visible', timeout: 15_000 })
   } catch {
-    return false
+    // Streaming completed before stop button appeared — already hidden, proceed
   }
+  await stopBtn.waitFor({ state: 'hidden', timeout })
+}
+
+// Extract the conversation ID from the /nexus?id= query param. Returns null if not on a conversation URL.
+export function getConversationIdFromUrl(page: Page): string | null {
+  return new URL(page.url()).searchParams.get('id')
 }

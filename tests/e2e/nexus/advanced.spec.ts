@@ -1,24 +1,14 @@
 import { test, expect } from '@playwright/test'
 import { gotoNexus, sendMessage, waitForStreamingComplete, getConversationIdFromUrl } from './utils'
 
-/**
- * Advanced Nexus feature tests.
- *
- * Part of Issue #154 — Nexus E2E Test Suite Implementation.
- *
- * Covers: fork conversation, model selector UI, tool selector UI, MCP popover,
- * error recovery, attachment input, invalid input handling.
- *
- * Auth-independent API tests always run.
- * Auth-required browser tests skip unless PLAYWRIGHT_AUTH_ENABLED=true.
- */
+// Advanced Nexus E2E tests — fork conversation, model/tool/voice selectors, error handling.
 
 // ── Fork API — Auth-independent ───────────────────────────────────────────────
 
 test.describe('Nexus Fork API — Unauthenticated', () => {
   test('POST /api/nexus/conversations/<id>/fork returns 401 without auth', async ({ request }) => {
     const res = await request.post('/api/nexus/conversations/some-id/fork', {
-      data: { messageId: 'msg-1' },
+      data: { atMessageId: 'msg-1' },
     })
     expect(res.status()).toBe(401)
   })
@@ -40,7 +30,7 @@ test.describe('Nexus Fork Conversation — Authenticated', () => {
       const res = await fetch('/api/nexus/conversations/00000000-0000-0000-0000-000000000000/fork', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messageId: 'msg-1' }),
+        body: JSON.stringify({ atMessageId: 'msg-1' }),
       })
       return { status: res.status }
     })
@@ -76,20 +66,20 @@ test.describe('Nexus Fork Conversation — Authenticated', () => {
     expect(userMessage).toBeDefined()
 
     const forkResult = await page.evaluate(
-      async ({ id, messageId }) => {
+      async ({ id, atMessageId }) => {
         const res = await fetch(`/api/nexus/conversations/${id}/fork`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ messageId }),
+          body: JSON.stringify({ atMessageId }),
         })
         return { status: res.status, body: await res.json() }
       },
-      { id: conversationId!, messageId: userMessage.id }
+      { id: conversationId!, atMessageId: userMessage.id }
     )
 
     expect(forkResult.status).toBe(200)
-    expect(forkResult.body).toHaveProperty('id')
-    expect(forkResult.body.id).not.toBe(conversationId)
+    expect(forkResult.body).toHaveProperty('forkedConversation')
+    expect(forkResult.body.forkedConversation.id).not.toBe(conversationId)
   })
 })
 
@@ -172,8 +162,8 @@ test.describe('Nexus Error Handling — Authenticated', () => {
   )
 
   test('navigating to non-existent conversation ID shows error or redirects', async ({ page }) => {
-    // UUID that is syntactically valid but does not exist
-    await page.goto('/nexus/00000000-0000-0000-0000-000000000000')
+    // UUID that is syntactically valid but does not exist — use ?id= query param (the app's routing form)
+    await page.goto('/nexus?id=00000000-0000-0000-0000-000000000000')
 
     // Either shows an error state or redirects to /nexus
     await page.waitForFunction(
@@ -320,7 +310,7 @@ test.describe('Nexus Message Persistence — Authenticated', () => {
         m.role === 'user' &&
         m.content.some(
           (part: { type: string; text?: string }) =>
-            part.type === 'text' && part.text?.includes(testMessage.split(' ')[0])
+            part.type === 'text' && part.text?.includes(testMessage)
         )
     )
     expect(userMsg).toBeDefined()

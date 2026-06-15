@@ -1,18 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { gotoNexus, sendMessage, waitForStreamingComplete, getConversationIdFromUrl } from './utils'
 
-/**
- * Core chat functionality E2E tests for Nexus.
- *
- * Part of Issue #154 — Nexus E2E Test Suite Implementation.
- *
- * Tests are split into two groups:
- * - Auth-independent: always run (redirect checks, API 401s, public structure)
- * - Auth-required: skip gracefully unless PLAYWRIGHT_AUTH_ENABLED=true
- *
- * Run authenticated tests locally with a seeded dev session or by setting
- * PLAYWRIGHT_AUTH_ENABLED=true with a storage-state file configured.
- */
+// Core Nexus chat E2E tests — auth-independent (redirect/401) and auth-required groups.
 
 // ── Auth-independent tests ────────────────────────────────────────────────────
 
@@ -32,8 +21,8 @@ test.describe('Nexus — Unauthenticated Access', () => {
     ).toBe(true)
   })
 
-  test('unauthenticated user is redirected from /nexus/<id> to /sign-in', async ({ page }) => {
-    await page.goto('/nexus/00000000-0000-0000-0000-000000000001')
+  test('unauthenticated user is redirected from /nexus?id=<id> to /sign-in', async ({ page }) => {
+    await page.goto('/nexus?id=00000000-0000-0000-0000-000000000001')
     await page.waitForURL(
       (url) =>
         url.pathname.includes('/sign-in') ||
@@ -47,18 +36,6 @@ test.describe('Nexus — Unauthenticated Access', () => {
     ).toBe(true)
   })
 
-  test('GET /api/nexus/conversations returns 401 without auth', async ({ request }) => {
-    const response = await request.get('/api/nexus/conversations')
-    expect(response.status()).toBe(401)
-  })
-
-  test('POST /api/nexus/conversations returns 401 without auth', async ({ request }) => {
-    const response = await request.post('/api/nexus/conversations', {
-      data: { title: 'Test', provider: 'openai' },
-    })
-    expect(response.status()).toBe(401)
-  })
-
   test('POST /api/nexus/chat returns 401 without auth', async ({ request }) => {
     const response = await request.post('/api/nexus/chat', {
       data: {
@@ -67,11 +44,6 @@ test.describe('Nexus — Unauthenticated Access', () => {
         provider: 'openai',
       },
     })
-    expect(response.status()).toBe(401)
-  })
-
-  test('GET /api/nexus/conversations/<id>/messages returns 401 without auth', async ({ request }) => {
-    const response = await request.get('/api/nexus/conversations/fake-id/messages')
     expect(response.status()).toBe(401)
   })
 
@@ -113,15 +85,12 @@ test.describe('Nexus Core Chat — Authenticated', () => {
     const input = page.locator('[aria-label="Message input"]')
     const sendButton = page.locator('[aria-label="Send message"]')
 
-    // Clear any existing text
     await input.clear()
     await expect(sendButton).toBeDisabled()
 
-    // Type something — button should become enabled
     await input.fill('hello')
     await expect(sendButton).toBeEnabled()
 
-    // Clear again — button should disable
     await input.fill('')
     await expect(sendButton).toBeDisabled()
   })
@@ -165,9 +134,9 @@ test.describe('Nexus Core Chat — Authenticated', () => {
   test('conversation URL updates after first message', async ({ page }) => {
     await sendMessage(page, 'Hello for URL test')
 
-    // URL should update to /nexus/<id>
+    // URL updates to /nexus?id=<uuid> after conversation is created
     await page.waitForURL(
-      (url) => url.pathname.startsWith('/nexus/') && url.pathname.length > '/nexus/'.length,
+      (url) => url.pathname === '/nexus' && url.searchParams.get('id') !== null,
       { timeout: 20_000 }
     )
 
@@ -229,22 +198,22 @@ test.describe('Nexus Core Chat — Authenticated', () => {
   })
 
   test('new chat button navigates to a fresh /nexus page', async ({ page }) => {
-    // Start a conversation first
     await sendMessage(page, 'Start conversation for new-chat test')
     await page.waitForURL(
-      (url) => url.pathname.startsWith('/nexus/') && url.pathname.length > '/nexus/'.length,
+      (url) => url.pathname === '/nexus' && url.searchParams.get('id') !== null,
       { timeout: 20_000 }
     )
 
-    // Click New Chat button
     const newChatBtn = page.locator('button[title="Start new chat"]')
     await expect(newChatBtn).toBeVisible()
     await newChatBtn.click()
 
-    // Should navigate back to /nexus (no conversation id) or new conversation
-    await page.waitForURL((url) => url.pathname === '/nexus', { timeout: 10_000 })
+    // New chat clears the id param — /nexus with no id means a fresh session
+    await page.waitForURL(
+      (url) => url.pathname === '/nexus' && url.searchParams.get('id') === null,
+      { timeout: 10_000 }
+    )
 
-    // Input should be empty and focused
     const input = page.locator('[aria-label="Message input"]')
     await expect(input).toBeVisible()
     await expect(input).toHaveValue('')

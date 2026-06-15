@@ -1,16 +1,7 @@
 import { test, expect } from '@playwright/test'
 import { gotoNexus, sendMessage, waitForStreamingComplete, getConversationIdFromUrl } from './utils'
 
-/**
- * Conversation management E2E tests for Nexus.
- *
- * Part of Issue #154 — Nexus E2E Test Suite Implementation.
- *
- * Covers: creation, listing, update (title, archive, pin), deletion via API.
- *
- * Auth-independent API tests always run.
- * Auth-required browser tests skip unless PLAYWRIGHT_AUTH_ENABLED=true.
- */
+// Nexus conversation management E2E tests — CRUD, archive/pin, sidebar, pagination.
 
 // ── Conversations API — Auth-independent ─────────────────────────────────────
 
@@ -310,34 +301,32 @@ test.describe('Nexus Sidebar — Authenticated', () => {
 
     // Wait for conversation URL to establish
     await page.waitForURL(
-      (url) => url.pathname.startsWith('/nexus/') && url.pathname.length > '/nexus/'.length,
+      (url) => url.pathname === '/nexus' && url.searchParams.get('id') !== null,
       { timeout: 20_000 }
     )
 
-    // The conversation list sidebar should show the new conversation
-    // (Thread list items appear in the assistant-ui ThreadListPrimitive)
-    const threadItems = page.locator('[class*="ThreadListItem"], [data-thread-list-item]')
+    // Sidebar should show a thread entry — look for the archive button rendered per thread
+    const threadItems = page.locator('[aria-label="Archive thread"], [aria-label*="Archive"]')
     await expect(threadItems.first()).toBeVisible({ timeout: 10_000 })
   })
 
   test('new conversation URL resolves on /nexus', async ({ page }) => {
     await gotoNexus(page)
 
-    // Start a conversation to get an ID
     await sendMessage(page, 'Create conversation for direct URL navigation test')
     await page.waitForURL(
-      (url) => url.pathname.startsWith('/nexus/') && url.pathname.length > '/nexus/'.length,
+      (url) => url.pathname === '/nexus' && url.searchParams.get('id') !== null,
       { timeout: 20_000 }
     )
 
     const conversationId = getConversationIdFromUrl(page)
     expect(conversationId).toBeTruthy()
 
-    // Navigate away and back to same conversation URL
+    // Navigate away and back using the query-param form /nexus?id=<uuid>
     await page.goto('/nexus')
     await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 10_000 })
 
-    await page.goto(`/nexus/${conversationId}`)
+    await page.goto(`/nexus?id=${conversationId}`)
     await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 10_000 })
     expect(page.url()).toContain(conversationId!)
   })
