@@ -223,7 +223,7 @@ export default [
       "unicorn/prefer-type-error": "error",
 
       // Better practices
-      "unicorn/no-array-for-each": "warn",
+      "unicorn/no-for-each": "warn",
       "unicorn/no-for-loop": "warn",
       "unicorn/prefer-array-find": "warn",
       "unicorn/prefer-array-some": "warn",
