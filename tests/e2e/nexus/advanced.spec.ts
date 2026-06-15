@@ -306,10 +306,10 @@ test.describe('Nexus Message Persistence — Authenticated', () => {
     expect(result.body.messages.length).toBeGreaterThan(0)
 
     const userMsg = result.body.messages.find(
-      (m: { role: string; content: unknown[] }) =>
+      (m: { role: string; content: Array<{ type: string; text?: string }> }) =>
         m.role === 'user' &&
         m.content.some(
-          (part: { type: string; text?: string }) =>
+          (part) =>
             part.type === 'text' && part.text?.includes(testMessage)
         )
     )
