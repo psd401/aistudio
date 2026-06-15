@@ -2,7 +2,7 @@
   "name": "embedding-generator",
   "version": "1.0.0",
   "description": "Lambda function for generating embeddings via postgres.js + Drizzle ORM",
-  "main": "index.js",
+  "main": "dist/index.js",
   "dependencies": {
     "@aws-sdk/client-bedrock-runtime": "^3.499.0",
     "@aws-sdk/client-secrets-manager": "^3.499.0",
@@ -16,6 +16,7 @@
     "typescript": "^5.3.3"
   },
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "prebuild": "rm -rf dist"
   }
 }

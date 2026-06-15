@@ -12,6 +12,7 @@ import * as sns from 'aws-cdk-lib/aws-sns';
 import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as path from 'path';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
+import { execSync } from 'child_process';
 import { ServiceRoleFactory } from './constructs/security';
 import { VPCProvider, EnvironmentConfig } from './constructs';
 
@@ -298,7 +299,40 @@ export class ProcessingStack extends cdk.Stack {
     const embeddingGenerator = new lambda.Function(this, 'EmbeddingGenerator', {
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambdas/embedding-generator')),
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '../lambdas/embedding-generator'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'embedding-generator');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  // eslint-disable-next-line no-console
+                  console.error('Local bundling failed, falling back to Docker:', e);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
       timeout: cdk.Duration.minutes(5),
       memorySize: 1024, // 1GB
       vpc,
