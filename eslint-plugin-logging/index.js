@@ -31,7 +31,7 @@ module.exports = {
       create(context) {
         return {
           MemberExpression(node) {
-            const filename = context.getFilename();
+            const filename = context.filename;
             
             // Only apply to server-side code
             if (!filename.includes('/actions/') && 
@@ -94,7 +94,7 @@ module.exports = {
         let isServerAction = false;
         let isApiRoute = false;
 
-        const filename = context.getFilename();
+        const filename = context.filename;
         
         // Skip NextAuth routes
         if (filename.includes('[...nextauth]')) {
@@ -171,16 +171,16 @@ module.exports = {
               return;
             }
             
-            if ((isServerAction || isApiRoute) && !context.getFilename().includes('.test.')) {
+            if ((isServerAction || isApiRoute) && !context.filename.includes('.test.')) {
               if (!hasGenerateRequestIdImport) {
                 context.report({
-                  node: context.getSourceCode().ast,
+                  node: context.sourceCode.ast,
                   messageId: 'missingImport',
                 });
               }
               if (!hasRequestIdGeneration) {
                 context.report({
-                  node: context.getSourceCode().ast,
+                  node: context.sourceCode.ast,
                   messageId: 'missingRequestId',
                 });
               }
@@ -213,7 +213,7 @@ module.exports = {
         let hasTimerCall = false;
         let isServerAction = false;
 
-        const filename = context.getFilename();
+        const filename = context.filename;
         if (filename.includes('/actions/') || filename.includes('.actions.')) {
           isServerAction = true;
         }
@@ -244,16 +244,16 @@ module.exports = {
             }
           },
           'Program:exit'() {
-            if (isServerAction && !context.getFilename().includes('.test.')) {
+            if (isServerAction && !context.filename.includes('.test.')) {
               if (hasStartTimerImport && !hasTimerCreation) {
                 context.report({
-                  node: context.getSourceCode().ast,
+                  node: context.sourceCode.ast,
                   messageId: 'missingTimer',
                 });
               }
               if (hasTimerCreation && !hasTimerCall) {
                 context.report({
-                  node: context.getSourceCode().ast,
+                  node: context.sourceCode.ast,
                   messageId: 'missingTimerCall',
                 });
               }
@@ -297,7 +297,7 @@ module.exports = {
           Literal(node) {
             if (typeof node.value !== 'string') return;
             
-            const filename = context.getFilename();
+            const filename = context.filename;
             
             // Skip test files
             if (filename.includes('.test.') || filename.includes('.spec.')) {
@@ -354,7 +354,7 @@ module.exports = {
       create(context) {
         return {
           ThrowStatement(node) {
-            const filename = context.getFilename();
+            const filename = context.filename;
             
             // Only check server code
             if (!filename.includes('/actions/') && 
@@ -421,7 +421,7 @@ module.exports = {
         let hasLoggerCreation = false;
         let isServerAction = false;
 
-        const filename = context.getFilename();
+        const filename = context.filename;
         if (filename.includes('/actions/') || filename.includes('.actions.')) {
           isServerAction = true;
         }
@@ -443,16 +443,16 @@ module.exports = {
             }
           },
           'Program:exit'() {
-            if (isServerAction && !context.getFilename().includes('.test.')) {
+            if (isServerAction && !context.filename.includes('.test.')) {
               if (!hasCreateLoggerImport) {
                 context.report({
-                  node: context.getSourceCode().ast,
+                  node: context.sourceCode.ast,
                   messageId: 'missingLoggerImport',
                 });
               }
               if (hasCreateLoggerImport && !hasLoggerCreation) {
                 context.report({
-                  node: context.getSourceCode().ast,
+                  node: context.sourceCode.ast,
                   messageId: 'missingLogger',
                 });
               }
