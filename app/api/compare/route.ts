@@ -153,12 +153,19 @@ async function* createImageGenerator(
   log: ReturnType<typeof createLogger>
 ): AsyncGenerator<DualStreamEvent> {
   const slotNum = modelSlot === 'model1' ? 1 : 2;
-  // Pass the provider through directly so generateImageForNexus can reject
-  // unsupported providers with a descriptive error instead of silently
-  // falling back to the OpenAI path for Bedrock, Azure, etc.
-  const provider = String(modelConfig.provider);
+  const rawProvider = String(modelConfig.provider);
 
   try {
+    // Validate and narrow the provider type — generateImageForNexus only supports
+    // 'openai' and 'google'. Throw inside the try so the catch converts unsupported
+    // providers to a graceful error event rather than crashing the generator.
+    if (rawProvider !== 'openai' && rawProvider !== 'google') {
+      throw new Error(
+        `Provider "${rawProvider}" does not support image generation. Supported providers: openai, google.`
+      );
+    }
+    const provider = rawProvider as 'openai' | 'google';
+
     log.info(`Model ${slotNum} image generation started`, {
       comparisonId,
       provider,
