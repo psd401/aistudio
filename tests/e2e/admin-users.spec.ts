@@ -30,13 +30,15 @@ function isAuthPage(url: string): boolean {
 
 async function gotoAdminUsers(page: Page): Promise<void> {
   await page.goto('/admin/users')
-  await page.waitForURL(
-    (url) => !isAuthPage(url.href),
-    { timeout: 15_000 }
-  )
-  await page.locator('h1').filter({ hasText: /User Management/i }).waitFor({
-    timeout: 15_000,
-  })
+  try {
+    await page.waitForSelector('[data-testid="user-management-page"]', { timeout: 15_000 })
+  } catch {
+    const url = page.url()
+    if (isAuthPage(url) || new URL(url).pathname === '/') {
+      throw new Error(`gotoAdminUsers: unauthenticated — redirected to ${url}`)
+    }
+    throw new Error(`gotoAdminUsers: user-management-page not found within 15s. Current URL: ${url}`)
+  }
 }
 
 async function openRowActionsMenu(page: Page, rowIndex = 0): Promise<void> {
@@ -71,10 +73,10 @@ test.describe('User Management — Auth Gating', () => {
     expect(res.status()).toBe(401)
   })
 
-  test('GET /api/admin/users/1 returns 401 without auth', async ({
+  test('GET /api/admin/users/1/details returns 401 without auth', async ({
     request,
   }) => {
-    const res = await request.get('/api/admin/users/1')
+    const res = await request.get('/api/admin/users/1/details')
     expect(res.status()).toBe(401)
   })
 
@@ -85,11 +87,11 @@ test.describe('User Management — Auth Gating', () => {
     expect(res.status()).toBe(401)
   })
 
-  test('PATCH /api/admin/users/1 returns 401 without auth', async ({
+  test('PUT /api/admin/users returns 401 without auth', async ({
     request,
   }) => {
-    const res = await request.patch('/api/admin/users/1', {
-      data: { firstName: 'Test' },
+    const res = await request.put('/api/admin/users', {
+      data: { id: 1, firstName: 'Test' },
     })
     expect(res.status()).toBe(401)
   })
@@ -100,7 +102,7 @@ test.describe('User Management — Auth Gating', () => {
 // ---------------------------------------------------------------------------
 test.describe('User Management — Page Structure', () => {
   test.skip(
-    !process.env.PLAYWRIGHT_AUTH_ENABLED,
+    process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
   )
 
@@ -177,7 +179,7 @@ test.describe('User Management — Page Structure', () => {
 // ---------------------------------------------------------------------------
 test.describe('User Management — Stats Cards', () => {
   test.skip(
-    !process.env.PLAYWRIGHT_AUTH_ENABLED,
+    process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
   )
 
@@ -225,7 +227,7 @@ test.describe('User Management — Stats Cards', () => {
 // ---------------------------------------------------------------------------
 test.describe('User Management — Role Tab Navigation', () => {
   test.skip(
-    !process.env.PLAYWRIGHT_AUTH_ENABLED,
+    process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
   )
 
@@ -286,7 +288,7 @@ test.describe('User Management — Role Tab Navigation', () => {
 // ---------------------------------------------------------------------------
 test.describe('User Management — Filters', () => {
   test.skip(
-    !process.env.PLAYWRIGHT_AUTH_ENABLED,
+    process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
   )
 
@@ -343,7 +345,7 @@ test.describe('User Management — Filters', () => {
 // ---------------------------------------------------------------------------
 test.describe('User Management — User Detail Sheet', () => {
   test.skip(
-    !process.env.PLAYWRIGHT_AUTH_ENABLED,
+    process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
   )
 
@@ -444,7 +446,7 @@ test.describe('User Management — User Detail Sheet', () => {
 // ---------------------------------------------------------------------------
 test.describe('User Management — Edit Mode', () => {
   test.skip(
-    !process.env.PLAYWRIGHT_AUTH_ENABLED,
+    process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
   )
 
@@ -512,7 +514,7 @@ test.describe('User Management — Edit Mode', () => {
 // ---------------------------------------------------------------------------
 test.describe('User Management — Delete Flow', () => {
   test.skip(
-    !process.env.PLAYWRIGHT_AUTH_ENABLED,
+    process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
   )
 
