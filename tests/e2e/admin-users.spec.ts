@@ -520,7 +520,8 @@ test.describe('User Management — Delete Flow', () => {
 
   test.beforeEach(async ({ page }) => {
     await gotoAdminUsers(page)
-    await page.locator('tbody tr').first().waitFor({ timeout: 15_000 })
+    // Wait for real data rows — action button only renders on loaded rows, not skeletons
+    await page.locator('[data-testid="user-row-actions"]').first().waitFor({ timeout: 15_000 })
   })
 
   test('Delete User menu item opens confirmation dialog', async ({ page }) => {
