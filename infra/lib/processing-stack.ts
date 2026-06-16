@@ -315,8 +315,7 @@ export class ProcessingStack extends cdk.Stack {
                   execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
                   return true;
                 } catch (e) {
-                  // eslint-disable-next-line no-console
-                  console.error('Local bundling failed, falling back to Docker:', e);
+                  process.stderr.write(`Local bundling failed, falling back to Docker: ${e}\n`);
                   return false;
                 }
               },
