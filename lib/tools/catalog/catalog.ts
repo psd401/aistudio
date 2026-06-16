@@ -62,17 +62,6 @@ interface DbCache {
   expiresAt: number;
 }
 
-/** In-process handler map for code-defined tools, keyed by identifier. */
-function buildHandlerMap(): Map<string, McpToolHandler> {
-  const map = new Map<string, McpToolHandler>();
-  for (const entry of TOOL_MANIFEST) {
-    if (entry.handler) {
-      map.set(entry.identifier, entry.handler);
-    }
-  }
-  return map;
-}
-
 /** The `identifier@version` key used to dedupe and look up entries. */
 function entryKey(identifier: string, version: string): string {
   return `${identifier}@${version}`;
@@ -124,7 +113,27 @@ export class ToolCatalog {
    * stampede on cold start / after `invalidate()`.
    */
   private dbPromise: Promise<DbState> | null = null;
-  private readonly handlers: Map<string, McpToolHandler> = buildHandlerMap();
+  /**
+   * In-process MCP handlers for code-defined tools, loaded lazily on first
+   * dispatch via a dynamic import and then memoized. Kept OUT of the static import
+   * graph on purpose: `tool-handlers` transitively pulls the API auth/service
+   * layer, which imports `node:crypto`. The boot-time catalog sync imports the
+   * manifest, and Next.js compiles that graph for the Edge runtime too — a static
+   * handler import there fails the production webpack build with a `node:crypto`
+   * UnhandledSchemeError. Resolving at dispatch time (always the Node.js runtime)
+   * avoids pulling that graph into any non-Node bundle. (PR #1032 follow-up.)
+   */
+  private handlersPromise: Promise<Record<string, McpToolHandler>> | null = null;
+
+  /** Lazily import and memoize the code-tool handler map (keyed by wire name). */
+  private loadHandlers(): Promise<Record<string, McpToolHandler>> {
+    if (!this.handlersPromise) {
+      this.handlersPromise = import("@/lib/mcp/tool-handlers").then(
+        (m) => m.TOOL_HANDLERS
+      );
+    }
+    return this.handlersPromise;
+  }
 
   /** Manifest-derived runtime entries (no DB round-trip). */
   private manifestEntries(inactiveCodeKeys: Set<string>): ToolCatalogEntry[] {
@@ -411,7 +420,11 @@ export class ToolCatalog {
     if (!hasRequiredScopes(context.scopes, entry.requiredScopes)) {
       return { ok: false, reason: "scope_denied" };
     }
-    const handler = this.handlers.get(entry.identifier);
+    // Code MCP tools are keyed in TOOL_HANDLERS by their wire `name` (what the
+    // manifest sets and what clients send), resolved lazily to keep the handler
+    // graph out of non-Node bundles.
+    const handlers = await this.loadHandlers();
+    const handler = handlers[entry.name];
     if (!handler) {
       return { ok: false, reason: "no_handler" };
     }

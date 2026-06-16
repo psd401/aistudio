@@ -35,7 +35,6 @@
  */
 
 import { MCP_TOOLS } from "@/lib/mcp/tool-registry";
-import { TOOL_HANDLERS } from "@/lib/mcp/tool-handlers";
 import type { McpToolDefinition } from "@/lib/mcp/types";
 import type { ToolManifestEntry } from "./types";
 import { compareVersionsDesc } from "./utils";
@@ -76,8 +75,15 @@ const MCP_TOOL_CATALOG_MAP: Record<
 
 /**
  * The 5 MCP tools, projected into catalog manifest entries. Schemas/descriptions
- * come straight from `MCP_TOOLS`; handlers from `TOOL_HANDLERS`. `surfaces` is
- * `['mcp']` initially per the issue's migration plan (expand as appropriate).
+ * come straight from `MCP_TOOLS`. The in-process handler is deliberately NOT bound
+ * here: `ToolCatalog` resolves it lazily at dispatch time (via a dynamic import of
+ * `lib/mcp/tool-handlers`), keyed by the MCP wire `name`. Binding the handler in
+ * the manifest would pull the handler -> service -> auth -> `node:crypto` graph
+ * into the boot-time sync's module graph, which Next.js also compiles for the Edge
+ * runtime — breaking the production webpack build with a `node:crypto`
+ * UnhandledSchemeError (PR #1032 follow-up). The manifest must stay pure metadata.
+ * `surfaces` is `['mcp']` initially per the issue's migration plan (expand as
+ * appropriate).
  */
 const MCP_MANIFEST_ENTRIES: ToolManifestEntry[] = MCP_TOOLS.map(
   (tool: McpToolDefinition): ToolManifestEntry => {
@@ -99,7 +105,6 @@ const MCP_MANIFEST_ENTRIES: ToolManifestEntry[] = MCP_TOOLS.map(
       surfaces: ["mcp"],
       requiredScopes: [mapping.requiredScope],
       agentCallable: true,
-      handler: TOOL_HANDLERS[tool.name],
     };
   }
 );

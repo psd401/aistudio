@@ -16,11 +16,7 @@ import type {
   ToolSurface,
   ToolCatalogSource,
 } from "@/lib/db/schema/tables/tool-catalog";
-import type {
-  McpToolDefinition,
-  McpToolHandler,
-  McpToolResult,
-} from "@/lib/mcp/types";
+import type { McpToolDefinition, McpToolResult } from "@/lib/mcp/types";
 
 export type { ToolSurface, ToolCatalogSource };
 
@@ -72,8 +68,10 @@ export interface ToolCatalogEntry {
 
 /**
  * A single code-defined tool. Lives in the TypeScript manifest and is reconciled
- * into the `tool_catalog` table on boot (`source = 'code'`). The `handler` is the
- * in-process function the catalog dispatcher calls for MCP `tools/call`.
+ * into the `tool_catalog` table on boot (`source = 'code'`). Pure metadata: the
+ * in-process MCP handler is NOT held here — `ToolCatalog` resolves it lazily at
+ * dispatch time (keyed by the wire `name`) so the manifest does not drag the
+ * handler/auth/`node:crypto` graph into the Edge-compiled boot-sync bundle.
  */
 export interface ToolManifestEntry {
   /** Stable `domain.action` ID. Immutable once shipped. */
@@ -97,12 +95,6 @@ export interface ToolManifestEntry {
    * allows it (human-only / destructive guard). Defaults to true.
    */
   agentCallable?: boolean;
-  /**
-   * In-process handler invoked for MCP `tools/call`. The catalog dispatcher
-   * routes to this by `identifier`. Optional for surfaces (e.g. pure `ai_sdk`
-   * provider-native tools) that do not dispatch through the MCP handler path.
-   */
-  handler?: McpToolHandler;
 }
 
 /** Filter inputs for `ToolCatalog.list()`. */

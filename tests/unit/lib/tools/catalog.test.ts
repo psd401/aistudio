@@ -34,8 +34,8 @@ jest.mock("@/lib/logger", () => {
   return { createLogger: () => singleton }
 })
 
-// The manifest imports tool-handlers (real service/DB layer) for code-tool
-// handlers. Mock it so the manifest builds without pulling the DB modules.
+// The catalog lazily imports tool-handlers (real service/DB layer) at dispatch
+// time. Mock it so dispatch resolves without pulling the DB/auth modules.
 jest.mock("@/lib/mcp/tool-handlers", () => ({
   TOOL_HANDLERS: {
     search_decisions: jest.fn(),
