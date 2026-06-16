@@ -25,6 +25,7 @@ export * from "./tables/tools";
 export * from "./tables/role-tools";
 export * from "./tables/capabilities";
 export * from "./tables/role-capabilities";
+export * from "./tables/tool-catalog";
 
 // ============================================
 // AI Models
