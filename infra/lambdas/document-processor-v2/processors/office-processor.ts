@@ -5,7 +5,7 @@ import {
   ProcessorConfig 
 } from './factory';
 import * as mammoth from 'mammoth';
-import * as XLSX from 'xlsx';
+import * as XLSX from '@e965/xlsx';
 import JSZip from 'jszip';
 import { parseString } from 'xml2js';
 import { createLambdaLogger } from '../utils/lambda-logger';

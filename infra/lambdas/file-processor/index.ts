@@ -7,7 +7,7 @@ import { TextractClient, StartDocumentAnalysisCommand, StartDocumentTextDetectio
 import { Readable } from 'stream';
 import pdfParse from 'pdf-parse';
 import * as mammoth from 'mammoth';
-import * as XLSX from 'xlsx';
+import * as XLSX from '@e965/xlsx';
 import { parse as csvParse } from 'csv-parse/sync';
 import { marked } from 'marked';
 import { TextractUsageTracker } from './textract-usage';
