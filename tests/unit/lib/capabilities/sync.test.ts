@@ -88,12 +88,17 @@ function makeTx() {
             )
           }
           // capabilities select is always followed by .where(inArray)
+          // The sync snapshots the comparable fields so it can skip no-op updates.
           return {
             where() {
               return Promise.resolve(
                 fakeCapabilities.map((c) => ({
                   id: c.id,
                   identifier: c.identifier,
+                  name: c.name,
+                  description: c.description,
+                  source: c.source,
+                  isActive: c.isActive,
                 }))
               )
             },
@@ -314,6 +319,33 @@ describe("syncCapabilityManifest", () => {
     expect(row?.isActive).toBe(true) // reactivated
   })
 
+  it("does NOT update a row that already matches the manifest (no churn)", async () => {
+    // Seed a row already in its post-sync state.
+    fakeCapabilities.push({
+      id: 9,
+      identifier: "feature-f",
+      name: "Feature F",
+      description: "f desc",
+      isActive: true,
+      source: "code",
+      promptChainToolId: null,
+    })
+
+    const manifest: CapabilityManifestEntry[] = [
+      {
+        identifier: "feature-f",
+        name: "Feature F",
+        description: "f desc",
+      },
+    ]
+
+    const result = await runSync(manifest)
+
+    expect(result.inserted).toEqual([])
+    // Nothing changed, so no UPDATE is issued and the row is not reported.
+    expect(result.updated).toEqual([])
+  })
+
   it("deactivates code-source capabilities no longer in the manifest", async () => {
     // An orphaned code capability not present in the new manifest.
     fakeCapabilities.push({
@@ -388,7 +420,9 @@ describe("syncCapabilityManifest", () => {
 
     const second = await runSync(manifest)
     expect(second.inserted).toEqual([])
-    expect(second.updated).toEqual(["feature-e"])
+    // The row already matches the manifest, so the second sync is a true no-op:
+    // no UPDATE is issued and nothing is reported as updated (no updatedAt churn).
+    expect(second.updated).toEqual([])
     expect(second.rolesGranted).toBe(0)
     // No duplicate grants.
     expect(fakeRoleCapabilities.length).toBe(grantsAfterFirst)

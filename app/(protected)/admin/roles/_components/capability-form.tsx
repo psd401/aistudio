@@ -30,21 +30,29 @@ import {
 } from "@/actions/admin/capabilities.actions"
 import type { CapabilityRow } from "./capabilities-table"
 
+// identifier/name mirror the capabilities table VARCHAR(100) columns.
 const createSchema = z.object({
   identifier: z
     .string()
     .min(1, "Identifier is required")
+    .max(100, "Identifier must be 100 characters or fewer")
     .regex(
       /^[a-z0-9][a-z0-9._-]*$/,
       "Lowercase alphanumeric; may contain '.', '-', '_'"
     ),
-  name: z.string().min(1, "Name is required"),
+  name: z
+    .string()
+    .min(1, "Name is required")
+    .max(100, "Name must be 100 characters or fewer"),
   description: z.string().optional(),
 })
 
 const editSchema = z.object({
   identifier: z.string(),
-  name: z.string().min(1, "Name is required"),
+  name: z
+    .string()
+    .min(1, "Name is required")
+    .max(100, "Name must be 100 characters or fewer"),
   description: z.string().optional(),
 })
 

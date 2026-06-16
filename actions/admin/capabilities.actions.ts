@@ -29,6 +29,9 @@ import type { Capability } from "@/lib/db/schema"
 import { revalidatePath } from "next/cache"
 
 const IDENTIFIER_PATTERN = /^[a-z0-9][a-z0-9._-]*$/
+// Mirror the capabilities table VARCHAR(100) limits (see schema 079).
+const MAX_IDENTIFIER_LENGTH = 100
+const MAX_NAME_LENGTH = 100
 
 export interface CreateCapabilityInput {
   identifier: string
@@ -101,6 +104,24 @@ export async function createCapabilityAction(
         },
       ])
     }
+    // Both columns are VARCHAR(100); validate here so an oversized value yields a
+    // clear field error instead of an opaque Postgres truncation/length failure.
+    if (identifier.length > MAX_IDENTIFIER_LENGTH) {
+      throw ErrorFactories.validationFailed([
+        {
+          field: "identifier",
+          message: `Identifier must be ${MAX_IDENTIFIER_LENGTH} characters or fewer`,
+        },
+      ])
+    }
+    if (name.length > MAX_NAME_LENGTH) {
+      throw ErrorFactories.validationFailed([
+        {
+          field: "name",
+          message: `Name must be ${MAX_NAME_LENGTH} characters or fewer`,
+        },
+      ])
+    }
 
     const existing = await getCapabilityByIdentifier(identifier)
     if (existing) {
@@ -138,7 +159,9 @@ function assertCodeFieldsUnchanged(
   input: UpdateCapabilityInput,
   existing: Capability
 ): void {
-  if (input.name !== undefined && input.name.trim() !== existing.name) {
+  // Compare both sides trimmed/normalized so a no-op save (same value, or only a
+  // whitespace difference) is NOT rejected as an illegal edit.
+  if (input.name !== undefined && input.name.trim() !== existing.name.trim()) {
     throw ErrorFactories.validationFailed([
       {
         field: "name",
@@ -149,7 +172,7 @@ function assertCodeFieldsUnchanged(
   }
   if (
     input.description !== undefined &&
-    (input.description?.trim() || null) !== (existing.description ?? null)
+    (input.description?.trim() || null) !== (existing.description?.trim() || null)
   ) {
     throw ErrorFactories.validationFailed([
       {
@@ -178,6 +201,14 @@ function buildCapabilityUpdates(
       const name = input.name.trim()
       if (!name) {
         throw ErrorFactories.missingRequiredField("name")
+      }
+      if (name.length > MAX_NAME_LENGTH) {
+        throw ErrorFactories.validationFailed([
+          {
+            field: "name",
+            message: `Name must be ${MAX_NAME_LENGTH} characters or fewer`,
+          },
+        ])
       }
       updates.name = name
     }

@@ -437,9 +437,12 @@ export async function approveAssistantArchitect(id: number) {
         .replace(/\s+/g, "-")
         .replace(/[^\da-z-]/g, "");
 
-      // Race condition safety: If concurrent approvals happen, onConflictDoNothing
-      // prevents duplicate key errors. Tool identifier is unique, so conflicts are
-      // handled gracefully without throwing errors.
+      // Race condition safety: concurrent approvals can't produce duplicate key
+      // errors because the tool identifier is unique. On conflict we upsert (not
+      // skip) so a re-approved AA — whose tool row was deactivated during an edit
+      // — is re-activated and its promptChainToolId is re-stamped. The
+      // post-approval code looks the tool up by promptChainToolId, so a skipped
+      // insert that left a stale/NULL promptChainToolId would break the lookup.
       await tx
         .insert(tools)
         .values({
@@ -449,16 +452,32 @@ export async function approveAssistantArchitect(id: number) {
           promptChainToolId: assistant.id,
           isActive: true,
         })
-        .onConflictDoNothing({
+        .onConflictDoUpdate({
           target: tools.identifier,
+          set: {
+            name: assistant.name,
+            description: assistant.description,
+            promptChainToolId: assistant.id,
+            isActive: true,
+            updatedAt: new Date(),
+          },
         });
 
       // Issue #923: dual-write the capability row in the same transaction so the
       // post-approval role grant (which now targets role_capabilities) and the
       // hasToolAccess() read path (which now reads capabilities) stay consistent.
       // AA-generated capabilities are source='manual' (admin-editable, like the
-      // legacy tool row). Drizzle setoff is skipped on conflict to preserve any
-      // admin edits made to an existing row.
+      // legacy tool row).
+      //
+      // On conflict we MUST upsert, not skip: an AA that was approved, edited
+      // (which deactivates this row via updateAssistantArchitectAction), then
+      // re-approved would otherwise stay is_active=false forever — the row exists,
+      // so the insert is skipped, and hasCapabilityAccess (which filters
+      // is_active=true) would deny access permanently. Re-stamp promptChainToolId
+      // so the post-approval lookup-by-promptChainToolId always resolves, even if
+      // the identifier was first claimed by the manifest sync (which leaves
+      // prompt_chain_tool_id NULL). We intentionally re-sync name/description from
+      // the assistant so the capability stays in step with the AA on re-approval.
       await tx
         .insert(capabilities)
         .values({
@@ -469,8 +488,16 @@ export async function approveAssistantArchitect(id: number) {
           isActive: true,
           source: "manual",
         })
-        .onConflictDoNothing({
+        .onConflictDoUpdate({
           target: capabilities.identifier,
+          set: {
+            name: assistant.name,
+            description: assistant.description,
+            promptChainToolId: assistant.id,
+            isActive: true,
+            source: "manual",
+            updatedAt: new Date(),
+          },
         });
 
       return assistant;

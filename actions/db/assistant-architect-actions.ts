@@ -54,7 +54,7 @@ import {
   assignToolToRole,
   createNavigationItem
 } from "@/lib/db/drizzle";
-import { executeQuery } from "@/lib/db/drizzle-client";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
 import { tools, navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities } from "@/lib/db/schema";
 
@@ -487,23 +487,23 @@ export async function updateAssistantArchitectAction(
     // If the tool was approved and is being edited, set status to pending_approval and deactivate it in the tools table
     if (currentTool.status === "approved") {
       data.status = "pending_approval"
-      await executeQuery(
-        (db) =>
-          db
+      // Issue #923: deactivate the legacy tools row AND the renamed capabilities
+      // row atomically. hasToolAccess() now reads `capabilities`, so a partial
+      // failure (tools deactivated, capabilities still active) would leave a user
+      // with access to an architect that is back in pending_approval. One
+      // transaction guarantees both flip together or neither does.
+      await executeTransaction(
+        async (tx) => {
+          await tx
             .update(tools)
-            .set({ isActive: false })
-            .where(eq(tools.promptChainToolId, idInt)),
-        "deactivateApprovedTool"
-      );
-      // Issue #923: keep the renamed capabilities table in sync so the swapped
-      // hasToolAccess() read path also sees the deactivation.
-      await executeQuery(
-        (db) =>
-          db
+            .set({ isActive: false, updatedAt: new Date() })
+            .where(eq(tools.promptChainToolId, idInt));
+          await tx
             .update(capabilities)
             .set({ isActive: false, updatedAt: new Date() })
-            .where(eq(capabilities.promptChainToolId, idInt)),
-        "deactivateApprovedCapability"
+            .where(eq(capabilities.promptChainToolId, idInt));
+        },
+        "deactivateApprovedToolAndCapability"
       );
     }
 
@@ -650,32 +650,25 @@ export async function deleteAssistantArchitectAction(
       isAdminDeletion: !isOwner && isAdmin
     })
     
-    // Delete from tools table (using prompt_chain_tool_id which references assistant_architect)
-    await executeQuery(
-      (db) =>
-        db
+    // Issue #923: delete the legacy tools row, the renamed capabilities row, and
+    // the navigation item atomically. role_capabilities rows cascade via the FK
+    // ON DELETE CASCADE. A partial failure here (tools deleted, capabilities row
+    // surviving) would leave an orphan capability that hasCapabilityAccess() still
+    // honors — a permanent access grant to a deleted architect. One transaction
+    // makes all three deletes succeed together or roll back together.
+    await executeTransaction(
+      async (tx) => {
+        await tx
           .delete(tools)
-          .where(eq(tools.promptChainToolId, idInt)),
-      "deleteToolsByAssistantArchitect"
-    );
-
-    // Issue #923: also delete the renamed capability row (role_capabilities rows
-    // cascade via the FK ON DELETE CASCADE) so no orphan grant remains.
-    await executeQuery(
-      (db) =>
-        db
+          .where(eq(tools.promptChainToolId, idInt));
+        await tx
           .delete(capabilities)
-          .where(eq(capabilities.promptChainToolId, idInt)),
-      "deleteCapabilitiesByAssistantArchitect"
-    );
-
-    // Delete from navigation_items
-    await executeQuery(
-      (db) =>
-        db
+          .where(eq(capabilities.promptChainToolId, idInt));
+        await tx
           .delete(navigationItems)
-          .where(eq(navigationItems.link, `/tools/assistant-architect/${id}`)),
-      "deleteNavigationItemByLink"
+          .where(eq(navigationItems.link, `/tools/assistant-architect/${id}`));
+      },
+      "deleteToolCapabilityAndNavItem"
     );
 
     // Use the deleteAssistantArchitect function which handles all the cascade deletes properly

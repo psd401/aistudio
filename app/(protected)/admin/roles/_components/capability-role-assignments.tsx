@@ -60,32 +60,45 @@ export function CapabilityRoleAssignments({
 
   const handleToggle = async (roleId: number, nextAssigned: boolean) => {
     setPendingRoleIds((prev) => new Set(prev).add(roleId))
-    const result = await setCapabilityRoleAssignmentAction(
-      capability.id,
-      roleId,
-      nextAssigned
-    )
-    setPendingRoleIds((prev) => {
-      const next = new Set(prev)
-      next.delete(roleId)
-      return next
-    })
+    try {
+      const result = await setCapabilityRoleAssignmentAction(
+        capability.id,
+        roleId,
+        nextAssigned
+      )
 
-    if (result.isSuccess) {
-      setAssignedRoleIds((prev) => {
-        const next = new Set(prev)
-        if (nextAssigned) {
-          next.add(roleId)
-        } else {
-          next.delete(roleId)
-        }
-        return next
-      })
-    } else {
+      if (result.isSuccess) {
+        setAssignedRoleIds((prev) => {
+          const next = new Set(prev)
+          if (nextAssigned) {
+            next.add(roleId)
+          } else {
+            next.delete(roleId)
+          }
+          return next
+        })
+      } else {
+        toast({
+          title: "Error",
+          description: result.message,
+          variant: "destructive",
+        })
+      }
+    } catch {
+      // Transport-layer failure (network drop, serialization error) — the action
+      // itself never throws, but the RSC call can. Surface it instead of leaving
+      // an unhandled rejection and a permanently-disabled checkbox.
       toast({
         title: "Error",
-        description: result.message,
+        description: "Failed to update role assignment. Please try again.",
         variant: "destructive",
+      })
+    } finally {
+      // Always clear the in-flight marker so the checkbox re-enables, even on error.
+      setPendingRoleIds((prev) => {
+        const next = new Set(prev)
+        next.delete(roleId)
+        return next
       })
     }
   }

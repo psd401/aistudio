@@ -135,16 +135,24 @@ export async function syncCapabilityManifest(
 
         // Snapshot existing rows for the manifest identifiers in one query.
         // (manifestIdentifiers is non-empty here — guarded above.)
+        // Pull the comparable fields too so the UPDATE branch only writes (and
+        // only reports in `updated`) when a value actually changed — re-running
+        // the sync against an already-synced DB is then a true no-op (no
+        // spurious updatedAt churn, no misleading "updated" log entries).
         const existing = await tx
           .select({
             id: capabilities.id,
             identifier: capabilities.identifier,
+            name: capabilities.name,
+            description: capabilities.description,
+            source: capabilities.source,
+            isActive: capabilities.isActive,
           })
           .from(capabilities)
           .where(inArray(capabilities.identifier, manifestIdentifiers));
 
         const existingByIdentifier = new Map(
-          existing.map((row) => [row.identifier, row.id])
+          existing.map((row) => [row.identifier, row])
         );
 
         // Resolve role name -> id once (for defaultRoles on insert).
@@ -154,9 +162,9 @@ export async function syncCapabilityManifest(
         const roleIdByName = new Map(allRoles.map((r) => [r.name, r.id]));
 
         for (const entry of manifest) {
-          const existingId = existingByIdentifier.get(entry.identifier);
+          const existingRow = existingByIdentifier.get(entry.identifier);
 
-          if (existingId === undefined) {
+          if (existingRow === undefined) {
             // INSERT new capability.
             const [row] = await tx
               .insert(capabilities)
@@ -183,17 +191,27 @@ export async function syncCapabilityManifest(
           } else {
             // UPDATE name/description/source; re-activate (manifest re-add).
             // Role assignments are intentionally NOT touched here.
-            await tx
-              .update(capabilities)
-              .set({
-                name: entry.name,
-                description: entry.description,
-                source: MANIFEST_SOURCE,
-                isActive: true,
-                updatedAt: new Date(),
-              })
-              .where(eq(capabilities.id, existingId));
-            updated.push(entry.identifier);
+            // Skip the write entirely when nothing changed so a re-sync against an
+            // already-synced DB does not churn updatedAt or report phantom updates.
+            const needsUpdate =
+              existingRow.name !== entry.name ||
+              (existingRow.description ?? null) !== (entry.description ?? null) ||
+              existingRow.source !== MANIFEST_SOURCE ||
+              existingRow.isActive !== true;
+
+            if (needsUpdate) {
+              await tx
+                .update(capabilities)
+                .set({
+                  name: entry.name,
+                  description: entry.description,
+                  source: MANIFEST_SOURCE,
+                  isActive: true,
+                  updatedAt: new Date(),
+                })
+                .where(eq(capabilities.id, existingRow.id));
+              updated.push(entry.identifier);
+            }
           }
         }
 
