@@ -110,12 +110,47 @@ async function syncCapabilities(): Promise<void> {
 }
 
 /**
+ * Sync the tool catalog manifest to the database on startup.
+ *
+ * Issue #924 - registers code-defined tools (lib/tools/catalog/manifest.ts) into
+ * the tool_catalog table so adding a tool requires only a manifest entry +
+ * restart, no SQL migration. Idempotent, advisory-locked for safe concurrent
+ * replica boots. Non-blocking: failures are logged and never prevent startup.
+ */
+async function syncToolCatalog(): Promise<void> {
+  const { createLogger } = await import("@/lib/logger");
+  const log = createLogger({
+    context: "instrumentation",
+    operation: "toolCatalogSync",
+  });
+
+  try {
+    const { syncToolCatalogManifest } = await import(
+      "@/lib/tools/catalog/sync"
+    );
+    const result = await syncToolCatalogManifest();
+    log.info("Tool catalog manifest synced on startup", {
+      inserted: result.inserted.length,
+      updated: result.updated.length,
+      deactivated: result.deactivated.length,
+    });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    // Don't fail startup on sync errors.
+    log.warn("Tool catalog manifest sync failed on startup", {
+      error: errorMessage,
+    });
+  }
+}
+
+/**
  * Next.js instrumentation register function
  *
  * Called once when the Next.js server starts. Used to:
  * 1. Register shutdown handlers for graceful connection cleanup
  * 2. Warm up the database connection pool to avoid cold start latency
  * 3. Sync the code capability manifest into the database (#923)
+ * 4. Sync the code tool catalog manifest into the database (#924)
  *
  * Only runs in Node.js runtime (not Edge runtime or during builds).
  */
@@ -144,6 +179,16 @@ export async function register(): Promise<void> {
     setImmediate(() => {
       syncCapabilities().catch(() => {
         // Errors already logged in syncCapabilities
+      });
+    });
+
+    // Sync tool catalog manifest (async, non-blocking). Same dispatch pattern as
+    // the capability sync; uses a distinct advisory lock so the two boot syncs do
+    // not serialize against each other. Failures are logged inside
+    // syncToolCatalog and never block startup.
+    setImmediate(() => {
+      syncToolCatalog().catch(() => {
+        // Errors already logged in syncToolCatalog
       });
     });
   }

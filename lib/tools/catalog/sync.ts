@@ -68,6 +68,151 @@ function sameJson(a: unknown, b: unknown): boolean {
   return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 }
 
+/** Transaction handle type as provided by executeTransaction. */
+type Tx = Parameters<Parameters<typeof executeTransaction>[0]>[0];
+
+/** A normalized manifest entry (version + agentCallable defaults applied). */
+type NormalizedEntry = ToolManifestEntry & {
+  version: string;
+  agentCallable: boolean;
+};
+
+/** Snapshot of an existing tool_catalog row (manifest-comparable fields). */
+interface ExistingRow {
+  id: number;
+  identifier: string;
+  version: string;
+  name: string;
+  description: string;
+  inputSchema: unknown;
+  outputSchema: unknown;
+  surfaces: string[] | null;
+  requiredScopes: string[] | null;
+  agentCallable: boolean;
+  handlerRef: string | null;
+  source: string;
+  isActive: boolean;
+}
+
+/** True when an existing row differs from the manifest entry (needs an UPDATE). */
+function rowNeedsUpdate(
+  existingRow: ExistingRow,
+  entry: NormalizedEntry,
+  handlerRef: string,
+  claimingOwnership: boolean
+): boolean {
+  return (
+    existingRow.name !== entry.name ||
+    existingRow.description !== entry.description ||
+    !sameJson(existingRow.inputSchema, entry.inputSchema) ||
+    !sameJson(existingRow.outputSchema, entry.outputSchema ?? null) ||
+    !sameStringArray(existingRow.surfaces ?? [], entry.surfaces) ||
+    !sameStringArray(existingRow.requiredScopes ?? [], entry.requiredScopes) ||
+    existingRow.agentCallable !== entry.agentCallable ||
+    (existingRow.handlerRef ?? null) !== handlerRef ||
+    claimingOwnership
+  );
+}
+
+/**
+ * Insert a new code tool, or update an existing one when a manifest field
+ * changed. Returns the action taken so the caller can record it.
+ */
+async function upsertEntry(
+  tx: Tx,
+  entry: NormalizedEntry,
+  existingRow: ExistingRow | undefined
+): Promise<"inserted" | "updated" | "unchanged"> {
+  const handlerRef = entry.identifier; // manifest dispatches by identifier
+
+  if (existingRow === undefined) {
+    await tx.insert(toolCatalog).values({
+      identifier: entry.identifier,
+      version: entry.version,
+      name: entry.name,
+      description: entry.description,
+      inputSchema: entry.inputSchema,
+      outputSchema: entry.outputSchema ?? null,
+      surfaces: entry.surfaces,
+      requiredScopes: entry.requiredScopes,
+      agentCallable: entry.agentCallable,
+      source: MANIFEST_TOOL_SOURCE,
+      handlerRef,
+      isActive: true,
+    });
+    return "inserted";
+  }
+
+  // Claiming a released/foreign row (source != 'code') re-activates it.
+  const claimingOwnership = existingRow.source !== MANIFEST_TOOL_SOURCE;
+  if (!rowNeedsUpdate(existingRow, entry, handlerRef, claimingOwnership)) {
+    return "unchanged";
+  }
+
+  await tx
+    .update(toolCatalog)
+    .set({
+      name: entry.name,
+      description: entry.description,
+      inputSchema: entry.inputSchema,
+      outputSchema: entry.outputSchema ?? null,
+      surfaces: entry.surfaces,
+      requiredScopes: entry.requiredScopes,
+      agentCallable: entry.agentCallable,
+      handlerRef,
+      source: MANIFEST_TOOL_SOURCE,
+      // Only (re)activate when claiming a released/foreign row. Preserve an
+      // admin's is_active toggle on an already-owned row.
+      ...(claimingOwnership ? { isActive: true } : {}),
+      updatedAt: new Date(),
+    })
+    .where(eq(toolCatalog.id, existingRow.id));
+  return "updated";
+}
+
+/**
+ * Deactivate + demote code tools no longer present in the manifest. Only touches
+ * rows the manifest currently owns (source = 'code'); assistant/skill rows are
+ * never affected. Returns the keys deactivated. Diffs in app code (not notInArray
+ * on a composite key) so version-scoped removal works correctly.
+ */
+async function deactivateOrphans(
+  tx: Tx,
+  manifestKeys: string[]
+): Promise<string[]> {
+  const manifestKeySet = new Set(manifestKeys);
+  const deactivated: string[] = [];
+  const orphanCandidates = await tx
+    .select({
+      id: toolCatalog.id,
+      identifier: toolCatalog.identifier,
+      version: toolCatalog.version,
+    })
+    .from(toolCatalog)
+    .where(
+      and(
+        eq(toolCatalog.source, MANIFEST_TOOL_SOURCE),
+        eq(toolCatalog.isActive, true)
+      )
+    );
+
+  for (const row of orphanCandidates) {
+    const rowKey = keyOf(row.identifier, row.version);
+    if (!manifestKeySet.has(rowKey)) {
+      await tx
+        .update(toolCatalog)
+        .set({
+          isActive: false,
+          source: RELEASED_SOURCE,
+          updatedAt: new Date(),
+        })
+        .where(eq(toolCatalog.id, row.id));
+      deactivated.push(rowKey);
+    }
+  }
+  return deactivated;
+}
+
 /**
  * Sync the tool catalog manifest into the database. Safe to call repeatedly.
  *
@@ -130,7 +275,7 @@ export async function syncToolCatalogManifest(
         const updated: string[] = [];
 
         // Snapshot existing rows for the manifest identifiers in one query.
-        const existing = await tx
+        const existing = (await tx
           .select({
             id: toolCatalog.id,
             identifier: toolCatalog.identifier,
@@ -147,7 +292,9 @@ export async function syncToolCatalogManifest(
             isActive: toolCatalog.isActive,
           })
           .from(toolCatalog)
-          .where(inArray(toolCatalog.identifier, manifestIdentifiers));
+          .where(
+            inArray(toolCatalog.identifier, manifestIdentifiers)
+          )) as ExistingRow[];
 
         const existingByKey = new Map(
           existing.map((row) => [keyOf(row.identifier, row.version), row])
@@ -155,108 +302,12 @@ export async function syncToolCatalogManifest(
 
         for (const entry of normalized) {
           const key = keyOf(entry.identifier, entry.version);
-          const existingRow = existingByKey.get(key);
-          const handlerRef = entry.identifier; // manifest dispatches by identifier
-
-          if (existingRow === undefined) {
-            // INSERT new code tool.
-            await tx.insert(toolCatalog).values({
-              identifier: entry.identifier,
-              version: entry.version,
-              name: entry.name,
-              description: entry.description,
-              inputSchema: entry.inputSchema,
-              outputSchema: entry.outputSchema ?? null,
-              surfaces: entry.surfaces,
-              requiredScopes: entry.requiredScopes,
-              agentCallable: entry.agentCallable,
-              source: MANIFEST_TOOL_SOURCE,
-              handlerRef,
-              isActive: true,
-            });
-            inserted.push(key);
-          } else {
-            // UPDATE manifest-owned fields, but only when something changed.
-            // Claiming a released/foreign row (source != 'code') re-activates it.
-            const claimingOwnership =
-              existingRow.source !== MANIFEST_TOOL_SOURCE;
-            const needsUpdate =
-              existingRow.name !== entry.name ||
-              existingRow.description !== entry.description ||
-              !sameJson(existingRow.inputSchema, entry.inputSchema) ||
-              !sameJson(
-                existingRow.outputSchema,
-                entry.outputSchema ?? null
-              ) ||
-              !sameStringArray(existingRow.surfaces ?? [], entry.surfaces) ||
-              !sameStringArray(
-                existingRow.requiredScopes ?? [],
-                entry.requiredScopes
-              ) ||
-              existingRow.agentCallable !== entry.agentCallable ||
-              (existingRow.handlerRef ?? null) !== handlerRef ||
-              claimingOwnership;
-
-            if (needsUpdate) {
-              await tx
-                .update(toolCatalog)
-                .set({
-                  name: entry.name,
-                  description: entry.description,
-                  inputSchema: entry.inputSchema,
-                  outputSchema: entry.outputSchema ?? null,
-                  surfaces: entry.surfaces,
-                  requiredScopes: entry.requiredScopes,
-                  agentCallable: entry.agentCallable,
-                  handlerRef,
-                  source: MANIFEST_TOOL_SOURCE,
-                  // Only (re)activate when claiming a released/foreign row.
-                  // Preserve an admin's is_active toggle on an owned row.
-                  ...(claimingOwnership ? { isActive: true } : {}),
-                  updatedAt: new Date(),
-                })
-                .where(eq(toolCatalog.id, existingRow.id));
-              updated.push(key);
-            }
-          }
+          const action = await upsertEntry(tx, entry, existingByKey.get(key));
+          if (action === "inserted") inserted.push(key);
+          else if (action === "updated") updated.push(key);
         }
 
-        // DEACTIVATE code tools no longer in the manifest, AND demote them so a
-        // later manifest re-add re-claims ownership (via the claimingOwnership
-        // branch above). Only touches rows the manifest currently owns
-        // (source = 'code'); assistant/skill rows are never affected. We diff in
-        // app code (not notInArray on a composite key) so version-scoped removal
-        // works correctly.
-        const manifestKeySet = new Set(manifestKeys);
-        const deactivated: string[] = [];
-        const orphanCandidates = await tx
-          .select({
-            id: toolCatalog.id,
-            identifier: toolCatalog.identifier,
-            version: toolCatalog.version,
-          })
-          .from(toolCatalog)
-          .where(
-            and(
-              eq(toolCatalog.source, MANIFEST_TOOL_SOURCE),
-              eq(toolCatalog.isActive, true)
-            )
-          );
-
-        for (const row of orphanCandidates) {
-          const rowKey = keyOf(row.identifier, row.version);
-          if (!manifestKeySet.has(rowKey)) {
-            await tx
-              .update(toolCatalog)
-              .set({
-                isActive: false,
-                source: RELEASED_SOURCE,
-                updatedAt: new Date(),
-              })
-              .where(eq(toolCatalog.id, row.id));
-            deactivated.push(rowKey);
-          }
-        }
+        const deactivated = await deactivateOrphans(tx, manifestKeys);
 
         return { inserted, updated, deactivated };
       },

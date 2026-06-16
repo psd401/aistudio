@@ -185,6 +185,34 @@ export class ToolCatalog {
     return entries;
   }
 
+  /**
+   * Filter a list of requested AI SDK tool names down to those the catalog
+   * exposes on the `ai_sdk` surface AND the caller's scopes permit. This is the
+   * server-side scope gate for built-in chat tools (the chat route receives the
+   * enabled-tools list from the client, which is otherwise untrusted).
+   *
+   * Tools not present in the catalog are passed through unchanged — model-
+   * capability filtering downstream still applies — so this never regresses an
+   * existing tool that has not yet been cataloged.
+   *
+   * @param requested - tool names the caller asked to enable.
+   * @param scopes - the caller's granted scopes.
+   * @returns the allowed subset of `requested`.
+   */
+  async filterAiSdkToolNames(
+    requested: string[],
+    scopes: string[]
+  ): Promise<string[]> {
+    const aiSdkTools = await this.list({ surface: "ai_sdk" });
+    // Index catalog AI SDK tools by wire name.
+    const byName = new Map(aiSdkTools.map((t) => [t.name, t]));
+    return requested.filter((name) => {
+      const entry = byName.get(name);
+      if (!entry) return true; // not cataloged -> leave to downstream filtering
+      return hasRequiredScopes(scopes, entry.requiredScopes);
+    });
+  }
+
   /** Resolve a single tool by identifier (latest matching version) or by name. */
   async get(identifierOrName: string): Promise<ToolCatalogEntry | undefined> {
     const all = await this.list({ includeInactive: true });

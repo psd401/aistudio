@@ -104,11 +104,68 @@ const MCP_MANIFEST_ENTRIES: ToolManifestEntry[] = MCP_TOOLS.map(
 );
 
 /**
+ * AI SDK tools exposed in chat / Nexus. These are descriptor-only catalog
+ * entries (no in-process MCP `handler`): the concrete tool implementations are
+ * provider-native and built dynamically per request by
+ * `lib/tools/provider-native-tools.ts`. Cataloging them gives the catalog a
+ * complete `surfaces: ['ai_sdk']` view and a single place to scope-gate which
+ * built-in tools a caller may use.
+ *
+ * `show_chart` is universal (always enabled, no scope). The optional tools carry
+ * `chat:write` so a caller without chat write cannot enable them. `name` matches
+ * the wire/registry name the chat route already uses.
+ */
+const AI_SDK_MANIFEST_ENTRIES: ToolManifestEntry[] = [
+  {
+    identifier: "chat.show_chart",
+    version: "v1",
+    name: "show_chart",
+    description:
+      "Render a chart (bar, line, pie, etc.) from structured data on the client.",
+    inputSchema: { type: "object", properties: {} },
+    surfaces: ["ai_sdk"],
+    requiredScopes: [],
+    agentCallable: true,
+  },
+  {
+    identifier: "chat.web_search",
+    version: "v1",
+    name: "web_search_preview",
+    description: "Search the web for current information and facts.",
+    inputSchema: { type: "object", properties: {} },
+    surfaces: ["ai_sdk"],
+    requiredScopes: ["chat:write"],
+    agentCallable: true,
+  },
+  {
+    identifier: "chat.code_interpreter",
+    version: "v1",
+    name: "code_interpreter",
+    description: "Execute code and perform data analysis.",
+    inputSchema: { type: "object", properties: {} },
+    surfaces: ["ai_sdk"],
+    requiredScopes: ["chat:write"],
+    agentCallable: true,
+  },
+  {
+    identifier: "chat.generate_image",
+    version: "v1",
+    name: "generateImage",
+    description: "Generate images from text descriptions using AI models.",
+    inputSchema: { type: "object", properties: {} },
+    surfaces: ["ai_sdk"],
+    requiredScopes: ["chat:write"],
+    agentCallable: true,
+  },
+];
+
+/**
  * The code-managed tool catalog. Boot-time sync reconciles `tool_catalog` to
  * this list; the runtime `ToolCatalog` merges it with DB-sourced entries.
  */
 export const TOOL_MANIFEST: readonly ToolManifestEntry[] = [
   ...MCP_MANIFEST_ENTRIES,
+  ...AI_SDK_MANIFEST_ENTRIES,
 ];
 
 /** Resolve a manifest entry by `domain.action` identifier (latest version). */

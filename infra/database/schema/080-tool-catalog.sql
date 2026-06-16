@@ -75,3 +75,23 @@ VALUES
      'Get details of a specific decision node and all its connections (incoming and outgoing edges).',
      '["mcp"]'::jsonb, '["mcp:get_decision_graph"]'::jsonb, true, 'code', 'get_decision_graph')
 ON CONFLICT (identifier, version) DO NOTHING;
+
+-- 3. Seed the AI SDK (chat / Nexus) tools. Descriptor-only entries — the concrete
+-- implementations are provider-native and built per request. surfaces = ['ai_sdk'].
+-- show_chart is universal (no scope); the rest require chat:write. The boot-time
+-- manifest sync owns these rows after deploy.
+INSERT INTO tool_catalog (identifier, version, name, description, surfaces, required_scopes, agent_callable, source, handler_ref)
+VALUES
+    ('chat.show_chart', 'v1', 'show_chart',
+     'Render a chart (bar, line, pie, etc.) from structured data on the client.',
+     '["ai_sdk"]'::jsonb, '[]'::jsonb, true, 'code', 'chat.show_chart'),
+    ('chat.web_search', 'v1', 'web_search_preview',
+     'Search the web for current information and facts.',
+     '["ai_sdk"]'::jsonb, '["chat:write"]'::jsonb, true, 'code', 'chat.web_search'),
+    ('chat.code_interpreter', 'v1', 'code_interpreter',
+     'Execute code and perform data analysis.',
+     '["ai_sdk"]'::jsonb, '["chat:write"]'::jsonb, true, 'code', 'chat.code_interpreter'),
+    ('chat.generate_image', 'v1', 'generateImage',
+     'Generate images from text descriptions using AI models.',
+     '["ai_sdk"]'::jsonb, '["chat:write"]'::jsonb, true, 'code', 'chat.generate_image')
+ON CONFLICT (identifier, version) DO NOTHING;

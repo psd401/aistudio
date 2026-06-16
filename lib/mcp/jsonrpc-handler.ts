@@ -15,8 +15,7 @@ import {
   JSONRPC_ERRORS,
   MCP_PROTOCOL_VERSION,
 } from "./types"
-import { getToolsForScopes, hasToolScope } from "./tool-registry"
-import { TOOL_HANDLERS } from "./tool-handlers"
+import { toolCatalog_instance } from "@/lib/tools/catalog/catalog"
 import { createLogger } from "@/lib/logger"
 
 // ============================================
@@ -80,7 +79,7 @@ export async function handleJsonRpcRequest(
       return handleInitialize(rpcRequest)
 
     case "tools/list":
-      return handleToolsList(rpcRequest, context)
+      return handleToolsList(rpcRequest, context, log)
 
     case "tools/call":
       return handleToolsCall(rpcRequest, context, log)
@@ -128,11 +127,20 @@ function handleInitialize(rpcRequest: JsonRpcRequest): JsonRpcResponse {
 // tools/list
 // ============================================
 
-function handleToolsList(
+async function handleToolsList(
   rpcRequest: JsonRpcRequest,
-  context: McpToolContext
-): JsonRpcResponse {
-  const tools = getToolsForScopes(context.scopes)
+  context: McpToolContext,
+  log: ReturnType<typeof createLogger>
+): Promise<JsonRpcResponse> {
+  // Catalog-backed: list active tools exposed on the `mcp` surface and filtered
+  // by the caller's scopes. The catalog merges code-manifest tools (the 5
+  // migrated MCP tools) with any assistant/skill-derived MCP tools.
+  const tools = await toolCatalog_instance.list({
+    surface: "mcp",
+    scopes: context.scopes,
+  })
+
+  log.debug("tools/list resolved from catalog", { count: tools.length })
 
   return successResponse(rpcRequest.id, {
     tools: tools.map((t) => ({
@@ -162,22 +170,10 @@ async function handleToolsCall(
     )
   }
 
-  // Scope check
-  if (!hasToolScope(context.scopes, params.name)) {
-    log.warn("MCP tool scope denied", {
-      tool: params.name,
-      userId: context.userId,
-    })
-    return errorResponse(
-      rpcRequest.id,
-      JSONRPC_ERRORS.INVALID_PARAMS.code,
-      `Insufficient scope for tool: ${params.name}`
-    )
-  }
-
-  // Find handler
-  const handler = TOOL_HANDLERS[params.name]
-  if (!handler) {
+  // Resolve the catalog entry first so we can distinguish "unknown tool" from
+  // "scope denied" with the correct JSON-RPC error code.
+  const entry = await toolCatalog_instance.get(params.name)
+  if (!entry || !entry.isActive) {
     return errorResponse(
       rpcRequest.id,
       JSONRPC_ERRORS.METHOD_NOT_FOUND.code,
@@ -186,7 +182,41 @@ async function handleToolsCall(
   }
 
   try {
-    const result = await handler(params.arguments ?? {}, context)
+    // Catalog dispatch performs the scope check and invokes the code handler.
+    // Returns null when the tool has no in-process handler (e.g. an
+    // assistant/skill-derived tool dispatched through a different path).
+    const result = await toolCatalog_instance.dispatch(
+      params.name,
+      params.arguments ?? {},
+      context
+    )
+
+    if (result === null) {
+      log.warn("MCP tool has no dispatchable handler", { tool: params.name })
+      return errorResponse(
+        rpcRequest.id,
+        JSONRPC_ERRORS.METHOD_NOT_FOUND.code,
+        `Tool not dispatchable: ${params.name}`
+      )
+    }
+
+    // A scope denial is surfaced by dispatch() as an isError tool result. Map it
+    // back to the JSON-RPC INVALID_PARAMS code for protocol-correct errors.
+    if (result.isError) {
+      const text = result.content[0]?.text ?? ""
+      if (text.startsWith("Insufficient scope")) {
+        log.warn("MCP tool scope denied", {
+          tool: params.name,
+          userId: context.userId,
+        })
+        return errorResponse(
+          rpcRequest.id,
+          JSONRPC_ERRORS.INVALID_PARAMS.code,
+          text
+        )
+      }
+    }
+
     return successResponse(rpcRequest.id, result)
   } catch (error) {
     log.error("MCP tool execution error", {
