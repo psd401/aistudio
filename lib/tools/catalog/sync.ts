@@ -67,9 +67,32 @@ function sameStringArray(a: string[], b: string[]): boolean {
   return sa.every((v, i) => v === sb[i]);
 }
 
-/** Stable JSON comparison for schema objects (null/undefined collapse to null). */
+/**
+ * Stable JSON comparison for schema objects (null/undefined collapse to null).
+ *
+ * Serializes with object keys sorted at every depth so the comparison is
+ * insensitive to key ordering. Postgres may store/return JSONB keys in a
+ * different order than the manifest declares them; a naive `JSON.stringify`
+ * would then report the stored schema as different from the manifest schema and
+ * trigger a spurious `UPDATE` on every sync. (PR #1032 review finding #7.)
+ */
 function sameJson(a: unknown, b: unknown): boolean {
-  return JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+  return stableStringify(a ?? null) === stableStringify(b ?? null);
+}
+
+/** JSON.stringify with object keys sorted recursively for order-stable output. */
+function stableStringify(value: unknown): string {
+  return JSON.stringify(value, (_key, val) => {
+    if (val && typeof val === "object" && !Array.isArray(val)) {
+      return Object.keys(val as Record<string, unknown>)
+        .sort()
+        .reduce<Record<string, unknown>>((acc, k) => {
+          acc[k] = (val as Record<string, unknown>)[k];
+          return acc;
+        }, {});
+    }
+    return val;
+  });
 }
 
 /** Transaction handle type as provided by executeTransaction. */

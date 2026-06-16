@@ -200,10 +200,23 @@ export class ToolCatalog {
         // every chat/MCP request. Prefer the last good cache (even expired) over
         // an empty state so a transient outage does not hide assistant/skill
         // tools or spuriously re-enable an admin-disabled code tool.
-        log.error("Failed to load DB tool catalog entries; using last cache or manifest only", {
-          error: error instanceof Error ? error.message : String(error),
-        });
-        return this.dbCache?.state ?? { entries: [], inactiveCodeKeys: new Set() };
+        if (this.dbCache) {
+          log.error("Failed to load DB tool catalog entries; serving last good cache", {
+            error: error instanceof Error ? error.message : String(error),
+          });
+          return this.dbCache.state;
+        }
+        // Cold start with no warm cache: we cannot read `inactiveCodeKeys`, so
+        // every code tool projects as active. This means an admin's DB-level
+        // disable of a code tool is NOT honored until the DB recovers and the
+        // cache warms. Surface this distinctly so on-call knows admin disables
+        // may be temporarily ignored (vs. the warm-cache path, which is safe).
+        // (PR #1032 review finding #1.)
+        log.error(
+          "Failed to load DB tool catalog entries on cold start; admin DB disables NOT honored until DB recovers",
+          { error: error instanceof Error ? error.message : String(error) }
+        );
+        return { entries: [], inactiveCodeKeys: new Set() };
       } finally {
         this.dbPromise = null;
       }
@@ -289,21 +302,38 @@ export class ToolCatalog {
     // ("web_search_preview"); normalize through TOOL_NAME_MAPPING so the scope
     // gate is not silently bypassed for aliased tools.
     const byName = new Map(aiSdkTools.map((t) => [t.name, t]));
-    return requested.filter((name) => {
+    // Cap the number of per-name pass-through logs so a client sending many
+    // fabricated tool names cannot flood the logs with one `info` line each;
+    // overflow is collapsed into a single aggregated warning. The pass-through
+    // itself is still bounded by downstream model-capability filtering. (PR
+    // #1032 review finding #2.)
+    const UNCATALOGED_LOG_CAP = 5;
+    const uncataloged: string[] = [];
+    const allowed = requested.filter((name) => {
       const entry = byName.get(name) ?? this.resolveAiSdkAlias(name, byName);
       if (!entry) {
         // Not cataloged under any known name -> leave to downstream
         // model-capability filtering. Log at `info` (not `debug`) so the scope
         // bypass is observable in production: operators can monitor the rate of
-        // uncataloged tool names reaching the AI SDK surface. (PR #1032 review
-        // finding #4.)
-        log.info("Requested tool not in catalog; passing through unscoped", {
-          tool: name,
-        });
+        // uncataloged tool names reaching the AI SDK surface.
+        if (uncataloged.length < UNCATALOGED_LOG_CAP) {
+          log.info("Requested tool not in catalog; passing through unscoped", {
+            tool: name,
+          });
+        }
+        uncataloged.push(name);
         return true;
       }
       return hasRequiredScopes(scopes, entry.requiredScopes);
     });
+    if (uncataloged.length > UNCATALOGED_LOG_CAP) {
+      log.warn("Many uncataloged tool names passed through unscoped in one request", {
+        total: uncataloged.length,
+        logged: UNCATALOGED_LOG_CAP,
+        suppressed: uncataloged.length - UNCATALOGED_LOG_CAP,
+      });
+    }
+    return allowed;
   }
 
   /**
@@ -330,6 +360,11 @@ export class ToolCatalog {
   /**
    * Resolve a single tool by identifier or by name, preferring the highest
    * version when multiple exist for the same identifier.
+   *
+   * Intentionally includes inactive entries (`includeInactive: true`): callers
+   * such as {@link dispatch} need to distinguish "found but disabled" (reject as
+   * unknown to avoid leaking tool existence) from "never existed". They re-check
+   * `entry.isActive` themselves.
    */
   async get(identifierOrName: string): Promise<ToolCatalogEntry | undefined> {
     const all = await this.list({ includeInactive: true });
@@ -365,6 +400,8 @@ export class ToolCatalog {
     args: Record<string, unknown>,
     context: McpToolContext
   ): Promise<ToolDispatchResult> {
+    // `get()` returns inactive entries too, so re-check `isActive` here: a
+    // found-but-disabled tool must report as unknown (not leak its existence).
     const entry = await this.get(toolName);
     // Restrict to MCP-surfaced tools so MCP semantics stay consistent: an
     // ai_sdk-only tool must report as unknown over MCP rather than leaking.

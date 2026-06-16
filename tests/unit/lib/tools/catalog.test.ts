@@ -18,14 +18,21 @@ jest.mock("@/lib/db/drizzle-client", () => ({
   executeQuery: jest.fn(() => Promise.resolve(dbRows)),
 }))
 
-jest.mock("@/lib/logger", () => ({
-  createLogger: () => ({
+// Shared logger singleton so tests can inspect the same instance the catalog
+// captures at module load. The singleton lives entirely inside the (hoisted)
+// factory — referencing any top-level `const` here would throw, because
+// `import { ToolCatalog }` is hoisted above this file and calls createLogger()
+// before top-level declarations initialize. Tests retrieve the instance via
+// `jest.requireMock("@/lib/logger").createLogger()` (idempotent — same object).
+jest.mock("@/lib/logger", () => {
+  const singleton = {
     info: jest.fn(),
     debug: jest.fn(),
     warn: jest.fn(),
     error: jest.fn(),
-  }),
-}))
+  }
+  return { createLogger: () => singleton }
+})
 
 // The manifest imports tool-handlers (real service/DB layer) for code-tool
 // handlers. Mock it so the manifest builds without pulling the DB modules.
@@ -40,6 +47,15 @@ jest.mock("@/lib/mcp/tool-handlers", () => ({
 }))
 
 import { ToolCatalog } from "@/lib/tools/catalog/catalog"
+import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest"
+
+// Derive expected MCP tool count from the manifest rather than hardcoding it,
+// so adding/removing an MCP-surface manifest tool updates these assertions
+// automatically (a hardcoded count would silently pass even if a newly-added
+// MCP tool were incorrectly filtered out). (PR #1032 review finding #3.)
+const MCP_TOOL_COUNT = TOOL_MANIFEST.filter((t) =>
+  t.surfaces.includes("mcp")
+).length
 
 describe("ToolCatalog", () => {
   beforeEach(() => {
@@ -59,7 +75,7 @@ describe("ToolCatalog", () => {
   it("wildcard scope sees all MCP tools", async () => {
     const catalog = new ToolCatalog()
     const tools = await catalog.list({ surface: "mcp", scopes: ["*"] })
-    expect(tools.length).toBe(5)
+    expect(tools.length).toBe(MCP_TOOL_COUNT)
     expect(tools.every((t) => t.surfaces.includes("mcp"))).toBe(true)
   })
 
@@ -238,7 +254,63 @@ describe("ToolCatalog", () => {
     executeQuery.mockRejectedValueOnce(new Error("db down"))
     const catalog = new ToolCatalog()
     const tools = await catalog.list({ surface: "mcp", scopes: ["*"] })
-    // The 5 manifest MCP tools are still returned.
-    expect(tools.length).toBe(5)
+    // The manifest MCP tools are still returned.
+    expect(tools.length).toBe(MCP_TOOL_COUNT)
+  })
+
+  it("invalidate() busts the DB cache so a later list() sees new rows", async () => {
+    const catalog = new ToolCatalog()
+    // Warm the cache with no DB rows.
+    const before = await catalog.list({ surface: "mcp", scopes: ["*"] })
+    expect(before.some((t) => t.name === "late_assistant")).toBe(false)
+
+    // Add a DB row, then invalidate so the next list() re-reads from the DB
+    // instead of serving the warm (now-stale) cache.
+    dbRows = [
+      {
+        identifier: "assistants.late",
+        version: "v1",
+        name: "late_assistant",
+        description: "x",
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: null,
+        surfaces: ["mcp"],
+        requiredScopes: [],
+        agentCallable: true,
+        source: "assistant",
+        isActive: true,
+        handlerRef: "assistant:7",
+      },
+    ]
+    catalog.invalidate()
+
+    const after = await catalog.list({ surface: "mcp", scopes: ["*"] })
+    expect(after.some((t) => t.name === "late_assistant")).toBe(true)
+  })
+
+  it("filterAiSdkToolNames caps per-name pass-through logging and warns on overflow", async () => {
+    // The catalog captures the shared logger at module load; retrieve the same
+    // singleton instance (createLogger returns the same object every call).
+    const { createLogger } = jest.requireMock("@/lib/logger") as {
+      createLogger: () => { info: jest.Mock; warn: jest.Mock }
+    }
+    const mockLogger = createLogger()
+    mockLogger.info.mockClear()
+    mockLogger.warn.mockClear()
+
+    const catalog = new ToolCatalog()
+    // 8 fabricated names -> all pass through, but only 5 info logs + 1 warn.
+    const fabricated = Array.from({ length: 8 }, (_, i) => `fake_tool_${i}`)
+    const allowed = await catalog.filterAiSdkToolNames(fabricated, [])
+    expect(allowed.sort()).toEqual(fabricated.sort())
+
+    const infoCalls = mockLogger.info.mock.calls.filter(
+      (c) => c[0] === "Requested tool not in catalog; passing through unscoped"
+    )
+    expect(infoCalls.length).toBe(5)
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      "Many uncataloged tool names passed through unscoped in one request",
+      expect.objectContaining({ total: 8, logged: 5, suppressed: 3 })
+    )
   })
 })
