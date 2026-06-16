@@ -17,8 +17,8 @@ import {
   users,
   userRoles,
   roles,
-  roleTools,
-  tools,
+  roleCapabilities,
+  capabilities,
   nexusConversations,
   nexusMessages,
   nexusFolders,
@@ -363,14 +363,20 @@ export async function getUserWithRolesAndTools(
     "getUserWithRolesAndTools.roles"
   );
 
-  // Get tools via role_tools
+  // Get tools (capabilities) via role_capabilities (#923 — renamed tables).
   const toolsData = await executeQuery(
     (db) =>
       db
-        .selectDistinct({ identifier: tools.identifier })
+        .selectDistinct({ identifier: capabilities.identifier })
         .from(userRoles)
-        .innerJoin(roleTools, eq(userRoles.roleId, roleTools.roleId))
-        .innerJoin(tools, eq(roleTools.toolId, tools.id))
+        .innerJoin(
+          roleCapabilities,
+          eq(userRoles.roleId, roleCapabilities.roleId)
+        )
+        .innerJoin(
+          capabilities,
+          eq(roleCapabilities.capabilityId, capabilities.id)
+        )
         .where(eq(userRoles.userId, userId)),
     "getUserWithRolesAndTools.tools"
   );

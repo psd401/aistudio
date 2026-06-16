@@ -73,6 +73,7 @@
     "075-skill-required-capability.sql",
     "076-agent-failures.sql",
     "077-agent-workspace-consent-nonces-cognito-data.sql",
-    "078-agent-deep-telemetry.sql"
+    "078-agent-deep-telemetry.sql",
+    "079-rename-tools-to-capabilities.sql"
   ]
 }
