@@ -367,9 +367,9 @@ test.describe('User Management — User Detail Sheet', () => {
     const dialog = page.locator('[role="dialog"]')
     await dialog.waitFor({ state: 'visible', timeout: 10_000 })
 
-    // Email shown in DialogDescription (small text under the user name)
+    // Email shown in DialogDescription (stable data-slot attribute from shadcn/ui)
     await expect(
-      dialog.locator('[class*="DialogDescription"], p').filter({ hasText: /@/i }).first()
+      dialog.locator('[data-slot="dialog-description"]').filter({ hasText: /@/i })
     ).toBeVisible({ timeout: 10_000 })
   })
 
@@ -533,7 +533,7 @@ test.describe('User Management — Delete Flow', () => {
 
     const alertDialog = page.locator('[role="alertdialog"]')
     await alertDialog.waitFor({ state: 'visible', timeout: 10_000 })
-    await expect(alertDialog.locator(':has-text("Delete User")')).toBeVisible()
+    await expect(alertDialog.getByRole('heading', { name: /Delete User/i })).toBeVisible()
   })
 
   test('delete dialog has Cancel and Delete action buttons', async ({ page }) => {
@@ -561,8 +561,8 @@ test.describe('User Management — Delete Flow', () => {
     await alertDialog.locator('button').filter({ hasText: /Cancel/i }).click()
 
     await expect(alertDialog).not.toBeVisible({ timeout: 5_000 })
-    // Use > 0 rather than exact count equality — background polling can add
-    // rows between the before/after snapshots, making exact count fragile.
-    expect(await page.locator('tbody tr').count()).toBeGreaterThan(0)
+    // Use >= rowCountBefore: tolerates background polling adding rows while
+    // still catching any deletion (> 0 would pass even if all-but-one were deleted).
+    expect(await page.locator('tbody tr').count()).toBeGreaterThanOrEqual(rowCountBefore)
   })
 })
