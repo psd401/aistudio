@@ -3,6 +3,10 @@
  *
  * Defines only the columns this Lambda reads or writes.
  * Dimension-agnostic vector type — the DB column enforces dimensions at INSERT/UPDATE time.
+ *
+ * DRIFT WARNING: This is a reduced copy of the canonical schema in /lib/db/schema/.
+ * When columns in settings, repository_items, or repository_item_chunks change,
+ * update this file to match. Relevant migrations: 010_repository_schema.sql and later.
  */
 
 import { customType, pgTable, serial, text, timestamp, varchar } from 'drizzle-orm/pg-core';

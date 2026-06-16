@@ -25,6 +25,8 @@ export type DrizzleClient = ReturnType<typeof drizzle<typeof schema>>;
 
 let _client: postgres.Sql | null = null;
 let _db: DrizzleClient | null = null;
+// Prevents concurrent cold-start callers from each racing through resolveCredentials().
+let _initPromise: Promise<DrizzleClient> | null = null;
 
 async function resolveCredentials(): Promise<{ username: string; password: string }> {
   const res = await secretsClient.send(
@@ -43,22 +45,25 @@ async function resolveCredentials(): Promise<{ username: string; password: strin
 }
 
 export async function getDb(): Promise<DrizzleClient> {
-  if (_db) return _db;
-
-  const creds = await resolveCredentials();
-  _client = postgres({
-    host: DATABASE_HOST,
-    port: DATABASE_PORT,
-    database: DATABASE_NAME,
-    username: creds.username,
-    password: creds.password,
-    ssl: 'require',
-    max: 1, // SQS batchSize=1, one record per invocation
-    idle_timeout: 20,
-    connect_timeout: 10,
-  });
-  _db = drizzle(_client, { schema });
-  return _db;
+  if (!_initPromise) {
+    _initPromise = (async () => {
+      const creds = await resolveCredentials();
+      _client = postgres({
+        host: DATABASE_HOST,
+        port: DATABASE_PORT,
+        database: DATABASE_NAME,
+        username: creds.username,
+        password: creds.password,
+        ssl: 'require',
+        max: 1, // SQS batchSize=1, one record per invocation
+        idle_timeout: 20,
+        connect_timeout: 10,
+      });
+      _db = drizzle(_client, { schema });
+      return _db;
+    })();
+  }
+  return _initPromise;
 }
 
 export async function closeDb(): Promise<void> {
@@ -66,5 +71,6 @@ export async function closeDb(): Promise<void> {
     await _client.end({ timeout: 5 });
     _client = null;
     _db = null;
+    _initPromise = null; // reset so the next warm invocation re-initialises cleanly
   }
 }

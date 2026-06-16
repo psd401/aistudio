@@ -170,7 +170,7 @@ async function retryWithBackoff<T>(
       }
     }
   }
-  throw lastError;
+  throw lastError ?? new Error('retryWithBackoff: exhausted retries with no captured error');
 }
 
 async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings): Promise<void> {
@@ -186,9 +186,20 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
       2000
     );
 
+    if (embeddings.length !== message.chunkIds.length) {
+      throw new Error(
+        `Embedding provider returned ${embeddings.length} vectors for ${message.chunkIds.length} chunks (item ${message.itemId})`
+      );
+    }
+
     for (let i = 0; i < message.chunkIds.length; i++) {
       const chunkId = message.chunkIds[i];
       const embedding = embeddings[i];
+
+      if (!embedding.every((v) => typeof v === 'number' && isFinite(v))) {
+        throw new Error(`Invalid embedding values for chunk ${chunkId}: contains NaN or Infinity`);
+      }
+
       const embeddingStr = `[${embedding.join(',')}]`;
 
       log.info(`Updating chunk ${chunkId} with embedding length: ${embedding.length}`);
@@ -224,6 +235,12 @@ async function processRecord(record: SQSRecord, embSettings: EmbeddingSettings):
 }
 
 export async function handler(event: SQSEvent): Promise<void> {
+  // batchSize=1 is set on the SqsEventSource in processing-stack.ts.
+  // Guard here so a misconfigured deployment fails loudly rather than silently
+  // processing a partial batch (closeDb() is called once for all records).
+  if (event.Records.length !== 1) {
+    throw new Error(`Expected exactly 1 SQS record, got ${event.Records.length} — verify batchSize=1 on the SqsEventSource`);
+  }
   log.info(`Processing embedding requests: ${event.Records.length}`);
 
   try {
@@ -232,6 +249,7 @@ export async function handler(event: SQSEvent): Promise<void> {
       await processRecord(record, embSettings);
     }
   } finally {
-    await closeDb();
+    // Swallow closeDb errors — they must not mask the original processing error.
+    await closeDb().catch((e) => log.error('closeDb failed', { error: String(e) }));
   }
 }
