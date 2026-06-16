@@ -16,9 +16,23 @@ import type {
   ToolSurface,
   ToolCatalogSource,
 } from "@/lib/db/schema/tables/tool-catalog";
-import type { McpToolDefinition, McpToolHandler } from "@/lib/mcp/types";
+import type {
+  McpToolDefinition,
+  McpToolHandler,
+  McpToolResult,
+} from "@/lib/mcp/types";
 
 export type { ToolSurface, ToolCatalogSource };
+
+/**
+ * Discriminated result of `ToolCatalog.dispatch()`. Carries the failure reason as
+ * a typed field rather than encoding it in a human-readable message string, so
+ * callers (e.g. the MCP JSON-RPC handler) map to protocol error codes by matching
+ * on `reason` — not by sniffing message text that can change or be localized.
+ */
+export type ToolDispatchResult =
+  | { ok: true; result: McpToolResult }
+  | { ok: false; reason: "unknown" | "scope_denied" | "no_handler" };
 
 /**
  * The merged, runtime-facing view of a single tool — produced by `ToolCatalog`

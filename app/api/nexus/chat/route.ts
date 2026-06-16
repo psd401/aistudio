@@ -44,7 +44,7 @@ import { eq, and } from 'drizzle-orm';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { nexusConversations } from '@/lib/db/schema';
 import { getScopesForRoles } from '@/lib/api-keys/scopes';
-import { toolCatalog_instance } from '@/lib/tools/catalog/catalog';
+import { toolCatalogInstance } from '@/lib/tools/catalog/catalog';
 
 // Allow streaming responses up to 30 minutes. Deep Research runs take 5–25
 // minutes; standard chat and image-gen finish well within this window.
@@ -944,22 +944,22 @@ async function scanAttachmentPII(
 }
 
 /**
- * Resolve MCP connector tools for all enabled connectors (parallel fetch).
- * Pushes successful results into `connectorToolResults` (mutated) and returns the
- * list of connector IDs that failed to resolve. Extracted from POST to keep the
- * route handler's cyclomatic complexity within bounds.
+ * Resolve MCP connector tools for all enabled connectors (parallel fetch). Pure:
+ * returns the resolved results and the list of connector IDs that failed, without
+ * mutating any caller-supplied array. Extracted from POST to keep the route
+ * handler's cyclomatic complexity within bounds.
  */
 async function resolveConnectorTools(params: {
   enabledConnectors: string[];
   userId: number;
   userRoleNames: string[];
   idToken?: string;
-  connectorToolResults: McpConnectorToolsResult[];
   log: ReturnType<typeof createLogger>;
-}): Promise<string[]> {
-  const { enabledConnectors, userId, userRoleNames, idToken, connectorToolResults, log } = params;
-  const failedConnectorIds: string[] = [];
-  if (enabledConnectors.length === 0) return failedConnectorIds;
+}): Promise<{ resolved: McpConnectorToolsResult[]; failedIds: string[] }> {
+  const { enabledConnectors, userId, userRoleNames, idToken, log } = params;
+  const resolved: McpConnectorToolsResult[] = [];
+  const failedIds: string[] = [];
+  if (enabledConnectors.length === 0) return { resolved, failedIds };
 
   log.info('Resolving MCP connector tools', { connectorCount: enabledConnectors.length });
   const connectorOptions = idToken ? { idToken } : undefined;
@@ -968,9 +968,9 @@ async function resolveConnectorTools(params: {
   );
   for (const [i, result] of results.entries()) {
     if (result.status === 'fulfilled') {
-      connectorToolResults.push(result.value);
+      resolved.push(result.value);
     } else {
-      failedConnectorIds.push(enabledConnectors[i]);
+      failedIds.push(enabledConnectors[i]);
       log.warn('Failed to resolve connector tools', {
         serverId: enabledConnectors[i],
         error: result.reason instanceof Error ? result.reason.message : String(result.reason)
@@ -979,11 +979,11 @@ async function resolveConnectorTools(params: {
   }
   log.info('MCP connector tools resolved', {
     requested: enabledConnectors.length,
-    resolved: connectorToolResults.length,
-    failed: failedConnectorIds.length,
-    totalTools: connectorToolResults.reduce((sum, r) => sum + Object.keys(r.tools).length, 0)
+    resolved: resolved.length,
+    failed: failedIds.length,
+    totalTools: resolved.reduce((sum, r) => sum + Object.keys(r.tools).length, 0)
   });
-  return failedConnectorIds;
+  return { resolved, failedIds };
 }
 
 /**
@@ -998,7 +998,7 @@ async function scopeFilterEnabledTools(
   log: ReturnType<typeof createLogger>
 ): Promise<string[]> {
   const callerScopes = getScopesForRoles(userRoleNames);
-  const scoped = await toolCatalog_instance.filterAiSdkToolNames(enabledTools, callerScopes);
+  const scoped = await toolCatalogInstance.filterAiSdkToolNames(enabledTools, callerScopes);
   if (scoped.length !== enabledTools.length) {
     log.info('Tool catalog filtered enabled tools by scope', {
       requested: enabledTools.length,
@@ -1085,11 +1085,14 @@ export async function POST(req: Request) {
       messagesWithParts
     );
 
-    // 8. Resolve MCP connector tools (parallel fetch for all enabled connectors)
-    const failedConnectorIds = await resolveConnectorTools({
-      enabledConnectors, userId, userRoleNames, idToken: session.idToken,
-      connectorToolResults, log,
-    });
+    // 8. Resolve MCP connector tools (parallel fetch for all enabled connectors).
+    // connectorToolResults is hoisted for catch-block cleanup; append the resolved
+    // results rather than mutating inside the helper.
+    const { resolved: resolvedConnectorTools, failedIds: failedConnectorIds } =
+      await resolveConnectorTools({
+        enabledConnectors, userId, userRoleNames, idToken: session.idToken, log,
+      });
+    connectorToolResults.push(...resolvedConnectorTools);
 
     // 8b. Scope-gate built-in (AI SDK) tools via the unified tool catalog (#924).
     const scopedEnabledTools = await scopeFilterEnabledTools(enabledTools, userRoleNames, log);

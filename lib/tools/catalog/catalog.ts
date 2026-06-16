@@ -23,15 +23,19 @@
  * internal agent loops cannot invoke human-only / destructive tools.
  */
 
-import { ne } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { toolCatalog } from "@/lib/db/schema";
 import { createLogger } from "@/lib/logger";
-import type { McpToolHandler, McpToolResult, McpToolContext } from "@/lib/mcp/types";
+import type { McpToolHandler, McpToolContext } from "@/lib/mcp/types";
 import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest";
+import {
+  getFriendlyToolName,
+  getAllToolNamesForUI,
+} from "@/lib/tools/tool-name-mapping";
 import type {
   ToolCatalogEntry,
   ToolCatalogFilter,
+  ToolDispatchResult,
   ToolManifestEntry,
 } from "@/lib/tools/catalog/types";
 
@@ -40,8 +44,20 @@ const log = createLogger({ module: "tool-catalog" });
 /** DB cache TTL — matches settings-manager's 5-minute cache. */
 const DB_CACHE_TTL_MS = 5 * 60 * 1000;
 
-interface DbCache {
+interface DbState {
+  /** Non-code (assistant/skill) DB entries, merged into the runtime catalog. */
   entries: ToolCatalogEntry[];
+  /**
+   * `is_active` state of code-managed rows, keyed by `identifier@version`. Lets an
+   * admin disable a code tool in the DB and have the runtime honor it (the manifest
+   * projection otherwise always reports a code tool as active). Only rows recorded
+   * as inactive are tracked; absence means active.
+   */
+  inactiveCodeKeys: Set<string>;
+}
+
+interface DbCache {
+  state: DbState;
   expiresAt: number;
 }
 
@@ -56,11 +72,24 @@ function buildHandlerMap(): Map<string, McpToolHandler> {
   return map;
 }
 
-/** Project a manifest entry into a runtime catalog entry. */
-function manifestToEntry(entry: ToolManifestEntry): ToolCatalogEntry {
+/** The `identifier@version` key used to dedupe and look up entries. */
+function entryKey(identifier: string, version: string): string {
+  return `${identifier}@${version}`;
+}
+
+/**
+ * Project a manifest entry into a runtime catalog entry. `isActive` defaults to
+ * true but is overridden to false when an admin has disabled the code row in the
+ * DB (passed via `inactiveCodeKeys`), so DB disables are honored at runtime.
+ */
+function manifestToEntry(
+  entry: ToolManifestEntry,
+  inactiveCodeKeys: Set<string>
+): ToolCatalogEntry {
+  const version = entry.version ?? "v1";
   return {
     identifier: entry.identifier,
-    version: entry.version ?? "v1",
+    version,
     name: entry.name,
     description: entry.description,
     inputSchema: entry.inputSchema,
@@ -69,9 +98,28 @@ function manifestToEntry(entry: ToolManifestEntry): ToolCatalogEntry {
     requiredScopes: entry.requiredScopes,
     agentCallable: entry.agentCallable ?? true,
     source: "code",
-    isActive: true,
+    isActive: !inactiveCodeKeys.has(entryKey(entry.identifier, version)),
     handlerRef: entry.identifier,
   };
+}
+
+/**
+ * Sort entries so the highest version wins for a given identifier. Versions are
+ * `v1`, `v2`, ... — compared numerically on the trailing digits, falling back to
+ * a locale string compare so non-`vN` versions still order deterministically.
+ */
+function versionRank(version: string): number {
+  const m = /^v(\d+)$/.exec(version);
+  return m ? Number(m[1]) : Number.NaN;
+}
+
+function compareVersionsDesc(a: string, b: string): number {
+  const ra = versionRank(a);
+  const rb = versionRank(b);
+  if (!Number.isNaN(ra) && !Number.isNaN(rb)) return rb - ra;
+  if (!Number.isNaN(ra)) return -1; // numeric versions sort ahead of non-numeric
+  if (!Number.isNaN(rb)) return 1;
+  return b.localeCompare(a);
 }
 
 /** True when `scopes` grant access to a tool requiring `requiredScopes`. */
@@ -88,66 +136,97 @@ function hasRequiredScopes(scopes: string[], requiredScopes: string[]): boolean 
  */
 export class ToolCatalog {
   private dbCache: DbCache | null = null;
+  /**
+   * In-flight DB load. Concurrent callers that arrive while a load is running
+   * reuse this promise instead of each issuing their own query — prevents a cache
+   * stampede on cold start / after `invalidate()`.
+   */
+  private dbPromise: Promise<DbState> | null = null;
   private readonly handlers: Map<string, McpToolHandler> = buildHandlerMap();
 
   /** Manifest-derived runtime entries (no DB round-trip). */
-  private manifestEntries(): ToolCatalogEntry[] {
-    return TOOL_MANIFEST.map(manifestToEntry);
+  private manifestEntries(inactiveCodeKeys: Set<string>): ToolCatalogEntry[] {
+    return TOOL_MANIFEST.map((e) => manifestToEntry(e, inactiveCodeKeys));
   }
 
-  /** Load non-code DB entries (assistant/skill), cached with a short TTL. */
-  private async dbEntries(): Promise<ToolCatalogEntry[]> {
+  /**
+   * Load DB state (non-code entries + code-row inactive set), cached with a short
+   * TTL. Concurrent callers share one in-flight query. On DB failure, degrades to
+   * the last good cache (even if expired) and finally to an empty state, so a
+   * transient outage never throws into every chat/MCP request.
+   */
+  private async dbState(): Promise<DbState> {
     const now = Date.now();
     if (this.dbCache && this.dbCache.expiresAt > now) {
-      return this.dbCache.entries;
+      return this.dbCache.state;
+    }
+    if (this.dbPromise) {
+      return this.dbPromise;
     }
 
-    try {
-      const rows = await executeQuery(
-        (db) =>
-          db
-            .select()
-            .from(toolCatalog)
-            // Code rows are authoritative from the manifest; only merge the
-            // dynamic (assistant/skill) rows from the DB to avoid double-listing.
-            .where(ne(toolCatalog.source, "code")),
-        "toolCatalog.loadDbEntries"
-      );
+    this.dbPromise = (async () => {
+      try {
+        const rows = await executeQuery(
+          (db) => db.select().from(toolCatalog),
+          "toolCatalog.loadDbEntries"
+        );
 
-      const entries: ToolCatalogEntry[] = rows.map((r) => ({
-        identifier: r.identifier,
-        version: r.version,
-        name: r.name,
-        description: r.description,
-        inputSchema:
-          (r.inputSchema as ToolCatalogEntry["inputSchema"]) ?? {
-            type: "object",
-            properties: {},
-          },
-        outputSchema: r.outputSchema ?? undefined,
-        surfaces: r.surfaces ?? [],
-        requiredScopes: r.requiredScopes ?? [],
-        agentCallable: r.agentCallable,
-        source: r.source,
-        isActive: r.isActive,
-        handlerRef: r.handlerRef ?? undefined,
-      }));
+        // Code rows are authoritative from the manifest; only merge the dynamic
+        // (assistant/skill) rows to avoid double-listing. But still read code
+        // rows' is_active so an admin DB disable is honored at runtime.
+        const entries: ToolCatalogEntry[] = [];
+        const inactiveCodeKeys = new Set<string>();
+        for (const r of rows) {
+          if (r.source === "code") {
+            if (!r.isActive) {
+              inactiveCodeKeys.add(entryKey(r.identifier, r.version));
+            }
+            continue;
+          }
+          entries.push({
+            identifier: r.identifier,
+            version: r.version,
+            name: r.name,
+            description: r.description,
+            inputSchema:
+              (r.inputSchema as ToolCatalogEntry["inputSchema"]) ?? {
+                type: "object",
+                properties: {},
+              },
+            outputSchema: r.outputSchema ?? undefined,
+            surfaces: r.surfaces ?? [],
+            requiredScopes: r.requiredScopes ?? [],
+            agentCallable: r.agentCallable,
+            source: r.source,
+            isActive: r.isActive,
+            handlerRef: r.handlerRef ?? undefined,
+          });
+        }
 
-      this.dbCache = { entries, expiresAt: now + DB_CACHE_TTL_MS };
-      return entries;
-    } catch (error) {
-      // On DB failure, degrade gracefully to manifest-only rather than throwing
-      // and breaking every chat/MCP request. Log so the failure is observable.
-      log.error("Failed to load DB tool catalog entries; using manifest only", {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return [];
-    }
+        const state: DbState = { entries, inactiveCodeKeys };
+        this.dbCache = { state, expiresAt: Date.now() + DB_CACHE_TTL_MS };
+        return state;
+      } catch (error) {
+        // On DB failure, degrade gracefully rather than throwing and breaking
+        // every chat/MCP request. Prefer the last good cache (even expired) over
+        // an empty state so a transient outage does not hide assistant/skill
+        // tools or spuriously re-enable an admin-disabled code tool.
+        log.error("Failed to load DB tool catalog entries; using last cache or manifest only", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return this.dbCache?.state ?? { entries: [], inactiveCodeKeys: new Set() };
+      } finally {
+        this.dbPromise = null;
+      }
+    })();
+
+    return this.dbPromise;
   }
 
   /** Invalidate the DB cache (call after assistant/skill catalog writes). */
   invalidate(): void {
     this.dbCache = null;
+    this.dbPromise = null;
   }
 
   /**
@@ -156,13 +235,15 @@ export class ToolCatalog {
    * identifier@version collision with a DB row.
    */
   async list(filter: ToolCatalogFilter = {}): Promise<ToolCatalogEntry[]> {
+    const { entries: dbEntries, inactiveCodeKeys } = await this.dbState();
     const merged = new Map<string, ToolCatalogEntry>();
-    for (const e of await this.dbEntries()) {
-      merged.set(`${e.identifier}@${e.version}`, e);
+    for (const e of dbEntries) {
+      merged.set(entryKey(e.identifier, e.version), e);
     }
-    // Manifest entries override DB rows for the same key (code is authoritative).
-    for (const e of this.manifestEntries()) {
-      merged.set(`${e.identifier}@${e.version}`, e);
+    // Manifest entries override DB rows for the same key (code is authoritative),
+    // but honor an admin's DB is_active=false via inactiveCodeKeys.
+    for (const e of this.manifestEntries(inactiveCodeKeys)) {
+      merged.set(entryKey(e.identifier, e.version), e);
     }
 
     let entries = [...merged.values()];
@@ -204,57 +285,100 @@ export class ToolCatalog {
     scopes: string[]
   ): Promise<string[]> {
     const aiSdkTools = await this.list({ surface: "ai_sdk" });
-    // Index catalog AI SDK tools by wire name.
+    // Index catalog AI SDK tools by wire name. The client may send a friendly
+    // alias (e.g. "webSearch") rather than the catalog wire name
+    // ("web_search_preview"); normalize through TOOL_NAME_MAPPING so the scope
+    // gate is not silently bypassed for aliased tools.
     const byName = new Map(aiSdkTools.map((t) => [t.name, t]));
     return requested.filter((name) => {
-      const entry = byName.get(name);
-      if (!entry) return true; // not cataloged -> leave to downstream filtering
+      const entry = byName.get(name) ?? this.resolveAiSdkAlias(name, byName);
+      if (!entry) {
+        // Not cataloged under any known name -> leave to downstream
+        // model-capability filtering. Log so the bypass is observable.
+        log.debug("Requested tool not in catalog; passing through unscoped", {
+          tool: name,
+        });
+        return true;
+      }
       return hasRequiredScopes(scopes, entry.requiredScopes);
     });
   }
 
-  /** Resolve a single tool by identifier (latest matching version) or by name. */
+  /**
+   * Resolve a client-supplied AI SDK tool alias (e.g. "webSearch") to its catalog
+   * entry. Walks every provider wire name registered for the friendly name so an
+   * OpenAI/Google/Bedrock-specific name also maps back to the same catalog row.
+   */
+  private resolveAiSdkAlias(
+    name: string,
+    byName: Map<string, ToolCatalogEntry>
+  ): ToolCatalogEntry | undefined {
+    const friendly = getFriendlyToolName(name);
+    if (!friendly) return undefined;
+    // The catalog wire `name` is one of the provider-specific names registered
+    // for this friendly tool (e.g. "web_search_preview"). Try every known alias
+    // (friendly + each provider wire name) until one matches a catalog entry.
+    for (const candidate of getAllToolNamesForUI(friendly)) {
+      const entry = byName.get(candidate);
+      if (entry) return entry;
+    }
+    return undefined;
+  }
+
+  /**
+   * Resolve a single tool by identifier or by name, preferring the highest
+   * version when multiple exist for the same identifier.
+   */
   async get(identifierOrName: string): Promise<ToolCatalogEntry | undefined> {
     const all = await this.list({ includeInactive: true });
-    return (
-      all.find((e) => e.identifier === identifierOrName) ??
-      all.find((e) => e.name === identifierOrName)
+    const matches = all.filter(
+      (e) => e.identifier === identifierOrName || e.name === identifierOrName
     );
+    if (matches.length === 0) return undefined;
+    // Prefer identifier matches over name matches, then highest version.
+    matches.sort((a, b) => {
+      const aId = a.identifier === identifierOrName ? 0 : 1;
+      const bId = b.identifier === identifierOrName ? 0 : 1;
+      if (aId !== bId) return aId - bId;
+      return compareVersionsDesc(a.version, b.version);
+    });
+    return matches[0];
   }
 
   /**
    * Dispatch an MCP `tools/call` for a code-defined tool. Resolves the tool by
-   * its MCP wire `name` (what clients send), checks scope + active state, and
-   * invokes the in-process handler.
+   * its MCP wire `name` (what clients send) on the `mcp` surface, checks scope +
+   * active state, and invokes the in-process handler.
    *
-   * Returns `null` when the tool is unknown or has no in-process handler (the
-   * caller decides how to surface that — e.g. assistant/skill tools dispatch
-   * through a different path keyed on `handlerRef`).
+   * Returns a typed {@link ToolDispatchResult} so the caller maps each failure to
+   * the correct protocol error code without inspecting message text:
+   *   - `reason: 'unknown'` — no active tool exposed on the MCP surface by that
+   *     name (also covers ai_sdk-only tools, which must not leak via MCP).
+   *   - `reason: 'scope_denied'` — found, but the caller lacks the required scope.
+   *   - `reason: 'no_handler'` — found and scoped, but no in-process handler (e.g.
+   *     an assistant/skill tool dispatched through a different `handlerRef` path).
    */
   async dispatch(
     toolName: string,
     args: Record<string, unknown>,
     context: McpToolContext
-  ): Promise<McpToolResult | null> {
+  ): Promise<ToolDispatchResult> {
     const entry = await this.get(toolName);
-    if (!entry || !entry.isActive) {
-      return null;
+    // Restrict to MCP-surfaced tools so MCP semantics stay consistent: an
+    // ai_sdk-only tool must report as unknown over MCP rather than leaking.
+    if (!entry || !entry.isActive || !entry.surfaces.includes("mcp")) {
+      return { ok: false, reason: "unknown" };
     }
     if (!hasRequiredScopes(context.scopes, entry.requiredScopes)) {
-      return {
-        content: [
-          { type: "text", text: `Insufficient scope for tool: ${toolName}` },
-        ],
-        isError: true,
-      };
+      return { ok: false, reason: "scope_denied" };
     }
     const handler = this.handlers.get(entry.identifier);
     if (!handler) {
-      return null;
+      return { ok: false, reason: "no_handler" };
     }
-    return handler(args, context);
+    return { ok: true, result: await handler(args, context) };
   }
 }
 
 /** Process-wide singleton. */
-export const toolCatalog_instance = new ToolCatalog();
+export const toolCatalogInstance = new ToolCatalog();

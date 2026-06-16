@@ -44,7 +44,13 @@ CREATE TABLE IF NOT EXISTS tool_catalog (
     replaced_by VARCHAR(170),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
-    CONSTRAINT tool_catalog_source_check CHECK (source IN ('code', 'assistant', 'skill')),
+    -- 'retired' marks a row that WAS code-managed but was removed from the
+    -- manifest: is_active=false + source='retired'. Distinct from 'assistant'
+    -- (a real assistant-derived tool) so observability/queries are not misled,
+    -- and from 'code' so a manifest re-add can detect the released row and
+    -- re-claim ownership (re-activating it) without clobbering an admin's
+    -- is_active toggle on a still-present code tool.
+    CONSTRAINT tool_catalog_source_check CHECK (source IN ('code', 'assistant', 'skill', 'retired')),
     CONSTRAINT tool_catalog_identifier_version_key UNIQUE (identifier, version)
 );
 
@@ -57,23 +63,28 @@ CREATE INDEX IF NOT EXISTS idx_tool_catalog_is_active ON tool_catalog (is_active
 -- deploy. surfaces = ['mcp'] initially per the issue's migration plan. The
 -- required_scopes mirror TOOL_SCOPE_MAP exactly. agent_callable defaults true;
 -- capture_decision is human-or-agent callable. All are code-sourced.
+--
+-- handler_ref is seeded with the canonical identifier (domain.action), matching
+-- what the manifest sync writes (handlerRef = entry.identifier). Seeding the old
+-- snake_case wire name here would differ from the manifest and trigger a spurious
+-- UPDATE for every row on the first boot sync.
 INSERT INTO tool_catalog (identifier, version, name, description, surfaces, required_scopes, agent_callable, source, handler_ref)
 VALUES
     ('decisions.search', 'v1', 'search_decisions',
      'Search decision graph nodes by type, class, or text query. Returns paginated results.',
-     '["mcp"]'::jsonb, '["mcp:search_decisions"]'::jsonb, true, 'code', 'search_decisions'),
+     '["mcp"]'::jsonb, '["mcp:search_decisions"]'::jsonb, true, 'code', 'decisions.search'),
     ('decisions.capture', 'v1', 'capture_decision',
      'Capture a structured decision with full context (evidence, constraints, reasoning, alternatives). Creates a decision subgraph with completeness scoring.',
-     '["mcp"]'::jsonb, '["mcp:capture_decision"]'::jsonb, true, 'code', 'capture_decision'),
+     '["mcp"]'::jsonb, '["mcp:capture_decision"]'::jsonb, true, 'code', 'decisions.capture'),
     ('assistants.execute', 'v1', 'execute_assistant',
      'Execute an AI assistant with the given inputs and return the final text result.',
-     '["mcp"]'::jsonb, '["mcp:execute_assistant"]'::jsonb, true, 'code', 'execute_assistant'),
+     '["mcp"]'::jsonb, '["mcp:execute_assistant"]'::jsonb, true, 'code', 'assistants.execute'),
     ('assistants.list', 'v1', 'list_assistants',
      'List AI assistants the authenticated user has access to execute.',
-     '["mcp"]'::jsonb, '["mcp:list_assistants"]'::jsonb, true, 'code', 'list_assistants'),
+     '["mcp"]'::jsonb, '["mcp:list_assistants"]'::jsonb, true, 'code', 'assistants.list'),
     ('decisions.graph_get', 'v1', 'get_decision_graph',
      'Get details of a specific decision node and all its connections (incoming and outgoing edges).',
-     '["mcp"]'::jsonb, '["mcp:get_decision_graph"]'::jsonb, true, 'code', 'get_decision_graph')
+     '["mcp"]'::jsonb, '["mcp:get_decision_graph"]'::jsonb, true, 'code', 'decisions.graph_get')
 ON CONFLICT (identifier, version) DO NOTHING;
 
 -- 3. Seed the AI SDK (chat / Nexus) tools. Descriptor-only entries — the concrete

@@ -59,8 +59,14 @@ import {
 /** Surfaces a catalog tool can be exposed on. */
 export type ToolSurface = "mcp" | "ai_sdk" | "rest" | "internal";
 
-/** Source of a catalog tool record. */
-export type ToolCatalogSource = "code" | "assistant" | "skill";
+/**
+ * Source of a catalog tool record.
+ * - `code` — manifest-managed (lib/tools/catalog/manifest.ts).
+ * - `assistant` / `skill` — dynamically registered via their lifecycle hooks.
+ * - `retired` — was code-managed but removed from the manifest; kept inactive so a
+ *   later manifest re-add can re-claim ownership. Never a live tool.
+ */
+export type ToolCatalogSource = "code" | "assistant" | "skill" | "retired";
 
 export const toolCatalog = pgTable(
   "tool_catalog",
@@ -99,7 +105,7 @@ export const toolCatalog = pgTable(
     ),
     check(
       "tool_catalog_source_check",
-      sql`${t.source} IN ('code', 'assistant', 'skill')`
+      sql`${t.source} IN ('code', 'assistant', 'skill', 'retired')`
     ),
     index("idx_tool_catalog_identifier").on(t.identifier),
     index("idx_tool_catalog_source").on(t.source),

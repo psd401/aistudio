@@ -19,7 +19,7 @@ interface FakeTool {
   requiredScopes: string[]
   agentCallable: boolean
   handlerRef: string | null
-  source: "code" | "assistant" | "skill"
+  source: "code" | "assistant" | "skill" | "retired"
   isActive: boolean
 }
 
@@ -155,31 +155,39 @@ function makeTx() {
     update() {
       return {
         set(vals: Record<string, unknown>) {
+          const applyVals = (row: FakeTool) => {
+            if (vals.name !== undefined) row.name = String(vals.name)
+            if (vals.description !== undefined)
+              row.description = String(vals.description)
+            if (vals.inputSchema !== undefined)
+              row.inputSchema = vals.inputSchema
+            if (vals.outputSchema !== undefined)
+              row.outputSchema = vals.outputSchema
+            if (vals.surfaces !== undefined)
+              row.surfaces = vals.surfaces as string[]
+            if (vals.requiredScopes !== undefined)
+              row.requiredScopes = vals.requiredScopes as string[]
+            if (vals.agentCallable !== undefined)
+              row.agentCallable = Boolean(vals.agentCallable)
+            if (vals.handlerRef !== undefined)
+              row.handlerRef = vals.handlerRef as string | null
+            if (vals.source !== undefined)
+              row.source = vals.source as FakeTool["source"]
+            if (vals.isActive !== undefined)
+              row.isActive = Boolean(vals.isActive)
+          }
           return {
             where(cond: { op: string; args: unknown[] }) {
               if (cond?.op === "eq") {
                 const id = Number((cond.args as unknown[])[1])
                 const row = fakeTools.find((t) => t.id === id)
-                if (row) {
-                  if (vals.name !== undefined) row.name = String(vals.name)
-                  if (vals.description !== undefined)
-                    row.description = String(vals.description)
-                  if (vals.inputSchema !== undefined)
-                    row.inputSchema = vals.inputSchema
-                  if (vals.outputSchema !== undefined)
-                    row.outputSchema = vals.outputSchema
-                  if (vals.surfaces !== undefined)
-                    row.surfaces = vals.surfaces as string[]
-                  if (vals.requiredScopes !== undefined)
-                    row.requiredScopes = vals.requiredScopes as string[]
-                  if (vals.agentCallable !== undefined)
-                    row.agentCallable = Boolean(vals.agentCallable)
-                  if (vals.handlerRef !== undefined)
-                    row.handlerRef = vals.handlerRef as string | null
-                  if (vals.source !== undefined)
-                    row.source = vals.source as FakeTool["source"]
-                  if (vals.isActive !== undefined)
-                    row.isActive = Boolean(vals.isActive)
+                if (row) applyVals(row)
+              } else if (cond?.op === "inArray") {
+                // Batch deactivation: args[1] is the array of ids.
+                const ids = (cond.args as unknown[])[1] as number[]
+                const idSet = new Set(ids.map((n) => Number(n)))
+                for (const row of fakeTools) {
+                  if (idSet.has(row.id)) applyVals(row)
                 }
               }
               return Promise.resolve(undefined)
@@ -268,7 +276,7 @@ describe("syncToolCatalogManifest", () => {
     expect(result.deactivated).toEqual(["decisions.capture@v1"])
     const dropped = fakeTools.find((t) => t.identifier === "decisions.capture")!
     expect(dropped.isActive).toBe(false)
-    expect(dropped.source).toBe("assistant") // demoted/released
+    expect(dropped.source).toBe("retired") // demoted/released
   })
 
   it("never touches assistant/skill-derived rows during deactivation", async () => {
@@ -299,10 +307,11 @@ describe("syncToolCatalogManifest", () => {
     await runSync([entry()])
     // Release it by removing from manifest.
     await runSync([])
-    // Empty manifest is a guarded no-op, so manually release for the test.
+    // Empty manifest is a guarded no-op, so manually release for the test
+    // (mirrors deactivateOrphans demoting a removed code row to 'retired').
     const row = fakeTools[0]
     row.isActive = false
-    row.source = "assistant"
+    row.source = "retired"
 
     const result = await runSync([entry()])
     expect(result.updated).toContain("decisions.search@v1")

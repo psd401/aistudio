@@ -13,9 +13,9 @@
  *     disables a code tool in the DB must stay disabled across restarts. Claiming
  *     ownership of a previously-released row (source != 'code') re-activates it.
  *   - DEACTIVATE code tools no longer in the manifest by setting
- *     `is_active = false` AND demoting `source = 'assistant'` (releases the row so
- *     a later manifest re-add re-claims ownership). Rows with
- *     `source != 'code'` (assistant/skill-derived) are never touched.
+ *     `is_active = false` AND demoting `source = 'retired'` (releases the row so a
+ *     later manifest re-add re-claims ownership). Rows with `source != 'code'`
+ *     (assistant/skill-derived) are never touched.
  *
  * Concurrency: wrapped in a transaction holding a session-scoped advisory lock
  * (`pg_advisory_xact_lock`) so multiple ECS replicas booting at once serialize
@@ -41,8 +41,12 @@ import type { ToolManifestEntry } from "@/lib/tools/catalog/types";
  */
 const SYNC_ADVISORY_LOCK_KEY = 924_001;
 
-/** Source a deactivated/released code row is demoted to. */
-const RELEASED_SOURCE = "assistant" as const;
+/**
+ * Source a deactivated/released code row is demoted to. Distinct from
+ * 'assistant' (a real assistant-derived tool) so a dead code tool is not
+ * mislabeled in the DB, and from 'code' so a manifest re-add re-claims ownership.
+ */
+const RELEASED_SOURCE = "retired" as const;
 
 export interface ToolCatalogSyncResult {
   inserted: string[];
@@ -196,19 +200,27 @@ async function deactivateOrphans(
       )
     );
 
+  const orphanIds: number[] = [];
   for (const row of orphanCandidates) {
     const rowKey = keyOf(row.identifier, row.version);
     if (!manifestKeySet.has(rowKey)) {
-      await tx
-        .update(toolCatalog)
-        .set({
-          isActive: false,
-          source: RELEASED_SOURCE,
-          updatedAt: new Date(),
-        })
-        .where(eq(toolCatalog.id, row.id));
+      orphanIds.push(row.id);
       deactivated.push(rowKey);
     }
+  }
+
+  // Batch the deactivation: the update values are identical for every orphan, so a
+  // single statement avoids N sequential round-trips inside the advisory-locked
+  // transaction (which would hold locks longer during a large manifest removal).
+  if (orphanIds.length > 0) {
+    await tx
+      .update(toolCatalog)
+      .set({
+        isActive: false,
+        source: RELEASED_SOURCE,
+        updatedAt: new Date(),
+      })
+      .where(inArray(toolCatalog.id, orphanIds));
   }
   return deactivated;
 }

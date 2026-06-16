@@ -6,6 +6,8 @@ let dbRows: Record<string, unknown>[] = []
 
 jest.mock("drizzle-orm", () => ({
   ne: (...args: unknown[]) => ({ op: "ne", args }),
+  eq: (...args: unknown[]) => ({ op: "eq", args }),
+  inArray: (...args: unknown[]) => ({ op: "inArray", args }),
 }))
 
 jest.mock("@/lib/db/schema", () => ({
@@ -64,13 +66,16 @@ describe("ToolCatalog", () => {
   it("filters AI SDK tools by surface", async () => {
     const catalog = new ToolCatalog()
     const tools = await catalog.list({ surface: "ai_sdk", scopes: ["*"] })
-    const names = tools.map((t) => t.name).sort()
-    expect(names).toEqual([
+    const names = tools.map((t) => t.name)
+    // Assert membership (not exact length/order) so adding a manifest tool does
+    // not break this test.
+    expect(names).toEqual(expect.arrayContaining([
       "code_interpreter",
       "generateImage",
       "show_chart",
       "web_search_preview",
-    ])
+    ]))
+    expect(tools.every((t) => t.surfaces.includes("ai_sdk"))).toBe(true)
   })
 
   it("filterAiSdkToolNames drops tools the caller lacks scope for", async () => {
@@ -91,6 +96,54 @@ describe("ToolCatalog", () => {
       ["chat:write"]
     )
     expect(allowed.sort()).toEqual(["show_chart", "web_search_preview"])
+  })
+
+  it("filterAiSdkToolNames scope-gates client-supplied friendly aliases", async () => {
+    const catalog = new ToolCatalog()
+    // The client sends the friendly names (webSearch/codeInterpreter), not the
+    // catalog wire names. Without chat:write these must be dropped, not passed
+    // through as 'uncataloged'.
+    const denied = await catalog.filterAiSdkToolNames(
+      ["webSearch", "codeInterpreter"],
+      []
+    )
+    expect(denied).toEqual([])
+
+    const allowed = await catalog.filterAiSdkToolNames(
+      ["webSearch", "codeInterpreter"],
+      ["chat:write"]
+    )
+    expect(allowed.sort()).toEqual(["codeInterpreter", "webSearch"])
+  })
+
+  it("respects an admin-disabled code tool (DB is_active=false)", async () => {
+    dbRows = [
+      {
+        identifier: "decisions.search",
+        version: "v1",
+        name: "search_decisions",
+        description: "x",
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: null,
+        surfaces: ["mcp"],
+        requiredScopes: ["mcp:search_decisions"],
+        agentCallable: true,
+        source: "code",
+        isActive: false,
+        handlerRef: "decisions.search",
+      },
+    ]
+    const catalog = new ToolCatalog()
+    const tools = await catalog.list({ surface: "mcp", scopes: ["*"] })
+    // The manifest projection must NOT force the admin-disabled tool back to active.
+    expect(tools.some((t) => t.name === "search_decisions")).toBe(false)
+    // Dispatch of the disabled tool is rejected as unknown.
+    const result = await catalog.dispatch(
+      "search_decisions",
+      {},
+      { userId: 1, cognitoSub: "s", scopes: ["*"], requestId: "r" }
+    )
+    expect(result.ok).toBe(false)
   })
 
   it("agentOnly excludes non-agent-callable DB tools", async () => {
@@ -151,18 +204,31 @@ describe("ToolCatalog", () => {
       {},
       { userId: 1, cognitoSub: "s", scopes: [], requestId: "r" }
     )
-    expect(result?.isError).toBe(true)
-    expect(result?.content[0]?.text).toMatch(/Insufficient scope/)
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.reason).toBe("scope_denied")
   })
 
-  it("dispatch returns null for an unknown tool", async () => {
+  it("dispatch reports unknown for an unknown tool", async () => {
     const catalog = new ToolCatalog()
     const result = await catalog.dispatch(
       "no_such_tool",
       {},
       { userId: 1, cognitoSub: "s", scopes: ["*"], requestId: "r" }
     )
-    expect(result).toBeNull()
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.reason).toBe("unknown")
+  })
+
+  it("dispatch reports unknown for an ai_sdk-only tool over MCP", async () => {
+    const catalog = new ToolCatalog()
+    // show_chart is an ai_sdk surface tool; it must not be dispatchable via MCP.
+    const result = await catalog.dispatch(
+      "show_chart",
+      {},
+      { userId: 1, cognitoSub: "s", scopes: ["*"], requestId: "r" }
+    )
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.reason).toBe("unknown")
   })
 
   it("degrades to manifest-only when the DB read fails", async () => {

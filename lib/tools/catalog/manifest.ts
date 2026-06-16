@@ -168,9 +168,33 @@ export const TOOL_MANIFEST: readonly ToolManifestEntry[] = [
   ...AI_SDK_MANIFEST_ENTRIES,
 ];
 
-/** Resolve a manifest entry by `domain.action` identifier (latest version). */
+/**
+ * Resolve a manifest entry by `domain.action` identifier, returning the highest
+ * version when more than one exists. Versions are `v1`, `v2`, ...; non-`vN` values
+ * fall back to a string compare so resolution stays deterministic.
+ */
 export function getManifestEntry(
   identifier: string
 ): ToolManifestEntry | undefined {
-  return TOOL_MANIFEST.find((e) => e.identifier === identifier);
+  const matches = TOOL_MANIFEST.filter((e) => e.identifier === identifier);
+  if (matches.length === 0) return undefined;
+  return matches.reduce((latest, entry) =>
+    compareManifestVersionsDesc(entry.version ?? "v1", latest.version ?? "v1") < 0
+      ? entry
+      : latest
+  );
+}
+
+/** Order two versions so the highest sorts first (negative = `a` is newer). */
+function compareManifestVersionsDesc(a: string, b: string): number {
+  const rank = (v: string): number => {
+    const m = /^v(\d+)$/.exec(v);
+    return m ? Number(m[1]) : Number.NaN;
+  };
+  const ra = rank(a);
+  const rb = rank(b);
+  if (!Number.isNaN(ra) && !Number.isNaN(rb)) return rb - ra;
+  if (!Number.isNaN(ra)) return -1;
+  if (!Number.isNaN(rb)) return 1;
+  return b.localeCompare(a);
 }
