@@ -1,6 +1,7 @@
 "use client"
 
 import { useState, useTransition } from "react"
+import { useRouter } from "next/navigation"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Switch } from "@/components/ui/switch"
@@ -37,23 +38,22 @@ interface CapabilitiesTableProps {
   roles: RoleOption[]
 }
 
-export function CapabilitiesTable({
-  capabilities,
-  roles,
-}: CapabilitiesTableProps) {
+/**
+ * Optimistic active-toggle logic for the capabilities table. Tracks in-flight
+ * toggles as a map of capability id -> optimistic next value so the switch flips
+ * immediately, then clears on settle (success revalidates via router.refresh()).
+ */
+function useCapabilityToggle() {
   const { toast } = useToast()
+  const router = useRouter()
   const [, startTransition] = useTransition()
-  const [editing, setEditing] = useState<CapabilityRow | null>(null)
-  const [creating, setCreating] = useState(false)
-  const [assigning, setAssigning] = useState<CapabilityRow | null>(null)
-  // Track in-flight toggles to disable the switch and reflect optimistic state.
   const [pendingToggles, setPendingToggles] = useState<Record<number, boolean>>(
     {}
   )
 
-  const handleToggleActive = (capability: CapabilityRow) => {
+  const toggle = (capability: CapabilityRow) => {
     const next = !capability.isActive
-    setPendingToggles((prev) => ({ ...prev, [capability.id]: true }))
+    setPendingToggles((prev) => ({ ...prev, [capability.id]: next }))
 
     startTransition(async () => {
       const result = await setCapabilityActiveAction(capability.id, next)
@@ -64,6 +64,7 @@ export function CapabilitiesTable({
       })
 
       if (result.isSuccess) {
+        router.refresh()
         toast({
           title: "Success",
           description: next
@@ -79,6 +80,18 @@ export function CapabilitiesTable({
       }
     })
   }
+
+  return { pendingToggles, toggle }
+}
+
+export function CapabilitiesTable({
+  capabilities,
+  roles,
+}: CapabilitiesTableProps) {
+  const [editing, setEditing] = useState<CapabilityRow | null>(null)
+  const [creating, setCreating] = useState(false)
+  const [assigning, setAssigning] = useState<CapabilityRow | null>(null)
+  const { pendingToggles, toggle: handleToggleActive } = useCapabilityToggle()
 
   return (
     <div className="space-y-4">
@@ -114,7 +127,10 @@ export function CapabilitiesTable({
           ) : (
             capabilities.map((capability) => {
               const isCode = capability.source === "code"
-              const isToggling = pendingToggles[capability.id] === true
+              const pending = pendingToggles[capability.id]
+              const isToggling = pending !== undefined
+              // Optimistic value while in flight, else the server prop value.
+              const activeState = pending ?? capability.isActive
               return (
                 <TableRow key={capability.id}>
                   <TableCell className="font-medium">{capability.name}</TableCell>
@@ -131,11 +147,11 @@ export function CapabilitiesTable({
                   </TableCell>
                   <TableCell>
                     <Switch
-                      checked={capability.isActive}
+                      checked={activeState}
                       disabled={isToggling}
                       onCheckedChange={() => handleToggleActive(capability)}
                       aria-label={
-                        capability.isActive
+                        activeState
                           ? `Disable ${capability.name}`
                           : `Enable ${capability.name}`
                       }

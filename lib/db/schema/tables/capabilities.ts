@@ -17,8 +17,11 @@
  * (dropped in workstream #6 once all `hasToolAccess()` call sites are renamed).
  */
 
+import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
+  index,
   integer,
   pgTable,
   serial,
@@ -34,20 +37,31 @@ import {
  */
 export type CapabilitySource = "code" | "manual";
 
-export const capabilities = pgTable("capabilities", {
-  id: serial("id").primaryKey(),
-  name: varchar("name", { length: 100 }).notNull(),
-  description: text("description"),
-  identifier: varchar("identifier", { length: 100 }).notNull().unique(),
-  isActive: boolean("is_active").default(true).notNull(),
-  source: varchar("source", { length: 20 })
-    .$type<CapabilitySource>()
-    .default("manual")
-    .notNull(),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().notNull(),
-  promptChainToolId: integer("prompt_chain_tool_id"),
-});
+export const capabilities = pgTable(
+  "capabilities",
+  {
+    id: serial("id").primaryKey(),
+    name: varchar("name", { length: 100 }).notNull(),
+    description: text("description"),
+    identifier: varchar("identifier", { length: 100 }).notNull().unique(),
+    isActive: boolean("is_active").default(true).notNull(),
+    source: varchar("source", { length: 20 })
+      .$type<CapabilitySource>()
+      .default("manual")
+      .notNull(),
+    createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
+    promptChainToolId: integer("prompt_chain_tool_id"),
+  },
+  (t) => [
+    // Mirrors CONSTRAINT capabilities_source_check in migration 079 so the Drizzle
+    // schema is the faithful source of truth (drift detection / regeneration).
+    check("capabilities_source_check", sql`${t.source} IN ('code', 'manual')`),
+    index("idx_capabilities_identifier").on(t.identifier),
+    index("idx_capabilities_is_active").on(t.isActive),
+    index("idx_capabilities_source").on(t.source),
+  ]
+);
 
 export type Capability = typeof capabilities.$inferSelect;
 export type NewCapability = typeof capabilities.$inferInsert;

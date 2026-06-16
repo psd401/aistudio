@@ -43,7 +43,7 @@
  */
 
 import { eq, desc, sql } from "drizzle-orm";
-import { executeQuery } from "@/lib/db/drizzle-client";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import {
   assistantArchitects,
   chainPrompts,
@@ -55,6 +55,30 @@ import {
   users,
 } from "@/lib/db/schema";
 import { ErrorFactories } from "@/lib/error-utils";
+import { CAPABILITY_MANIFEST } from "@/lib/capabilities/manifest";
+
+/**
+ * Identifiers owned by the code manifest. An Assistant Architect whose slugified
+ * name collides with one of these MUST NOT claim it (the approval upsert would
+ * otherwise overwrite the manifest row's source/promptChainToolId, corrupting a
+ * code-managed capability). Collisions are disambiguated with an id suffix.
+ */
+const MANIFEST_IDENTIFIERS: ReadonlySet<string> = new Set(
+  CAPABILITY_MANIFEST.map((e) => e.identifier)
+);
+
+/**
+ * Slugify an Assistant Architect name into a tool/capability identifier.
+ * If the slug collides with a code-manifest identifier, append the assistant id
+ * to keep the AA's own row distinct from the manifest-managed capability.
+ */
+function buildAssistantToolIdentifier(name: string, assistantId: number): string {
+  const base = name
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^\da-z-]/g, "");
+  return MANIFEST_IDENTIFIERS.has(base) ? `${base}-${assistantId}` : base;
+}
 
 // ============================================
 // Types
@@ -361,9 +385,11 @@ export async function updateAssistantArchitect(
  * Uses cascading deletes through related tables
  */
 export async function deleteAssistantArchitect(id: number) {
-  // Delete in correct order to respect foreign key constraints
-  return executeQuery(
-    (db) => db.transaction(async (tx) => {
+  // Delete in correct order to respect foreign key constraints.
+  // Use executeTransaction directly (never nest db.transaction inside
+  // executeQuery — the wrapper's retry could replay a partially-committed tx).
+  return executeTransaction(
+    async (tx) => {
       // 1. Delete prompt_results (references chain_prompts via prompt_id)
       await tx
         .delete(promptResults)
@@ -393,7 +419,7 @@ export async function deleteAssistantArchitect(id: number) {
         .returning();
 
       return result[0];
-    }),
+    },
     "deleteAssistantArchitectTransaction"
   );
 }
@@ -407,8 +433,10 @@ export async function deleteAssistantArchitect(id: number) {
  * Also creates the corresponding tool entry if it doesn't exist
  */
 export async function approveAssistantArchitect(id: number) {
-  return executeQuery(
-    (db) => db.transaction(async (tx) => {
+  // Use executeTransaction directly (never nest db.transaction inside
+  // executeQuery — the wrapper's retry could replay a partially-committed tx).
+  return executeTransaction(
+    async (tx) => {
       // Update status to approved
       const result = await tx
         .update(assistantArchitects)
@@ -431,11 +459,33 @@ export async function approveAssistantArchitect(id: number) {
 
       // Create tool entry if it doesn't already exist
       // Use INSERT ... ON CONFLICT DO NOTHING to handle race conditions
-      // If another transaction creates the tool first, this silently succeeds
-      const toolIdentifier = assistant.name
-        .toLowerCase()
-        .replace(/\s+/g, "-")
-        .replace(/[^\da-z-]/g, "");
+      // If another transaction creates the tool first, this silently succeeds.
+      // A name that slugifies to a code-manifest identifier is disambiguated with
+      // an id suffix so the approval upsert can never hijack a manifest-owned
+      // capability row (which would overwrite its source/promptChainToolId).
+      let toolIdentifier = buildAssistantToolIdentifier(
+        assistant.name,
+        assistant.id
+      );
+
+      // Guard against two different assistants whose names slugify to the same
+      // identifier (e.g. both "Weekly Report" -> "weekly-report"). Without this,
+      // the upsert below would re-stamp the FIRST assistant's capability row with
+      // THIS assistant's promptChainToolId, silently stealing its tool mapping
+      // (assistant_architects.name is not unique). If the identifier is already
+      // owned by a different assistant, disambiguate with this assistant's id.
+      const [conflicting] = await tx
+        .select({ promptChainToolId: capabilities.promptChainToolId })
+        .from(capabilities)
+        .where(eq(capabilities.identifier, toolIdentifier))
+        .limit(1);
+      if (
+        conflicting &&
+        conflicting.promptChainToolId !== null &&
+        conflicting.promptChainToolId !== assistant.id
+      ) {
+        toolIdentifier = `${toolIdentifier}-${assistant.id}`;
+      }
 
       // Race condition safety: concurrent approvals can't produce duplicate key
       // errors because the tool identifier is unique. On conflict we upsert (not
@@ -501,7 +551,7 @@ export async function approveAssistantArchitect(id: number) {
         });
 
       return assistant;
-    }),
+    },
     "approveAssistantArchitectTransaction"
   );
 }

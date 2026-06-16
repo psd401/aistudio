@@ -424,9 +424,7 @@ export async function getCapabilityRoleIds(
         .where(eq(roleCapabilities.capabilityId, capabilityId)),
     "getCapabilityRoleIds"
   );
-  return result
-    .map((r) => r.roleId)
-    .filter((id): id is number => id !== null);
+  return result.map((r) => r.roleId);
 }
 
 /**

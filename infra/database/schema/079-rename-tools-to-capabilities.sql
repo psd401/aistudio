@@ -46,11 +46,14 @@ CREATE TABLE IF NOT EXISTS capabilities (
     CONSTRAINT capabilities_source_check CHECK (source IN ('code', 'manual'))
 );
 
--- 2. role_capabilities join table (mirrors role_tools, capability_id FK)
+-- 2. role_capabilities join table (mirrors role_tools, capability_id FK).
+-- Both FK columns are NOT NULL: a grant row is meaningless without both sides,
+-- and a NULL key would satisfy UNIQUE(role_id, capability_id) independently
+-- (Postgres treats NULLs as distinct), allowing unlimited orphan rows.
 CREATE TABLE IF NOT EXISTS role_capabilities (
     id SERIAL PRIMARY KEY,
-    role_id INTEGER REFERENCES roles(id) ON DELETE CASCADE,
-    capability_id INTEGER REFERENCES capabilities(id) ON DELETE CASCADE,
+    role_id INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+    capability_id INTEGER NOT NULL REFERENCES capabilities(id) ON DELETE CASCADE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
     UNIQUE(role_id, capability_id)
 );

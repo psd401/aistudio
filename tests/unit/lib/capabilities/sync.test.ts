@@ -79,7 +79,8 @@ function makeTx() {
 
     // SELECT { id, identifier } FROM capabilities WHERE inArray(identifier, [...])
     // and SELECT { id, name } FROM roles
-    select(columns: Record<string, unknown>) {
+    // columns param is intentionally unused (the fake returns fixed shapes).
+    select(_columns: Record<string, unknown>) {
       return {
         from(table: { table: string }) {
           if (table.table === "roles") {
@@ -103,8 +104,6 @@ function makeTx() {
               )
             },
           }
-          // columns param intentionally unused beyond shaping
-          void columns
         },
       }
     },
@@ -181,6 +180,11 @@ function makeTx() {
                       !manifestIdentifiersForRun.has(c.identifier)
                     ) {
                       c.isActive = false
+                      // Mirror the real sync: deactivation also demotes source so
+                      // a later manifest re-add can re-claim ownership.
+                      if (vals.source !== undefined) {
+                        c.source = vals.source as "code" | "manual"
+                      }
                       deactivated.push({ identifier: c.identifier })
                     }
                   }
@@ -467,5 +471,74 @@ describe("syncCapabilityManifest", () => {
 
     await runSync([{ identifier: "feature-f", name: "Feature F", description: "f" }])
     expect(txSpy).toHaveBeenCalled()
+  })
+
+  it("does NOT re-enable an admin-disabled code capability still in the manifest", async () => {
+    // Admin disabled this code-owned capability via the UI (is_active=false,
+    // source still 'code'). A subsequent sync must preserve the disable.
+    fakeCapabilities.push({
+      id: 30,
+      identifier: "voice-mode",
+      name: "Voice Mode",
+      description: "voice",
+      isActive: false,
+      source: "code",
+      promptChainToolId: null,
+    })
+
+    const result = await runSync([
+      { identifier: "voice-mode", name: "Voice Mode", description: "voice" },
+    ])
+
+    // Nothing changed except is_active (which the sync must not touch), so the
+    // row is a no-op and stays disabled.
+    expect(result.updated).toEqual([])
+    expect(
+      fakeCapabilities.find((c) => c.identifier === "voice-mode")?.isActive
+    ).toBe(false)
+  })
+
+  it("demotes deactivated orphans to source='manual' so re-adding re-claims them", async () => {
+    fakeCapabilities.push({
+      id: 31,
+      identifier: "removed-then-readded",
+      name: "Removed",
+      description: "r",
+      isActive: true,
+      source: "code",
+      promptChainToolId: null,
+    })
+
+    // First sync: identifier not in manifest -> deactivate + demote to manual.
+    await runSync([{ identifier: "other", name: "Other", description: "o" }])
+    const afterRemoval = fakeCapabilities.find(
+      (c) => c.identifier === "removed-then-readded"
+    )
+    expect(afterRemoval?.isActive).toBe(false)
+    expect(afterRemoval?.source).toBe("manual")
+
+    // Second sync: re-add to the manifest -> claim ownership re-activates it.
+    const result = await runSync([
+      {
+        identifier: "removed-then-readded",
+        name: "Removed",
+        description: "r",
+      },
+    ])
+    expect(result.updated).toContain("removed-then-readded")
+    const reclaimed = fakeCapabilities.find(
+      (c) => c.identifier === "removed-then-readded"
+    )
+    expect(reclaimed?.isActive).toBe(true)
+    expect(reclaimed?.source).toBe("code")
+  })
+
+  it("throws on a manifest containing duplicate identifiers", async () => {
+    await expect(
+      syncCapabilityManifest([
+        { identifier: "dup", name: "Dup A", description: "a" },
+        { identifier: "dup", name: "Dup B", description: "b" },
+      ])
+    ).rejects.toThrow(/duplicate identifiers: dup/)
   })
 })

@@ -7,12 +7,18 @@
  * Behavior (idempotent):
  *   - INSERT capabilities present in the manifest but not in the DB.
  *     On insert, grant the entry's `defaultRoles` (applied ONLY on first insert).
- *   - UPDATE name/description/source and re-activate capabilities that exist in
- *     both. (Flips backfilled `source = 'manual'` rows to `source = 'code'`.)
- *   - DEACTIVATE (`is_active = false`) capabilities with `source = 'code'` that are
- *     no longer in the manifest. Manual capabilities and rows owned by the
- *     assistant-architect lifecycle (identified by `prompt_chain_tool_id`) are
- *     never touched.
+ *   - UPDATE name/description/source for capabilities that exist in both. The
+ *     manifest owns name/description/source but NOT `is_active`: an admin who
+ *     disables a code capability in the UI must stay disabled across restarts, so
+ *     the sync never flips `is_active` back to true on an existing row. (Flips
+ *     backfilled `source = 'manual'` rows to `source = 'code'`.)
+ *   - DEACTIVATE capabilities with `source = 'code'` that are no longer in the
+ *     manifest by setting `is_active = false` AND `source = 'manual'`. Demoting to
+ *     `manual` "releases" the row: a later manifest re-add then takes the INSERT-
+ *     equivalent claim-ownership path (source flips back to `code`, re-activated),
+ *     while an admin's manual disable of a still-in-manifest code row is preserved.
+ *     Manual capabilities and rows owned by the assistant-architect lifecycle
+ *     (identified by `prompt_chain_tool_id`) are never touched.
  *
  * Concurrency: wrapped in a transaction holding a session-scoped advisory lock
  * (`pg_advisory_xact_lock`) so multiple ECS replicas booting at once serialize
@@ -106,6 +112,22 @@ export async function syncCapabilityManifest(
 
   const manifestIdentifiers = manifest.map((e) => e.identifier);
 
+  // Fail fast on a malformed manifest. Duplicate identifiers would otherwise hit
+  // the `capabilities.identifier` UNIQUE constraint mid-transaction (the second
+  // duplicate is not in the pre-loop snapshot, so it takes the INSERT path),
+  // rolling back the whole sync silently. A deterministic boot error is far
+  // easier to diagnose than a single startup warning with no rows written.
+  const duplicateIdentifiers = manifestIdentifiers.filter(
+    (id, i) => manifestIdentifiers.indexOf(id) !== i
+  );
+  if (duplicateIdentifiers.length > 0) {
+    throw new Error(
+      `CAPABILITY_MANIFEST contains duplicate identifiers: ${[
+        ...new Set(duplicateIdentifiers),
+      ].join(", ")}`
+    );
+  }
+
   log.info("Starting capability manifest sync", {
     manifestCount: manifest.length,
   });
@@ -189,15 +211,22 @@ export async function syncCapabilityManifest(
               );
             }
           } else {
-            // UPDATE name/description/source; re-activate (manifest re-add).
-            // Role assignments are intentionally NOT touched here.
+            // UPDATE name/description/source. The manifest owns these three
+            // fields but deliberately does NOT touch `is_active`: an admin who
+            // disabled this code capability in the UI must stay disabled across
+            // restarts. Re-activation only happens when the manifest re-claims a
+            // previously-released row — and a released row was demoted to
+            // `source = 'manual'` by the deactivation pass, so it takes the claim-
+            // ownership branch below (source != MANIFEST_SOURCE) and is reactivated
+            // there. Role assignments are intentionally NOT touched here.
+            //
             // Skip the write entirely when nothing changed so a re-sync against an
             // already-synced DB does not churn updatedAt or report phantom updates.
+            const claimingOwnership = existingRow.source !== MANIFEST_SOURCE;
             const needsUpdate =
               existingRow.name !== entry.name ||
               (existingRow.description ?? null) !== (entry.description ?? null) ||
-              existingRow.source !== MANIFEST_SOURCE ||
-              existingRow.isActive !== true;
+              claimingOwnership;
 
             if (needsUpdate) {
               await tx
@@ -206,7 +235,10 @@ export async function syncCapabilityManifest(
                   name: entry.name,
                   description: entry.description,
                   source: MANIFEST_SOURCE,
-                  isActive: true,
+                  // Only (re)activate when the manifest is claiming a released or
+                  // manual row. For a row already owned by the manifest, preserve
+                  // the admin's is_active toggle.
+                  ...(claimingOwnership ? { isActive: true } : {}),
                   updatedAt: new Date(),
                 })
                 .where(eq(capabilities.id, existingRow.id));
@@ -215,13 +247,18 @@ export async function syncCapabilityManifest(
           }
         }
 
-        // DEACTIVATE code-source capabilities no longer in the manifest.
+        // DEACTIVATE code-source capabilities no longer in the manifest, AND
+        // demote them to `source = 'manual'`. Demotion "releases" the row so that
+        // (a) re-adding the manifest entry later re-claims ownership and
+        // re-activates it (via the claimingOwnership branch above), while
+        // (b) an admin disabling a still-in-manifest code row is NOT re-enabled on
+        // the next boot (that row keeps source = 'code' and is skipped here).
         // Never touch manual capabilities or AA-lifecycle rows
         // (prompt_chain_tool_id IS NOT NULL). manifestIdentifiers is non-empty
         // here (empty manifest bailed above), so notInArray is always present.
         const deactivatedRows = await tx
           .update(capabilities)
-          .set({ isActive: false, updatedAt: new Date() })
+          .set({ isActive: false, source: "manual", updatedAt: new Date() })
           .where(
             and(
               eq(capabilities.source, MANIFEST_SOURCE),

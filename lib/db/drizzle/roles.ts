@@ -10,13 +10,12 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, and, asc } from "drizzle-orm";
+import { eq, and, asc, inArray } from "drizzle-orm";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
-import { roles, roleCapabilities } from "@/lib/db/schema";
+import { roles, roleCapabilities, tools } from "@/lib/db/schema";
 import { ErrorFactories } from "@/lib/error-utils";
 import {
   getCapabilities,
-  getCapabilitiesByIds,
   getRoleCapabilities,
   assignCapabilityToRole,
   removeCapabilityFromRole,
@@ -225,13 +224,40 @@ export async function getTools() {
 }
 
 /**
- * Get capabilities by their IDs. Returns a map of id -> identifier.
- * @deprecated Prefer `getCapabilitiesByIds`. Compat shim (#923).
+ * Get legacy tool identifiers by their IDs. Returns a map of id -> identifier.
+ *
+ * IMPORTANT (#923): this MUST query the legacy `tools` table, NOT `capabilities`.
+ * The sole caller (the navigation API) passes `navigation_items.tool_id` values,
+ * and that column is an FK into `tools.id`. Migration 079 backfilled
+ * `capabilities` preserving the legacy ids, but the two tables have INDEPENDENT
+ * identity sequences: any `tools` row inserted after the migration (e.g. a newly
+ * approved Assistant Architect) gets an id from the `tools` sequence while its
+ * paired `capabilities` row gets a different id from the `capabilities` sequence.
+ * Resolving a `tools.id` against `capabilities.id` would therefore return the
+ * wrong identifier (or none) and silently hide the nav item. Stay on `tools`
+ * until navigation_items.tool_id is migrated to capability_id (workstream #6).
  */
 export async function getToolsByIds(
   toolIds: number[]
 ): Promise<Map<number, string>> {
-  return getCapabilitiesByIds(toolIds);
+  if (toolIds.length === 0) {
+    return new Map();
+  }
+
+  const result = await executeQuery(
+    (db) =>
+      db
+        .select({ id: tools.id, identifier: tools.identifier })
+        .from(tools)
+        .where(inArray(tools.id, toolIds)),
+    "getToolsByIds"
+  );
+
+  const map = new Map<number, string>();
+  for (const row of result) {
+    map.set(row.id, row.identifier);
+  }
+  return map;
 }
 
 /**
