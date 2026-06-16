@@ -265,16 +265,24 @@ async function extractTextFromDOCX(buffer: Buffer): Promise<string> {
   return result.value;
 }
 
+const MAX_XLSX_BYTES = 25 * 1024 * 1024; // 25 MB — matches documented upload limit
+const MAX_XLSX_ROWS = 10000; // cap rows per sheet to prevent unbounded CSV output
+
 async function extractTextFromExcel(buffer: Buffer): Promise<string> {
-  const workbook = XLSX.read(buffer);
+  if (buffer.length > MAX_XLSX_BYTES) {
+    throw new Error(`XLSX file exceeds maximum allowed size of ${MAX_XLSX_BYTES} bytes`);
+  }
+  const workbook = XLSX.read(buffer, { cellFormula: false, sheetRows: MAX_XLSX_ROWS });
   let text = '';
-  
+
   workbook.SheetNames.forEach((sheetName: string) => {
     const sheet = workbook.Sheets[sheetName];
     const csv = XLSX.utils.sheet_to_csv(sheet);
-    text += `\n\n## Sheet: ${sheetName}\n${csv}`;
+    // Sanitize sheet name before interpolating into text to prevent injection
+    const safeSheetName = sheetName.replace(/[\r\n|#`\\]/g, ' ').trim() || 'Sheet';
+    text += `\n\n## Sheet: ${safeSheetName}\n${csv}`;
   });
-  
+
   return text.trim();
 }
 
@@ -552,30 +560,42 @@ function validateS3Key(key: string): boolean {
   if (key.includes('../') || key.includes('..\\') || key.startsWith('/')) {
     return false;
   }
-  
+
   // Accept two valid patterns:
   // 1. New format: repositories/{repoId}/{itemId}/{filename}
-  // 2. Legacy format: {userId}/{timestamp}-{filename}
+  // 2. Legacy format: {userId}/{timestamp}-{filename} (tightened to safe filename chars)
   const newFormatPattern = /^repositories\/\d+\/\d+\/[^/]+$/;
-  const legacyFormatPattern = /^\d+\/\d+-[^/]+$/;
-  
+  const legacyFormatPattern = /^\d+\/\d+-[\w.\-]+$/;
+
   return newFormatPattern.test(key) || legacyFormatPattern.test(key);
+}
+
+// Validate S3 bucket name against the expected environment bucket
+function validateBucketName(bucketName: string): boolean {
+  return bucketName === DOCUMENTS_BUCKET;
 }
 
 // Lambda handler
 export async function handler(event: SQSEvent) {
   console.log('Received SQS event:', JSON.stringify(event, null, 2));
-  
+
   for (const record of event.Records) {
     try {
       const job: ProcessingJob = JSON.parse(record.body);
-      
+
+      // Validate bucket name against expected environment bucket to prevent
+      // cross-bucket data exfiltration via a tampered SQS message
+      if (!validateBucketName(job.bucketName)) {
+        console.error(`Invalid bucket name in job: ${job.bucketName}`);
+        throw new Error(`Invalid bucket name: ${job.bucketName}`);
+      }
+
       // Validate file key before processing
       if (!validateS3Key(job.fileKey)) {
         console.error(`Invalid S3 key detected: ${job.fileKey}`);
         throw new Error(`Invalid S3 key: ${job.fileKey}`);
       }
-      
+
       await processFile(job);
     } catch (error) {
       console.error('Failed to process record:', error);

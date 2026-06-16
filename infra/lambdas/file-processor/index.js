@@ -229,13 +229,19 @@ async function extractTextFromDOCX(buffer) {
     const result = await mammoth.extractRawText({ buffer });
     return result.value;
 }
+const MAX_XLSX_BYTES = 25 * 1024 * 1024;
+const MAX_XLSX_ROWS = 10000;
 async function extractTextFromExcel(buffer) {
-    const workbook = XLSX.read(buffer);
+    if (buffer.length > MAX_XLSX_BYTES) {
+        throw new Error(`XLSX file exceeds maximum allowed size of ${MAX_XLSX_BYTES} bytes`);
+    }
+    const workbook = XLSX.read(buffer, { cellFormula: false, sheetRows: MAX_XLSX_ROWS });
     let text = '';
     workbook.SheetNames.forEach((sheetName) => {
         const sheet = workbook.Sheets[sheetName];
         const csv = XLSX.utils.sheet_to_csv(sheet);
-        text += `\n\n## Sheet: ${sheetName}\n${csv}`;
+        const safeSheetName = sheetName.replace(/[\r\n|#`\\]/g, ' ').trim() || 'Sheet';
+        text += `\n\n## Sheet: ${safeSheetName}\n${csv}`;
     });
     return text.trim();
 }
@@ -465,16 +471,16 @@ async function processFile(job) {
 }
 // Validate S3 key to prevent path traversal attacks
 function validateS3Key(key) {
-    // Reject keys with path traversal patterns
     if (key.includes('../') || key.includes('..\\') || key.startsWith('/')) {
         return false;
     }
-    // Accept two valid patterns:
-    // 1. New format: repositories/{repoId}/{itemId}/{filename}
-    // 2. Legacy format: {userId}/{timestamp}-{filename}
     const newFormatPattern = /^repositories\/\d+\/\d+\/[^/]+$/;
-    const legacyFormatPattern = /^\d+\/\d+-[^/]+$/;
+    const legacyFormatPattern = /^\d+\/\d+-[\w.\-]+$/;
     return newFormatPattern.test(key) || legacyFormatPattern.test(key);
+}
+// Validate S3 bucket name against the expected environment bucket
+function validateBucketName(bucketName) {
+    return bucketName === DOCUMENTS_BUCKET;
 }
 // Lambda handler
 async function handler(event) {
@@ -482,7 +488,10 @@ async function handler(event) {
     for (const record of event.Records) {
         try {
             const job = JSON.parse(record.body);
-            // Validate file key before processing
+            if (!validateBucketName(job.bucketName)) {
+                console.error(`Invalid bucket name in job: ${job.bucketName}`);
+                throw new Error(`Invalid bucket name: ${job.bucketName}`);
+            }
             if (!validateS3Key(job.fileKey)) {
                 console.error(`Invalid S3 key detected: ${job.fileKey}`);
                 throw new Error(`Invalid S3 key: ${job.fileKey}`);

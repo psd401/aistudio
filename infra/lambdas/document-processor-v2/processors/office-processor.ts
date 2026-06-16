@@ -11,35 +11,31 @@ import { parseString } from 'xml2js';
 import { createLambdaLogger } from '../utils/lambda-logger';
 
 /**
- * Securely removes HTML tags to prevent injection attacks
- * This function handles malformed HTML and prevents bypassing attempts
+ * Securely removes HTML tags to prevent injection attacks.
+ *
+ * Order matters: decode entities FIRST so that double-encoded sequences
+ * (e.g. &amp;lt;script&amp;gt;) are resolved before tag stripping, preventing
+ * double-decode bypass attacks (CLAUDE.md: use single-pass entity decode).
  */
 function sanitizeHTML(html: string): string {
-  // First, iteratively remove HTML tags until none remain
-  // This prevents bypassing through nested or malformed tags
-  let sanitized = html;
-  let previousLength = 0;
-  
-  while (sanitized.length !== previousLength && /<[^>]*>/g.test(sanitized)) {
-    previousLength = sanitized.length;
-    sanitized = sanitized.replace(/<[^>]*>/g, ' ');
-  }
-  
-  // AFTER tags are removed, safely decode HTML entities (prevents security bypass)
-  sanitized = sanitized
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#x27;/g, "'")
-    .replace(/&#39;/g, "'")
-    .replace(/&amp;/g, '&');
-  
-  // Clean up extra whitespace created by tag removal
-  sanitized = sanitized
-    .replace(/\s+/g, ' ')
-    .trim();
-    
-  return sanitized;
+  // Step 1: Decode entities in a single pass with a lookup table to prevent
+  // the double-decode bypass that chained .replace() calls allow.
+  const entityMap: Record<string, string> = {
+    '&lt;': '<',
+    '&gt;': '>',
+    '&quot;': '"',
+    '&#x27;': "'",
+    '&#39;': "'",
+    '&amp;': '&',
+  };
+  let sanitized = html.replace(/&(?:lt|gt|quot|#x27|#39|amp);/g, (m) => entityMap[m] ?? m);
+
+  // Step 2: Strip all HTML tags in a single pass (no loop needed — global replace
+  // removes all non-overlapping tag matches in one sweep, avoiding O(n²) behaviour).
+  sanitized = sanitized.replace(/<[^>]*>/g, ' ');
+
+  // Step 3: Clean up whitespace
+  return sanitized.replace(/\s+/g, ' ').trim();
 }
 
 interface XlsxSheetData {
@@ -159,33 +155,47 @@ export class OfficeProcessor implements DocumentProcessor {
     };
   }
 
+  private static readonly MAX_XLSX_BYTES = 25 * 1024 * 1024; // 25 MB
+  private static readonly MAX_XLSX_ROWS_PARSE = 10000; // hard cap at parse time
+
   private async processXlsx(buffer: Buffer): Promise<any> {
     const logger = createLambdaLogger({ operation: 'OfficeProcessor.processXlsx' });
     logger.info('Processing XLSX document');
-    
-    const workbook = XLSX.read(buffer);
+
+    if (buffer.length > OfficeProcessor.MAX_XLSX_BYTES) {
+      throw new Error(`XLSX file exceeds maximum allowed size of ${OfficeProcessor.MAX_XLSX_BYTES} bytes`);
+    }
+
+    const workbook = XLSX.read(buffer, {
+      cellFormula: false,
+      sheetRows: OfficeProcessor.MAX_XLSX_ROWS_PARSE,
+    });
     let combinedText = '';
     const sheetData: any[] = [];
-    
+
     workbook.SheetNames.forEach((sheetName: string, index: number) => {
       const sheet = workbook.Sheets[sheetName];
-      
+
       // Convert to CSV for text extraction
       const csv = XLSX.utils.sheet_to_csv(sheet);
-      
-      // Convert to JSON for structured data
-      const json = XLSX.utils.sheet_to_json(sheet, { header: 1 });
-      
+
+      // Convert to JSON for structured data — { header: 1 } returns array-of-arrays,
+      // avoiding prototype pollution through column-named __proto__ keys
+      const json = XLSX.utils.sheet_to_json(sheet, { header: 1 }) as unknown[][];
+
       const safeSheetName = OfficeProcessor.sanitizeSheetName(sheetName);
       combinedText += `\n\n## Sheet: ${safeSheetName}\n${csv}`;
-      
+
       sheetData.push({
         name: sheetName,
         index,
         csv,
         json,
         rowCount: json.length,
-        columnCount: json.length > 0 ? Math.max(...json.map((row: any) => Array.isArray(row) ? row.length : 0)) : 0,
+        // Cap spread to avoid stack overflow on sheets with thousands of columns
+        columnCount: json.length > 0
+          ? Math.min(10000, Math.max(0, ...json.map((row) => Array.isArray(row) ? row.length : 0)))
+          : 0,
       });
     });
     
