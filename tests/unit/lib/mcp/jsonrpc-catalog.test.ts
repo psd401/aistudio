@@ -52,6 +52,14 @@ jest.mock("@/lib/mcp/tool-handlers", () => ({
 
 import { handleJsonRpcRequest } from "@/lib/mcp/jsonrpc-handler"
 import type { McpToolContext } from "@/lib/mcp/types"
+import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest"
+
+// Derive the expected MCP tool count from the manifest so this test self-updates
+// when an MCP tool is added/removed, rather than asserting a hardcoded length.
+// (PR #1032 review finding #10.)
+const MCP_TOOL_COUNT = TOOL_MANIFEST.filter((t) =>
+  t.surfaces.includes("mcp")
+).length
 
 function ctx(scopes: string[]): McpToolContext {
   return { userId: 1, cognitoSub: "sub", scopes, requestId: "req" }
@@ -72,13 +80,13 @@ describe("MCP JSON-RPC via catalog", () => {
     expect(result.tools.map((t) => t.name)).toEqual(["search_decisions"])
   })
 
-  it("tools/list with wildcard returns all 5 MCP tools", async () => {
+  it("tools/list with wildcard returns all MCP tools", async () => {
     const res = await handleJsonRpcRequest(
       { jsonrpc: "2.0", method: "tools/list", id: 2 },
       ctx(["*"])
     )
     const result = res.result as { tools: { name: string }[] }
-    expect(result.tools).toHaveLength(5)
+    expect(result.tools).toHaveLength(MCP_TOOL_COUNT)
   })
 
   it("tools/call dispatches via the catalog handler", async () => {

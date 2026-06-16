@@ -79,10 +79,10 @@ export async function handleJsonRpcRequest(
       return handleInitialize(rpcRequest)
 
     case "tools/list":
-      return handleToolsList(rpcRequest, context, log)
+      return await handleToolsList(rpcRequest, context, log)
 
     case "tools/call":
-      return handleToolsCall(rpcRequest, context, log)
+      return await handleToolsCall(rpcRequest, context, log)
 
     case "ping":
       return successResponse(rpcRequest.id, {})

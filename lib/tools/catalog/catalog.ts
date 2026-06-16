@@ -28,6 +28,7 @@ import { toolCatalog } from "@/lib/db/schema";
 import { createLogger } from "@/lib/logger";
 import type { McpToolHandler, McpToolContext } from "@/lib/mcp/types";
 import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest";
+import { compareVersionsDesc } from "@/lib/tools/catalog/utils";
 import {
   getFriendlyToolName,
   getAllToolNamesForUI,
@@ -103,25 +104,6 @@ function manifestToEntry(
   };
 }
 
-/**
- * Sort entries so the highest version wins for a given identifier. Versions are
- * `v1`, `v2`, ... — compared numerically on the trailing digits, falling back to
- * a locale string compare so non-`vN` versions still order deterministically.
- */
-function versionRank(version: string): number {
-  const m = /^v(\d+)$/.exec(version);
-  return m ? Number(m[1]) : Number.NaN;
-}
-
-function compareVersionsDesc(a: string, b: string): number {
-  const ra = versionRank(a);
-  const rb = versionRank(b);
-  if (!Number.isNaN(ra) && !Number.isNaN(rb)) return rb - ra;
-  if (!Number.isNaN(ra)) return -1; // numeric versions sort ahead of non-numeric
-  if (!Number.isNaN(rb)) return 1;
-  return b.localeCompare(a);
-}
-
 /** True when `scopes` grant access to a tool requiring `requiredScopes`. */
 function hasRequiredScopes(scopes: string[], requiredScopes: string[]): boolean {
   if (scopes.includes("*")) return true;
@@ -177,7 +159,14 @@ export class ToolCatalog {
         const entries: ToolCatalogEntry[] = [];
         const inactiveCodeKeys = new Set<string>();
         for (const r of rows) {
-          if (r.source === "code") {
+          // Treat both 'code' and 'retired' rows as code-managed for is_active
+          // tracking. A retired row is a code tool removed from the manifest;
+          // if it is later re-added, its admin-disabled state must still be
+          // honored. Without including 'retired' here, the row would leak into
+          // the non-code `entries` list and its key would never reach
+          // `inactiveCodeKeys`, so a re-added tool would spuriously project as
+          // active. (PR #1032 review finding #1.)
+          if (r.source === "code" || r.source === "retired") {
             if (!r.isActive) {
               inactiveCodeKeys.add(entryKey(r.identifier, r.version));
             }
@@ -223,7 +212,17 @@ export class ToolCatalog {
     return this.dbPromise;
   }
 
-  /** Invalidate the DB cache (call after assistant/skill catalog writes). */
+  /**
+   * Invalidate the DB cache (call after assistant/skill catalog writes).
+   *
+   * Note: clearing `dbPromise` here only detaches the reference — it does not
+   * cancel an in-flight `dbState()` query (the underlying fetch cannot be
+   * aborted). Callers already `await`ing the prior promise still receive its
+   * result, but that result is no longer cached (the load's `finally` nulls
+   * `dbPromise` and the cache was cleared), so the next caller issues a fresh
+   * query. This is correctness-safe — it only costs an extra round-trip under
+   * concurrent invalidations. (PR #1032 review finding #2.)
+   */
   invalidate(): void {
     this.dbCache = null;
     this.dbPromise = null;
@@ -294,8 +293,11 @@ export class ToolCatalog {
       const entry = byName.get(name) ?? this.resolveAiSdkAlias(name, byName);
       if (!entry) {
         // Not cataloged under any known name -> leave to downstream
-        // model-capability filtering. Log so the bypass is observable.
-        log.debug("Requested tool not in catalog; passing through unscoped", {
+        // model-capability filtering. Log at `info` (not `debug`) so the scope
+        // bypass is observable in production: operators can monitor the rate of
+        // uncataloged tool names reaching the AI SDK surface. (PR #1032 review
+        // finding #4.)
+        log.info("Requested tool not in catalog; passing through unscoped", {
           tool: name,
         });
         return true;

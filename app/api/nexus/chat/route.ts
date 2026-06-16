@@ -830,17 +830,6 @@ function extractPartText(part: Record<string, unknown>): string | null {
 }
 
 /**
- * Scan PII in file / document attachment parts of the last user message BEFORE
- * processMessagesWithAttachments moves their content to S3. Returns token
- * mappings produced by the scan and mutates `messagesWithParts` in-place so
- * that document text is tokenized before being stored.
- *
- * This runs at the route level so that:
- * 1. The extracted document text is available (not yet replaced with s3:// refs).
- * 2. Token mappings can be passed to executeStreaming as `precomputedInputTokenMappings`
- *    and merged with inline-text tokens from the streaming service's own scan.
- */
-/**
  * Collect extractable text from document/file parts of a message, paired with
  * their part index. Extracted from scanAttachmentPII to keep that function's
  * cyclomatic complexity within bounds.
@@ -859,6 +848,17 @@ function collectAttachmentTexts(
   return out;
 }
 
+/**
+ * Scan PII in file / document attachment parts of the last user message BEFORE
+ * processMessagesWithAttachments moves their content to S3. Returns token
+ * mappings produced by the scan and mutates `messagesWithParts` in-place so
+ * that document text is tokenized before being stored.
+ *
+ * This runs at the route level so that:
+ * 1. The extracted document text is available (not yet replaced with s3:// refs).
+ * 2. Token mappings can be passed to executeStreaming as `precomputedInputTokenMappings`
+ *    and merged with inline-text tokens from the streaming service's own scan.
+ */
 async function scanAttachmentPII(
   messagesWithParts: UIMessage[],
   sessionId: string,

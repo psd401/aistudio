@@ -38,6 +38,7 @@ import { MCP_TOOLS } from "@/lib/mcp/tool-registry";
 import { TOOL_HANDLERS } from "@/lib/mcp/tool-handlers";
 import type { McpToolDefinition } from "@/lib/mcp/types";
 import type { ToolManifestEntry } from "./types";
+import { compareVersionsDesc } from "./utils";
 
 /** Source value applied to every manifest-managed catalog row. */
 export const MANIFEST_TOOL_SOURCE = "code" as const;
@@ -179,22 +180,8 @@ export function getManifestEntry(
   const matches = TOOL_MANIFEST.filter((e) => e.identifier === identifier);
   if (matches.length === 0) return undefined;
   return matches.reduce((latest, entry) =>
-    compareManifestVersionsDesc(entry.version ?? "v1", latest.version ?? "v1") < 0
+    compareVersionsDesc(entry.version ?? "v1", latest.version ?? "v1") < 0
       ? entry
       : latest
   );
-}
-
-/** Order two versions so the highest sorts first (negative = `a` is newer). */
-function compareManifestVersionsDesc(a: string, b: string): number {
-  const rank = (v: string): number => {
-    const m = /^v(\d+)$/.exec(v);
-    return m ? Number(m[1]) : Number.NaN;
-  };
-  const ra = rank(a);
-  const rb = rank(b);
-  if (!Number.isNaN(ra) && !Number.isNaN(rb)) return rb - ra;
-  if (!Number.isNaN(ra)) return -1;
-  if (!Number.isNaN(rb)) return 1;
-  return b.localeCompare(a);
 }
