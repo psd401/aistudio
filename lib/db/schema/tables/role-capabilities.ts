@@ -13,8 +13,12 @@ import { capabilities } from "./capabilities";
 
 export const roleCapabilities = pgTable("role_capabilities", {
   id: serial("id").primaryKey(),
-  roleId: integer("role_id").references(() => roles.id),
-  capabilityId: integer("capability_id").references(() => capabilities.id),
+  roleId: integer("role_id").references(() => roles.id, {
+    onDelete: "cascade",
+  }),
+  capabilityId: integer("capability_id").references(() => capabilities.id, {
+    onDelete: "cascade",
+  }),
   createdAt: timestamp("created_at").defaultNow().notNull(),
 });
 

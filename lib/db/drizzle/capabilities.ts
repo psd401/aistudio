@@ -92,7 +92,9 @@ export async function hasCapabilityAccess(
     const result = await executeQuery(
       (db) =>
         db
-          .select({ exists: sql<boolean>`true` })
+          // Selecting a constant; the access decision is result.length > 0.
+          // Typed as number (postgres.js returns the literal, not a JS boolean).
+          .select({ exists: sql<number>`1` })
           .from(users)
           .innerJoin(userRoles, eq(users.id, userRoles.userId))
           .innerJoin(
@@ -106,7 +108,10 @@ export async function hasCapabilityAccess(
           .where(
             and(
               eq(users.cognitoSub, cognitoSub),
-              eq(capabilities.identifier, capabilityIdentifier)
+              eq(capabilities.identifier, capabilityIdentifier),
+              // Disabled capabilities must not grant access. (The disable toggle
+              // and AA deactivate-on-edit both rely on this — #923.)
+              eq(capabilities.isActive, true)
             )
           )
           .limit(1),
@@ -160,7 +165,13 @@ export async function getUserCapabilities(
           capabilities,
           eq(roleCapabilities.capabilityId, capabilities.id)
         )
-        .where(eq(users.cognitoSub, cognitoSub)),
+        .where(
+          and(
+            eq(users.cognitoSub, cognitoSub),
+            // Only active capabilities count toward a user's accessible set.
+            eq(capabilities.isActive, true)
+          )
+        ),
     "getUserCapabilities"
   );
   return result.map((r) => r.identifier);

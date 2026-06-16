@@ -137,8 +137,10 @@ export async function register(): Promise<void> {
       });
     });
 
-    // Sync capability manifest (async, non-blocking). Runs after warmup so the
-    // pool is established; failures are logged inside syncCapabilities.
+    // Sync capability manifest (async, non-blocking). Dispatched after the
+    // warmup callback in registration order; the connection pool initializes
+    // lazily on the sync's first query if warmup hasn't completed yet. Failures
+    // are logged inside syncCapabilities and never block startup.
     setImmediate(() => {
       syncCapabilities().catch(() => {
         // Errors already logged in syncCapabilities

@@ -25,8 +25,6 @@ export interface CapabilityRow {
   description: string | null
   isActive: boolean
   source: "code" | "manual"
-  createdAt: Date | string
-  updatedAt: Date | string
 }
 
 export interface RoleOption {

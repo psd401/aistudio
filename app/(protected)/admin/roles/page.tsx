@@ -1,5 +1,3 @@
-"use server"
-
 import { RolesPageClient } from "./_components/roles-page-client"
 import { requireRole } from "@/lib/auth/role-helpers"
 import { getRoles, getTools, getCapabilities } from "@/lib/db/drizzle"

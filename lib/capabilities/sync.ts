@@ -79,11 +79,14 @@ async function grantDefaultRoles(
       });
       continue;
     }
-    await tx
+    const insertedRows = await tx
       .insert(roleCapabilities)
       .values({ roleId, capabilityId })
-      .onConflictDoNothing();
-    granted += 1;
+      .onConflictDoNothing()
+      .returning({ id: roleCapabilities.id });
+    // Only count a grant that was actually inserted (a no-op conflict means the
+    // role already had the capability — don't overcount on re-sync).
+    granted += insertedRows.length;
   }
   return granted;
 }
@@ -115,21 +118,30 @@ export async function syncCapabilityManifest(
           sql`SELECT pg_advisory_xact_lock(${SYNC_ADVISORY_LOCK_KEY})`
         );
 
+        // SAFETY: an empty manifest must be a no-op, NOT a mass-deactivate. The
+        // deactivation pass below would otherwise disable every code-source
+        // capability (no notInArray guard when there are zero identifiers),
+        // locking all users out of gated features. Bail early.
+        if (manifestIdentifiers.length === 0) {
+          log.warn(
+            "Empty capability manifest — skipping sync to avoid mass deactivation"
+          );
+          return { inserted: [], updated: [], deactivated: [], rolesGranted: 0 };
+        }
+
         const inserted: string[] = [];
         const updated: string[] = [];
         let rolesGranted = 0;
 
         // Snapshot existing rows for the manifest identifiers in one query.
-        const existing =
-          manifestIdentifiers.length > 0
-            ? await tx
-                .select({
-                  id: capabilities.id,
-                  identifier: capabilities.identifier,
-                })
-                .from(capabilities)
-                .where(inArray(capabilities.identifier, manifestIdentifiers))
-            : [];
+        // (manifestIdentifiers is non-empty here — guarded above.)
+        const existing = await tx
+          .select({
+            id: capabilities.id,
+            identifier: capabilities.identifier,
+          })
+          .from(capabilities)
+          .where(inArray(capabilities.identifier, manifestIdentifiers));
 
         const existingByIdentifier = new Map(
           existing.map((row) => [row.identifier, row.id])
@@ -187,22 +199,19 @@ export async function syncCapabilityManifest(
 
         // DEACTIVATE code-source capabilities no longer in the manifest.
         // Never touch manual capabilities or AA-lifecycle rows
-        // (prompt_chain_tool_id IS NOT NULL).
-        const deactivateConditions = [
-          eq(capabilities.source, MANIFEST_SOURCE),
-          eq(capabilities.isActive, true),
-          sql`${capabilities.promptChainToolId} IS NULL`,
-        ];
-        if (manifestIdentifiers.length > 0) {
-          deactivateConditions.push(
-            notInArray(capabilities.identifier, manifestIdentifiers)
-          );
-        }
-
+        // (prompt_chain_tool_id IS NOT NULL). manifestIdentifiers is non-empty
+        // here (empty manifest bailed above), so notInArray is always present.
         const deactivatedRows = await tx
           .update(capabilities)
           .set({ isActive: false, updatedAt: new Date() })
-          .where(and(...deactivateConditions))
+          .where(
+            and(
+              eq(capabilities.source, MANIFEST_SOURCE),
+              eq(capabilities.isActive, true),
+              sql`${capabilities.promptChainToolId} IS NULL`,
+              notInArray(capabilities.identifier, manifestIdentifiers)
+            )
+          )
           .returning({ identifier: capabilities.identifier });
 
         return {

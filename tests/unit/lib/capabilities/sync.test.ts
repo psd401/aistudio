@@ -136,10 +136,15 @@ function makeTx() {
               const exists = fakeRoleCapabilities.some(
                 (rc) => rc.roleId === roleId && rc.capabilityId === capabilityId
               )
+              const insertedRows: { id: number }[] = []
               if (!exists) {
                 fakeRoleCapabilities.push({ roleId, capabilityId })
+                insertedRows.push({ id: fakeRoleCapabilities.length })
               }
-              return Promise.resolve([])
+              // grantDefaultRoles chains .returning() after onConflictDoNothing.
+              return {
+                returning: () => Promise.resolve(insertedRows),
+              }
             },
           }
         },
@@ -387,6 +392,29 @@ describe("syncCapabilityManifest", () => {
     expect(second.rolesGranted).toBe(0)
     // No duplicate grants.
     expect(fakeRoleCapabilities.length).toBe(grantsAfterFirst)
+  })
+
+  it("treats an empty manifest as a no-op (does NOT mass-deactivate)", async () => {
+    // Seed an active code capability that would be wiped by an unguarded sync.
+    fakeCapabilities.push({
+      id: 20,
+      identifier: "critical-feature",
+      name: "Critical",
+      description: null,
+      isActive: true,
+      source: "code",
+      promptChainToolId: null,
+    })
+
+    const result = await runSync([])
+
+    expect(result.inserted).toEqual([])
+    expect(result.updated).toEqual([])
+    expect(result.deactivated).toEqual([])
+    // The critical capability must remain active.
+    expect(
+      fakeCapabilities.find((c) => c.identifier === "critical-feature")?.isActive
+    ).toBe(true)
   })
 
   it("acquires the advisory lock inside the transaction", async () => {

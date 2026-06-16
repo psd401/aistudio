@@ -29,7 +29,9 @@ export function CapabilityRoleAssignments({
   const { toast } = useToast()
   const [assignedRoleIds, setAssignedRoleIds] = useState<Set<number>>(new Set())
   const [loading, setLoading] = useState(true)
-  const [pendingRoleId, setPendingRoleId] = useState<number | null>(null)
+  // Track every in-flight role toggle so rapid clicks on different rows each
+  // stay disabled until their own request resolves.
+  const [pendingRoleIds, setPendingRoleIds] = useState<Set<number>>(new Set())
 
   useEffect(() => {
     let cancelled = false
@@ -57,13 +59,17 @@ export function CapabilityRoleAssignments({
   }, [capability.id, toast])
 
   const handleToggle = async (roleId: number, nextAssigned: boolean) => {
-    setPendingRoleId(roleId)
+    setPendingRoleIds((prev) => new Set(prev).add(roleId))
     const result = await setCapabilityRoleAssignmentAction(
       capability.id,
       roleId,
       nextAssigned
     )
-    setPendingRoleId(null)
+    setPendingRoleIds((prev) => {
+      const next = new Set(prev)
+      next.delete(roleId)
+      return next
+    })
 
     if (result.isSuccess) {
       setAssignedRoleIds((prev) => {
@@ -104,7 +110,7 @@ export function CapabilityRoleAssignments({
                 >
                   <Checkbox
                     checked={checked}
-                    disabled={pendingRoleId === role.id}
+                    disabled={pendingRoleIds.has(role.id)}
                     onCheckedChange={(value) =>
                       handleToggle(role.id, value === true)
                     }

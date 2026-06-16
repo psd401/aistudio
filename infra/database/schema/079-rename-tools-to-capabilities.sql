@@ -63,14 +63,27 @@ WHERE NOT EXISTS (
     SELECT 1 FROM capabilities c WHERE c.identifier = t.identifier
 );
 
--- 3b. Backfill role_capabilities from role_tools, preserving ids and grants.
-INSERT INTO role_capabilities (id, role_id, capability_id, created_at)
-SELECT rt.id, rt.role_id, rt.tool_id, rt.created_at
+-- 3b. Backfill role_capabilities from role_tools, preserving grants.
+-- NOTE: we deliberately do NOT carry over role_tools.id. role_capabilities.id is
+-- not referenced anywhere (unlike capabilities.id, which prompt_chain_tool_id and
+-- role grants depend on), so letting the sequence assign it avoids a primary-key
+-- collision if the migration is retried after new role_tools rows appear. The
+-- (role_id, capability_id) WHERE NOT EXISTS guard keeps the backfill idempotent.
+INSERT INTO role_capabilities (role_id, capability_id, created_at)
+SELECT rt.role_id, rt.tool_id, rt.created_at
 FROM role_tools rt
 WHERE NOT EXISTS (
     SELECT 1 FROM role_capabilities rc
     WHERE rc.role_id = rt.role_id AND rc.capability_id = rt.tool_id
 );
+
+-- NOTE on prompt_chain_tool_id: despite the legacy tools_prompt_chain_tool_id_fkey
+-- declaring REFERENCES tools(id), the column actually stores the
+-- assistant_architects.id (see approveAssistantArchitect), NOT a tools/capability
+-- id. We therefore intentionally do NOT add a self-referential FK on
+-- capabilities.prompt_chain_tool_id — doing so would reject AA approvals whose
+-- assistant id does not coincide with a capability id. The column is treated as a
+-- plain back-reference to the assistant architect, matching how the app uses it.
 
 -- 4. Indexes (match the legacy tools/role_tools indexes).
 CREATE INDEX IF NOT EXISTS idx_role_capabilities_role_id ON role_capabilities(role_id);
