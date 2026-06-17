@@ -1,9 +1,28 @@
 /**
  * Unit tests for skill allowed-tools enforcement (Issue #925, AC#6).
- * Pure intersection semantics only — DB access is exercised elsewhere.
+ * Covers the pure intersection semantics and the security-relevant DB accessor
+ * (`getApprovedSkillAllowedTools`), whose `null` return is the "do not loosen"
+ * signal for an unknown/unapproved skill id.
  */
 
-import { intersectSkillAllowedTools } from "@/lib/skills/skill-tool-enforcement"
+// Mock the DB layer so getApprovedSkillAllowedTools can be driven by the rows
+// executeQuery resolves to. The Drizzle query builder callback is never run.
+const executeQueryMock = jest.fn()
+jest.mock("@/lib/db/drizzle-client", () => ({
+  executeQuery: (...args: unknown[]) => executeQueryMock(...args),
+}))
+jest.mock("@/lib/db/schema/tables/agent-skills", () => ({
+  psdAgentSkills: {},
+}))
+jest.mock("drizzle-orm", () => ({
+  and: (...a: unknown[]) => a,
+  eq: (...a: unknown[]) => a,
+}))
+
+import {
+  intersectSkillAllowedTools,
+  getApprovedSkillAllowedTools,
+} from "@/lib/skills/skill-tool-enforcement"
 
 describe("intersectSkillAllowedTools", () => {
   it("returns all available tools when the skill pins nothing", () => {
@@ -47,5 +66,36 @@ describe("intersectSkillAllowedTools", () => {
     expect(
       intersectSkillAllowedTools(["a", "b", "c"], ["b"])
     ).toEqual(["b"])
+  })
+})
+
+describe("getApprovedSkillAllowedTools (DB path)", () => {
+  beforeEach(() => {
+    executeQueryMock.mockReset()
+  })
+
+  it("returns null when the skill id is unknown or not approved", async () => {
+    // No matching row (draft/rejected skill, or bogus id).
+    executeQueryMock.mockResolvedValue([])
+    await expect(
+      getApprovedSkillAllowedTools("00000000-0000-0000-0000-000000000000")
+    ).resolves.toBeNull()
+  })
+
+  it("returns the skill's allowed-tools when approved", async () => {
+    executeQueryMock.mockResolvedValue([
+      { allowedTools: ["webSearch", "imageGen"] },
+    ])
+    await expect(getApprovedSkillAllowedTools("skill-id")).resolves.toEqual([
+      "webSearch",
+      "imageGen",
+    ])
+  })
+
+  it("returns an empty array (no pin) when allowedTools is null in the row", async () => {
+    // An approved skill that pins nothing stores null/non-array; the accessor
+    // normalizes to [] so callers keep all available tools (no pin), NOT null.
+    executeQueryMock.mockResolvedValue([{ allowedTools: null }])
+    await expect(getApprovedSkillAllowedTools("skill-id")).resolves.toEqual([])
   })
 })

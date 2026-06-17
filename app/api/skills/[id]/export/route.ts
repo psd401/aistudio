@@ -7,6 +7,7 @@ import { ErrorFactories, handleError } from "@/lib/error-utils"
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { psdAgentSkills } from "@/lib/db/schema/tables/agent-skills"
 import { downloadSkillFolder } from "@/lib/skills/skill-publish-pipeline"
+import { ErrorCode, ERROR_STATUS_CODES } from "@/types/error-types"
 
 /**
  * Zip export of an approved skill's SKILL.md folder (Issue #925, AC#7).
@@ -16,8 +17,10 @@ import { downloadSkillFolder } from "@/lib/skills/skill-publish-pipeline"
  * Desktop. Only APPROVED skills (scope = 'shared', scanStatus = 'clean') are
  * exportable, to any authenticated user.
  *
- * Runs on the Node.js runtime (AWS SDK + JSZip).
+ * Runs on the Node.js runtime (AWS SDK + JSZip). Without this the route may be
+ * placed on the Edge runtime, which lacks `Buffer` and breaks the AWS SDK.
  */
+export const runtime = "nodejs"
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -103,10 +106,15 @@ async function getHandler(
       requestId,
       operation: "GET /api/skills/[id]/export",
     })
-    return NextResponse.json(
-      { error: result.message },
-      { status: 500 }
-    )
+    // Map the structured error code to its HTTP status so auth/validation
+    // failures surface as 401/400 instead of a blanket 500. handleError
+    // returns an ActionState (no status), so derive it from the error code.
+    const code = (error as { code?: string } | null)?.code
+    const status =
+      code && code in ERROR_STATUS_CODES
+        ? ERROR_STATUS_CODES[code as ErrorCode]
+        : 500
+    return NextResponse.json({ error: result.message }, { status })
   }
 }
 

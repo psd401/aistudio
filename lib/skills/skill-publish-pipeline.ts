@@ -247,7 +247,17 @@ export async function listSkillObjectKeys(s3Prefix: string): Promise<string[]> {
     for (const obj of res.Contents ?? []) {
       if (!obj.Key) continue
       const relative = obj.Key.slice(prefix.length)
-      if (relative === "" || relative.startsWith("node_modules/")) continue
+      // Skip the prefix marker, scan-pipeline build artifacts, and any key whose
+      // relative path could escape the skill folder once zipped. `../` cannot
+      // occur in a normal upload (assertSafeKeyParts guards publish time), but a
+      // corrupted/rogue object key must never be able to write outside the folder.
+      if (
+        relative === "" ||
+        relative.startsWith("node_modules/") ||
+        relative.includes("../") ||
+        relative.startsWith("/")
+      )
+        continue
       keys.push(obj.Key)
     }
     continuationToken = res.IsTruncated ? res.NextContinuationToken : undefined

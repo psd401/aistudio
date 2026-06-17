@@ -260,6 +260,8 @@ export async function approveSkillToShared(
         // unified tool catalog so every surface can discover/invoke it.
         await registerSkillCatalogTool(tx, {
           skillId,
+          // psd_agent_skills.name stores the URL-safe slug (the serializer writes
+          // name: serialized.slug), not a human display name.
           slug: skill.name,
           summary: skill.summary,
         })

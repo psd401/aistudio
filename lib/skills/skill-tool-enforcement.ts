@@ -48,6 +48,12 @@ export function intersectSkillAllowedTools(
  *   - `null` — the skill id is unknown or not approved; callers MUST treat this
  *     as "do not loosen" (leave the existing tool set unchanged) so a bogus id
  *     can never widen access.
+ *
+ * NOTE: this runs one indexed primary-key lookup per chat request for the
+ * lifetime of a skill-bound session. It is intentionally uncached so that an
+ * admin un-approving a skill takes effect immediately (no stale TTL window). If
+ * this lookup ever shows up in latency profiles, introduce a short-TTL cache
+ * keyed by skillId here — not in the calling route.
  */
 export async function getApprovedSkillAllowedTools(
   skillId: string
