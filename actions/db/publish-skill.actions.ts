@@ -120,6 +120,7 @@ export async function publishAssistantArchitectAsSkillAction(
           s3Key: draftPrefix,
           summary: serialized.summary,
           scanStatus: "pending",
+          allowedTools: serialized.allowedTools,
         })
         .onConflictDoUpdate({
           target: [psdAgentSkills.name, psdAgentSkills.ownerUserId],
@@ -128,6 +129,7 @@ export async function publishAssistantArchitectAsSkillAction(
             s3Key: draftPrefix,
             summary: serialized.summary,
             scanStatus: "pending",
+            allowedTools: serialized.allowedTools,
             version: sql`${psdAgentSkills.version} + 1`,
             updatedAt: new Date(),
           },

@@ -45,6 +45,10 @@ import { executeQuery } from '@/lib/db/drizzle-client';
 import { nexusConversations } from '@/lib/db/schema';
 import { getScopesForRoles } from '@/lib/api-keys/scopes';
 import { toolCatalogInstance } from '@/lib/tools/catalog/catalog';
+import {
+  intersectSkillAllowedTools,
+  getApprovedSkillAllowedTools,
+} from '@/lib/skills/skill-tool-enforcement';
 
 // Allow streaming responses up to 30 minutes. Deep Research runs take 5–25
 // minutes; standard chat and image-gen finish well within this window.
@@ -273,6 +277,9 @@ const ChatRequestSchema = z.object({
   conversationId: z.string().nullable().optional(),
   enabledTools: z.array(z.string()).optional(),
   enabledConnectors: z.array(z.string().uuid()).max(10).optional(),
+  // When the session is bound to a published skill ("use in chat"), the skill's
+  // `allowed-tools` pin is enforced server-side over the client tool list (#925 AC#6).
+  skillId: z.string().uuid().optional(),
   reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high']).optional(),
   responseMode: z.enum(['standard', 'priority', 'flex']).optional()
 });
@@ -1009,6 +1016,34 @@ async function scopeFilterEnabledTools(
 }
 
 /**
+ * Enforce a bound skill's `allowed-tools` pin over the (already scope-filtered)
+ * tool list (#925 AC#6). The client tool list is untrusted, so the pin is
+ * re-applied here whenever the session is bound to a skill. A skill with no pin
+ * (empty allowed-tools) or an unknown/unapproved id leaves the list unchanged.
+ */
+async function enforceSkillAllowedTools(
+  scopedEnabledTools: string[],
+  skillId: string | undefined,
+  log: ReturnType<typeof createLogger>
+): Promise<string[]> {
+  if (!skillId) return scopedEnabledTools;
+  const allowed = await getApprovedSkillAllowedTools(skillId);
+  if (allowed === null) {
+    log.warn('Session bound to unknown/unapproved skill; not enforcing tool pin', { skillId });
+    return scopedEnabledTools;
+  }
+  const enforced = intersectSkillAllowedTools(scopedEnabledTools, allowed);
+  if (enforced.length !== scopedEnabledTools.length) {
+    log.info('Skill allowed-tools pin applied', {
+      skillId,
+      before: scopedEnabledTools.length,
+      after: enforced.length,
+    });
+  }
+  return enforced;
+}
+
+/**
  * Nexus Chat API - Native Streaming with AI SDK v5
  */
 export async function POST(req: Request) {
@@ -1027,7 +1062,7 @@ export async function POST(req: Request) {
     const validation = validateRequest(body, requestId, log);
     if (!validation.valid) return validation.error;
 
-    const { messages, modelId, provider = 'openai', conversationId: existingConversationId, enabledTools = [], enabledConnectors = [] } = validation.data;
+    const { messages, modelId, provider = 'openai', conversationId: existingConversationId, enabledTools = [], enabledConnectors = [], skillId } = validation.data;
     const conversationIdValue = existingConversationId || undefined;
 
     // 2. Validate conversation ID format
@@ -1094,8 +1129,13 @@ export async function POST(req: Request) {
       });
     connectorToolResults.push(...resolvedConnectorTools);
 
-    // 8b. Scope-gate built-in (AI SDK) tools via the unified tool catalog (#924).
-    const scopedEnabledTools = await scopeFilterEnabledTools(enabledTools, userRoleNames, log);
+    // 8b. Scope-gate built-in (AI SDK) tools via the unified tool catalog (#924),
+    // then enforce the bound skill's allowed-tools pin if the session loaded one (#925).
+    const scopedEnabledTools = await enforceSkillAllowedTools(
+      await scopeFilterEnabledTools(enabledTools, userRoleNames, log),
+      skillId,
+      log
+    );
 
     // 9. Execute streaming and return response
     // Once executeStreaming returns successfully, the streaming Response is in flight.

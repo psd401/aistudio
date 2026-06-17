@@ -17,6 +17,8 @@
 import {
   S3Client,
   PutObjectCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
 } from "@aws-sdk/client-s3"
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda"
 import { createLogger } from "@/lib/logger"
@@ -189,4 +191,110 @@ export async function invokeSkillScan(
     })
     return false
   }
+}
+
+// ---------------------------------------------------------------------------
+// Reads — used by the user-facing catalog (SKILL.md preview) and zip export.
+// These read from the SAME workspace bucket the publish flow writes to, NOT the
+// documents bucket that lib/aws/s3-client.ts targets.
+// ---------------------------------------------------------------------------
+
+export interface DownloadedSkillFile {
+  /** Relative path within the skill folder, e.g. "SKILL.md". */
+  path: string
+  /** UTF-8 text content. */
+  content: string
+}
+
+function requireBucket(): string {
+  const bucket = getSkillsBucket()
+  if (!bucket) {
+    throw new Error(
+      "Agent workspace bucket is not configured (AGENT_WORKSPACE_BUCKET). " +
+        "Cannot read skill artifacts."
+    )
+  }
+  return bucket
+}
+
+/**
+ * List object keys under a skill's S3 prefix. Paginates fully. Returns absolute
+ * S3 keys (including the prefix). `node_modules/` entries are excluded — they are
+ * build artifacts from the scan pipeline, not part of the authored skill folder.
+ */
+export async function listSkillObjectKeys(s3Prefix: string): Promise<string[]> {
+  const bucket = requireBucket()
+  const s3 = getS3()
+  const prefix = s3Prefix.endsWith("/") ? s3Prefix : `${s3Prefix}/`
+  const keys: string[] = []
+  let continuationToken: string | undefined
+
+  do {
+    const res = await s3.send(
+      new ListObjectsV2Command({
+        Bucket: bucket,
+        Prefix: prefix,
+        ContinuationToken: continuationToken,
+      })
+    )
+    for (const obj of res.Contents ?? []) {
+      if (!obj.Key) continue
+      const relative = obj.Key.slice(prefix.length)
+      if (relative === "" || relative.startsWith("node_modules/")) continue
+      keys.push(obj.Key)
+    }
+    continuationToken = res.IsTruncated ? res.NextContinuationToken : undefined
+  } while (continuationToken)
+
+  return keys
+}
+
+/** Download a single S3 object as UTF-8 text. */
+export async function downloadSkillObject(key: string): Promise<string> {
+  const bucket = requireBucket()
+  const s3 = getS3()
+  const res = await s3.send(
+    new GetObjectCommand({ Bucket: bucket, Key: key })
+  )
+  if (!res.Body) {
+    throw new Error(`No body returned from S3 for key "${key}"`)
+  }
+  // AWS SDK v3 Node stream helper.
+  return res.Body.transformToString("utf-8")
+}
+
+/**
+ * Read a skill's SKILL.md from its S3 prefix. Returns null if it is missing (the
+ * skill row may exist before the folder is fully written, or the artifact may be
+ * absent for legacy rows).
+ */
+export async function readSkillMarkdown(s3Prefix: string): Promise<string | null> {
+  const prefix = s3Prefix.endsWith("/") ? s3Prefix.slice(0, -1) : s3Prefix
+  try {
+    return await downloadSkillObject(`${prefix}/SKILL.md`)
+  } catch (error) {
+    log.warn("SKILL.md not readable for skill prefix", {
+      s3Prefix,
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return null
+  }
+}
+
+/**
+ * Download all authored files in a skill folder (for zip export). Returns each
+ * file's path relative to the skill folder plus its UTF-8 content.
+ */
+export async function downloadSkillFolder(
+  s3Prefix: string
+): Promise<DownloadedSkillFile[]> {
+  const prefix = s3Prefix.endsWith("/") ? s3Prefix : `${s3Prefix}/`
+  const keys = await listSkillObjectKeys(s3Prefix)
+  const files = await Promise.all(
+    keys.map(async (key) => ({
+      path: key.slice(prefix.length),
+      content: await downloadSkillObject(key),
+    }))
+  )
+  return files
 }
