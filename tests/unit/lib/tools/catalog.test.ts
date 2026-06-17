@@ -313,4 +313,47 @@ describe("ToolCatalog", () => {
       expect.objectContaining({ total: 8, logged: 5, suppressed: 3 })
     )
   })
+
+  // Per-surface scope resolution (#924 follow-up): a tool on both mcp + rest
+  // carries different scope vocabularies per surface (mcp:execute_assistant vs
+  // assistants:execute). Scope filtering must use the surface-specific scope.
+  describe("per-surface scopes", () => {
+    it("lists assistants.execute on the rest surface for an assistants:execute caller", async () => {
+      const catalog = new ToolCatalog()
+      const tools = await catalog.list({
+        surface: "rest",
+        scopes: ["assistants:execute"],
+      })
+      expect(tools.some((t) => t.identifier === "assistants.execute")).toBe(true)
+    })
+
+    it("does NOT expose the rest tool to a caller holding only the MCP scope", async () => {
+      const catalog = new ToolCatalog()
+      const tools = await catalog.list({
+        surface: "rest",
+        scopes: ["mcp:execute_assistant"],
+      })
+      expect(tools.some((t) => t.identifier === "assistants.execute")).toBe(false)
+    })
+
+    it("still gates the MCP surface by the MCP scope", async () => {
+      const catalog = new ToolCatalog()
+      const tools = await catalog.list({
+        surface: "mcp",
+        scopes: ["mcp:execute_assistant"],
+      })
+      expect(tools.some((t) => t.identifier === "assistants.execute")).toBe(true)
+    })
+
+    it("getRequiredScopes returns the surface-specific scope", async () => {
+      const catalog = new ToolCatalog()
+      expect(await catalog.getRequiredScopes("assistants.execute", "rest")).toEqual([
+        "assistants:execute",
+      ])
+      expect(await catalog.getRequiredScopes("assistants.execute", "mcp")).toEqual([
+        "mcp:execute_assistant",
+      ])
+      expect(await catalog.getRequiredScopes("no.such.tool", "rest")).toBeUndefined()
+    })
+  })
 })

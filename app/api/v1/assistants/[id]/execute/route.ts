@@ -12,13 +12,14 @@ import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
 import {
   withApiAuth,
-  requireAssistantScope,
+  requireScope,
   createApiResponse,
   createErrorResponse,
   extractNumericParam,
   verifyAssistantAccess,
   parseRequestBody,
   isErrorResponse,
+  type ApiAuthContext,
 } from "@/lib/api"
 import {
   executeAssistant,
@@ -27,6 +28,7 @@ import {
   isContentSafetyBlocked,
 } from "@/lib/api/assistant-execution-service"
 import { jobManagementService } from "@/lib/streaming/job-management-service"
+import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 import { createLogger, startTimer } from "@/lib/logger"
 
 // Allow streaming responses up to 15 minutes for long chains
@@ -39,6 +41,25 @@ export const maxDuration = 900
 const executeBodySchema = z.object({
   inputs: z.record(z.string(), z.unknown()).default({}),
 })
+
+/**
+ * Require permission to execute the assistant. The broad REST scope is resolved
+ * from the tool catalog (single source of truth — issue #924 AC #4/#7) rather
+ * than hardcoded; the per-assistant `assistant:{id}:execute` variant still
+ * applies. The catalog resolves the scope from the manifest even during a DB
+ * outage, so the literal fallback is only a last resort. Checking the
+ * per-assistant scope first avoids a spurious requireScope denial log when it
+ * would have passed. Returns a 403 response if denied, or null if allowed.
+ */
+async function requireExecuteScope(
+  auth: ApiAuthContext,
+  assistantId: number,
+  requestId: string
+): Promise<NextResponse | null> {
+  if (auth.scopes.includes(`assistant:${assistantId}:execute`)) return null
+  const restScopes = await toolCatalogInstance.getRequiredScopes("assistants.execute", "rest")
+  return requireScope(auth, restScopes?.[0] ?? "assistants:execute", requestId)
+}
 
 // ============================================
 // POST — Execute Assistant
@@ -53,8 +74,8 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid assistant ID")
   }
 
-  // 2. Check scope (assistants:execute or assistant:{id}:execute)
-  const scopeError = requireAssistantScope(auth, assistantId, requestId)
+  // 2. Check scope (catalog-resolved REST scope or per-assistant variant).
+  const scopeError = await requireExecuteScope(auth, assistantId, requestId)
   if (scopeError) return scopeError
 
   // 3. Verify assistant exists and user has access

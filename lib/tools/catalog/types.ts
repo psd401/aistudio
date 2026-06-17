@@ -20,6 +20,37 @@ import type { McpToolDefinition, McpToolResult } from "@/lib/mcp/types";
 
 export type { ToolSurface, ToolCatalogSource };
 
+/** HTTP methods a REST-surfaced tool endpoint can use. */
+export type RestMethod = "get" | "post" | "put" | "patch" | "delete";
+
+/**
+ * REST binding for a `rest`-surfaced catalog tool — the metadata the
+ * catalog→OpenAPI generator needs to emit the tool's path + operation. Kept on
+ * the manifest entry (code tools); the generator reads `TOOL_MANIFEST` directly.
+ */
+export interface ToolRestBinding {
+  /** HTTP method (lowercase, OpenAPI operation key). */
+  method: RestMethod;
+  /** OpenAPI path template, e.g. `/api/v1/assistants/{id}/execute`. */
+  path: string;
+  /** One-line operation summary for the generated spec. */
+  summary: string;
+  /** Optional longer description. */
+  description?: string;
+  /** `operationId` for the generated operation; defaults to the identifier. */
+  operationId?: string;
+}
+
+/**
+ * Per-surface scope overrides. A tool exposed on multiple surfaces often needs a
+ * different scope vocabulary per surface (e.g. MCP `mcp:execute_assistant` vs REST
+ * `assistants:execute`). When a surface key is present, it REPLACES `requiredScopes`
+ * for that surface; otherwise `requiredScopes` applies. Without this, a multi-
+ * surface tool would force callers to hold the union of every surface's scopes
+ * (scope filtering is all-of), which is wrong. (#924 follow-up.)
+ */
+export type SurfaceScopes = Partial<Record<ToolSurface, string[]>>;
+
 /**
  * Discriminated result of `ToolCatalog.dispatch()`. Carries the failure reason as
  * a typed field rather than encoding it in a human-readable message string, so
@@ -52,6 +83,12 @@ export interface ToolCatalogEntry {
   surfaces: ToolSurface[];
   /** API scope strings the caller must hold to see/invoke this tool. */
   requiredScopes: string[];
+  /**
+   * Per-surface scope overrides. When the listing/dispatch surface has an entry
+   * here, it replaces `requiredScopes` for that surface (e.g. REST uses
+   * `assistants:execute` while MCP uses `mcp:execute_assistant`).
+   */
+  surfaceScopes?: SurfaceScopes;
   /** When false, internal agent loops may NOT invoke this tool. */
   agentCallable: boolean;
   /** Where this entry comes from. */
@@ -100,6 +137,18 @@ export interface ToolManifestEntry {
   surfaces: ToolSurface[];
   /** API scopes required to see/invoke this tool. */
   requiredScopes: string[];
+  /**
+   * Per-surface scope overrides — see {@link SurfaceScopes}. Lets a multi-surface
+   * tool carry, e.g., `mcp:execute_assistant` on `mcp` and `assistants:execute`
+   * on `rest` without forcing callers to hold both.
+   */
+  surfaceScopes?: SurfaceScopes;
+  /**
+   * REST binding for `rest`-surfaced tools — consumed by the catalog→OpenAPI
+   * generator (`scripts/openapi/generate-from-catalog.ts`). Required when
+   * `surfaces` includes `rest`.
+   */
+  rest?: ToolRestBinding;
   /**
    * When false, internal agent loops may NOT invoke this tool even if the scope
    * allows it (human-only / destructive guard). Defaults to true.

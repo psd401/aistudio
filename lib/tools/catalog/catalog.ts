@@ -38,6 +38,7 @@ import type {
   ToolCatalogFilter,
   ToolDispatchResult,
   ToolManifestEntry,
+  ToolSurface,
 } from "@/lib/tools/catalog/types";
 
 const log = createLogger({ module: "tool-catalog" });
@@ -86,6 +87,7 @@ function manifestToEntry(
     outputSchema: entry.outputSchema,
     surfaces: entry.surfaces,
     requiredScopes: entry.requiredScopes,
+    surfaceScopes: entry.surfaceScopes,
     agentCallable: entry.agentCallable ?? true,
     source: "code",
     isActive: !inactiveCodeKeys.has(entryKey(entry.identifier, version)),
@@ -102,6 +104,22 @@ function hasRequiredScopes(scopes: string[], requiredScopes: string[]): boolean 
   // A tool with no required scopes is open to any authenticated caller.
   if (requiredScopes.length === 0) return true;
   return requiredScopes.every((s) => scopes.includes(s));
+}
+
+/**
+ * Resolve the scopes a caller must hold for a tool on a given surface. When the
+ * surface has a `surfaceScopes` override it REPLACES `requiredScopes` (e.g. REST
+ * `assistants:execute` vs MCP `mcp:execute_assistant`); otherwise the base
+ * `requiredScopes` apply. Omitting the surface yields the base scopes.
+ */
+function requiredScopesForSurface(
+  entry: ToolCatalogEntry,
+  surface?: ToolSurface
+): string[] {
+  if (surface && entry.surfaceScopes?.[surface]) {
+    return entry.surfaceScopes[surface] as string[];
+  }
+  return entry.requiredScopes;
 }
 
 /**
@@ -280,7 +298,10 @@ export class ToolCatalog {
     }
     if (filter.scopes) {
       entries = entries.filter((e) =>
-        hasRequiredScopes(filter.scopes!, e.requiredScopes)
+        hasRequiredScopes(
+          filter.scopes as string[],
+          requiredScopesForSurface(e, filter.surface)
+        )
       );
     }
     if (filter.agentOnly) {
@@ -395,6 +416,22 @@ export class ToolCatalog {
   }
 
   /**
+   * Resolve the scopes a caller must hold to invoke a tool on a given surface —
+   * the single source REST routes use instead of hardcoding a scope string.
+   * Returns `undefined` when the tool is not cataloged (caller may fall back to a
+   * default). Includes inactive entries so the scope is resolvable even if an
+   * admin temporarily disabled the tool.
+   */
+  async getRequiredScopes(
+    identifierOrName: string,
+    surface?: ToolSurface
+  ): Promise<string[] | undefined> {
+    const entry = await this.get(identifierOrName);
+    if (!entry) return undefined;
+    return requiredScopesForSurface(entry, surface);
+  }
+
+  /**
    * Dispatch an MCP `tools/call` for a code-defined tool. Resolves the tool by
    * its MCP wire `name` (what clients send) on the `mcp` surface, checks scope +
    * active state, and invokes the in-process handler.
@@ -420,7 +457,7 @@ export class ToolCatalog {
     if (!entry || !entry.isActive || !entry.surfaces.includes("mcp")) {
       return { ok: false, reason: "unknown" };
     }
-    if (!hasRequiredScopes(context.scopes, entry.requiredScopes)) {
+    if (!hasRequiredScopes(context.scopes, requiredScopesForSurface(entry, "mcp"))) {
       return { ok: false, reason: "scope_denied" };
     }
     // Code MCP tools are keyed in TOOL_HANDLERS by their wire `name` (what the

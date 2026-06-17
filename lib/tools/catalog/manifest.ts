@@ -37,7 +37,11 @@
 import { MCP_TOOLS } from "@/lib/mcp/tool-registry";
 import type { McpToolDefinition } from "@/lib/mcp/types";
 import { AI_SDK_TOOLS } from "./ai-sdk-tools";
-import type { ToolManifestEntry } from "./types";
+import type {
+  ToolManifestEntry,
+  ToolRestBinding,
+  ToolSurface,
+} from "./types";
 import { compareVersionsDesc } from "./utils";
 
 /** Source value applied to every manifest-managed catalog row. */
@@ -48,10 +52,19 @@ export const MANIFEST_TOOL_SOURCE = "code" as const;
  * Keeps the schema/description single-sourced from `MCP_TOOLS` while assigning
  * the new `domain.action` identifier and the required scope.
  */
-const MCP_TOOL_CATALOG_MAP: Record<
-  string,
-  { identifier: string; requiredScope: string }
-> = {
+interface McpCatalogMapping {
+  identifier: string;
+  /** MCP-surface scope (the base `requiredScopes`). */
+  requiredScope: string;
+  /**
+   * Present when the tool is ALSO exposed on the REST surface by an existing
+   * `/api/v1` route. `scopes` are the REST scope(s) (distinct from the MCP scope);
+   * `binding` is the OpenAPI path/operation the catalog→OpenAPI generator emits.
+   */
+  rest?: { scopes: string[]; binding: ToolRestBinding };
+}
+
+const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
   search_decisions: {
     identifier: "decisions.search",
     requiredScope: "mcp:search_decisions",
@@ -63,10 +76,33 @@ const MCP_TOOL_CATALOG_MAP: Record<
   execute_assistant: {
     identifier: "assistants.execute",
     requiredScope: "mcp:execute_assistant",
+    rest: {
+      // REST callers use `assistants:execute` (see app/api/v1/assistants/[id]/execute);
+      // distinct from the MCP scope, hence surfaceScopes rather than a shared array.
+      scopes: ["assistants:execute"],
+      binding: {
+        method: "post",
+        path: "/api/v1/assistants/{id}/execute",
+        summary: "Execute an assistant",
+        description:
+          "Execute an assistant architect by id. Returns an SSE stream (default) or a 202 job (Accept: application/json).",
+        operationId: "executeAssistant",
+      },
+    },
   },
   list_assistants: {
     identifier: "assistants.list",
     requiredScope: "mcp:list_assistants",
+    rest: {
+      // REST list route uses `assistants:list` (see app/api/v1/assistants GET).
+      scopes: ["assistants:list"],
+      binding: {
+        method: "get",
+        path: "/api/v1/assistants",
+        summary: "List assistants available for API execution",
+        operationId: "listAssistants",
+      },
+    },
   },
   get_decision_graph: {
     identifier: "decisions.graph_get",
@@ -97,15 +133,22 @@ const MCP_MANIFEST_ENTRIES: ToolManifestEntry[] = MCP_TOOLS.map(
           `lib/tools/catalog/manifest.ts (MCP_TOOL_CATALOG_MAP). Add one.`
       );
     }
+    const surfaces: ToolSurface[] = mapping.rest ? ["mcp", "rest"] : ["mcp"];
     return {
       identifier: mapping.identifier,
       version: "v1",
       name: tool.name,
       description: tool.description,
       inputSchema: tool.inputSchema,
-      surfaces: ["mcp"],
+      surfaces,
       requiredScopes: [mapping.requiredScope],
       agentCallable: true,
+      ...(mapping.rest
+        ? {
+            surfaceScopes: { rest: mapping.rest.scopes },
+            rest: mapping.rest.binding,
+          }
+        : {}),
     };
   }
 );
