@@ -90,6 +90,9 @@ function manifestToEntry(
     source: "code",
     isActive: !inactiveCodeKeys.has(entryKey(entry.identifier, version)),
     handlerRef: entry.identifier,
+    displayName: entry.displayName,
+    category: entry.category,
+    requiredCapabilities: entry.requiredCapabilities,
   };
 }
 

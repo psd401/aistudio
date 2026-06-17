@@ -59,6 +59,16 @@ export interface ToolCatalogEntry {
   /** Whether the tool is currently exposed. */
   isActive: boolean;
   /**
+   * UI metadata for selectable `ai_sdk` chat tools — present only for tools the
+   * Nexus tool selector renders. Lets the catalog be the single source for tool
+   * display + model gating, not just identity/scope. (#924 follow-up.)
+   */
+  displayName?: string;
+  /** UI grouping (`search` | `code` | `analysis` | `creative` | `media`). */
+  category?: string;
+  /** Model-capability keys; the tool shows for a model with ANY of these. */
+  requiredCapabilities?: string[];
+  /**
    * Handler dispatch reference. For `source = 'code'` this is the manifest
    * handler key. For `assistant`/`skill` it is a pointer the dispatcher resolves
    * (e.g. `assistant:42`).
@@ -95,6 +105,16 @@ export interface ToolManifestEntry {
    * allows it (human-only / destructive guard). Defaults to true.
    */
   agentCallable?: boolean;
+  /**
+   * UI metadata for selectable `ai_sdk` chat tools — present only for tools the
+   * Nexus tool selector renders. Universal/always-on tools omit these. The
+   * catalog manifest populates them from `lib/tools/catalog/ai-sdk-tools.ts`.
+   */
+  displayName?: string;
+  /** UI grouping (`search` | `code` | `analysis` | `creative` | `media`). */
+  category?: string;
+  /** Model-capability keys; the tool shows for a model with ANY of these. */
+  requiredCapabilities?: string[];
 }
 
 /** Filter inputs for `ToolCatalog.list()`. */
