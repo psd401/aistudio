@@ -39,8 +39,25 @@ export function stripExportUrls(text: string): string {
 }
 
 /**
+ * Builds the proxied download URL for an export link.
+ *
+ * Presigned S3 URLs signed with STS session credentials embed an
+ * X-Amz-Security-Token that some browsers and network proxies mangle,
+ * causing intermittent InvalidToken errors when clicked directly (the same
+ * failure mode documented for psd-image-gen and fixed in PR #934).
+ *
+ * Routing through /api/export-download lets the Next.js server fetch the
+ * file from S3 — where there are no CORS restrictions and no STS token in
+ * the browser — and stream it to the user.
+ */
+function proxyDownloadUrl(presignedUrl: string): string {
+  return `/api/export-download?url=${encodeURIComponent(presignedUrl)}`
+}
+
+/**
  * Renders export URL markers as styled download links.
- * Presigned URLs expire after 5 minutes — this is shown to the user.
+ * Downloads are routed through /api/export-download to avoid browser-side
+ * CORS and STS token issues with presigned S3 URLs.
  *
  * Accepts pre-parsed links to avoid redundant parsing when the caller
  * has already called parseExportUrls().
@@ -53,9 +70,8 @@ export function ExportUrlLinks({ links }: { links: ExportLink[] }) {
       {links.map((link) => (
         <a
           key={link.url}
-          href={link.url}
-          target="_blank"
-          rel="noopener noreferrer"
+          href={proxyDownloadUrl(link.url)}
+          download
           className="flex items-center gap-2 rounded-md border border-border bg-muted/50 px-3 py-2 text-sm text-primary hover:bg-muted transition-colors"
         >
           <Download className="h-4 w-4 shrink-0" />
