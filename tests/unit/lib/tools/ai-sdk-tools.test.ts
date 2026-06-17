@@ -34,7 +34,9 @@ function caps(enabled: (keyof ModelCapabilities)[]): ModelCapabilities {
     "contextCaching",
     "imageGeneration",
   ]
-  const result = Object.fromEntries(all.map((k) => [k, false])) as ModelCapabilities
+  const result = Object.fromEntries(
+    all.map((k) => [k, false])
+  ) as unknown as ModelCapabilities
   for (const key of enabled) result[key] = true
   return result
 }
