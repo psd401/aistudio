@@ -135,6 +135,14 @@ export class EcsServiceConstruct extends Construct {
 
     const { vpc, environment, documentsBucketName } = props;
 
+    // Issue #925: agent workspace bucket holds published SKILL.md folders.
+    // Published to SSM by AgentPlatformStack. Resolved once and reused for both
+    // the container env and the task-role S3 grant below.
+    const agentWorkspaceBucketName = ssm.StringParameter.valueForStringParameter(
+      this,
+      `/aistudio/${environment}/agent-workspace-bucket-name`
+    );
+
     // ============================================================================
     // ECR Repository for container images
     // ============================================================================
@@ -387,6 +395,18 @@ export class EcsServiceConstruct extends Construct {
               actions: ['lambda:InvokeFunction'],
               resources: [
                 `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:aistudio-${environment}-schedule-executor`,
+                // Issue #925: skill-builder scans/promotes published skill drafts
+                `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
+              ],
+            }),
+            // Issue #925: write SKILL.md draft folders to the agent workspace
+            // bucket so the existing scan pipeline can pick them up. Scoped to
+            // the skills/ prefix.
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: ['s3:PutObject', 's3:GetObject'],
+              resources: [
+                `arn:aws:s3:::${agentWorkspaceBucketName}/skills/*`,
               ],
             }),
             new iam.PolicyStatement({
@@ -643,6 +663,12 @@ export class EcsServiceConstruct extends Construct {
         GUARDRAIL_VIOLATION_TOPIC_ARN: cdk.Fn.importValue(`${environment}-ViolationTopicArn`),
         CONTENT_SAFETY_ENABLED: 'true',
         PII_TOKENIZATION_ENABLED: 'true',
+        // Issue #925: Skill publishing pipeline. The agent workspace bucket
+        // (published to SSM by AgentPlatformStack) holds SKILL.md folders, and
+        // the skill-builder Lambda scans/promotes drafts. Both are optional at
+        // runtime — if absent, publishing falls back to a reviewable draft row.
+        AGENT_WORKSPACE_BUCKET: agentWorkspaceBucketName,
+        SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
       },
       // Secrets injected from Secrets Manager at runtime
       secrets: {
