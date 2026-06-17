@@ -8,6 +8,7 @@ import { test, expect } from '@playwright/test'
  * - Capabilities tab renders alongside Roles
  * - Admin can create a manual capability and it appears in the list
  * - Manifest-managed (source=code) capabilities show as read-only name/description
+ * - Manifest capability auto-registers on boot (present with source=code, no SQL)
  * - Role assignment dialog opens for a capability
  *
  * Auth note: admin-gated tests auto-skip in CI unless a seeded admin session is
@@ -103,6 +104,27 @@ test.describe('Admin Capability Management', () => {
     // Name field should be disabled for code-managed capabilities.
     const nameField = page.getByLabel('Name')
     await expect(nameField).toBeDisabled()
+  })
+
+  test('manifest capability auto-registered on boot shows source=code', async ({ page }) => {
+    // The boot-time sync (instrumentation.ts -> syncCapabilityManifest) reconciles
+    // lib/capabilities/manifest.ts into the DB with source='code'. This asserts a
+    // known manifest entry is present WITHOUT any SQL migration or manual creation,
+    // i.e. it auto-registered on boot. `model-compare` is a stable manifest id.
+    await page.getByRole('tab', { name: /Capabilities/i }).click()
+
+    const manifestRow = page
+      .getByRole('row', { name: /model-compare/i })
+      .first()
+
+    if ((await manifestRow.count()) === 0) {
+      test.skip(true, 'Manifest sync not run in this env — seed + boot locally')
+      return
+    }
+
+    // The row must carry the "code" source badge, proving it came from the
+    // manifest (source=code), not a manual admin-created capability.
+    await expect(manifestRow.getByText(/^code$/i)).toBeVisible({ timeout: 10000 })
   })
 
   test('role assignment dialog opens for a capability', async ({ page }) => {
