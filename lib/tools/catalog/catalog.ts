@@ -301,11 +301,11 @@ export class ToolCatalog {
       entries = entries.filter((e) => e.surfaces.includes(filter.surface!));
     }
     if (filter.scopes) {
+      // Bind to a local so TypeScript narrows away `undefined` inside the arrow
+      // fn (it doesn't carry the outer `if` guard through the closure boundary).
+      const filterScopes = filter.scopes;
       entries = entries.filter((e) =>
-        hasRequiredScopes(
-          filter.scopes as string[],
-          requiredScopesForSurface(e, filter.surface)
-        )
+        hasRequiredScopes(filterScopes, requiredScopesForSurface(e, filter.surface))
       );
     }
     if (filter.agentOnly) {

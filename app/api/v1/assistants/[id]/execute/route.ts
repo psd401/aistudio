@@ -81,10 +81,11 @@ async function requireExecuteScope(
 
   // The REST surface may declare more than one required scope (all-of semantics).
   // requireScope only checks a single scope, so enforce every returned scope —
-  // indexing [0] would silently drop any additional required scopes.
-  const restScopes = entry
-    ? await toolCatalogInstance.getRequiredScopes(EXECUTE_TOOL_IDENTIFIER, "rest")
-    : undefined
+  // indexing [0] would silently drop any additional required scopes. Resolve the
+  // surface scopes from the already-fetched `entry` (mirrors
+  // requiredScopesForSurface) rather than calling getRequiredScopes, which would
+  // re-fetch the same entry from the catalog.
+  const restScopes = entry ? (entry.surfaceScopes?.rest ?? entry.requiredScopes) : undefined
   const scopesToCheck = restScopes?.length ? restScopes : ["assistants:execute"]
   for (const scope of scopesToCheck) {
     const scopeError = requireScope(auth, scope, requestId)
