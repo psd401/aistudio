@@ -104,6 +104,17 @@ wire `name` (`search_decisions`) is unchanged for client compatibility.
 > are *consumed* tools, not part of this catalog (which tracks only tools AI Studio
 > itself *exposes*).
 
+### Surface coverage (#924)
+
+The catalog is the single source of truth across every surface AI Studio exposes:
+
+| Surface | How it reads the catalog |
+|---------|--------------------------|
+| `mcp` | `tools/list` / `tools/call` dispatch via `ToolCatalog` (above). |
+| `ai_sdk` | The chat/Nexus tools have one source — `lib/tools/catalog/ai-sdk-tools.ts` — which the catalog manifest ingests. The Nexus route scope-gates `enabledTools` via `ToolCatalog.filterAiSdkToolNames`; the server + client tool registries derive their lists (and model-capability + UI metadata) from that same source. Adding a chat tool is one edit. |
+| `rest` | Tool-backed `/api/v1` routes declare a `rest` surface + `surfaceScopes.rest` + a `rest` binding. The route resolves its scope from the catalog (`getRequiredScopes(id, 'rest')`), and the tool-endpoint OpenAPI is generated from the catalog (`scripts/openapi/generate-from-catalog.ts` → `docs/API/v1/generated/tool-catalog.openapi.json`, `bun run openapi:generate`). |
+| `internal` | **Not applicable in this repo.** There is no internal agent loop here (the agent platform is the external AgentCore service; `lib/agent/` holds only a workspace-token helper). The one internal tool-resolving path — `lib/streaming/unified-streaming-service.ts` / provider adapters — builds AI SDK tools that are already catalog-gated upstream (the `ai_sdk` row above). The catalog is ready for a future internal loop: `agent_callable` + `ToolCatalog.list({ agentOnly })` already filter human-only/destructive tools. No speculative code was added for a surface that does not yet exist. |
+
 ## Files
 
 | Path | Purpose |
@@ -117,5 +128,8 @@ wire `name` (`search_decisions`) is unchanged for client compatibility.
 | `lib/api-keys/scopes.ts` | MCP scope definitions |
 | `lib/tools/catalog/catalog.ts` | Unified `ToolCatalog` runtime (merge + filter + dispatch) |
 | `lib/tools/catalog/manifest.ts` | Code-defined tool catalog |
+| `lib/tools/catalog/ai-sdk-tools.ts` | Single source for AI SDK chat tools (ingested by the manifest) |
 | `lib/tools/catalog/sync.ts` | Boot-time `tool_catalog` reconciliation |
 | `lib/db/schema/tables/tool-catalog.ts` | `tool_catalog` table schema |
+| `scripts/openapi/build-spec.ts` | Catalog → OpenAPI fragment builder (REST surface) |
+| `scripts/openapi/generate-from-catalog.ts` | `openapi:generate` / `openapi:check` CLI |
