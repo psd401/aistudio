@@ -2,10 +2,10 @@ import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals
 import { NextRequest } from 'next/server';
 
 // Mock AWS SDK clients BEFORE importing modules that use them
-const mockDynamoSend = jest.fn() as jest.MockedFunction<any>;
-const mockS3Send = jest.fn() as jest.MockedFunction<any>;
-const mockSQSSend = jest.fn() as jest.MockedFunction<any>;
-const mockGetSignedUrl = jest.fn() as jest.MockedFunction<any>;
+const mockDynamoSend = jest.fn() as jest.MockedFunction<(...args: unknown[]) => unknown>;
+const mockS3Send = jest.fn() as jest.MockedFunction<(...args: unknown[]) => unknown>;
+const mockSQSSend = jest.fn() as jest.MockedFunction<(...args: unknown[]) => unknown>;
+const mockGetSignedUrl = jest.fn() as jest.MockedFunction<(...args: unknown[]) => unknown>;
 
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(() => ({

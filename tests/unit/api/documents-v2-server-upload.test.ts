@@ -88,7 +88,7 @@ import { sendToProcessingQueue } from '@/lib/aws/lambda-trigger';
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
-const SESSION_WITH_SUB = { sub: 'user-abc', user: { id: 'user-abc', email: 'test@psd401.net' } };
+const SESSION_WITH_SUB = { sub: 'user-abc', user: { id: 'user-abc', email: 'test@example.com' } };
 
 /** Create a minimal fake File suitable for formData.append */
 function makeFakeFile(name: string, type: string, sizeBytes = 1024): File {
@@ -160,7 +160,7 @@ describe('POST /api/documents/v2/upload', () => {
 
     it('returns 401 when session exists but sub is missing or falsy', async () => {
       // This can happen mid-OAuth when Cognito hasn't yet issued the JWT sub claim
-      (getServerSession as jest.Mock).mockResolvedValue({ user: { email: 'pending@psd401.net' } });
+      (getServerSession as jest.Mock).mockResolvedValue({ user: { email: 'pending@example.com' } });
 
       const req = buildUploadRequest(makeFakeFile('test.pdf', 'application/pdf'));
       const res = await POST(req);
