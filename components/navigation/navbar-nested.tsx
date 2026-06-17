@@ -415,7 +415,7 @@ function collectBugReportMetadata(userDescription: string, steps: string, consol
   sections.push(`Authenticated: ${session ? 'Yes' : 'No'}`);
   if (session?.user) {
     sections.push(`User Email: ${escapeHtml(session.user.email ?? 'N/A')}`);
-    const displayName = session.user.name ?? [session.user.givenName, session.user.familyName].filter(Boolean).join(' ') || 'N/A';
+    const displayName = session.user.name ?? ([session.user.givenName, session.user.familyName].filter(Boolean).join(' ') || 'N/A');
     sections.push(`User Name: ${escapeHtml(displayName)}`);
     sections.push(`User ID: ${escapeHtml(session.user.id ?? 'N/A')}`);
   }
