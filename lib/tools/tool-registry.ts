@@ -2,12 +2,12 @@ import type { ToolSet } from 'ai'
 import { getAIModelByModelId } from '@/lib/db/drizzle'
 import { parseCapabilities, type CapabilityKey } from '@/lib/ai/capability-utils'
 import { toolCatalogInstance } from '@/lib/tools/catalog/catalog'
-import { getFriendlyToolName } from '@/lib/tools/tool-name-mapping'
 import {
   getSelectableToolConfigs,
   getSelectableToolConfig,
+  filterToolConfigsByCapabilities,
+  toToolCategory,
   type ModelCapabilities,
-  type ToolCategory,
   type ToolConfig,
 } from '@/lib/tools/catalog/ai-sdk-tools'
 
@@ -88,20 +88,42 @@ export async function getModelCapabilities(modelId: string): Promise<ModelCapabi
  * Reads the live `ToolCatalog` (so future assistant/skill-derived ai_sdk tools
  * with display metadata are included automatically), keeping the catalog the
  * single source of truth. Selectable tools are those that carry a `displayName`
- * (universal/always-on tools such as `show_chart` omit it). The catalog `name`
- * is the wire name; the UI uses the friendly name.
+ * (universal/always-on tools such as `show_chart` omit it).
+ *
+ * `name` is the catalog's `friendlyName` (the key the UI + `enabledTools` use),
+ * falling back to the wire `name` only if a catalog row lacks it. Reading
+ * `friendlyName` directly removes the prior dependency on reverse-mapping the
+ * wire name through `TOOL_NAME_MAPPING`, which silently returned the wire name
+ * for any tool not in that map. `category` is runtime-validated rather than cast.
  */
 async function getSelectableToolConfigsFromCatalog(): Promise<ToolConfig[]> {
   const entries = await toolCatalogInstance.list({ surface: 'ai_sdk' })
-  return entries
-    .filter((e) => e.displayName)
-    .map((e) => ({
-      name: getFriendlyToolName(e.name) ?? e.name,
-      requiredCapabilities: (e.requiredCapabilities ?? []) as (keyof ModelCapabilities)[],
-      displayName: e.displayName as string,
+  const configs: ToolConfig[] = []
+  for (const e of entries) {
+    if (!e.displayName) continue
+    configs.push({
+      name: e.friendlyName ?? e.name,
+      requiredCapabilities: (e.requiredCapabilities ?? []).filter(
+        (c): c is keyof ModelCapabilities => isModelCapabilityKey(c)
+      ),
+      displayName: e.displayName,
       description: e.description,
-      category: (e.category ?? 'analysis') as ToolCategory,
-    }))
+      category: toToolCategory(e.category),
+    })
+  }
+  return configs
+}
+
+/** The set of valid `ModelCapabilities` keys, for validating DB-sourced data. */
+const MODEL_CAPABILITY_KEYS: ReadonlySet<string> = new Set<keyof ModelCapabilities>([
+  'webSearch', 'codeInterpreter', 'codeExecution', 'grounding', 'workspaceTools',
+  'canvas', 'artifacts', 'thinking', 'reasoning', 'computerUse', 'responsesAPI',
+  'promptCaching', 'contextCaching', 'imageGeneration',
+])
+
+/** True when `key` is a recognized model-capability flag. */
+function isModelCapabilityKey(key: string): key is keyof ModelCapabilities {
+  return MODEL_CAPABILITY_KEYS.has(key)
 }
 
 /**
@@ -118,16 +140,9 @@ export async function getAvailableToolsForModel(modelId: string): Promise<ToolCo
   }
 
   const tools = await getSelectableToolConfigsFromCatalog()
-  return tools.filter(toolConfig => {
-    // Tools with no required capabilities are universal (available for all models)
-    if (toolConfig.requiredCapabilities.length === 0) {
-      return true
-    }
-    // Check if model has ANY of the required capabilities (OR logic)
-    return toolConfig.requiredCapabilities.some(capability =>
-      capabilities[capability] === true
-    )
-  })
+  // Single capability-gate implementation, shared with the sync/client paths so
+  // the two cannot drift (OR logic; no-capability tools are universal).
+  return filterToolConfigsByCapabilities(tools, capabilities)
 }
 
 /**

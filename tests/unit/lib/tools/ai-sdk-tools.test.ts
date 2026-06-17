@@ -4,7 +4,10 @@ import {
   getSelectableToolConfigs,
   getSelectableToolConfig,
   filterToolsByCapabilities,
+  filterToolConfigsByCapabilities,
+  toToolCategory,
   type ModelCapabilities,
+  type ToolConfig,
 } from "@/lib/tools/catalog/ai-sdk-tools"
 import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest"
 
@@ -106,8 +109,47 @@ describe("catalog manifest derives from the single source", () => {
     expect(chartEntry?.displayName).toBeUndefined()
   })
 
+  it("projects friendlyName onto selectable manifest entries (no TOOL_NAME_MAPPING dependency)", () => {
+    // friendlyName is carried directly so the server registry need not reverse-map
+    // the wire name through TOOL_NAME_MAPPING (which silently returned the wire
+    // name for any unmapped tool).
+    const webEntry = TOOL_MANIFEST.find((e) => e.identifier === "chat.web_search")
+    expect(webEntry?.friendlyName).toBe("webSearch")
+    expect(webEntry?.name).toBe("web_search_preview") // wire name, distinct from friendly
+
+    // Universals omit friendlyName along with the rest of the UI metadata.
+    const chartEntry = TOOL_MANIFEST.find((e) => e.identifier === "chat.show_chart")
+    expect(chartEntry?.friendlyName).toBeUndefined()
+  })
+
   it("defines no duplicate friendly names", () => {
     const friendly = AI_SDK_TOOLS.map((t) => t.friendlyName)
     expect(new Set(friendly).size).toBe(friendly.length)
+  })
+})
+
+describe("shared capability + category helpers", () => {
+  it("filterToolConfigsByCapabilities gates an arbitrary list (OR logic)", () => {
+    const tools: ToolConfig[] = [
+      { name: "a", requiredCapabilities: ["webSearch"], displayName: "A", description: "", category: "search" },
+      { name: "b", requiredCapabilities: [], displayName: "B", description: "", category: "analysis" },
+    ]
+    // Universal (no caps) always passes; capability-gated needs ANY match.
+    expect(filterToolConfigsByCapabilities(tools, caps([])).map((t) => t.name)).toEqual(["b"])
+    expect(filterToolConfigsByCapabilities(tools, caps(["webSearch"])).map((t) => t.name)).toEqual(["a", "b"])
+  })
+
+  it("filterToolsByCapabilities delegates to the shared helper (no drift)", () => {
+    const c = caps(["webSearch", "grounding"])
+    expect(filterToolsByCapabilities(c)).toEqual(
+      filterToolConfigsByCapabilities(getSelectableToolConfigs(), c)
+    )
+  })
+
+  it("toToolCategory validates and defaults unknown values to 'analysis'", () => {
+    expect(toToolCategory("search")).toBe("search")
+    expect(toToolCategory("media")).toBe("media")
+    expect(toToolCategory("not-a-category")).toBe("analysis")
+    expect(toToolCategory(undefined)).toBe("analysis")
   })
 })

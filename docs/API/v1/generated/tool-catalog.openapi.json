@@ -30,6 +30,15 @@
         "responses": {
           "200": {
             "description": "Success"
+          },
+          "401": {
+            "description": "Missing or invalid API credentials."
+          },
+          "403": {
+            "description": "Authenticated but missing a required scope."
+          },
+          "500": {
+            "description": "Internal error."
           }
         }
       }
@@ -60,7 +69,28 @@
         ],
         "responses": {
           "200": {
-            "description": "Success"
+            "description": "SSE stream of execution events (default Accept: text/event-stream)."
+          },
+          "202": {
+            "description": "Async job accepted; poll for completion (Accept: application/json)."
+          },
+          "400": {
+            "description": "Validation error — malformed body or invalid inputs."
+          },
+          "401": {
+            "description": "Missing or invalid API credentials."
+          },
+          "403": {
+            "description": "Authenticated but missing a required scope."
+          },
+          "404": {
+            "description": "Resource not found, or the tool is disabled in the catalog."
+          },
+          "429": {
+            "description": "Concurrent-execution or rate limit exceeded."
+          },
+          "500": {
+            "description": "Internal error."
           }
         }
       }

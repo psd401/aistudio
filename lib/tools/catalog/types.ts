@@ -39,6 +39,20 @@ export interface ToolRestBinding {
   description?: string;
   /** `operationId` for the generated operation; defaults to the identifier. */
   operationId?: string;
+  /**
+   * Success responses (status code → description) the generated OpenAPI emits for
+   * this operation. Defaults to `{ "200": "Success" }`. Set this when an endpoint
+   * has a non-200 / multi-mode success (e.g. the execute route streams 200 for
+   * SSE but returns 202 for `Accept: application/json` async jobs). Error
+   * responses are appended by the generator from a shared set.
+   */
+  successResponses?: Record<string, string>;
+  /**
+   * Error status codes this operation can return, overriding the generator's
+   * method-based default (write methods get 400/404/429 on top of the 401/403/500
+   * base; GETs get only the base). Set this to declare exactly which errors apply.
+   */
+  errorResponses?: string[];
 }
 
 /**
@@ -101,6 +115,13 @@ export interface ToolCatalogEntry {
    * display + model gating, not just identity/scope. (#924 follow-up.)
    */
   displayName?: string;
+  /**
+   * Friendly key the UI registry + `enabledTools` list use (e.g. `webSearch`),
+   * distinct from the wire `name` (e.g. `web_search_preview`). Present only for
+   * selectable `ai_sdk` chat tools. Carried directly so consumers do not have to
+   * reverse-map the wire name through `TOOL_NAME_MAPPING`. (#924 follow-up.)
+   */
+  friendlyName?: string;
   /** UI grouping (`search` | `code` | `analysis` | `creative` | `media`). */
   category?: string;
   /** Model-capability keys; the tool shows for a model with ANY of these. */
@@ -160,6 +181,11 @@ export interface ToolManifestEntry {
    * catalog manifest populates them from `lib/tools/catalog/ai-sdk-tools.ts`.
    */
   displayName?: string;
+  /**
+   * Friendly key for the UI registry + `enabledTools` list (e.g. `webSearch`),
+   * distinct from the wire `name`. Populated from `ai-sdk-tools.ts`. (#924.)
+   */
+  friendlyName?: string;
   /** UI grouping (`search` | `code` | `analysis` | `creative` | `media`). */
   category?: string;
   /** Model-capability keys; the tool shows for a model with ANY of these. */

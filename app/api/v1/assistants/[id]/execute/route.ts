@@ -42,25 +42,49 @@ const executeBodySchema = z.object({
   inputs: z.record(z.string(), z.unknown()).default({}),
 })
 
+const EXECUTE_TOOL_IDENTIFIER = "assistants.execute"
+
 /**
- * Require permission to execute the assistant. The broad REST scope is resolved
- * from the tool catalog (single source of truth — issue #924 AC #4/#7) rather
- * than hardcoded; the per-assistant `assistant:{id}:execute` variant still
- * applies. The catalog resolves the scope from the manifest even during a DB
- * outage, so the literal fallback is only a last resort. Checking the
- * per-assistant scope first avoids a spurious requireScope denial log when it
- * would have passed. Returns a 403 response if denied, or null if allowed.
+ * Gate execution on the tool catalog (single source of truth — issue #924 AC
+ * #4/#7) and scope. Two checks, in order:
+ *
+ *  1. Active state. The catalog row for `assistants.execute` carries an
+ *     `is_active` flag an admin can flip in the DB control plane. The MCP
+ *     surface enforces this via `ToolCatalog.dispatch()`, but this REST route
+ *     calls `executeAssistant()` directly, so it must re-check `isActive` itself
+ *     (the catalog `get()` returns inactive entries by design). Without this,
+ *     disabling the tool would silently block MCP yet leave REST callable —
+ *     a deceptive admin control. Returns 404 (not 403) so a disabled tool is
+ *     indistinguishable from a non-existent one and does not leak its state.
+ *  2. Scope. The per-assistant `assistant:{id}:execute` variant short-circuits
+ *     first (avoids a spurious requireScope denial log). Otherwise every REST
+ *     scope the catalog declares must be held (all-of semantics) — the literal
+ *     fallback is only used if the tool is absent from the catalog (e.g. a DB
+ *     outage that also lost the manifest projection).
+ *
+ * Returns a NextResponse to short-circuit (403/404), or null if allowed.
  */
 async function requireExecuteScope(
   auth: ApiAuthContext,
   assistantId: number,
   requestId: string
 ): Promise<NextResponse | null> {
+  // Active-state gate. If the tool is cataloged but disabled, deny regardless of
+  // scope. An absent entry (undefined) means the catalog could not resolve it;
+  // fall through to the scope check, whose literal fallback still enforces auth.
+  const entry = await toolCatalogInstance.get(EXECUTE_TOOL_IDENTIFIER)
+  if (entry && !entry.isActive) {
+    return createErrorResponse(requestId, 404, "NOT_FOUND", "Assistant execution is not available")
+  }
+
   if (auth.scopes.includes(`assistant:${assistantId}:execute`)) return null
-  const restScopes = await toolCatalogInstance.getRequiredScopes("assistants.execute", "rest")
+
   // The REST surface may declare more than one required scope (all-of semantics).
   // requireScope only checks a single scope, so enforce every returned scope —
   // indexing [0] would silently drop any additional required scopes.
+  const restScopes = entry
+    ? await toolCatalogInstance.getRequiredScopes(EXECUTE_TOOL_IDENTIFIER, "rest")
+    : undefined
   const scopesToCheck = restScopes?.length ? restScopes : ["assistants:execute"]
   for (const scope of scopesToCheck) {
     const scopeError = requireScope(auth, scope, requestId)

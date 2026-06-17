@@ -168,17 +168,51 @@ export function getSelectableToolConfig(name: string): ToolConfig | undefined {
 }
 
 /**
- * Filter selectable tools down to those a model supports. A tool shows when the
- * model has ANY of its `requiredCapabilities` (OR logic), mirroring the prior
- * registry behavior. Tools with no required capabilities are universal.
+ * Filter any `ToolConfig[]` down to those a model supports. A tool shows when the
+ * model has ANY of its `requiredCapabilities` (OR logic); tools with no required
+ * capabilities are universal. This is the single capability-gate implementation —
+ * both the sync (`filterToolsByCapabilities`) and catalog-backed
+ * (`tool-registry.ts`) paths call it so the two cannot drift.
  */
-export function filterToolsByCapabilities(
+export function filterToolConfigsByCapabilities(
+  tools: ToolConfig[],
   capabilities: ModelCapabilities
 ): ToolConfig[] {
-  return getSelectableToolConfigs().filter((toolConfig) => {
+  return tools.filter((toolConfig) => {
     if (toolConfig.requiredCapabilities.length === 0) return true
     return toolConfig.requiredCapabilities.some(
       (capability) => capabilities[capability] === true
     )
   })
+}
+
+/**
+ * Filter selectable tools down to those a model supports, mirroring the prior
+ * registry behavior. Delegates to {@link filterToolConfigsByCapabilities}.
+ */
+export function filterToolsByCapabilities(
+  capabilities: ModelCapabilities
+): ToolConfig[] {
+  return filterToolConfigsByCapabilities(getSelectableToolConfigs(), capabilities)
+}
+
+/** The valid `ToolCategory` values, for runtime validation of DB-sourced data. */
+const VALID_TOOL_CATEGORIES: ReadonlySet<string> = new Set<ToolCategory>([
+  'search',
+  'code',
+  'analysis',
+  'creative',
+  'media',
+])
+
+/**
+ * Coerce an arbitrary (possibly DB-sourced) category string to a valid
+ * `ToolCategory`. Unknown/absent values fall back to `'analysis'` — the neutral
+ * "general purpose" bucket — rather than passing an invalid literal through a
+ * cast. Returning a known-good value keeps the Nexus selector grouping stable.
+ */
+export function toToolCategory(value: string | undefined): ToolCategory {
+  return value && VALID_TOOL_CATEGORIES.has(value)
+    ? (value as ToolCategory)
+    : 'analysis'
 }

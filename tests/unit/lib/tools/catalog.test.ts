@@ -355,5 +355,35 @@ describe("ToolCatalog", () => {
       ])
       expect(await catalog.getRequiredScopes("no.such.tool", "rest")).toBeUndefined()
     })
+
+    it("get() surfaces is_active=false so the REST route can gate on it", async () => {
+      // The REST execute route reads entry.isActive to deny when an admin disables
+      // the tool (the MCP surface gates via dispatch()). get() must therefore return
+      // the inactive entry rather than hiding it.
+      dbRows = [
+        {
+          identifier: "assistants.execute",
+          version: "v1",
+          name: "execute_assistant",
+          description: "x",
+          inputSchema: { type: "object", properties: {} },
+          outputSchema: null,
+          surfaces: ["mcp", "rest"],
+          requiredScopes: ["mcp:execute_assistant"],
+          agentCallable: true,
+          source: "code",
+          isActive: false,
+          handlerRef: "assistants.execute",
+        },
+      ]
+      const catalog = new ToolCatalog()
+      const entry = await catalog.get("assistants.execute")
+      expect(entry).toBeDefined()
+      expect(entry?.isActive).toBe(false)
+      // Scope is still resolvable even while disabled (so the route can choose 404).
+      expect(await catalog.getRequiredScopes("assistants.execute", "rest")).toEqual([
+        "assistants:execute",
+      ])
+    })
   })
 })

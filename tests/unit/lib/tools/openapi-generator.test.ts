@@ -55,4 +55,35 @@ describe("catalog → OpenAPI generator", () => {
       expect(manifestEntry?.rest).toBeDefined()
     }
   })
+
+  it("documents auth/scope/server error codes on every operation (CLAUDE.md)", () => {
+    const spec = buildSpec()
+    for (const methods of Object.values(spec.paths)) {
+      for (const op of Object.values(methods)) {
+        // Base errors apply to every authenticated tool endpoint.
+        expect(op.responses).toHaveProperty("401")
+        expect(op.responses).toHaveProperty("403")
+        expect(op.responses).toHaveProperty("500")
+      }
+    }
+  })
+
+  it("emits the execute route's dual-mode success codes (200 SSE, 202 async)", () => {
+    const op = buildSpec().paths["/api/v1/assistants/{id}/execute"]?.post
+    expect(op?.responses).toHaveProperty("200")
+    expect(op?.responses).toHaveProperty("202")
+    // Write-method errors (body validation, not-found/disabled, concurrency).
+    expect(op?.responses).toHaveProperty("400")
+    expect(op?.responses).toHaveProperty("404")
+    expect(op?.responses).toHaveProperty("429")
+  })
+
+  it("does not emit body/concurrency error codes on the GET list route", () => {
+    const op = buildSpec().paths["/api/v1/assistants"]?.get
+    expect(op).toBeDefined()
+    // A GET has no request body and no per-resource id/concurrency path.
+    expect(op?.responses).not.toHaveProperty("400")
+    expect(op?.responses).not.toHaveProperty("404")
+    expect(op?.responses).not.toHaveProperty("429")
+  })
 })

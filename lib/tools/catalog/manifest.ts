@@ -87,6 +87,10 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
         description:
           "Execute an assistant architect by id. Returns an SSE stream (default) or a 202 job (Accept: application/json).",
         operationId: "executeAssistant",
+        successResponses: {
+          "200": "SSE stream of execution events (default Accept: text/event-stream).",
+          "202": "Async job accepted; poll for completion (Accept: application/json).",
+        },
       },
     },
   },
@@ -179,6 +183,7 @@ const AI_SDK_MANIFEST_ENTRIES: ToolManifestEntry[] = AI_SDK_TOOLS.map((tool) => 
   ...(tool.ui
     ? {
         displayName: tool.ui.displayName,
+        friendlyName: tool.friendlyName,
         category: tool.ui.category,
         requiredCapabilities: tool.ui.requiredCapabilities,
       }
