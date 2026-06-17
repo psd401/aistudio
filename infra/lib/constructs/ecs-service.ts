@@ -17,6 +17,12 @@ export interface EcsServiceConstructProps {
   vpc: ec2.IVpc;
   environment: 'dev' | 'prod';
   documentsBucketName: string;
+  /**
+   * Agent workspace bucket name (holds published SKILL.md folders, #925).
+   * Passed as a cross-stack prop from AgentPlatformStack — same pattern as
+   * documentsBucketName — so the dependency + Export/Import is explicit.
+   */
+  agentWorkspaceBucketName: string;
   enableContainerInsights?: boolean;
   enableFargateSpot?: boolean;
   /**
@@ -133,15 +139,7 @@ export class EcsServiceConstruct extends Construct {
   constructor(scope: Construct, id: string, props: EcsServiceConstructProps) {
     super(scope, id);
 
-    const { vpc, environment, documentsBucketName } = props;
-
-    // Issue #925: agent workspace bucket holds published SKILL.md folders.
-    // Published to SSM by AgentPlatformStack. Resolved once and reused for both
-    // the container env and the task-role S3 grant below.
-    const agentWorkspaceBucketName = ssm.StringParameter.valueForStringParameter(
-      this,
-      `/aistudio/${environment}/agent-workspace-bucket-name`
-    );
+    const { vpc, environment, documentsBucketName, agentWorkspaceBucketName } = props;
 
     // ============================================================================
     // ECR Repository for container images
