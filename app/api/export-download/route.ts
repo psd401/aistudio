@@ -24,10 +24,10 @@ function isAllowedS3Url(raw: string): boolean {
     return false
   }
   if (parsed.protocol !== 'https:') return false
-  // Must end with amazonaws.com and contain "s3" as an exact hostname label.
+  // Require .amazonaws.com with a leading dot to reject attacker-amazonaws.com.
   // String-based checks avoid ReDoS vulnerabilities from complex regex quantifiers.
   const host = parsed.hostname
-  if (!host.endsWith('amazonaws.com')) return false
+  if (!host.endsWith('.amazonaws.com')) return false
   return host.split('.').includes('s3')
 }
 
@@ -50,6 +50,7 @@ export async function GET(req: NextRequest) {
     log.warn('Unauthorized export-download request')
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
+  const userId = session.sub
 
   const url = req.nextUrl.searchParams.get('url')
   if (!url) {
@@ -57,30 +58,30 @@ export async function GET(req: NextRequest) {
   }
 
   if (!isAllowedS3Url(url)) {
-    log.warn('Rejected non-S3 export URL')
+    log.warn('Rejected non-S3 export URL', { userId })
     return NextResponse.json({ error: 'Invalid export URL' }, { status: 400 })
   }
 
   try {
-    // codeql[js/server-side-request-forgery] URL validated to AWS S3 hostname by isAllowedS3Url above; redirect:error blocks SSRF via open redirects
     const upstream = await fetch(url, {
       redirect: 'error',
+      // Inner 30s timeout guards S3 response start; outer maxDuration=120 covers total stream time.
       signal: AbortSignal.timeout(30_000),
-    })
+    }) // codeql[js/server-side-request-forgery] URL validated to AWS S3 hostname by isAllowedS3Url; redirect:error blocks SSRF via open redirects
 
     if (!upstream.ok) {
       if (upstream.status === 403 || upstream.status === 404) {
-        log.warn('Presigned URL expired or invalid', { upstreamStatus: upstream.status })
+        log.warn('Presigned URL expired or invalid', { upstreamStatus: upstream.status, userId })
         timer({ status: 'expired' })
         return NextResponse.json(
           {
             error:
-              'Export link has expired. Presigned URLs are valid for 5 minutes — please re-run the query to get a new export link.',
+              'Export link has expired — please re-run the query to generate a new download link.',
           },
           { status: 410 }
         )
       }
-      log.error('Upstream S3 error', { upstreamStatus: upstream.status })
+      log.error('Upstream S3 error', { upstreamStatus: upstream.status, userId })
       timer({ status: 'error' })
       return NextResponse.json({ error: 'Failed to fetch export file' }, { status: 502 })
     }
@@ -88,7 +89,7 @@ export async function GET(req: NextRequest) {
     // Reject oversized exports before streaming to avoid exhausting ECS task memory.
     const contentLength = upstream.headers.get('Content-Length')
     if (contentLength && Number(contentLength) > MAX_EXPORT_BYTES) {
-      log.warn('Export too large to proxy', { bytes: contentLength })
+      log.warn('Export too large to proxy', { bytes: contentLength, userId })
       timer({ status: 'too-large' })
       return NextResponse.json(
         { error: `Export is too large to download via the browser (max ${MAX_EXPORT_BYTES / 1024 / 1024} MB). Contact support.` },
@@ -103,7 +104,7 @@ export async function GET(req: NextRequest) {
     const filename = rawFilename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200) || 'export.csv'
 
     timer({ status: 'success' })
-    log.info('Export proxied successfully', { filename, contentLength })
+    log.info('Export proxied successfully', { filename, contentLength, userId })
 
     // Force text/csv regardless of what S3 reports — the upstream Content-Type
     // is attacker-influenced (object owner controls object metadata). Passthrough
@@ -121,6 +122,7 @@ export async function GET(req: NextRequest) {
     timer({ status: 'error' })
     log.error('Export download failed', {
       error: err instanceof Error ? err.message : String(err),
+      userId,
     })
     return NextResponse.json({ error: 'Failed to fetch export file' }, { status: 502 })
   }

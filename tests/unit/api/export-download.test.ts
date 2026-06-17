@@ -19,12 +19,12 @@ jest.mock('next/server', () => {
     NextResponse: class NextResponse {
       body: unknown
       status: number
-      headers: Record<string, string>
+      headers: Headers
 
       constructor(body: unknown, init?: { headers?: Record<string, string>; status?: number }) {
         this.body = body
         this.status = init?.status ?? 200
-        this.headers = init?.headers ?? {}
+        this.headers = new Headers(init?.headers)
       }
 
       async json() {
@@ -90,6 +90,17 @@ describe('GET /api/export-download', () => {
     expect(global.fetch).not.toHaveBeenCalled()
   })
 
+  it('rejects attacker-amazonaws.com (substring bypass attempt)', async () => {
+    mockGetServerSession.mockResolvedValueOnce({ sub: 'user-1', email: 'test@psd401.net' })
+
+    const res = await GET(makeRequest('https://attacker-amazonaws.com/data.csv') as never)
+
+    const body = await res.json()
+    expect(res.status).toBe(400)
+    expect(body.error).toMatch(/invalid export url/i)
+    expect(global.fetch).not.toHaveBeenCalled()
+  })
+
   it('rejects http:// S3 URLs', async () => {
     mockGetServerSession.mockResolvedValueOnce({ sub: 'user-1', email: 'test@psd401.net' })
 
@@ -114,7 +125,7 @@ describe('GET /api/export-download', () => {
     const res = await GET(makeRequest(s3Url) as never)
 
     expect(res.status).toBe(200)
-    expect(res.headers['Content-Disposition']).toMatch(/attachment.*filename.*query\.csv/)
+    expect(res.headers.get('Content-Disposition')).toMatch(/attachment.*filename.*query\.csv/)
   })
 
   it('returns 410 when presigned URL has expired (S3 returns 403)', async () => {
@@ -146,12 +157,12 @@ describe('GET /api/export-download', () => {
     const res = await GET(makeRequest(s3Url) as never)
 
     expect(res.status).toBe(200)
-    expect(res.headers['Content-Type']).toBe('text/csv; charset=utf-8')
-    expect(res.headers['Content-Disposition']).toBe(
+    expect(res.headers.get('Content-Type')).toBe('text/csv; charset=utf-8')
+    expect(res.headers.get('Content-Disposition')).toBe(
       'attachment; filename="student-counts-2026.csv"'
     )
-    expect(res.headers['Cache-Control']).toBe('no-store')
-    expect(res.headers['X-Content-Type-Options']).toBe('nosniff')
+    expect(res.headers.get('Cache-Control')).toBe('no-store')
+    expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff')
   })
 
   it('forces text/csv even when S3 returns a different Content-Type', async () => {
@@ -168,8 +179,8 @@ describe('GET /api/export-download', () => {
     const res = await GET(makeRequest(s3Url) as never)
 
     expect(res.status).toBe(200)
-    expect(res.headers['Content-Type']).toBe('text/csv; charset=utf-8')
-    expect(res.headers['X-Content-Type-Options']).toBe('nosniff')
+    expect(res.headers.get('Content-Type')).toBe('text/csv; charset=utf-8')
+    expect(res.headers.get('X-Content-Type-Options')).toBe('nosniff')
   })
 
   it('returns 413 when S3 Content-Length exceeds the 50 MB cap', async () => {
@@ -188,5 +199,17 @@ describe('GET /api/export-download', () => {
     const body = await res.json()
     expect(res.status).toBe(413)
     expect(body.error).toMatch(/too large/i)
+  })
+
+  it('returns 502 when upstream fetch throws a network error', async () => {
+    mockGetServerSession.mockResolvedValueOnce({ sub: 'user-1', email: 'test@psd401.net' })
+    ;(global.fetch as jest.Mock).mockRejectedValueOnce(new TypeError('Failed to fetch'))
+
+    const s3Url = 'https://bucket.s3.amazonaws.com/exports/data.csv?X-Amz-Credential=xxx'
+    const res = await GET(makeRequest(s3Url) as never)
+
+    const body = await res.json()
+    expect(res.status).toBe(502)
+    expect(body.error).toMatch(/failed to fetch/i)
   })
 })
