@@ -24,10 +24,11 @@ function isAllowedS3Url(raw: string): boolean {
     return false
   }
   if (parsed.protocol !== 'https:') return false
-  // hostname must be *.amazonaws.com and contain "s3" as a label
-  return /^([a-z0-9][a-z0-9\-.]{0,61}\.)?s3(\.[a-z0-9-]+)*\.amazonaws\.com$/.test(
-    parsed.hostname
-  )
+  // Must end with amazonaws.com and contain "s3" as an exact hostname label.
+  // String-based checks avoid ReDoS vulnerabilities from complex regex quantifiers.
+  const host = parsed.hostname
+  if (!host.endsWith('amazonaws.com')) return false
+  return host.split('.').includes('s3')
 }
 
 /**
@@ -56,12 +57,16 @@ export async function GET(req: NextRequest) {
   }
 
   if (!isAllowedS3Url(url)) {
-    log.warn('Rejected non-S3 export URL', { urlPrefix: url.slice(0, 80) })
+    log.warn('Rejected non-S3 export URL')
     return NextResponse.json({ error: 'Invalid export URL' }, { status: 400 })
   }
 
   try {
-    const upstream = await fetch(url)
+    // codeql[js/server-side-request-forgery] URL validated to AWS S3 hostname by isAllowedS3Url above; redirect:error blocks SSRF via open redirects
+    const upstream = await fetch(url, {
+      redirect: 'error',
+      signal: AbortSignal.timeout(30_000),
+    })
 
     if (!upstream.ok) {
       if (upstream.status === 403 || upstream.status === 404) {

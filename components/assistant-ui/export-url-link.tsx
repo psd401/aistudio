@@ -47,8 +47,8 @@ export function stripExportUrls(text: string): string {
  * failure mode documented for psd-image-gen and fixed in PR #934).
  *
  * Routing through /api/export-download lets the Next.js server fetch the
- * file from S3 — where there are no CORS restrictions and no STS token in
- * the browser — and stream it to the user.
+ * file from S3 — the browser never contacts S3 directly, so STS token
+ * mangling by network proxies and CORS restrictions do not apply.
  */
 function proxyDownloadUrl(presignedUrl: string): string {
   return `/api/export-download?url=${encodeURIComponent(presignedUrl)}`
