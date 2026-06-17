@@ -26,7 +26,7 @@ import { createLogger } from "@/lib/logger"
 const log = createLogger({ service: "skill-publish-pipeline" })
 
 const REGION = process.env.AWS_REGION || process.env.AWS_DEFAULT_REGION || "us-east-1"
-const ENVIRONMENT = process.env.ENVIRONMENT || process.env.NODE_ENV || "dev"
+const ENVIRONMENT = process.env.ENVIRONMENT || "dev"
 
 /**
  * Resolve the agent workspace bucket name. Wired into the ECS task as
@@ -116,8 +116,9 @@ export async function uploadSkillDraft(
   assertSafeKeyParts(ownerEmail, slug)
   const draftPrefix = `skills/user/${ownerEmail}/drafts/${slug}`
   const destinationPrefix = `skills/user/${ownerEmail}/approved/${slug}`
+  const safeOwnerEmail = ownerEmail.replace(/[^a-zA-Z0-9\s+=\-._ :/@]/g, "_")
   const tagging = `Environment=${ENVIRONMENT}&ManagedBy=cdk&Scope=draft&Owner=${encodeURIComponent(
-    ownerEmail
+    safeOwnerEmail
   )}`
 
   const s3 = getS3()

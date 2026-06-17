@@ -90,7 +90,7 @@ function toYamlScalar(value: string): string {
   const oneLine = value.replace(/\s*\n\s*/g, " ").trim()
   const needsQuoting =
     oneLine === "" ||
-    /^[\s>|!&*#?@`%"'\-[\]{},]/.test(oneLine) ||
+    /^[\s>|!&*#?@`%"'\-\[\]{},]/.test(oneLine) ||
     /:\s/.test(oneLine) ||
     /\s#/.test(oneLine) ||
     oneLine.endsWith(":")
@@ -147,9 +147,9 @@ function renderInputFields(fields: SerializerInputField[]): string {
   }
   const lines = ["| Field | Label | Type |", "| --- | --- | --- |"]
   for (const f of fields) {
-    const label = (f.label ?? "").replace(/\|/g, "\\|").trim() || "—"
-    const name = f.name.replace(/\|/g, "\\|")
-    const type = f.fieldType.replace(/\|/g, "\\|")
+    const label = (f.label ?? "").replace(/\\/g, "\\\\").replace(/\|/g, "\\|").trim() || "—"
+    const name = f.name.replace(/\\/g, "\\\\").replace(/\|/g, "\\|")
+    const type = f.fieldType.replace(/\\/g, "\\\\").replace(/\|/g, "\\|")
     lines.push(`| \`${name}\` | ${label} | ${type} |`)
   }
   return lines.join("\n")
@@ -170,7 +170,7 @@ function renderPrompts(prompts: SerializerPrompt[]): string {
     if (p.systemContext && p.systemContext.trim()) {
       parts.push(`**System context**\n\n${p.systemContext.trim()}`)
     }
-    parts.push(`**Prompt**\n\n${p.content.trim()}`)
+    parts.push(`**Prompt**\n\n${(p.content ?? "").trim()}`)
     const tools = Array.isArray(p.enabledTools) ? p.enabledTools.filter(Boolean) : []
     if (tools.length > 0) {
       parts.push(`**Tools:** ${tools.join(", ")}`)

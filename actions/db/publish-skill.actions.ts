@@ -80,6 +80,16 @@ export async function publishAssistantArchitectAsSkillAction(
     }
     const architect = architectResult.data
 
+    // Verify the caller owns this assistant before serializing its content.
+    if (architect.userId !== ownerUserId) {
+      log.warn("Publish attempt for unowned assistant", {
+        assistantId,
+        assistantOwnerId: architect.userId,
+        requestorId: ownerUserId,
+      })
+      throw ErrorFactories.authzInsufficientPermissions("publish this assistant")
+    }
+
     // 2. Serialize to SKILL.md.
     const serialized = serializeAssistantToSkill({
       name: architect.name,

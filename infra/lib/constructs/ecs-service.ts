@@ -404,7 +404,7 @@ export class EcsServiceConstruct extends Construct {
             // the skills/ prefix.
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
-              actions: ['s3:PutObject', 's3:GetObject'],
+              actions: ['s3:PutObject', 's3:PutObjectTagging', 's3:GetObject'],
               resources: [
                 `arn:aws:s3:::${agentWorkspaceBucketName}/skills/*`,
               ],
