@@ -17,6 +17,12 @@ export interface EcsServiceConstructProps {
   vpc: ec2.IVpc;
   environment: 'dev' | 'prod';
   documentsBucketName: string;
+  /**
+   * Agent workspace bucket name (holds published SKILL.md folders, #925).
+   * Passed as a cross-stack prop from AgentPlatformStack — same pattern as
+   * documentsBucketName — so the dependency + Export/Import is explicit.
+   */
+  agentWorkspaceBucketName: string;
   enableContainerInsights?: boolean;
   enableFargateSpot?: boolean;
   /**
@@ -133,7 +139,7 @@ export class EcsServiceConstruct extends Construct {
   constructor(scope: Construct, id: string, props: EcsServiceConstructProps) {
     super(scope, id);
 
-    const { vpc, environment, documentsBucketName } = props;
+    const { vpc, environment, documentsBucketName, agentWorkspaceBucketName } = props;
 
     // ============================================================================
     // ECR Repository for container images
@@ -387,6 +393,32 @@ export class EcsServiceConstruct extends Construct {
               actions: ['lambda:InvokeFunction'],
               resources: [
                 `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:aistudio-${environment}-schedule-executor`,
+                // Issue #925: skill-builder scans/promotes published skill drafts
+                `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
+              ],
+            }),
+            // Issue #925: write SKILL.md draft folders to the agent workspace
+            // bucket so the existing scan pipeline can pick them up. Scoped to
+            // the skills/ prefix.
+            //
+            // ListBucket must target the bucket ARN (not the object-prefix ARN);
+            // ListObjectsV2 (used by listSkillObjectKeys for the detail-page
+            // SKILL.md preview and the zip export) fails with AccessDenied
+            // without it. The s3:prefix condition keeps the grant scoped to the
+            // skills/ tree.
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: ['s3:ListBucket'],
+              resources: [`arn:aws:s3:::${agentWorkspaceBucketName}`],
+              conditions: {
+                StringLike: { 's3:prefix': ['skills/*'] },
+              },
+            }),
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: ['s3:PutObject', 's3:PutObjectTagging', 's3:GetObject'],
+              resources: [
+                `arn:aws:s3:::${agentWorkspaceBucketName}/skills/*`,
               ],
             }),
             new iam.PolicyStatement({
@@ -643,6 +675,12 @@ export class EcsServiceConstruct extends Construct {
         GUARDRAIL_VIOLATION_TOPIC_ARN: cdk.Fn.importValue(`${environment}-ViolationTopicArn`),
         CONTENT_SAFETY_ENABLED: 'true',
         PII_TOKENIZATION_ENABLED: 'true',
+        // Issue #925: Skill publishing pipeline. The agent workspace bucket
+        // (published to SSM by AgentPlatformStack) holds SKILL.md folders, and
+        // the skill-builder Lambda scans/promotes drafts. Both are optional at
+        // runtime — if absent, publishing falls back to a reviewable draft row.
+        AGENT_WORKSPACE_BUCKET: agentWorkspaceBucketName,
+        SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
       },
       // Secrets injected from Secrets Manager at runtime
       secrets: {

@@ -20,6 +20,7 @@ export interface FrontendStackEcsProps extends cdk.StackProps {
    */
   customSubdomain?: string;
   documentsBucketName?: string; // Optional for backward compatibility
+  agentWorkspaceBucketName?: string; // Optional for backward compatibility (#925)
   /**
    * If true, will look up existing VPC from database stack.
    * If false, will create a new VPC for ECS (not recommended - prefer VPC sharing)
@@ -62,6 +63,14 @@ export class FrontendStackEcs extends cdk.Stack {
     const documentsBucketName = props.documentsBucketName ||
       ssm.StringParameter.valueForStringParameter(
         this, `/aistudio/${environment}/documents-bucket-name`
+      );
+
+    // Agent workspace bucket (#925) — prefer the cross-stack prop from
+    // AgentPlatformStack; fall back to the SSM param for backward compatibility
+    // / partial deploys, mirroring documentsBucketName above.
+    const agentWorkspaceBucketName = props.agentWorkspaceBucketName ||
+      ssm.StringParameter.valueForStringParameter(
+        this, `/aistudio/${environment}/agent-workspace-bucket-name`
       );
 
     // ============================================================================
@@ -128,6 +137,7 @@ export class FrontendStackEcs extends cdk.Stack {
       vpc,
       environment,
       documentsBucketName,
+      agentWorkspaceBucketName,
       enableContainerInsights: true,
       enableFargateSpot: true, // Enable Fargate Spot for cost optimization
       spotRatio: environment === 'prod' ? 50 : 100, // 50% Spot in prod, 100% in dev

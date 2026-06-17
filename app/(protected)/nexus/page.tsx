@@ -65,6 +65,7 @@ interface ConversationRuntimeProviderProps {
   selectedModel: SelectAiModel | null
   enabledTools: string[]
   enabledConnectors: string[]
+  skillId?: string
   attachmentAdapter: AttachmentAdapter
   voiceAdapter?: RealtimeVoiceAdapter
   initialMessages?: UIMessage[]
@@ -84,6 +85,7 @@ function ConversationRuntimeProvider({
   selectedModel,
   enabledTools,
   enabledConnectors,
+  skillId,
   attachmentAdapter,
   voiceAdapter,
   initialMessages = [],
@@ -317,6 +319,8 @@ function ConversationRuntimeProvider({
           provider: model.provider,
           enabledTools,
           enabledConnectors,
+          // Bind the session to a skill so the server enforces its allowed-tools pin (#925).
+          skillId,
           conversationId: conversationIdRef.current || undefined
         }
       }
@@ -346,6 +350,7 @@ interface NexusRuntimeWrapperProps {
   selectedModel: SelectAiModel | null
   enabledTools: string[]
   enabledConnectors: string[]
+  skillId?: string
   attachmentAdapter: AttachmentAdapter
   voiceAvailable: boolean
   voiceUnavailableReason?: string
@@ -364,6 +369,7 @@ function NexusRuntimeWrapper({
   selectedModel,
   enabledTools,
   enabledConnectors,
+  skillId,
   attachmentAdapter,
   voiceAvailable,
   voiceUnavailableReason,
@@ -443,6 +449,7 @@ function NexusRuntimeWrapper({
       selectedModel={selectedModel}
       enabledTools={enabledTools}
       enabledConnectors={enabledConnectors}
+      skillId={skillId}
       attachmentAdapter={attachmentAdapter}
       voiceAdapter={voiceAdapter}
       initialMessages={initialMessages}
@@ -527,6 +534,13 @@ function NexusPageContent() {
       log.warn('URL connector params truncated or filtered', { rawCount: raw.length, validCount: validated.length })
     }
     return validated
+  }, [searchParams])
+
+  // Skill binding (#925): when arriving from a skill's "Use in chat" action, the
+  // session is bound to the skill so the server enforces its allowed-tools pin.
+  const urlSkillId = useMemo(() => {
+    const raw = searchParams.get('skillId')
+    return raw && uuidSchema.safeParse(raw).success ? raw : undefined
   }, [searchParams])
 
   // Load models and manage model selection
@@ -752,6 +766,7 @@ function NexusPageContent() {
                         selectedModel={selectedModel}
                         enabledTools={enabledTools}
                         enabledConnectors={enabledConnectors}
+                        skillId={urlSkillId}
                         attachmentAdapter={attachmentAdapter}
                         voiceAvailable={voiceAvailability.available}
                         voiceUnavailableReason={!voiceAvailability.available && !voiceAvailability.loading ? voiceAvailability.reason : undefined}
