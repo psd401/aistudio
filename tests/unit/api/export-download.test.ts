@@ -146,10 +146,47 @@ describe('GET /api/export-download', () => {
     const res = await GET(makeRequest(s3Url) as never)
 
     expect(res.status).toBe(200)
-    expect(res.headers['Content-Type']).toContain('text/csv')
+    expect(res.headers['Content-Type']).toBe('text/csv; charset=utf-8')
     expect(res.headers['Content-Disposition']).toBe(
       'attachment; filename="student-counts-2026.csv"'
     )
     expect(res.headers['Cache-Control']).toBe('no-store')
+    expect(res.headers['X-Content-Type-Options']).toBe('nosniff')
+  })
+
+  it('forces text/csv even when S3 returns a different Content-Type', async () => {
+    mockGetServerSession.mockResolvedValueOnce({ sub: 'user-1', email: 'test@psd401.net' })
+    ;(global.fetch as jest.Mock).mockResolvedValueOnce(
+      new Response('<html>injected</html>', {
+        status: 200,
+        // S3 object metadata can be set by whoever uploaded the object
+        headers: { 'Content-Type': 'text/html', 'Content-Length': '21' },
+      })
+    )
+
+    const s3Url = 'https://bucket.s3.amazonaws.com/exports/data.csv?X-Amz-Credential=xxx'
+    const res = await GET(makeRequest(s3Url) as never)
+
+    expect(res.status).toBe(200)
+    expect(res.headers['Content-Type']).toBe('text/csv; charset=utf-8')
+    expect(res.headers['X-Content-Type-Options']).toBe('nosniff')
+  })
+
+  it('returns 413 when S3 Content-Length exceeds the 50 MB cap', async () => {
+    mockGetServerSession.mockResolvedValueOnce({ sub: 'user-1', email: 'test@psd401.net' })
+    const bigSize = 51 * 1024 * 1024 // 51 MB
+    ;(global.fetch as jest.Mock).mockResolvedValueOnce(
+      new Response('data', {
+        status: 200,
+        headers: { 'Content-Type': 'text/csv', 'Content-Length': String(bigSize) },
+      })
+    )
+
+    const s3Url = 'https://bucket.s3.amazonaws.com/exports/huge.csv?X-Amz-Credential=xxx'
+    const res = await GET(makeRequest(s3Url) as never)
+
+    const body = await res.json()
+    expect(res.status).toBe(413)
+    expect(body.error).toMatch(/too large/i)
   })
 })

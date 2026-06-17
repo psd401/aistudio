@@ -6,6 +6,9 @@ export const runtime = 'nodejs'
 // Exports can be large CSVs; allow up to 2 minutes before ALB times out.
 export const maxDuration = 120
 
+// 50 MB hard cap — prevents a single large export from exhausting ECS task memory.
+const MAX_EXPORT_BYTES = 50 * 1024 * 1024
+
 /**
  * Validates that the URL is a legitimate AWS S3 presigned URL.
  *
@@ -77,22 +80,34 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: 'Failed to fetch export file' }, { status: 502 })
     }
 
+    // Reject oversized exports before streaming to avoid exhausting ECS task memory.
+    const contentLength = upstream.headers.get('Content-Length')
+    if (contentLength && Number(contentLength) > MAX_EXPORT_BYTES) {
+      log.warn('Export too large to proxy', { bytes: contentLength })
+      timer({ status: 'too-large' })
+      return NextResponse.json(
+        { error: `Export is too large to download via the browser (max ${MAX_EXPORT_BYTES / 1024 / 1024} MB). Contact support.` },
+        { status: 413 }
+      )
+    }
+
     // Derive a sensible filename from the S3 object key.
     const s3Path = new URL(url).pathname
     const rawFilename = s3Path.split('/').pop() || 'export.csv'
-    // Strip any query-string remnant and sanitize
+    // Strip any query-string remnant and sanitize (allowlist: alphanumeric, dots, hyphens, underscores)
     const filename = rawFilename.replace(/[^a-zA-Z0-9._-]/g, '_').slice(0, 200) || 'export.csv'
 
-    const contentType = upstream.headers.get('Content-Type') || 'text/csv; charset=utf-8'
-    const contentLength = upstream.headers.get('Content-Length')
-
     timer({ status: 'success' })
-    log.info('Export proxied successfully', { filename, contentType })
+    log.info('Export proxied successfully', { filename, contentLength })
 
+    // Force text/csv regardless of what S3 reports — the upstream Content-Type
+    // is attacker-influenced (object owner controls object metadata). Passthrough
+    // would let an html/js payload be delivered with an executable MIME type.
     const headers: Record<string, string> = {
-      'Content-Type': contentType,
+      'Content-Type': 'text/csv; charset=utf-8',
       'Content-Disposition': `attachment; filename="${filename}"`,
       'Cache-Control': 'no-store',
+      'X-Content-Type-Options': 'nosniff',
     }
     if (contentLength) headers['Content-Length'] = contentLength
 
