@@ -9,7 +9,7 @@
  * the method is a pure lookup table with no side effects.
  */
 
-import { jest } from '@jest/globals';
+import { describe, it, expect, jest } from '@jest/globals';
 
 // HybridDocumentAdapter imports client-logger at module level.
 // Mock it to prevent Node-environment issues with browser-only APIs.

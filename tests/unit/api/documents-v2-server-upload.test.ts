@@ -103,7 +103,11 @@ function makeFakeFile(name: string, type: string, sizeBytes = 1024): File {
 function buildUploadRequest(file: File, extra?: Record<string, string>): NextRequest {
   const formData = new FormData();
   formData.append('file', file);
-  formData.append('purpose', 'chat');
+  // Only append the default purpose if the caller hasn't overridden it — FormData.get()
+  // returns the first value, so appending a default before the override would shadow it.
+  if (!extra?.purpose) {
+    formData.append('purpose', 'chat');
+  }
   if (extra) {
     for (const [k, v] of Object.entries(extra)) {
       formData.append(k, v);
@@ -311,9 +315,11 @@ describe('POST /api/documents/v2/upload', () => {
 
       const req = buildUploadRequest(makeFakeFile('doc.pdf', 'application/pdf'));
       const res = await POST(req);
+      const dynBody = await res.json();
 
-      // dynamodb error matches the fallback UPLOAD_FAILED pattern
-      expect(res.status).toBeGreaterThanOrEqual(500);
+      // 'DynamoDB connection failed' matches the 'dynamodb' ERROR_PATTERN → JOB_SERVICE_UNAVAILABLE (503)
+      expect(res.status).toBe(503);
+      expect(dynBody.code).toBe('JOB_SERVICE_UNAVAILABLE');
     });
   });
 });

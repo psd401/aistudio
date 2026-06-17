@@ -62,7 +62,8 @@ jest.mock('@/lib/services/document-job-service', () => ({
 
 jest.mock('@/lib/aws/document-upload', () => ({
   generatePresignedUrl: jest.fn(),
-  generateMultipartUrls: jest.fn()
+  generateMultipartUrls: jest.fn(),
+  sanitizeFileName: jest.fn((name: string) => name),
 }));
 
 jest.mock('@/lib/aws/lambda-trigger', () => ({
