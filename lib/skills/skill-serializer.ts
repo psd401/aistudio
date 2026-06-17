@@ -90,7 +90,7 @@ function toYamlScalar(value: string): string {
   const oneLine = value.replace(/\s*\n\s*/g, " ").trim()
   const needsQuoting =
     oneLine === "" ||
-    /^[\s>|!&*#?@`%"'\-\[\]{},]/.test(oneLine) ||
+    /^[\s>|!&*#?@`%"'\-[\]{},]/.test(oneLine) ||
     /:\s/.test(oneLine) ||
     /\s#/.test(oneLine) ||
     oneLine.endsWith(":")
