@@ -4,6 +4,7 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import Image from 'next/image';
 import Link from 'next/link';
 import { useSession } from 'next-auth/react';
+import type { Session } from 'next-auth';
 import { motion, AnimatePresence } from 'framer-motion';
 import { LogOut, Settings, Bug, LucideIcon, Image as ImageIcon, X } from 'lucide-react';
 import { ScrollArea } from '@/components/ui/scroll-area';
@@ -365,7 +366,7 @@ function readFileAsDataUrl(file: File): Promise<string> {
   });
 }
 
-function collectBugReportMetadata(userDescription: string, steps: string, consoleErrors: string[], isAuthenticated: boolean): string {
+function collectBugReportMetadata(userDescription: string, steps: string, consoleErrors: string[], session: Session | null | undefined): string {
   const sections: string[] = [];
 
   // User description - escape HTML
@@ -407,11 +408,17 @@ function collectBugReportMetadata(userDescription: string, steps: string, consol
     sections.push(`Pixel Ratio: ${window.devicePixelRatio}`);
   }
 
-  // Session - use isAuthenticated param instead of localStorage
+  // Session info
   sections.push('<br><br><strong>=== SESSION INFO ===</strong>');
   sections.push(`Timestamp: ${new Date().toISOString()}`);
   sections.push(`Timezone: ${Intl.DateTimeFormat().resolvedOptions().timeZone}`);
-  sections.push(`Authenticated: ${isAuthenticated ? 'Yes' : 'No'}`);
+  sections.push(`Authenticated: ${session ? 'Yes' : 'No'}`);
+  if (session?.user) {
+    sections.push(`User Email: ${escapeHtml(session.user.email ?? 'N/A')}`);
+    const displayName = session.user.name ?? [session.user.givenName, session.user.familyName].filter(Boolean).join(' ') || 'N/A';
+    sections.push(`User Name: ${escapeHtml(displayName)}`);
+    sections.push(`User ID: ${escapeHtml(session.user.id ?? 'N/A')}`);
+  }
   if (typeof window !== 'undefined' && window.localStorage) {
     sections.push(`Local Storage Items: ${window.localStorage.length}`);
   }
@@ -532,7 +539,7 @@ function BugReportModal({ isExpanded }: BugReportModalProps) {
       const steps = stepsEl instanceof HTMLTextAreaElement ? stepsEl.value : '';
 
       // Build rich description with all metadata
-      const fullDescription = collectBugReportMetadata(descriptionText, steps, consoleErrors, !!session);
+      const fullDescription = collectBugReportMetadata(descriptionText, steps, consoleErrors, session);
 
       const formData = new FormData();
       formData.append('title', title);

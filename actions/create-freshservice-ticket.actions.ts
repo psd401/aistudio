@@ -148,6 +148,10 @@ export async function createFreshserviceTicketAction(
       freshserviceFormData.append('subject', title)
       freshserviceFormData.append('description', description)
       freshserviceFormData.append('email', session.email || 'noreply@psd401.org')
+      const multipartRequesterName = [session.givenName, session.familyName].filter(Boolean).join(' ').trim()
+      if (multipartRequesterName) {
+        freshserviceFormData.append('name', multipartRequesterName)
+      }
       freshserviceFormData.append('priority', settings.priority)
       freshserviceFormData.append('status', settings.status)
       freshserviceFormData.append('department_id', settings.departmentId)
@@ -190,6 +194,12 @@ export async function createFreshserviceTicketAction(
         type: settings.ticketType
       }
       
+      // Add requester name if available
+      const jsonRequesterName = [session.givenName, session.familyName].filter(Boolean).join(' ').trim()
+      if (jsonRequesterName) {
+        ticketData.name = jsonRequesterName
+      }
+
       // Add workspace_id for JSON requests
       if (settings.workspaceId) {
         ticketData.workspace_id = Number.parseInt(settings.workspaceId)
