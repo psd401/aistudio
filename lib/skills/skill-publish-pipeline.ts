@@ -22,6 +22,7 @@ import {
 } from "@aws-sdk/client-s3"
 import { LambdaClient, InvokeCommand } from "@aws-sdk/client-lambda"
 import { createLogger } from "@/lib/logger"
+import { getSetting } from "@/lib/settings-manager"
 
 const log = createLogger({ service: "skill-publish-pipeline" })
 
@@ -32,17 +33,22 @@ const ENVIRONMENT = process.env.ENVIRONMENT || "dev"
  * Resolve the agent workspace bucket name. Wired into the ECS task as
  * AGENT_WORKSPACE_BUCKET (mirrors infra SSM /aistudio/{env}/agent-workspace-bucket-name).
  */
-export function getSkillsBucket(): string | null {
+export async function getSkillsBucket(): Promise<string | null> {
+  // Settings table is canonical (admin-configurable, no redeploy). getSetting
+  // falls back to the AGENT_WORKSPACE_BUCKET env var — CDK-injected on ECS,
+  // set in .env.local for local dev.
   return (
-    process.env.AGENT_WORKSPACE_BUCKET ||
-    process.env.WORKSPACE_BUCKET ||
+    (await getSetting("AGENT_WORKSPACE_BUCKET")) ||
+    (await getSetting("WORKSPACE_BUCKET")) ||
     null
   )
 }
 
 /** Resolve the skill-builder Lambda ARN if it has been provisioned to ECS. */
-export function getSkillBuilderLambdaArn(): string | null {
-  return process.env.SKILL_BUILDER_LAMBDA_ARN || null
+export async function getSkillBuilderLambdaArn(): Promise<string | null> {
+  // Settings table first, env fallback (CDK-injected on ECS). Absent ⇒ the scan
+  // invoke is skipped and the skill stays a reviewable draft.
+  return (await getSetting("SKILL_BUILDER_LAMBDA_ARN")) || null
 }
 
 export interface SkillFile {
@@ -104,7 +110,7 @@ function getS3(): S3Client {
 export async function uploadSkillDraft(
   params: UploadSkillParams
 ): Promise<UploadSkillResult> {
-  const bucket = getSkillsBucket()
+  const bucket = await getSkillsBucket()
   if (!bucket) {
     throw new Error(
       "Agent workspace bucket is not configured (AGENT_WORKSPACE_BUCKET). " +
@@ -158,7 +164,7 @@ export interface InvokeScanParams {
 export async function invokeSkillScan(
   params: InvokeScanParams
 ): Promise<boolean> {
-  const arn = getSkillBuilderLambdaArn()
+  const arn = await getSkillBuilderLambdaArn()
   if (!arn) {
     log.info("Skill-builder Lambda ARN not configured; skill stays as pending draft", {
       skillId: params.skillId,
@@ -207,8 +213,8 @@ export interface DownloadedSkillFile {
   content: string
 }
 
-function requireBucket(): string {
-  const bucket = getSkillsBucket()
+async function requireBucket(): Promise<string> {
+  const bucket = await getSkillsBucket()
   if (!bucket) {
     throw new Error(
       "Agent workspace bucket is not configured (AGENT_WORKSPACE_BUCKET). " +
@@ -224,7 +230,7 @@ function requireBucket(): string {
  * build artifacts from the scan pipeline, not part of the authored skill folder.
  */
 export async function listSkillObjectKeys(s3Prefix: string): Promise<string[]> {
-  const bucket = requireBucket()
+  const bucket = await requireBucket()
   const s3 = getS3()
   const prefix = s3Prefix.endsWith("/") ? s3Prefix : `${s3Prefix}/`
   const keys: string[] = []
@@ -252,7 +258,7 @@ export async function listSkillObjectKeys(s3Prefix: string): Promise<string[]> {
 
 /** Download a single S3 object as UTF-8 text. */
 export async function downloadSkillObject(key: string): Promise<string> {
-  const bucket = requireBucket()
+  const bucket = await requireBucket()
   const s3 = getS3()
   const res = await s3.send(
     new GetObjectCommand({ Bucket: bucket, Key: key })
