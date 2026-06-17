@@ -100,6 +100,14 @@ function getS3(): S3Client {
   return s3ClientSingleton
 }
 
+let lambdaClientSingleton: LambdaClient | null = null
+function getLambda(): LambdaClient {
+  if (!lambdaClientSingleton) {
+    lambdaClientSingleton = new LambdaClient({ region: REGION })
+  }
+  return lambdaClientSingleton
+}
+
 /**
  * Upload a serialized skill folder to the draft prefix in the workspace bucket.
  * Tags objects identically to the infra author flow so existing lifecycle and
@@ -173,7 +181,7 @@ export async function invokeSkillScan(
   }
 
   try {
-    const client = new LambdaClient({ region: REGION })
+    const client = getLambda()
     await client.send(
       new InvokeCommand({
         FunctionName: arn,
@@ -205,6 +213,14 @@ export async function invokeSkillScan(
 // These read from the SAME workspace bucket the publish flow writes to, NOT the
 // documents bucket that lib/aws/s3-client.ts targets.
 // ---------------------------------------------------------------------------
+
+/**
+ * Bounds on a single skill's exportable folder. Only clean-scanned approved
+ * skills reach the zip export, so these are guardrails against a pathological /
+ * corrupted folder spiking ECS task memory — not a product limit on authoring.
+ */
+export const MAX_EXPORT_FILES = 50
+export const MAX_EXPORT_TOTAL_BYTES = 10 * 1024 * 1024 // 10 MB
 
 export interface DownloadedSkillFile {
   /** Relative path within the skill folder, e.g. "SKILL.md". */
@@ -307,11 +323,33 @@ export async function downloadSkillFolder(
 ): Promise<DownloadedSkillFile[]> {
   const prefix = s3Prefix.endsWith("/") ? s3Prefix : `${s3Prefix}/`
   const keys = await listSkillObjectKeys(s3Prefix)
+
+  // Cap file count before fanning out the downloads so a folder with thousands
+  // of objects cannot issue thousands of concurrent GetObject calls.
+  if (keys.length > MAX_EXPORT_FILES) {
+    throw new Error(
+      `Skill folder has ${keys.length} files, exceeding the export limit of ${MAX_EXPORT_FILES}.`
+    )
+  }
+
   const files = await Promise.all(
     keys.map(async (key) => ({
       path: key.slice(prefix.length),
       content: await downloadSkillObject(key),
     }))
   )
+
+  // Cap total decoded size so an oversized folder cannot spike ECS task memory
+  // while the zip is built in-memory.
+  const totalBytes = files.reduce(
+    (sum, f) => sum + Buffer.byteLength(f.content, "utf-8"),
+    0
+  )
+  if (totalBytes > MAX_EXPORT_TOTAL_BYTES) {
+    throw new Error(
+      `Skill folder is ${totalBytes} bytes, exceeding the export limit of ${MAX_EXPORT_TOTAL_BYTES} bytes.`
+    )
+  }
+
   return files
 }

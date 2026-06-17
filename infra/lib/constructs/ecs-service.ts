@@ -402,6 +402,20 @@ export class EcsServiceConstruct extends Construct {
             // Issue #925: write SKILL.md draft folders to the agent workspace
             // bucket so the existing scan pipeline can pick them up. Scoped to
             // the skills/ prefix.
+            //
+            // ListBucket must target the bucket ARN (not the object-prefix ARN);
+            // ListObjectsV2 (used by listSkillObjectKeys for the detail-page
+            // SKILL.md preview and the zip export) fails with AccessDenied
+            // without it. The s3:prefix condition keeps the grant scoped to the
+            // skills/ tree.
+            new iam.PolicyStatement({
+              effect: iam.Effect.ALLOW,
+              actions: ['s3:ListBucket'],
+              resources: [`arn:aws:s3:::${agentWorkspaceBucketName}`],
+              conditions: {
+                StringLike: { 's3:prefix': ['skills/*'] },
+              },
+            }),
             new iam.PolicyStatement({
               effect: iam.Effect.ALLOW,
               actions: ['s3:PutObject', 's3:PutObjectTagging', 's3:GetObject'],

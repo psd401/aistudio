@@ -180,6 +180,9 @@ export async function publishAssistantArchitectAsSkillAction(
           slug: serialized.slug,
           allowedTools: serialized.allowedTools,
           s3Key: draftPrefix,
+          // Record the promotion target so an admin can re-trigger the scan
+          // Lambda without reconstructing the path from the draft prefix.
+          destinationPrefix,
         },
       })
 
