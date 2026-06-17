@@ -55,8 +55,9 @@ jest.mock('@/lib/auth/server-session', () => ({
 
 jest.mock('@/lib/services/document-job-service', () => ({
   createDocumentJob: jest.fn(),
-  getJobStatus: jest.fn(), 
-  confirmDocumentUpload: jest.fn()
+  getJobStatus: jest.fn(),
+  confirmDocumentUpload: jest.fn(),
+  fetchResultFromS3: jest.fn(),
 }));
 
 jest.mock('@/lib/aws/document-upload', () => ({
@@ -94,7 +95,7 @@ afterEach(() => {
   mockGetSignedUrl.mockReset();
 });
 
-describe.skip('Documents v2 API Routes', () => {
+describe('Documents v2 API Routes', () => {
   const mockSession = {
     sub: 'user-123',
     userId: 'user-123',
