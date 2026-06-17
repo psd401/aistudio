@@ -63,9 +63,11 @@ export async function GET(req: NextRequest) {
   }
 
   try {
+    // AbortSignal.timeout fires after 30s of inactivity on the *entire* fetch lifecycle
+    // (connection + headers + body streaming). For large CSVs this may abort mid-transfer.
+    // The outer maxDuration=120 is the true streaming ceiling; 30s guards hung connections.
     const upstream = await fetch(url, {
       redirect: 'error',
-      // Inner 30s timeout guards S3 response start; outer maxDuration=120 covers total stream time.
       signal: AbortSignal.timeout(30_000),
     }) // codeql[js/server-side-request-forgery] URL validated to AWS S3 hostname by isAllowedS3Url; redirect:error blocks SSRF via open redirects
 
@@ -86,7 +88,9 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: 'Failed to fetch export file' }, { status: 502 })
     }
 
-    // Reject oversized exports before streaming to avoid exhausting ECS task memory.
+    // Reject oversized exports before streaming to protect ECS task memory.
+    // Content-Length guard covers the common case; the TransformStream counter below
+    // catches chunked responses where S3 omits Content-Length.
     const contentLength = upstream.headers.get('Content-Length')
     if (contentLength && Number(contentLength) > MAX_EXPORT_BYTES) {
       log.warn('Export too large to proxy', { bytes: contentLength, userId })
@@ -117,7 +121,22 @@ export async function GET(req: NextRequest) {
     }
     if (contentLength) headers['Content-Length'] = contentLength
 
-    return new NextResponse(upstream.body, { headers })
+    // Byte-counter TransformStream: enforces the size cap during streaming even
+    // when S3 uses chunked transfer encoding and omits Content-Length.
+    let bytesSeen = 0
+    const sizeLimiter = new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        bytesSeen += chunk.byteLength
+        if (bytesSeen > MAX_EXPORT_BYTES) {
+          controller.error(new Error('TOO_LARGE'))
+        } else {
+          controller.enqueue(chunk)
+        }
+      },
+    })
+
+    const limitedBody = upstream.body ? upstream.body.pipeThrough(sizeLimiter) : null
+    return new NextResponse(limitedBody, { headers })
   } catch (err) {
     timer({ status: 'error' })
     log.error('Export download failed', {

@@ -1,3 +1,10 @@
+/**
+ * @jest-environment node
+ *
+ * Must run in Node environment: the route uses AbortSignal.timeout() which is
+ * a Node 17.3+ built-in and is not available in jsdom.
+ */
+
 jest.mock('@/lib/auth/server-session', () => ({
   getServerSession: jest.fn(),
 }))
@@ -211,5 +218,20 @@ describe('GET /api/export-download', () => {
     const body = await res.json()
     expect(res.status).toBe(502)
     expect(body.error).toMatch(/failed to fetch/i)
+  })
+
+  it('streams response body when Content-Length is absent (chunked transfer)', async () => {
+    mockGetServerSession.mockResolvedValueOnce({ sub: 'user-1', email: 'test@psd401.net' })
+    const csvContent = 'a,b\n1,2'
+    ;(global.fetch as jest.Mock).mockResolvedValueOnce(
+      // No Content-Length header — simulates chunked transfer encoding
+      new Response(csvContent, { status: 200, headers: { 'Content-Type': 'text/csv' } })
+    )
+
+    const s3Url = 'https://bucket.s3.amazonaws.com/exports/data.csv?X-Amz-Credential=xxx'
+    const res = await GET(makeRequest(s3Url) as never)
+
+    expect(res.status).toBe(200)
+    expect(res.headers.get('Content-Type')).toBe('text/csv; charset=utf-8')
   })
 })
