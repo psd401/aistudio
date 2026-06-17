@@ -64,6 +64,26 @@ export interface UploadSkillResult {
   destinationPrefix: string
 }
 
+/** RFC-lite email check (mirrors infra common.js validateUserEmail). */
+const EMAIL_RE = /^[^\s@/]+@[^\s@/]+\.[^\s@/]+$/
+/** S3/path-safe slug check (mirrors infra common.js SAFE_NAME_RE). */
+const SAFE_SLUG_RE = /^[a-zA-Z0-9_.-]+$/
+
+/**
+ * Validate the components that flow into the S3 key. Both are validated again
+ * here (defense in depth) even though the serializer produces a safe slug and
+ * the email comes from the authenticated session — neither must ever be able
+ * to inject "/" or ".." into the object key.
+ */
+function assertSafeKeyParts(ownerEmail: string, slug: string): void {
+  if (!EMAIL_RE.test(ownerEmail) || ownerEmail.includes("..")) {
+    throw new Error(`Invalid owner email for skill S3 key: "${ownerEmail}"`)
+  }
+  if (!SAFE_SLUG_RE.test(slug) || slug.includes("..")) {
+    throw new Error(`Invalid skill slug for S3 key: "${slug}"`)
+  }
+}
+
 let s3ClientSingleton: S3Client | null = null
 function getS3(): S3Client {
   if (!s3ClientSingleton) {
@@ -91,6 +111,7 @@ export async function uploadSkillDraft(
   }
 
   const { ownerEmail, slug, files } = params
+  assertSafeKeyParts(ownerEmail, slug)
   const draftPrefix = `skills/user/${ownerEmail}/drafts/${slug}`
   const destinationPrefix = `skills/user/${ownerEmail}/approved/${slug}`
   const tagging = `Environment=${ENVIRONMENT}&ManagedBy=cdk&Scope=draft&Owner=${encodeURIComponent(
