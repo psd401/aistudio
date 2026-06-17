@@ -151,7 +151,7 @@ describe('POST /api/documents/v2/upload', () => {
   // -----------------------------------------------------------------------
   describe('authentication', () => {
     it('returns 401 when there is no session (unauthenticated user)', async () => {
-      (getServerSession as jest.Mock<unknown>).mockResolvedValue(null);
+      (getServerSession as unknown as jest.Mock).mockResolvedValue(null);
 
       const req = buildUploadRequest(makeFakeFile('test.pdf', 'application/pdf'));
       const res = await POST(req);
@@ -164,7 +164,7 @@ describe('POST /api/documents/v2/upload', () => {
 
     it('returns 401 when session exists but sub is missing or falsy', async () => {
       // This can happen mid-OAuth when Cognito hasn't yet issued the JWT sub claim
-      (getServerSession as jest.Mock<unknown>).mockResolvedValue({ user: { email: 'pending@example.com' } });
+      (getServerSession as unknown as jest.Mock).mockResolvedValue({ user: { email: 'pending@example.com' } });
 
       const req = buildUploadRequest(makeFakeFile('test.pdf', 'application/pdf'));
       const res = await POST(req);
@@ -175,7 +175,7 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('returns 401 when session.sub is an empty string', async () => {
-      (getServerSession as jest.Mock<unknown>).mockResolvedValue({ sub: '', user: {} });
+      (getServerSession as unknown as jest.Mock).mockResolvedValue({ sub: '', user: {} });
 
       const req = buildUploadRequest(makeFakeFile('doc.pdf', 'application/pdf'));
       const res = await POST(req);
@@ -186,7 +186,7 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('does NOT call createDocumentJob when auth fails', async () => {
-      (getServerSession as jest.Mock<unknown>).mockResolvedValue(null);
+      (getServerSession as unknown as jest.Mock).mockResolvedValue(null);
 
       const req = buildUploadRequest(makeFakeFile('test.pdf', 'application/pdf'));
       await POST(req);
@@ -195,7 +195,7 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('does NOT call uploadToS3 when auth fails', async () => {
-      (getServerSession as jest.Mock<unknown>).mockResolvedValue(null);
+      (getServerSession as unknown as jest.Mock).mockResolvedValue(null);
 
       const req = buildUploadRequest(makeFakeFile('test.pdf', 'application/pdf'));
       await POST(req);
@@ -209,7 +209,7 @@ describe('POST /api/documents/v2/upload', () => {
   // -----------------------------------------------------------------------
   describe('validation', () => {
     it('returns 400 when no file is provided', async () => {
-      (getServerSession as jest.Mock<unknown>).mockResolvedValue(SESSION_WITH_SUB);
+      (getServerSession as unknown as jest.Mock).mockResolvedValue(SESSION_WITH_SUB);
 
       const formData = new FormData();
       formData.append('purpose', 'chat');
@@ -223,7 +223,7 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('returns 400 for an unsupported purpose value', async () => {
-      (getServerSession as jest.Mock<unknown>).mockResolvedValue(SESSION_WITH_SUB);
+      (getServerSession as unknown as jest.Mock).mockResolvedValue(SESSION_WITH_SUB);
 
       // The Zod schema only allows 'chat' | 'repository' | 'assistant'
       const file = makeFakeFile('report.pdf', 'application/pdf', 100);
@@ -239,14 +239,14 @@ describe('POST /api/documents/v2/upload', () => {
   // -----------------------------------------------------------------------
   describe('successful upload', () => {
     beforeEach(() => {
-      (getServerSession as jest.Mock<unknown>).mockResolvedValue(SESSION_WITH_SUB);
-      (createDocumentJob as jest.Mock<unknown>).mockResolvedValue({ id: 'job-xyz' });
-      (uploadToS3 as jest.Mock<unknown>).mockResolvedValue({
+      (getServerSession as unknown as jest.Mock).mockResolvedValue(SESSION_WITH_SUB);
+      (createDocumentJob as unknown as jest.Mock).mockResolvedValue({ id: 'job-xyz' });
+      (uploadToS3 as unknown as jest.Mock).mockResolvedValue({
         s3Key: 'uploads/job-xyz/test.pdf',
         sanitizedFileName: 'test.pdf',
       });
-      (confirmDocumentUpload as jest.Mock<unknown>).mockResolvedValue(undefined);
-      (sendToProcessingQueue as jest.Mock<unknown>).mockResolvedValue(undefined);
+      (confirmDocumentUpload as unknown as jest.Mock).mockResolvedValue(undefined);
+      (sendToProcessingQueue as unknown as jest.Mock).mockResolvedValue(undefined);
     });
 
     it('returns 200 with jobId when upload succeeds', async () => {
@@ -291,12 +291,12 @@ describe('POST /api/documents/v2/upload', () => {
   // -----------------------------------------------------------------------
   describe('error handling', () => {
     beforeEach(() => {
-      (getServerSession as jest.Mock<unknown>).mockResolvedValue(SESSION_WITH_SUB);
+      (getServerSession as unknown as jest.Mock).mockResolvedValue(SESSION_WITH_SUB);
     });
 
     it('returns 503 when S3 upload fails with storage error', async () => {
-      (createDocumentJob as jest.Mock<unknown>).mockResolvedValue({ id: 'job-err' });
-      (uploadToS3 as jest.Mock<unknown>).mockRejectedValue(new Error('S3 upload to bucket failed'));
+      (createDocumentJob as unknown as jest.Mock).mockResolvedValue({ id: 'job-err' });
+      (uploadToS3 as unknown as jest.Mock).mockRejectedValue(new Error('S3 upload to bucket failed'));
 
       const req = buildUploadRequest(makeFakeFile('big.pdf', 'application/pdf'));
       const res = await POST(req);
@@ -307,8 +307,8 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('returns 500 when createDocumentJob throws an unexpected error', async () => {
-      (createDocumentJob as jest.Mock<unknown>).mockRejectedValue(new Error('DynamoDB connection failed'));
-      (uploadToS3 as jest.Mock<unknown>).mockResolvedValue({
+      (createDocumentJob as unknown as jest.Mock).mockRejectedValue(new Error('DynamoDB connection failed'));
+      (uploadToS3 as unknown as jest.Mock).mockResolvedValue({
         s3Key: 'uploads/job-err/test.pdf',
         sanitizedFileName: 'test.pdf',
       });
