@@ -66,10 +66,11 @@ export async function GET(req: NextRequest) {
     // AbortSignal.timeout fires after 30s of inactivity on the *entire* fetch lifecycle
     // (connection + headers + body streaming). For large CSVs this may abort mid-transfer.
     // The outer maxDuration=120 is the true streaming ceiling; 30s guards hung connections.
+    // codeql[js/server-side-request-forgery] URL validated to AWS S3 hostname by isAllowedS3Url before reaching fetch; redirect:error blocks SSRF via open redirects
     const upstream = await fetch(url, {
       redirect: 'error',
       signal: AbortSignal.timeout(30_000),
-    }) // codeql[js/server-side-request-forgery] URL validated to AWS S3 hostname by isAllowedS3Url; redirect:error blocks SSRF via open redirects
+    })
 
     if (!upstream.ok) {
       if (upstream.status === 403 || upstream.status === 404) {
