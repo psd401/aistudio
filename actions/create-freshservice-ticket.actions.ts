@@ -148,7 +148,8 @@ export async function createFreshserviceTicketAction(
       freshserviceFormData.append('subject', title)
       freshserviceFormData.append('description', description)
       freshserviceFormData.append('email', session.email || 'noreply@psd401.org')
-      const multipartRequesterName = [session.givenName, session.familyName].filter(Boolean).join(' ').trim()
+      const multipartSessionName = typeof session.name === 'string' ? session.name.trim() : ''
+      const multipartRequesterName = multipartSessionName || [session.givenName, session.familyName].filter(Boolean).join(' ').trim()
       if (multipartRequesterName) {
         freshserviceFormData.append('name', multipartRequesterName)
       }
@@ -194,8 +195,9 @@ export async function createFreshserviceTicketAction(
         type: settings.ticketType
       }
       
-      // Add requester name if available
-      const jsonRequesterName = [session.givenName, session.familyName].filter(Boolean).join(' ').trim()
+      // Add requester name if available — prefer combined name, fall back to given+family
+      const jsonSessionName = typeof session.name === 'string' ? session.name.trim() : ''
+      const jsonRequesterName = jsonSessionName || [session.givenName, session.familyName].filter(Boolean).join(' ').trim()
       if (jsonRequesterName) {
         ticketData.name = jsonRequesterName
       }
