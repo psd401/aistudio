@@ -102,6 +102,9 @@ export async function createFreshserviceTicketAction(
     
     let response: Response
 
+    const requesterName = (typeof session.name === 'string' ? session.name.trim() : '')
+      || [session.givenName, session.familyName].filter(Boolean).join(' ').trim()
+
     // Reconstruct screenshot from base64 data URL if provided
     const hasAttachment = screenshotData && screenshotData.startsWith('data:')
 
@@ -148,10 +151,8 @@ export async function createFreshserviceTicketAction(
       freshserviceFormData.append('subject', title)
       freshserviceFormData.append('description', description)
       freshserviceFormData.append('email', session.email || 'noreply@psd401.org')
-      const multipartSessionName = typeof session.name === 'string' ? session.name.trim() : ''
-      const multipartRequesterName = multipartSessionName || [session.givenName, session.familyName].filter(Boolean).join(' ').trim()
-      if (multipartRequesterName) {
-        freshserviceFormData.append('name', multipartRequesterName)
+      if (requesterName) {
+        freshserviceFormData.append('name', requesterName)
       }
       freshserviceFormData.append('priority', settings.priority)
       freshserviceFormData.append('status', settings.status)
@@ -195,11 +196,8 @@ export async function createFreshserviceTicketAction(
         type: settings.ticketType
       }
       
-      // Add requester name if available — prefer combined name, fall back to given+family
-      const jsonSessionName = typeof session.name === 'string' ? session.name.trim() : ''
-      const jsonRequesterName = jsonSessionName || [session.givenName, session.familyName].filter(Boolean).join(' ').trim()
-      if (jsonRequesterName) {
-        ticketData.name = jsonRequesterName
+      if (requesterName) {
+        ticketData.name = requesterName
       }
 
       // Add workspace_id for JSON requests
