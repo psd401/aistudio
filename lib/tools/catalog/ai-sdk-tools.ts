@@ -47,12 +47,11 @@ export type ToolCategory = 'search' | 'code' | 'analysis' | 'creative' | 'media'
 /**
  * UI/selection view of a chat tool, consumed by the Nexus tool selectors and
  * status indicator. `name` is the friendly key (e.g. `webSearch`) the UI and the
- * `enabledTools` list use. `tool` is a decorative placeholder — the executable
- * tool object is built per-request by `provider-native-tools.ts`, never from here.
+ * `enabledTools` list use. The executable tool object is built per-request by
+ * `provider-native-tools.ts`, never from here, so it is intentionally omitted.
  */
 export interface ToolConfig {
   name: string
-  tool: unknown
   requiredCapabilities: (keyof ModelCapabilities)[]
   displayName: string
   description: string
@@ -137,13 +136,14 @@ export const AI_SDK_TOOLS: readonly AiSdkToolDef[] = [
   },
 ]
 
-/** Map a canonical def to the UI `ToolConfig`. Caller guarantees `def.ui`. */
-function toToolConfig(def: AiSdkToolDef): ToolConfig {
-  // Non-null asserted: callers only pass `ui`-present defs.
-  const ui = def.ui!
+/** A canonical def known to carry UI metadata (selectable tools only). */
+type AiSdkToolDefWithUi = AiSdkToolDef & { ui: NonNullable<AiSdkToolDef['ui']> }
+
+/** Map a canonical selectable def to the UI `ToolConfig`. */
+function toToolConfig(def: AiSdkToolDefWithUi): ToolConfig {
+  const { ui } = def
   return {
     name: def.friendlyName,
-    tool: {},
     requiredCapabilities: ui.requiredCapabilities,
     displayName: ui.displayName,
     description: def.description,
@@ -157,7 +157,9 @@ function toToolConfig(def: AiSdkToolDef): ToolConfig {
  * full-list / lookup needs.
  */
 export function getSelectableToolConfigs(): ToolConfig[] {
-  return AI_SDK_TOOLS.filter((d) => d.ui).map(toToolConfig)
+  return AI_SDK_TOOLS.filter(
+    (d): d is AiSdkToolDefWithUi => d.ui !== undefined
+  ).map(toToolConfig)
 }
 
 /** Look up a selectable tool's `ToolConfig` by its friendly name. */

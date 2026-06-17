@@ -58,7 +58,15 @@ async function requireExecuteScope(
 ): Promise<NextResponse | null> {
   if (auth.scopes.includes(`assistant:${assistantId}:execute`)) return null
   const restScopes = await toolCatalogInstance.getRequiredScopes("assistants.execute", "rest")
-  return requireScope(auth, restScopes?.[0] ?? "assistants:execute", requestId)
+  // The REST surface may declare more than one required scope (all-of semantics).
+  // requireScope only checks a single scope, so enforce every returned scope —
+  // indexing [0] would silently drop any additional required scopes.
+  const scopesToCheck = restScopes?.length ? restScopes : ["assistants:execute"]
+  for (const scope of scopesToCheck) {
+    const scopeError = requireScope(auth, scope, requestId)
+    if (scopeError) return scopeError
+  }
+  return null
 }
 
 // ============================================

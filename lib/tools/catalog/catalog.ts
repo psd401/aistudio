@@ -215,6 +215,9 @@ export class ToolCatalog {
             outputSchema: r.outputSchema ?? undefined,
             surfaces: r.surfaces ?? [],
             requiredScopes: r.requiredScopes ?? [],
+            // No `surfaceScopes` here on purpose: per-surface scope overrides are
+            // a manifest (code-tool) concept and have no `tool_catalog` column.
+            // DB (assistant/skill) rows use the same scope on every surface.
             agentCallable: r.agentCallable,
             source: r.source,
             isActive: r.isActive,
@@ -319,7 +322,10 @@ export class ToolCatalog {
    *
    * Tools not present in the catalog are passed through unchanged — model-
    * capability filtering downstream still applies — so this never regresses an
-   * existing tool that has not yet been cataloged.
+   * existing tool that has not yet been cataloged. Names from non-`ai_sdk`
+   * surfaces (e.g. MCP wire names like `search_decisions`) are also unresolvable
+   * here and pass through; provider adapters ignore unrecognized names, so these
+   * are inert, but they do appear in the uncataloged pass-through log.
    *
    * @param requested - tool names the caller asked to enable.
    * @param scopes - the caller's granted scopes.
@@ -357,7 +363,10 @@ export class ToolCatalog {
         uncataloged.push(name);
         return true;
       }
-      return hasRequiredScopes(scopes, entry.requiredScopes);
+      // Route through requiredScopesForSurface (consistent with list() and
+      // dispatch()) so a future ai_sdk-surface scope override is honored rather
+      // than silently bypassed by reading the base requiredScopes directly.
+      return hasRequiredScopes(scopes, requiredScopesForSurface(entry, "ai_sdk"));
     });
     if (uncataloged.length > UNCATALOGED_LOG_CAP) {
       log.warn("Many uncataloged tool names passed through unscoped in one request", {

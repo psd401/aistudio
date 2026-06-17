@@ -97,7 +97,6 @@ async function getSelectableToolConfigsFromCatalog(): Promise<ToolConfig[]> {
     .filter((e) => e.displayName)
     .map((e) => ({
       name: getFriendlyToolName(e.name) ?? e.name,
-      tool: {},
       requiredCapabilities: (e.requiredCapabilities ?? []) as (keyof ModelCapabilities)[],
       displayName: e.displayName as string,
       description: e.description,
