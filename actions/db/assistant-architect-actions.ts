@@ -56,7 +56,7 @@ import {
 } from "@/lib/db/drizzle";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
-import { tools, navigationItems, navigationItemRoles, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities, roleTools } from "@/lib/db/schema";
+import { tools, navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities } from "@/lib/db/schema";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -650,38 +650,7 @@ export async function deleteAssistantArchitectAction(
       isAdminDeletion: !isOwner && isAdmin
     })
 
-    // Issue #923: delete the legacy tools row, the renamed capabilities row, and
-    // the navigation item atomically. role_capabilities rows cascade via the FK
-    // ON DELETE CASCADE. role_tools has no cascade, so we delete those rows
-    // first to avoid a FK violation when deleting the tool row.
-    await executeTransaction(
-      async (tx) => {
-        // role_tools FK has no cascade — must be removed before the tools row
-        await tx
-          .delete(roleTools)
-          .where(
-            sql`${roleTools.toolId} IN (SELECT id FROM tools WHERE prompt_chain_tool_id = ${idInt})`
-          );
-        await tx
-          .delete(tools)
-          .where(eq(tools.promptChainToolId, idInt));
-        await tx
-          .delete(capabilities)
-          .where(eq(capabilities.promptChainToolId, idInt));
-        // navigation_item_roles FK has no cascade — delete grants before the nav item
-        await tx
-          .delete(navigationItemRoles)
-          .where(
-            sql`${navigationItemRoles.navigationItemId} IN (SELECT id FROM navigation_items WHERE link = ${`/tools/assistant-architect/${id}`})`
-          );
-        await tx
-          .delete(navigationItems)
-          .where(eq(navigationItems.link, `/tools/assistant-architect/${id}`));
-      },
-      "deleteToolCapabilityAndNavItem"
-    );
-
-    // Use the deleteAssistantArchitect function which handles all the cascade deletes properly
+    // deleteAssistantArchitect handles all FK-constrained cleanup atomically in one transaction
     await drizzleDeleteAssistantArchitect(idInt);
 
     log.info("Assistant architect deleted successfully", { 

@@ -42,7 +42,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, desc, sql } from "drizzle-orm";
+import { eq, desc, sql, inArray } from "drizzle-orm";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import {
   assistantArchitects,
@@ -55,6 +55,11 @@ import {
   users,
   toolEdits,
   scheduledExecutions,
+  executionResults,
+  userNotifications,
+  roleTools,
+  navigationItems,
+  navigationItemRoles,
 } from "@/lib/db/schema";
 import { ErrorFactories } from "@/lib/error-utils";
 import { CAPABILITY_MANIFEST } from "@/lib/capabilities/manifest";
@@ -388,10 +393,80 @@ export async function updateAssistantArchitect(
  */
 export async function deleteAssistantArchitect(id: number) {
   // Delete in correct order to respect foreign key constraints.
-  // Use executeTransaction directly (never nest db.transaction inside
-  // executeQuery — the wrapper's retry could replay a partially-committed tx).
+  // All steps run in ONE transaction so a partial failure never leaves the DB
+  // in a broken state (e.g. tools gone but assistant row still present).
   return executeTransaction(
     async (tx) => {
+      // 0a. Gather scheduled_execution IDs so we can cascade through child tables.
+      const schedIds = await tx
+        .select({ id: scheduledExecutions.id })
+        .from(scheduledExecutions)
+        .where(eq(scheduledExecutions.assistantArchitectId, id));
+
+      if (schedIds.length > 0) {
+        const schedIdList = schedIds.map((r) => r.id);
+
+        // 0b. Gather execution_result IDs so we can cascade to user_notifications.
+        const execResultIds = await tx
+          .select({ id: executionResults.id })
+          .from(executionResults)
+          .where(inArray(executionResults.scheduledExecutionId, schedIdList));
+
+        if (execResultIds.length > 0) {
+          // 0c. Delete user_notifications (FK to execution_results, no cascade).
+          await tx
+            .delete(userNotifications)
+            .where(inArray(userNotifications.executionResultId, execResultIds.map((r) => r.id)));
+        }
+
+        // 0d. Delete execution_results (FK to scheduled_executions, no cascade).
+        await tx
+          .delete(executionResults)
+          .where(inArray(executionResults.scheduledExecutionId, schedIdList));
+      }
+
+      // 0e. Gather tool IDs linked to this assistant via prompt_chain_tool_id.
+      const toolRows = await tx
+        .select({ id: tools.id })
+        .from(tools)
+        .where(eq(tools.promptChainToolId, id));
+
+      if (toolRows.length > 0) {
+        // 0f. Delete role_tools (FK to tools, no cascade).
+        await tx
+          .delete(roleTools)
+          .where(inArray(roleTools.toolId, toolRows.map((r) => r.id)));
+      }
+
+      // 0g. Delete tools linked to this assistant.
+      await tx
+        .delete(tools)
+        .where(eq(tools.promptChainToolId, id));
+
+      // 0h. Delete capabilities linked to this assistant.
+      await tx
+        .delete(capabilities)
+        .where(eq(capabilities.promptChainToolId, id));
+
+      // 0i. Gather navigation item IDs for this assistant.
+      const navLink = `/tools/assistant-architect/${id}`;
+      const navItemRows = await tx
+        .select({ id: navigationItems.id })
+        .from(navigationItems)
+        .where(eq(navigationItems.link, navLink));
+
+      if (navItemRows.length > 0) {
+        // 0j. Delete navigation_item_roles (FK to navigation_items, no cascade).
+        await tx
+          .delete(navigationItemRoles)
+          .where(inArray(navigationItemRoles.navigationItemId, navItemRows.map((r) => r.id)));
+      }
+
+      // 0k. Delete navigation_items.
+      await tx
+        .delete(navigationItems)
+        .where(eq(navigationItems.link, navLink));
+
       // 1. Delete prompt_results (references chain_prompts via prompt_id)
       await tx
         .delete(promptResults)

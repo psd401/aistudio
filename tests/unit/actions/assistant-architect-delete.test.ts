@@ -1,11 +1,12 @@
-// @ts-nocheck
 import { describe, it, expect, jest, beforeEach, beforeAll } from '@jest/globals'
+import type { ActionState } from '@/types'
 
 const mockExecuteQuery = jest.fn(() => Promise.resolve([]))
 const mockExecuteTransaction = jest.fn((fn) => fn({
   delete: jest.fn().mockReturnValue({ where: jest.fn().mockResolvedValue([]) }),
 }))
 const mockDeleteAssistantArchitect = jest.fn(() => Promise.resolve(true))
+const mockGetAssistantArchitectById = jest.fn()
 const mockHasRole = jest.fn(() => Promise.resolve(false))
 const mockGetCurrentUserAction = jest.fn(() => Promise.resolve({}))
 const mockGetServerSession = jest.fn(() => Promise.resolve(null))
@@ -20,7 +21,7 @@ jest.mock('@/lib/db/drizzle-client', () => ({
 }))
 
 jest.mock('@/lib/db/drizzle', () => ({
-  getAssistantArchitectById: jest.fn(),
+  getAssistantArchitectById: mockGetAssistantArchitectById,
   deleteAssistantArchitect: mockDeleteAssistantArchitect,
 }))
 
@@ -42,14 +43,15 @@ jest.mock('@/lib/logger', () => ({
   }),
   generateRequestId: () => 'test-id',
   startTimer: () => jest.fn(),
-  sanitizeForLogging: (x) => x,
+  sanitizeForLogging: (x: unknown) => x,
 }))
 
 jest.mock('@/lib/db/schema', () => ({
-  tools: { promptChainToolId: 'prompt_chain_tool_id' },
+  tools: { id: 'id', promptChainToolId: 'prompt_chain_tool_id' },
   capabilities: { promptChainToolId: 'prompt_chain_tool_id' },
   roleTools: { toolId: 'tool_id' },
   navigationItems: { link: 'link' },
+  navigationItemRoles: { navigationItemId: 'navigation_item_id' },
   toolInputFields: { assistantArchitectId: 'assistant_architect_id' },
   chainPrompts: { assistantArchitectId: 'assistant_architect_id' },
   assistantArchitects: { id: 'id' },
@@ -60,7 +62,8 @@ jest.mock('@/lib/db/schema', () => ({
 }))
 
 describe('deleteAssistantArchitectAction', () => {
-  let deleteAssistantArchitectAction
+  // Definite assignment: beforeAll assigns this before any it() runs.
+  let deleteAssistantArchitectAction!: (id: string) => Promise<ActionState<void>>
 
   beforeAll(async () => {
     const module = await import('@/actions/db/assistant-architect-actions')
@@ -90,9 +93,7 @@ describe('deleteAssistantArchitectAction', () => {
 
   it('returns error when assistant not found', async () => {
     mockGetServerSession.mockResolvedValue({ sub: 'user-1' })
-    mockExecuteQuery.mockResolvedValue([])
-    mockGetCurrentUserAction.mockResolvedValue({ isSuccess: true, data: { user: { id: 1 } } })
-    mockHasRole.mockResolvedValue(false)
+    mockGetAssistantArchitectById.mockResolvedValue(null)
     const result = await deleteAssistantArchitectAction('99')
     expect(result.isSuccess).toBe(false)
     expect(result.message).toBe('Assistant not found')
@@ -100,7 +101,7 @@ describe('deleteAssistantArchitectAction', () => {
 
   it('blocks non-admin from deleting approved assistant', async () => {
     mockGetServerSession.mockResolvedValue({ sub: 'user-1' })
-    mockExecuteQuery.mockResolvedValueOnce([{ id: 1, userId: 1, status: 'approved' }])
+    mockGetAssistantArchitectById.mockResolvedValue({ id: 1, userId: 1, status: 'approved' })
     mockGetCurrentUserAction.mockResolvedValue({ isSuccess: true, data: { user: { id: 1 } } })
     mockHasRole.mockResolvedValue(false)
     const result = await deleteAssistantArchitectAction('1')
@@ -110,7 +111,7 @@ describe('deleteAssistantArchitectAction', () => {
 
   it('blocks non-admin from deleting pending_approval assistant', async () => {
     mockGetServerSession.mockResolvedValue({ sub: 'user-1' })
-    mockExecuteQuery.mockResolvedValueOnce([{ id: 1, userId: 1, status: 'pending_approval' }])
+    mockGetAssistantArchitectById.mockResolvedValue({ id: 1, userId: 1, status: 'pending_approval' })
     mockGetCurrentUserAction.mockResolvedValue({ isSuccess: true, data: { user: { id: 1 } } })
     mockHasRole.mockResolvedValue(false)
     const result = await deleteAssistantArchitectAction('1')
@@ -120,9 +121,9 @@ describe('deleteAssistantArchitectAction', () => {
 
   it('allows admin to delete approved assistant (issue #1000 fix)', async () => {
     mockGetServerSession.mockResolvedValue({ sub: 'admin-1' })
-    mockExecuteQuery.mockResolvedValueOnce([{ id: 5, userId: 99, status: 'approved' }])
+    mockGetAssistantArchitectById.mockResolvedValue({ id: 5, userId: 99, status: 'approved' })
     mockGetCurrentUserAction.mockResolvedValue({ isSuccess: true, data: { user: { id: 1 } } })
-    mockHasRole.mockResolvedValue(true) // admin
+    mockHasRole.mockResolvedValue(true)
     mockDeleteAssistantArchitect.mockResolvedValue({ id: 5 })
     const result = await deleteAssistantArchitectAction('5')
     expect(result.isSuccess).toBe(true)
@@ -131,7 +132,7 @@ describe('deleteAssistantArchitectAction', () => {
 
   it('allows admin to delete pending_approval assistant', async () => {
     mockGetServerSession.mockResolvedValue({ sub: 'admin-1' })
-    mockExecuteQuery.mockResolvedValueOnce([{ id: 7, userId: 99, status: 'pending_approval' }])
+    mockGetAssistantArchitectById.mockResolvedValue({ id: 7, userId: 99, status: 'pending_approval' })
     mockGetCurrentUserAction.mockResolvedValue({ isSuccess: true, data: { user: { id: 1 } } })
     mockHasRole.mockResolvedValue(true)
     mockDeleteAssistantArchitect.mockResolvedValue({ id: 7 })
@@ -141,7 +142,7 @@ describe('deleteAssistantArchitectAction', () => {
 
   it('allows owner to delete their draft assistant', async () => {
     mockGetServerSession.mockResolvedValue({ sub: 'user-1' })
-    mockExecuteQuery.mockResolvedValueOnce([{ id: 2, userId: 42, status: 'draft' }])
+    mockGetAssistantArchitectById.mockResolvedValue({ id: 2, userId: 42, status: 'draft' })
     mockGetCurrentUserAction.mockResolvedValue({ isSuccess: true, data: { user: { id: 42 } } })
     mockHasRole.mockResolvedValue(false)
     mockDeleteAssistantArchitect.mockResolvedValue({ id: 2 })
@@ -152,7 +153,7 @@ describe('deleteAssistantArchitectAction', () => {
 
   it('blocks non-owner non-admin from deleting draft assistant', async () => {
     mockGetServerSession.mockResolvedValue({ sub: 'user-2' })
-    mockExecuteQuery.mockResolvedValueOnce([{ id: 3, userId: 99, status: 'draft' }])
+    mockGetAssistantArchitectById.mockResolvedValue({ id: 3, userId: 99, status: 'draft' })
     mockGetCurrentUserAction.mockResolvedValue({ isSuccess: true, data: { user: { id: 42 } } })
     mockHasRole.mockResolvedValue(false)
     const result = await deleteAssistantArchitectAction('3')
