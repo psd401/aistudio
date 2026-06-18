@@ -8,6 +8,8 @@ import { test, expect } from '@playwright/test'
  *   - agentic-assistant-execution-with-tools
  *   - tool-call-timeline-display
  *   - form-driven-assistant-backward-compat
+ *   - agentic-per-assistant-rate-limit-config (#926 follow-up)
+ *   - destructive-tool-confirmation-gate (#926 follow-up)
  *
  * These tests gracefully skip when the required fixtures (an editable / an
  * approved agentic / an approved prompt-chain assistant) aren't present in the
@@ -42,6 +44,47 @@ test.describe('Assistant Architect — agentic mode', () => {
     await expect(page.locator('[data-testid="agent-max-steps"]')).toBeVisible()
     await expect(page.locator('[data-testid="agent-timeout"]')).toBeVisible()
     await expect(page.locator('[data-testid="agent-cost-cap"]')).toBeVisible()
+  })
+
+  // ── agentic-per-assistant-rate-limit-config ────────────────────────────────
+  test('agentic config exposes a per-assistant runs-per-hour limit', async ({ page }) => {
+    await page.goto('/utilities/assistant-architect/create')
+    const modeSection = page.locator('[data-testid="agentic-mode-section"]')
+    try {
+      await modeSection.waitFor({ timeout: 10000 })
+    } catch {
+      test.skip(true, 'Assistant Architect create form not accessible in this environment')
+      return
+    }
+    await page.locator('#mode-agentic').click()
+    // The per-assistant rate-limit input renders alongside the per-run limits.
+    await expect(page.locator('[data-testid="agent-rate-limit"]')).toBeVisible()
+  })
+
+  // ── destructive-tool-confirmation-gate ─────────────────────────────────────
+  test('agentic execution offers a destructive-tool approval opt-in', async ({ page }) => {
+    await page.goto('/utilities/assistant-catalog')
+    const cards = page.locator('[data-testid="assistant-architect-card"], [class*="card"]')
+    if ((await cards.count()) === 0) {
+      test.skip(true, 'No assistants available to execute')
+      return
+    }
+    await cards.nth(0).click()
+
+    // The destructive-approval checkbox renders only for an agentic assistant that
+    // exposes at least one tool. Its presence is the contract under test; absence
+    // (prompt-chain assistant, or agentic with no tools) is an acceptable skip.
+    const approval = page.getByLabel('Allow destructive tool actions for this run')
+    const appeared = await approval
+      .waitFor({ timeout: 6000 })
+      .then(() => true)
+      .catch(() => false)
+    if (appeared) {
+      // Default is unchecked: destructive tools are gated unless the user opts in.
+      await expect(approval).not.toBeChecked()
+    } else {
+      test.skip(true, 'Selected assistant is not agentic-with-tools')
+    }
   })
 
   // ── agentic-assistant-execution-with-tools + tool-call-timeline-display ─────
