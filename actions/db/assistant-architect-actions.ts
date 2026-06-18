@@ -2094,6 +2094,63 @@ export async function getToolsAction(): Promise<ActionState<SelectTool[]>> {
   }
 }
 
+/** A tool the current user may enable for an agentic assistant (Issue #926). */
+export interface AvailableAgentTool {
+  /** Catalog `domain.action` identifier — what `agentEnabledTools` stores. */
+  identifier: string;
+  /** Model/human-facing tool name. */
+  name: string;
+  /** Description shown in the tools picker. */
+  description: string;
+}
+
+/**
+ * List the agent-callable tools the CURRENT user may enable for an agentic
+ * assistant (Issue #926). Resolved from the unified catalog on the `internal`
+ * surface, filtered by the user's role-derived scopes and `agentOnly`. The author
+ * can only pick tools they themselves could invoke; the caller's scopes are
+ * re-checked at execution time.
+ */
+export async function getAvailableAgentToolsAction(): Promise<ActionState<AvailableAgentTool[]>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("getAvailableAgentTools")
+  const log = createLogger({ requestId, action: "getAvailableAgentTools" })
+
+  try {
+    const session = await getServerSession();
+    if (!session || !session.sub) {
+      return { isSuccess: false, message: "Unauthorized" }
+    }
+    const currentUser = await getCurrentUserAction();
+    if (!currentUser.isSuccess || !currentUser.data) {
+      return { isSuccess: false, message: "User not found" }
+    }
+    const roleNames = currentUser.data.roles.map(r => r.name);
+    const scopes = getScopesForRoles(roleNames);
+
+    const entries = await toolCatalogInstance.list({
+      surface: "internal",
+      scopes,
+      agentOnly: true,
+    });
+    const tools: AvailableAgentTool[] = entries.map(e => ({
+      identifier: e.identifier,
+      name: e.name,
+      description: e.description,
+    }));
+
+    log.info("Available agent tools retrieved", { count: tools.length })
+    timer({ status: "success", count: tools.length })
+    return createSuccess(tools, "Available agent tools retrieved")
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to get available agent tools", {
+      context: "getAvailableAgentTools",
+      requestId,
+    })
+  }
+}
+
 export async function getAiModelsAction(): Promise<ActionState<SelectAiModel[]>> {
   const requestId = generateRequestId()
   const timer = startTimer("getAiModels")

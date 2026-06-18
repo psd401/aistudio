@@ -31,6 +31,7 @@ import { AssistantRuntimeProvider, useThreadRuntime, useLocalRuntime, type ChatM
 import { Thread } from '@/components/assistant-ui/thread'
 import { createLogger } from '@/lib/client-logger'
 import { ExecutionProgress } from './execution-progress'
+import { ToolCallTimeline } from './tool-call-timeline'
 import {
   parseSSEEvent,
   isTextDeltaEvent,
@@ -101,6 +102,39 @@ interface AssistantArchitectAdapterOptions {
   executionModelRef: React.MutableRefObject<{ modelId: string; provider: string } | null>
   onExecutionIdChangeRef: React.MutableRefObject<(id: number) => void>
   onPromptCountChangeRef: React.MutableRefObject<(count: number) => void>
+  /**
+   * Called for each tool-call lifecycle event so the UI can render an agentic
+   * tool-call timeline (Issue #926). Held in a ref so the stable adapter never
+   * re-initializes when the handler identity changes.
+   */
+  onToolEventRef: React.MutableRefObject<(event: ToolTimelineEvent) => void>
+}
+
+/** A single tool-call timeline entry surfaced to the execution UI (#926). */
+export interface ToolTimelineEvent {
+  toolCallId: string
+  toolName: string
+  phase: 'call' | 'output' | 'error'
+  /** Output/error text when phase is 'output' | 'error'. */
+  detail?: string
+}
+
+/**
+ * Merge a tool-call event into the timeline: upsert by toolCallId, latest phase
+ * wins, but a late 'call' never clobbers a terminal 'output'/'error'. Pure so the
+ * setState updater stays a one-liner (keeps callback nesting shallow).
+ */
+function mergeToolTimelineEvent(
+  prev: ToolTimelineEvent[],
+  event: ToolTimelineEvent
+): ToolTimelineEvent[] {
+  const idx = prev.findIndex(e => e.toolCallId === event.toolCallId)
+  if (idx === -1) return [...prev, event]
+  const existing = prev[idx]
+  if (existing.phase !== 'call' && event.phase === 'call') return prev
+  const next = [...prev]
+  next[idx] = { ...existing, ...event }
+  return next
 }
 
 // Factory function to create a stable ChatModelAdapter
@@ -113,7 +147,8 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
     conversationIdRef,
     executionModelRef,
     onExecutionIdChangeRef,
-    onPromptCountChangeRef
+    onPromptCountChangeRef,
+    onToolEventRef
   } = options
 
   return {
@@ -338,11 +373,21 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
                       toolName: event.toolName,
                       type: event.type
                     })
-                    // Tool calls are handled by the UI components
+                    // Feed the agentic tool-call timeline (#926).
+                    onToolEventRef.current({
+                      toolCallId: event.toolCallId,
+                      toolName: event.toolName,
+                      phase: 'call',
+                    })
                   }
                   // Handle tool input events (from web_search_preview, etc.)
                   else if (isToolInputStartEvent(event)) {
                     log.debug('Tool input started', { toolCallId: event.toolCallId, toolName: event.toolName })
+                    onToolEventRef.current({
+                      toolCallId: event.toolCallId,
+                      toolName: event.toolName,
+                      phase: 'call',
+                    })
                   }
                   else if (isToolInputDeltaEvent(event)) {
                     log.debug('Tool input delta', { toolCallId: event.toolCallId })
@@ -352,12 +397,29 @@ function createAssistantArchitectAdapter(options: AssistantArchitectAdapterOptio
                   }
                   else if (isToolInputErrorEvent(event)) {
                     log.debug('Tool input error', { toolCallId: event.toolCallId, toolName: event.toolName })
+                    onToolEventRef.current({
+                      toolCallId: event.toolCallId,
+                      toolName: event.toolName ?? 'tool',
+                      phase: 'error',
+                      detail: 'Tool input error',
+                    })
                   }
                   else if (isToolOutputErrorEvent(event)) {
                     log.debug('Tool output error', { toolCallId: event.toolCallId, errorText: event.errorText })
+                    onToolEventRef.current({
+                      toolCallId: event.toolCallId,
+                      toolName: 'tool',
+                      phase: 'error',
+                      detail: event.errorText ?? 'Tool output error',
+                    })
                   }
                   else if (isToolOutputAvailableEvent(event)) {
                     log.debug('Tool output available', { toolCallId: event.toolCallId })
+                    onToolEventRef.current({
+                      toolCallId: event.toolCallId,
+                      toolName: 'tool',
+                      phase: 'output',
+                    })
                   }
                   // Handle errors
                   else if (isErrorEvent(event)) {
@@ -536,7 +598,8 @@ function AssistantArchitectRuntimeProvider({
   onPromptCountChange,
   onExecutionComplete,
   onExecutionError,
-  hasCompletedExecution
+  hasCompletedExecution,
+  onToolEvent
 }: {
   children: React.ReactNode
   tool: AssistantArchitectWithRelations
@@ -546,6 +609,7 @@ function AssistantArchitectRuntimeProvider({
   onExecutionComplete: () => void
   onExecutionError: (error: string) => void
   hasCompletedExecution: boolean
+  onToolEvent: (event: ToolTimelineEvent) => void
 }) {
   const inputsRef = useRef(inputs)
 
@@ -556,11 +620,13 @@ function AssistantArchitectRuntimeProvider({
   // Use refs for callbacks to avoid dependency issues
   const onExecutionIdChangeRef = useRef(onExecutionIdChange)
   const onPromptCountChangeRef = useRef(onPromptCountChange)
+  const onToolEventRef = useRef(onToolEvent)
 
   useEffect(() => {
     onExecutionIdChangeRef.current = onExecutionIdChange
     onPromptCountChangeRef.current = onPromptCountChange
-  }, [onExecutionIdChange, onPromptCountChange])
+    onToolEventRef.current = onToolEvent
+  }, [onExecutionIdChange, onPromptCountChange, onToolEvent])
 
   // Track whether we're in execution or conversation mode
   const hasCompletedExecutionRef = useRef(hasCompletedExecution)
@@ -624,7 +690,8 @@ function AssistantArchitectRuntimeProvider({
       conversationIdRef,
       executionModelRef,
       onExecutionIdChangeRef,
-      onPromptCountChangeRef
+      onPromptCountChangeRef,
+      onToolEventRef
     })
     startTransition(() => { setAdapter(newAdapter) })
   }, [currentToolId])
@@ -819,6 +886,16 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
   const [isExecuting, setIsExecuting] = useState(false)
   const [hasResults, setHasResults] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Agentic tool-call timeline (Issue #926). Latest phase per toolCallId wins so
+  // a tool's row updates call -> output/error in place rather than duplicating.
+  const [toolTimeline, setToolTimeline] = useState<ToolTimelineEvent[]>([])
+  const isAgentic = tool.mode === 'agentic'
+
+  // Stable callback (no deps) so the ref-based adapter never re-initializes.
+  // The merge is a module-level pure fn to keep nesting shallow.
+  const handleToolEvent = useCallback((event: ToolTimelineEvent) => {
+    setToolTimeline(prev => mergeToolTimelineEvent(prev, event))
+  }, [])
 
   // CRITICAL FIX: Reset hasResults when tool changes (user navigates to different assistant)
   // This was causing the bug where hasResults stayed true from a previous session
@@ -828,6 +905,7 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
       setHasResults(false)
       setIsExecuting(false)
       setError(null)
+      setToolTimeline([])
     })
   }, [tool.id])
 
@@ -1116,6 +1194,7 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
             onExecutionComplete={handleExecutionComplete}
             onExecutionError={handleExecutionError}
             hasCompletedExecution={hasResults}
+            onToolEvent={handleToolEvent}
           >
             <div className="space-y-6">
               {/* Progress indicator for multi-prompt execution */}
@@ -1124,6 +1203,11 @@ export const AssistantArchitectStreaming = memo(function AssistantArchitectStrea
                   totalPrompts={promptCount}
                   prompts={tool.prompts || []}
                 />
+              )}
+
+              {/* Agentic tool-call timeline (Issue #926) */}
+              {isAgentic && (
+                <ToolCallTimeline events={toolTimeline} />
               )}
 
               {/* Execution in-progress status banner */}
