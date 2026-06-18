@@ -1,15 +1,4 @@
-/**
- * Unit tests for /api/documents/v2/upload — the server-side upload proxy.
- *
- * Regression tests for issue #1017 (FS#148338): attachment uploads silently
- * failing when the user's session was not established. The fix:
- *   1. The Nexus page doesn't render when sessionStatus === 'unauthenticated'
- *   2. customFetch blocks requests pre-send when session is unauthenticated
- *   3. This endpoint returns 401 { code: 'UNAUTHORIZED' } when !session?.sub
- *
- * These tests lock in the 401 behavior so a future refactor cannot accidentally
- * allow uploads for unauthenticated users.
- */
+// Unit tests for /api/documents/v2/upload — regression coverage for issue #1017 (FS#148338).
 
 import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
 import { NextRequest } from 'next/server';
@@ -86,6 +75,18 @@ import { uploadToS3 } from '@/lib/aws/document-upload';
 import { sendToProcessingQueue } from '@/lib/aws/lambda-trigger';
 
 // ---------------------------------------------------------------------------
+// Typed mock aliases — jest.Mock without type params resolves to `never` in
+// Jest 30, breaking every .mockResolvedValue() call. Casting through
+// MockedFunction<() => Promise<unknown>> gives .mockResolvedValue(unknown).
+// ---------------------------------------------------------------------------
+type AnyAsyncMock = jest.MockedFunction<() => Promise<unknown>>;
+const mockGetServerSession = getServerSession as unknown as AnyAsyncMock;
+const mockCreateDocumentJob = createDocumentJob as unknown as AnyAsyncMock;
+const mockUploadToS3 = uploadToS3 as unknown as AnyAsyncMock;
+const mockConfirmDocumentUpload = confirmDocumentUpload as unknown as AnyAsyncMock;
+const mockSendToProcessingQueue = sendToProcessingQueue as unknown as AnyAsyncMock;
+
+// ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 const SESSION_WITH_SUB = { sub: 'user-abc', user: { id: 'user-abc', email: 'test@example.com' } };
@@ -151,7 +152,7 @@ describe('POST /api/documents/v2/upload', () => {
   // -----------------------------------------------------------------------
   describe('authentication', () => {
     it('returns 401 when there is no session (unauthenticated user)', async () => {
-      (getServerSession as unknown as jest.Mock).mockResolvedValue(null);
+      mockGetServerSession.mockResolvedValue(null);
 
       const req = buildUploadRequest(makeFakeFile('test.pdf', 'application/pdf'));
       const res = await POST(req);
@@ -164,7 +165,7 @@ describe('POST /api/documents/v2/upload', () => {
 
     it('returns 401 when session exists but sub is missing or falsy', async () => {
       // This can happen mid-OAuth when Cognito hasn't yet issued the JWT sub claim
-      (getServerSession as unknown as jest.Mock).mockResolvedValue({ user: { email: 'pending@example.com' } });
+      mockGetServerSession.mockResolvedValue({ user: { email: 'pending@example.com' } });
 
       const req = buildUploadRequest(makeFakeFile('test.pdf', 'application/pdf'));
       const res = await POST(req);
@@ -175,7 +176,7 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('returns 401 when session.sub is an empty string', async () => {
-      (getServerSession as unknown as jest.Mock).mockResolvedValue({ sub: '', user: {} });
+      mockGetServerSession.mockResolvedValue({ sub: '', user: {} });
 
       const req = buildUploadRequest(makeFakeFile('doc.pdf', 'application/pdf'));
       const res = await POST(req);
@@ -186,7 +187,7 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('does NOT call createDocumentJob when auth fails', async () => {
-      (getServerSession as unknown as jest.Mock).mockResolvedValue(null);
+      mockGetServerSession.mockResolvedValue(null);
 
       const req = buildUploadRequest(makeFakeFile('test.pdf', 'application/pdf'));
       await POST(req);
@@ -195,7 +196,7 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('does NOT call uploadToS3 when auth fails', async () => {
-      (getServerSession as unknown as jest.Mock).mockResolvedValue(null);
+      mockGetServerSession.mockResolvedValue(null);
 
       const req = buildUploadRequest(makeFakeFile('test.pdf', 'application/pdf'));
       await POST(req);
@@ -209,7 +210,7 @@ describe('POST /api/documents/v2/upload', () => {
   // -----------------------------------------------------------------------
   describe('validation', () => {
     it('returns 400 when no file is provided', async () => {
-      (getServerSession as unknown as jest.Mock).mockResolvedValue(SESSION_WITH_SUB);
+      mockGetServerSession.mockResolvedValue(SESSION_WITH_SUB);
 
       const formData = new FormData();
       formData.append('purpose', 'chat');
@@ -223,7 +224,7 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('returns 400 for an unsupported purpose value', async () => {
-      (getServerSession as unknown as jest.Mock).mockResolvedValue(SESSION_WITH_SUB);
+      mockGetServerSession.mockResolvedValue(SESSION_WITH_SUB);
 
       // The Zod schema only allows 'chat' | 'repository' | 'assistant'
       const file = makeFakeFile('report.pdf', 'application/pdf', 100);
@@ -239,14 +240,14 @@ describe('POST /api/documents/v2/upload', () => {
   // -----------------------------------------------------------------------
   describe('successful upload', () => {
     beforeEach(() => {
-      (getServerSession as unknown as jest.Mock).mockResolvedValue(SESSION_WITH_SUB);
-      (createDocumentJob as unknown as jest.Mock).mockResolvedValue({ id: 'job-xyz' });
-      (uploadToS3 as unknown as jest.Mock).mockResolvedValue({
+      mockGetServerSession.mockResolvedValue(SESSION_WITH_SUB);
+      mockCreateDocumentJob.mockResolvedValue({ id: 'job-xyz' });
+      mockUploadToS3.mockResolvedValue({
         s3Key: 'uploads/job-xyz/test.pdf',
         sanitizedFileName: 'test.pdf',
       });
-      (confirmDocumentUpload as unknown as jest.Mock).mockResolvedValue(undefined);
-      (sendToProcessingQueue as unknown as jest.Mock).mockResolvedValue(undefined);
+      mockConfirmDocumentUpload.mockResolvedValue(undefined);
+      mockSendToProcessingQueue.mockResolvedValue(undefined);
     });
 
     it('returns 200 with jobId when upload succeeds', async () => {
@@ -291,12 +292,12 @@ describe('POST /api/documents/v2/upload', () => {
   // -----------------------------------------------------------------------
   describe('error handling', () => {
     beforeEach(() => {
-      (getServerSession as unknown as jest.Mock).mockResolvedValue(SESSION_WITH_SUB);
+      mockGetServerSession.mockResolvedValue(SESSION_WITH_SUB);
     });
 
     it('returns 503 when S3 upload fails with storage error', async () => {
-      (createDocumentJob as unknown as jest.Mock).mockResolvedValue({ id: 'job-err' });
-      (uploadToS3 as unknown as jest.Mock).mockRejectedValue(new Error('S3 upload to bucket failed'));
+      mockCreateDocumentJob.mockResolvedValue({ id: 'job-err' });
+      mockUploadToS3.mockRejectedValue(new Error('S3 upload to bucket failed'));
 
       const req = buildUploadRequest(makeFakeFile('big.pdf', 'application/pdf'));
       const res = await POST(req);
@@ -307,8 +308,8 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('returns 500 when createDocumentJob throws an unexpected error', async () => {
-      (createDocumentJob as unknown as jest.Mock).mockRejectedValue(new Error('DynamoDB connection failed'));
-      (uploadToS3 as unknown as jest.Mock).mockResolvedValue({
+      mockCreateDocumentJob.mockRejectedValue(new Error('DynamoDB connection failed'));
+      mockUploadToS3.mockResolvedValue({
         s3Key: 'uploads/job-err/test.pdf',
         sanitizedFileName: 'test.pdf',
       });

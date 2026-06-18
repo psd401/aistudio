@@ -1,13 +1,4 @@
-/**
- * Unit tests for HybridDocumentAdapter.toSafeErrorMessage.
- *
- * Regression coverage for issue #1017 (FS#148338): when an unauthenticated
- * upload returns 401, the UNAUTHORIZED code must map to 'Authentication
- * required.' so the user sees a clear message in the attachment error state.
- *
- * We test the static method directly — no adapter instance required — because
- * the method is a pure lookup table with no side effects.
- */
+// Unit tests for HybridDocumentAdapter.toSafeErrorMessage — regression coverage for issue #1017 (FS#148338).
 
 import { describe, it, expect, jest } from '@jest/globals';
 
