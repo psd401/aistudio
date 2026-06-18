@@ -209,6 +209,7 @@ type AgenticUpdateFields = Partial<{
   agentMaxSteps: number;
   agentTimeoutSeconds: number;
   agentCostCapCents: number | null;
+  agentMaxRequestsPerHour: number | null;
 }>;
 
 /**
@@ -249,19 +250,23 @@ async function resolveAgenticUpdateFields(
   if (data.agentTimeoutSeconds !== undefined) {
     fields.agentTimeoutSeconds = clampIntInRange(data.agentTimeoutSeconds, 1, 900, 300);
   }
+  // null/<=0/non-finite => no cap. Keeps NaN out of the DB (which would surface
+  // as a generic insert failure) and avoids a negative becoming a 1-unit cap.
   if (data.agentCostCapCents !== undefined) {
-    const cap = data.agentCostCapCents;
-    // null => no cap; a non-finite/<=0 value falls back to no cap rather than
-    // letting NaN reach the DB and surface as a generic insert failure.
-    if (cap === null) {
-      fields.agentCostCapCents = null;
-    } else {
-      const n = Math.floor(Number(cap));
-      fields.agentCostCapCents = Number.isFinite(n) && n > 0 ? n : null;
-    }
+    fields.agentCostCapCents = nullablePositiveInt(data.agentCostCapCents);
+  }
+  if (data.agentMaxRequestsPerHour !== undefined) {
+    fields.agentMaxRequestsPerHour = nullablePositiveInt(data.agentMaxRequestsPerHour);
   }
 
   return { fields };
+}
+
+/** Normalize a nullable numeric limit to a positive integer, or null for no cap. */
+function nullablePositiveInt(value: number | null): number | null {
+  if (value === null) return null;
+  const n = Math.floor(Number(value));
+  return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /** Parse + clamp an integer into [min, max]; falls back for non-finite input. */
@@ -429,6 +434,7 @@ export async function getAssistantArchitectsAction(): Promise<
           agentMaxSteps: architect.agentMaxSteps,
           agentTimeoutSeconds: architect.agentTimeoutSeconds,
           agentCostCapCents: architect.agentCostCapCents,
+          agentMaxRequestsPerHour: architect.agentMaxRequestsPerHour,
           inputFields,
           prompts: transformedPrompts,
           creator: architect.creator ? {
@@ -666,6 +672,7 @@ export async function updateAssistantArchitectAction(
       agentMaxSteps: number;
       agentTimeoutSeconds: number;
       agentCostCapCents: number | null;
+      agentMaxRequestsPerHour: number | null;
     }> = {};
 
     if (data.name !== undefined) updateData.name = data.name;

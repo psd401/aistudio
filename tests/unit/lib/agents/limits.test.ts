@@ -2,6 +2,7 @@ import { describe, it, expect } from "@jest/globals"
 import {
   resolveAgentRunLimits,
   isCostCapExceeded,
+  isAgentRateLimitExceeded,
 } from "@/lib/agents/limits"
 import { AGENT_LIMIT_DEFAULTS, AGENT_LIMIT_CEILINGS } from "@/lib/agents/types"
 
@@ -71,5 +72,21 @@ describe("isCostCapExceeded", () => {
     expect(isCostCapExceeded(limits, 99)).toBe(false)
     expect(isCostCapExceeded(limits, 100)).toBe(true)
     expect(isCostCapExceeded(limits, 101)).toBe(true)
+  })
+})
+
+describe("isAgentRateLimitExceeded", () => {
+  it("never trips when no cap is set (null/undefined/<=0/non-finite)", () => {
+    expect(isAgentRateLimitExceeded(1000, null)).toBe(false)
+    expect(isAgentRateLimitExceeded(1000, undefined)).toBe(false)
+    expect(isAgentRateLimitExceeded(1000, 0)).toBe(false)
+    expect(isAgentRateLimitExceeded(1000, -5)).toBe(false)
+    expect(isAgentRateLimitExceeded(1000, Number.NaN)).toBe(false)
+  })
+
+  it("trips at or above the cap, not below", () => {
+    expect(isAgentRateLimitExceeded(4, 5)).toBe(false)
+    expect(isAgentRateLimitExceeded(5, 5)).toBe(true)
+    expect(isAgentRateLimitExceeded(6, 5)).toBe(true)
   })
 })

@@ -413,6 +413,33 @@ describe("resolveAgenticUpdateFields — limit clamping", () => {
       expect.objectContaining({ agentCostCapCents: 250 })
     )
   })
+
+  it("keeps a valid positive agentMaxRequestsPerHour", async () => {
+    await updateAssistantArchitectAction("1", { agentMaxRequestsPerHour: 20 })
+
+    expect(updateArchitectMock).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ agentMaxRequestsPerHour: 20 })
+    )
+  })
+
+  it("treats a null/zero/negative agentMaxRequestsPerHour as no limit (null)", async () => {
+    await updateAssistantArchitectAction("1", { agentMaxRequestsPerHour: null })
+    expect(updateArchitectMock).toHaveBeenLastCalledWith(
+      1,
+      expect.objectContaining({ agentMaxRequestsPerHour: null })
+    )
+    await updateAssistantArchitectAction("1", { agentMaxRequestsPerHour: 0 })
+    expect(updateArchitectMock).toHaveBeenLastCalledWith(
+      1,
+      expect.objectContaining({ agentMaxRequestsPerHour: null })
+    )
+    await updateAssistantArchitectAction("1", { agentMaxRequestsPerHour: -3 })
+    expect(updateArchitectMock).toHaveBeenLastCalledWith(
+      1,
+      expect.objectContaining({ agentMaxRequestsPerHour: null })
+    )
+  })
 })
 
 // ── getAvailableAgentToolsAction ──────────────────────────────────────────────

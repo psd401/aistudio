@@ -17,8 +17,11 @@ import {
   resolveAgentTools,
   closeAgentConnectorClients,
   resolveAgentRunLimits,
+  isAgentRateLimitExceeded,
+  AGENT_RATE_LIMIT_WINDOW_MS,
 } from '@/lib/agents';
 import type { ToolInvocationAudit } from '@/lib/agents';
+import { countAssistantExecutionsSince } from '@/lib/db/drizzle/assistant-architects';
 import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
 import type { AssistantArchitectMode } from '@/lib/db/schema/tables/assistant-architects';
 import type { StreamRequest } from '@/lib/streaming/types';
@@ -348,6 +351,37 @@ export async function POST(req: Request) {
       promptCount: prompts.length,
       userId
     }));
+
+    // 5.5 Per-assistant rate limit (Issue #926): an agentic assistant may cap how
+    // many runs it accepts per rolling hour (separate from any per-user limit).
+    // Checked BEFORE creating the execution row so a rejected request leaves no
+    // dangling 'running' record. NULL/unset cap => no limit (author-configured).
+    if (architect.mode === 'agentic') {
+      const rateCap = (architect as { agentMaxRequestsPerHour?: number | null }).agentMaxRequestsPerHour;
+      if (typeof rateCap === 'number' && rateCap > 0) {
+        const windowStart = new Date(Date.now() - AGENT_RATE_LIMIT_WINDOW_MS);
+        const recentCount = await countAssistantExecutionsSince(toolId, windowStart);
+        if (isAgentRateLimitExceeded(recentCount, rateCap)) {
+          log.warn('Assistant rate limit exceeded', { toolId, rateCap, recentCount });
+          timer({ status: 'rate_limited' });
+          return new Response(
+            JSON.stringify({
+              error: 'Rate limit exceeded',
+              message: `This assistant is limited to ${rateCap} run(s) per hour. Please try again later.`,
+              requestId
+            }),
+            {
+              status: 429,
+              headers: {
+                'Content-Type': 'application/json',
+                'Retry-After': '3600',
+                'X-Request-Id': requestId
+              }
+            }
+          );
+        }
+      }
+    }
 
     // 6. Create tool_execution record
     // CRITICAL: Drizzle's AWS Data API driver doesn't properly serialize JSONB.
@@ -795,6 +829,7 @@ interface AgenticArchitectFields {
   agentMaxSteps?: number | null;
   agentTimeoutSeconds?: number | null;
   agentCostCapCents?: number | null;
+  agentMaxRequestsPerHour?: number | null;
 }
 
 /**

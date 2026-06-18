@@ -42,7 +42,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, desc, sql } from "drizzle-orm";
+import { eq, desc, sql, and, gte } from "drizzle-orm";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import {
   assistantArchitects,
@@ -105,6 +105,7 @@ export interface AssistantArchitectData {
   agentMaxSteps?: number;
   agentTimeoutSeconds?: number;
   agentCostCapCents?: number | null;
+  agentMaxRequestsPerHour?: number | null;
 }
 
 export interface AssistantArchitectUpdateData {
@@ -121,6 +122,7 @@ export interface AssistantArchitectUpdateData {
   agentMaxSteps?: number;
   agentTimeoutSeconds?: number;
   agentCostCapCents?: number | null;
+  agentMaxRequestsPerHour?: number | null;
 }
 
 export interface AssistantArchitectWithCreator {
@@ -141,6 +143,7 @@ export interface AssistantArchitectWithCreator {
   agentMaxSteps: number;
   agentTimeoutSeconds: number;
   agentCostCapCents: number | null;
+  agentMaxRequestsPerHour: number | null;
   creator: {
     id: number;
     firstName: string | null;
@@ -180,6 +183,7 @@ export async function getAssistantArchitects(): Promise<
           agentMaxSteps: assistantArchitects.agentMaxSteps,
           agentTimeoutSeconds: assistantArchitects.agentTimeoutSeconds,
           agentCostCapCents: assistantArchitects.agentCostCapCents,
+          agentMaxRequestsPerHour: assistantArchitects.agentMaxRequestsPerHour,
           creatorId: users.id,
           creatorFirstName: users.firstName,
           creatorLastName: users.lastName,
@@ -210,6 +214,7 @@ export async function getAssistantArchitects(): Promise<
     agentMaxSteps: row.agentMaxSteps,
     agentTimeoutSeconds: row.agentTimeoutSeconds,
     agentCostCapCents: row.agentCostCapCents,
+    agentMaxRequestsPerHour: row.agentMaxRequestsPerHour,
     creator:
       row.creatorId && row.creatorEmail
         ? {
@@ -266,6 +271,7 @@ export async function getAssistantArchitectWithCreator(
           agentMaxSteps: assistantArchitects.agentMaxSteps,
           agentTimeoutSeconds: assistantArchitects.agentTimeoutSeconds,
           agentCostCapCents: assistantArchitects.agentCostCapCents,
+          agentMaxRequestsPerHour: assistantArchitects.agentMaxRequestsPerHour,
           creatorId: users.id,
           creatorFirstName: users.firstName,
           creatorLastName: users.lastName,
@@ -299,6 +305,7 @@ export async function getAssistantArchitectWithCreator(
     agentMaxSteps: row.agentMaxSteps,
     agentTimeoutSeconds: row.agentTimeoutSeconds,
     agentCostCapCents: row.agentCostCapCents,
+    agentMaxRequestsPerHour: row.agentMaxRequestsPerHour,
     creator:
       row.creatorId && row.creatorEmail
         ? {
@@ -309,6 +316,31 @@ export async function getAssistantArchitectWithCreator(
           }
         : null,
   };
+}
+
+/**
+ * Count executions of an assistant started at/after `since` — the per-assistant
+ * rate-limit window query (Issue #926). Counts ALL executions of the assistant
+ * (across users), which is what a per-assistant limit means.
+ */
+export async function countAssistantExecutionsSince(
+  assistantId: number,
+  since: Date
+): Promise<number> {
+  const result = await executeQuery(
+    (db) =>
+      db
+        .select({ count: sql<number>`count(*)` })
+        .from(toolExecutions)
+        .where(
+          and(
+            eq(toolExecutions.assistantArchitectId, assistantId),
+            gte(toolExecutions.startedAt, since)
+          )
+        ),
+    "countAssistantExecutionsSince"
+  );
+  return Number(result[0]?.count ?? 0);
 }
 
 /**
@@ -388,6 +420,9 @@ export async function createAssistantArchitect(data: AssistantArchitectData) {
             : {}),
           ...(data.agentCostCapCents !== undefined
             ? { agentCostCapCents: data.agentCostCapCents }
+            : {}),
+          ...(data.agentMaxRequestsPerHour !== undefined
+            ? { agentMaxRequestsPerHour: data.agentMaxRequestsPerHour }
             : {}),
         })
         .returning(),

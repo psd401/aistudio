@@ -50,6 +50,12 @@ ALTER TABLE assistant_architects
 ALTER TABLE assistant_architects
     ADD COLUMN IF NOT EXISTS agent_cost_cap_cents INTEGER;
 
+-- Per-ASSISTANT rate limit: max agentic runs of THIS assistant per rolling hour
+-- (separate from any per-user limit). NULL = no per-assistant cap. The number is
+-- author-configured (no platform-imposed default cap).
+ALTER TABLE assistant_architects
+    ADD COLUMN IF NOT EXISTS agent_max_requests_per_hour INTEGER;
+
 -- Enforce the two valid modes. Guarded so re-running the migration is a no-op.
 -- (Postgres has no ADD CONSTRAINT IF NOT EXISTS; the DROP ... IF EXISTS makes it idempotent.)
 ALTER TABLE assistant_architects DROP CONSTRAINT IF EXISTS assistant_architects_mode_check;
@@ -73,6 +79,11 @@ ALTER TABLE assistant_architects DROP CONSTRAINT IF EXISTS assistant_architects_
 ALTER TABLE assistant_architects
     ADD CONSTRAINT assistant_architects_agent_cost_cap_check
     CHECK (agent_cost_cap_cents IS NULL OR agent_cost_cap_cents > 0);
+
+ALTER TABLE assistant_architects DROP CONSTRAINT IF EXISTS assistant_architects_agent_rate_limit_check;
+ALTER TABLE assistant_architects
+    ADD CONSTRAINT assistant_architects_agent_rate_limit_check
+    CHECK (agent_max_requests_per_hour IS NULL OR agent_max_requests_per_hour > 0);
 
 -- 2. Expose the code MCP tools on the `internal` surface so the agentic runtime
 --    can resolve them via the catalog. The boot-time manifest sync also does this

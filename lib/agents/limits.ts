@@ -75,3 +75,20 @@ export function isCostCapExceeded(
   if (limits.costCapCents === null) return false;
   return accumulatedCostCents >= limits.costCapCents;
 }
+
+/** Length of the per-assistant rate-limit window (one rolling hour). */
+export const AGENT_RATE_LIMIT_WINDOW_MS = 60 * 60 * 1000;
+
+/**
+ * Decide whether a per-assistant rate limit is exceeded (Issue #926). `cap` is
+ * the author-configured max runs per rolling hour; null/≤0/non-finite means no
+ * cap (never invent a default). Returns true when a cap is set AND the count of
+ * runs already started in the window is at or above it.
+ */
+export function isAgentRateLimitExceeded(
+  recentCount: number,
+  cap: number | null | undefined
+): boolean {
+  if (typeof cap !== "number" || !Number.isFinite(cap) || cap <= 0) return false;
+  return recentCount >= cap;
+}

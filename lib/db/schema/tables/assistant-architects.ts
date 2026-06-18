@@ -65,4 +65,10 @@ export const assistantArchitects = pgTable("assistant_architects", {
   agentTimeoutSeconds: integer("agent_timeout_seconds").default(300).notNull(),
   /** Per-run cost cap in whole US cents. NULL = no cap. */
   agentCostCapCents: integer("agent_cost_cap_cents"),
+  /**
+   * Per-ASSISTANT rate limit: max agentic runs of this assistant per rolling hour
+   * (separate from any per-user limit). NULL = no per-assistant cap. Author-set;
+   * no platform-imposed default (Issue #926).
+   */
+  agentMaxRequestsPerHour: integer("agent_max_requests_per_hour"),
 });

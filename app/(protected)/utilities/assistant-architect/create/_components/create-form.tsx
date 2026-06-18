@@ -47,6 +47,7 @@ function toAgenticPayload(agentic: AgenticConfigState) {
     agentTimeoutSeconds: agentic.timeoutSeconds,
     agentCostCapCents:
       agentic.costCapDollars === null ? null : Math.round(agentic.costCapDollars * 100),
+    agentMaxRequestsPerHour: agentic.maxRequestsPerHour,
   }
 }
 
@@ -70,6 +71,10 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
     costCapDollars:
       typeof initialData?.agentCostCapCents === "number"
         ? initialData.agentCostCapCents / 100
+        : null,
+    maxRequestsPerHour:
+      typeof initialData?.agentMaxRequestsPerHour === "number"
+        ? initialData.agentMaxRequestsPerHour
         : null,
   }))
   // The mode transition is one-way: an assistant already in agentic mode cannot

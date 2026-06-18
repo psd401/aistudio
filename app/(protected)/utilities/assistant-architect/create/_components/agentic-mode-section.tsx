@@ -21,6 +21,8 @@ export interface AgenticConfigState {
   timeoutSeconds: number
   /** Cost cap in whole US dollars (UI unit); converted to cents on save. */
   costCapDollars: number | null
+  /** Per-assistant max runs per rolling hour; null = no cap (Issue #926). */
+  maxRequestsPerHour: number | null
 }
 
 interface AgenticModeSectionProps {
@@ -171,7 +173,7 @@ function AgentLimitsGrid({
   update: (patch: Partial<AgenticConfigState>) => void
 }) {
   return (
-    <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+    <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
       <div className="space-y-2">
         <Label htmlFor="agent-max-steps">Max steps</Label>
         <Input
@@ -217,6 +219,26 @@ function AgentLimitsGrid({
           data-testid="agent-cost-cap"
         />
         <p className="text-xs text-muted-foreground">Blank = no cap.</p>
+      </div>
+      <div className="space-y-2">
+        <Label htmlFor="agent-rate-limit">Runs per hour</Label>
+        <Input
+          id="agent-rate-limit"
+          type="number"
+          min={1}
+          step="1"
+          value={value.maxRequestsPerHour ?? ""}
+          disabled={disabled}
+          placeholder="No limit"
+          onChange={(e) => {
+            const v = e.target.value.trim()
+            update({
+              maxRequestsPerHour: v === "" ? null : Math.max(1, Math.floor(Number(v))),
+            })
+          }}
+          data-testid="agent-rate-limit"
+        />
+        <p className="text-xs text-muted-foreground">Blank = no limit.</p>
       </div>
     </div>
   )

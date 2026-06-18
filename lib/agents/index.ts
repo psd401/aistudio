@@ -10,7 +10,12 @@ export {
   resolveAgentTools,
   closeAgentConnectorClients,
 } from "./tool-resolver";
-export { resolveAgentRunLimits, isCostCapExceeded } from "./limits";
+export {
+  resolveAgentRunLimits,
+  isCostCapExceeded,
+  isAgentRateLimitExceeded,
+  AGENT_RATE_LIMIT_WINDOW_MS,
+} from "./limits";
 export type { AgentLimitConfig } from "./limits";
 export {
   AGENT_LIMIT_CEILINGS,
