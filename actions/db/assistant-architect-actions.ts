@@ -56,7 +56,7 @@ import {
 } from "@/lib/db/drizzle";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
-import { tools, navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities } from "@/lib/db/schema";
+import { tools, navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities, roleTools } from "@/lib/db/schema";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -592,20 +592,8 @@ export async function deleteAssistantArchitectAction(
       ownerId: architect.userId
     })
 
-    // Check if the assistant can be deleted based on status
-    if (architect.status !== 'draft' && architect.status !== 'rejected') {
-      log.warn("Attempted to delete non-deletable assistant", {
-        id,
-        status: architect.status
-      })
-      timer({ status: "error" })
-      return {
-        isSuccess: false,
-        message: "Only draft or rejected assistants can be deleted"
-      }
-    }
-
-    // Get current user to check ownership
+    // Get current user and admin status before applying the status guard so
+    // that admins can bypass the draft/rejected restriction (issue #1000).
     const { getCurrentUserAction } = await import("@/actions/db/get-current-user-action");
     const currentUserResult = await getCurrentUserAction();
 
@@ -617,8 +605,6 @@ export async function deleteAssistantArchitectAction(
 
     const currentUser = currentUserResult.data.user;
     const isOwner = architect.userId === currentUser.id;
-    
-    // Check if user is an administrator
     const isAdmin = await hasRole("administrator");
 
     log.debug("Permission check", {
@@ -627,7 +613,21 @@ export async function deleteAssistantArchitectAction(
       isOwner,
       isAdmin
     })
-    
+
+    // Non-admins may only delete assistants they own that are in draft or
+    // rejected state. Admins can delete any assistant regardless of status.
+    if (!isAdmin && architect.status !== 'draft' && architect.status !== 'rejected') {
+      log.warn("Attempted to delete non-deletable assistant", {
+        id,
+        status: architect.status
+      })
+      timer({ status: "error" })
+      return {
+        isSuccess: false,
+        message: "Only draft or rejected assistants can be deleted"
+      }
+    }
+
     // Check permissions: owner OR admin can delete
     if (!isOwner && !isAdmin) {
       log.warn("Unauthorized deletion attempt", {
@@ -649,15 +649,19 @@ export async function deleteAssistantArchitectAction(
       isOwnerDeletion: isOwner,
       isAdminDeletion: !isOwner && isAdmin
     })
-    
+
     // Issue #923: delete the legacy tools row, the renamed capabilities row, and
     // the navigation item atomically. role_capabilities rows cascade via the FK
-    // ON DELETE CASCADE. A partial failure here (tools deleted, capabilities row
-    // surviving) would leave an orphan capability that hasCapabilityAccess() still
-    // honors — a permanent access grant to a deleted architect. One transaction
-    // makes all three deletes succeed together or roll back together.
+    // ON DELETE CASCADE. role_tools has no cascade, so we delete those rows
+    // first to avoid a FK violation when deleting the tool row.
     await executeTransaction(
       async (tx) => {
+        // role_tools FK has no cascade — must be removed before the tools row
+        await tx
+          .delete(roleTools)
+          .where(
+            sql`${roleTools.toolId} IN (SELECT id FROM tools WHERE prompt_chain_tool_id = ${idInt})`
+          );
         await tx
           .delete(tools)
           .where(eq(tools.promptChainToolId, idInt));
