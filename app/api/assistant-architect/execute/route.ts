@@ -17,12 +17,10 @@ import {
   resolveAgentTools,
   closeAgentConnectorClients,
   resolveAgentRunLimits,
-  isAgentRateLimitExceeded,
   AGENT_RATE_LIMIT_WINDOW_MS,
   extractImageInputParts,
 } from '@/lib/agents';
 import type { ToolInvocationAudit } from '@/lib/agents';
-import { countAssistantExecutionsSince } from '@/lib/db/drizzle/assistant-architects';
 import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
 import type { AssistantArchitectMode } from '@/lib/db/schema/tables/assistant-architects';
 import type { StreamRequest } from '@/lib/streaming/types';
@@ -353,57 +351,73 @@ export async function POST(req: Request) {
       userId
     }));
 
-    // 5.5 Per-assistant rate limit (Issue #926): an agentic assistant may cap how
-    // many runs it accepts per rolling hour (separate from any per-user limit).
-    // Checked BEFORE creating the execution row so a rejected request leaves no
-    // dangling 'running' record. NULL/unset cap => no limit (author-configured).
-    if (architect.mode === 'agentic') {
-      const rateCap = (architect as { agentMaxRequestsPerHour?: number | null }).agentMaxRequestsPerHour;
-      if (typeof rateCap === 'number' && rateCap > 0) {
-        const windowStart = new Date(Date.now() - AGENT_RATE_LIMIT_WINDOW_MS);
-        const recentCount = await countAssistantExecutionsSince(toolId, windowStart);
-        if (isAgentRateLimitExceeded(recentCount, rateCap)) {
-          log.warn('Assistant rate limit exceeded', { toolId, rateCap, recentCount });
-          timer({ status: 'rate_limited' });
-          return new Response(
-            JSON.stringify({
-              error: 'Rate limit exceeded',
-              message: `This assistant is limited to ${rateCap} run(s) per hour. Please try again later.`,
-              requestId
-            }),
-            {
-              status: 429,
-              headers: {
-                'Content-Type': 'application/json',
-                'Retry-After': '3600',
-                'X-Request-Id': requestId
-              }
-            }
-          );
-        }
-      }
-    }
-
-    // 6. Create tool_execution record
-    // CRITICAL: Drizzle's AWS Data API driver doesn't properly serialize JSONB.
-    // The driver bypasses customType.toDriver() and passes objects directly,
-    // causing RDS Data API to fail. We must use raw SQL to work around this.
-    // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+    // 6. Create the tool_execution record.
+    // For an agentic assistant with a per-assistant hourly cap (Issue #926), the
+    // insert is GUARDED atomically: INSERT ... SELECT ... WHERE <window count> < cap.
+    // Collapsing the count + insert into ONE statement removes the prior
+    // check-then-insert TOCTOU (two near-simultaneous requests could both pass a
+    // separate pre-check before either row landed). A guarded insert that returns
+    // no row means the cap is reached -> 429. NULL/unset cap => unguarded insert.
+    // (Correctness review.)
+    //
+    // input_data is bound (${...}::jsonb) — postgres.js is the active driver, which
+    // binds parameterized casts correctly (the old sql.raw() JSONB workaround was
+    // for the retired RDS Data API driver). See Issue #599.
     const inputData = Object.keys(inputs).length > 0 ? inputs : { __no_inputs: true };
     const inputDataJson = JSON.stringify(inputData);
+    const startedAtIso = new Date().toISOString();
+
+    const rateCap = architect.mode === 'agentic'
+      ? (architect as { agentMaxRequestsPerHour?: number | null }).agentMaxRequestsPerHour
+      : null;
+    const rateCapped = typeof rateCap === 'number' && rateCap > 0;
 
     const executionResult = await executeQuery(
-      (db) => db.execute(sql`
-        INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
-        VALUES (${userId}, ${inputDataJson}::jsonb, 'running', ${new Date().toISOString()}::timestamp, ${toolId})
-        RETURNING id
-      `),
+      (db) => {
+        if (rateCapped) {
+          const windowStartIso = new Date(Date.now() - AGENT_RATE_LIMIT_WINDOW_MS).toISOString();
+          return db.execute(sql`
+            INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
+            SELECT ${userId}, ${inputDataJson}::jsonb, 'running', ${startedAtIso}::timestamp, ${toolId}
+            WHERE (
+              SELECT count(*) FROM tool_executions
+              WHERE assistant_architect_id = ${toolId} AND started_at >= ${windowStartIso}::timestamp
+            ) < ${rateCap}
+            RETURNING id
+          `);
+        }
+        return db.execute(sql`
+          INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
+          VALUES (${userId}, ${inputDataJson}::jsonb, 'running', ${startedAtIso}::timestamp, ${toolId})
+          RETURNING id
+        `);
+      },
       'createToolExecution'
     );
 
     // postgres.js returns result directly as array-like object (no .rows property - Issue #603)
     const rows = executionResult as unknown as Array<{ id: number }>;
     if (!rows || rows.length === 0 || !rows[0]?.id) {
+      if (rateCapped) {
+        // Guarded insert added no row => the assistant is at/over its hourly cap.
+        log.warn('Assistant rate limit exceeded', { toolId, rateCap });
+        timer({ status: 'rate_limited' });
+        return new Response(
+          JSON.stringify({
+            error: 'Rate limit exceeded',
+            message: `This assistant is limited to ${rateCap} run(s) per hour. Please try again later.`,
+            requestId
+          }),
+          {
+            status: 429,
+            headers: {
+              'Content-Type': 'application/json',
+              'Retry-After': '3600',
+              'X-Request-Id': requestId
+            }
+          }
+        );
+      }
       log.error('Failed to create tool execution', { toolId });
       return new Response(
         JSON.stringify({
@@ -722,7 +736,13 @@ async function executePromptChain(
       const failures = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[];
       if (failures.length > 0) {
         const firstError = failures[0].reason;
-        const failedPromptIds = failures.map((_, idx) => promptsAtPosition[idx]?.id).filter(Boolean);
+        // Map failures back to their ORIGINAL prompt by index into `results`
+        // (which is positionally aligned with `promptsAtPosition`). Indexing
+        // `promptsAtPosition` by the filtered `failures` index would mis-attribute
+        // IDs when an earlier prompt succeeded. (Correctness review.)
+        const failedPromptIds = results
+          .map((r, idx) => (r.status === 'rejected' ? promptsAtPosition[idx]?.id : undefined))
+          .filter((id): id is number => typeof id === 'number');
 
         log.error('Parallel prompt execution failed', {
           position,
@@ -814,19 +834,23 @@ async function executePromptChain(
 function buildCostRates(
   modelData: { inputCostPer1kTokens?: string | null; outputCostPer1kTokens?: string | null }
 ): { inputPerToken: number; outputPerToken: number } | null {
-  // Number(null) and Number(undefined) are 0 / NaN respectively; treat a missing,
-  // non-finite, or negative rate as 0 so a bad/blank column can never UNDER-count
-  // cost (which would let the cost-cap stop condition fail to trip). The DB does
-  // not constrain these to be non-negative, so clamp defensively here.
-  const toRate = (raw: string | null | undefined): number => {
-    if (raw === null || raw === undefined || raw === "") return 0;
+  // A cost cap needs COMPLETE pricing. Parse each rate; a missing/blank/non-finite/
+  // negative column yields null ("unknown"). If EITHER rate is unknown we cannot
+  // compute an accurate per-step cost — treating the unknown side as 0 would
+  // UNDER-count (e.g. a model with priced input but a null output column would let
+  // the cap never trip). Return null so the cap is simply not enforced (the
+  // maxSteps/timeout bounds still apply) rather than silently under-counting.
+  // (Correctness review — corrects the earlier "missing => 0" behavior.)
+  const parseRate = (raw: string | null | undefined): number | null => {
+    if (raw === null || raw === undefined || raw === "") return null;
     const n = Number(raw);
-    return Number.isFinite(n) && n > 0 ? n : 0;
+    return Number.isFinite(n) && n >= 0 ? n : null;
   };
-  const inPer1k = toRate(modelData.inputCostPer1kTokens);
-  const outPer1k = toRate(modelData.outputCostPer1kTokens);
-  // No usable pricing at all → no cost cap (the maxSteps bound still applies).
-  if (inPer1k <= 0 && outPer1k <= 0) return null;
+  const inPer1k = parseRate(modelData.inputCostPer1kTokens);
+  const outPer1k = parseRate(modelData.outputCostPer1kTokens);
+  if (inPer1k === null || outPer1k === null) return null;
+  // A genuinely free model (both rates 0) has no cost to cap.
+  if (inPer1k === 0 && outPer1k === 0) return null;
   return { inputPerToken: inPer1k / 1000, outputPerToken: outPer1k / 1000 };
 }
 

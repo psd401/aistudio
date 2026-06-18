@@ -418,8 +418,14 @@ export async function closeAgentConnectorClients(
   const CLOSE_TIMEOUT_MS = 5_000;
   const closeWithTimeout = (r: McpConnectorToolsResult) => {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
-    const timeoutPromise = new Promise<void>((resolve) => {
-      timeoutId = setTimeout(resolve, CLOSE_TIMEOUT_MS);
+    // REJECT (not resolve) on timeout so a hung close() is counted as a failure
+    // below — resolving made `settled.filter('rejected')` report 0 even when a
+    // client never closed. The race still never stalls onFinish. (Correctness review.)
+    const timeoutPromise = new Promise<void>((_, reject) => {
+      timeoutId = setTimeout(
+        () => reject(new Error(`connector close timed out after ${CLOSE_TIMEOUT_MS}ms`)),
+        CLOSE_TIMEOUT_MS
+      );
     });
     // Clear the timer once close() settles so a fast close doesn't leave a
     // dangling timer that delays test runs or serverless freeze/terminate.

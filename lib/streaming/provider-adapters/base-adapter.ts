@@ -319,7 +319,10 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
             } : undefined,
             finishReason: event.finishReason || 'stop',
             toolCalls: accumulatedToolCalls.length > 0 ? accumulatedToolCalls : undefined,
-            steps: steps && steps.length > 1 ? steps : undefined,
+            // Pass steps whenever any exist (not only > 1): a single-step agentic
+            // run that calls one tool still needs its step data so onFinish can
+            // count tool calls. `> 1` dropped single-step tool data. (Correctness review.)
+            steps: steps && steps.length > 0 ? steps : undefined,
           };
 
           // Call provider-specific finish handler

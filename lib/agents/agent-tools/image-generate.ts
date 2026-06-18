@@ -21,6 +21,11 @@ function textResult(text: string, isError = false): McpToolResult {
  * Pick the image-generation model for an agent run: the first active model that
  * declares the `imageGeneration` capability on a supported provider (openai or
  * google). Returns null when the deployment has no image model configured.
+ *
+ * Not cached on purpose: this resolves with one indexed `ai_models` query whose
+ * latency is negligible next to the multi-second image-generation API call it
+ * precedes, so a module-level cache would add staleness + shared mutable state for
+ * no meaningful gain. (Correctness review — considered and intentionally skipped.)
  */
 async function resolveImageModel(): Promise<
   { modelId: string; provider: "openai" | "google" } | null

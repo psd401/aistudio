@@ -27,7 +27,7 @@ jest.mock("@/lib/logger", () => {
   return { createLogger: () => singleton }
 })
 
-import { resolveAgentTools } from "@/lib/agents/tool-resolver"
+import { resolveAgentTools, closeAgentConnectorClients } from "@/lib/agents/tool-resolver"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 
 const listMock = toolCatalogInstance.list as jest.Mock
@@ -335,5 +335,40 @@ describe("resolveAgentTools", () => {
       expect(dispatchMock).toHaveBeenCalled()
       expect(result).toBe("ok")
     })
+  })
+})
+
+describe("closeAgentConnectorClients", () => {
+  it("counts a hung close() as a failure (and does not stall)", async () => {
+    jest.useFakeTimers()
+    try {
+      const { createLogger } = jest.requireMock("@/lib/logger") as {
+        createLogger: () => { warn: jest.Mock }
+      }
+      const warn = createLogger().warn
+      warn.mockClear()
+
+      // A connector whose close() never settles — only the 5s timeout can end it.
+      const hung = {
+        serverId: "hung",
+        serverName: "Hung",
+        tools: {},
+        close: jest.fn(() => new Promise<void>(() => {})),
+      }
+      const done = closeAgentConnectorClients(
+        [hung as unknown as Parameters<typeof closeAgentConnectorClients>[0][number]],
+        "req-close"
+      )
+      // Advance past the close timeout; the function must resolve, not hang.
+      await jest.advanceTimersByTimeAsync(6_000)
+      await done
+      // The timeout now REJECTS, so the hung close is reported as a failure.
+      expect(warn).toHaveBeenCalledWith(
+        "Some agent connector clients failed to close",
+        expect.objectContaining({ failed: 1, total: 1 })
+      )
+    } finally {
+      jest.useRealTimers()
+    }
   })
 })

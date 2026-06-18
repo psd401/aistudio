@@ -42,7 +42,7 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, desc, sql, and, gte } from "drizzle-orm";
+import { eq, desc, sql } from "drizzle-orm";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import {
   assistantArchitects,
@@ -322,31 +322,6 @@ export async function getAssistantArchitectWithCreator(
           }
         : null,
   };
-}
-
-/**
- * Count executions of an assistant started at/after `since` — the per-assistant
- * rate-limit window query (Issue #926). Counts ALL executions of the assistant
- * (across users), which is what a per-assistant limit means.
- */
-export async function countAssistantExecutionsSince(
-  assistantId: number,
-  since: Date
-): Promise<number> {
-  const result = await executeQuery(
-    (db) =>
-      db
-        .select({ count: sql<number>`count(*)` })
-        .from(toolExecutions)
-        .where(
-          and(
-            eq(toolExecutions.assistantArchitectId, assistantId),
-            gte(toolExecutions.startedAt, since)
-          )
-        ),
-    "countAssistantExecutionsSince"
-  );
-  return Number(result[0]?.count ?? 0);
 }
 
 /**

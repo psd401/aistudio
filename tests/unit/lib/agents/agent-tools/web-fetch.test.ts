@@ -52,6 +52,13 @@ describe("assertSafeFetchUrl", () => {
     "https://169.254.169.254/latest/meta-data",
     "https://metadata.google.internal/x",
     "https://[::1]/x",
+    // IPv4-mapped IPv6 loopback, compressed and full form (URL normalizes both to
+    // ::ffff:7f00:1, caught by the ::ffff: prefix). (Correctness review.)
+    "https://[::ffff:127.0.0.1]/x",
+    "https://[0:0:0:0:0:ffff:127.0.0.1]/x",
+    // Link-local fe80::/10 beyond the fe80 prefix (fe9x/feax/febx).
+    "https://[fe9a::1]/x",
+    "https://[feba::1]/x",
   ])("blocks private/internal target %s", (url) => {
     expect(() => assertSafeFetchUrl(url)).toThrow(/private|loopback|internal/i);
   });
@@ -78,6 +85,14 @@ describe("htmlToText", () => {
     expect(text).toContain("Title");
     expect(text).toContain("Hello & welcome");
     expect(text).toContain("Line two");
+  });
+
+  it("strips an UNCLOSED script block (malformed HTML) to end of input", () => {
+    const html = "<body><p>Visible</p><script>secret = leak()";
+    const text = htmlToText(html);
+    expect(text).toContain("Visible");
+    expect(text).not.toMatch(/secret/);
+    expect(text).not.toMatch(/leak/);
   });
 });
 

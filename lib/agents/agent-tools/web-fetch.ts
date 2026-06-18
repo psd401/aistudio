@@ -44,7 +44,11 @@ function isPrivateIpv6(host: string): boolean {
     host === "::1" ||
     host.startsWith("fc") ||
     host.startsWith("fd") ||
-    host.startsWith("fe80") ||
+    // Link-local fe80::/10 spans the fe80–febf prefixes, not just fe80.
+    // (Correctness review.)
+    /^fe[89ab]/.test(host) ||
+    // Any IPv4-mapped form. URL normalizes full-form (0:0:0:0:0:ffff:…) to this
+    // compressed prefix, so this also blocks ::ffff:<private-or-public-v4>.
     host.startsWith("::ffff:")
   );
 }
@@ -123,6 +127,10 @@ export function htmlToText(html: string): string {
     html
       // Drop entire script/style/noscript/template blocks (content + tags).
       .replace(/<(script|style|noscript|template)[\s\S]*?<\/\1>/gi, " ")
+      // Handle an UNCLOSED script/style/etc block (malformed HTML): strip from the
+      // opening tag to end-of-input so its raw content can't leak as text.
+      // (Correctness review.)
+      .replace(/<(script|style|noscript|template)\b[\s\S]*$/gi, " ")
       // Turn common block boundaries into newlines so structure survives.
       .replace(/<\/(p|div|li|h[1-6]|tr|br|section|article|header|footer)>/gi, "\n")
       .replace(/<br\s*\/?>/gi, "\n")
