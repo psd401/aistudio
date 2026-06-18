@@ -12,6 +12,14 @@ import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from '@/lib/assist
 import { hasToolAccess, hasRole } from '@/utils/roles';
 import { ErrorFactories } from '@/lib/error-utils';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
+import { getScopesForRoles } from '@/lib/api-keys/scopes';
+import {
+  resolveAgentTools,
+  closeAgentConnectorClients,
+  resolveAgentRunLimits,
+} from '@/lib/agents';
+import type { ToolInvocationAudit } from '@/lib/agents';
+import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
 import type { StreamRequest } from '@/lib/streaming/types';
 import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { storeExecutionEvent } from '@/lib/assistant-architect/event-storage';
@@ -87,6 +95,29 @@ interface PromptExecutionContext {
     assistantId: number;
     assistantName: string;
   };
+  /**
+   * Caller identity for agentic-mode tool resolution (Issue #926). Scopes are
+   * role-derived; tools the author enabled are intersected with these at
+   * execution time so a low-privilege executor cannot invoke a tool they lack
+   * the scope for.
+   */
+  caller?: {
+    scopes: string[];
+    roleNames: string[];
+    idToken?: string;
+  };
+}
+
+/**
+ * Agentic execution config for an assistant (Issue #926). Resolved from the
+ * architect row + caller context and passed to the agent runtime.
+ */
+interface AgenticConfig {
+  enabledToolIdentifiers: string[];
+  enabledConnectorIds: string[];
+  maxSteps: number;
+  timeoutSeconds: number;
+  costCapCents: number | null;
 }
 
 /**
@@ -399,7 +430,9 @@ export async function POST(req: Request) {
       });
     }
 
-    // 8. Execute prompt chain with streaming
+    // 8. Execute with streaming. Caller scopes (role-derived) are needed for
+    // agentic tool resolution; harmless to compute for prompt-chain mode too.
+    const callerRoleNames = currentUser.data.roles.map(r => r.name);
     const context: PromptExecutionContext = {
       previousOutputs: new Map(),
       accumulatedMessages: [],
@@ -413,10 +446,21 @@ export async function POST(req: Request) {
         assistantId: toolId,
         assistantName: architect.name,
       } : undefined,
+      caller: {
+        scopes: getScopesForRoles(callerRoleNames),
+        roleNames: callerRoleNames,
+        idToken: session.idToken,
+      },
     };
 
     try {
-      const streamResponse = await executePromptChain(prompts as ChainPrompt[], inputs, context, requestId, log);
+      // Issue #926: branch on assistant mode. Agentic assistants run a model loop
+      // with tool access; prompt-chain assistants keep the original sequential
+      // template execution untouched.
+      const isAgentic = architect.mode === 'agentic';
+      const streamResponse = isAgentic
+        ? await executeAgenticAssistant({ architect, prompts: prompts as ChainPrompt[], inputs, context, requestId, log })
+        : await executePromptChain(prompts as ChainPrompt[], inputs, context, requestId, log);
 
       // 9. Update execution status to completed on stream completion
       // This is done in the onFinish callback of the last prompt
@@ -716,6 +760,343 @@ async function executePromptChain(
   }
 
   return lastStreamResponse;
+}
+
+/** The agentic-mode fields read off the architect row (Issue #926). */
+interface AgenticArchitectFields {
+  name: string;
+  mode?: string | null;
+  agentEnabledTools?: string[] | null;
+  agentEnabledConnectors?: string[] | null;
+  agentMaxSteps?: number | null;
+  agentTimeoutSeconds?: number | null;
+  agentCostCapCents?: number | null;
+}
+
+/**
+ * Build the initial user message for an agentic run from the form inputs plus
+ * any author-defined prompt content (used as upfront context / task framing). The
+ * model then decides which tools to call and continues until done.
+ */
+function buildAgenticInitialMessage(
+  prompts: ChainPrompt[],
+  inputs: Record<string, unknown>
+): { systemPrompt?: string; userText: string } {
+  // The lowest-position prompt's systemContext seeds the system prompt; its
+  // content frames the task. Remaining prompts are appended as additional
+  // context so an author migrating a chain keeps their authored guidance.
+  const ordered = [...prompts].sort((a, b) => a.position - b.position);
+  const systemPrompt = ordered.find(p => p.systemContext)?.systemContext || undefined;
+
+  const taskParts: string[] = [];
+  for (const p of ordered) {
+    const substituted = substituteVariables(p.content, inputs, new Map(), (p.inputMapping || {}) as Record<string, string>);
+    if (substituted.trim()) taskParts.push(substituted.trim());
+  }
+
+  const inputLines = Object.entries(inputs)
+    .map(([k, v]) => `- ${String(k).slice(0, 100)}: ${typeof v === 'string' ? v.slice(0, 2000) : String(v).slice(0, 2000)}`)
+    .join('\n');
+
+  const userText = [
+    taskParts.join('\n\n'),
+    inputLines ? `\n\nUser inputs:\n${inputLines}` : '',
+  ].join('').trim() || 'Begin.';
+
+  return { systemPrompt, userText };
+}
+
+/** Usage shape passed to the streaming onFinish callback. */
+interface AgenticFinishUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+  reasoningTokens?: number;
+  totalCost?: number;
+}
+
+/**
+ * Finalize a completed agentic run: persist the final output as a prompt_result,
+ * save the assistant message to the conversation, mark the execution completed,
+ * and reconcile conversation stats. Extracted from onFinish to keep that callback
+ * lean. Throws on a fatal persistence failure (caller rejects + cleans up).
+ */
+async function persistAgenticResult(args: {
+  context: PromptExecutionContext;
+  drivingPromptId: number;
+  agentStartTime: number;
+  text: string;
+  usage?: AgenticFinishUsage;
+  finishReason: string;
+  steps: Array<{ toolCalls?: unknown[] }>;
+  log: ReturnType<typeof createLogger>;
+}): Promise<void> {
+  const { context, drivingPromptId, agentStartTime, text, usage, finishReason, steps, log } = args;
+  const executionTimeMs = Date.now() - agentStartTime;
+  const toolCallCount = steps.reduce((n, s) => n + (s.toolCalls?.length || 0), 0);
+  log.info('Agentic execution finished', {
+    executionId: context.executionId,
+    finishReason,
+    steps: steps.length,
+    toolCalls: toolCallCount,
+    hasText: !!text,
+  });
+
+  // Persist the final output as a single prompt_result attributed to the driving
+  // prompt. Per-tool detail lives in the events table (the audit sink).
+  const promptInputData = { mode: 'agentic', toolCalls: toolCallCount, steps: steps.length };
+  const escapedInputJson = JSON.stringify(promptInputData).replace(/'/g, "''");
+  await executeQuery(
+    (db) => db.execute(sql`
+      INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, started_at, completed_at, execution_time_ms)
+      VALUES (${context.executionId}, ${drivingPromptId}, ${sql.raw(`'${escapedInputJson}'::jsonb`)}, ${text}, ${sql.raw("'completed'::execution_status")}, ${new Date(agentStartTime).toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
+    `),
+    'saveAgenticResult'
+  );
+
+  // Save the assistant message to the nexus conversation for resumption.
+  if (context.conversation) {
+    try {
+      const metadata: AssistantArchitectMessageMetadata = {
+        source: 'assistant-architect-execution',
+        executionId: context.executionId,
+        promptId: drivingPromptId,
+        promptName: 'Agentic run',
+        position: 0,
+        executionTimeMs,
+      };
+      await createMessageWithStats({
+        conversationId: context.conversation.conversationId,
+        role: 'assistant',
+        content: text,
+        parts: [{ type: 'text', text }],
+        tokenUsage: usage ? {
+          promptTokens: usage.promptTokens,
+          completionTokens: usage.completionTokens,
+          totalTokens: usage.totalTokens,
+        } : undefined,
+        metadata: metadata as unknown as Record<string, unknown>,
+      });
+    } catch (msgErr) {
+      log.error('Failed to save agentic result as conversation message', {
+        error: msgErr instanceof Error ? msgErr.message : String(msgErr),
+        executionId: context.executionId,
+      });
+    }
+  }
+
+  // Mark execution completed + emit completion event.
+  await executeQuery(
+    (db) => db.execute(sql`
+      UPDATE tool_executions
+      SET status = 'completed', completed_at = ${new Date().toISOString()}::timestamp
+      WHERE id = ${context.executionId}
+    `),
+    'updateAgenticExecutionCompleted'
+  );
+  await storeExecutionEvent(context.executionId, 'execution-complete', {
+    executionId: context.executionId,
+    totalTokens: usage?.totalTokens || 0,
+    duration: Date.now() - context.executionStartTime,
+    success: true,
+  }).catch(err => log.error('Failed to store agentic execution-complete event', { error: err }));
+
+  if (context.conversation) {
+    try {
+      const existing = await getConversationById(context.conversation.conversationId, context.userId);
+      await updateConversation(context.conversation.conversationId, context.userId, {
+        metadata: {
+          ...existing.metadata,
+          ...buildExecutionMetadata(context.conversation.assistantId, context.conversation.assistantName, context.executionId, 'completed'),
+        },
+      });
+      await updateConversationStats(context.conversation.conversationId);
+    } catch (err) {
+      log.error('Failed to finalize agentic conversation', {
+        error: err instanceof Error ? err.message : String(err),
+        executionId: context.executionId,
+      });
+    }
+  }
+}
+
+/**
+ * Execute an assistant in AGENTIC mode (Issue #926): a model loop with tool
+ * access. Tools are resolved from the unified catalog (#924, internal surface,
+ * agentCallable only) + per-user MCP connectors (#774), intersected with the
+ * caller's scopes. The loop is bounded by per-run step/timeout/cost limits.
+ *
+ * Returns the stream response (UI message stream) once streaming starts; result
+ * persistence, tool-invocation audit, and connector cleanup happen in onFinish/
+ * onError so clients are never closed while tool calls are in flight.
+ */
+async function executeAgenticAssistant(args: {
+  architect: AgenticArchitectFields;
+  prompts: ChainPrompt[];
+  inputs: Record<string, unknown>;
+  context: PromptExecutionContext;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+}) {
+  const { architect, prompts, inputs, context, requestId, log } = args;
+  log.info('Starting agentic assistant execution', { executionId: context.executionId });
+
+  if (!context.caller) {
+    throw ErrorFactories.sysInternalError('Agentic execution requires caller context', {
+      details: { executionId: context.executionId }
+    });
+  }
+
+  // Resolve run limits (defaults + clamp to ceilings; DB also CHECK-constrains).
+  const limits = resolveAgentRunLimits({
+    agentMaxSteps: architect.agentMaxSteps,
+    agentTimeoutSeconds: architect.agentTimeoutSeconds,
+    agentCostCapCents: architect.agentCostCapCents,
+  });
+
+  const config: AgenticConfig = {
+    enabledToolIdentifiers: Array.isArray(architect.agentEnabledTools) ? architect.agentEnabledTools : [],
+    enabledConnectorIds: Array.isArray(architect.agentEnabledConnectors) ? architect.agentEnabledConnectors : [],
+    maxSteps: limits.maxSteps,
+    timeoutSeconds: limits.timeoutSeconds,
+    costCapCents: limits.costCapCents,
+  };
+
+  // The model uses the first configured prompt for a model id; agentic mode still
+  // requires a model to drive the loop.
+  const orderedPrompts = [...prompts].sort((a, b) => a.position - b.position);
+  const drivingPrompt = orderedPrompts[0];
+  if (!drivingPrompt || !drivingPrompt.modelId) {
+    throw ErrorFactories.sysInternalError('Agentic assistant has no model configured', {
+      details: { executionId: context.executionId }
+    });
+  }
+  const modelData = await getAIModelById(drivingPrompt.modelId);
+  if (!modelData || !modelData.modelId || !modelData.provider) {
+    throw ErrorFactories.dbRecordNotFound('ai_models', drivingPrompt.modelId, {
+      details: { executionId: context.executionId }
+    });
+  }
+
+  // Tool-invocation audit sink — persists one tool-execution-complete event per
+  // invocation, conforming to the existing SSE event schema (#937). promptId is
+  // the driving prompt; the catalog identifier + timing + principal ride in
+  // `result` for the timeline. Failures are swallowed by the resolver so this
+  // never breaks the loop.
+  const onToolInvocation = async (event: ToolInvocationAudit) => {
+    await storeExecutionEvent(context.executionId, 'tool-execution-complete', {
+      promptId: drivingPrompt.id,
+      toolName: event.toolName,
+      success: event.ok,
+      error: event.error,
+      result: {
+        toolIdentifier: event.toolIdentifier,
+        args: event.args,
+        durationMs: event.durationMs,
+        userId: event.userId,
+      },
+    });
+  };
+
+  // Resolve tools (catalog ∩ caller scopes ∩ author allow-list, + connectors).
+  const resolved = await resolveAgentTools({
+    enabledToolIdentifiers: config.enabledToolIdentifiers,
+    enabledConnectorIds: config.enabledConnectorIds,
+    caller: {
+      userId: context.userId,
+      cognitoSub: context.userCognitoSub,
+      scopes: context.caller.scopes,
+      roleNames: context.caller.roleNames,
+      idToken: context.caller.idToken,
+    },
+    requestId,
+    onToolInvocation,
+  });
+
+  log.info('Agentic tools resolved', {
+    executionId: context.executionId,
+    granted: resolved.grantedToolIdentifiers.length,
+    denied: resolved.deniedToolIdentifiers.length,
+    connectorTools: resolved.connectorResults.length,
+    maxSteps: config.maxSteps,
+  });
+
+  const { systemPrompt, userText } = buildAgenticInitialMessage(orderedPrompts, inputs);
+  const userMessage: UIMessage = {
+    id: `agentic-${context.executionId}-${Date.now()}`,
+    role: 'user',
+    parts: [{ type: 'text', text: userText }],
+  };
+
+  const agentStartTime = Date.now();
+  const connectorResults: McpConnectorToolsResult[] = resolved.connectorResults;
+  let cleanedUp = false;
+  const cleanupConnectors = async () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+    await closeAgentConnectorClients(connectorResults, requestId);
+  };
+
+  return new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined>((resolve, reject) => {
+    let resolveStreamResponse!: (value: Awaited<ReturnType<typeof unifiedStreamingService.stream>>) => void;
+    let rejectStreamResponse!: (error: Error) => void;
+    const streamResponsePromise = new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>>>((res, rej) => {
+      resolveStreamResponse = res;
+      rejectStreamResponse = rej;
+    });
+
+    const streamRequest: StreamRequest = {
+      messages: [userMessage],
+      modelId: String(modelData.modelId),
+      provider: String(modelData.provider),
+      userId: context.userId.toString(),
+      sessionId: context.userCognitoSub,
+      source: 'assistant_execution' as const,
+      systemPrompt,
+      // Pre-resolved tool set (catalog + connectors). maxSteps drives the loop.
+      tools: Object.keys(resolved.tools).length > 0 ? resolved.tools : undefined,
+      maxSteps: config.maxSteps,
+      timeout: config.timeoutSeconds * 1000,
+      callbacks: {
+        onFinish: async ({ text, usage, finishReason, steps }) => {
+          try {
+            await persistAgenticResult({
+              context, drivingPromptId: drivingPrompt.id, agentStartTime,
+              text: text || '', usage, finishReason, steps: steps || [], log,
+            });
+            // Close MCP clients AFTER the stream finished (never in a sync finally).
+            await cleanupConnectors();
+            resolve(await streamResponsePromise);
+          } catch (saveError) {
+            await cleanupConnectors();
+            log.error('Failed to finalize agentic execution', { error: saveError, executionId: context.executionId });
+            reject(saveError);
+          }
+        },
+        onError: async (error) => {
+          await cleanupConnectors();
+          log.error('Agentic streaming error', { error, executionId: context.executionId });
+          reject(error);
+        },
+      },
+    };
+
+    (async () => {
+      try {
+        const streamResponse = await unifiedStreamingService.stream(streamRequest);
+        resolveStreamResponse(streamResponse);
+      } catch (error) {
+        await cleanupConnectors();
+        log.error('Failed to start agentic stream', { error, executionId: context.executionId });
+        rejectStreamResponse(error as Error);
+        reject(error);
+      }
+    })().catch(async (error) => {
+      await cleanupConnectors();
+      rejectStreamResponse(error as Error);
+      reject(error);
+    });
+  });
 }
 
 /**
