@@ -182,7 +182,6 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('returns 401 when session has no sub', async () => {
-      // @ts-expect-error intentionally testing malformed session
       mockGetServerSession.mockResolvedValue({ email: 'no-sub@test.com' });
 
       const req = makeRequest(makeFormData({}));
