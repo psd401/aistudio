@@ -1,30 +1,31 @@
 // Unit tests for HybridDocumentAdapter.toSafeErrorMessage — regression coverage for issue #1017 (FS#148338).
 
-import { describe, it, expect, jest } from '@jest/globals';
+import { describe, it, expect } from '@jest/globals';
+
+// assistant-ui/react is ESM-only; replace with class stubs so Jest (CJS) can
+// load enhanced-attachment-adapters.ts without hitting an ESM parse error.
+// NOTE: must use global jest (not imported from @jest/globals) so the SWC
+// transform can hoist this call before the module imports are evaluated.
+jest.mock('@assistant-ui/react', () => ({
+  AttachmentAdapter: class {},
+  CompositeAttachmentAdapter: class {},
+  SimpleImageAttachmentAdapter: class {},
+  SimpleTextAttachmentAdapter: class {},
+}));
 
 // HybridDocumentAdapter imports client-logger at module level.
-// Mock it to prevent Node-environment issues with browser-only APIs.
 jest.mock('@/lib/client-logger', () => ({
   createLogger: () => ({
-    info: jest.fn(),
-    warn: jest.fn(),
-    error: jest.fn(),
-    debug: jest.fn(),
+    info: () => {},
+    warn: () => {},
+    error: () => {},
+    debug: () => {},
   }),
 }));
 
-// generateUUID is used at module level via the adapter constructor; mock it
-// to keep the test isolated.
+// generateUUID is used at module level via the adapter constructor.
 jest.mock('@/lib/utils/uuid', () => ({
-  generateUUID: jest.fn(() => 'test-uuid'),
-}));
-
-// assistant-ui/react exports complex React components — replace with stubs.
-jest.mock('@assistant-ui/react', () => ({
-  AttachmentAdapter: jest.fn(),
-  CompositeAttachmentAdapter: jest.fn(),
-  SimpleImageAttachmentAdapter: jest.fn(),
-  SimpleTextAttachmentAdapter: jest.fn(),
+  generateUUID: () => 'test-uuid',
 }));
 
 import { HybridDocumentAdapter } from '@/lib/nexus/enhanced-attachment-adapters';
