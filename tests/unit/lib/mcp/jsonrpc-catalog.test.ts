@@ -50,9 +50,13 @@ jest.mock("@/lib/mcp/tool-handlers", () => ({
   },
 }))
 
-import { handleJsonRpcRequest } from "@/lib/mcp/jsonrpc-handler"
+import {
+  handleJsonRpcRequest,
+  selectListedTools,
+} from "@/lib/mcp/jsonrpc-handler"
 import type { McpToolContext } from "@/lib/mcp/types"
 import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest"
+import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 
 // Derive the expected MCP tool count from the manifest so this test self-updates
 // when an MCP tool is added/removed, rather than asserting a hardcoded length.
@@ -69,6 +73,10 @@ describe("MCP JSON-RPC via catalog", () => {
   beforeEach(() => {
     dbRows = []
     searchHandler.mockClear()
+    // The JSON-RPC handler uses the module-level catalog singleton, which caches
+    // DB rows for 5 min. Bust it between tests so each test's `dbRows` is read
+    // fresh instead of serving a previous test's warm (stale) cache.
+    toolCatalogInstance.invalidate()
   })
 
   it("tools/list returns catalog-backed MCP tools filtered by scope", async () => {
@@ -129,5 +137,108 @@ describe("MCP JSON-RPC via catalog", () => {
       ctx(["*"])
     )
     expect(res.error?.code).toBe(-32601)
+  })
+
+  // Versioning (#927): tools/list hides deprecated versions by default and
+  // collapses to the latest version per identifier; include:"all" returns all.
+  describe("version filtering (#927)", () => {
+    // A deprecated v1 + a live v2 of the same identifier as DB (assistant) rows.
+    function multiVersionRows() {
+      return [
+        {
+          identifier: "assistants.multi",
+          version: "v1",
+          name: "multi_v1",
+          description: "old",
+          inputSchema: { type: "object", properties: {} },
+          outputSchema: null,
+          surfaces: ["mcp"],
+          requiredScopes: [],
+          agentCallable: true,
+          source: "assistant",
+          isActive: true,
+          deprecatedAt: new Date("2026-01-01T00:00:00Z"),
+          replacedBy: "assistants.multi@v2",
+          removalDate: new Date("2026-04-01T00:00:00Z"),
+          handlerRef: "assistant:1",
+        },
+        {
+          identifier: "assistants.multi",
+          version: "v2",
+          name: "multi_v2",
+          description: "new",
+          inputSchema: { type: "object", properties: {} },
+          outputSchema: null,
+          surfaces: ["mcp"],
+          requiredScopes: [],
+          agentCallable: true,
+          source: "assistant",
+          isActive: true,
+          deprecatedAt: null,
+          replacedBy: null,
+          removalDate: null,
+          handlerRef: "assistant:2",
+        },
+      ]
+    }
+
+    it("default tools/list hides the deprecated version and keeps the latest", async () => {
+      dbRows = multiVersionRows()
+      const res = await handleJsonRpcRequest(
+        { jsonrpc: "2.0", method: "tools/list", id: 6 },
+        ctx(["*"])
+      )
+      const result = res.result as {
+        tools: { name: string; version: string; deprecated?: boolean }[]
+      }
+      const multi = result.tools.filter((t) => t.name.startsWith("multi_"))
+      expect(multi).toHaveLength(1)
+      expect(multi[0].name).toBe("multi_v2")
+      expect(multi[0].version).toBe("v2")
+      expect(multi[0].deprecated).toBeUndefined()
+    })
+
+    it("include:'all' returns every version, tagging deprecated ones", async () => {
+      dbRows = multiVersionRows()
+      const res = await handleJsonRpcRequest(
+        { jsonrpc: "2.0", method: "tools/list", id: 7, params: { include: "all" } },
+        ctx(["*"])
+      )
+      const result = res.result as {
+        tools: {
+          name: string
+          version: string
+          deprecated?: boolean
+          replacedBy?: string | null
+        }[]
+      }
+      const multi = result.tools.filter((t) => t.name.startsWith("multi_"))
+      expect(multi.map((t) => t.version).sort()).toEqual(["v1", "v2"])
+      const v1 = multi.find((t) => t.version === "v1")
+      expect(v1?.deprecated).toBe(true)
+      expect(v1?.replacedBy).toBe("assistants.multi@v2")
+      const v2 = multi.find((t) => t.version === "v2")
+      expect(v2?.deprecated).toBeUndefined()
+    })
+  })
+})
+
+describe("selectListedTools (#927)", () => {
+  const tools = [
+    { identifier: "a.x", version: "v1", name: "ax1" },
+    { identifier: "a.x", version: "v2", name: "ax2" },
+    { identifier: "b.y", version: "v1", name: "by1" },
+  ]
+
+  it("collapses to the latest version per identifier by default", () => {
+    const result = selectListedTools(tools, false)
+    expect(result).toHaveLength(2)
+    const ax = result.find((t) => t.identifier === "a.x")
+    expect(ax?.version).toBe("v2")
+  })
+
+  it("returns every entry when includeAll is true", () => {
+    const result = selectListedTools(tools, true)
+    expect(result).toHaveLength(3)
   })
 })

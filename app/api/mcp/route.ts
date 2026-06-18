@@ -82,6 +82,19 @@ export async function POST(request: NextRequest): Promise<NextResponse | Respons
     )
   }
 
+  // Versioning (#927): allow `?include=all` on the URL as a convenience for
+  // `tools/list` (in addition to the JSON-RPC `params.include`). Merge it into
+  // the request params so the handler sees a single source. The explicit
+  // JSON-RPC param wins if both are present.
+  if (rpcRequest.method === "tools/list") {
+    const include = request.nextUrl.searchParams.get("include")
+    if (include) {
+      const params = (rpcRequest.params ?? {}) as Record<string, unknown>
+      if (params.include === undefined) params.include = include
+      rpcRequest.params = params
+    }
+  }
+
   log.info("MCP request", {
     method: rpcRequest.method,
     userId: auth.userId,

@@ -16,6 +16,7 @@ import {
   MCP_PROTOCOL_VERSION,
 } from "./types"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
+import { compareVersionsDesc } from "@/lib/tools/catalog/utils"
 import { createLogger } from "@/lib/logger"
 
 // ============================================
@@ -132,23 +133,74 @@ async function handleToolsList(
   context: McpToolContext,
   log: ReturnType<typeof createLogger>
 ): Promise<JsonRpcResponse> {
+  // Versioning (#927): by DEFAULT, return only the latest non-deprecated version
+  // of each tool. The opt-in `include: "all"` param returns every version
+  // including deprecated ones, each tagged with a `deprecated` boolean so a
+  // client can distinguish them. `include` arrives either as a JSON-RPC param
+  // (`params.include`) or, for convenience, the `?include=all` query string the
+  // route merges into params.
+  const includeAll =
+    (rpcRequest.params as { include?: unknown } | undefined)?.include === "all"
+
   // Catalog-backed: list active tools exposed on the `mcp` surface and filtered
   // by the caller's scopes. The catalog merges code-manifest tools (the 5
-  // migrated MCP tools) with any assistant/skill-derived MCP tools.
+  // migrated MCP tools) with any assistant/skill-derived MCP tools. Deprecated
+  // tools are excluded unless `include: "all"`.
   const tools = await toolCatalogInstance.list({
     surface: "mcp",
     scopes: context.scopes,
+    excludeDeprecated: !includeAll,
   })
 
-  log.debug("tools/list resolved from catalog", { count: tools.length })
+  // Default view: collapse to the latest version per identifier so a client sees
+  // exactly one entry per logical tool. With `include: "all"` we keep every
+  // version (the client opted into the full set). `selectListedTools` is pure +
+  // unit-tested.
+  const listed = selectListedTools(tools, includeAll)
+
+  log.debug("tools/list resolved from catalog", {
+    count: listed.length,
+    includeAll,
+  })
 
   return successResponse(rpcRequest.id, {
-    tools: tools.map((t) => ({
+    tools: listed.map((t) => ({
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
+      // Version metadata so clients can pin / detect deprecation. `deprecated`
+      // is only ever true in the include=all view (default hides deprecated).
+      version: t.version,
+      identifier: t.identifier,
+      ...(t.deprecatedAt
+        ? { deprecated: true, replacedBy: t.replacedBy ?? null }
+        : {}),
     })),
   })
+}
+
+/**
+ * Choose which catalog entries `tools/list` returns (#927).
+ *
+ * - `includeAll = false` (default): one entry per identifier — the highest
+ *   version present (already deprecation-filtered upstream).
+ * - `includeAll = true`: every entry as-is (all versions, incl. deprecated).
+ *
+ * Pure so the collapse-to-latest logic is unit-testable without the catalog/DB.
+ * Exported for tests.
+ */
+export function selectListedTools<
+  T extends { identifier: string; version: string }
+>(tools: readonly T[], includeAll: boolean): T[] {
+  if (includeAll) return [...tools]
+  const latestByIdentifier = new Map<string, T>()
+  for (const tool of tools) {
+    const current = latestByIdentifier.get(tool.identifier)
+    if (!current || compareVersionsDesc(tool.version, current.version) < 0) {
+      latestByIdentifier.set(tool.identifier, tool)
+    }
+  }
+  return [...latestByIdentifier.values()]
 }
 
 // ============================================
