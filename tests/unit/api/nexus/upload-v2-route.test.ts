@@ -33,7 +33,7 @@ jest.mock('@/lib/aws/lambda-trigger', () => ({
 }));
 
 jest.mock('@/lib/rate-limit', () => ({
-  apiRateLimit: jest.fn().mockResolvedValue(null),
+  apiRateLimit: { upload: (handler: (...args: unknown[]) => unknown) => handler },
 }));
 
 jest.mock('@/lib/logger', () => ({
@@ -146,8 +146,8 @@ describe('POST /api/documents/v2/upload', () => {
 
     it('accepts CSV files with text/csv MIME type', async () => {
       mockGetServerSession.mockResolvedValue(makeSession());
-      mockCreateDocumentJob.mockResolvedValue({ jobId: 'job-csv-1', s3Key: 'uploads/job-csv-1/data.csv' });
-      mockUploadToS3.mockResolvedValue(undefined);
+      mockCreateDocumentJob.mockResolvedValue({ id: 'job-csv-1' });
+      mockUploadToS3.mockResolvedValue({ s3Key: 'v2/uploads/job-csv-1/data.csv', sanitizedFileName: 'data.csv' });
       mockSendToProcessingQueue.mockResolvedValue(undefined);
       mockConfirmDocumentUpload.mockResolvedValue(undefined);
 
@@ -161,8 +161,8 @@ describe('POST /api/documents/v2/upload', () => {
 
     it('accepts CSV files with application/csv MIME type', async () => {
       mockGetServerSession.mockResolvedValue(makeSession());
-      mockCreateDocumentJob.mockResolvedValue({ jobId: 'job-csv-2', s3Key: 'uploads/job-csv-2/data.csv' });
-      mockUploadToS3.mockResolvedValue(undefined);
+      mockCreateDocumentJob.mockResolvedValue({ id: 'job-csv-2' });
+      mockUploadToS3.mockResolvedValue({ s3Key: 'v2/uploads/job-csv-2/data.csv', sanitizedFileName: 'data.csv' });
       mockSendToProcessingQueue.mockResolvedValue(undefined);
       mockConfirmDocumentUpload.mockResolvedValue(undefined);
 
@@ -176,8 +176,8 @@ describe('POST /api/documents/v2/upload', () => {
 
     it('accepts PDF files', async () => {
       mockGetServerSession.mockResolvedValue(makeSession());
-      mockCreateDocumentJob.mockResolvedValue({ jobId: 'job-pdf-1', s3Key: 'uploads/job-pdf-1/doc.pdf' });
-      mockUploadToS3.mockResolvedValue(undefined);
+      mockCreateDocumentJob.mockResolvedValue({ id: 'job-pdf-1' });
+      mockUploadToS3.mockResolvedValue({ s3Key: 'v2/uploads/job-pdf-1/doc.pdf', sanitizedFileName: 'doc.pdf' });
       mockSendToProcessingQueue.mockResolvedValue(undefined);
       mockConfirmDocumentUpload.mockResolvedValue(undefined);
 
@@ -211,8 +211,8 @@ describe('POST /api/documents/v2/upload', () => {
   describe('Successful upload flow', () => {
     it('uploads file to S3, queues processing job, and returns jobId', async () => {
       mockGetServerSession.mockResolvedValue(makeSession());
-      mockCreateDocumentJob.mockResolvedValue({ jobId: 'job-success-1', s3Key: 'uploads/job-success-1/data.csv' });
-      mockUploadToS3.mockResolvedValue(undefined);
+      mockCreateDocumentJob.mockResolvedValue({ id: 'job-success-1' });
+      mockUploadToS3.mockResolvedValue({ s3Key: 'v2/uploads/job-success-1/data.csv', sanitizedFileName: 'data.csv' });
       mockSendToProcessingQueue.mockResolvedValue(undefined);
       mockConfirmDocumentUpload.mockResolvedValue(undefined);
 
@@ -229,8 +229,8 @@ describe('POST /api/documents/v2/upload', () => {
 
     it('propagates processing options to the job queue', async () => {
       mockGetServerSession.mockResolvedValue(makeSession());
-      mockCreateDocumentJob.mockResolvedValue({ jobId: 'job-opts-1', s3Key: 'uploads/job-opts-1/doc.pdf' });
-      mockUploadToS3.mockResolvedValue(undefined);
+      mockCreateDocumentJob.mockResolvedValue({ id: 'job-opts-1' });
+      mockUploadToS3.mockResolvedValue({ s3Key: 'v2/uploads/job-opts-1/doc.pdf', sanitizedFileName: 'doc.pdf' });
       mockSendToProcessingQueue.mockResolvedValue(undefined);
       mockConfirmDocumentUpload.mockResolvedValue(undefined);
 
@@ -259,7 +259,7 @@ describe('POST /api/documents/v2/upload', () => {
   describe('Error handling', () => {
     it('returns 503 when S3 upload fails', async () => {
       mockGetServerSession.mockResolvedValue(makeSession());
-      mockCreateDocumentJob.mockResolvedValue({ jobId: 'job-err-1', s3Key: 'uploads/job-err-1/data.csv' });
+      mockCreateDocumentJob.mockResolvedValue({ id: 'job-err-1' });
       mockUploadToS3.mockRejectedValue(new Error('S3 bucket not found (NoSuchBucket)'));
 
       const req = makeRequest(makeFormData({}));
@@ -272,8 +272,8 @@ describe('POST /api/documents/v2/upload', () => {
 
     it('returns 503 when processing queue is unavailable', async () => {
       mockGetServerSession.mockResolvedValue(makeSession());
-      mockCreateDocumentJob.mockResolvedValue({ jobId: 'job-err-2', s3Key: 'uploads/job-err-2/data.csv' });
-      mockUploadToS3.mockResolvedValue(undefined);
+      mockCreateDocumentJob.mockResolvedValue({ id: 'job-err-2' });
+      mockUploadToS3.mockResolvedValue({ s3Key: 'v2/uploads/job-err-2/data.csv', sanitizedFileName: 'data.csv' });
       mockSendToProcessingQueue.mockRejectedValue(new Error('SQS processing_queue_url not configured'));
 
       const req = makeRequest(makeFormData({}));

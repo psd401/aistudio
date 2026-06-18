@@ -689,7 +689,10 @@ function NexusPageContent() {
         duration: 8000,
         action: {
           label: 'Sign in',
-          onClick: () => { window.location.href = '/api/auth/signin?callbackUrl=/nexus' },
+          onClick: () => {
+            const callbackUrl = encodeURIComponent(window.location.pathname + window.location.search)
+            window.location.href = `/api/auth/signin?callbackUrl=${callbackUrl}`
+          },
         },
       })
     } else {
