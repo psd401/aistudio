@@ -30,6 +30,7 @@ import type { ToolCatalogEntry } from "@/lib/tools/catalog/types";
 import type { McpConnectorToolsResult } from "@/lib/mcp/connector-types";
 import type { McpToolContext, McpToolResult } from "@/lib/mcp/types";
 import { createLogger } from "@/lib/logger";
+import { buildConfirmationMessage } from "./confirmation";
 import type {
   ResolveAgentToolsParams,
   ResolvedAgentTools,
@@ -89,10 +90,13 @@ function catalogEntryToTool(
   entry: ToolCatalogEntry,
   ctx: McpToolContext,
   onToolInvocation: ResolveAgentToolsParams["onToolInvocation"],
+  approveDestructive: boolean,
   log: ReturnType<typeof createLogger>
 ): Tool {
   return tool({
-    description: entry.description,
+    description: entry.destructive
+      ? `${entry.description} [DESTRUCTIVE: requires human approval; will not run unless this run is approved for destructive actions.]`
+      : entry.description,
     // The MCP inputSchema ({ type:'object', properties, required? }) is
     // structurally a JSON Schema 7 object — cast to the precise type the AI SDK
     // expects rather than a flat bag.
@@ -106,6 +110,36 @@ function catalogEntryToTool(
       let ok = false;
       let error: string | undefined;
       let resultText: string;
+
+      // Human-in-the-loop gate (#926): a destructive tool is NOT executed unless
+      // this run was explicitly approved for destructive actions. The model gets a
+      // confirmation-required message; the audit records the gated attempt. This
+      // is enforced server-side — the model can never bypass it.
+      if (entry.destructive && !approveDestructive) {
+        const message = buildConfirmationMessage(entry.name);
+        log.info("Destructive agent tool gated pending confirmation", {
+          tool: entry.identifier,
+        });
+        try {
+          await onToolInvocation?.({
+            toolIdentifier: entry.identifier,
+            toolName: entry.name,
+            args: boundAuditArgs(args),
+            ok: false,
+            error: "confirmation_required",
+            durationMs: Date.now() - startedAt,
+            userId: ctx.userId,
+            confirmationRequired: true,
+          });
+        } catch (auditErr) {
+          log.error("Failed to record confirmation-required audit", {
+            tool: entry.identifier,
+            error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+          });
+        }
+        return message;
+      }
+
       try {
         // Dispatch on the `internal` surface (where agent tools live): the
         // catalog re-validates the tool is internal-surfaced, active, and the
@@ -179,6 +213,7 @@ export async function resolveAgentTools(
 ): Promise<ResolvedAgentTools> {
   const { enabledToolIdentifiers, enabledConnectorIds, caller, requestId } =
     params;
+  const approveDestructive = params.approveDestructive === true;
   const log = createLogger({ requestId, module: "agent-tool-resolver" });
 
   const tools: ToolSet = {};
@@ -218,6 +253,7 @@ export async function resolveAgentTools(
         entry,
         ctx,
         params.onToolInvocation,
+        approveDestructive,
         log
       );
       grantedToolIdentifiers.push(identifier);

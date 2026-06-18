@@ -52,6 +52,12 @@ export interface ResolveAgentToolsParams {
   /** Correlates dispatch + audit logs to the execution request. */
   requestId: string;
   /**
+   * Whether THIS run is approved to execute destructive (state-changing) tools.
+   * When false (default), destructive tools are gated: the model sees a
+   * confirmation-required message and the tool is NOT executed (Issue #926).
+   */
+  approveDestructive?: boolean;
+  /**
    * Optional audit sink invoked once per tool invocation (after it completes),
    * so the execution route can persist a tool-invocation event. Never throws back
    * into the model loop — failures are swallowed by the resolver.
@@ -75,6 +81,12 @@ export interface ToolInvocationAudit {
   durationMs: number;
   /** Invoking principal (the executing caller's user id). */
   userId: number;
+  /**
+   * True when the invocation was a destructive tool BLOCKED pending human
+   * confirmation (the handler was not executed). Lets the audit/timeline
+   * distinguish a gated call from a real failure (Issue #926).
+   */
+  confirmationRequired?: boolean;
 }
 
 /** Runtime limits enforced per agentic run. */

@@ -48,6 +48,7 @@ function entry(overrides: Partial<ToolCatalogEntry> = {}): ToolCatalogEntry {
     surfaces: ["internal"],
     requiredScopes: ["mcp:search_decisions"],
     agentCallable: true,
+    destructive: false,
     source: "code",
     isActive: true,
     ...overrides,

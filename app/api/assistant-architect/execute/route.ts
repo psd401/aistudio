@@ -54,7 +54,14 @@ const ExecuteRequestSchema = z.object({
       (inputs) => Object.keys(inputs).length <= MAX_INPUT_FIELDS,
       { message: `Too many input fields (maximum ${MAX_INPUT_FIELDS})` }
     ),
-  conversationId: z.string().uuid().optional()
+  conversationId: z.string().uuid().optional(),
+  /**
+   * Per-run approval for destructive (state-changing) agent tools (Issue #926).
+   * When omitted/false, destructive tools are gated behind a confirmation message
+   * and not executed. The executing user opts in (e.g. an execution-form checkbox)
+   * to allow them to run in this agentic run. Ignored in prompt-chain mode.
+   */
+  approveDestructiveTools: z.boolean().optional()
 });
 
 interface ChainPrompt {
@@ -203,7 +210,7 @@ export async function POST(req: Request) {
       );
     }
 
-    const { toolId, inputs, conversationId } = validationResult.data;
+    const { toolId, inputs, conversationId, approveDestructiveTools } = validationResult.data;
 
     log.info('Request parsed', sanitizeForLogging({
       toolId,
@@ -460,7 +467,7 @@ export async function POST(req: Request) {
       // template execution untouched.
       const isAgentic = architect.mode === 'agentic';
       const streamResponse = isAgentic
-        ? await executeAgenticAssistant({ architect, prompts: prompts as ChainPrompt[], inputs, context, requestId, log })
+        ? await executeAgenticAssistant({ architect, prompts: prompts as ChainPrompt[], inputs, context, requestId, log, approveDestructiveTools: approveDestructiveTools === true })
         : await executePromptChain(prompts as ChainPrompt[], inputs, context, requestId, log);
 
       // 9. Update execution status to completed on stream completion
@@ -988,6 +995,33 @@ async function markAgenticExecutionFailed(
 }
 
 /**
+ * Persist one tool-invocation audit event (Issue #926). Reuses the existing
+ * tool-execution-complete event (no new assistant_event_type enum value —
+ * migration 082 deliberately avoided ALTER TYPE). A destructive tool gated for
+ * confirmation rides as success:false with a `confirmationRequired` marker in
+ * `result`, so the audit/timeline distinguishes it from a real failure.
+ */
+function storeToolInvocationEvent(
+  executionId: number,
+  promptId: number,
+  event: ToolInvocationAudit
+): Promise<void> {
+  return storeExecutionEvent(executionId, 'tool-execution-complete', {
+    promptId,
+    toolName: event.toolName,
+    success: event.ok,
+    error: event.error,
+    result: {
+      toolIdentifier: event.toolIdentifier,
+      args: event.args,
+      durationMs: event.durationMs,
+      userId: event.userId,
+      ...(event.confirmationRequired ? { confirmationRequired: true } : {}),
+    },
+  });
+}
+
+/**
  * Execute an assistant in AGENTIC mode (Issue #926): a model loop with tool
  * access. Tools are resolved from the unified catalog (#924, internal surface,
  * agentCallable only) + per-user MCP connectors (#774), intersected with the
@@ -1004,9 +1038,14 @@ async function executeAgenticAssistant(args: {
   context: PromptExecutionContext;
   requestId: string;
   log: ReturnType<typeof createLogger>;
+  /** Per-run approval to execute destructive agent tools (Issue #926). */
+  approveDestructiveTools: boolean;
 }) {
-  const { architect, prompts, inputs, context, requestId, log } = args;
-  log.info('Starting agentic assistant execution', { executionId: context.executionId });
+  const { architect, prompts, inputs, context, requestId, log, approveDestructiveTools } = args;
+  log.info('Starting agentic assistant execution', {
+    executionId: context.executionId,
+    approveDestructiveTools,
+  });
 
   if (!context.caller) {
     throw ErrorFactories.sysInternalError('Agentic execution requires caller context', {
@@ -1046,24 +1085,9 @@ async function executeAgenticAssistant(args: {
   }
 
   // Tool-invocation audit sink — persists one tool-execution-complete event per
-  // invocation, conforming to the existing SSE event schema (#937). promptId is
-  // the driving prompt; the catalog identifier + timing + principal ride in
-  // `result` for the timeline. Failures are swallowed by the resolver so this
-  // never breaks the loop.
-  const onToolInvocation = async (event: ToolInvocationAudit) => {
-    await storeExecutionEvent(context.executionId, 'tool-execution-complete', {
-      promptId: drivingPrompt.id,
-      toolName: event.toolName,
-      success: event.ok,
-      error: event.error,
-      result: {
-        toolIdentifier: event.toolIdentifier,
-        args: event.args,
-        durationMs: event.durationMs,
-        userId: event.userId,
-      },
-    });
-  };
+  // invocation (extracted to a module-level helper to keep this function lean).
+  const onToolInvocation = (event: ToolInvocationAudit) =>
+    storeToolInvocationEvent(context.executionId, drivingPrompt.id, event);
 
   // Resolve tools (catalog ∩ caller scopes ∩ author allow-list, + connectors).
   const resolved = await resolveAgentTools({
@@ -1077,6 +1101,7 @@ async function executeAgenticAssistant(args: {
       idToken: context.caller.idToken,
     },
     requestId,
+    approveDestructive: approveDestructiveTools,
     onToolInvocation,
   });
 

@@ -1,6 +1,6 @@
 "use client"
 
-import { CheckCircle2, Loader2, XCircle, Wrench } from "lucide-react"
+import { CheckCircle2, Loader2, XCircle, Wrench, ShieldAlert } from "lucide-react"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import type { ToolTimelineEvent } from "./assistant-architect-streaming"
 
@@ -57,6 +57,10 @@ function PhaseIcon({ phase }: { phase: ToolTimelineEvent["phase"] }) {
   }
   if (phase === "error") {
     return <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" aria-label="error" />
+  }
+  if (phase === "confirmation") {
+    // Destructive tool gated pending human approval (#926).
+    return <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" aria-label="awaiting confirmation" />
   }
   return <Loader2 className="mt-0.5 h-4 w-4 shrink-0 animate-spin text-muted-foreground" aria-label="running" />
 }

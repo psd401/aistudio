@@ -72,6 +72,12 @@ interface McpCatalogMapping {
    * runtime can resolve it via `catalog.list({ surface: 'internal' })`.
    */
   internalScopes?: string[];
+  /**
+   * When true, the tool is destructive / state-changing (writes data, deletes,
+   * external side effect) and an agent loop must obtain human confirmation before
+   * executing it (Issue #926). Defaults to false.
+   */
+  destructive?: boolean;
 }
 
 const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
@@ -84,6 +90,9 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
     identifier: "decisions.capture",
     requiredScope: "mcp:capture_decision",
     internalScopes: ["mcp:capture_decision"],
+    // Writes new decision-graph nodes/edges — gated behind human confirmation in
+    // an agent loop (#926).
+    destructive: true,
   },
   execute_assistant: {
     identifier: "assistants.execute",
@@ -174,6 +183,7 @@ const MCP_MANIFEST_ENTRIES: ToolManifestEntry[] = MCP_TOOLS.map(
       surfaces,
       requiredScopes: [mapping.requiredScope],
       agentCallable: true,
+      ...(mapping.destructive ? { destructive: true } : {}),
       ...(Object.keys(surfaceScopes).length > 0 ? { surfaceScopes } : {}),
       ...(mapping.rest ? { rest: mapping.rest.binding } : {}),
     };

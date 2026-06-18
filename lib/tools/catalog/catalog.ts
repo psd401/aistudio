@@ -89,6 +89,7 @@ function manifestToEntry(
     requiredScopes: entry.requiredScopes,
     surfaceScopes: entry.surfaceScopes,
     agentCallable: entry.agentCallable ?? true,
+    destructive: entry.destructive ?? false,
     source: "code",
     isActive: !inactiveCodeKeys.has(entryKey(entry.identifier, version)),
     handlerRef: entry.identifier,
@@ -221,6 +222,10 @@ export class ToolCatalog {
             // a manifest (code-tool) concept and have no `tool_catalog` column.
             // DB (assistant/skill) rows use the same scope on every surface.
             agentCallable: r.agentCallable,
+            // No `destructive` column on tool_catalog: DB-sourced (assistant/skill)
+            // tools default to non-destructive. The destructive gate is a code-tool
+            // (manifest) concept for now. (#926.)
+            destructive: false,
             source: r.source,
             isActive: r.isActive,
             handlerRef: r.handlerRef ?? undefined,

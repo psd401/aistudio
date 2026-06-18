@@ -57,6 +57,7 @@ function entry(overrides: Partial<ToolCatalogEntry>): ToolCatalogEntry {
     surfaces: ["internal"],
     requiredScopes: ["mcp:search_decisions"],
     agentCallable: true,
+    destructive: false,
     source: "code",
     isActive: true,
     ...overrides,
@@ -194,5 +195,71 @@ describe("resolveAgentTools", () => {
     expect(Object.keys(resolved.tools)).toContain("remote_tool")
     expect(resolved.connectorResults).toHaveLength(1)
     expect(resolved.failedConnectorIds).toEqual(["srv-missing"])
+  })
+
+  describe("destructive-tool confirmation gate (#926)", () => {
+    const destructiveEntry = entry({
+      identifier: "decisions.capture",
+      name: "capture_decision",
+      destructive: true,
+    })
+
+    it("gates a destructive tool when the run is NOT approved (no dispatch)", async () => {
+      listMock.mockResolvedValue([destructiveEntry])
+      const onToolInvocation = jest.fn()
+      const resolved = await resolveAgentTools({
+        enabledToolIdentifiers: ["decisions.capture"],
+        enabledConnectorIds: [],
+        caller,
+        requestId: "req-gate",
+        approveDestructive: false,
+        onToolInvocation,
+      })
+      const result = await asExecutable(resolved.tools.capture_decision).execute({})
+      // The model gets a confirmation-required message; the handler never runs.
+      expect(result).toContain("CONFIRMATION REQUIRED")
+      expect(dispatchMock).not.toHaveBeenCalled()
+      expect(onToolInvocation).toHaveBeenCalledWith(
+        expect.objectContaining({
+          toolIdentifier: "decisions.capture",
+          ok: false,
+          error: "confirmation_required",
+          confirmationRequired: true,
+        })
+      )
+    })
+
+    it("executes a destructive tool when the run IS approved", async () => {
+      listMock.mockResolvedValue([destructiveEntry])
+      const resolved = await resolveAgentTools({
+        enabledToolIdentifiers: ["decisions.capture"],
+        enabledConnectorIds: [],
+        caller,
+        requestId: "req-approved",
+        approveDestructive: true,
+      })
+      const result = await asExecutable(resolved.tools.capture_decision).execute({})
+      expect(dispatchMock).toHaveBeenCalledWith(
+        "capture_decision",
+        {},
+        expect.anything(),
+        "internal"
+      )
+      expect(result).toBe("ok")
+    })
+
+    it("never gates a non-destructive tool, regardless of approval", async () => {
+      listMock.mockResolvedValue([entry({})]) // decisions.search, destructive:false
+      const resolved = await resolveAgentTools({
+        enabledToolIdentifiers: ["decisions.search"],
+        enabledConnectorIds: [],
+        caller,
+        requestId: "req-nondestructive",
+        approveDestructive: false,
+      })
+      const result = await asExecutable(resolved.tools.search_decisions).execute({})
+      expect(dispatchMock).toHaveBeenCalled()
+      expect(result).toBe("ok")
+    })
   })
 })

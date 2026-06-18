@@ -459,5 +459,36 @@ describe("ToolCatalog", () => {
         expect(ids.has(id)).toBe(false)
       }
     })
+
+    it("are not destructive (no confirmation gate)", () => {
+      for (const id of AGENT_TOOL_IDS) {
+        const entry = TOOL_MANIFEST.find((t) => t.identifier === id)
+        expect(entry?.destructive ?? false).toBe(false)
+      }
+    })
+  })
+
+  // Issue #926: destructive flag drives the human-in-the-loop confirmation gate.
+  describe("destructive flag (#926)", () => {
+    it("marks decisions.capture (a writing tool) destructive", () => {
+      const entry = TOOL_MANIFEST.find((t) => t.identifier === "decisions.capture")
+      expect(entry?.destructive).toBe(true)
+    })
+
+    it("leaves read-only tools non-destructive", () => {
+      for (const id of ["decisions.search", "assistants.list", "decisions.graph_get"]) {
+        const entry = TOOL_MANIFEST.find((t) => t.identifier === id)
+        expect(entry?.destructive ?? false).toBe(false)
+      }
+    })
+
+    it("projects destructive onto the runtime entry (default false)", async () => {
+      const catalog = new ToolCatalog()
+      const all = await catalog.list({ includeInactive: true })
+      const capture = all.find((e) => e.identifier === "decisions.capture")
+      const search = all.find((e) => e.identifier === "decisions.search")
+      expect(capture?.destructive).toBe(true)
+      expect(search?.destructive).toBe(false)
+    })
   })
 })
