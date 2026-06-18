@@ -53,6 +53,8 @@ import {
   tools,
   capabilities,
   users,
+  toolEdits,
+  scheduledExecutions,
 } from "@/lib/db/schema";
 import { ErrorFactories } from "@/lib/error-utils";
 import { CAPABILITY_MANIFEST } from "@/lib/capabilities/manifest";
@@ -412,7 +414,17 @@ export async function deleteAssistantArchitect(id: number) {
         .delete(toolExecutions)
         .where(eq(toolExecutions.assistantArchitectId, id));
 
-      // 5. Finally delete the assistant architect itself
+      // 5. Delete tool_edits (audit log rows — FK with no onDelete cascade)
+      await tx
+        .delete(toolEdits)
+        .where(eq(toolEdits.assistantArchitectId, id));
+
+      // 6. Delete scheduled_executions (FK with no onDelete cascade)
+      await tx
+        .delete(scheduledExecutions)
+        .where(eq(scheduledExecutions.assistantArchitectId, id));
+
+      // 7. Finally delete the assistant architect itself
       const result = await tx
         .delete(assistantArchitects)
         .where(eq(assistantArchitects.id, id))
