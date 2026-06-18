@@ -1,15 +1,16 @@
 import { describe, it, expect, jest, beforeEach, beforeAll } from '@jest/globals'
 import type { ActionState } from '@/types'
 
-const mockExecuteQuery = jest.fn(() => Promise.resolve([]))
-const mockExecuteTransaction = jest.fn((fn) => fn({
-  delete: jest.fn().mockReturnValue({ where: jest.fn().mockResolvedValue([]) }),
-}))
-const mockDeleteAssistantArchitect = jest.fn(() => Promise.resolve(true))
-const mockGetAssistantArchitectById = jest.fn()
-const mockHasRole = jest.fn(() => Promise.resolve(false))
-const mockGetCurrentUserAction = jest.fn(() => Promise.resolve({}))
-const mockGetServerSession = jest.fn(() => Promise.resolve(null))
+const mockExecuteQuery = jest.fn<Promise<unknown[]>, unknown[]>(() => Promise.resolve([]))
+const mockExecuteTransaction = jest.fn(
+  (fn: (tx: { delete: jest.Mock }) => unknown) =>
+    fn({ delete: jest.fn().mockReturnValue({ where: jest.fn<Promise<unknown[]>, unknown[]>().mockResolvedValue([]) }) })
+)
+const mockDeleteAssistantArchitect = jest.fn<Promise<boolean | { id: number }>, [number]>(() => Promise.resolve(true))
+const mockGetAssistantArchitectById = jest.fn<Promise<{ id: number; userId: number; status: string } | null>, unknown[]>()
+const mockHasRole = jest.fn<Promise<boolean>, unknown[]>(() => Promise.resolve(false))
+const mockGetCurrentUserAction = jest.fn<Promise<unknown>, unknown[]>(() => Promise.resolve({}))
+const mockGetServerSession = jest.fn<Promise<{ sub: string } | null>, []>(() => Promise.resolve(null))
 
 jest.mock('@/lib/auth/server-session', () => ({
   getServerSession: mockGetServerSession
@@ -72,9 +73,10 @@ describe('deleteAssistantArchitectAction', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
-    mockExecuteTransaction.mockImplementation((fn) => fn({
-      delete: jest.fn().mockReturnValue({ where: jest.fn().mockResolvedValue([]) }),
-    }))
+    mockExecuteTransaction.mockImplementation(
+      (fn: (tx: { delete: jest.Mock }) => unknown) =>
+        fn({ delete: jest.fn().mockReturnValue({ where: jest.fn<Promise<unknown[]>, unknown[]>().mockResolvedValue([]) }) })
+    )
   })
 
   it('returns error when no session', async () => {
