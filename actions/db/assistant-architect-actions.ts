@@ -56,7 +56,7 @@ import {
 } from "@/lib/db/drizzle";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
-import { tools, navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities, roleTools } from "@/lib/db/schema";
+import { tools, navigationItems, navigationItemRoles, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities, roleTools } from "@/lib/db/schema";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -668,6 +668,12 @@ export async function deleteAssistantArchitectAction(
         await tx
           .delete(capabilities)
           .where(eq(capabilities.promptChainToolId, idInt));
+        // navigation_item_roles FK has no cascade — delete grants before the nav item
+        await tx
+          .delete(navigationItemRoles)
+          .where(
+            sql`${navigationItemRoles.navigationItemId} IN (SELECT id FROM navigation_items WHERE link = ${`/tools/assistant-architect/${id}`})`
+          );
         await tx
           .delete(navigationItems)
           .where(eq(navigationItems.link, `/tools/assistant-architect/${id}`));

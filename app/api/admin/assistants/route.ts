@@ -12,7 +12,7 @@ import {
 } from "@/lib/db/drizzle"
 import { executeTransaction } from "@/lib/db/drizzle-client"
 import { eq, sql } from "drizzle-orm"
-import { tools, capabilities, roleTools, navigationItems } from "@/lib/db/schema"
+import { tools, capabilities, roleTools, navigationItems, navigationItemRoles } from "@/lib/db/schema"
 
 export async function GET() {
   const requestId = generateRequestId();
@@ -286,6 +286,12 @@ export async function DELETE(request: Request) {
         await tx
           .delete(capabilities)
           .where(eq(capabilities.promptChainToolId, assistantId));
+        // navigation_item_roles FK has no cascade — delete grants before the nav item
+        await tx
+          .delete(navigationItemRoles)
+          .where(
+            sql`${navigationItemRoles.navigationItemId} IN (SELECT id FROM navigation_items WHERE link = ${`/tools/assistant-architect/${assistantId}`})`
+          );
         await tx
           .delete(navigationItems)
           .where(eq(navigationItems.link, `/tools/assistant-architect/${assistantId}`));
