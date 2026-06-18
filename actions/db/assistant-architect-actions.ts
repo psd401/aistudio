@@ -15,6 +15,8 @@ import {
 // CoreMessage import removed - AI completion now handled by Lambda workers
 import { parseRepositoryIds } from "@/lib/utils/repository-utils"
 import { getAvailableToolsForModel, getAllTools } from "@/lib/tools/tool-registry"
+import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
+import { getScopesForRoles } from "@/lib/api-keys/scopes"
 
 import { handleError, createSuccess, ErrorFactories, createError } from "@/lib/error-utils";
 import { ActionState, ErrorLevel } from "@/types";
@@ -156,6 +158,105 @@ async function validateEnabledTools(
   }
 }
 
+/**
+ * Validate an agentic assistant's `agentEnabledTools` (catalog `domain.action`
+ * identifiers) against the unified catalog (#924). A tool is valid only if it is
+ * exposed on the `internal` surface, is `agentCallable`, and the AUTHOR's
+ * role-derived scopes permit it — so an author cannot enable a tool they could
+ * not themselves invoke. The caller's scopes are re-checked at execution time
+ * (resolveAgentTools), giving the required dual scope intersection (#926).
+ */
+async function validateAgentTools(
+  agentEnabledTools: string[],
+  authorRoleNames: string[]
+): Promise<{ isValid: boolean; invalidTools: string[]; message?: string }> {
+  if (!agentEnabledTools || agentEnabledTools.length === 0) {
+    return { isValid: true, invalidTools: [] };
+  }
+  try {
+    const authorScopes = getScopesForRoles(authorRoleNames);
+    const allowed = await toolCatalogInstance.list({
+      surface: "internal",
+      scopes: authorScopes,
+      agentOnly: true,
+    });
+    const allowedIdentifiers = new Set(allowed.map((e) => e.identifier));
+    const invalidTools = agentEnabledTools.filter(
+      (id) => !allowedIdentifiers.has(id)
+    );
+    if (invalidTools.length > 0) {
+      return {
+        isValid: false,
+        invalidTools,
+        message: `Tools not available for agentic use with your permissions: ${invalidTools.join(", ")}`,
+      };
+    }
+    return { isValid: true, invalidTools: [] };
+  } catch (error) {
+    return {
+      isValid: false,
+      invalidTools: agentEnabledTools,
+      message: `Error validating agent tools: ${error instanceof Error ? error.message : "Unknown error"}`,
+    };
+  }
+}
+
+/** Agentic-mode columns an update may set (Issue #926). */
+type AgenticUpdateFields = Partial<{
+  mode: "prompt_chain" | "agentic";
+  agentEnabledTools: string[];
+  agentEnabledConnectors: string[];
+  agentMaxSteps: number;
+  agentTimeoutSeconds: number;
+  agentCostCapCents: number | null;
+}>;
+
+/**
+ * Resolve + validate the agentic-mode fields from an update payload (Issue #926).
+ * Enforces the one-way mode transition (prompt_chain -> agentic only), validates
+ * the agent tool list against the catalog with the AUTHOR's scopes, and clamps
+ * the numeric limits to their DB CHECK ranges. Returns either the partial fields
+ * to merge or a user-facing error string.
+ */
+async function resolveAgenticUpdateFields(
+  data: Partial<InsertAssistantArchitect>,
+  currentMode: string | null | undefined,
+  authorRoleNames: string[]
+): Promise<{ fields: AgenticUpdateFields } | { error: string }> {
+  const fields: AgenticUpdateFields = {};
+
+  if (data.mode !== undefined) {
+    const nextMode = data.mode as "prompt_chain" | "agentic";
+    // Mode is one-way: agentic -> prompt_chain is not supported.
+    if (currentMode === "agentic" && nextMode === "prompt_chain") {
+      return { error: "Cannot convert an agentic assistant back to prompt-chain mode" };
+    }
+    fields.mode = nextMode;
+  }
+  if (data.agentEnabledTools !== undefined) {
+    const toolValidation = await validateAgentTools(data.agentEnabledTools, authorRoleNames);
+    if (!toolValidation.isValid) {
+      return { error: toolValidation.message || "Invalid agent tools" };
+    }
+    fields.agentEnabledTools = data.agentEnabledTools;
+  }
+  if (data.agentEnabledConnectors !== undefined) {
+    fields.agentEnabledConnectors = data.agentEnabledConnectors;
+  }
+  if (data.agentMaxSteps !== undefined) {
+    fields.agentMaxSteps = Math.min(50, Math.max(1, Math.floor(Number(data.agentMaxSteps))));
+  }
+  if (data.agentTimeoutSeconds !== undefined) {
+    fields.agentTimeoutSeconds = Math.min(900, Math.max(1, Math.floor(Number(data.agentTimeoutSeconds))));
+  }
+  if (data.agentCostCapCents !== undefined) {
+    const cap = data.agentCostCapCents;
+    fields.agentCostCapCents = cap === null ? null : Math.max(1, Math.floor(Number(cap)));
+  }
+
+  return { fields };
+}
+
 // Input validation and sanitization function for Assistant Architect
 // The missing function needed by page.tsx
 export async function getAssistantArchitectAction(
@@ -285,6 +386,13 @@ export async function getAssistantArchitectsAction(): Promise<
           timeoutSeconds: architect.timeoutSeconds,
           createdAt: architect.createdAt,
           updatedAt: architect.updatedAt,
+          // Agentic mode fields (Issue #926)
+          mode: architect.mode,
+          agentEnabledTools: architect.agentEnabledTools,
+          agentEnabledConnectors: architect.agentEnabledConnectors,
+          agentMaxSteps: architect.agentMaxSteps,
+          agentTimeoutSeconds: architect.agentTimeoutSeconds,
+          agentCostCapCents: architect.agentCostCapCents,
           inputFields,
           prompts: transformedPrompts,
           creator: architect.creator ? {
@@ -515,6 +623,13 @@ export async function updateAssistantArchitectAction(
       imagePath: string | null;
       isParallel: boolean;
       timeoutSeconds: number | null;
+      // Agentic mode (Issue #926)
+      mode: "prompt_chain" | "agentic";
+      agentEnabledTools: string[];
+      agentEnabledConnectors: string[];
+      agentMaxSteps: number;
+      agentTimeoutSeconds: number;
+      agentCostCapCents: number | null;
     }> = {};
 
     if (data.name !== undefined) updateData.name = data.name;
@@ -524,6 +639,18 @@ export async function updateAssistantArchitectAction(
     // Handle isParallel and timeoutSeconds if present in data
     if ('isParallel' in data) updateData.isParallel = Boolean(data.isParallel);
     if ('timeoutSeconds' in data) updateData.timeoutSeconds = data.timeoutSeconds as number | null;
+
+    // Agentic mode fields (Issue #926) — resolved + validated in a helper to keep
+    // this action's cyclomatic complexity bounded.
+    const agentResult = await resolveAgenticUpdateFields(
+      data,
+      currentTool.mode,
+      currentUser.data.roles.map(r => r.name)
+    );
+    if ("error" in agentResult) {
+      return { isSuccess: false, message: agentResult.error }
+    }
+    Object.assign(updateData, agentResult.fields);
 
     if (Object.keys(updateData).length === 0) {
       return { isSuccess: false, message: "No fields to update" }

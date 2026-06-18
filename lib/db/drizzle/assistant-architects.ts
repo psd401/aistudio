@@ -134,6 +134,13 @@ export interface AssistantArchitectWithCreator {
   userId: number | null;
   createdAt: Date;
   updatedAt: Date;
+  // Agentic mode (Issue #926)
+  mode: AssistantArchitectMode;
+  agentEnabledTools: string[];
+  agentEnabledConnectors: string[];
+  agentMaxSteps: number;
+  agentTimeoutSeconds: number;
+  agentCostCapCents: number | null;
   creator: {
     id: number;
     firstName: string | null;
@@ -166,6 +173,13 @@ export async function getAssistantArchitects(): Promise<
           userId: assistantArchitects.userId,
           createdAt: assistantArchitects.createdAt,
           updatedAt: assistantArchitects.updatedAt,
+          // Agentic mode (Issue #926)
+          mode: assistantArchitects.mode,
+          agentEnabledTools: assistantArchitects.agentEnabledTools,
+          agentEnabledConnectors: assistantArchitects.agentEnabledConnectors,
+          agentMaxSteps: assistantArchitects.agentMaxSteps,
+          agentTimeoutSeconds: assistantArchitects.agentTimeoutSeconds,
+          agentCostCapCents: assistantArchitects.agentCostCapCents,
           creatorId: users.id,
           creatorFirstName: users.firstName,
           creatorLastName: users.lastName,
@@ -189,6 +203,13 @@ export async function getAssistantArchitects(): Promise<
     userId: row.userId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    // Agentic mode (Issue #926)
+    mode: row.mode,
+    agentEnabledTools: row.agentEnabledTools,
+    agentEnabledConnectors: row.agentEnabledConnectors,
+    agentMaxSteps: row.agentMaxSteps,
+    agentTimeoutSeconds: row.agentTimeoutSeconds,
+    agentCostCapCents: row.agentCostCapCents,
     creator:
       row.creatorId && row.creatorEmail
         ? {
@@ -238,6 +259,13 @@ export async function getAssistantArchitectWithCreator(
           userId: assistantArchitects.userId,
           createdAt: assistantArchitects.createdAt,
           updatedAt: assistantArchitects.updatedAt,
+          // Agentic mode (Issue #926)
+          mode: assistantArchitects.mode,
+          agentEnabledTools: assistantArchitects.agentEnabledTools,
+          agentEnabledConnectors: assistantArchitects.agentEnabledConnectors,
+          agentMaxSteps: assistantArchitects.agentMaxSteps,
+          agentTimeoutSeconds: assistantArchitects.agentTimeoutSeconds,
+          agentCostCapCents: assistantArchitects.agentCostCapCents,
           creatorId: users.id,
           creatorFirstName: users.firstName,
           creatorLastName: users.lastName,
@@ -264,6 +292,13 @@ export async function getAssistantArchitectWithCreator(
     userId: row.userId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    // Agentic mode (Issue #926)
+    mode: row.mode,
+    agentEnabledTools: row.agentEnabledTools,
+    agentEnabledConnectors: row.agentEnabledConnectors,
+    agentMaxSteps: row.agentMaxSteps,
+    agentTimeoutSeconds: row.agentTimeoutSeconds,
+    agentCostCapCents: row.agentCostCapCents,
     creator:
       row.creatorId && row.creatorEmail
         ? {
