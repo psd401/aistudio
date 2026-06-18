@@ -120,12 +120,14 @@ describe('GET /api/export-download', () => {
 
   it('accepts virtual-hosted-style S3 URLs with region', async () => {
     mockGetServerSession.mockResolvedValueOnce({ sub: 'user-1', email: 'test@psd401.net' })
-    ;(global.fetch as jest.Mock).mockResolvedValueOnce(
-      new Response('col1,col2\nval1,val2', {
-        status: 200,
-        headers: { 'Content-Type': 'text/csv', 'Content-Length': '20' },
-      })
-    )
+    // Use a plain object (not new Response()) to avoid undici ReadableStream /
+    // TransformStream incompatibility in the Jest Node environment.
+    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'Content-Type': 'text/csv', 'Content-Length': '20' }),
+      body: null,
+    })
 
     const s3Url =
       'https://psd-data-exports.s3.us-west-2.amazonaws.com/exports/user/query.csv?X-Amz-Algorithm=AWS4-HMAC-SHA256'
@@ -151,13 +153,13 @@ describe('GET /api/export-download', () => {
 
   it('streams CSV with correct headers on success', async () => {
     mockGetServerSession.mockResolvedValueOnce({ sub: 'user-1', email: 'test@psd401.net' })
-    const csvContent = 'id,name\n1,Alice\n2,Bob'
-    ;(global.fetch as jest.Mock).mockResolvedValueOnce(
-      new Response(csvContent, {
-        status: 200,
-        headers: { 'Content-Type': 'text/csv; charset=utf-8', 'Content-Length': String(csvContent.length) },
-      })
-    )
+    const csvLength = 'id,name\n1,Alice\n2,Bob'.length
+    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Headers({ 'Content-Type': 'text/csv; charset=utf-8', 'Content-Length': String(csvLength) }),
+      body: null,
+    })
 
     const s3Url =
       'https://psd-data-exports.s3.amazonaws.com/exports/student-counts-2026.csv?X-Amz-Credential=xxx'
@@ -174,13 +176,13 @@ describe('GET /api/export-download', () => {
 
   it('forces text/csv even when S3 returns a different Content-Type', async () => {
     mockGetServerSession.mockResolvedValueOnce({ sub: 'user-1', email: 'test@psd401.net' })
-    ;(global.fetch as jest.Mock).mockResolvedValueOnce(
-      new Response('<html>injected</html>', {
-        status: 200,
-        // S3 object metadata can be set by whoever uploaded the object
-        headers: { 'Content-Type': 'text/html', 'Content-Length': '21' },
-      })
-    )
+    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      // S3 object metadata can be set by whoever uploaded the object
+      headers: new Headers({ 'Content-Type': 'text/html', 'Content-Length': '21' }),
+      body: null,
+    })
 
     const s3Url = 'https://bucket.s3.amazonaws.com/exports/data.csv?X-Amz-Credential=xxx'
     const res = await GET(makeRequest(s3Url) as never)
@@ -193,12 +195,14 @@ describe('GET /api/export-download', () => {
   it('returns 413 when S3 Content-Length exceeds the 50 MB cap', async () => {
     mockGetServerSession.mockResolvedValueOnce({ sub: 'user-1', email: 'test@psd401.net' })
     const bigSize = 51 * 1024 * 1024 // 51 MB
-    ;(global.fetch as jest.Mock).mockResolvedValueOnce(
-      new Response('data', {
-        status: 200,
-        headers: { 'Content-Type': 'text/csv', 'Content-Length': String(bigSize) },
-      })
-    )
+    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      // Explicit Headers object ensures Content-Length is accessible via .get()
+      // (undici Response constructor may strip Content-Length in some Node versions)
+      headers: new Headers({ 'Content-Type': 'text/csv', 'Content-Length': String(bigSize) }),
+      body: null,
+    })
 
     const s3Url = 'https://bucket.s3.amazonaws.com/exports/huge.csv?X-Amz-Credential=xxx'
     const res = await GET(makeRequest(s3Url) as never)
@@ -222,11 +226,13 @@ describe('GET /api/export-download', () => {
 
   it('streams response body when Content-Length is absent (chunked transfer)', async () => {
     mockGetServerSession.mockResolvedValueOnce({ sub: 'user-1', email: 'test@psd401.net' })
-    const csvContent = 'a,b\n1,2'
-    ;(global.fetch as jest.Mock).mockResolvedValueOnce(
-      // No Content-Length header — simulates chunked transfer encoding
-      new Response(csvContent, { status: 200, headers: { 'Content-Type': 'text/csv' } })
-    )
+    ;(global.fetch as jest.Mock).mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      // No Content-Length — simulates chunked transfer encoding
+      headers: new Headers({ 'Content-Type': 'text/csv' }),
+      body: null,
+    })
 
     const s3Url = 'https://bucket.s3.amazonaws.com/exports/data.csv?X-Amz-Credential=xxx'
     const res = await GET(makeRequest(s3Url) as never)
