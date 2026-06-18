@@ -247,6 +247,36 @@ describe("ToolCatalog", () => {
     expect(result.ok === false && result.reason).toBe("unknown")
   })
 
+  it("dispatch on the internal surface succeeds for an agent tool (#926)", async () => {
+    // The agentic runtime dispatches catalog tools on the 'internal' surface.
+    // Without the surface param this would default to 'mcp'; the manifest MCP
+    // tools are on BOTH surfaces, so dispatch must succeed on 'internal' too.
+    const catalog = new ToolCatalog()
+    const result = await catalog.dispatch(
+      "search_decisions",
+      {},
+      { userId: 1, cognitoSub: "s", scopes: ["mcp:search_decisions"], requestId: "r" },
+      "internal"
+    )
+    // The mocked handler returns undefined (jest.fn), so ok is true with a
+    // handler invoked — the key assertion is it is NOT rejected as unknown.
+    expect(result.ok === false && result.reason === "unknown").toBe(false)
+  })
+
+  it("dispatch on the internal surface uses the internal scope (#926)", async () => {
+    // The internal surfaceScopes for search_decisions is ['mcp:search_decisions'].
+    // A caller without it must be scope_denied on the internal surface.
+    const catalog = new ToolCatalog()
+    const result = await catalog.dispatch(
+      "search_decisions",
+      {},
+      { userId: 1, cognitoSub: "s", scopes: [], requestId: "r" },
+      "internal"
+    )
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.reason).toBe("scope_denied")
+  })
+
   it("degrades to manifest-only when the DB read fails", async () => {
     const { executeQuery } = jest.requireMock("@/lib/db/drizzle-client") as {
       executeQuery: jest.Mock
@@ -384,6 +414,81 @@ describe("ToolCatalog", () => {
       expect(await catalog.getRequiredScopes("assistants.execute", "rest")).toEqual([
         "assistants:execute",
       ])
+    })
+  })
+
+  // Issue #926: image gen / web fetch / document gen are agent platform tools.
+  describe("agent platform tools (#926)", () => {
+    const AGENT_TOOL_IDS = ["images.generate", "web.fetch", "documents.create"]
+
+    it("are in the manifest on the internal surface only, agentCallable, chat:write", () => {
+      for (const id of AGENT_TOOL_IDS) {
+        const entry = TOOL_MANIFEST.find((t) => t.identifier === id)
+        expect(entry).toBeDefined()
+        expect(entry!.surfaces).toEqual(["internal"])
+        // Not advertised to the external MCP server or REST.
+        expect(entry!.surfaces).not.toContain("mcp")
+        expect(entry!.surfaces).not.toContain("rest")
+        expect(entry!.agentCallable).toBe(true)
+        expect(entry!.requiredScopes).toEqual(["chat:write"])
+      }
+    })
+
+    it("list({surface:'internal', agentOnly}) returns them for a chat:write caller", async () => {
+      const catalog = new ToolCatalog()
+      const tools = await catalog.list({
+        surface: "internal",
+        scopes: ["chat:write"],
+        agentOnly: true,
+      })
+      const ids = new Set(tools.map((t) => t.identifier))
+      for (const id of AGENT_TOOL_IDS) {
+        expect(ids.has(id)).toBe(true)
+      }
+    })
+
+    it("are hidden from a caller without chat:write", async () => {
+      const catalog = new ToolCatalog()
+      const tools = await catalog.list({
+        surface: "internal",
+        scopes: ["assistants:read"],
+        agentOnly: true,
+      })
+      const ids = new Set(tools.map((t) => t.identifier))
+      for (const id of AGENT_TOOL_IDS) {
+        expect(ids.has(id)).toBe(false)
+      }
+    })
+
+    it("are not destructive (no confirmation gate)", () => {
+      for (const id of AGENT_TOOL_IDS) {
+        const entry = TOOL_MANIFEST.find((t) => t.identifier === id)
+        expect(entry?.destructive ?? false).toBe(false)
+      }
+    })
+  })
+
+  // Issue #926: destructive flag drives the human-in-the-loop confirmation gate.
+  describe("destructive flag (#926)", () => {
+    it("marks decisions.capture (a writing tool) destructive", () => {
+      const entry = TOOL_MANIFEST.find((t) => t.identifier === "decisions.capture")
+      expect(entry?.destructive).toBe(true)
+    })
+
+    it("leaves read-only tools non-destructive", () => {
+      for (const id of ["decisions.search", "assistants.list", "decisions.graph_get"]) {
+        const entry = TOOL_MANIFEST.find((t) => t.identifier === id)
+        expect(entry?.destructive ?? false).toBe(false)
+      }
+    })
+
+    it("projects destructive onto the runtime entry (default false)", async () => {
+      const catalog = new ToolCatalog()
+      const all = await catalog.list({ includeInactive: true })
+      const capture = all.find((e) => e.identifier === "decisions.capture")
+      const search = all.find((e) => e.identifier === "decisions.search")
+      expect(capture?.destructive).toBe(true)
+      expect(search?.destructive).toBe(false)
     })
   })
 })

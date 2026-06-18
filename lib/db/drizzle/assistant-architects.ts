@@ -56,6 +56,8 @@ import {
 } from "@/lib/db/schema";
 import { ErrorFactories } from "@/lib/error-utils";
 import { CAPABILITY_MANIFEST } from "@/lib/capabilities/manifest";
+// Single source of truth for the runtime mode union (#926) — see re-export below.
+import type { AssistantArchitectMode } from "@/lib/db/schema/tables/assistant-architects";
 
 /**
  * Identifiers owned by the code manifest. An Assistant Architect whose slugified
@@ -87,6 +89,13 @@ function buildAssistantToolIdentifier(name: string, assistantId: number): string
 /** Tool status values from the database enum */
 export type ToolStatus = "draft" | "pending_approval" | "approved" | "rejected" | "disabled";
 
+/**
+ * Assistant runtime mode (Issue #926). Re-exported from the schema definition
+ * (imported at the top of this file) so there is a single source of truth —
+ * adding a future mode in the schema can't drift from this layer.
+ */
+export type { AssistantArchitectMode };
+
 export interface AssistantArchitectData {
   name: string;
   description?: string | null;
@@ -95,6 +104,14 @@ export interface AssistantArchitectData {
   isParallel?: boolean;
   timeoutSeconds?: number | null;
   imagePath?: string | null;
+  // Agentic mode (Issue #926)
+  mode?: AssistantArchitectMode;
+  agentEnabledTools?: string[];
+  agentEnabledConnectors?: string[];
+  agentMaxSteps?: number;
+  agentTimeoutSeconds?: number;
+  agentCostCapCents?: number | null;
+  agentMaxRequestsPerHour?: number | null;
 }
 
 export interface AssistantArchitectUpdateData {
@@ -104,6 +121,14 @@ export interface AssistantArchitectUpdateData {
   isParallel?: boolean;
   timeoutSeconds?: number | null;
   imagePath?: string | null;
+  // Agentic mode (Issue #926)
+  mode?: AssistantArchitectMode;
+  agentEnabledTools?: string[];
+  agentEnabledConnectors?: string[];
+  agentMaxSteps?: number;
+  agentTimeoutSeconds?: number;
+  agentCostCapCents?: number | null;
+  agentMaxRequestsPerHour?: number | null;
 }
 
 export interface AssistantArchitectWithCreator {
@@ -117,6 +142,14 @@ export interface AssistantArchitectWithCreator {
   userId: number | null;
   createdAt: Date;
   updatedAt: Date;
+  // Agentic mode (Issue #926)
+  mode: AssistantArchitectMode;
+  agentEnabledTools: string[];
+  agentEnabledConnectors: string[];
+  agentMaxSteps: number;
+  agentTimeoutSeconds: number;
+  agentCostCapCents: number | null;
+  agentMaxRequestsPerHour: number | null;
   creator: {
     id: number;
     firstName: string | null;
@@ -149,6 +182,14 @@ export async function getAssistantArchitects(): Promise<
           userId: assistantArchitects.userId,
           createdAt: assistantArchitects.createdAt,
           updatedAt: assistantArchitects.updatedAt,
+          // Agentic mode (Issue #926)
+          mode: assistantArchitects.mode,
+          agentEnabledTools: assistantArchitects.agentEnabledTools,
+          agentEnabledConnectors: assistantArchitects.agentEnabledConnectors,
+          agentMaxSteps: assistantArchitects.agentMaxSteps,
+          agentTimeoutSeconds: assistantArchitects.agentTimeoutSeconds,
+          agentCostCapCents: assistantArchitects.agentCostCapCents,
+          agentMaxRequestsPerHour: assistantArchitects.agentMaxRequestsPerHour,
           creatorId: users.id,
           creatorFirstName: users.firstName,
           creatorLastName: users.lastName,
@@ -172,6 +213,14 @@ export async function getAssistantArchitects(): Promise<
     userId: row.userId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    // Agentic mode (Issue #926)
+    mode: row.mode,
+    agentEnabledTools: row.agentEnabledTools,
+    agentEnabledConnectors: row.agentEnabledConnectors,
+    agentMaxSteps: row.agentMaxSteps,
+    agentTimeoutSeconds: row.agentTimeoutSeconds,
+    agentCostCapCents: row.agentCostCapCents,
+    agentMaxRequestsPerHour: row.agentMaxRequestsPerHour,
     creator:
       row.creatorId && row.creatorEmail
         ? {
@@ -221,6 +270,14 @@ export async function getAssistantArchitectWithCreator(
           userId: assistantArchitects.userId,
           createdAt: assistantArchitects.createdAt,
           updatedAt: assistantArchitects.updatedAt,
+          // Agentic mode (Issue #926)
+          mode: assistantArchitects.mode,
+          agentEnabledTools: assistantArchitects.agentEnabledTools,
+          agentEnabledConnectors: assistantArchitects.agentEnabledConnectors,
+          agentMaxSteps: assistantArchitects.agentMaxSteps,
+          agentTimeoutSeconds: assistantArchitects.agentTimeoutSeconds,
+          agentCostCapCents: assistantArchitects.agentCostCapCents,
+          agentMaxRequestsPerHour: assistantArchitects.agentMaxRequestsPerHour,
           creatorId: users.id,
           creatorFirstName: users.firstName,
           creatorLastName: users.lastName,
@@ -247,6 +304,14 @@ export async function getAssistantArchitectWithCreator(
     userId: row.userId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    // Agentic mode (Issue #926)
+    mode: row.mode,
+    agentEnabledTools: row.agentEnabledTools,
+    agentEnabledConnectors: row.agentEnabledConnectors,
+    agentMaxSteps: row.agentMaxSteps,
+    agentTimeoutSeconds: row.agentTimeoutSeconds,
+    agentCostCapCents: row.agentCostCapCents,
+    agentMaxRequestsPerHour: row.agentMaxRequestsPerHour,
     creator:
       row.creatorId && row.creatorEmail
         ? {
@@ -318,6 +383,28 @@ export async function createAssistantArchitect(data: AssistantArchitectData) {
           isParallel: data.isParallel ?? false,
           timeoutSeconds: data.timeoutSeconds,
           imagePath: data.imagePath,
+          // Agentic mode (Issue #926). Column DB-defaults cover undefined, but
+          // pass through explicitly so a caller creating an agentic assistant in
+          // one step gets the right mode + config.
+          ...(data.mode !== undefined ? { mode: data.mode } : {}),
+          ...(data.agentEnabledTools !== undefined
+            ? { agentEnabledTools: data.agentEnabledTools }
+            : {}),
+          ...(data.agentEnabledConnectors !== undefined
+            ? { agentEnabledConnectors: data.agentEnabledConnectors }
+            : {}),
+          ...(data.agentMaxSteps !== undefined
+            ? { agentMaxSteps: data.agentMaxSteps }
+            : {}),
+          ...(data.agentTimeoutSeconds !== undefined
+            ? { agentTimeoutSeconds: data.agentTimeoutSeconds }
+            : {}),
+          ...(data.agentCostCapCents !== undefined
+            ? { agentCostCapCents: data.agentCostCapCents }
+            : {}),
+          ...(data.agentMaxRequestsPerHour !== undefined
+            ? { agentMaxRequestsPerHour: data.agentMaxRequestsPerHour }
+            : {}),
         })
         .returning(),
     "createAssistantArchitect"

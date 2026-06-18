@@ -89,6 +89,7 @@ function manifestToEntry(
     requiredScopes: entry.requiredScopes,
     surfaceScopes: entry.surfaceScopes,
     agentCallable: entry.agentCallable ?? true,
+    destructive: entry.destructive ?? false,
     source: "code",
     isActive: !inactiveCodeKeys.has(entryKey(entry.identifier, version)),
     handlerRef: entry.identifier,
@@ -221,6 +222,10 @@ export class ToolCatalog {
             // a manifest (code-tool) concept and have no `tool_catalog` column.
             // DB (assistant/skill) rows use the same scope on every surface.
             agentCallable: r.agentCallable,
+            // No `destructive` column on tool_catalog: DB-sourced (assistant/skill)
+            // tools default to non-destructive. The destructive gate is a code-tool
+            // (manifest) concept for now. (#926.)
+            destructive: false,
             source: r.source,
             isActive: r.isActive,
             handlerRef: r.handlerRef ?? undefined,
@@ -443,14 +448,21 @@ export class ToolCatalog {
   }
 
   /**
-   * Dispatch an MCP `tools/call` for a code-defined tool. Resolves the tool by
-   * its MCP wire `name` (what clients send) on the `mcp` surface, checks scope +
-   * active state, and invokes the in-process handler.
+   * Dispatch a `tools/call` for a code-defined tool. Resolves the tool by its
+   * wire `name`, checks it is exposed on the given `surface`, checks scope +
+   * active state (using that surface's scopes), and invokes the in-process
+   * handler.
+   *
+   * `surface` defaults to `'mcp'` so existing MCP-server callers are unchanged.
+   * The agentic Assistant Architect runtime (#926) passes `'internal'` so its
+   * tools are validated against the internal surface + its scopes — without this
+   * parameter an internal-only tool, or one whose internal scopes differ from
+   * its MCP scopes, would be wrongly rejected or scope-checked. (PR review.)
    *
    * Returns a typed {@link ToolDispatchResult} so the caller maps each failure to
    * the correct protocol error code without inspecting message text:
-   *   - `reason: 'unknown'` — no active tool exposed on the MCP surface by that
-   *     name (also covers ai_sdk-only tools, which must not leak via MCP).
+   *   - `reason: 'unknown'` — no active tool exposed on `surface` by that name
+   *     (also covers tools on other surfaces, which must not leak across).
    *   - `reason: 'scope_denied'` — found, but the caller lacks the required scope.
    *   - `reason: 'no_handler'` — found and scoped, but no in-process handler (e.g.
    *     an assistant/skill tool dispatched through a different `handlerRef` path).
@@ -458,17 +470,18 @@ export class ToolCatalog {
   async dispatch(
     toolName: string,
     args: Record<string, unknown>,
-    context: McpToolContext
+    context: McpToolContext,
+    surface: ToolSurface = "mcp"
   ): Promise<ToolDispatchResult> {
     // `get()` returns inactive entries too, so re-check `isActive` here: a
     // found-but-disabled tool must report as unknown (not leak its existence).
     const entry = await this.get(toolName);
-    // Restrict to MCP-surfaced tools so MCP semantics stay consistent: an
-    // ai_sdk-only tool must report as unknown over MCP rather than leaking.
-    if (!entry || !entry.isActive || !entry.surfaces.includes("mcp")) {
+    // Restrict to tools exposed on the requested surface so cross-surface leakage
+    // is impossible: a tool not on `surface` reports as unknown.
+    if (!entry || !entry.isActive || !entry.surfaces.includes(surface)) {
       return { ok: false, reason: "unknown" };
     }
-    if (!hasRequiredScopes(context.scopes, requiredScopesForSurface(entry, "mcp"))) {
+    if (!hasRequiredScopes(context.scopes, requiredScopesForSurface(entry, surface))) {
       return { ok: false, reason: "scope_denied" };
     }
     // Code MCP tools are keyed in TOOL_HANDLERS by their wire `name` (what the

@@ -105,6 +105,12 @@ export interface ToolCatalogEntry {
   surfaceScopes?: SurfaceScopes;
   /** When false, internal agent loops may NOT invoke this tool. */
   agentCallable: boolean;
+  /**
+   * When true, the tool performs a destructive / state-changing action (admin
+   * action, deletion, external write) and requires human-in-the-loop confirmation
+   * before an agent loop may actually execute it (Issue #926). Defaults to false.
+   */
+  destructive: boolean;
   /** Where this entry comes from. */
   source: ToolCatalogSource;
   /** Whether the tool is currently exposed. */
@@ -175,6 +181,13 @@ export interface ToolManifestEntry {
    * allows it (human-only / destructive guard). Defaults to true.
    */
   agentCallable?: boolean;
+  /**
+   * When true, the tool is destructive / state-changing and an agent loop must
+   * obtain human confirmation before executing it (Issue #926). Defaults to false.
+   * Distinct from `agentCallable: false` (which blocks the tool outright): a
+   * destructive tool is callable but gated behind per-run approval.
+   */
+  destructive?: boolean;
   /**
    * UI metadata for selectable `ai_sdk` chat tools — present only for tools the
    * Nexus tool selector renders. Universal/always-on tools omit these. The
