@@ -38,3 +38,12 @@ ALTER TABLE tool_catalog
 CREATE INDEX IF NOT EXISTS idx_tool_catalog_deprecated
     ON tool_catalog (deprecated_at)
     WHERE deprecated_at IS NOT NULL;
+
+-- 4. Admin → Tool Versions navigation item (parent_id 11 = Admin, admin-only).
+--    The version-history + deprecation UI lives at /admin/tools.
+INSERT INTO navigation_items (label, icon, link, parent_id, requires_role, position, is_active, type, description)
+SELECT 'Tool Versions', 'IconVersions', '/admin/tools', 11, 'administrator', 28, true, 'link',
+       'Inspect tool catalog versions, deprecation state, and usage'
+WHERE NOT EXISTS (
+    SELECT 1 FROM navigation_items WHERE link = '/admin/tools'
+);
