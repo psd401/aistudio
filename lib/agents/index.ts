@@ -27,3 +27,5 @@ export type {
   ToolInvocationAudit,
   AgentRunLimits,
 } from "./types";
+export { extractImageInputParts, detectImageInput } from "./vision";
+export type { ImageFilePart } from "./vision";

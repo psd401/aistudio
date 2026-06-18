@@ -19,6 +19,7 @@ import {
   resolveAgentRunLimits,
   isAgentRateLimitExceeded,
   AGENT_RATE_LIMIT_WINDOW_MS,
+  extractImageInputParts,
 } from '@/lib/agents';
 import type { ToolInvocationAudit } from '@/lib/agents';
 import { countAssistantExecutionsSince } from '@/lib/db/drizzle/assistant-architects';
@@ -1149,10 +1150,20 @@ async function executeAgenticAssistant(args: {
   });
 
   const { systemPrompt, userText } = buildAgenticInitialMessage(orderedPrompts, inputs);
+  // Image understanding (#926): attach any image-valued inputs (data:image URIs or
+  // image URLs) as file parts so vision-capable models can see them. The author is
+  // responsible for selecting a vision-capable model.
+  const imageParts = extractImageInputParts(inputs);
+  if (imageParts.length > 0) {
+    log.info('Attaching image inputs to agentic run', {
+      executionId: context.executionId,
+      imageCount: imageParts.length,
+    });
+  }
   const userMessage: UIMessage = {
     id: `agentic-${context.executionId}-${Date.now()}`,
     role: 'user',
-    parts: [{ type: 'text', text: userText }],
+    parts: [{ type: 'text', text: userText }, ...imageParts],
   };
 
   const agentStartTime = Date.now();
