@@ -51,7 +51,7 @@ jest.mock('next/server', () => {
   return { NextRequest: MockNextRequest, NextResponse };
 });
 
-import { describe, it, expect, jest, beforeEach } from '@jest/globals';
+import { describe, it, expect, beforeEach } from '@jest/globals';
 import { NextRequest } from 'next/server';
 
 // ── Mock order matters: must precede imports of our code ──────────────────────
@@ -98,11 +98,11 @@ import type { DocumentJob } from '@/lib/services/document-job-service';
 import { uploadToS3 } from '@/lib/aws/document-upload';
 import { sendToProcessingQueue } from '@/lib/aws/lambda-trigger';
 
-const mockGetServerSession = getServerSession as jest.MockedFunction<typeof getServerSession>;
-const mockCreateDocumentJob = createDocumentJob as jest.MockedFunction<typeof createDocumentJob>;
-const mockConfirmDocumentUpload = confirmDocumentUpload as jest.MockedFunction<typeof confirmDocumentUpload>;
-const mockUploadToS3 = uploadToS3 as jest.MockedFunction<typeof uploadToS3>;
-const mockSendToProcessingQueue = sendToProcessingQueue as jest.MockedFunction<typeof sendToProcessingQueue>;
+const mockGetServerSession = getServerSession as jest.Mock;
+const mockCreateDocumentJob = createDocumentJob as jest.Mock;
+const mockConfirmDocumentUpload = confirmDocumentUpload as jest.Mock;
+const mockUploadToS3 = uploadToS3 as jest.Mock;
+const mockSendToProcessingQueue = sendToProcessingQueue as jest.Mock;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
