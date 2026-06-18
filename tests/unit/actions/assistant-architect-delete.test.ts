@@ -1,16 +1,16 @@
 import { describe, it, expect, jest, beforeEach, beforeAll } from '@jest/globals'
 import type { ActionState } from '@/types'
 
-const mockExecuteQuery = jest.fn<Promise<unknown[]>, unknown[]>(() => Promise.resolve([]))
+const mockExecuteQuery = jest.fn(() => Promise.resolve([]))
 const mockExecuteTransaction = jest.fn(
   (fn: (tx: { delete: jest.Mock }) => unknown) =>
-    fn({ delete: jest.fn().mockReturnValue({ where: jest.fn<Promise<unknown[]>, unknown[]>().mockResolvedValue([]) }) })
+    fn({ delete: jest.fn().mockReturnValue({ where: jest.fn<Promise<unknown[]>>().mockResolvedValue([]) }) })
 )
-const mockDeleteAssistantArchitect = jest.fn<Promise<boolean | { id: number }>, [number]>(() => Promise.resolve(true))
-const mockGetAssistantArchitectById = jest.fn<Promise<{ id: number; userId: number; status: string } | null>, unknown[]>()
-const mockHasRole = jest.fn<Promise<boolean>, unknown[]>(() => Promise.resolve(false))
-const mockGetCurrentUserAction = jest.fn<Promise<unknown>, unknown[]>(() => Promise.resolve({}))
-const mockGetServerSession = jest.fn<Promise<{ sub: string } | null>, []>(() => Promise.resolve(null))
+const mockDeleteAssistantArchitect = jest.fn(() => Promise.resolve(true as boolean | { id: number }))
+const mockGetAssistantArchitectById = jest.fn<Promise<{ id: number; userId: number; status: string } | null>>()
+const mockHasRole = jest.fn(() => Promise.resolve(false))
+const mockGetCurrentUserAction = jest.fn(() => Promise.resolve({} as unknown))
+const mockGetServerSession = jest.fn(() => Promise.resolve(null as { sub: string } | null))
 
 jest.mock('@/lib/auth/server-session', () => ({
   getServerSession: mockGetServerSession
@@ -75,7 +75,7 @@ describe('deleteAssistantArchitectAction', () => {
     jest.clearAllMocks()
     mockExecuteTransaction.mockImplementation(
       (fn: (tx: { delete: jest.Mock }) => unknown) =>
-        fn({ delete: jest.fn().mockReturnValue({ where: jest.fn<Promise<unknown[]>, unknown[]>().mockResolvedValue([]) }) })
+        fn({ delete: jest.fn().mockReturnValue({ where: jest.fn<Promise<unknown[]>>().mockResolvedValue([]) }) })
     )
   })
 
