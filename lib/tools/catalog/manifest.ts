@@ -36,6 +36,7 @@
 
 import { MCP_TOOLS } from "@/lib/mcp/tool-registry";
 import type { McpToolDefinition } from "@/lib/mcp/types";
+import { AGENT_TOOL_DESCRIPTORS } from "@/lib/agents/agent-tools/descriptors";
 import { AI_SDK_TOOLS } from "./ai-sdk-tools";
 import type {
   ToolManifestEntry,
@@ -213,12 +214,36 @@ const AI_SDK_MANIFEST_ENTRIES: ToolManifestEntry[] = AI_SDK_TOOLS.map((tool) => 
 }));
 
 /**
+ * Agent platform tools (Issue #926): image generation, bounded web fetch, and
+ * document generation, exposed on the `internal` surface ONLY (not `mcp`/`rest`),
+ * so the agentic Assistant Architect runtime can resolve + dispatch them but they
+ * are not advertised to external MCP clients. Pure descriptors live in
+ * `lib/agents/agent-tools/descriptors.ts`; their handlers are registered in
+ * `lib/mcp/tool-handlers.ts` (spread from `AGENT_TOOL_HANDLERS`) and resolved
+ * lazily at dispatch — keeping the S3/AI-SDK/format-lib graph out of this
+ * Edge-compiled manifest module.
+ */
+const AGENT_TOOL_MANIFEST_ENTRIES: ToolManifestEntry[] = AGENT_TOOL_DESCRIPTORS.map(
+  (descriptor): ToolManifestEntry => ({
+    identifier: descriptor.identifier,
+    version: "v1",
+    name: descriptor.name,
+    description: descriptor.description,
+    inputSchema: descriptor.inputSchema,
+    surfaces: ["internal"],
+    requiredScopes: descriptor.requiredScopes,
+    agentCallable: true,
+  })
+);
+
+/**
  * The code-managed tool catalog. Boot-time sync reconciles `tool_catalog` to
  * this list; the runtime `ToolCatalog` merges it with DB-sourced entries.
  */
 export const TOOL_MANIFEST: readonly ToolManifestEntry[] = [
   ...MCP_MANIFEST_ENTRIES,
   ...AI_SDK_MANIFEST_ENTRIES,
+  ...AGENT_TOOL_MANIFEST_ENTRIES,
 ];
 
 /**

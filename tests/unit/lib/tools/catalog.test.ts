@@ -416,4 +416,48 @@ describe("ToolCatalog", () => {
       ])
     })
   })
+
+  // Issue #926: image gen / web fetch / document gen are agent platform tools.
+  describe("agent platform tools (#926)", () => {
+    const AGENT_TOOL_IDS = ["images.generate", "web.fetch", "documents.create"]
+
+    it("are in the manifest on the internal surface only, agentCallable, chat:write", () => {
+      for (const id of AGENT_TOOL_IDS) {
+        const entry = TOOL_MANIFEST.find((t) => t.identifier === id)
+        expect(entry).toBeDefined()
+        expect(entry!.surfaces).toEqual(["internal"])
+        // Not advertised to the external MCP server or REST.
+        expect(entry!.surfaces).not.toContain("mcp")
+        expect(entry!.surfaces).not.toContain("rest")
+        expect(entry!.agentCallable).toBe(true)
+        expect(entry!.requiredScopes).toEqual(["chat:write"])
+      }
+    })
+
+    it("list({surface:'internal', agentOnly}) returns them for a chat:write caller", async () => {
+      const catalog = new ToolCatalog()
+      const tools = await catalog.list({
+        surface: "internal",
+        scopes: ["chat:write"],
+        agentOnly: true,
+      })
+      const ids = new Set(tools.map((t) => t.identifier))
+      for (const id of AGENT_TOOL_IDS) {
+        expect(ids.has(id)).toBe(true)
+      }
+    })
+
+    it("are hidden from a caller without chat:write", async () => {
+      const catalog = new ToolCatalog()
+      const tools = await catalog.list({
+        surface: "internal",
+        scopes: ["assistants:read"],
+        agentOnly: true,
+      })
+      const ids = new Set(tools.map((t) => t.identifier))
+      for (const id of AGENT_TOOL_IDS) {
+        expect(ids.has(id)).toBe(false)
+      }
+    })
+  })
 })
