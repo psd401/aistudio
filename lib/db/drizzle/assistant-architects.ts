@@ -87,6 +87,9 @@ function buildAssistantToolIdentifier(name: string, assistantId: number): string
 /** Tool status values from the database enum */
 export type ToolStatus = "draft" | "pending_approval" | "approved" | "rejected" | "disabled";
 
+/** Assistant runtime mode (Issue #926). */
+export type AssistantArchitectMode = "prompt_chain" | "agentic";
+
 export interface AssistantArchitectData {
   name: string;
   description?: string | null;
@@ -95,6 +98,13 @@ export interface AssistantArchitectData {
   isParallel?: boolean;
   timeoutSeconds?: number | null;
   imagePath?: string | null;
+  // Agentic mode (Issue #926)
+  mode?: AssistantArchitectMode;
+  agentEnabledTools?: string[];
+  agentEnabledConnectors?: string[];
+  agentMaxSteps?: number;
+  agentTimeoutSeconds?: number;
+  agentCostCapCents?: number | null;
 }
 
 export interface AssistantArchitectUpdateData {
@@ -104,6 +114,13 @@ export interface AssistantArchitectUpdateData {
   isParallel?: boolean;
   timeoutSeconds?: number | null;
   imagePath?: string | null;
+  // Agentic mode (Issue #926)
+  mode?: AssistantArchitectMode;
+  agentEnabledTools?: string[];
+  agentEnabledConnectors?: string[];
+  agentMaxSteps?: number;
+  agentTimeoutSeconds?: number;
+  agentCostCapCents?: number | null;
 }
 
 export interface AssistantArchitectWithCreator {
@@ -318,6 +335,25 @@ export async function createAssistantArchitect(data: AssistantArchitectData) {
           isParallel: data.isParallel ?? false,
           timeoutSeconds: data.timeoutSeconds,
           imagePath: data.imagePath,
+          // Agentic mode (Issue #926). Column DB-defaults cover undefined, but
+          // pass through explicitly so a caller creating an agentic assistant in
+          // one step gets the right mode + config.
+          ...(data.mode !== undefined ? { mode: data.mode } : {}),
+          ...(data.agentEnabledTools !== undefined
+            ? { agentEnabledTools: data.agentEnabledTools }
+            : {}),
+          ...(data.agentEnabledConnectors !== undefined
+            ? { agentEnabledConnectors: data.agentEnabledConnectors }
+            : {}),
+          ...(data.agentMaxSteps !== undefined
+            ? { agentMaxSteps: data.agentMaxSteps }
+            : {}),
+          ...(data.agentTimeoutSeconds !== undefined
+            ? { agentTimeoutSeconds: data.agentTimeoutSeconds }
+            : {}),
+          ...(data.agentCostCapCents !== undefined
+            ? { agentCostCapCents: data.agentCostCapCents }
+            : {}),
         })
         .returning(),
     "createAssistantArchitect"
