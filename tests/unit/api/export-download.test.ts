@@ -21,27 +21,34 @@ jest.mock('@/lib/logger', () => ({
 
 jest.mock('next/server', () => {
   const actual = jest.requireActual('next/server')
+  // Use a plain Record accessor instead of `new Headers(...)` to avoid
+  // undici / Node.js brand-check quirks in the Jest Node environment.
+  class MockNextResponse {
+    body: unknown
+    status: number
+    headers: { get: (name: string) => string | null }
+
+    constructor(body: unknown, init?: { headers?: Record<string, string>; status?: number }) {
+      this.body = body
+      this.status = init?.status ?? 200
+      const h: Record<string, string> = init?.headers ?? {}
+      this.headers = {
+        get: (name: string): string | null =>
+          Object.prototype.hasOwnProperty.call(h, name) ? h[name] : null,
+      }
+    }
+
+    async json() {
+      return JSON.parse(this.body as string)
+    }
+
+    static json(data: unknown, init?: { status?: number }) {
+      return new MockNextResponse(JSON.stringify(data), { status: init?.status ?? 200 })
+    }
+  }
   return {
     ...actual,
-    NextResponse: class NextResponse {
-      body: unknown
-      status: number
-      headers: Headers
-
-      constructor(body: unknown, init?: { headers?: Record<string, string>; status?: number }) {
-        this.body = body
-        this.status = init?.status ?? 200
-        this.headers = new Headers(init?.headers)
-      }
-
-      async json() {
-        return JSON.parse(this.body as string)
-      }
-
-      static json(data: unknown, init?: { status?: number }) {
-        return new NextResponse(JSON.stringify(data), { status: init?.status ?? 200 })
-      }
-    },
+    NextResponse: MockNextResponse,
   }
 })
 
@@ -198,9 +205,9 @@ describe('GET /api/export-download', () => {
     ;(global.fetch as jest.Mock).mockResolvedValueOnce({
       ok: true,
       status: 200,
-      // Explicit Headers object ensures Content-Length is accessible via .get()
-      // (undici Response constructor may strip Content-Length in some Node versions)
-      headers: new Headers({ 'Content-Type': 'text/csv', 'Content-Length': String(bigSize) }),
+      // Use plain-object accessor instead of `new Headers(...)` to avoid
+      // undici brand-check quirks where .get() may return undefined in Jest.
+      headers: { get: (name: string) => name === 'Content-Length' ? String(bigSize) : null },
       body: null,
     })
 
