@@ -19,6 +19,50 @@
 import { and, eq } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { psdAgentSkills } from "@/lib/db/schema/tables/agent-skills";
+import { parseToolRef } from "@/lib/tools/catalog/version-resolver";
+
+/**
+ * A single parsed `allowed-tools` pin (Issue #927). `name` is the version-
+ * stripped tool identifier/wire name used for intersection matching; `version`
+ * is the pinned `vN` (or `null` for "latest"). The raw entry is preserved for
+ * logging / version resolution downstream.
+ */
+export interface SkillToolPin {
+  /** Tool identifier or wire name without any `@version` suffix. */
+  name: string;
+  /** Pinned version (`v1`, ...) or `null` when the skill tracks latest. */
+  version: string | null;
+  /** The original `allowed-tools` entry as written in the frontmatter. */
+  raw: string;
+}
+
+/**
+ * Parse a skill's `allowed-tools` list, splitting each entry into its base name
+ * and optional `@version` pin (Issue #927). Entries with a malformed `@version`
+ * (e.g. `tool@2`, `tool@latest`) are treated as an UNPINNED reference to the
+ * whole string as a name — so a typo'd pin fails closed (it simply will not match
+ * any real tool) rather than silently widening access. Empty/blank entries are
+ * dropped. Order is preserved; duplicates are NOT collapsed (callers that need a
+ * set build one).
+ *
+ * Pure — no I/O.
+ */
+export function parseSkillAllowedTools(allowedTools: string[]): SkillToolPin[] {
+  const pins: SkillToolPin[] = [];
+  for (const raw of allowedTools) {
+    const trimmed = typeof raw === "string" ? raw.trim() : "";
+    if (!trimmed) continue;
+    const parsed = parseToolRef(trimmed);
+    if (parsed) {
+      pins.push({ name: parsed.identifier, version: parsed.version, raw: trimmed });
+    } else {
+      // Malformed (e.g. bad @version). Keep the literal as a name so it fails to
+      // match a real tool rather than being dropped (fail-closed).
+      pins.push({ name: trimmed, version: null, raw: trimmed });
+    }
+  }
+  return pins;
+}
 
 /**
  * Intersect a session's available tool names with a skill's `allowed-tools`.
@@ -28,6 +72,11 @@ import { psdAgentSkills } from "@/lib/db/schema/tables/agent-skills";
  * - A NON-EMPTY `allowedTools` restricts the session to the overlap, preserving
  *   the order of `available`.
  *
+ * Version pins (`@version`, Issue #927) are matched on the version-stripped base
+ * name: the client-supplied `available` tool names carry no version, so a pin of
+ * `documents.create@v1` gates the session to `documents.create`. The version
+ * itself is consumed later when the catalog resolves which version to dispatch.
+ *
  * Pure — no I/O. Callers are responsible for having already scope-filtered
  * `available`.
  */
@@ -36,7 +85,9 @@ export function intersectSkillAllowedTools(
   allowedTools: string[]
 ): string[] {
   if (allowedTools.length === 0) return [...available];
-  const pinned = new Set(allowedTools);
+  const pinned = new Set(
+    parseSkillAllowedTools(allowedTools).map((p) => p.name)
+  );
   return available.filter((name) => pinned.has(name));
 }
 

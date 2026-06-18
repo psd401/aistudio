@@ -106,9 +106,12 @@ function toYamlScalar(value: string): string {
  * declares its tools in `enabledTools` (a JSONB string[]). We take the union,
  * dedupe, and sort for deterministic output.
  *
- * Returns catalog tool identifiers as-is. AI-Studio-specific tools (e.g.
- * `nexus.chat`) are passed through unchanged — the export documentation notes
- * which references are platform-specific.
+ * Returns catalog tool identifiers as-is, INCLUDING any `@version` pin (Issue
+ * #927). A prompt may pin a specific tool version (e.g. `documents.create@v1`);
+ * the suffix is preserved verbatim so the published skill stays pinned to that
+ * version until republished, even after a newer version ships. AI-Studio-specific
+ * tools (e.g. `nexus.chat`) are passed through unchanged — the export
+ * documentation notes which references are platform-specific.
  */
 export function deriveAllowedTools(prompts: SerializerPrompt[] = []): string[] {
   const set = new Set<string>()
