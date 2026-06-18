@@ -73,3 +73,18 @@ ALTER TABLE assistant_architects DROP CONSTRAINT IF EXISTS assistant_architects_
 ALTER TABLE assistant_architects
     ADD CONSTRAINT assistant_architects_agent_cost_cap_check
     CHECK (agent_cost_cap_cents IS NULL OR agent_cost_cap_cents > 0);
+
+-- 2. Expose the code MCP tools on the `internal` surface so the agentic runtime
+--    can resolve them via the catalog. The boot-time manifest sync also does this
+--    (it reconciles `surfaces` from lib/tools/catalog/manifest.ts), but seeding it
+--    here keeps a freshly migrated DB correct even before the first sync runs.
+--    Only append 'internal' when absent so this stays idempotent and does not
+--    clobber the 'rest' surface that execute_assistant / list_assistants carry.
+UPDATE tool_catalog
+SET surfaces = surfaces || '["internal"]'::jsonb
+WHERE source = 'code'
+  AND identifier IN (
+    'decisions.search', 'decisions.capture', 'assistants.execute',
+    'assistants.list', 'decisions.graph_get'
+  )
+  AND NOT (surfaces @> '["internal"]'::jsonb);

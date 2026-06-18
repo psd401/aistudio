@@ -62,20 +62,32 @@ interface McpCatalogMapping {
    * `binding` is the OpenAPI path/operation the catalog→OpenAPI generator emits.
    */
   rest?: { scopes: string[]; binding: ToolRestBinding };
+  /**
+   * Scope(s) a caller must hold to invoke this tool from the `internal` agent
+   * loop (Issue #926). The MCP scope (`mcp:*`) is the right grant for an
+   * in-process agent calling the same handler: the agent runs in the caller's
+   * session, and these scopes are what an app session already carries. Present
+   * here means the tool is exposed on the `internal` surface so the agentic
+   * runtime can resolve it via `catalog.list({ surface: 'internal' })`.
+   */
+  internalScopes?: string[];
 }
 
 const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
   search_decisions: {
     identifier: "decisions.search",
     requiredScope: "mcp:search_decisions",
+    internalScopes: ["mcp:search_decisions"],
   },
   capture_decision: {
     identifier: "decisions.capture",
     requiredScope: "mcp:capture_decision",
+    internalScopes: ["mcp:capture_decision"],
   },
   execute_assistant: {
     identifier: "assistants.execute",
     requiredScope: "mcp:execute_assistant",
+    internalScopes: ["mcp:execute_assistant"],
     rest: {
       // REST callers use `assistants:execute` (see app/api/v1/assistants/[id]/execute);
       // distinct from the MCP scope, hence surfaceScopes rather than a shared array.
@@ -97,6 +109,7 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
   list_assistants: {
     identifier: "assistants.list",
     requiredScope: "mcp:list_assistants",
+    internalScopes: ["mcp:list_assistants"],
     rest: {
       // REST list route uses `assistants:list` (see app/api/v1/assistants GET).
       scopes: ["assistants:list"],
@@ -111,6 +124,7 @@ const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
   get_decision_graph: {
     identifier: "decisions.graph_get",
     requiredScope: "mcp:get_decision_graph",
+    internalScopes: ["mcp:get_decision_graph"],
   },
 };
 
@@ -137,7 +151,19 @@ const MCP_MANIFEST_ENTRIES: ToolManifestEntry[] = MCP_TOOLS.map(
           `lib/tools/catalog/manifest.ts (MCP_TOOL_CATALOG_MAP). Add one.`
       );
     }
-    const surfaces: ToolSurface[] = mapping.rest ? ["mcp", "rest"] : ["mcp"];
+    // Every code MCP tool has an in-process handler resolvable via
+    // `catalog.dispatch()`, so each is also exposed on the `internal` surface for
+    // the agentic Assistant Architect runtime (#926). The `mcp` base scope is the
+    // right grant for an in-app agent calling the same handler.
+    const surfaces: ToolSurface[] = ["mcp", "internal"];
+    if (mapping.rest) surfaces.push("rest");
+
+    // surfaceScopes: REST and internal each replace the base mcp scope on their
+    // own surface. Merge both into one object (undefined keys are simply absent).
+    const surfaceScopes: NonNullable<ToolManifestEntry["surfaceScopes"]> = {};
+    if (mapping.rest) surfaceScopes.rest = mapping.rest.scopes;
+    if (mapping.internalScopes) surfaceScopes.internal = mapping.internalScopes;
+
     return {
       identifier: mapping.identifier,
       version: "v1",
@@ -147,12 +173,8 @@ const MCP_MANIFEST_ENTRIES: ToolManifestEntry[] = MCP_TOOLS.map(
       surfaces,
       requiredScopes: [mapping.requiredScope],
       agentCallable: true,
-      ...(mapping.rest
-        ? {
-            surfaceScopes: { rest: mapping.rest.scopes },
-            rest: mapping.rest.binding,
-          }
-        : {}),
+      ...(Object.keys(surfaceScopes).length > 0 ? { surfaceScopes } : {}),
+      ...(mapping.rest ? { rest: mapping.rest.binding } : {}),
     };
   }
 );
