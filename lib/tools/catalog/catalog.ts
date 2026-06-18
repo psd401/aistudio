@@ -117,8 +117,9 @@ function requiredScopesForSurface(
   entry: ToolCatalogEntry,
   surface?: ToolSurface
 ): string[] {
-  if (surface && entry.surfaceScopes?.[surface]) {
-    return entry.surfaceScopes[surface] as string[];
+  const surfaceSpecific = surface ? entry.surfaceScopes?.[surface] : undefined;
+  if (surfaceSpecific) {
+    return surfaceSpecific;
   }
   return entry.requiredScopes;
 }
