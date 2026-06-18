@@ -10,6 +10,47 @@
  * Related issue: #1018 — CSV file uploads fail in Nexus
  */
 
+// ── next/server must be mocked FIRST so NextResponse is a usable constructor ──
+// NextResponse is not a valid constructor in the jsdom test environment without
+// this mock. NextRequest needs formData() support for the upload tests.
+jest.mock('next/server', () => {
+  class MockNextRequest {
+    url: string;
+    method: string;
+    private _fd: FormData | null;
+    constructor(url: string, init?: { method?: string; body?: FormData }) {
+      this.url = url;
+      this.method = init?.method || 'GET';
+      this._fd = (init?.body as FormData) || null;
+    }
+    async formData() {
+      return this._fd || new FormData();
+    }
+  }
+
+  class NextResponse {
+    body: string;
+    status: number;
+    headers: Map<string, string>;
+    constructor(body: string, init?: { status?: number; headers?: Record<string, string> }) {
+      this.body = body;
+      this.status = init?.status || 200;
+      this.headers = new Map(Object.entries(init?.headers || {}));
+    }
+    json() {
+      return Promise.resolve(JSON.parse(this.body));
+    }
+    static json(data: unknown, init?: { status?: number; headers?: Record<string, string> }) {
+      return new NextResponse(JSON.stringify(data), {
+        ...init,
+        headers: { 'Content-Type': 'application/json', ...(init?.headers || {}) },
+      });
+    }
+  }
+
+  return { NextRequest: MockNextRequest, NextResponse };
+});
+
 import { describe, it, expect, jest, beforeEach } from '@jest/globals';
 import { NextRequest } from 'next/server';
 
