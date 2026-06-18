@@ -1,4 +1,6 @@
 /**
+ * @jest-environment node
+ *
  * Unit tests for /api/documents/v2/upload/route.ts
  *
  * Covers:
@@ -8,11 +10,13 @@
  * - Successful upload flow (S3 + job creation + queue)
  *
  * Related issue: #1018 — CSV file uploads fail in Nexus
+ *
+ * Uses @jest-environment node because the route calls file.stream() which requires
+ * Node.js's native File/Blob stream support (not available in jsdom).
  */
 
 // ── next/server must be mocked FIRST so NextResponse is a usable constructor ──
-// NextResponse is not a valid constructor in the jsdom test environment without
-// this mock. NextRequest needs formData() support for the upload tests.
+// NextRequest needs formData() support for the upload tests.
 jest.mock('next/server', () => {
   class MockNextRequest {
     url: string;
