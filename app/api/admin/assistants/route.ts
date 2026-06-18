@@ -10,6 +10,9 @@ import {
   approveAssistantArchitect,
   rejectAssistantArchitect
 } from "@/lib/db/drizzle"
+import { executeTransaction } from "@/lib/db/drizzle-client"
+import { eq, sql } from "drizzle-orm"
+import { tools, capabilities, roleTools, navigationItems } from "@/lib/db/schema"
 
 export async function GET() {
   const requestId = generateRequestId();
@@ -265,6 +268,30 @@ export async function DELETE(request: Request) {
         { status: 400, headers: { "X-Request-Id": requestId } }
       )
     }
+
+    // Clean up the tool/capability rows and their role grants before calling
+    // deleteAssistantArchitect, which handles the remaining FK-constrained rows.
+    // role_tools has no cascade, so delete those first; role_capabilities cascades
+    // automatically when the capabilities row is deleted.
+    await executeTransaction(
+      async (tx) => {
+        await tx
+          .delete(roleTools)
+          .where(
+            sql`${roleTools.toolId} IN (SELECT id FROM tools WHERE prompt_chain_tool_id = ${assistantId})`
+          );
+        await tx
+          .delete(tools)
+          .where(eq(tools.promptChainToolId, assistantId));
+        await tx
+          .delete(capabilities)
+          .where(eq(capabilities.promptChainToolId, assistantId));
+        await tx
+          .delete(navigationItems)
+          .where(eq(navigationItems.link, `/tools/assistant-architect/${assistantId}`));
+      },
+      "adminDeleteAssistantRelatedRecords"
+    );
 
     await deleteAssistantArchitect(assistantId)
 
