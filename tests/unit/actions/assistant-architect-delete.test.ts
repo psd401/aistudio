@@ -4,10 +4,10 @@ import type { ActionState } from '@/types'
 const mockExecuteQuery = jest.fn(() => Promise.resolve([]))
 const mockExecuteTransaction = jest.fn(
   (fn: (tx: { delete: jest.Mock }) => unknown) =>
-    fn({ delete: jest.fn().mockReturnValue({ where: jest.fn<Promise<unknown[]>>().mockResolvedValue([]) }) })
+    fn({ delete: jest.fn().mockReturnValue({ where: jest.fn<() => Promise<unknown[]>>().mockResolvedValue([]) }) })
 )
-const mockDeleteAssistantArchitect = jest.fn(() => Promise.resolve(true as boolean | { id: number }))
-const mockGetAssistantArchitectById = jest.fn<Promise<{ id: number; userId: number; status: string } | null>>()
+const mockDeleteAssistantArchitect = jest.fn<(id: number) => Promise<boolean | { id: number }>>(() => Promise.resolve(true))
+const mockGetAssistantArchitectById = jest.fn<() => Promise<{ id: number; userId: number; status: string } | null>>()
 const mockHasRole = jest.fn(() => Promise.resolve(false))
 const mockGetCurrentUserAction = jest.fn(() => Promise.resolve({} as unknown))
 const mockGetServerSession = jest.fn(() => Promise.resolve(null as { sub: string } | null))
@@ -75,7 +75,7 @@ describe('deleteAssistantArchitectAction', () => {
     jest.clearAllMocks()
     mockExecuteTransaction.mockImplementation(
       (fn: (tx: { delete: jest.Mock }) => unknown) =>
-        fn({ delete: jest.fn().mockReturnValue({ where: jest.fn<Promise<unknown[]>>().mockResolvedValue([]) }) })
+        fn({ delete: jest.fn().mockReturnValue({ where: jest.fn<() => Promise<unknown[]>>().mockResolvedValue([]) }) })
     )
   })
 
