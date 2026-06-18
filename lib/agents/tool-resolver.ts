@@ -27,7 +27,6 @@
 import { tool, jsonSchema, type Tool, type ToolSet } from "ai";
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog";
 import type { ToolCatalogEntry } from "@/lib/tools/catalog/types";
-import { getConnectorTools } from "@/lib/mcp/connector-service";
 import type { McpConnectorToolsResult } from "@/lib/mcp/connector-types";
 import type { McpToolContext, McpToolResult } from "@/lib/mcp/types";
 import { createLogger } from "@/lib/logger";
@@ -217,6 +216,10 @@ export async function resolveAgentTools(
   const connectorResults: McpConnectorToolsResult[] = [];
   const failedConnectorIds: string[] = [];
   if (enabledConnectorIds.length > 0) {
+    // Lazy-import so the MCP client graph (@ai-sdk/mcp -> pkce-challenge, ESM)
+    // is only pulled in when connectors are actually used — keeps it out of any
+    // non-Node bundle and out of the resolver's test import graph.
+    const { getConnectorTools } = await import("@/lib/mcp/connector-service");
     const connectorOptions = caller.idToken
       ? { idToken: caller.idToken }
       : undefined;
