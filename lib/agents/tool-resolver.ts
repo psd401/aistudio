@@ -202,6 +202,79 @@ function catalogEntryToTool(
 }
 
 /**
+ * Wrap an MCP connector tool set so each invocation emits an audit event, mirroring
+ * the catalog-tool audit path (#926). Connector tools come from the MCP server as
+ * AI SDK `Tool`s with their own `execute`; without wrapping, their calls would be
+ * invisible in the execution audit/timeline (catalog tools call `onToolInvocation`,
+ * connector tools did not). We preserve the original `execute` and time/record it.
+ *
+ * Audit never breaks the model loop: a failing sink is swallowed, and the original
+ * tool result/throw is passed through unchanged.
+ */
+function auditConnectorTools(
+  serverId: string,
+  toolSet: ToolSet,
+  ctx: McpToolContext,
+  onToolInvocation: ResolveAgentToolsParams["onToolInvocation"],
+  log: ReturnType<typeof createLogger>
+): ToolSet {
+  if (!onToolInvocation) return toolSet;
+  const wrapped: ToolSet = {};
+  for (const [name, original] of Object.entries(toolSet)) {
+    const originalExecute = original.execute;
+    if (typeof originalExecute !== "function") {
+      // Non-executable tool (e.g. client-handled); pass through untouched.
+      wrapped[name] = original;
+      continue;
+    }
+    wrapped[name] = {
+      ...original,
+      execute: async (rawArgs: unknown, options: unknown) => {
+        const args =
+          rawArgs && typeof rawArgs === "object"
+            ? (rawArgs as Record<string, unknown>)
+            : {};
+        const startedAt = Date.now();
+        let ok = false;
+        let error: string | undefined;
+        try {
+          const result = await (
+            originalExecute as (a: unknown, o: unknown) => unknown
+          )(rawArgs, options);
+          ok = true;
+          return result;
+        } catch (err) {
+          error = err instanceof Error ? err.message : String(err);
+          throw err;
+        } finally {
+          try {
+            await onToolInvocation({
+              // Namespace connector tools by serverId so they're distinguishable
+              // from catalog tools and from other connectors in the audit log.
+              toolIdentifier: `connector:${serverId}:${name}`,
+              toolName: name,
+              args: boundAuditArgs(args),
+              ok,
+              error,
+              durationMs: Date.now() - startedAt,
+              userId: ctx.userId,
+            });
+          } catch (auditErr) {
+            log.error("Failed to record connector tool invocation audit", {
+              serverId,
+              tool: name,
+              error:
+                auditErr instanceof Error ? auditErr.message : String(auditErr),
+            });
+          }
+        }
+      },
+    } as Tool;
+  }
+  return wrapped;
+}
+
+/**
  * Resolve the merged AI SDK tool set for an agentic run.
  *
  * Catalog tools are resolved on the `internal` surface with the caller's scopes
@@ -220,6 +293,14 @@ export async function resolveAgentTools(
   const grantedToolIdentifiers: string[] = [];
   const deniedToolIdentifiers: string[] = [];
 
+  // Shared invocation context for both catalog and connector tool auditing.
+  const ctx: McpToolContext = {
+    userId: caller.userId,
+    cognitoSub: caller.cognitoSub,
+    scopes: caller.scopes,
+    requestId,
+  };
+
   // ── 1. Catalog (internal-surface) tools ────────────────────────────────────
   const requested = new Set(enabledToolIdentifiers);
   if (requested.size > 0) {
@@ -233,13 +314,6 @@ export async function resolveAgentTools(
     const allowedByIdentifier = new Map(
       allowedEntries.map((e) => [e.identifier, e])
     );
-
-    const ctx: McpToolContext = {
-      userId: caller.userId,
-      cognitoSub: caller.cognitoSub,
-      scopes: caller.scopes,
-      requestId,
-    };
 
     for (const identifier of requested) {
       const entry = allowedByIdentifier.get(identifier);
@@ -284,7 +358,18 @@ export async function resolveAgentTools(
     for (const [i, result] of settled.entries()) {
       if (result.status === "fulfilled") {
         connectorResults.push(result.value);
-        Object.assign(tools, result.value.tools);
+        // Wrap so each connector tool call emits an audit event (catalog tools
+        // already do; raw connector tools otherwise leave no audit trail). (#926)
+        Object.assign(
+          tools,
+          auditConnectorTools(
+            result.value.serverId,
+            result.value.tools as ToolSet,
+            ctx,
+            params.onToolInvocation,
+            log
+          )
+        );
       } else {
         failedConnectorIds.push(enabledConnectorIds[i]);
         log.warn("Failed to resolve agent connector tools", {
@@ -331,11 +416,18 @@ export async function closeAgentConnectorClients(
   // Bound each close() so a hung MCP server can't stall onFinish (and the HTTP
   // response) indefinitely. (PR review.)
   const CLOSE_TIMEOUT_MS = 5_000;
-  const closeWithTimeout = (r: McpConnectorToolsResult) =>
-    Promise.race([
-      r.close(),
-      new Promise<void>((resolve) => setTimeout(resolve, CLOSE_TIMEOUT_MS)),
+  const closeWithTimeout = (r: McpConnectorToolsResult) => {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<void>((resolve) => {
+      timeoutId = setTimeout(resolve, CLOSE_TIMEOUT_MS);
+    });
+    // Clear the timer once close() settles so a fast close doesn't leave a
+    // dangling timer that delays test runs or serverless freeze/terminate.
+    return Promise.race([
+      r.close().finally(() => clearTimeout(timeoutId)),
+      timeoutPromise,
     ]);
+  };
   const settled = await Promise.allSettled(
     connectorResults.map((r) => closeWithTimeout(r))
   );

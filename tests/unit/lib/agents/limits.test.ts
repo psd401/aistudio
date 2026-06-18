@@ -59,6 +59,20 @@ describe("resolveAgentRunLimits", () => {
     expect(limits.timeoutSeconds).toBe(60)
     expect(limits.costCapCents).toBe(99)
   })
+
+  it("falls back to defaults for fractional values in (0, 1) instead of clamping to 0", () => {
+    // Regression: a value like 0.5 is > 0 but Math.floor(0.5) === 0, which would
+    // violate the DB CHECK constraints (steps/timeout BETWEEN 1 AND <max>). The
+    // guard is `< 1`, so anything below 1 resolves to the default, never 0.
+    const limits = resolveAgentRunLimits({
+      agentMaxSteps: 0.5,
+      agentTimeoutSeconds: 0.9,
+    })
+    expect(limits.maxSteps).toBe(AGENT_LIMIT_DEFAULTS.maxSteps)
+    expect(limits.timeoutSeconds).toBe(AGENT_LIMIT_DEFAULTS.timeoutSeconds)
+    // A value of exactly 1 is valid and passes through.
+    expect(resolveAgentRunLimits({ agentMaxSteps: 1 }).maxSteps).toBe(1)
+  })
 })
 
 describe("isCostCapExceeded", () => {

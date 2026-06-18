@@ -188,7 +188,9 @@ async function validateAgentTools(
       return {
         isValid: false,
         invalidTools,
-        message: `Tools not available for agentic use with your permissions: ${invalidTools.join(", ")}`,
+        // Report a count rather than echoing the caller-supplied identifiers back
+        // in the message (avoids reflecting arbitrary input into the response).
+        message: `Tools not available for agentic use with your permissions: ${invalidTools.length} not accessible`,
       };
     }
     return { isValid: true, invalidTools: [] };
@@ -222,12 +224,19 @@ type AgenticUpdateFields = Partial<{
 async function resolveAgenticUpdateFields(
   data: Partial<InsertAssistantArchitect>,
   currentMode: string | null | undefined,
-  authorRoleNames: string[]
+  authorRoleNames: string[],
+  authorUserId: number
 ): Promise<{ fields: AgenticUpdateFields } | { error: string }> {
   const fields: AgenticUpdateFields = {};
 
   if (data.mode !== undefined) {
-    const nextMode = data.mode as "prompt_chain" | "agentic";
+    // Validate at runtime rather than blind-casting: a malformed payload would
+    // otherwise reach the DB and surface as a generic constraint failure instead
+    // of a clear validation error.
+    if (data.mode !== "prompt_chain" && data.mode !== "agentic") {
+      return { error: `Invalid assistant mode: ${String(data.mode)}` };
+    }
+    const nextMode = data.mode;
     // Mode is one-way: agentic -> prompt_chain is not supported.
     if (currentMode === "agentic" && nextMode === "prompt_chain") {
       return { error: "Cannot convert an agentic assistant back to prompt-chain mode" };
@@ -242,6 +251,12 @@ async function resolveAgenticUpdateFields(
     fields.agentEnabledTools = data.agentEnabledTools;
   }
   if (data.agentEnabledConnectors !== undefined) {
+    const connectorError = await validateAgentConnectors(
+      data.agentEnabledConnectors,
+      authorUserId,
+      authorRoleNames
+    );
+    if (connectorError) return { error: connectorError };
     fields.agentEnabledConnectors = data.agentEnabledConnectors;
   }
   if (data.agentMaxSteps !== undefined) {
@@ -260,6 +275,31 @@ async function resolveAgenticUpdateFields(
   }
 
   return { fields };
+}
+
+/**
+ * Validate that every connector ID is one the author can access (parity with
+ * agentEnabledTools). Returns a user-facing error string when one or more IDs are
+ * not accessible, or null when all are valid (or none were supplied).
+ *
+ * Execution-time resolution already filters connectors by the CALLER's access, so
+ * an unowned connector can't be invoked regardless — this is defense in depth plus
+ * a clear authoring-time error. Reports a count rather than echoing the raw IDs.
+ */
+async function validateAgentConnectors(
+  connectorIds: string[],
+  authorUserId: number,
+  authorRoleNames: string[]
+): Promise<string | null> {
+  if (connectorIds.length === 0) return null;
+  const { getAvailableConnectors } = await import("@/lib/mcp/connector-service");
+  const accessible = await getAvailableConnectors(authorUserId, authorRoleNames);
+  const accessibleIds = new Set(accessible.map(c => c.id));
+  const invalidCount = connectorIds.filter(id => !accessibleIds.has(id)).length;
+  if (invalidCount > 0) {
+    return `Connectors not available with your permissions: ${invalidCount} not accessible`;
+  }
+  return null;
 }
 
 /** Normalize a nullable numeric limit to a positive integer, or null for no cap. */
@@ -344,7 +384,8 @@ export async function createAssistantArchitectAction(
     const agentResult = await resolveAgenticUpdateFields(
       assistant,
       undefined,
-      currentUser.data.roles.map(r => r.name)
+      currentUser.data.roles.map(r => r.name),
+      currentUser.data.user.id
     )
     if ("error" in agentResult) {
       throw ErrorFactories.validationFailed([{
@@ -688,7 +729,8 @@ export async function updateAssistantArchitectAction(
     const agentResult = await resolveAgenticUpdateFields(
       data,
       currentTool.mode,
-      currentUser.data.roles.map(r => r.name)
+      currentUser.data.roles.map(r => r.name),
+      currentUser.data.user.id
     );
     if ("error" in agentResult) {
       return { isSuccess: false, message: agentResult.error }

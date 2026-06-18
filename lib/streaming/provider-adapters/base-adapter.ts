@@ -180,6 +180,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       // accumulated usage cost reaches the per-run cap. AI SDK `stopWhen` accepts
       // an array — ANY condition stops the loop.
       const stopConditions = this.buildStopConditions(enhancedConfig, logger);
+      const abortSignal = this.buildTimeoutSignal(enhancedConfig.timeout, logger); // #926
 
       // Start streaming with AI SDK
       const result = streamText({
@@ -189,6 +190,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
         tools: enhancedConfig.tools,
         toolChoice: enhancedConfig.toolChoice,
         temperature: enhancedConfig.temperature,
+        ...(abortSignal && { abortSignal }),
         ...(stopConditions.length > 0 && { stopWhen: stopConditions }),
         ...(enhancedConfig.experimental_telemetry && enhancedConfig.experimental_telemetry.isEnabled && {
           experimental_telemetry: {
@@ -392,11 +394,36 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       // survives provider-specific config enhancement.
       costCapCents: config.costCapCents,
       costRates: config.costRates,
+      // Preserve the per-run wall-clock timeout (#926) so the abortSignal is
+      // applied after enhancement (otherwise the timeout would be silently lost).
+      timeout: config.timeout,
       temperature: config.temperature,
       tools: config.tools,
       toolChoice: config.toolChoice,
       experimental_telemetry: config.experimental_telemetry
     };
+  }
+
+  /**
+   * Build a wall-clock abort signal for the per-run timeout (#926). Without it the
+   * configured `timeout` was inert: a hung model/tool loop ran until the
+   * route/platform ceiling (up to 900s). `AbortSignal.timeout` aborts the whole
+   * streamText call (model calls + tool loop) once the limit elapses. Returns
+   * undefined when no positive, finite timeout is configured. Shared by all
+   * adapters (base + provider overrides) so every path enforces the timeout.
+   */
+  protected buildTimeoutSignal(
+    timeoutMs: number | undefined,
+    logger: ReturnType<typeof createLogger>
+  ): AbortSignal | undefined {
+    if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return undefined;
+    }
+    logger.debug('Applying stream wall-clock timeout', {
+      provider: this.providerName,
+      timeoutMs,
+    });
+    return AbortSignal.timeout(timeoutMs);
   }
 
   /**

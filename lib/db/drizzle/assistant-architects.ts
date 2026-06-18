@@ -56,6 +56,8 @@ import {
 } from "@/lib/db/schema";
 import { ErrorFactories } from "@/lib/error-utils";
 import { CAPABILITY_MANIFEST } from "@/lib/capabilities/manifest";
+// Single source of truth for the runtime mode union (#926) — see re-export below.
+import type { AssistantArchitectMode } from "@/lib/db/schema/tables/assistant-architects";
 
 /**
  * Identifiers owned by the code manifest. An Assistant Architect whose slugified
@@ -87,8 +89,12 @@ function buildAssistantToolIdentifier(name: string, assistantId: number): string
 /** Tool status values from the database enum */
 export type ToolStatus = "draft" | "pending_approval" | "approved" | "rejected" | "disabled";
 
-/** Assistant runtime mode (Issue #926). */
-export type AssistantArchitectMode = "prompt_chain" | "agentic";
+/**
+ * Assistant runtime mode (Issue #926). Re-exported from the schema definition
+ * (imported at the top of this file) so there is a single source of truth —
+ * adding a future mode in the schema can't drift from this layer.
+ */
+export type { AssistantArchitectMode };
 
 export interface AssistantArchitectData {
   name: string;

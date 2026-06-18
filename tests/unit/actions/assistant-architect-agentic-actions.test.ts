@@ -27,6 +27,11 @@ jest.mock("@/lib/api-keys/scopes", () => ({
   getScopesForRoles: jest.fn(() => ["mcp:test_tool"]),
 }))
 
+// Connector-ownership validation (#926) dynamically imports this module.
+jest.mock("@/lib/mcp/connector-service", () => ({
+  getAvailableConnectors: jest.fn(() => Promise.resolve([])),
+}))
+
 jest.mock("@/lib/tools/tool-registry", () => ({
   getAvailableToolsForModel: jest.fn(() => Promise.resolve([])),
   getAllTools: jest.fn(() => []),
@@ -131,6 +136,9 @@ const getArchitectByIdMock = (
 const updateArchitectMock = (
   jest.requireMock("@/lib/db/drizzle") as { updateAssistantArchitect: jest.Mock }
 ).updateAssistantArchitect
+const getAvailableConnectorsMock = (
+  jest.requireMock("@/lib/mcp/connector-service") as { getAvailableConnectors: jest.Mock }
+).getAvailableConnectors
 
 // ── Test fixtures ─────────────────────────────────────────────────────────────
 
@@ -208,7 +216,11 @@ describe("validateAgentTools — via updateAssistantArchitectAction", () => {
     })
 
     expect(result.isSuccess).toBe(false)
-    expect(result.message).toContain("decisions.capture")
+    // The error reports a COUNT of inaccessible tools rather than echoing the
+    // caller-supplied identifiers back (avoids reflecting arbitrary input). One
+    // of the two requested tools (decisions.capture) is not in the allowed set.
+    expect(result.message).toMatch(/not available for agentic use/i)
+    expect(result.message).toContain("1 not accessible")
   })
 
   it("accepts tools that are in the author's allowed catalog set", async () => {
@@ -324,6 +336,72 @@ describe("resolveAgenticUpdateFields — mode transition enforcement", () => {
     })
 
     expect(result.isSuccess).toBe(true)
+  })
+
+  it("rejects an invalid mode value rather than passing it to the DB (#926)", async () => {
+    getArchitectByIdMock.mockResolvedValue(draftArchitect({ mode: "prompt_chain" }))
+
+    const result = await updateAssistantArchitectAction("1", {
+      // Deliberately malformed mode — should fail validation, not reach the DB.
+      mode: "not_a_real_mode" as unknown as "agentic",
+    })
+
+    expect(result.isSuccess).toBe(false)
+    expect(result.message).toMatch(/invalid assistant mode/i)
+    expect(updateArchitectMock).not.toHaveBeenCalled()
+  })
+})
+
+// ── validateAgentConnectors (tested via updateAssistantArchitectAction) ─────────
+
+describe("agentEnabledConnectors validation (#926)", () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    getServerSessionMock.mockResolvedValue(AUTHOR_SESSION)
+    getCurrentUserMock.mockResolvedValue(CURRENT_USER_OK)
+    hasRoleMock.mockResolvedValue(false)
+    getArchitectByIdMock.mockResolvedValue(draftArchitect())
+    listMock.mockResolvedValue([])
+    updateArchitectMock.mockResolvedValue({ id: 1 })
+    getAvailableConnectorsMock.mockResolvedValue([])
+  })
+
+  it("rejects connector IDs the author cannot access", async () => {
+    getAvailableConnectorsMock.mockResolvedValue([{ id: "srv-owned" }])
+
+    const result = await updateAssistantArchitectAction("1", {
+      agentEnabledConnectors: ["srv-owned", "srv-unowned"],
+    })
+
+    expect(result.isSuccess).toBe(false)
+    // Reports a count, never echoes the raw connector IDs back.
+    expect(result.message).toMatch(/connectors not available/i)
+    expect(result.message).toContain("1 not accessible")
+    expect(result.message).not.toContain("srv-unowned")
+    expect(updateArchitectMock).not.toHaveBeenCalled()
+  })
+
+  it("accepts connector IDs the author owns", async () => {
+    getAvailableConnectorsMock.mockResolvedValue([{ id: "srv-a" }, { id: "srv-b" }])
+
+    const result = await updateAssistantArchitectAction("1", {
+      agentEnabledConnectors: ["srv-a"],
+    })
+
+    expect(result.isSuccess).toBe(true)
+    expect(updateArchitectMock).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ agentEnabledConnectors: ["srv-a"] })
+    )
+  })
+
+  it("skips the ownership lookup when no connectors are supplied", async () => {
+    const result = await updateAssistantArchitectAction("1", {
+      agentEnabledConnectors: [],
+    })
+
+    expect(result.isSuccess).toBe(true)
+    expect(getAvailableConnectorsMock).not.toHaveBeenCalled()
   })
 })
 

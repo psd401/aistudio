@@ -298,9 +298,12 @@ describe("tool-resolver: dispatch exception handling", () => {
       requestId: "req-throw",
     })
 
+    // execute() resolving (not rejecting) is itself the "does not throw" guarantee.
+    // Assert it returns a string carrying the error text — the previous
+    // `expect(out).not.toThrow` was a no-op (it just accessed a matcher property).
     const out = await asExecutable(resolved.tools["search_decisions"]).execute({})
+    expect(typeof out).toBe("string")
     expect(out).toContain("upstream crashed")
-    expect(out).not.toThrow
   })
 
   it("records ok=false and the error message in the audit when dispatch throws", async () => {

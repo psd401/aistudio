@@ -207,18 +207,25 @@ function AgentLimitsGrid({
         <Input
           id="agent-cost-cap"
           type="number"
-          min={0}
+          min={0.01}
           step="0.01"
           value={value.costCapDollars ?? ""}
           disabled={disabled}
           placeholder="No cap"
           onChange={(e) => {
             const v = e.target.value.trim()
-            update({ costCapDollars: v === "" ? null : Math.max(0, Number(v)) })
+            // Only a positive value sets a cap. Blank OR a non-positive number
+            // (0, negative, NaN) means "no cap" (null) — matching the server's
+            // nullablePositiveInt behavior — so a 0 isn't silently promoted to a
+            // cap value the user didn't intend.
+            const n = Number(v)
+            update({
+              costCapDollars: v === "" || !Number.isFinite(n) || n <= 0 ? null : n,
+            })
           }}
           data-testid="agent-cost-cap"
         />
-        <p className="text-xs text-muted-foreground">Blank = no cap.</p>
+        <p className="text-xs text-muted-foreground">Blank or 0 = no cap.</p>
       </div>
       <div className="space-y-2">
         <Label htmlFor="agent-rate-limit">Runs per hour</Label>

@@ -966,7 +966,15 @@ export class UnifiedStreamingService {
    */
   private getAdaptiveTimeout(capabilities: ProviderCapabilities, request: StreamRequest): number {
     const baseTimeout = 30000; // 30 seconds
-    
+
+    // An explicitly configured timeout always wins (e.g. an agentic run's per-run
+    // wall-clock limit, #926). The adaptive values below are only fallbacks for
+    // callers that don't set one — otherwise a reasoning/thinking model would
+    // ignore the author-configured timeout entirely.
+    if (typeof request.timeout === 'number' && Number.isFinite(request.timeout) && request.timeout > 0) {
+      return request.timeout;
+    }
+
     // Extend timeout for reasoning models
     if (capabilities.supportsReasoning) {
       // o3/o4 models may need up to 5 minutes for complex reasoning

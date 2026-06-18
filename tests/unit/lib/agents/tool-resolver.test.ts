@@ -197,6 +197,80 @@ describe("resolveAgentTools", () => {
     expect(resolved.failedConnectorIds).toEqual(["srv-missing"])
   })
 
+  it("audits connector tool invocations (#926)", async () => {
+    listMock.mockResolvedValue([])
+    const remoteExecute = jest.fn(() => Promise.resolve("remote result"))
+    getConnectorToolsMock.mockResolvedValue({
+      serverId: "srv-ok",
+      serverName: "OK",
+      tools: { remote_tool: { description: "remote", execute: remoteExecute } },
+      close: jest.fn(() => Promise.resolve()),
+    })
+    const audits: Array<{
+      toolIdentifier: string
+      toolName: string
+      ok: boolean
+    }> = []
+    const resolved = await resolveAgentTools({
+      enabledToolIdentifiers: [],
+      enabledConnectorIds: ["srv-ok"],
+      caller,
+      requestId: "req-audit-connector",
+      onToolInvocation: (e) => {
+        audits.push({ toolIdentifier: e.toolIdentifier, toolName: e.toolName, ok: e.ok })
+      },
+    })
+
+    const out = await (
+      resolved.tools["remote_tool"] as { execute: (a: unknown, o: unknown) => Promise<unknown> }
+    ).execute({ q: "x" }, {})
+
+    // Original execute still runs and its result is passed through unchanged.
+    expect(out).toBe("remote result")
+    expect(remoteExecute).toHaveBeenCalledTimes(1)
+    // And the invocation produced an audit event namespaced by connector serverId.
+    expect(audits).toHaveLength(1)
+    expect(audits[0]).toEqual({
+      toolIdentifier: "connector:srv-ok:remote_tool",
+      toolName: "remote_tool",
+      ok: true,
+    })
+  })
+
+  it("records ok=false in the connector audit when the connector tool throws (#926)", async () => {
+    listMock.mockResolvedValue([])
+    getConnectorToolsMock.mockResolvedValue({
+      serverId: "srv-ok",
+      serverName: "OK",
+      tools: {
+        remote_tool: {
+          description: "remote",
+          execute: jest.fn(() => Promise.reject(new Error("remote boom"))),
+        },
+      },
+      close: jest.fn(() => Promise.resolve()),
+    })
+    const audits: Array<{ ok: boolean; error?: string }> = []
+    const resolved = await resolveAgentTools({
+      enabledToolIdentifiers: [],
+      enabledConnectorIds: ["srv-ok"],
+      caller,
+      requestId: "req-audit-connector-err",
+      onToolInvocation: (e) => {
+        audits.push({ ok: e.ok, error: e.error })
+      },
+    })
+
+    // The wrapper does not swallow the original throw (connector semantics preserved).
+    await expect(
+      (resolved.tools["remote_tool"] as { execute: (a: unknown, o: unknown) => Promise<unknown> })
+        .execute({}, {})
+    ).rejects.toThrow("remote boom")
+    expect(audits).toHaveLength(1)
+    expect(audits[0].ok).toBe(false)
+    expect(audits[0].error).toContain("remote boom")
+  })
+
   describe("destructive-tool confirmation gate (#926)", () => {
     const destructiveEntry = entry({
       identifier: "decisions.capture",

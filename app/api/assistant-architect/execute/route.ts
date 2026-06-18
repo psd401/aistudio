@@ -814,9 +814,18 @@ async function executePromptChain(
 function buildCostRates(
   modelData: { inputCostPer1kTokens?: string | null; outputCostPer1kTokens?: string | null }
 ): { inputPerToken: number; outputPerToken: number } | null {
-  const inPer1k = Number(modelData.inputCostPer1kTokens);
-  const outPer1k = Number(modelData.outputCostPer1kTokens);
-  if (!Number.isFinite(inPer1k) || !Number.isFinite(outPer1k)) return null;
+  // Number(null) and Number(undefined) are 0 / NaN respectively; treat a missing,
+  // non-finite, or negative rate as 0 so a bad/blank column can never UNDER-count
+  // cost (which would let the cost-cap stop condition fail to trip). The DB does
+  // not constrain these to be non-negative, so clamp defensively here.
+  const toRate = (raw: string | null | undefined): number => {
+    if (raw === null || raw === undefined || raw === "") return 0;
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  };
+  const inPer1k = toRate(modelData.inputCostPer1kTokens);
+  const outPer1k = toRate(modelData.outputCostPer1kTokens);
+  // No usable pricing at all → no cost cap (the maxSteps bound still applies).
   if (inPer1k <= 0 && outPer1k <= 0) return null;
   return { inputPerToken: inPer1k / 1000, outputPerToken: outPer1k / 1000 };
 }
@@ -854,8 +863,23 @@ function buildAgenticInitialMessage(
     if (substituted.trim()) taskParts.push(substituted.trim());
   }
 
+  // Format each value for the model. Objects/arrays are JSON-serialized (rather
+  // than coerced to the useless "[object Object]") so the model can reason over
+  // their structure; everything else is stringified. Values are truncated; keys
+  // come from the assistant's own schema (not user-controlled at run time).
+  const formatInputValue = (v: unknown): string => {
+    if (typeof v === 'string') return v.slice(0, 2000);
+    if (v !== null && typeof v === 'object') {
+      try {
+        return JSON.stringify(v).slice(0, 2000);
+      } catch {
+        return String(v).slice(0, 2000);
+      }
+    }
+    return String(v).slice(0, 2000);
+  };
   const inputLines = Object.entries(inputs)
-    .map(([k, v]) => `- ${String(k).slice(0, 100)}: ${typeof v === 'string' ? v.slice(0, 2000) : String(v).slice(0, 2000)}`)
+    .map(([k, v]) => `- ${String(k)}: ${formatInputValue(v)}`)
     .join('\n');
 
   const userText = [
@@ -905,11 +929,13 @@ async function persistAgenticResult(args: {
   // Persist the final output as a single prompt_result attributed to the driving
   // prompt. Per-tool detail lives in the events table (the audit sink).
   const promptInputData = { mode: 'agentic', toolCalls: toolCallCount, steps: steps.length };
-  const escapedInputJson = JSON.stringify(promptInputData).replace(/'/g, "''");
+  // Bind every value as a parameter (never sql.raw + manual escaping, which is
+  // fragile and bypasses Drizzle's parameterization). The jsonb and enum casts
+  // are applied to bound placeholders so untrusted-shaped data can't break out.
   await executeQuery(
     (db) => db.execute(sql`
       INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, started_at, completed_at, execution_time_ms)
-      VALUES (${context.executionId}, ${drivingPromptId}, ${sql.raw(`'${escapedInputJson}'::jsonb`)}, ${text}, ${sql.raw("'completed'::execution_status")}, ${new Date(agentStartTime).toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
+      VALUES (${context.executionId}, ${drivingPromptId}, ${JSON.stringify(promptInputData)}::jsonb, ${text}, ${'completed'}::execution_status, ${new Date(agentStartTime).toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
     `),
     'saveAgenticResult'
   );
@@ -1176,13 +1202,6 @@ async function executeAgenticAssistant(args: {
   };
 
   return new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined>((resolve, reject) => {
-    let resolveStreamResponse!: (value: Awaited<ReturnType<typeof unifiedStreamingService.stream>>) => void;
-    let rejectStreamResponse!: (error: Error) => void;
-    const streamResponsePromise = new Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>>>((res, rej) => {
-      resolveStreamResponse = res;
-      rejectStreamResponse = rej;
-    });
-
     const streamRequest: StreamRequest = {
       messages: [userMessage],
       modelId: String(modelData.modelId),
@@ -1201,19 +1220,23 @@ async function executeAgenticAssistant(args: {
       costRates: buildCostRates(modelData),
       timeout: config.timeoutSeconds * 1000,
       callbacks: {
+        // onFinish/onError run asynchronously AFTER the HTTP response has already
+        // started streaming to the client (the outer promise resolves as soon as
+        // the stream starts — see the IIFE below). They finalize persistence and
+        // clean up connectors in the background; they must NOT settle the outer
+        // promise (doing so blocked the response until the whole loop finished).
         onFinish: async ({ text, usage, finishReason, steps }) => {
           try {
             await persistAgenticResult({
               context, drivingPromptId: drivingPrompt.id, agentStartTime,
               text: text || '', usage, finishReason, steps: steps || [], log,
             });
-            // Close MCP clients AFTER the stream finished (never in a sync finally).
-            await cleanupConnectors();
-            resolve(await streamResponsePromise);
           } catch (saveError) {
-            await cleanupConnectors();
             log.error('Failed to finalize agentic execution', { error: saveError, executionId: context.executionId });
-            reject(saveError);
+          } finally {
+            // Close MCP clients AFTER the stream finished (never in a sync finally
+            // around the stream itself — clients must stay open while tools run).
+            await cleanupConnectors();
           }
         },
         onError: async (error) => {
@@ -1223,24 +1246,25 @@ async function executeAgenticAssistant(args: {
           // (the route-level catch only runs for synchronous pre-stream errors;
           // a post-stream onError otherwise left tool_executions stuck). (PR review.)
           await markAgenticExecutionFailed(context, error, log);
-          reject(error);
         },
       },
     };
 
+    // Resolve the outer promise as soon as the stream STARTS — not when the agent
+    // loop finishes. This lets the route return toUIMessageStreamResponse() and
+    // stream tokens to the client in real time, and avoids gateway timeouts on
+    // long agentic runs. Persistence/cleanup happen later in onFinish/onError.
     (async () => {
       try {
         const streamResponse = await unifiedStreamingService.stream(streamRequest);
-        resolveStreamResponse(streamResponse);
+        resolve(streamResponse);
       } catch (error) {
         await cleanupConnectors();
         log.error('Failed to start agentic stream', { error, executionId: context.executionId });
-        rejectStreamResponse(error as Error);
         reject(error);
       }
     })().catch(async (error) => {
       await cleanupConnectors();
-      rejectStreamResponse(error as Error);
       reject(error);
     });
   });

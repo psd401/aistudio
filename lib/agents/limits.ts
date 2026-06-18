@@ -21,13 +21,19 @@ export interface AgentLimitConfig {
   agentCostCapCents?: number | null;
 }
 
-/** Clamp `n` into [min, max]; fall back to `fallback` for non-finite/≤0 input. */
+/**
+ * Clamp `n` into [1, max]; fall back to `fallback` for non-finite input or any
+ * value `< 1`. The `< 1` guard (not `<= 0`) matters: a fractional value like
+ * `0.5` is truthy and `> 0`, but `Math.floor(0.5)` is `0`, which would violate
+ * the DB CHECK constraints (steps/timeout are `BETWEEN 1 AND <max>`). Anything
+ * below 1 therefore resolves to the default rather than an invalid `0`.
+ */
 function clampPositive(
   n: number | null | undefined,
   fallback: number,
   max: number
 ): number {
-  if (typeof n !== "number" || !Number.isFinite(n) || n <= 0) return fallback;
+  if (typeof n !== "number" || !Number.isFinite(n) || n < 1) return fallback;
   return Math.min(Math.floor(n), max);
 }
 
