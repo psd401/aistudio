@@ -247,6 +247,36 @@ describe("ToolCatalog", () => {
     expect(result.ok === false && result.reason).toBe("unknown")
   })
 
+  it("dispatch on the internal surface succeeds for an agent tool (#926)", async () => {
+    // The agentic runtime dispatches catalog tools on the 'internal' surface.
+    // Without the surface param this would default to 'mcp'; the manifest MCP
+    // tools are on BOTH surfaces, so dispatch must succeed on 'internal' too.
+    const catalog = new ToolCatalog()
+    const result = await catalog.dispatch(
+      "search_decisions",
+      {},
+      { userId: 1, cognitoSub: "s", scopes: ["mcp:search_decisions"], requestId: "r" },
+      "internal"
+    )
+    // The mocked handler returns undefined (jest.fn), so ok is true with a
+    // handler invoked — the key assertion is it is NOT rejected as unknown.
+    expect(result.ok === false && result.reason === "unknown").toBe(false)
+  })
+
+  it("dispatch on the internal surface uses the internal scope (#926)", async () => {
+    // The internal surfaceScopes for search_decisions is ['mcp:search_decisions'].
+    // A caller without it must be scope_denied on the internal surface.
+    const catalog = new ToolCatalog()
+    const result = await catalog.dispatch(
+      "search_decisions",
+      {},
+      { userId: 1, cognitoSub: "s", scopes: [], requestId: "r" },
+      "internal"
+    )
+    expect(result.ok).toBe(false)
+    expect(result.ok === false && result.reason).toBe("scope_denied")
+  })
+
   it("degrades to manifest-only when the DB read fails", async () => {
     const { executeQuery } = jest.requireMock("@/lib/db/drizzle-client") as {
       executeQuery: jest.Mock

@@ -133,7 +133,14 @@ describe("resolveAgentTools", () => {
     })
     const out = await asExecutable(resolved.tools["search_decisions"]).execute({ query: "x" })
     expect(out).toContain("hello world")
-    expect(dispatchMock).toHaveBeenCalled()
+    // Must dispatch on the 'internal' surface (#926) — the default 'mcp' would
+    // reject internal-only tools and use the wrong scope.
+    expect(dispatchMock).toHaveBeenCalledWith(
+      "search_decisions",
+      expect.any(Object),
+      expect.any(Object),
+      "internal"
+    )
   })
 
   it("invokes the audit sink for each tool invocation", async () => {

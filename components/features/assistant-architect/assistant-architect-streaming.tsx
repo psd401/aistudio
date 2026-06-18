@@ -133,7 +133,12 @@ function mergeToolTimelineEvent(
   const existing = prev[idx]
   if (existing.phase !== 'call' && event.phase === 'call') return prev
   const next = [...prev]
-  next[idx] = { ...existing, ...event }
+  // Output/error SSE events don't carry the tool name (the AI SDK omits it on
+  // those parts), so they arrive with the placeholder 'tool'. Preserve the real
+  // name captured at the 'call' phase rather than clobbering it. (PR review.)
+  const toolName =
+    event.toolName && event.toolName !== 'tool' ? event.toolName : existing.toolName
+  next[idx] = { ...existing, ...event, toolName }
   return next
 }
 

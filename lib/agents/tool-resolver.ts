@@ -24,7 +24,7 @@
  *     no tools), never an unfiltered fallback.
  */
 
-import { tool, jsonSchema, type Tool, type ToolSet } from "ai";
+import { tool, jsonSchema, type Tool, type ToolSet, type JSONSchema7 } from "ai";
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog";
 import type { ToolCatalogEntry } from "@/lib/tools/catalog/types";
 import type { McpConnectorToolsResult } from "@/lib/mcp/connector-types";
@@ -51,7 +51,9 @@ function flattenMcpResult(result: McpToolResult): {
   isError: boolean;
 } {
   const parts: string[] = [];
-  for (const item of result.content) {
+  // Guard against a malformed/empty result: MCP wire results may omit `content`.
+  const content = Array.isArray(result?.content) ? result.content : [];
+  for (const item of content) {
     if (item.type === "text" && typeof item.text === "string") {
       parts.push(item.text);
     } else if (item.type === "image") {
@@ -91,8 +93,10 @@ function catalogEntryToTool(
 ): Tool {
   return tool({
     description: entry.description,
-    // The catalog input schema is already JSON-Schema shaped (MCP inputSchema).
-    inputSchema: jsonSchema(entry.inputSchema as Record<string, unknown>),
+    // The MCP inputSchema ({ type:'object', properties, required? }) is
+    // structurally a JSON Schema 7 object — cast to the precise type the AI SDK
+    // expects rather than a flat bag.
+    inputSchema: jsonSchema(entry.inputSchema as JSONSchema7),
     execute: async (rawArgs: unknown) => {
       const args =
         rawArgs && typeof rawArgs === "object"
@@ -103,9 +107,17 @@ function catalogEntryToTool(
       let error: string | undefined;
       let resultText: string;
       try {
-        // Dispatch is resolved by the MCP wire `name` (what handlers are keyed
-        // by). The catalog re-validates scope + active state inside dispatch().
-        const dispatch = await toolCatalogInstance.dispatch(entry.name, args, ctx);
+        // Dispatch on the `internal` surface (where agent tools live): the
+        // catalog re-validates the tool is internal-surfaced, active, and the
+        // caller holds the internal-surface scope before invoking the handler.
+        // Passing the surface is required — the default `mcp` would reject any
+        // internal-only tool and use the wrong scope. (PR review.)
+        const dispatch = await toolCatalogInstance.dispatch(
+          entry.name,
+          args,
+          ctx,
+          "internal"
+        );
         if (!dispatch.ok) {
           error = dispatch.reason;
           resultText = `Tool "${entry.name}" could not run (${dispatch.reason}).`;
@@ -280,8 +292,16 @@ export async function closeAgentConnectorClients(
 ): Promise<void> {
   if (connectorResults.length === 0) return;
   const log = createLogger({ requestId, module: "agent-tool-resolver" });
+  // Bound each close() so a hung MCP server can't stall onFinish (and the HTTP
+  // response) indefinitely. (PR review.)
+  const CLOSE_TIMEOUT_MS = 5_000;
+  const closeWithTimeout = (r: McpConnectorToolsResult) =>
+    Promise.race([
+      r.close(),
+      new Promise<void>((resolve) => setTimeout(resolve, CLOSE_TIMEOUT_MS)),
+    ]);
   const settled = await Promise.allSettled(
-    connectorResults.map((r) => r.close())
+    connectorResults.map((r) => closeWithTimeout(r))
   );
   const failed = settled.filter((s) => s.status === "rejected").length;
   if (failed > 0) {

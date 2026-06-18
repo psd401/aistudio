@@ -12,6 +12,19 @@ import type {
 const log = createLogger({ module: 'base-provider-adapter' });
 
 /**
+ * A cost-cap stop predicate (#926): receives the completed steps (with token
+ * usage) and returns true to stop the multi-step loop. Typed locally because the
+ * AI SDK `stopWhen` accepts a heterogeneous array of step-count guards and custom
+ * predicates.
+ */
+type CostStopPredicate = (opts: {
+  steps: ReadonlyArray<{ usage?: { inputTokens?: number; outputTokens?: number } }>;
+}) => boolean;
+
+/** A single AI SDK `stopWhen` condition: a step-count guard or a cost predicate. */
+type StopCondition = ReturnType<typeof stepCountIs> | CostStopPredicate;
+
+/**
  * Standalone transient error classifier used by both the streaming adapters
  * and the dual-stream merger to ensure consistent behavior across all paths.
  *
@@ -162,6 +175,12 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       // Includes result field for persistence (required for assistant-ui to render completed tool calls)
       const accumulatedToolCalls: AccumulatedToolCall[] = [];
 
+      // Build the multi-step stop conditions. The step-count guard is the primary
+      // runaway bound; the cost guard (#926) additionally stops the loop once
+      // accumulated usage cost reaches the per-run cap. AI SDK `stopWhen` accepts
+      // an array — ANY condition stops the loop.
+      const stopConditions = this.buildStopConditions(enhancedConfig, logger);
+
       // Start streaming with AI SDK
       const result = streamText({
         model: enhancedConfig.model,
@@ -170,7 +189,7 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
         tools: enhancedConfig.tools,
         toolChoice: enhancedConfig.toolChoice,
         temperature: enhancedConfig.temperature,
-        ...(enhancedConfig.maxSteps && { stopWhen: stepCountIs(enhancedConfig.maxSteps) }),
+        ...(stopConditions.length > 0 && { stopWhen: stopConditions }),
         ...(enhancedConfig.experimental_telemetry && enhancedConfig.experimental_telemetry.isEnabled && {
           experimental_telemetry: {
             isEnabled: enhancedConfig.experimental_telemetry.isEnabled,
@@ -369,11 +388,58 @@ export abstract class BaseProviderAdapter implements ProviderAdapter {
       system: config.system,
       maxTokens: config.maxTokens,
       maxSteps: config.maxSteps,
+      // Preserve the cost-cap inputs (#926) so the agentic loop's stop condition
+      // survives provider-specific config enhancement.
+      costCapCents: config.costCapCents,
+      costRates: config.costRates,
       temperature: config.temperature,
       tools: config.tools,
       toolChoice: config.toolChoice,
       experimental_telemetry: config.experimental_telemetry
     };
+  }
+
+  /**
+   * Build the multi-step `stopWhen` conditions (Issue #926). Always includes the
+   * step-count bound when `maxSteps` is set. Adds a cost-cap condition when both a
+   * cap and per-token rates are provided: it sums each completed step's token
+   * usage × rates and stops once the estimated cost (in cents) reaches the cap.
+   * Token usage (not dollars) is what the AI SDK exposes per step, so cost is
+   * derived from the caller-supplied rates.
+   */
+  protected buildStopConditions(
+    config: StreamConfig,
+    logger: ReturnType<typeof createLogger>
+  ): StopCondition[] {
+    const conditions: StopCondition[] = [];
+    if (config.maxSteps) {
+      conditions.push(stepCountIs(config.maxSteps));
+    }
+    const cap = config.costCapCents;
+    const rates = config.costRates;
+    if (typeof cap === 'number' && cap > 0 && rates) {
+      const capDollars = cap / 100;
+      const costStop: CostStopPredicate = ({ steps }) => {
+        let costDollars = 0;
+        for (const step of steps) {
+          const inTok = step.usage?.inputTokens ?? 0;
+          const outTok = step.usage?.outputTokens ?? 0;
+          costDollars += inTok * rates.inputPerToken + outTok * rates.outputPerToken;
+        }
+        const exceeded = costDollars >= capDollars;
+        if (exceeded) {
+          logger.warn('Agentic run hit cost cap; stopping loop', {
+            provider: this.providerName,
+            capCents: cap,
+            estimatedCents: Math.round(costDollars * 100),
+            steps: steps.length,
+          });
+        }
+        return exceeded;
+      };
+      conditions.push(costStop);
+    }
+    return conditions;
   }
   
   /**

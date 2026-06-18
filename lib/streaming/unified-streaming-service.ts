@@ -631,6 +631,8 @@ function buildStreamConfig(options: BuildConfigOptions): StreamConfig {
     system: request.systemPrompt,
     maxTokens: request.maxTokens,
     maxSteps: request.maxSteps,
+    costCapCents: request.costCapCents,
+    costRates: request.costRates,
     temperature: request.temperature,
     tools,
     toolChoice: tools && Object.keys(tools).length > 0 ? 'auto' : undefined,

@@ -20,6 +20,7 @@ import {
 } from '@/lib/agents';
 import type { ToolInvocationAudit } from '@/lib/agents';
 import type { McpConnectorToolsResult } from '@/lib/mcp/connector-types';
+import type { AssistantArchitectMode } from '@/lib/db/schema/tables/assistant-architects';
 import type { StreamRequest } from '@/lib/streaming/types';
 import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { storeExecutionEvent } from '@/lib/assistant-architect/event-storage';
@@ -762,10 +763,26 @@ async function executePromptChain(
   return lastStreamResponse;
 }
 
+/**
+ * Derive per-token USD cost rates from a model row's per-1k-token numeric
+ * columns (stored as strings). Returns null when either rate is missing/invalid,
+ * which makes the cost cap a no-op for that model (the maxSteps bound still
+ * applies). (Issue #926.)
+ */
+function buildCostRates(
+  modelData: { inputCostPer1kTokens?: string | null; outputCostPer1kTokens?: string | null }
+): { inputPerToken: number; outputPerToken: number } | null {
+  const inPer1k = Number(modelData.inputCostPer1kTokens);
+  const outPer1k = Number(modelData.outputCostPer1kTokens);
+  if (!Number.isFinite(inPer1k) || !Number.isFinite(outPer1k)) return null;
+  if (inPer1k <= 0 && outPer1k <= 0) return null;
+  return { inputPerToken: inPer1k / 1000, outputPerToken: outPer1k / 1000 };
+}
+
 /** The agentic-mode fields read off the architect row (Issue #926). */
 interface AgenticArchitectFields {
   name: string;
-  mode?: string | null;
+  mode?: AssistantArchitectMode | null;
   agentEnabledTools?: string[] | null;
   agentEnabledConnectors?: string[] | null;
   agentMaxSteps?: number | null;
@@ -921,6 +938,56 @@ async function persistAgenticResult(args: {
 }
 
 /**
+ * Mark an agentic execution as failed when the stream errors after starting.
+ * Best-effort: updates tool_executions, emits execution-error, and reconciles
+ * the conversation status. Never throws (it runs on an already-failing path).
+ */
+async function markAgenticExecutionFailed(
+  context: PromptExecutionContext,
+  error: unknown,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const errMsg = error instanceof Error ? error.message : String(error);
+  try {
+    await executeQuery(
+      (db) => db.execute(sql`
+        UPDATE tool_executions
+        SET status = 'failed', error_message = ${errMsg}, completed_at = ${new Date().toISOString()}::timestamp
+        WHERE id = ${context.executionId}
+      `),
+      'markAgenticExecutionFailed'
+    );
+  } catch (dbErr) {
+    log.error('Failed to mark agentic execution failed', {
+      error: dbErr instanceof Error ? dbErr.message : String(dbErr),
+      executionId: context.executionId,
+    });
+  }
+  await storeExecutionEvent(context.executionId, 'execution-error', {
+    executionId: context.executionId,
+    error: errMsg,
+    recoverable: false,
+  }).catch(err => log.error('Failed to store agentic execution-error event', { error: err }));
+  if (context.conversation) {
+    try {
+      const existing = await getConversationById(context.conversation.conversationId, context.userId);
+      await updateConversation(context.conversation.conversationId, context.userId, {
+        metadata: {
+          ...existing.metadata,
+          ...buildExecutionMetadata(context.conversation.assistantId, context.conversation.assistantName, context.executionId, 'failed'),
+        },
+      });
+      await updateConversationStats(context.conversation.conversationId);
+    } catch (convErr) {
+      log.error('Failed to mark agentic conversation failed', {
+        error: convErr instanceof Error ? convErr.message : String(convErr),
+        executionId: context.executionId,
+      });
+    }
+  }
+}
+
+/**
  * Execute an assistant in AGENTIC mode (Issue #926): a model loop with tool
  * access. Tools are resolved from the unified catalog (#924, internal surface,
  * agentCallable only) + per-user MCP connectors (#774), intersected with the
@@ -1056,6 +1123,11 @@ async function executeAgenticAssistant(args: {
       // Pre-resolved tool set (catalog + connectors). maxSteps drives the loop.
       tools: Object.keys(resolved.tools).length > 0 ? resolved.tools : undefined,
       maxSteps: config.maxSteps,
+      // Per-run cost cap (#926): the streaming adapter stops the loop once the
+      // estimated cost reaches the cap. Rates come from the model row (per-1k →
+      // per-token). Skipped when the model has no cost data or no cap is set.
+      costCapCents: config.costCapCents,
+      costRates: buildCostRates(modelData),
       timeout: config.timeoutSeconds * 1000,
       callbacks: {
         onFinish: async ({ text, usage, finishReason, steps }) => {
@@ -1076,6 +1148,10 @@ async function executeAgenticAssistant(args: {
         onError: async (error) => {
           await cleanupConnectors();
           log.error('Agentic streaming error', { error, executionId: context.executionId });
+          // Mark the execution failed so the row doesn't linger as 'running'
+          // (the route-level catch only runs for synchronous pre-stream errors;
+          // a post-stream onError otherwise left tool_executions stuck). (PR review.)
+          await markAgenticExecutionFailed(context, error, log);
           reject(error);
         },
       },

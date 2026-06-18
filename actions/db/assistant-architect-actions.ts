@@ -313,12 +313,29 @@ export async function createAssistantArchitectAction(
       userId: currentUser.data.user.id
     })
 
+    // Agentic fields (Issue #926). Resolved + validated in a helper (shared
+    // clamping/validation with the update path) to persist agentic config on the
+    // initial create — previously dropped (PR review) — without inflating this
+    // action's complexity. Mode transition guard is N/A on create (no prior mode).
+    const agentResult = await resolveAgenticUpdateFields(
+      assistant,
+      undefined,
+      currentUser.data.roles.map(r => r.name)
+    )
+    if ("error" in agentResult) {
+      throw ErrorFactories.validationFailed([{
+        field: 'agentEnabledTools',
+        message: agentResult.error
+      }])
+    }
+
     const architect = await drizzleCreateAssistantArchitect({
       name: assistant.name,
       description: assistant.description || null,
       userId: currentUser.data.user.id,
       status: (assistant.status || 'draft') as "draft" | "pending_approval" | "approved" | "rejected" | "disabled",
-      imagePath: assistant.imagePath || null
+      imagePath: assistant.imagePath || null,
+      ...agentResult.fields,
     });
 
     log.info("Assistant architect created successfully", {

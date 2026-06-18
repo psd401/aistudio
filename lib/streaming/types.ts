@@ -34,6 +34,19 @@ export interface StreamRequest {
   enabledTools?: string[]; // Tool names to enable (tools will be created by adapter)
   enabledConnectors?: string[]; // MCP connector server IDs to enable
   maxSteps?: number; // Max tool-use round-trips (default: 1, set higher for multi-step tool use)
+  /**
+   * Per-run cost cap in whole US cents (Issue #926, agentic Assistant Architect).
+   * When set, the multi-step loop stops scheduling further steps once accumulated
+   * usage cost reaches/exceeds this cap. Null/undefined = no cap. Enforced via a
+   * `stopWhen` cost predicate in the provider adapter (alongside `maxSteps`).
+   */
+  costCapCents?: number | null;
+  /**
+   * Per-token cost rates (USD/token) used with `costCapCents` to estimate
+   * accumulated cost across steps. Omitted = the cost cap can't be evaluated and
+   * is skipped (the `maxSteps` bound still applies). (#926.)
+   */
+  costRates?: { inputPerToken: number; outputPerToken: number } | null;
 
   // Advanced model options
   options?: {
@@ -108,6 +121,14 @@ export interface StreamConfig {
   system?: string;
   maxTokens?: number;
   maxSteps?: number;
+  /** Per-run cost cap in whole US cents; stops the loop when reached (#926). */
+  costCapCents?: number | null;
+  /**
+   * Per-token cost rates (USD per single token) used to estimate accumulated cost
+   * for the `costCapCents` stop condition. Supplied by the caller from the model
+   * row; omitted = cost cap cannot be evaluated (it is then skipped). (#926.)
+   */
+  costRates?: { inputPerToken: number; outputPerToken: number } | null;
   temperature?: number;
   timeout?: number;
   tools?: ToolSet;

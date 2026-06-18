@@ -59,9 +59,14 @@ export function resolveAgentRunLimits(
 }
 
 /**
- * Decide whether a run has exceeded its cost cap. Returns true when a cap is set
- * AND the accumulated cost (in cents) is at or above it. Used by the execution
- * loop to stop scheduling further steps. A null cap never trips.
+ * Decide whether an accumulated cost (in cents) has reached a run's cost cap.
+ * Returns true when a cap is set AND `accumulatedCostCents >= cap`. A null cap
+ * never trips.
+ *
+ * NOTE: the loop's actual mid-run enforcement lives in the streaming provider
+ * adapter's `stopWhen` cost condition (it has per-step token usage). This pure
+ * predicate is the shared definition of the cap boundary — usable for pre-flight
+ * checks or post-run reconciliation against the same semantics.
  */
 export function isCostCapExceeded(
   limits: AgentRunLimits,
