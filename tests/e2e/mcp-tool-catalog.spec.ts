@@ -7,6 +7,10 @@ import { test, expect } from '@playwright/test'
  * auth UI — MCP uses a Bearer API key). Covers the issue's e2e flows:
  *   - MCP tools/list returns catalog-backed tools
  *   - MCP tools/call dispatches via the catalog
+ *   - tool manifest auto-registration on boot (full manifest MCP set is listed)
+ *
+ * The fourth issue flow — "AI SDK chat receives catalog-filtered tools" — lives in
+ * tests/e2e/nexus-chat-tools.spec.ts (session-auth route, not the MCP API-key one).
  *
  * Auth note: the authenticated flows require an MCP API key (sk-...) with the
  * relevant mcp:* scopes. Set MCP_E2E_API_KEY to run them; otherwise they skip
@@ -72,6 +76,29 @@ test.describe('MCP server — catalog-backed dispatch', () => {
     expect(body.jsonrpc).toBe('2.0')
     // A successful dispatch returns an MCP tool result (content array).
     expect(Array.isArray(body.result?.content)).toBe(true)
+  })
+
+  test('tool manifest auto-registered on boot — full MCP set is listed', async ({ request }) => {
+    // The boot-time catalog sync (instrumentation.ts -> syncToolCatalog) reconciles
+    // lib/tools/catalog/manifest.ts into tool_catalog with source='code'. If the 5
+    // migrated MCP tools all appear in tools/list, the whole manifest auto-registered
+    // on boot with no SQL migration and no per-tool wiring (issue #924 AC #8).
+    const resp = await request.post('/api/mcp', {
+      headers: { Authorization: `Bearer ${MCP_KEY}` },
+      data: rpc('tools/list'),
+    })
+    expect(resp.status()).toBe(200)
+    const body = await resp.json()
+    const names = (body.result?.tools as Array<{ name: string }>).map((t) => t.name)
+    for (const wire of [
+      'search_decisions',
+      'capture_decision',
+      'execute_assistant',
+      'list_assistants',
+      'get_decision_graph',
+    ]) {
+      expect(names).toContain(wire)
+    }
   })
 
   test('tools/call for an unknown tool returns METHOD_NOT_FOUND', async ({ request }) => {

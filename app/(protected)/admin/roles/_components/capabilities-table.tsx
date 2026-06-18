@@ -26,6 +26,18 @@ export interface CapabilityRow {
   description: string | null
   isActive: boolean
   source: "code" | "manual"
+  createdAt: Date | string
+}
+
+/**
+ * Format a capability's creation timestamp as a stable `YYYY-MM-DD` string.
+ * Uses an ISO slice rather than `toLocaleDateString()` so the server-rendered
+ * and client-rendered output match (no hydration mismatch from locale/timezone).
+ */
+function formatCreatedAt(value: Date | string): string {
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) return "—"
+  return date.toISOString().slice(0, 10)
 }
 
 export interface RoleOption {
@@ -113,6 +125,7 @@ export function CapabilitiesTable({
             <TableHead>Identifier</TableHead>
             <TableHead>Source</TableHead>
             <TableHead>Description</TableHead>
+            <TableHead className="w-[120px]">Created</TableHead>
             <TableHead className="w-[110px]">Active</TableHead>
             <TableHead className="w-[160px]">Actions</TableHead>
           </TableRow>
@@ -120,7 +133,7 @@ export function CapabilitiesTable({
         <TableBody>
           {capabilities.length === 0 ? (
             <TableRow>
-              <TableCell colSpan={6} className="text-center text-muted-foreground">
+              <TableCell colSpan={7} className="text-center text-muted-foreground">
                 No capabilities found.
               </TableCell>
             </TableRow>
@@ -144,6 +157,9 @@ export function CapabilitiesTable({
                   </TableCell>
                   <TableCell className="max-w-xs truncate">
                     {capability.description}
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground tabular-nums">
+                    {formatCreatedAt(capability.createdAt)}
                   </TableCell>
                   <TableCell>
                     <Switch

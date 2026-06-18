@@ -37,6 +37,20 @@ info:
     previous response's `meta.nextCursor` to fetch the next page.
     Cursors are opaque base64url-encoded strings. Do not construct them manually.
 
+    ## Tool-backed endpoints (catalog-generated)
+
+    Endpoints backed by a unified tool-catalog entry (surfaces include `rest`) —
+    e.g. `POST /api/v1/assistants/{id}/execute`, `GET /api/v1/assistants` — are
+    also described by a spec GENERATED from the catalog manifest at
+    `docs/API/v1/generated/tool-catalog.openapi.json` (run `bun run
+    openapi:generate`; CI runs `openapi:check`). Each generated operation carries
+    `x-tool-identifier`/`x-tool-version`, the REST scope resolved from the
+    catalog, its success responses (e.g. execute emits `200` SSE and `202` async),
+    and the shared auth/validation error codes (`401`/`403`/`500`, plus
+    `400`/`404`/`429` on write methods). This hand-authored file covers the
+    remainder of the surface (graph, conversations, jobs, health). See issue #924
+    (Epic #922).
+
   contact:
     name: AI Studio Team
   license:

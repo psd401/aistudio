@@ -4,6 +4,7 @@ REST API for managing context graph nodes and edges. Part of Epic #674 (External
 
 **Base URL:** `/api/v1`
 **OpenAPI Spec:** [`docs/API/v1/openapi.yaml`](./openapi.yaml)
+**Tool endpoints (catalog-generated):** [`generated/tool-catalog.openapi.json`](./generated/tool-catalog.openapi.json) — endpoints backed by a unified tool-catalog entry (e.g. assistant execute/list) are generated from the catalog manifest via `bun run openapi:generate` (issue #924).
 
 ---
 

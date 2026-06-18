@@ -313,4 +313,77 @@ describe("ToolCatalog", () => {
       expect.objectContaining({ total: 8, logged: 5, suppressed: 3 })
     )
   })
+
+  // Per-surface scope resolution (#924 follow-up): a tool on both mcp + rest
+  // carries different scope vocabularies per surface (mcp:execute_assistant vs
+  // assistants:execute). Scope filtering must use the surface-specific scope.
+  describe("per-surface scopes", () => {
+    it("lists assistants.execute on the rest surface for an assistants:execute caller", async () => {
+      const catalog = new ToolCatalog()
+      const tools = await catalog.list({
+        surface: "rest",
+        scopes: ["assistants:execute"],
+      })
+      expect(tools.some((t) => t.identifier === "assistants.execute")).toBe(true)
+    })
+
+    it("does NOT expose the rest tool to a caller holding only the MCP scope", async () => {
+      const catalog = new ToolCatalog()
+      const tools = await catalog.list({
+        surface: "rest",
+        scopes: ["mcp:execute_assistant"],
+      })
+      expect(tools.some((t) => t.identifier === "assistants.execute")).toBe(false)
+    })
+
+    it("still gates the MCP surface by the MCP scope", async () => {
+      const catalog = new ToolCatalog()
+      const tools = await catalog.list({
+        surface: "mcp",
+        scopes: ["mcp:execute_assistant"],
+      })
+      expect(tools.some((t) => t.identifier === "assistants.execute")).toBe(true)
+    })
+
+    it("getRequiredScopes returns the surface-specific scope", async () => {
+      const catalog = new ToolCatalog()
+      expect(await catalog.getRequiredScopes("assistants.execute", "rest")).toEqual([
+        "assistants:execute",
+      ])
+      expect(await catalog.getRequiredScopes("assistants.execute", "mcp")).toEqual([
+        "mcp:execute_assistant",
+      ])
+      expect(await catalog.getRequiredScopes("no.such.tool", "rest")).toBeUndefined()
+    })
+
+    it("get() surfaces is_active=false so the REST route can gate on it", async () => {
+      // The REST execute route reads entry.isActive to deny when an admin disables
+      // the tool (the MCP surface gates via dispatch()). get() must therefore return
+      // the inactive entry rather than hiding it.
+      dbRows = [
+        {
+          identifier: "assistants.execute",
+          version: "v1",
+          name: "execute_assistant",
+          description: "x",
+          inputSchema: { type: "object", properties: {} },
+          outputSchema: null,
+          surfaces: ["mcp", "rest"],
+          requiredScopes: ["mcp:execute_assistant"],
+          agentCallable: true,
+          source: "code",
+          isActive: false,
+          handlerRef: "assistants.execute",
+        },
+      ]
+      const catalog = new ToolCatalog()
+      const entry = await catalog.get("assistants.execute")
+      expect(entry).toBeDefined()
+      expect(entry?.isActive).toBe(false)
+      // Scope is still resolvable even while disabled (so the route can choose 404).
+      expect(await catalog.getRequiredScopes("assistants.execute", "rest")).toEqual([
+        "assistants:execute",
+      ])
+    })
+  })
 })

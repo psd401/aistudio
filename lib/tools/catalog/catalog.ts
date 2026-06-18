@@ -38,6 +38,7 @@ import type {
   ToolCatalogFilter,
   ToolDispatchResult,
   ToolManifestEntry,
+  ToolSurface,
 } from "@/lib/tools/catalog/types";
 
 const log = createLogger({ module: "tool-catalog" });
@@ -86,10 +87,15 @@ function manifestToEntry(
     outputSchema: entry.outputSchema,
     surfaces: entry.surfaces,
     requiredScopes: entry.requiredScopes,
+    surfaceScopes: entry.surfaceScopes,
     agentCallable: entry.agentCallable ?? true,
     source: "code",
     isActive: !inactiveCodeKeys.has(entryKey(entry.identifier, version)),
     handlerRef: entry.identifier,
+    displayName: entry.displayName,
+    friendlyName: entry.friendlyName,
+    category: entry.category,
+    requiredCapabilities: entry.requiredCapabilities,
   };
 }
 
@@ -99,6 +105,23 @@ function hasRequiredScopes(scopes: string[], requiredScopes: string[]): boolean 
   // A tool with no required scopes is open to any authenticated caller.
   if (requiredScopes.length === 0) return true;
   return requiredScopes.every((s) => scopes.includes(s));
+}
+
+/**
+ * Resolve the scopes a caller must hold for a tool on a given surface. When the
+ * surface has a `surfaceScopes` override it REPLACES `requiredScopes` (e.g. REST
+ * `assistants:execute` vs MCP `mcp:execute_assistant`); otherwise the base
+ * `requiredScopes` apply. Omitting the surface yields the base scopes.
+ */
+function requiredScopesForSurface(
+  entry: ToolCatalogEntry,
+  surface?: ToolSurface
+): string[] {
+  const surfaceSpecific = surface ? entry.surfaceScopes?.[surface] : undefined;
+  if (surfaceSpecific) {
+    return surfaceSpecific;
+  }
+  return entry.requiredScopes;
 }
 
 /**
@@ -194,6 +217,9 @@ export class ToolCatalog {
             outputSchema: r.outputSchema ?? undefined,
             surfaces: r.surfaces ?? [],
             requiredScopes: r.requiredScopes ?? [],
+            // No `surfaceScopes` here on purpose: per-surface scope overrides are
+            // a manifest (code-tool) concept and have no `tool_catalog` column.
+            // DB (assistant/skill) rows use the same scope on every surface.
             agentCallable: r.agentCallable,
             source: r.source,
             isActive: r.isActive,
@@ -276,8 +302,11 @@ export class ToolCatalog {
       entries = entries.filter((e) => e.surfaces.includes(filter.surface!));
     }
     if (filter.scopes) {
+      // Bind to a local so TypeScript narrows away `undefined` inside the arrow
+      // fn (it doesn't carry the outer `if` guard through the closure boundary).
+      const filterScopes = filter.scopes;
       entries = entries.filter((e) =>
-        hasRequiredScopes(filter.scopes!, e.requiredScopes)
+        hasRequiredScopes(filterScopes, requiredScopesForSurface(e, filter.surface))
       );
     }
     if (filter.agentOnly) {
@@ -295,7 +324,10 @@ export class ToolCatalog {
    *
    * Tools not present in the catalog are passed through unchanged — model-
    * capability filtering downstream still applies — so this never regresses an
-   * existing tool that has not yet been cataloged.
+   * existing tool that has not yet been cataloged. Names from non-`ai_sdk`
+   * surfaces (e.g. MCP wire names like `search_decisions`) are also unresolvable
+   * here and pass through; provider adapters ignore unrecognized names, so these
+   * are inert, but they do appear in the uncataloged pass-through log.
    *
    * @param requested - tool names the caller asked to enable.
    * @param scopes - the caller's granted scopes.
@@ -333,7 +365,10 @@ export class ToolCatalog {
         uncataloged.push(name);
         return true;
       }
-      return hasRequiredScopes(scopes, entry.requiredScopes);
+      // Route through requiredScopesForSurface (consistent with list() and
+      // dispatch()) so a future ai_sdk-surface scope override is honored rather
+      // than silently bypassed by reading the base requiredScopes directly.
+      return hasRequiredScopes(scopes, requiredScopesForSurface(entry, "ai_sdk"));
     });
     if (uncataloged.length > UNCATALOGED_LOG_CAP) {
       log.warn("Many uncataloged tool names passed through unscoped in one request", {
@@ -392,6 +427,22 @@ export class ToolCatalog {
   }
 
   /**
+   * Resolve the scopes a caller must hold to invoke a tool on a given surface —
+   * the single source REST routes use instead of hardcoding a scope string.
+   * Returns `undefined` when the tool is not cataloged (caller may fall back to a
+   * default). Includes inactive entries so the scope is resolvable even if an
+   * admin temporarily disabled the tool.
+   */
+  async getRequiredScopes(
+    identifierOrName: string,
+    surface?: ToolSurface
+  ): Promise<string[] | undefined> {
+    const entry = await this.get(identifierOrName);
+    if (!entry) return undefined;
+    return requiredScopesForSurface(entry, surface);
+  }
+
+  /**
    * Dispatch an MCP `tools/call` for a code-defined tool. Resolves the tool by
    * its MCP wire `name` (what clients send) on the `mcp` surface, checks scope +
    * active state, and invokes the in-process handler.
@@ -417,7 +468,7 @@ export class ToolCatalog {
     if (!entry || !entry.isActive || !entry.surfaces.includes("mcp")) {
       return { ok: false, reason: "unknown" };
     }
-    if (!hasRequiredScopes(context.scopes, entry.requiredScopes)) {
+    if (!hasRequiredScopes(context.scopes, requiredScopesForSurface(entry, "mcp"))) {
       return { ok: false, reason: "scope_denied" };
     }
     // Code MCP tools are keyed in TOOL_HANDLERS by their wire `name` (what the

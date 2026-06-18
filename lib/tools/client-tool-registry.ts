@@ -1,65 +1,26 @@
 /**
  * Client-side safe tool registry functions
- * This file doesn't import server-side dependencies and can be used in browser
+ * This file doesn't import server-side dependencies and can be used in browser.
+ *
+ * Issue #924 follow-up: the standalone `TOOL_REGISTRY` literal (a duplicate of the
+ * one in `tool-registry.ts`) has been removed. The selectable chat tools now have
+ * a single source — `lib/tools/catalog/ai-sdk-tools.ts` — which the catalog
+ * manifest also ingests. The browser cannot call the server-side `ToolCatalog`
+ * synchronously, so it reads that same source constant directly; there is no
+ * second source of truth.
  */
 
-export interface ModelCapabilities {
-  webSearch: boolean
-  codeInterpreter: boolean
-  codeExecution: boolean
-  grounding: boolean
-  workspaceTools: boolean
-  canvas: boolean
-  artifacts: boolean
-  thinking: boolean
-  reasoning: boolean
-  computerUse: boolean
-  responsesAPI: boolean
-  promptCaching: boolean
-  contextCaching: boolean
-  imageGeneration: boolean
-}
+import {
+  filterToolsByCapabilities,
+  getSelectableToolConfig,
+  getSelectableToolConfigs,
+  type ModelCapabilities,
+  type ToolConfig,
+} from '@/lib/tools/catalog/ai-sdk-tools'
 
-export interface ToolConfig {
-  name: string
-  tool: unknown // Generic type for client-side usage
-  requiredCapabilities: (keyof ModelCapabilities)[]
-  displayName: string
-  description: string
-  category: 'search' | 'code' | 'analysis' | 'creative' | 'media'
-}
-
-/**
- * Registry of tools that require manual selection
- * Universal tools (like showChart) are always enabled and not shown here
- */
-const TOOL_REGISTRY: Record<string, ToolConfig> = {
-  webSearch: {
-    name: 'webSearch',
-    tool: {}, // Placeholder for client-side usage
-    requiredCapabilities: ['webSearch', 'grounding'],
-    displayName: 'Web Search',
-    description: 'Search the web for current information and facts',
-    category: 'search'
-  },
-  codeInterpreter: {
-    name: 'codeInterpreter',
-    tool: {}, // Placeholder for client-side usage
-    requiredCapabilities: ['codeInterpreter', 'codeExecution'],
-    displayName: 'Code Interpreter',
-    description: 'Execute code and perform data analysis',
-    category: 'code'
-  },
-  generateImage: {
-    name: 'generateImage',
-    tool: {}, // Placeholder for client-side usage
-    requiredCapabilities: ['imageGeneration'],
-    displayName: 'Image Generation',
-    description: 'Generate images from text descriptions using AI models like GPT-Image-1, DALL-E 3, and Imagen 4',
-    category: 'media'
-  }
-  // Note: showChart is a universal tool that's always enabled - see provider-native-tools.ts
-}
+// Re-export the shared tool types so existing client-side import sites
+// (`@/lib/tools` / `@/lib/tools/client-tool-registry`) keep working.
+export type { ModelCapabilities, ToolConfig }
 
 /**
  * Get model capabilities from API endpoint (client-side safe)
@@ -86,24 +47,14 @@ export async function getAvailableToolsForModel(modelId: string): Promise<ToolCo
   if (!capabilities) {
     return []
   }
-
-  return Object.values(TOOL_REGISTRY).filter(toolConfig => {
-    // Tools with no required capabilities are universal (available for all models)
-    if (toolConfig.requiredCapabilities.length === 0) {
-      return true
-    }
-    // Check if model has ANY of the required capabilities (OR logic)
-    return toolConfig.requiredCapabilities.some(capability =>
-      capabilities[capability] === true
-    )
-  })
+  return filterToolsByCapabilities(capabilities)
 }
 
 /**
  * Check if a specific tool is available for a model
  */
 export async function isToolAvailableForModel(
-  modelId: string, 
+  modelId: string,
   toolName: string
 ): Promise<boolean> {
   const availableTools = await getAvailableToolsForModel(modelId)
@@ -114,12 +65,12 @@ export async function isToolAvailableForModel(
  * Get all registered tools (for UI rendering)
  */
 export function getAllTools(): ToolConfig[] {
-  return Object.values(TOOL_REGISTRY)
+  return getSelectableToolConfigs()
 }
 
 /**
  * Get tool configuration by name
  */
 export function getToolConfig(toolName: string): ToolConfig | undefined {
-  return TOOL_REGISTRY[toolName]
+  return getSelectableToolConfig(toolName)
 }

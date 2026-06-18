@@ -35,6 +35,9 @@ jobs:
     - name: Run type checking
       run: bun run typecheck
 
+    - name: Check generated tool-catalog OpenAPI is in sync
+      run: bun run openapi:check
+
     - name: Run tests
       run: bun run test:ci
       env:

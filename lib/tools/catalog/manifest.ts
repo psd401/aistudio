@@ -36,7 +36,12 @@
 
 import { MCP_TOOLS } from "@/lib/mcp/tool-registry";
 import type { McpToolDefinition } from "@/lib/mcp/types";
-import type { ToolManifestEntry } from "./types";
+import { AI_SDK_TOOLS } from "./ai-sdk-tools";
+import type {
+  ToolManifestEntry,
+  ToolRestBinding,
+  ToolSurface,
+} from "./types";
 import { compareVersionsDesc } from "./utils";
 
 /** Source value applied to every manifest-managed catalog row. */
@@ -47,10 +52,19 @@ export const MANIFEST_TOOL_SOURCE = "code" as const;
  * Keeps the schema/description single-sourced from `MCP_TOOLS` while assigning
  * the new `domain.action` identifier and the required scope.
  */
-const MCP_TOOL_CATALOG_MAP: Record<
-  string,
-  { identifier: string; requiredScope: string }
-> = {
+interface McpCatalogMapping {
+  identifier: string;
+  /** MCP-surface scope (the base `requiredScopes`). */
+  requiredScope: string;
+  /**
+   * Present when the tool is ALSO exposed on the REST surface by an existing
+   * `/api/v1` route. `scopes` are the REST scope(s) (distinct from the MCP scope);
+   * `binding` is the OpenAPI path/operation the catalog→OpenAPI generator emits.
+   */
+  rest?: { scopes: string[]; binding: ToolRestBinding };
+}
+
+const MCP_TOOL_CATALOG_MAP: Record<string, McpCatalogMapping> = {
   search_decisions: {
     identifier: "decisions.search",
     requiredScope: "mcp:search_decisions",
@@ -62,10 +76,37 @@ const MCP_TOOL_CATALOG_MAP: Record<
   execute_assistant: {
     identifier: "assistants.execute",
     requiredScope: "mcp:execute_assistant",
+    rest: {
+      // REST callers use `assistants:execute` (see app/api/v1/assistants/[id]/execute);
+      // distinct from the MCP scope, hence surfaceScopes rather than a shared array.
+      scopes: ["assistants:execute"],
+      binding: {
+        method: "post",
+        path: "/api/v1/assistants/{id}/execute",
+        summary: "Execute an assistant",
+        description:
+          "Execute an assistant architect by id. Returns an SSE stream (default) or a 202 job (Accept: application/json).",
+        operationId: "executeAssistant",
+        successResponses: {
+          "200": "SSE stream of execution events (default Accept: text/event-stream).",
+          "202": "Async job accepted; poll for completion (Accept: application/json).",
+        },
+      },
+    },
   },
   list_assistants: {
     identifier: "assistants.list",
     requiredScope: "mcp:list_assistants",
+    rest: {
+      // REST list route uses `assistants:list` (see app/api/v1/assistants GET).
+      scopes: ["assistants:list"],
+      binding: {
+        method: "get",
+        path: "/api/v1/assistants",
+        summary: "List assistants available for API execution",
+        operationId: "listAssistants",
+      },
+    },
   },
   get_decision_graph: {
     identifier: "decisions.graph_get",
@@ -96,74 +137,58 @@ const MCP_MANIFEST_ENTRIES: ToolManifestEntry[] = MCP_TOOLS.map(
           `lib/tools/catalog/manifest.ts (MCP_TOOL_CATALOG_MAP). Add one.`
       );
     }
+    const surfaces: ToolSurface[] = mapping.rest ? ["mcp", "rest"] : ["mcp"];
     return {
       identifier: mapping.identifier,
       version: "v1",
       name: tool.name,
       description: tool.description,
       inputSchema: tool.inputSchema,
-      surfaces: ["mcp"],
+      surfaces,
       requiredScopes: [mapping.requiredScope],
       agentCallable: true,
+      ...(mapping.rest
+        ? {
+            surfaceScopes: { rest: mapping.rest.scopes },
+            rest: mapping.rest.binding,
+          }
+        : {}),
     };
   }
 );
 
 /**
- * AI SDK tools exposed in chat / Nexus. These are descriptor-only catalog
- * entries (no in-process MCP `handler`): the concrete tool implementations are
- * provider-native and built dynamically per request by
+ * AI SDK tools exposed in chat / Nexus, projected from the single browser-safe
+ * source of truth (`lib/tools/catalog/ai-sdk-tools.ts`). These are descriptor-only
+ * catalog entries (no in-process MCP `handler`): the concrete tool implementations
+ * are provider-native and built dynamically per request by
  * `lib/tools/provider-native-tools.ts`. Cataloging them gives the catalog a
- * complete `surfaces: ['ai_sdk']` view and a single place to scope-gate which
- * built-in tools a caller may use.
+ * complete `surfaces: ['ai_sdk']` view, a single place to scope-gate which built-in
+ * tools a caller may use, AND the UI/model-gating metadata the Nexus tool selector
+ * reads (so the catalog is the one source for identity, scope, and display).
  *
- * `show_chart` is universal (always enabled, no scope). The optional tools carry
- * `chat:write` so a caller without chat write cannot enable them. `name` matches
- * the wire/registry name the chat route already uses.
+ * `show_chart` is universal (always enabled, no scope, no `ui`). The optional tools
+ * carry `chat:write` so a caller without chat write cannot enable them. `name`
+ * matches the wire/registry name the chat route already uses. (#924 follow-up.)
  */
-const AI_SDK_MANIFEST_ENTRIES: ToolManifestEntry[] = [
-  {
-    identifier: "chat.show_chart",
-    version: "v1",
-    name: "show_chart",
-    description:
-      "Render a chart (bar, line, pie, etc.) from structured data on the client.",
-    inputSchema: { type: "object", properties: {} },
-    surfaces: ["ai_sdk"],
-    requiredScopes: [],
-    agentCallable: true,
-  },
-  {
-    identifier: "chat.web_search",
-    version: "v1",
-    name: "web_search_preview",
-    description: "Search the web for current information and facts.",
-    inputSchema: { type: "object", properties: {} },
-    surfaces: ["ai_sdk"],
-    requiredScopes: ["chat:write"],
-    agentCallable: true,
-  },
-  {
-    identifier: "chat.code_interpreter",
-    version: "v1",
-    name: "code_interpreter",
-    description: "Execute code and perform data analysis.",
-    inputSchema: { type: "object", properties: {} },
-    surfaces: ["ai_sdk"],
-    requiredScopes: ["chat:write"],
-    agentCallable: true,
-  },
-  {
-    identifier: "chat.generate_image",
-    version: "v1",
-    name: "generateImage",
-    description: "Generate images from text descriptions using AI models.",
-    inputSchema: { type: "object", properties: {} },
-    surfaces: ["ai_sdk"],
-    requiredScopes: ["chat:write"],
-    agentCallable: true,
-  },
-];
+const AI_SDK_MANIFEST_ENTRIES: ToolManifestEntry[] = AI_SDK_TOOLS.map((tool) => ({
+  identifier: tool.identifier,
+  version: "v1",
+  name: tool.wireName,
+  description: tool.description,
+  inputSchema: { type: "object", properties: {} },
+  surfaces: ["ai_sdk"],
+  requiredScopes: tool.requiredScopes,
+  agentCallable: true,
+  ...(tool.ui
+    ? {
+        displayName: tool.ui.displayName,
+        friendlyName: tool.friendlyName,
+        category: tool.ui.category,
+        requiredCapabilities: tool.ui.requiredCapabilities,
+      }
+    : {}),
+}));
 
 /**
  * The code-managed tool catalog. Boot-time sync reconciles `tool_catalog` to

@@ -33,6 +33,8 @@
     "migration:prepare": "tsx scripts/drizzle-helpers/prepare-migration.ts",
     "migration:create": "tsx scripts/drizzle-helpers/create-migration.ts",
     "migration:list": "tsx scripts/drizzle-helpers/list-migrations.ts",
+    "openapi:generate": "bun scripts/openapi/generate-from-catalog.ts",
+    "openapi:check": "bun scripts/openapi/generate-from-catalog.ts --check",
     "db:up": "docker compose -f docker-compose.dev.yml up -d postgres",
     "db:down": "docker compose -f docker-compose.dev.yml down",
     "db:reset": "docker compose -f docker-compose.dev.yml down -v && docker compose -f docker-compose.dev.yml up -d postgres",
