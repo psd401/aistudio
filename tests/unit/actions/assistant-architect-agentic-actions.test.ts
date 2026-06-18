@@ -394,12 +394,23 @@ describe("resolveAgenticUpdateFields — limit clamping", () => {
     )
   })
 
-  it("clamps a negative agentCostCapCents to 1 (minimum allowed)", async () => {
+  it("treats a negative agentCostCapCents as no cap (null)", async () => {
+    // A negative/invalid cap shouldn't silently become a 1-cent cap that blocks
+    // every run; it falls back to null (no cap). The maxSteps bound still applies.
     await updateAssistantArchitectAction("1", { agentCostCapCents: -100 })
 
     expect(updateArchitectMock).toHaveBeenCalledWith(
       1,
-      expect.objectContaining({ agentCostCapCents: 1 })
+      expect.objectContaining({ agentCostCapCents: null })
+    )
+  })
+
+  it("keeps a valid positive agentCostCapCents", async () => {
+    await updateAssistantArchitectAction("1", { agentCostCapCents: 250 })
+
+    expect(updateArchitectMock).toHaveBeenCalledWith(
+      1,
+      expect.objectContaining({ agentCostCapCents: 250 })
     )
   })
 })

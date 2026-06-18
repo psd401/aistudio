@@ -244,17 +244,36 @@ async function resolveAgenticUpdateFields(
     fields.agentEnabledConnectors = data.agentEnabledConnectors;
   }
   if (data.agentMaxSteps !== undefined) {
-    fields.agentMaxSteps = Math.min(50, Math.max(1, Math.floor(Number(data.agentMaxSteps))));
+    fields.agentMaxSteps = clampIntInRange(data.agentMaxSteps, 1, 50, 10);
   }
   if (data.agentTimeoutSeconds !== undefined) {
-    fields.agentTimeoutSeconds = Math.min(900, Math.max(1, Math.floor(Number(data.agentTimeoutSeconds))));
+    fields.agentTimeoutSeconds = clampIntInRange(data.agentTimeoutSeconds, 1, 900, 300);
   }
   if (data.agentCostCapCents !== undefined) {
     const cap = data.agentCostCapCents;
-    fields.agentCostCapCents = cap === null ? null : Math.max(1, Math.floor(Number(cap)));
+    // null => no cap; a non-finite/<=0 value falls back to no cap rather than
+    // letting NaN reach the DB and surface as a generic insert failure.
+    if (cap === null) {
+      fields.agentCostCapCents = null;
+    } else {
+      const n = Math.floor(Number(cap));
+      fields.agentCostCapCents = Number.isFinite(n) && n > 0 ? n : null;
+    }
   }
 
   return { fields };
+}
+
+/** Parse + clamp an integer into [min, max]; falls back for non-finite input. */
+function clampIntInRange(
+  value: unknown,
+  min: number,
+  max: number,
+  fallback: number
+): number {
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
 }
 
 // Input validation and sanitization function for Assistant Architect

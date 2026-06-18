@@ -55,7 +55,6 @@ export function AgenticModeSection({
 
   useEffect(() => {
     if (value.mode !== "agentic" || fetchedRef.current) return
-    fetchedRef.current = true
     let cancelled = false
     const load = async () => {
       setLoadingTools(true)
@@ -63,6 +62,10 @@ export function AgenticModeSection({
         const result = await getAvailableAgentToolsAction()
         if (!cancelled && result.isSuccess && result.data) {
           setAvailableTools(result.data)
+          // Mark fetched only after a successful apply, so a cancelled/failed
+          // first attempt (e.g. StrictMode unmount mid-fetch) can retry on
+          // remount rather than leaving the picker permanently empty.
+          fetchedRef.current = true
         }
       } finally {
         if (!cancelled) setLoadingTools(false)
