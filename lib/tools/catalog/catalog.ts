@@ -129,6 +129,88 @@ function manifestToEntry(
   };
 }
 
+/** Row shape returned by the `tool_catalog` select (Drizzle infers the columns). */
+type ToolCatalogDbRow = {
+  identifier: string;
+  version: string;
+  name: string;
+  description: string;
+  inputSchema: unknown;
+  outputSchema: Record<string, unknown> | null;
+  surfaces: ToolSurface[] | null;
+  requiredScopes: string[] | null;
+  agentCallable: boolean;
+  source: ToolCatalogEntry["source"];
+  isActive: boolean;
+  deprecatedAt: Date | null;
+  replacedBy: string | null;
+  removalDate: Date | null;
+  handlerRef: string | null;
+};
+
+/**
+ * Project a non-code (assistant/skill) DB row into a runtime catalog entry.
+ * Extracted from {@link ToolCatalog.dbState} to keep that method's complexity low.
+ */
+function dbRowToEntry(r: ToolCatalogDbRow): ToolCatalogEntry {
+  return {
+    identifier: r.identifier,
+    version: r.version,
+    name: r.name,
+    description: r.description,
+    inputSchema:
+      (r.inputSchema as ToolCatalogEntry["inputSchema"]) ?? {
+        type: "object",
+        properties: {},
+      },
+    outputSchema: r.outputSchema ?? undefined,
+    surfaces: r.surfaces ?? [],
+    requiredScopes: r.requiredScopes ?? [],
+    // No `surfaceScopes` here on purpose: per-surface scope overrides are a
+    // manifest (code-tool) concept and have no `tool_catalog` column. DB
+    // (assistant/skill) rows use the same scope on every surface.
+    agentCallable: r.agentCallable,
+    // No `destructive` column on tool_catalog: DB-sourced (assistant/skill) tools
+    // default to non-destructive. The destructive gate is a code-tool (manifest)
+    // concept for now. (#926.)
+    destructive: false,
+    source: r.source,
+    isActive: r.isActive,
+    // Version deprecation lifecycle (#927). Threaded through so the runtime can
+    // resolve "latest non-deprecated", emit a deprecation telemetry event at
+    // dispatch, and surface the successor to callers.
+    deprecatedAt: r.deprecatedAt ?? null,
+    replacedBy: r.replacedBy ?? null,
+    removalDate: r.removalDate ?? null,
+    handlerRef: r.handlerRef ?? undefined,
+  };
+}
+
+/**
+ * Record a code/retired row's runtime-relevant DB state (is_active + deprecation)
+ * into the manifest-projection overlays. Extracted from {@link ToolCatalog.dbState}
+ * to keep that method's complexity low.
+ */
+function recordCodeRowState(
+  r: ToolCatalogDbRow,
+  inactiveCodeKeys: Set<string>,
+  deprecatedCodeKeys: Map<string, CodeDeprecationState>
+): void {
+  const key = entryKey(r.identifier, r.version);
+  if (!r.isActive) {
+    inactiveCodeKeys.add(key);
+  }
+  // Merge an admin's DB-level deprecation of a code tool version into the
+  // manifest projection (which always reports code as live). (#927.)
+  if (r.deprecatedAt) {
+    deprecatedCodeKeys.set(key, {
+      deprecatedAt: r.deprecatedAt,
+      replacedBy: r.replacedBy ?? null,
+      removalDate: r.removalDate ?? null,
+    });
+  }
+}
+
 /** True when `scopes` grant access to a tool requiring `requiredScopes`. */
 function hasRequiredScopes(scopes: string[], requiredScopes: string[]): boolean {
   if (scopes.includes("*")) return true;
@@ -226,61 +308,17 @@ export class ToolCatalog {
         const entries: ToolCatalogEntry[] = [];
         const inactiveCodeKeys = new Set<string>();
         const deprecatedCodeKeys = new Map<string, CodeDeprecationState>();
-        for (const r of rows) {
-          // Treat both 'code' and 'retired' rows as code-managed for is_active
-          // tracking. A retired row is a code tool removed from the manifest;
-          // if it is later re-added, its admin-disabled state must still be
-          // honored. Without including 'retired' here, the row would leak into
-          // the non-code `entries` list and its key would never reach
-          // `inactiveCodeKeys`, so a re-added tool would spuriously project as
-          // active. (PR #1032 review finding #1.)
+        for (const r of rows as ToolCatalogDbRow[]) {
+          // Treat both 'code' and 'retired' rows as code-managed: track their
+          // is_active + deprecation state for the manifest projection rather than
+          // listing them as standalone (assistant/skill) entries. A retired row
+          // is a code tool removed from the manifest; its admin-disabled state
+          // must survive a later re-add (PR #1032 review finding #1).
           if (r.source === "code" || r.source === "retired") {
-            const key = entryKey(r.identifier, r.version);
-            if (!r.isActive) {
-              inactiveCodeKeys.add(key);
-            }
-            // Merge an admin's DB-level deprecation of a code tool version into
-            // the manifest projection (which always reports code as live). (#927.)
-            if (r.deprecatedAt) {
-              deprecatedCodeKeys.set(key, {
-                deprecatedAt: r.deprecatedAt,
-                replacedBy: r.replacedBy ?? null,
-                removalDate: r.removalDate ?? null,
-              });
-            }
+            recordCodeRowState(r, inactiveCodeKeys, deprecatedCodeKeys);
             continue;
           }
-          entries.push({
-            identifier: r.identifier,
-            version: r.version,
-            name: r.name,
-            description: r.description,
-            inputSchema:
-              (r.inputSchema as ToolCatalogEntry["inputSchema"]) ?? {
-                type: "object",
-                properties: {},
-              },
-            outputSchema: r.outputSchema ?? undefined,
-            surfaces: r.surfaces ?? [],
-            requiredScopes: r.requiredScopes ?? [],
-            // No `surfaceScopes` here on purpose: per-surface scope overrides are
-            // a manifest (code-tool) concept and have no `tool_catalog` column.
-            // DB (assistant/skill) rows use the same scope on every surface.
-            agentCallable: r.agentCallable,
-            // No `destructive` column on tool_catalog: DB-sourced (assistant/skill)
-            // tools default to non-destructive. The destructive gate is a code-tool
-            // (manifest) concept for now. (#926.)
-            destructive: false,
-            source: r.source,
-            isActive: r.isActive,
-            // Version deprecation lifecycle (#927). Threaded through so the
-            // runtime can resolve "latest non-deprecated", emit a deprecation
-            // telemetry event at dispatch, and surface the successor to callers.
-            deprecatedAt: r.deprecatedAt ?? null,
-            replacedBy: r.replacedBy ?? null,
-            removalDate: r.removalDate ?? null,
-            handlerRef: r.handlerRef ?? undefined,
-          });
+          entries.push(dbRowToEntry(r));
         }
 
         const state: DbState = {

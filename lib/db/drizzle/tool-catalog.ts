@@ -10,7 +10,7 @@
  * All functions use the executeQuery() wrapper (circuit breaker + retry).
  */
 
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, or, sql, type SQL, type AnyColumn } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   toolCatalog,
@@ -19,6 +19,22 @@ import {
   type ToolCatalogRow,
 } from "@/lib/db/schema";
 import { ErrorFactories } from "@/lib/error-utils";
+
+/**
+ * Build a predicate matching rows whose JSONB string-array `column` contains the
+ * pinned `identifier@version` OR the bare `identifier`. Uses the JSONB containment
+ * operator `@>` (a single-element array literal per candidate) rather than the
+ * any-key operator `?|` — `?` would be ambiguous with driver parameter syntax, so
+ * `@>` keeps the query portable and parameter-safe. Each candidate is passed as a
+ * bound parameter cast to a JSONB array.
+ */
+function jsonbArrayContainsAny(column: AnyColumn, candidates: string[]): SQL {
+  const clauses = candidates.map(
+    (value) => sql`${column} @> ${JSON.stringify([value])}::jsonb`
+  );
+  // `or()` of one clause is just that clause; never empty here (callers pass 2).
+  return or(...clauses) ?? sql`false`;
+}
 
 /**
  * Usage counts for a single tool version (Issue #927). Drives the admin version-
@@ -111,7 +127,7 @@ async function countSkillUsage(
         .select({ count: sql<number>`count(*)::int` })
         .from(psdAgentSkills)
         .where(
-          sql`${psdAgentSkills.allowedTools} ?| array[${pinned}, ${identifier}]`
+          jsonbArrayContainsAny(psdAgentSkills.allowedTools, [pinned, identifier])
         ),
     "countSkillUsage"
   );
@@ -134,7 +150,7 @@ async function countAssistantPromptUsage(
         .select({ count: sql<number>`count(*)::int` })
         .from(chainPrompts)
         .where(
-          sql`${chainPrompts.enabledTools} ?| array[${pinned}, ${identifier}]`
+          jsonbArrayContainsAny(chainPrompts.enabledTools, [pinned, identifier])
         ),
     "countAssistantPromptUsage"
   );
