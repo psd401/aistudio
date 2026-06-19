@@ -1,6 +1,6 @@
 // Unit tests for /api/documents/v2/upload — regression coverage for issue #1017 (FS#148338).
 
-import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import { NextRequest } from 'next/server';
 
 // ---------------------------------------------------------------------------

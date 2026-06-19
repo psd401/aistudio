@@ -1,4 +1,4 @@
-import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
+import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
 import type { NextRequest } from 'next/server';
 
 // Mock AWS SDK clients BEFORE importing modules that use them
