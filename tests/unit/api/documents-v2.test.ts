@@ -48,38 +48,29 @@ jest.mock('@/lib/logger', () => ({
   sanitizeForLogging: jest.fn(data => data)
 }));
 
-// Mock dependencies BEFORE any imports of our code  
+// Mock dependencies BEFORE any imports of our code
 jest.mock('@/lib/auth/server-session', () => ({
   getServerSession: jest.fn()
 }));
 
-// Outer-scope mock* variables required for SWC hoisting — see documents-v2-server-upload.test.ts
-// for a detailed explanation. Factories that only use inline jest.fn() are not hoisted,
-// causing routes to import the real modules and return 500 instead of the expected status codes.
-const mockCreateDocumentJob = jest.fn();
-const mockGetJobStatus = jest.fn();
-const mockConfirmDocumentUpload = jest.fn();
-const mockFetchResultFromS3 = jest.fn();
-const mockGeneratePresignedUrl = jest.fn();
-const mockGenerateMultipartUrls = jest.fn();
-const mockSanitizeFileName = jest.fn(name => name);
-const mockSendToProcessingQueue = jest.fn();
-
+// Use only inline jest.fn() inside factories — outer-scope const variables are in TDZ
+// when SWC executes the hoisted factory before static imports run. Tests configure
+// return values via require() + .mockResolvedValue() inside each test body.
 jest.mock('@/lib/services/document-job-service', () => ({
-  createDocumentJob: mockCreateDocumentJob,
-  getJobStatus: mockGetJobStatus,
-  confirmDocumentUpload: mockConfirmDocumentUpload,
-  fetchResultFromS3: mockFetchResultFromS3,
+  createDocumentJob: jest.fn(),
+  getJobStatus: jest.fn(),
+  confirmDocumentUpload: jest.fn(),
+  fetchResultFromS3: jest.fn(),
 }));
 
 jest.mock('@/lib/aws/document-upload', () => ({
-  generatePresignedUrl: mockGeneratePresignedUrl,
-  generateMultipartUrls: mockGenerateMultipartUrls,
-  sanitizeFileName: mockSanitizeFileName,
+  generatePresignedUrl: jest.fn(),
+  generateMultipartUrls: jest.fn(),
+  sanitizeFileName: jest.fn().mockImplementation((name) => name),
 }));
 
 jest.mock('@/lib/aws/lambda-trigger', () => ({
-  sendToProcessingQueue: mockSendToProcessingQueue,
+  sendToProcessingQueue: jest.fn(),
 }));
 
 import { POST as initiateUpload } from '@/app/api/documents/v2/initiate-upload/route';

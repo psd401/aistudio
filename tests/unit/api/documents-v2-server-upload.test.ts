@@ -59,16 +59,16 @@ jest.mock('@/lib/aws/lambda-trigger', () => ({
 }));
 
 // Bypass rate limiting so tests focus on handler logic.
-// IMPORTANT: outer-scope mock* variable required — SWC hoists jest.mock()
-// factories that reference outer-scope variables whose names start with "mock".
-// Factories with only inline jest.fn() calls are NOT reliably hoisted, which
-// causes the real withRateLimit to run and hit `response instanceof NextResponse`
-// (TypeError) because tests/setup.ts mocks NextResponse as a plain object.
-const mockApiRateLimitUpload = jest.fn().mockImplementation(h => h);
-
+// Use only inline jest.fn() calls inside the factory — outer-scope const variables
+// are in TDZ when SWC executes the hoisted factory (before static imports run).
 jest.mock('@/lib/rate-limit', () => ({
+  rateLimit: jest.fn(),
+  withRateLimit: jest.fn().mockImplementation((handler) => handler),
   apiRateLimit: {
-    upload: mockApiRateLimitUpload,
+    standard: jest.fn().mockImplementation((handler) => handler),
+    ai: jest.fn().mockImplementation((handler) => handler),
+    auth: jest.fn().mockImplementation((handler) => handler),
+    upload: jest.fn().mockImplementation((handler) => handler),
   },
 }));
 
