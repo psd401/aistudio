@@ -11,7 +11,6 @@ import {
   rejectAssistantArchitect
 } from "@/lib/db/drizzle"
 
-
 export async function GET() {
   const requestId = generateRequestId();
   const timer = startTimer("api.admin.assistants.list");
