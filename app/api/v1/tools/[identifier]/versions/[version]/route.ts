@@ -13,8 +13,7 @@
 
 import { withApiAuth, requireScope, createApiResponse, createErrorResponse } from "@/lib/api"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
-import { serializeToolEntry } from "@/lib/tools/catalog/rest-serializer"
-import { normalizeVersionParam } from "@/lib/tools/catalog/rest-serializer"
+import { serializeToolEntry, normalizeVersionParam } from "@/lib/tools/catalog/rest-serializer"
 import { createLogger } from "@/lib/logger"
 
 export const GET = withApiAuth(async (request, auth, requestId) => {

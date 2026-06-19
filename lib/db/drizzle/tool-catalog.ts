@@ -169,17 +169,57 @@ export async function getToolVersionUsage(
   return { skillCount, assistantPromptCount };
 }
 
-/** Get all versions of a tool with usage counts attached (admin history view). */
+/**
+ * Get all versions of a tool with usage counts attached (admin history view).
+ *
+ * Uses 2 DB queries (skills + assistant prompts) regardless of how many versions
+ * the tool has, then counts per version in application code. This replaces the
+ * previous O(2N) query pattern that fired one query per version.
+ */
 export async function getToolVersionsWithUsage(
   identifier: string
 ): Promise<ToolVersionWithUsage[]> {
   const versions = await getToolCatalogVersions(identifier);
-  return Promise.all(
-    versions.map(async (row) => ({
-      ...row,
-      usage: await getToolVersionUsage(row.identifier, row.version),
-    }))
-  );
+  if (versions.length === 0) return [];
+
+  // Build candidate set: every pinned reference + the bare identifier.
+  // The bare identifier counts toward every version (blast-radius view for admins).
+  const candidates = [
+    ...versions.map((v) => `${identifier}@${v.version}`),
+    identifier,
+  ];
+
+  const [skillRows, promptRows] = await Promise.all([
+    executeQuery(
+      (db) =>
+        db
+          .select({ allowedTools: psdAgentSkills.allowedTools })
+          .from(psdAgentSkills)
+          .where(jsonbArrayContainsAny(psdAgentSkills.allowedTools, candidates)),
+      "getSkillsForToolUsage"
+    ),
+    executeQuery(
+      (db) =>
+        db
+          .select({ enabledTools: chainPrompts.enabledTools })
+          .from(chainPrompts)
+          .where(jsonbArrayContainsAny(chainPrompts.enabledTools, candidates)),
+      "getPromptsForToolUsage"
+    ),
+  ]);
+
+  return versions.map((row) => {
+    const vPin = `${identifier}@${row.version}`;
+    const skillCount = skillRows.filter(
+      (s) => s.allowedTools.includes(vPin) || s.allowedTools.includes(identifier)
+    ).length;
+    const assistantPromptCount = promptRows.filter(
+      (p) =>
+        (p.enabledTools ?? []).includes(vPin) ||
+        (p.enabledTools ?? []).includes(identifier)
+    ).length;
+    return { ...row, usage: { skillCount, assistantPromptCount } };
+  });
 }
 
 /**

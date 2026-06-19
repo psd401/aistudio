@@ -59,8 +59,8 @@ export function serializeToolEntry(
 export function normalizeVersionParam(raw: string): string | null {
   const trimmed = raw.trim();
   if (trimmed.length === 0) return null;
-  // Already a vN token?
-  if (!Number.isNaN(versionRank(trimmed))) return trimmed;
+  // Already a vN token? Require rank >= 1 to reject "v0".
+  if (!Number.isNaN(versionRank(trimmed)) && versionRank(trimmed) >= 1) return trimmed;
   // Bare positive integer -> vN.
   if (/^\d+$/.test(trimmed)) {
     const n = Number(trimmed);

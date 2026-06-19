@@ -15,8 +15,7 @@ import {
 import { useToast } from "@/components/ui/use-toast"
 import { deprecateToolVersionAction } from "@/actions/admin/tool-versions.actions"
 import type { ToolVersionWithUsage } from "@/lib/db/drizzle"
-
-const DEFAULT_GRACE_DAYS = 90
+import { DEFAULT_GRACE_PERIOD_DAYS } from "@/lib/db/schema/tables/tool-catalog"
 
 interface DeprecateVersionDialogProps {
   version: ToolVersionWithUsage
@@ -35,7 +34,7 @@ export function DeprecateVersionDialog({
 }: DeprecateVersionDialogProps) {
   const { toast } = useToast()
   const [replacedBy, setReplacedBy] = useState("")
-  const [gracePeriodDays, setGracePeriodDays] = useState(String(DEFAULT_GRACE_DAYS))
+  const [gracePeriodDays, setGracePeriodDays] = useState(String(DEFAULT_GRACE_PERIOD_DAYS))
   const [pending, startTransition] = useTransition()
 
   const ref = `${version.identifier}@${version.version}`
@@ -107,7 +106,7 @@ export function DeprecateVersionDialog({
               onChange={(e) => setGracePeriodDays(e.target.value)}
             />
             <p className="text-xs text-muted-foreground">
-              Minimum days before the version can be removed. Default {DEFAULT_GRACE_DAYS}.
+              Minimum days before the version can be removed. Default {DEFAULT_GRACE_PERIOD_DAYS}.
             </p>
           </div>
           {version.usage.skillCount + version.usage.assistantPromptCount > 0 && (

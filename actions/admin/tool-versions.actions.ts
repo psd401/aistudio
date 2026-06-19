@@ -218,7 +218,15 @@ export async function undeprecateToolVersionAction(
     if (!id) throw ErrorFactories.missingRequiredField("identifier")
     if (!ver) throw ErrorFactories.missingRequiredField("version")
 
+    // Confirm the version exists before mutating (mirrors deprecateToolVersionAction).
+    const existing = await getToolCatalogVersion(id, ver)
+    if (!existing) {
+      throw ErrorFactories.dbRecordNotFound("tool_catalog", `${id}@${ver}`)
+    }
+
     const updated = await undeprecateToolVersion(id, ver, DEFAULT_GRACE_PERIOD_DAYS)
+    // AUDIT: written after the successful DB write so a not-found never produces a
+    // false-positive "tool_version_undeprecated" entry in the audit log.
     log.warn("tool_version_undeprecated", {
       tool: `${id}@${ver}`,
       identifier: id,

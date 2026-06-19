@@ -3,6 +3,16 @@
 import { useCallback, useEffect, useRef, useState, useTransition } from "react"
 import { Badge } from "@/components/ui/badge"
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog"
+import {
   Table,
   TableBody,
   TableCell,
@@ -33,6 +43,7 @@ export function ToolVersionsClient({ identifiers }: ToolVersionsClientProps) {
   const [versions, setVersions] = useState<ToolVersionWithUsage[]>([])
   const [loading, setLoading] = useState(false)
   const [deprecating, setDeprecating] = useState<ToolVersionWithUsage | null>(null)
+  const [removing, setRemoving] = useState<ToolVersionWithUsage | null>(null)
   const [, startTransition] = useTransition()
   // Tracks the latest requested identifier so a slow earlier response cannot
   // overwrite a newer selection's data (stale-response guard).
@@ -43,15 +54,20 @@ export function ToolVersionsClient({ identifiers }: ToolVersionsClientProps) {
       latestRequest.current = identifier
       startTransition(async () => {
         setLoading(true)
-        const result = await getToolVersionHistoryAction(identifier)
-        // Ignore a response that is no longer for the current selection.
-        if (latestRequest.current !== identifier) return
-        setLoading(false)
-        if (result.isSuccess) {
-          setVersions(result.data)
-        } else {
-          toast({ title: "Error", description: result.message, variant: "destructive" })
-          setVersions([])
+        try {
+          const result = await getToolVersionHistoryAction(identifier)
+          // Ignore a response that is no longer for the current selection.
+          if (latestRequest.current !== identifier) return
+          if (result.isSuccess) {
+            setVersions(result.data)
+          } else {
+            toast({ title: "Error", description: result.message, variant: "destructive" })
+            setVersions([])
+          }
+        } finally {
+          // Only clear the spinner if this response is still current, so a stale
+          // response from a previous selection never clears a live in-flight load.
+          if (latestRequest.current === identifier) setLoading(false)
         }
       })
     },
@@ -86,11 +102,17 @@ export function ToolVersionsClient({ identifiers }: ToolVersionsClientProps) {
 
   const handleRemove = useCallback(
     (row: ToolVersionWithUsage) => {
+      // Open the AlertDialog for confirmation instead of using window.confirm
+      // (which blocks the main thread and can be suppressed in sandboxed contexts).
+      setRemoving(row)
+    },
+    []
+  )
+
+  const confirmRemove = useCallback(
+    (row: ToolVersionWithUsage) => {
       const ref = `${row.identifier}@${row.version}`
-      const confirmed = window.confirm(
-        `Permanently remove ${ref}? Skills/assistants pinned to this version will fail with a clear error. This cannot be undone.`
-      )
-      if (!confirmed) return
+      setRemoving(null)
       startTransition(async () => {
         const result = await removeToolVersionAction({
           identifier: row.identifier,
@@ -169,6 +191,36 @@ export function ToolVersionsClient({ identifiers }: ToolVersionsClientProps) {
           }}
         />
       )}
+
+      <AlertDialog open={removing !== null} onOpenChange={(open) => !open && setRemoving(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              Remove {removing ? `${removing.identifier}@${removing.version}` : ""}?
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently deletes the version. Skills and assistants pinned to it
+              will fail with a clear error. This action cannot be undone.
+              {removing &&
+                removing.usage.skillCount + removing.usage.assistantPromptCount > 0 && (
+                  <span className="mt-2 block font-medium text-destructive">
+                    Currently referenced by {removing.usage.skillCount} skill(s) and{" "}
+                    {removing.usage.assistantPromptCount} assistant prompt(s).
+                  </span>
+                )}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={() => removing && confirmRemove(removing)}
+            >
+              Remove permanently
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   )
 }
