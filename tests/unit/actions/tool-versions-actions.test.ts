@@ -139,15 +139,24 @@ describe("deprecateToolVersionAction (#927)", () => {
 
 describe("undeprecateToolVersionAction (#927)", () => {
   beforeEach(() => {
+    mockGetToolCatalogVersion.mockReset()
     mockUndeprecateToolVersion.mockClear()
     mockInvalidate.mockClear()
   })
 
   it("restores a version and invalidates the cache", async () => {
+    mockGetToolCatalogVersion.mockResolvedValue(row())
     const result = await undeprecateToolVersionAction("documents.create", "v1")
     expect(result.isSuccess).toBe(true)
     expect(mockUndeprecateToolVersion).toHaveBeenCalledTimes(1)
     expect(mockInvalidate).toHaveBeenCalledTimes(1)
+  })
+
+  it("fails when the version does not exist", async () => {
+    mockGetToolCatalogVersion.mockResolvedValue(undefined)
+    const result = await undeprecateToolVersionAction("documents.create", "v9")
+    expect(result.isSuccess).toBe(false)
+    expect(mockUndeprecateToolVersion).not.toHaveBeenCalled()
   })
 })
 
