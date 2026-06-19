@@ -58,10 +58,12 @@ jest.mock('@/lib/aws/lambda-trigger', () => ({
   sendToProcessingQueue: jest.fn(),
 }));
 
-// Bypass rate limiting so tests focus on handler logic
+// Bypass rate limiting so tests focus on handler logic.
+// No TypeScript generics in the factory — they are not valid across the
+// jest.mock hoisting/transpilation boundary in this configuration.
 jest.mock('@/lib/rate-limit', () => ({
   apiRateLimit: {
-    upload: <T extends unknown[], R>(handler: (...args: T) => Promise<R>) => handler,
+    upload: (handler: (...args: unknown[]) => Promise<unknown>) => handler,
   },
 }));
 
@@ -69,22 +71,6 @@ jest.mock('@/lib/rate-limit', () => ({
 // Route import — after all mocks are set up
 // ---------------------------------------------------------------------------
 import { POST } from '@/app/api/documents/v2/upload/route';
-import { getServerSession } from '@/lib/auth/server-session';
-import { createDocumentJob, confirmDocumentUpload } from '@/lib/services/document-job-service';
-import { uploadToS3 } from '@/lib/aws/document-upload';
-import { sendToProcessingQueue } from '@/lib/aws/lambda-trigger';
-
-// ---------------------------------------------------------------------------
-// Typed mock aliases — jest.Mock without type params resolves to `never` in
-// Jest 30, breaking every .mockResolvedValue() call. Casting through
-// MockedFunction<() => Promise<unknown>> gives .mockResolvedValue(unknown).
-// ---------------------------------------------------------------------------
-type AnyAsyncMock = jest.MockedFunction<() => Promise<unknown>>;
-const mockGetServerSession = getServerSession as unknown as AnyAsyncMock;
-const mockCreateDocumentJob = createDocumentJob as unknown as AnyAsyncMock;
-const mockUploadToS3 = uploadToS3 as unknown as AnyAsyncMock;
-const mockConfirmDocumentUpload = confirmDocumentUpload as unknown as AnyAsyncMock;
-const mockSendToProcessingQueue = sendToProcessingQueue as unknown as AnyAsyncMock;
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -95,8 +81,7 @@ const SESSION_WITH_SUB = { sub: 'user-abc', user: { id: 'user-abc', email: 'test
 function makeFakeFile(name: string, type: string, sizeBytes = 1024): File {
   const bytes = new Uint8Array(sizeBytes).fill(0x20);
   // Minimal stream stub so route can call file.stream() without crashing
-  const blobParts: BlobPart[] = [bytes];
-  const file = new File(blobParts, name, { type });
+  const file = new File([bytes], name, { type });
   return file;
 }
 
@@ -152,7 +137,8 @@ describe('POST /api/documents/v2/upload', () => {
   // -----------------------------------------------------------------------
   describe('authentication', () => {
     it('returns 401 when there is no session (unauthenticated user)', async () => {
-      mockGetServerSession.mockResolvedValue(null);
+      const { getServerSession } = require('@/lib/auth/server-session');
+      getServerSession.mockResolvedValue(null);
 
       const req = buildUploadRequest(makeFakeFile('test.pdf', 'application/pdf'));
       const res = await POST(req);
@@ -165,7 +151,8 @@ describe('POST /api/documents/v2/upload', () => {
 
     it('returns 401 when session exists but sub is missing or falsy', async () => {
       // This can happen mid-OAuth when Cognito hasn't yet issued the JWT sub claim
-      mockGetServerSession.mockResolvedValue({ user: { email: 'pending@example.com' } });
+      const { getServerSession } = require('@/lib/auth/server-session');
+      getServerSession.mockResolvedValue({ user: { email: 'pending@example.com' } });
 
       const req = buildUploadRequest(makeFakeFile('test.pdf', 'application/pdf'));
       const res = await POST(req);
@@ -176,7 +163,8 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('returns 401 when session.sub is an empty string', async () => {
-      mockGetServerSession.mockResolvedValue({ sub: '', user: {} });
+      const { getServerSession } = require('@/lib/auth/server-session');
+      getServerSession.mockResolvedValue({ sub: '', user: {} });
 
       const req = buildUploadRequest(makeFakeFile('doc.pdf', 'application/pdf'));
       const res = await POST(req);
@@ -187,7 +175,9 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('does NOT call createDocumentJob when auth fails', async () => {
-      mockGetServerSession.mockResolvedValue(null);
+      const { getServerSession } = require('@/lib/auth/server-session');
+      const { createDocumentJob } = require('@/lib/services/document-job-service');
+      getServerSession.mockResolvedValue(null);
 
       const req = buildUploadRequest(makeFakeFile('test.pdf', 'application/pdf'));
       await POST(req);
@@ -196,7 +186,9 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('does NOT call uploadToS3 when auth fails', async () => {
-      mockGetServerSession.mockResolvedValue(null);
+      const { getServerSession } = require('@/lib/auth/server-session');
+      const { uploadToS3 } = require('@/lib/aws/document-upload');
+      getServerSession.mockResolvedValue(null);
 
       const req = buildUploadRequest(makeFakeFile('test.pdf', 'application/pdf'));
       await POST(req);
@@ -210,7 +202,8 @@ describe('POST /api/documents/v2/upload', () => {
   // -----------------------------------------------------------------------
   describe('validation', () => {
     it('returns 400 when no file is provided', async () => {
-      mockGetServerSession.mockResolvedValue(SESSION_WITH_SUB);
+      const { getServerSession } = require('@/lib/auth/server-session');
+      getServerSession.mockResolvedValue(SESSION_WITH_SUB);
 
       const formData = new FormData();
       formData.append('purpose', 'chat');
@@ -224,7 +217,8 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('returns 400 for an unsupported purpose value', async () => {
-      mockGetServerSession.mockResolvedValue(SESSION_WITH_SUB);
+      const { getServerSession } = require('@/lib/auth/server-session');
+      getServerSession.mockResolvedValue(SESSION_WITH_SUB);
 
       // The Zod schema only allows 'chat' | 'repository' | 'assistant'
       const file = makeFakeFile('report.pdf', 'application/pdf', 100);
@@ -240,14 +234,19 @@ describe('POST /api/documents/v2/upload', () => {
   // -----------------------------------------------------------------------
   describe('successful upload', () => {
     beforeEach(() => {
-      mockGetServerSession.mockResolvedValue(SESSION_WITH_SUB);
-      mockCreateDocumentJob.mockResolvedValue({ id: 'job-xyz' });
-      mockUploadToS3.mockResolvedValue({
+      const { getServerSession } = require('@/lib/auth/server-session');
+      const { createDocumentJob, confirmDocumentUpload } = require('@/lib/services/document-job-service');
+      const { uploadToS3 } = require('@/lib/aws/document-upload');
+      const { sendToProcessingQueue } = require('@/lib/aws/lambda-trigger');
+
+      getServerSession.mockResolvedValue(SESSION_WITH_SUB);
+      createDocumentJob.mockResolvedValue({ id: 'job-xyz' });
+      uploadToS3.mockResolvedValue({
         s3Key: 'uploads/job-xyz/test.pdf',
         sanitizedFileName: 'test.pdf',
       });
-      mockConfirmDocumentUpload.mockResolvedValue(undefined);
-      mockSendToProcessingQueue.mockResolvedValue(undefined);
+      confirmDocumentUpload.mockResolvedValue(undefined);
+      sendToProcessingQueue.mockResolvedValue(undefined);
     });
 
     it('returns 200 with jobId when upload succeeds', async () => {
@@ -262,6 +261,7 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('creates a document job with the authenticated user id', async () => {
+      const { createDocumentJob } = require('@/lib/services/document-job-service');
       const req = buildUploadRequest(makeFakeFile('report.pdf', 'application/pdf', 2048));
       await POST(req);
 
@@ -271,6 +271,7 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('calls uploadToS3 with the job id', async () => {
+      const { uploadToS3 } = require('@/lib/aws/document-upload');
       const req = buildUploadRequest(makeFakeFile('slides.pdf', 'application/pdf'));
       await POST(req);
 
@@ -280,6 +281,7 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('calls confirmDocumentUpload after the S3 upload', async () => {
+      const { confirmDocumentUpload } = require('@/lib/services/document-job-service');
       const req = buildUploadRequest(makeFakeFile('doc.pdf', 'application/pdf'));
       await POST(req);
 
@@ -292,12 +294,15 @@ describe('POST /api/documents/v2/upload', () => {
   // -----------------------------------------------------------------------
   describe('error handling', () => {
     beforeEach(() => {
-      mockGetServerSession.mockResolvedValue(SESSION_WITH_SUB);
+      const { getServerSession } = require('@/lib/auth/server-session');
+      getServerSession.mockResolvedValue(SESSION_WITH_SUB);
     });
 
     it('returns 503 when S3 upload fails with storage error', async () => {
-      mockCreateDocumentJob.mockResolvedValue({ id: 'job-err' });
-      mockUploadToS3.mockRejectedValue(new Error('S3 upload to bucket failed'));
+      const { createDocumentJob } = require('@/lib/services/document-job-service');
+      const { uploadToS3 } = require('@/lib/aws/document-upload');
+      createDocumentJob.mockResolvedValue({ id: 'job-err' });
+      uploadToS3.mockRejectedValue(new Error('S3 upload to bucket failed'));
 
       const req = buildUploadRequest(makeFakeFile('big.pdf', 'application/pdf'));
       const res = await POST(req);
@@ -308,8 +313,10 @@ describe('POST /api/documents/v2/upload', () => {
     });
 
     it('returns 500 when createDocumentJob throws an unexpected error', async () => {
-      mockCreateDocumentJob.mockRejectedValue(new Error('DynamoDB connection failed'));
-      mockUploadToS3.mockResolvedValue({
+      const { createDocumentJob } = require('@/lib/services/document-job-service');
+      const { uploadToS3 } = require('@/lib/aws/document-upload');
+      createDocumentJob.mockRejectedValue(new Error('DynamoDB connection failed'));
+      uploadToS3.mockResolvedValue({
         s3Key: 'uploads/job-err/test.pdf',
         sanitizedFileName: 'test.pdf',
       });
