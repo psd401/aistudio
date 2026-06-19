@@ -82,36 +82,43 @@ import { POST } from '@/app/api/documents/v2/upload/route';
 // ---------------------------------------------------------------------------
 const SESSION_WITH_SUB = { sub: 'user-abc', user: { id: 'user-abc', email: 'test@example.com' } };
 
-/** Create a minimal fake File suitable for formData.append */
-function makeFakeFile(name: string, type: string, sizeBytes = 1024): File {
-  const bytes = new Uint8Array(sizeBytes).fill(0x20);
-  // Minimal stream stub so route can call file.stream() without crashing
-  const file = new File([bytes], name, { type });
-  return file;
+/** Minimal shape the route reads from a file — name/size/type plus stream(). */
+type RouteFile = Pick<File, 'name' | 'size' | 'type'> & { stream: () => unknown };
+
+/**
+ * Create a minimal fake file for tests.
+ * Returns a plain object instead of a real File so that .stream() is always
+ * available — jsdom and some Node.js builds do not implement File.prototype.stream,
+ * causing the route to crash before uploadToS3 is ever invoked.
+ * uploadToS3 is always mocked in these tests so the stream value is never consumed.
+ */
+function makeFakeFile(name: string, type: string, sizeBytes = 1024): RouteFile {
+  return {
+    name,
+    size: sizeBytes,
+    type,
+    stream: () => ({}),
+  };
 }
 
 /** Build a NextRequest with a multipart FormData body */
-function buildUploadRequest(file: File, extra?: Record<string, string>): NextRequest {
-  const formData = new FormData();
-  formData.append('file', file);
-  // Only append the default purpose if the caller hasn't overridden it — FormData.get()
-  // returns the first value, so appending a default before the override would shadow it.
+function buildUploadRequest(file: RouteFile, extra?: Record<string, string>): NextRequest {
+  // Use a FormData stub with a .get() method instead of real FormData so that
+  // arbitrary objects (including our RouteFile with .stream()) can be stored.
+  const fields: Record<string, RouteFile | string> = { file };
   if (!extra?.purpose) {
-    formData.append('purpose', 'chat');
+    fields.purpose = 'chat';
   }
   if (extra) {
     for (const [k, v] of Object.entries(extra)) {
-      formData.append(k, v);
+      fields[k] = v;
     }
   }
 
-  // NextRequest needs a real Request-like body — use a stub that returns our FormData
-  const req = {
-    formData: async () => formData,
+  return {
+    formData: async () => ({ get: (key: string) => fields[key] ?? null } as unknown as FormData),
     headers: new Headers({ 'x-forwarded-for': '127.0.0.1' }),
   } as unknown as NextRequest;
-
-  return req;
 }
 
 // ---------------------------------------------------------------------------
