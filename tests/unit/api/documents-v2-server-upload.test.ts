@@ -6,7 +6,7 @@ import { NextRequest } from 'next/server';
 // ---------------------------------------------------------------------------
 // AWS SDK mocks — must be declared before any imports that pull in SDK clients
 // ---------------------------------------------------------------------------
-const mockS3Send = jest.fn() as jest.MockedFunction<(...args: unknown[]) => unknown>;
+const mockS3Send = jest.fn();
 
 jest.mock('@aws-sdk/client-s3', () => ({
   S3Client: jest.fn(() => ({ send: mockS3Send })),
@@ -59,13 +59,13 @@ jest.mock('@/lib/aws/lambda-trigger', () => ({
 }));
 
 // Bypass rate limiting so tests focus on handler logic.
-// IMPORTANT: no angle-bracket generics inside this factory — SWC hoists
-// jest.mock() before TypeScript stripping, so generic syntax like Promise<T>
-// silently breaks the hoist and loads the real rate-limit module instead.
-// Plain array types (unknown[]) use [] syntax and are safe.
+// IMPORTANT: no TypeScript annotations inside this factory — SWC hoists
+// jest.mock() before TypeScript stripping, so any type syntax (angle-bracket
+// generics OR parameter annotations like `handler: Type`) prevents the hoist
+// and loads the real rate-limit module instead. Use plain JS only.
 jest.mock('@/lib/rate-limit', () => ({
   apiRateLimit: {
-    upload: (handler: (...args: unknown[]) => unknown) => handler,
+    upload: jest.fn().mockImplementation(h => h),
   },
 }));
 

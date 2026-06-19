@@ -2,10 +2,10 @@ import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals
 import type { NextRequest } from 'next/server';
 
 // Mock AWS SDK clients BEFORE importing modules that use them
-const mockDynamoSend = jest.fn() as jest.MockedFunction<(...args: unknown[]) => unknown>;
-const mockS3Send = jest.fn() as jest.MockedFunction<(...args: unknown[]) => unknown>;
-const mockSQSSend = jest.fn() as jest.MockedFunction<(...args: unknown[]) => unknown>;
-const mockGetSignedUrl = jest.fn() as jest.MockedFunction<(...args: unknown[]) => unknown>;
+const mockDynamoSend = jest.fn();
+const mockS3Send = jest.fn();
+const mockSQSSend = jest.fn();
+const mockGetSignedUrl = jest.fn();
 
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(() => ({
@@ -63,7 +63,7 @@ jest.mock('@/lib/services/document-job-service', () => ({
 jest.mock('@/lib/aws/document-upload', () => ({
   generatePresignedUrl: jest.fn(),
   generateMultipartUrls: jest.fn(),
-  sanitizeFileName: jest.fn((name: string) => name),
+  sanitizeFileName: jest.fn(name => name),
 }));
 
 jest.mock('@/lib/aws/lambda-trigger', () => ({
