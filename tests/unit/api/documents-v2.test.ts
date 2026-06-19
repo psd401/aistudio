@@ -53,21 +53,33 @@ jest.mock('@/lib/auth/server-session', () => ({
   getServerSession: jest.fn()
 }));
 
+// Outer-scope mock* variables required for SWC hoisting — see documents-v2-server-upload.test.ts
+// for a detailed explanation. Factories that only use inline jest.fn() are not hoisted,
+// causing routes to import the real modules and return 500 instead of the expected status codes.
+const mockCreateDocumentJob = jest.fn();
+const mockGetJobStatus = jest.fn();
+const mockConfirmDocumentUpload = jest.fn();
+const mockFetchResultFromS3 = jest.fn();
+const mockGeneratePresignedUrl = jest.fn();
+const mockGenerateMultipartUrls = jest.fn();
+const mockSanitizeFileName = jest.fn(name => name);
+const mockSendToProcessingQueue = jest.fn();
+
 jest.mock('@/lib/services/document-job-service', () => ({
-  createDocumentJob: jest.fn(),
-  getJobStatus: jest.fn(),
-  confirmDocumentUpload: jest.fn(),
-  fetchResultFromS3: jest.fn(),
+  createDocumentJob: mockCreateDocumentJob,
+  getJobStatus: mockGetJobStatus,
+  confirmDocumentUpload: mockConfirmDocumentUpload,
+  fetchResultFromS3: mockFetchResultFromS3,
 }));
 
 jest.mock('@/lib/aws/document-upload', () => ({
-  generatePresignedUrl: jest.fn(),
-  generateMultipartUrls: jest.fn(),
-  sanitizeFileName: jest.fn(name => name),
+  generatePresignedUrl: mockGeneratePresignedUrl,
+  generateMultipartUrls: mockGenerateMultipartUrls,
+  sanitizeFileName: mockSanitizeFileName,
 }));
 
 jest.mock('@/lib/aws/lambda-trigger', () => ({
-  sendToProcessingQueue: jest.fn()
+  sendToProcessingQueue: mockSendToProcessingQueue,
 }));
 
 import { POST as initiateUpload } from '@/app/api/documents/v2/initiate-upload/route';

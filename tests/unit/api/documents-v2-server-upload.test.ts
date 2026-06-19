@@ -59,13 +59,16 @@ jest.mock('@/lib/aws/lambda-trigger', () => ({
 }));
 
 // Bypass rate limiting so tests focus on handler logic.
-// IMPORTANT: no TypeScript annotations inside this factory — SWC hoists
-// jest.mock() before TypeScript stripping, so any type syntax (angle-bracket
-// generics OR parameter annotations like `handler: Type`) prevents the hoist
-// and loads the real rate-limit module instead. Use plain JS only.
+// IMPORTANT: outer-scope mock* variable required — SWC hoists jest.mock()
+// factories that reference outer-scope variables whose names start with "mock".
+// Factories with only inline jest.fn() calls are NOT reliably hoisted, which
+// causes the real withRateLimit to run and hit `response instanceof NextResponse`
+// (TypeError) because tests/setup.ts mocks NextResponse as a plain object.
+const mockApiRateLimitUpload = jest.fn().mockImplementation(h => h);
+
 jest.mock('@/lib/rate-limit', () => ({
   apiRateLimit: {
-    upload: jest.fn().mockImplementation(h => h),
+    upload: mockApiRateLimitUpload,
   },
 }));
 
