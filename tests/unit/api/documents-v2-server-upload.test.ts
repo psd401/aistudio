@@ -59,12 +59,13 @@ jest.mock('@/lib/aws/lambda-trigger', () => ({
 }));
 
 // Bypass rate limiting so tests focus on handler logic.
-// No TypeScript syntax in the factory — SWC cannot strip TS generics before
-// jest.mock hoisting, so the factory must be pure JS or it silently fails to
-// hoist and the real rate-limit module (with its in-memory 429 store) runs.
+// IMPORTANT: no angle-bracket generics inside this factory — SWC hoists
+// jest.mock() before TypeScript stripping, so generic syntax like Promise<T>
+// silently breaks the hoist and loads the real rate-limit module instead.
+// Plain array types (unknown[]) use [] syntax and are safe.
 jest.mock('@/lib/rate-limit', () => ({
   apiRateLimit: {
-    upload: (handler) => handler,
+    upload: (handler: (...args: unknown[]) => unknown) => handler,
   },
 }));
 
