@@ -314,7 +314,7 @@ describe('POST /api/documents/v2/upload', () => {
       expect(body.code).toBe('STORAGE_UNAVAILABLE');
     });
 
-    it('returns 500 when createDocumentJob throws an unexpected error', async () => {
+    it('returns 503 (JOB_SERVICE_UNAVAILABLE) when createDocumentJob throws a DynamoDB error', async () => {
       const { createDocumentJob } = require('@/lib/services/document-job-service');
       const { uploadToS3 } = require('@/lib/aws/document-upload');
       createDocumentJob.mockRejectedValue(new Error('DynamoDB connection failed'));
