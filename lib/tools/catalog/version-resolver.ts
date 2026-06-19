@@ -75,7 +75,9 @@ export function parseToolRef(ref: string): ParsedToolRef | null {
     return { identifier: trimmed, version: null };
   }
 
-  const [identifier, version] = trimmed.split("@");
+  const [rawIdentifier, rawVersion] = trimmed.split("@");
+  const identifier = rawIdentifier?.trim();
+  const version = rawVersion?.trim();
   // Both sides must be non-empty, and the version must be a valid vN token.
   if (!identifier || !version) return null;
   if (Number.isNaN(versionRank(version))) return null;

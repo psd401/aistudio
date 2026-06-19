@@ -39,7 +39,14 @@ CREATE INDEX IF NOT EXISTS idx_tool_catalog_deprecated
     ON tool_catalog (deprecated_at)
     WHERE deprecated_at IS NOT NULL;
 
--- 4. Admin → Tool Versions navigation item (parent_id 11 = Admin, admin-only).
+-- 4. Widen replaced_by from varchar(170) to varchar(200) — the max possible
+--    identifier@version length is 150 + 1 + 20 = 171 characters, which exceeds the
+--    original length. In PostgreSQL, widening a varchar constraint is instant and
+--    requires no table rewrite.
+ALTER TABLE tool_catalog
+    ALTER COLUMN replaced_by TYPE varchar(200);
+
+-- 5. Admin → Tool Versions navigation item (parent_id 11 = Admin, admin-only).
 --    The version-history + deprecation UI lives at /admin/tools.
 INSERT INTO navigation_items (label, icon, link, parent_id, requires_role, position, is_active, type, description)
 SELECT 'Tool Versions', 'IconVersions', '/admin/tools', 11, 'administrator', 28, true, 'link',

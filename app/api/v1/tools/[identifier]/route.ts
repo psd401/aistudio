@@ -27,7 +27,7 @@ export const GET = withApiAuth(async (request, auth, requestId) => {
   // contain dots, which are URL-safe, but decode defensively for any
   // percent-encoding).
   const identifier = decodeURIComponent(
-    pathname.split("/").findLast((s) => s.length > 0) ?? ""
+    pathname.split("/").filter(Boolean).pop() ?? ""
   )
   if (!identifier) {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Missing tool identifier")

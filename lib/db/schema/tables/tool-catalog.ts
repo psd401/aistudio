@@ -39,8 +39,9 @@
  *   `identifier@version`; `grace_period_days` is the minimum number of days a
  *   deprecated version stays callable (default 90); `removal_date` is the computed
  *   `deprecated_at + grace_period_days` snapshot, after which an admin may remove
- *   the version. A non-deprecated version has all four NULL (grace_period_days
- *   keeps its default only when relevant).
+ *   the version. A non-deprecated version has deprecated_at / replaced_by /
+ *   removal_date all NULL; grace_period_days always has a value (default 90) but
+ *   is only semantically meaningful once deprecated_at is set.
  *
  * NOTE: No PL/pgSQL triggers / DO $$ blocks for `updated_at` — the RDS Data API
  * migration runner's statement splitter cannot handle dollar-quoted blocks (see
@@ -105,7 +106,7 @@ export const toolCatalog = pgTable(
     handlerRef: varchar("handler_ref", { length: 200 }),
     isActive: boolean("is_active").default(true).notNull(),
     deprecatedAt: timestamp("deprecated_at"),
-    replacedBy: varchar("replaced_by", { length: 170 }),
+    replacedBy: varchar("replaced_by", { length: 200 }),
     /**
      * Computed `deprecated_at + grace_period_days` snapshot, set when a version is
      * deprecated. After this date an admin may remove the version. NULL while the

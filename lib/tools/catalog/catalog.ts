@@ -665,9 +665,17 @@ export class ToolCatalog {
     if (!hasRequiredScopes(context.scopes, requiredScopesForSurface(entry, surface))) {
       return { ok: false, reason: "scope_denied" };
     }
-    // Emit the deprecation telemetry event AFTER scope passes (only successful,
-    // authorized invocations of a deprecated version count as usage we must
-    // track). Fire-and-forget; does not gate or delay dispatch. (#927.)
+    // Code MCP tools are keyed in TOOL_HANDLERS by their wire `name` (what the
+    // manifest sets and what clients send), resolved lazily to keep the handler
+    // graph out of non-Node bundles.
+    const handlers = await this.loadHandlers();
+    const handler = handlers[entry.name];
+    if (!handler) {
+      return { ok: false, reason: "no_handler" };
+    }
+    // Emit the deprecation telemetry event AFTER confirming a handler exists —
+    // only tools that will actually be invoked should count as deprecated usage.
+    // Fire-and-forget; does not gate or delay dispatch. (#927.)
     if (entry.deprecatedAt) {
       this.emitDeprecationWarning(entry, {
         // Default to the surface-implied caller type when not explicitly passed:
@@ -676,14 +684,6 @@ export class ToolCatalog {
           callerType ?? (surface === "mcp" ? "mcp_client" : "internal"),
         callerId: String(context.userId),
       });
-    }
-    // Code MCP tools are keyed in TOOL_HANDLERS by their wire `name` (what the
-    // manifest sets and what clients send), resolved lazily to keep the handler
-    // graph out of non-Node bundles.
-    const handlers = await this.loadHandlers();
-    const handler = handlers[entry.name];
-    if (!handler) {
-      return { ok: false, reason: "no_handler" };
     }
     return { ok: true, result: await handler(args, context) };
   }

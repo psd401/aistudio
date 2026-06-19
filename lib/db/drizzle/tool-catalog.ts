@@ -207,9 +207,12 @@ export async function deprecateToolVersion(params: {
         .set({
           // COALESCE keeps the original deprecation timestamp/removal date if the
           // row is already deprecated (don't restart the grace clock).
+          // grace_period_days is NOT NULL (default 90), so COALESCE would always
+          // keep the existing value — use CASE WHEN instead to snapshot the
+          // admin-supplied value only on the first deprecation.
           deprecatedAt: sql`COALESCE(${toolCatalog.deprecatedAt}, ${deprecatedAt})`,
           removalDate: sql`COALESCE(${toolCatalog.removalDate}, ${removalDate})`,
-          gracePeriodDays: sql`COALESCE(${toolCatalog.gracePeriodDays}, ${gracePeriodDays})`,
+          gracePeriodDays: sql`CASE WHEN ${toolCatalog.deprecatedAt} IS NULL THEN ${gracePeriodDays} ELSE ${toolCatalog.gracePeriodDays} END`,
           // replaced_by is always updatable (an admin may set/correct the successor).
           replacedBy: replacedBy ?? null,
           updatedAt: new Date(),
