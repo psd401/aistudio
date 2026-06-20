@@ -19,10 +19,13 @@ export function isSafeImageUrl(url: string): boolean {
   try {
     const parsed = new URL(url)
     if (parsed.protocol !== 'https:') return false
+    const { hostname } = parsed
     // Restrict to S3 virtual-hosted (<bucket>.s3.<region>.amazonaws.com) and
     // path-style (s3.amazonaws.com, s3.<region>.amazonaws.com) hostnames only.
     // Other amazonaws.com services (API Gateway, EC2, etc.) are rejected.
-    return /^([^.]+\.)?s3(\.[a-z0-9-]+)?\.amazonaws\.com$/.test(parsed.hostname)
+    if (!hostname.endsWith('.amazonaws.com')) return false
+    const sub = hostname.slice(0, -'.amazonaws.com'.length)
+    return sub === 's3' || sub.startsWith('s3.') || sub.endsWith('.s3') || sub.includes('.s3.')
   } catch {
     return false
   }
