@@ -105,6 +105,10 @@ describe('isSafeImageUrl — URL validation guard', () => {
   it('rejects non-S3 HTTPS URLs', () => {
     expect(isSafeImageUrl('https://example.com/image.png')).toBe(false)
     expect(isSafeImageUrl('https://evil.com/.amazonaws.com/image.png')).toBe(false)
+    // API Gateway and other AWS services are not S3
+    expect(isSafeImageUrl('https://execute-api.us-east-1.amazonaws.com/stage/path')).toBe(false)
+    // Domain-spoofing attempts
+    expect(isSafeImageUrl('https://evil.amazonaws.com.badactor.net/image.png')).toBe(false)
   })
 
   it('rejects empty and malformed strings', () => {

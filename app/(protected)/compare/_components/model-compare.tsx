@@ -174,6 +174,7 @@ export function ModelCompare() {
                       setModel1ImageUrl(data.imageUrl)
                     } else {
                       log.warn('Received unsafe imageUrl for model1, ignoring')
+                      setModel1Error('Image generation failed. Please try again.')
                     }
                   } else if (data.type === 'finish') {
                     setModel1Complete(true)
@@ -199,6 +200,7 @@ export function ModelCompare() {
                       setModel2ImageUrl(data.imageUrl)
                     } else {
                       log.warn('Received unsafe imageUrl for model2, ignoring')
+                      setModel2Error('Image generation failed. Please try again.')
                     }
                   } else if (data.type === 'finish') {
                     setModel2Complete(true)

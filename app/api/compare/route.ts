@@ -188,6 +188,7 @@ async function* createImageGenerator(
             .set({
               response1: result.imageUrl,
               executionTimeMs1: Date.now() - timerStartTime,
+              tokensUsed1: 0, // image generation is priced per-image, not per-token
               updatedAt: new Date()
             })
             .where(eq(modelComparisons.id, comparisonId)),
@@ -199,6 +200,7 @@ async function* createImageGenerator(
             .set({
               response2: result.imageUrl,
               executionTimeMs2: Date.now() - timerStartTime,
+              tokensUsed2: 0, // image generation is priced per-image, not per-token
               updatedAt: new Date()
             })
             .where(eq(modelComparisons.id, comparisonId)),

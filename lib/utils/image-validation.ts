@@ -18,12 +18,15 @@
 export function isSafeImageUrl(url: string): boolean {
   try {
     const parsed = new URL(url)
-    return parsed.protocol === 'https:' && parsed.hostname.endsWith('.amazonaws.com')
+    if (parsed.protocol !== 'https:') return false
+    // Restrict to S3 virtual-hosted (<bucket>.s3.<region>.amazonaws.com) and
+    // path-style (s3.amazonaws.com, s3.<region>.amazonaws.com) hostnames only.
+    // Other amazonaws.com services (API Gateway, EC2, etc.) are rejected.
+    return /^([^.]+\.)?s3(\.[a-z0-9-]+)?\.amazonaws\.com$/.test(parsed.hostname)
   } catch {
     return false
   }
 }
-
 
 /**
  * MIME types considered safe for rendering in <img> / <Image> elements.
