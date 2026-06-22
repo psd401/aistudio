@@ -190,13 +190,17 @@ function asUrlCitation(value: unknown): DeepResearchCitation | null {
 }
 
 /**
- * Pull report text + URL citations out of Google's `outputs` array.
- * Outputs is a heterogeneous list of Content blocks; we keep text blocks
+ * Pull report text + URL citations out of model-output content blocks.
+ * `outputs` is a heterogeneous list of Content blocks; we keep text blocks
  * and harvest `url_citation` annotations into a flat list. Non-text blocks
  * (function calls, image content, etc.) are ignored — Deep Research returns
  * a written report, anything else is exotic.
+ *
+ * @google/genai v2 moved the response payload from `Interaction.outputs` to
+ * `Interaction.steps[].content` (model_output steps); the caller flattens
+ * those before passing them here, so the block-handling logic is unchanged.
  */
-function extractReportAndCitations(outputs: Interaction['outputs']): {
+function extractReportAndCitations(outputs: Interactions.Content[]): {
   report: string;
   citations: DeepResearchCitation[];
 } {
@@ -429,7 +433,12 @@ export async function runDeepResearch(
       );
     }
 
-    const { report, citations } = extractReportAndCitations(last.outputs);
+    // @google/genai v2: the report payload lives in model_output steps'
+    // content (v1 exposed it as Interaction.outputs). Flatten those blocks.
+    const outputBlocks = (last.steps ?? []).flatMap((step) =>
+      step.type === 'model_output' ? (step.content ?? []) : []
+    );
+    const { report, citations } = extractReportAndCitations(outputBlocks);
     const durationMs = Date.now() - startMs;
 
     log.info('Deep Research completed', {
