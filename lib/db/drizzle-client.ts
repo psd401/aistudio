@@ -184,6 +184,13 @@ export const db = new Proxy({} as ReturnType<typeof drizzle<typeof schema>>, {
  */
 export type DrizzleDB = typeof db;
 
+/**
+ * Type alias for the transaction client passed to `executeTransaction`'s
+ * callback. Lets helpers that participate in a caller-owned transaction type
+ * their `tx` parameter without re-deriving the `Parameters<...>` chain.
+ */
+export type DbTransaction = Parameters<Parameters<typeof db.transaction>[0]>[0];
+
 // ============================================
 // Result Type Helpers
 // ============================================

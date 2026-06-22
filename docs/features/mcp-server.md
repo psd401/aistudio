@@ -78,8 +78,42 @@ curl -X POST http://localhost:3000/api/mcp \
 POST /api/mcp → authenticateRequest() → checkRateLimit()
   → parseJsonRpcRequest() → handleJsonRpcRequest()
     → initialize | tools/list | tools/call | ping
-      → tool-handlers.ts → existing service layer
+      → ToolCatalog (lib/tools/catalog) → code handler / existing service layer
 ```
+
+### Catalog-backed dispatch (#924)
+
+As of the unified tool catalog (Epic #922, workstream #2), `tools/list` and
+`tools/call` resolve through the **`ToolCatalog`** (`lib/tools/catalog/catalog.ts`)
+rather than the static MCP registry:
+
+- `tools/list` returns catalog tools exposed on the `mcp` surface, filtered by the
+  caller's scopes.
+- `tools/call` resolves the tool in the catalog (scope-checked) and invokes its
+  code handler.
+
+The catalog is hybrid: **code-defined** tools live in a TypeScript manifest
+(`lib/tools/catalog/manifest.ts`) and are reconciled into the `tool_catalog` table
+on boot (`lib/tools/catalog/sync.ts`); **assistant/skill-derived** tools live in
+the `tool_catalog` table and are merged at runtime. Each catalog entry carries
+`surfaces`, `required_scopes`, `agent_callable`, and `version`. The 5 original MCP
+tools migrated to `domain.action` identifiers (e.g. `decisions.search`); their MCP
+wire `name` (`search_decisions`) is unchanged for client compatibility.
+
+> Note: external MCP tools resolved per-user via `lib/mcp/connector-service.ts`
+> are *consumed* tools, not part of this catalog (which tracks only tools AI Studio
+> itself *exposes*).
+
+### Surface coverage (#924)
+
+The catalog is the single source of truth across every surface AI Studio exposes:
+
+| Surface | How it reads the catalog |
+|---------|--------------------------|
+| `mcp` | `tools/list` / `tools/call` dispatch via `ToolCatalog` (above). |
+| `ai_sdk` | The chat/Nexus tools have one source — `lib/tools/catalog/ai-sdk-tools.ts` — which the catalog manifest ingests. The Nexus route scope-gates `enabledTools` via `ToolCatalog.filterAiSdkToolNames`; the server + client tool registries derive their lists (and model-capability + UI metadata) from that same source. Adding a chat tool is one edit. |
+| `rest` | Tool-backed `/api/v1` routes declare a `rest` surface + `surfaceScopes.rest` + a `rest` binding. The route resolves its scope from the catalog (`getRequiredScopes(id, 'rest')`), and the tool-endpoint OpenAPI is generated from the catalog (`scripts/openapi/generate-from-catalog.ts` → `docs/API/v1/generated/tool-catalog.openapi.json`, `bun run openapi:generate`). |
+| `internal` | **Not applicable in this repo.** There is no internal agent loop here (the agent platform is the external AgentCore service; `lib/agent/` holds only a workspace-token helper). The one internal tool-resolving path — `lib/streaming/unified-streaming-service.ts` / provider adapters — builds AI SDK tools that are already catalog-gated upstream (the `ai_sdk` row above). The catalog is ready for a future internal loop: `agent_callable` + `ToolCatalog.list({ agentOnly })` already filter human-only/destructive tools. No speculative code was added for a surface that does not yet exist. |
 
 ## Files
 
@@ -87,8 +121,15 @@ POST /api/mcp → authenticateRequest() → checkRateLimit()
 |------|---------|
 | `app/api/mcp/route.ts` | HTTP route handler |
 | `lib/mcp/types.ts` | Protocol type definitions |
-| `lib/mcp/tool-registry.ts` | Tool schemas + scope mapping |
+| `lib/mcp/tool-registry.ts` | Tool schemas + scope mapping (sourced into the catalog manifest) |
 | `lib/mcp/tool-handlers.ts` | Tool implementation adapters |
-| `lib/mcp/jsonrpc-handler.ts` | JSON-RPC 2.0 dispatcher |
+| `lib/mcp/jsonrpc-handler.ts` | JSON-RPC 2.0 dispatcher (catalog-backed) |
 | `lib/mcp/session-manager.ts` | Optional session tracking |
 | `lib/api-keys/scopes.ts` | MCP scope definitions |
+| `lib/tools/catalog/catalog.ts` | Unified `ToolCatalog` runtime (merge + filter + dispatch) |
+| `lib/tools/catalog/manifest.ts` | Code-defined tool catalog |
+| `lib/tools/catalog/ai-sdk-tools.ts` | Single source for AI SDK chat tools (ingested by the manifest) |
+| `lib/tools/catalog/sync.ts` | Boot-time `tool_catalog` reconciliation |
+| `lib/db/schema/tables/tool-catalog.ts` | `tool_catalog` table schema |
+| `scripts/openapi/build-spec.ts` | Catalog → OpenAPI fragment builder (REST surface) |
+| `scripts/openapi/generate-from-catalog.ts` | `openapi:generate` / `openapi:check` CLI |

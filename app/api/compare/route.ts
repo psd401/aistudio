@@ -8,7 +8,12 @@ import { eq, inArray } from 'drizzle-orm';
 import { modelComparisons, aiModels } from '@/lib/db/schema';
 import { hasToolAccess } from '@/utils/roles';
 import { createProviderModel } from '@/lib/ai/provider-factory';
-import { mergeStreamsWithIdentifiers, asyncGeneratorToStream } from '@/lib/compare/dual-stream-merger';
+import { hasCapability } from '@/lib/ai/capability-utils';
+import { generateImageForNexus } from '@/lib/ai/image-generation-service';
+import type { ImageGenerationError } from '@/lib/ai/image-generation-service';
+import { mergeResponseGenerators, asyncGeneratorToStream, type DualStreamEvent } from '@/lib/compare/dual-stream-merger';
+import { isTransientStreamError } from '@/lib/streaming/provider-adapters/base-adapter'
+import { isSafeImageUrl } from '@/lib/utils/image-validation';
 
 // Allow streaming responses up to 5 minutes
 export const maxDuration = 300;
@@ -22,9 +27,242 @@ const CompareRequestSchema = z.object({
   model2Name: z.string().optional()
 });
 
+/** DB model config row returned by the model query */
+interface ModelConfig {
+  id: number | string;
+  provider: string | null;
+  modelId: string | null;
+  name: string | null;
+  nexusEnabled: boolean | null;
+  capabilities: string | null;
+}
+
+/**
+ * Async generator for a text-based model response.
+ * Streams text chunks, then saves to DB and emits finish.
+ */
+async function* createTextGenerator(
+  modelSlot: 'model1' | 'model2',
+  modelConfig: ModelConfig,
+  prompt: string,
+  comparisonId: number,
+  timerStartTime: number,
+  log: ReturnType<typeof createLogger>
+): AsyncGenerator<DualStreamEvent> {
+  const slotNum = modelSlot === 'model1' ? 1 : 2;
+
+  try {
+    const model = await createProviderModel(
+      String(modelConfig.provider),
+      String(modelConfig.modelId)
+    );
+
+    const streamResult = streamText({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+    });
+
+    for await (const chunk of streamResult.textStream) {
+      yield { modelId: modelSlot, type: 'content', chunk };
+    }
+
+    const result = await streamResult;
+    const usage = await result.usage;
+    const finishReason = await result.finishReason;
+    const text = await result.text;
+
+    // Persist response to DB
+    try {
+      if (slotNum === 1) {
+        await executeQuery(
+          (db) => db.update(modelComparisons)
+            .set({
+              response1: text,
+              executionTimeMs1: Date.now() - timerStartTime,
+              tokensUsed1: usage?.totalTokens || 0,
+              updatedAt: new Date()
+            })
+            .where(eq(modelComparisons.id, comparisonId)),
+          'saveModel1Response'
+        );
+      } else {
+        await executeQuery(
+          (db) => db.update(modelComparisons)
+            .set({
+              response2: text,
+              executionTimeMs2: Date.now() - timerStartTime,
+              tokensUsed2: usage?.totalTokens || 0,
+              updatedAt: new Date()
+            })
+            .where(eq(modelComparisons.id, comparisonId)),
+          'saveModel2Response'
+        );
+      }
+
+      log.info(`Model ${slotNum} text response saved`, {
+        comparisonId,
+        textLength: text.length,
+        finishReason
+      });
+    } catch (dbError) {
+      log.error(`Failed to save model ${slotNum} text response`, {
+        comparisonId,
+        error: dbError instanceof Error ? dbError.message : String(dbError)
+      });
+    }
+
+    const finishEvent: DualStreamEvent = {
+      modelId: modelSlot,
+      type: 'finish',
+      finishReason: finishReason ?? 'stop',
+      usage: usage
+        ? {
+            promptTokens: usage.inputTokens || 0,
+            completionTokens: usage.outputTokens || 0,
+            totalTokens: (usage.inputTokens || 0) + (usage.outputTokens || 0)
+          }
+        : undefined
+    };
+    yield finishEvent;
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const isTransient = error instanceof Error && isTransientStreamError(error);
+
+    if (isTransient) {
+      log.warn(`Model ${slotNum} text stream failed (transient)`, { comparisonId, error: errorMessage });
+      yield { modelId: modelSlot, type: 'warning', warning: 'Comparison unavailable — model response could not be generated' };
+    } else {
+      log.error(`Model ${slotNum} text stream failed`, { comparisonId, error: errorMessage });
+      yield { modelId: modelSlot, type: 'error', error: 'Stream processing failed' };
+    }
+    yield { modelId: modelSlot, type: 'finish', finishReason: 'error' };
+  }
+}
+
+/**
+ * Async generator for an image-generation model response.
+ * Emits a single image event, then saves to DB and emits finish.
+ */
+async function* createImageGenerator(
+  modelSlot: 'model1' | 'model2',
+  modelConfig: ModelConfig,
+  prompt: string,
+  userId: string,
+  comparisonId: number,
+  timerStartTime: number,
+  log: ReturnType<typeof createLogger>
+): AsyncGenerator<DualStreamEvent> {
+  const slotNum = modelSlot === 'model1' ? 1 : 2;
+  const rawProvider = String(modelConfig.provider);
+
+  try {
+    // Validate and narrow the provider type — generateImageForNexus only supports
+    // 'openai' and 'google'. Throw inside the try so the catch converts unsupported
+    // providers to a graceful error event rather than crashing the generator.
+    if (rawProvider !== 'openai' && rawProvider !== 'google') {
+      throw new Error(
+        `Provider "${rawProvider}" does not support image generation. Supported providers: openai, google.`
+      );
+    }
+    const provider = rawProvider as 'openai' | 'google';
+
+    log.info(`Model ${slotNum} image generation started`, {
+      comparisonId,
+      provider,
+      modelId: String(modelConfig.modelId)
+    });
+
+    const result = await generateImageForNexus({
+      prompt,
+      modelId: String(modelConfig.modelId),
+      provider,
+      conversationId: `compare-${comparisonId}`,
+      userId,
+    });
+
+    // Persist image URL to DB
+    try {
+      if (slotNum === 1) {
+        await executeQuery(
+          (db) => db.update(modelComparisons)
+            .set({
+              response1: result.imageUrl,
+              executionTimeMs1: Date.now() - timerStartTime,
+              tokensUsed1: 0, // image generation is priced per-image, not per-token
+              updatedAt: new Date()
+            })
+            .where(eq(modelComparisons.id, comparisonId)),
+          'saveModel1ImageResponse'
+        );
+      } else {
+        await executeQuery(
+          (db) => db.update(modelComparisons)
+            .set({
+              response2: result.imageUrl,
+              executionTimeMs2: Date.now() - timerStartTime,
+              tokensUsed2: 0, // image generation is priced per-image, not per-token
+              updatedAt: new Date()
+            })
+            .where(eq(modelComparisons.id, comparisonId)),
+          'saveModel2ImageResponse'
+        );
+      }
+
+      log.info(`Model ${slotNum} image response saved`, { comparisonId, s3Key: result.s3Key });
+    } catch (dbError) {
+      log.error(`Failed to save model ${slotNum} image response`, {
+        comparisonId,
+        error: dbError instanceof Error ? dbError.message : String(dbError)
+      });
+    }
+
+    // Validate imageUrl is an HTTPS S3 URL before emitting to client (shared
+    // guard from lib/utils/image-validation — same check runs client-side in
+    // model-compare.tsx before the URL is rendered).
+    if (!isSafeImageUrl(result.imageUrl)) {
+      log.error(`Model ${slotNum} returned unexpected image URL origin, blocking emit`, {
+        comparisonId,
+        imageUrl: result.imageUrl.slice(0, 80)
+      });
+      yield { modelId: modelSlot, type: 'error', error: 'Image generation failed. Please try again.' };
+      yield { modelId: modelSlot, type: 'finish', finishReason: 'error' };
+      return;
+    }
+
+    yield { modelId: modelSlot, type: 'image', imageUrl: result.imageUrl };
+    yield { modelId: modelSlot, type: 'finish', finishReason: 'stop' };
+  } catch (error) {
+    const errorType: string =
+      error instanceof Error && 'type' in error
+        ? String((error as Error & Partial<ImageGenerationError>).type ?? 'UNKNOWN')
+        : 'UNKNOWN';
+    const errorMessage = error instanceof Error ? error.message : String(error);
+
+    log.error(`Model ${slotNum} image generation failed`, {
+      comparisonId,
+      errorType,
+      error: errorMessage
+    });
+
+    // Send user-friendly error message based on failure type
+    let clientMessage: string;
+    if (errorType === 'CONTENT_POLICY') {
+      clientMessage = 'Image prompt was rejected by content policy. Please revise your prompt.';
+    } else if (errorType === 'RATE_LIMIT') {
+      clientMessage = 'Image generation rate limit reached. Please try again in a moment.';
+    } else {
+      clientMessage = 'Image generation failed. Please try again or select a different model.';
+    }
+
+    yield { modelId: modelSlot, type: 'error', error: clientMessage };
+    yield { modelId: modelSlot, type: 'finish', finishReason: 'error' };
+  }
+}
+
 /**
  * Compare Models API - Native Dual Streaming
- * Streams responses from two models in parallel using Server-Sent Events
+ * Streams responses from two models in parallel using Server-Sent Events.
+ * Supports both text-generation and image-generation models.
  */
 export async function POST(req: Request) {
   const requestId = generateRequestId();
@@ -100,7 +338,8 @@ export async function POST(req: Request) {
         provider: aiModels.provider,
         modelId: aiModels.modelId,
         name: aiModels.name,
-        nexusEnabled: aiModels.nexusEnabled
+        nexusEnabled: aiModels.nexusEnabled,
+        capabilities: aiModels.capabilities,
       })
       .from(aiModels)
       .where(inArray(aiModels.modelId, [model1Id, model2Id])),
@@ -182,18 +421,24 @@ export async function POST(req: Request) {
       );
     }
 
+    // 6. Detect image generation models
+    const isModel1Image = hasCapability(model1Config.capabilities, 'imageGeneration');
+    const isModel2Image = hasCapability(model2Config.capabilities, 'imageGeneration');
+
     log.info('Both models validated', sanitizeForLogging({
       model1: {
         provider: String(model1Config.provider),
-        modelId: String(model1Config.modelId)
+        modelId: String(model1Config.modelId),
+        isImageModel: isModel1Image
       },
       model2: {
         provider: String(model2Config.provider),
-        modelId: String(model2Config.modelId)
+        modelId: String(model2Config.modelId),
+        isImageModel: isModel2Image
       }
     }));
 
-    // 6. Create comparison record for tracking
+    // 7. Create comparison record for tracking
     const now = new Date();
     const comparisonResult = await executeQuery(
       (db) => db.insert(modelComparisons)
@@ -220,107 +465,17 @@ export async function POST(req: Request) {
 
     log.info('Comparison record created', sanitizeForLogging({ comparisonId }));
 
-    // 7. Create provider models for streaming
-    const model1 = await createProviderModel(
-      String(model1Config.provider),
-      String(model1Config.modelId)
-    );
+    // 8. Create per-model response generators (text or image)
+    const gen1 = isModel1Image
+      ? createImageGenerator('model1', model1Config, prompt, String(userId), comparisonId, timerStartTime, log)
+      : createTextGenerator('model1', model1Config, prompt, comparisonId, timerStartTime, log);
 
-    const model2 = await createProviderModel(
-      String(model2Config.provider),
-      String(model2Config.modelId)
-    );
+    const gen2 = isModel2Image
+      ? createImageGenerator('model2', model2Config, prompt, String(userId), comparisonId, timerStartTime, log)
+      : createTextGenerator('model2', model2Config, prompt, comparisonId, timerStartTime, log);
 
-    log.info('Provider models created', {
-      model1Provider: String(model1Config.provider),
-      model2Provider: String(model2Config.provider)
-    });
-
-    // 8. Create streaming responses for both models
-    const stream1Promise = streamText({
-      model: model1,
-      messages: [
-        {
-          role: 'user',
-          content: prompt
-        }
-      ],
-      onFinish: async ({ text, usage, finishReason }) => {
-        // Save Model 1 response
-        try {
-          await executeQuery(
-            (db) => db.update(modelComparisons)
-              .set({
-                response1: text,
-                executionTimeMs1: Date.now() - timerStartTime,
-                tokensUsed1: usage?.totalTokens || 0,
-                updatedAt: new Date()
-              })
-              .where(eq(modelComparisons.id, comparisonId)),
-            'saveModel1Response'
-          );
-
-          log.info('Model 1 response saved', {
-            comparisonId,
-            textLength: text.length,
-            usage,
-            finishReason
-          });
-        } catch (error) {
-          log.error('Failed to save Model 1 response', {
-            comparisonId,
-            error: error instanceof Error ? error.message : String(error)
-          });
-        }
-      }
-    });
-
-    const stream2Promise = streamText({
-      model: model2,
-      messages: [
-        {
-          role: 'user',
-          content: prompt
-        }
-      ],
-      onFinish: async ({ text, usage, finishReason }) => {
-        // Save Model 2 response
-        try {
-          await executeQuery(
-            (db) => db.update(modelComparisons)
-              .set({
-                response2: text,
-                executionTimeMs2: Date.now() - timerStartTime,
-                tokensUsed2: usage?.totalTokens || 0,
-                updatedAt: new Date()
-              })
-              .where(eq(modelComparisons.id, comparisonId)),
-            'saveModel2Response'
-          );
-
-          log.info('Model 2 response saved', {
-            comparisonId,
-            textLength: text.length,
-            usage,
-            finishReason
-          });
-        } catch (error) {
-          log.error('Failed to save Model 2 response', {
-            comparisonId,
-            error: error instanceof Error ? error.message : String(error)
-          });
-        }
-      }
-    });
-
-    // 9. Merge both streams with model identification
-    // StreamTextResult is both a Promise and has async iterable properties
-    const mergedGenerator = mergeStreamsWithIdentifiers(
-      stream1Promise,
-      stream2Promise
-    );
-
-    // Convert AsyncGenerator to ReadableStream
+    // 9. Merge both generators into a single SSE stream
+    const mergedGenerator = mergeResponseGenerators(gen1, gen2);
     const mergedStream = asyncGeneratorToStream(mergedGenerator);
 
     timer({

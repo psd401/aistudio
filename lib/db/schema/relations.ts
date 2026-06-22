@@ -18,6 +18,8 @@ import { roles } from "./tables/roles";
 import { userRoles } from "./tables/user-roles";
 import { tools } from "./tables/tools";
 import { roleTools } from "./tables/role-tools";
+import { capabilities } from "./tables/capabilities";
+import { roleCapabilities } from "./tables/role-capabilities";
 
 // AI Models
 import { aiModels } from "./tables/ai-models";
@@ -146,6 +148,7 @@ export const usersRelations = relations(users, ({ one, many }) => ({
 export const rolesRelations = relations(roles, ({ many }) => ({
   userRoles: many(userRoles),
   roleTools: many(roleTools),
+  roleCapabilities: many(roleCapabilities),
   repositoryAccess: many(repositoryAccess),
 }));
 
@@ -175,6 +178,24 @@ export const roleToolsRelations = relations(roleTools, ({ one }) => ({
     references: [tools.id],
   }),
 }));
+
+export const capabilitiesRelations = relations(capabilities, ({ many }) => ({
+  roleCapabilities: many(roleCapabilities),
+}));
+
+export const roleCapabilitiesRelations = relations(
+  roleCapabilities,
+  ({ one }) => ({
+    role: one(roles, {
+      fields: [roleCapabilities.roleId],
+      references: [roles.id],
+    }),
+    capability: one(capabilities, {
+      fields: [roleCapabilities.capabilityId],
+      references: [capabilities.id],
+    }),
+  })
+);
 
 // ============================================
 // Assistant Architect Relations

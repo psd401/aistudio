@@ -4,6 +4,7 @@ REST API for managing context graph nodes and edges. Part of Epic #674 (External
 
 **Base URL:** `/api/v1`
 **OpenAPI Spec:** [`docs/API/v1/openapi.yaml`](./openapi.yaml)
+**Tool endpoints (catalog-generated):** [`generated/tool-catalog.openapi.json`](./generated/tool-catalog.openapi.json) — endpoints backed by a unified tool-catalog entry (e.g. assistant execute/list) are generated from the catalog manifest via `bun run openapi:generate` (issue #924).
 
 ---
 
@@ -434,6 +435,60 @@ Delete a single edge. Requires `graph:write`.
 ```
 
 **Response `404`** — Edge not found.
+
+---
+
+### Tools (catalog versioning — Issue #927)
+
+Inspect the unified tool catalog and its version history. Tools are versioned
+`v1`/`v2`/`v3` (not semver). A version is **immutable** once published; a breaking
+change is a new version. Deprecated versions stay callable for a grace period
+(default **90 days**) before an admin may remove them. All endpoints require the
+`tools:read` scope.
+
+Tool versions are addressed in the catalog as `identifier@version` (e.g.
+`documents.create@v2`); the REST API itself stays at `/api/v1` — per-tool
+versioning is in the path/query below, not in the API version.
+
+#### `GET /api/v1/tools/{identifier}`
+
+Returns the latest **non-deprecated** version of a tool.
+
+- `?include=all` returns every version (including deprecated) under a `versions`
+  array.
+
+**Response `200`** (latest)
+
+```json
+{
+  "data": {
+    "identifier": "documents.create",
+    "version": "v2",
+    "name": "create_document",
+    "surfaces": ["internal"],
+    "requiredScopes": ["chat:write"],
+    "agentCallable": true,
+    "isActive": true,
+    "deprecated": false,
+    "deprecatedAt": null,
+    "replacedBy": null,
+    "removalDate": null
+  },
+  "meta": { "requestId": "req_abc123" }
+}
+```
+
+**Response `404`** — No tool with that identifier.
+
+#### `GET /api/v1/tools/{identifier}/versions/{version}`
+
+Returns one specific version. `{version}` may be `v2` or a bare `2`.
+
+**Response `200`** — the `ToolVersion` object (same shape as above).
+
+**Response `404`** — That version was removed (past its grace period) or never
+existed. The message points the caller at the latest version. This is the error a
+skill or assistant pinned to a removed version receives.
 
 ---
 

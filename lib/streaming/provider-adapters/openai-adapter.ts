@@ -1,5 +1,5 @@
 import { createOpenAI } from '@ai-sdk/openai';
-import { streamText, stepCountIs, type ModelMessage, type ToolSet } from 'ai';
+import { streamText, type ModelMessage, type ToolSet } from 'ai';
 import { createLogger } from '@/lib/logger';
 import { Settings } from '@/lib/settings-manager';
 import { ErrorFactories } from '@/lib/error-utils';
@@ -314,6 +314,13 @@ export class OpenAIAdapter extends BaseProviderAdapter {
       // Accumulate tool calls across steps (OpenAI Responses API path)
       const accumulatedToolCalls: AccumulatedToolCall[] = [];
 
+      // Use the SHARED stop conditions (maxSteps + cost cap) and the SHARED
+      // wall-clock timeout (#926). The Responses-API path previously set only
+      // stepCountIs(maxSteps), silently bypassing the cost cap and timeout for
+      // these models. Reuse the base-adapter helpers so all paths enforce both.
+      const stopConditions = this.buildStopConditions(enhancedConfig, logger);
+      const abortSignal = this.buildTimeoutSignal(enhancedConfig.timeout, logger);
+
       // Stream with Responses API enhancements
       const result = streamText({
         model: enhancedConfig.model,
@@ -322,7 +329,8 @@ export class OpenAIAdapter extends BaseProviderAdapter {
         tools: enhancedConfig.tools,
         toolChoice: enhancedConfig.toolChoice,
         temperature: enhancedConfig.temperature,
-        ...(enhancedConfig.maxSteps && { stopWhen: stepCountIs(enhancedConfig.maxSteps) }),
+        ...(abortSignal && { abortSignal }),
+        ...(stopConditions.length > 0 && { stopWhen: stopConditions }),
         // Capture tool calls as each step finishes
         onStepFinish: (event) => {
           if (event.toolCalls && Array.isArray(event.toolCalls)) {

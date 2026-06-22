@@ -19,6 +19,7 @@ import type { SelectAssistantArchitect, SelectToolInputField } from "@/types"
 import { AssistantDetailsForm } from "./assistant-details-form"
 import { InputFieldsSection } from "./input-fields-section"
 import type { InputFieldData } from "./input-field-editor"
+import { AgenticModeSection, type AgenticConfigState } from "./agentic-mode-section"
 
 interface CreateFormProps {
   initialData?: SelectAssistantArchitect
@@ -33,6 +34,23 @@ const formSchema = z.object({
 
 type FormValues = z.infer<typeof formSchema>
 
+/**
+ * Map the UI agentic config to the server-action payload. Cost cap is whole
+ * dollars in the UI; the action/DB store whole cents. Tools are cleared when not
+ * in agentic mode so a mode flip doesn't leave a stale tool list.
+ */
+function toAgenticPayload(agentic: AgenticConfigState) {
+  return {
+    mode: agentic.mode,
+    agentEnabledTools: agentic.mode === "agentic" ? agentic.enabledTools : [],
+    agentMaxSteps: agentic.maxSteps,
+    agentTimeoutSeconds: agentic.timeoutSeconds,
+    agentCostCapCents:
+      agentic.costCapDollars === null ? null : Math.round(agentic.costCapDollars * 100),
+    agentMaxRequestsPerHour: agentic.maxRequestsPerHour,
+  }
+}
+
 export function CreateForm({ initialData, initialInputFields = [] }: CreateFormProps) {
   const router = useRouter()
   const { toast } = useToast()
@@ -42,6 +60,26 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
     initialData?.id ? String(initialData.id) : null
   )
   const [inputFields, setInputFields] = useState<SelectToolInputField[]>(initialInputFields)
+
+  // Agentic mode config (Issue #926). Initialized from the existing assistant
+  // when editing; defaults to prompt-chain for new assistants.
+  const [agentic, setAgentic] = useState<AgenticConfigState>(() => ({
+    mode: (initialData?.mode as AgenticConfigState["mode"]) || "prompt_chain",
+    enabledTools: initialData?.agentEnabledTools ?? [],
+    maxSteps: initialData?.agentMaxSteps ?? 10,
+    timeoutSeconds: initialData?.agentTimeoutSeconds ?? 300,
+    costCapDollars:
+      typeof initialData?.agentCostCapCents === "number"
+        ? initialData.agentCostCapCents / 100
+        : null,
+    maxRequestsPerHour:
+      typeof initialData?.agentMaxRequestsPerHour === "number"
+        ? initialData.agentMaxRequestsPerHour
+        : null,
+  }))
+  // The mode transition is one-way: an assistant already in agentic mode cannot
+  // be reverted, so lock the prompt-chain option when editing such an assistant.
+  const lockAgentic = initialData?.mode === "agentic"
 
   useEffect(() => {
     fetch("/api/assistant-images")
@@ -64,10 +102,15 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
     const isValid = await form.trigger()
     if (!isValid) return null
 
+    const agenticPayload = toAgenticPayload(agentic)
+
     try {
       setIsSubmitting(true)
       if (assistantId) {
-        const result = await updateAssistantArchitectAction(assistantId, values)
+        const result = await updateAssistantArchitectAction(assistantId, {
+          ...values,
+          ...agenticPayload,
+        })
         if (!result.isSuccess) throw new Error(result.message)
         return assistantId
       }
@@ -75,7 +118,8 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
         name: values.name,
         description: values.description || "",
         imagePath: values.imagePath,
-        status: "draft"
+        status: "draft",
+        ...agenticPayload,
       })
       if (!result.isSuccess) throw new Error(result.message)
       const newId = String(result.data.id)
@@ -91,7 +135,7 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
     } finally {
       setIsSubmitting(false)
     }
-  }, [form, assistantId, toast])
+  }, [form, assistantId, toast, agentic])
 
   const handleAddField = useCallback(async () => saveAssistant(), [saveAssistant])
 
@@ -149,6 +193,13 @@ export function CreateForm({ initialData, initialInputFields = [] }: CreateFormP
           <AssistantDetailsForm control={form.control} images={images} />
         </form>
       </Form>
+
+      <AgenticModeSection
+        value={agentic}
+        onChange={setAgentic}
+        lockAgentic={lockAgentic}
+        disabled={isSubmitting}
+      />
 
       <InputFieldsSection
         inputFields={inputFields}

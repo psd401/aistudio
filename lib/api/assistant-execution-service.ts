@@ -134,6 +134,21 @@ async function prepareAssistantExecution(
   }
 
   const architect = architectResult.data
+
+  // Agentic assistants (#926) require the full agentic runtime (tool resolution,
+  // per-run limits, mid-loop cost cap) which currently lives only in the
+  // assistant-architect execute route. The REST API v1 and MCP execution paths
+  // route through this prompt-chain service. Rather than silently running an
+  // agentic assistant as a plain prompt chain — dropping its configured tools and
+  // limits — fail loudly so callers get a clear, actionable error.
+  if (architect.mode === "agentic") {
+    throw ErrorFactories.validationFailed([{
+      field: "mode",
+      message:
+        "Agentic assistants are not supported on this execution surface. Run agentic assistants through the Assistant Architect UI.",
+    }])
+  }
+
   const prompts = (architect.prompts || []).sort((a, b) => a.position - b.position)
 
   if (!prompts || prompts.length === 0) {

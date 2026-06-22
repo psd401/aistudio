@@ -109,6 +109,44 @@ WHERE r.name = 'staff'
 ON CONFLICT (role_id, tool_id) DO NOTHING;
 
 -- ============================================================================
+-- Capabilities (Issue #923 — renamed successor to tools)
+-- ============================================================================
+-- hasToolAccess() now reads from capabilities/role_capabilities. Seed the same
+-- identifiers so local test users keep access. These are marked source='manual'
+-- here; the boot-time manifest sync (lib/capabilities/manifest.ts) flips
+-- manifest-managed identifiers to source='code' when the dev server starts.
+
+INSERT INTO capabilities (identifier, name, description, is_active, source) VALUES
+('assistant-architect', 'Assistant Architect', 'Build and schedule custom AI assistants', true, 'manual'),
+('model-compare', 'Model Compare', 'Compare AI model responses side-by-side', true, 'manual'),
+('knowledge-repositories', 'Knowledge Repositories', 'Manage knowledge bases for AI assistants', true, 'manual'),
+('decision-capture', 'Decision Capture', 'Extract and capture decisions from meeting transcripts into the context graph', true, 'manual'),
+('voice-mode', 'Voice Mode', 'Real-time voice conversations in Nexus using AI speech providers', true, 'manual')
+ON CONFLICT (identifier) DO UPDATE SET
+    name = EXCLUDED.name,
+    description = EXCLUDED.description,
+    is_active = EXCLUDED.is_active,
+    updated_at = CURRENT_TIMESTAMP;
+
+-- Grant these capabilities to administrator role
+INSERT INTO role_capabilities (role_id, capability_id)
+SELECT r.id, c.id
+FROM roles r
+CROSS JOIN capabilities c
+WHERE r.name = 'administrator'
+  AND c.identifier IN ('assistant-architect', 'model-compare', 'knowledge-repositories', 'decision-capture', 'voice-mode')
+ON CONFLICT (role_id, capability_id) DO NOTHING;
+
+-- Grant assistant-architect and model-compare to staff role
+INSERT INTO role_capabilities (role_id, capability_id)
+SELECT r.id, c.id
+FROM roles r
+CROSS JOIN capabilities c
+WHERE r.name = 'staff'
+  AND c.identifier IN ('assistant-architect', 'model-compare')
+ON CONFLICT (role_id, capability_id) DO NOTHING;
+
+-- ============================================================================
 -- Navigation Items
 -- ============================================================================
 -- Standard navigation structure for the application

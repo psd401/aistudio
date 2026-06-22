@@ -55,7 +55,6 @@ const mockGetAvailableTools = getAvailableToolsForModel as jest.MockedFunction<
 
 const WEB_SEARCH_TOOL: ToolConfig = {
   name: 'webSearch',
-  tool: {},
   requiredCapabilities: ['webSearch', 'grounding'],
   displayName: 'Web Search',
   description: 'Search the web for current information and facts',
@@ -64,7 +63,6 @@ const WEB_SEARCH_TOOL: ToolConfig = {
 
 const CODE_TOOL: ToolConfig = {
   name: 'codeInterpreter',
-  tool: {},
   requiredCapabilities: ['codeInterpreter', 'codeExecution'],
   displayName: 'Code Interpreter',
   description: 'Execute code',

@@ -19,6 +19,7 @@ import { ConnectorToolProvider, useConnectorTools } from './_components/tools/co
 import { ConnectorReconnectPrompt, ConnectorToolFallback } from './_components/tools/connector-tool-ui'
 import { useModelsWithPersistence } from '@/lib/hooks/use-models'
 import { createEnhancedNexusAttachmentAdapter } from '@/lib/nexus/enhanced-attachment-adapters'
+import { UploadClassifiedError } from '@/lib/errors/upload-errors'
 import { validateConversationId } from '@/lib/nexus/conversation-navigation'
 import type { SelectAiModel } from '@/types'
 import { createLogger } from '@/lib/client-logger'
@@ -65,6 +66,7 @@ interface ConversationRuntimeProviderProps {
   selectedModel: SelectAiModel | null
   enabledTools: string[]
   enabledConnectors: string[]
+  skillId?: string
   attachmentAdapter: AttachmentAdapter
   voiceAdapter?: RealtimeVoiceAdapter
   initialMessages?: UIMessage[]
@@ -84,6 +86,7 @@ function ConversationRuntimeProvider({
   selectedModel,
   enabledTools,
   enabledConnectors,
+  skillId,
   attachmentAdapter,
   voiceAdapter,
   initialMessages = [],
@@ -317,6 +320,8 @@ function ConversationRuntimeProvider({
           provider: model.provider,
           enabledTools,
           enabledConnectors,
+          // Bind the session to a skill so the server enforces its allowed-tools pin (#925).
+          skillId,
           conversationId: conversationIdRef.current || undefined
         }
       }
@@ -346,6 +351,7 @@ interface NexusRuntimeWrapperProps {
   selectedModel: SelectAiModel | null
   enabledTools: string[]
   enabledConnectors: string[]
+  skillId?: string
   attachmentAdapter: AttachmentAdapter
   voiceAvailable: boolean
   voiceUnavailableReason?: string
@@ -364,6 +370,7 @@ function NexusRuntimeWrapper({
   selectedModel,
   enabledTools,
   enabledConnectors,
+  skillId,
   attachmentAdapter,
   voiceAvailable,
   voiceUnavailableReason,
@@ -443,6 +450,7 @@ function NexusRuntimeWrapper({
       selectedModel={selectedModel}
       enabledTools={enabledTools}
       enabledConnectors={enabledConnectors}
+      skillId={skillId}
       attachmentAdapter={attachmentAdapter}
       voiceAdapter={voiceAdapter}
       initialMessages={initialMessages}
@@ -527,6 +535,13 @@ function NexusPageContent() {
       log.warn('URL connector params truncated or filtered', { rawCount: raw.length, validCount: validated.length })
     }
     return validated
+  }, [searchParams])
+
+  // Skill binding (#925): when arriving from a skill's "Use in chat" action, the
+  // session is bound to the skill so the server enforces its allowed-tools pin.
+  const urlSkillId = useMemo(() => {
+    const raw = searchParams.get('skillId')
+    return raw && uuidSchema.safeParse(raw).success ? raw : undefined
   }, [searchParams])
 
   // Load models and manage model selection
@@ -661,6 +676,35 @@ function NexusPageContent() {
     log.debug('Attachment processing completed', { attachmentId })
   }, [])
 
+  const handleAttachmentError = useCallback((attachmentId: string, error: UploadClassifiedError | Error) => {
+    log.warn('Attachment processing failed', {
+      attachmentId,
+      code: error instanceof UploadClassifiedError ? error.code : undefined,
+      error: error.message,
+    })
+
+    if (error instanceof UploadClassifiedError && error.code === 'UNAUTHORIZED') {
+      toast.error('Session expired', {
+        description: 'Your session expired during file upload. Please sign in again.',
+        duration: 8000,
+        action: {
+          label: 'Sign in',
+          onClick: () => {
+            const callbackUrl = encodeURIComponent(window.location.pathname + window.location.search)
+            window.location.href = `/api/auth/signin?callbackUrl=${callbackUrl}`
+          },
+        },
+      })
+    } else {
+      toast.error('File upload failed', {
+        description: error instanceof UploadClassifiedError
+          ? `Upload error: ${error.code.replace(/_/g, ' ').toLowerCase()}.`
+          : 'The file could not be uploaded. Please try again.',
+        duration: 6000,
+      })
+    }
+  }, [])
+
   // Conversation ID callback for maintaining conversation continuity
   const handleConversationIdChange = useCallback((newConversationId: string) => {
     setConversationId(newConversationId)
@@ -700,8 +744,9 @@ function NexusPageContent() {
     return createEnhancedNexusAttachmentAdapter({
       onProcessingStart: handleAttachmentProcessingStart,
       onProcessingComplete: handleAttachmentProcessingComplete,
+      onError: handleAttachmentError,
     })
-  }, [handleAttachmentProcessingStart, handleAttachmentProcessingComplete])
+  }, [handleAttachmentProcessingStart, handleAttachmentProcessingComplete, handleAttachmentError])
 
   // Voice mode — check availability (adapter created inside NexusRuntimeWrapper via useVoiceSession)
   const voiceAvailability = useVoiceAvailability()
@@ -752,6 +797,7 @@ function NexusPageContent() {
                         selectedModel={selectedModel}
                         enabledTools={enabledTools}
                         enabledConnectors={enabledConnectors}
+                        skillId={urlSkillId}
                         attachmentAdapter={attachmentAdapter}
                         voiceAvailable={voiceAvailability.available}
                         voiceUnavailableReason={!voiceAvailability.available && !voiceAvailability.loading ? voiceAvailability.reason : undefined}

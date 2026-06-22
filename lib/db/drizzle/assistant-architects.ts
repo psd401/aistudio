@@ -42,8 +42,8 @@
  * @see https://orm.drizzle.team/docs/select
  */
 
-import { eq, desc, sql } from "drizzle-orm";
-import { executeQuery } from "@/lib/db/drizzle-client";
+import { eq, desc, sql, inArray } from "drizzle-orm";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import {
   assistantArchitects,
   chainPrompts,
@@ -51,9 +51,43 @@ import {
   toolExecutions,
   promptResults,
   tools,
+  capabilities,
   users,
+  toolEdits,
+  scheduledExecutions,
+  executionResults,
+  userNotifications,
+  roleTools,
+  navigationItems,
+  navigationItemRoles,
 } from "@/lib/db/schema";
 import { ErrorFactories } from "@/lib/error-utils";
+import { CAPABILITY_MANIFEST } from "@/lib/capabilities/manifest";
+// Single source of truth for the runtime mode union (#926) — see re-export below.
+import type { AssistantArchitectMode } from "@/lib/db/schema/tables/assistant-architects";
+
+/**
+ * Identifiers owned by the code manifest. An Assistant Architect whose slugified
+ * name collides with one of these MUST NOT claim it (the approval upsert would
+ * otherwise overwrite the manifest row's source/promptChainToolId, corrupting a
+ * code-managed capability). Collisions are disambiguated with an id suffix.
+ */
+const MANIFEST_IDENTIFIERS: ReadonlySet<string> = new Set(
+  CAPABILITY_MANIFEST.map((e) => e.identifier)
+);
+
+/**
+ * Slugify an Assistant Architect name into a tool/capability identifier.
+ * If the slug collides with a code-manifest identifier, append the assistant id
+ * to keep the AA's own row distinct from the manifest-managed capability.
+ */
+function buildAssistantToolIdentifier(name: string, assistantId: number): string {
+  const base = name
+    .toLowerCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^\da-z-]/g, "");
+  return MANIFEST_IDENTIFIERS.has(base) ? `${base}-${assistantId}` : base;
+}
 
 // ============================================
 // Types
@@ -61,6 +95,13 @@ import { ErrorFactories } from "@/lib/error-utils";
 
 /** Tool status values from the database enum */
 export type ToolStatus = "draft" | "pending_approval" | "approved" | "rejected" | "disabled";
+
+/**
+ * Assistant runtime mode (Issue #926). Re-exported from the schema definition
+ * (imported at the top of this file) so there is a single source of truth —
+ * adding a future mode in the schema can't drift from this layer.
+ */
+export type { AssistantArchitectMode };
 
 export interface AssistantArchitectData {
   name: string;
@@ -70,6 +111,14 @@ export interface AssistantArchitectData {
   isParallel?: boolean;
   timeoutSeconds?: number | null;
   imagePath?: string | null;
+  // Agentic mode (Issue #926)
+  mode?: AssistantArchitectMode;
+  agentEnabledTools?: string[];
+  agentEnabledConnectors?: string[];
+  agentMaxSteps?: number;
+  agentTimeoutSeconds?: number;
+  agentCostCapCents?: number | null;
+  agentMaxRequestsPerHour?: number | null;
 }
 
 export interface AssistantArchitectUpdateData {
@@ -79,6 +128,14 @@ export interface AssistantArchitectUpdateData {
   isParallel?: boolean;
   timeoutSeconds?: number | null;
   imagePath?: string | null;
+  // Agentic mode (Issue #926)
+  mode?: AssistantArchitectMode;
+  agentEnabledTools?: string[];
+  agentEnabledConnectors?: string[];
+  agentMaxSteps?: number;
+  agentTimeoutSeconds?: number;
+  agentCostCapCents?: number | null;
+  agentMaxRequestsPerHour?: number | null;
 }
 
 export interface AssistantArchitectWithCreator {
@@ -92,6 +149,14 @@ export interface AssistantArchitectWithCreator {
   userId: number | null;
   createdAt: Date;
   updatedAt: Date;
+  // Agentic mode (Issue #926)
+  mode: AssistantArchitectMode;
+  agentEnabledTools: string[];
+  agentEnabledConnectors: string[];
+  agentMaxSteps: number;
+  agentTimeoutSeconds: number;
+  agentCostCapCents: number | null;
+  agentMaxRequestsPerHour: number | null;
   creator: {
     id: number;
     firstName: string | null;
@@ -124,6 +189,14 @@ export async function getAssistantArchitects(): Promise<
           userId: assistantArchitects.userId,
           createdAt: assistantArchitects.createdAt,
           updatedAt: assistantArchitects.updatedAt,
+          // Agentic mode (Issue #926)
+          mode: assistantArchitects.mode,
+          agentEnabledTools: assistantArchitects.agentEnabledTools,
+          agentEnabledConnectors: assistantArchitects.agentEnabledConnectors,
+          agentMaxSteps: assistantArchitects.agentMaxSteps,
+          agentTimeoutSeconds: assistantArchitects.agentTimeoutSeconds,
+          agentCostCapCents: assistantArchitects.agentCostCapCents,
+          agentMaxRequestsPerHour: assistantArchitects.agentMaxRequestsPerHour,
           creatorId: users.id,
           creatorFirstName: users.firstName,
           creatorLastName: users.lastName,
@@ -147,6 +220,14 @@ export async function getAssistantArchitects(): Promise<
     userId: row.userId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    // Agentic mode (Issue #926)
+    mode: row.mode,
+    agentEnabledTools: row.agentEnabledTools,
+    agentEnabledConnectors: row.agentEnabledConnectors,
+    agentMaxSteps: row.agentMaxSteps,
+    agentTimeoutSeconds: row.agentTimeoutSeconds,
+    agentCostCapCents: row.agentCostCapCents,
+    agentMaxRequestsPerHour: row.agentMaxRequestsPerHour,
     creator:
       row.creatorId && row.creatorEmail
         ? {
@@ -196,6 +277,14 @@ export async function getAssistantArchitectWithCreator(
           userId: assistantArchitects.userId,
           createdAt: assistantArchitects.createdAt,
           updatedAt: assistantArchitects.updatedAt,
+          // Agentic mode (Issue #926)
+          mode: assistantArchitects.mode,
+          agentEnabledTools: assistantArchitects.agentEnabledTools,
+          agentEnabledConnectors: assistantArchitects.agentEnabledConnectors,
+          agentMaxSteps: assistantArchitects.agentMaxSteps,
+          agentTimeoutSeconds: assistantArchitects.agentTimeoutSeconds,
+          agentCostCapCents: assistantArchitects.agentCostCapCents,
+          agentMaxRequestsPerHour: assistantArchitects.agentMaxRequestsPerHour,
           creatorId: users.id,
           creatorFirstName: users.firstName,
           creatorLastName: users.lastName,
@@ -222,6 +311,14 @@ export async function getAssistantArchitectWithCreator(
     userId: row.userId,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
+    // Agentic mode (Issue #926)
+    mode: row.mode,
+    agentEnabledTools: row.agentEnabledTools,
+    agentEnabledConnectors: row.agentEnabledConnectors,
+    agentMaxSteps: row.agentMaxSteps,
+    agentTimeoutSeconds: row.agentTimeoutSeconds,
+    agentCostCapCents: row.agentCostCapCents,
+    agentMaxRequestsPerHour: row.agentMaxRequestsPerHour,
     creator:
       row.creatorId && row.creatorEmail
         ? {
@@ -293,6 +390,28 @@ export async function createAssistantArchitect(data: AssistantArchitectData) {
           isParallel: data.isParallel ?? false,
           timeoutSeconds: data.timeoutSeconds,
           imagePath: data.imagePath,
+          // Agentic mode (Issue #926). Column DB-defaults cover undefined, but
+          // pass through explicitly so a caller creating an agentic assistant in
+          // one step gets the right mode + config.
+          ...(data.mode !== undefined ? { mode: data.mode } : {}),
+          ...(data.agentEnabledTools !== undefined
+            ? { agentEnabledTools: data.agentEnabledTools }
+            : {}),
+          ...(data.agentEnabledConnectors !== undefined
+            ? { agentEnabledConnectors: data.agentEnabledConnectors }
+            : {}),
+          ...(data.agentMaxSteps !== undefined
+            ? { agentMaxSteps: data.agentMaxSteps }
+            : {}),
+          ...(data.agentTimeoutSeconds !== undefined
+            ? { agentTimeoutSeconds: data.agentTimeoutSeconds }
+            : {}),
+          ...(data.agentCostCapCents !== undefined
+            ? { agentCostCapCents: data.agentCostCapCents }
+            : {}),
+          ...(data.agentMaxRequestsPerHour !== undefined
+            ? { agentMaxRequestsPerHour: data.agentMaxRequestsPerHour }
+            : {}),
         })
         .returning(),
     "createAssistantArchitect"
@@ -360,9 +479,81 @@ export async function updateAssistantArchitect(
  * Uses cascading deletes through related tables
  */
 export async function deleteAssistantArchitect(id: number) {
-  // Delete in correct order to respect foreign key constraints
-  return executeQuery(
-    (db) => db.transaction(async (tx) => {
+  // Delete in correct order to respect foreign key constraints.
+  // All steps run in ONE transaction so a partial failure never leaves the DB
+  // in a broken state (e.g. tools gone but assistant row still present).
+  return executeTransaction(
+    async (tx) => {
+      // 0a. Gather scheduled_execution IDs so we can cascade through child tables.
+      const schedIds = await tx
+        .select({ id: scheduledExecutions.id })
+        .from(scheduledExecutions)
+        .where(eq(scheduledExecutions.assistantArchitectId, id));
+
+      if (schedIds.length > 0) {
+        const schedIdList = schedIds.map((r) => r.id);
+
+        // 0b. Gather execution_result IDs so we can cascade to user_notifications.
+        const execResultIds = await tx
+          .select({ id: executionResults.id })
+          .from(executionResults)
+          .where(inArray(executionResults.scheduledExecutionId, schedIdList));
+
+        if (execResultIds.length > 0) {
+          // 0c. Delete user_notifications (FK to execution_results, no cascade).
+          await tx
+            .delete(userNotifications)
+            .where(inArray(userNotifications.executionResultId, execResultIds.map((r) => r.id)));
+        }
+
+        // 0d. Delete execution_results (FK to scheduled_executions, no cascade).
+        await tx
+          .delete(executionResults)
+          .where(inArray(executionResults.scheduledExecutionId, schedIdList));
+      }
+
+      // 0e. Gather tool IDs linked to this assistant via prompt_chain_tool_id.
+      const toolRows = await tx
+        .select({ id: tools.id })
+        .from(tools)
+        .where(eq(tools.promptChainToolId, id));
+
+      if (toolRows.length > 0) {
+        // 0f. Delete role_tools (FK to tools, no cascade).
+        await tx
+          .delete(roleTools)
+          .where(inArray(roleTools.toolId, toolRows.map((r) => r.id)));
+      }
+
+      // 0g. Delete tools linked to this assistant.
+      await tx
+        .delete(tools)
+        .where(eq(tools.promptChainToolId, id));
+
+      // 0h. Delete capabilities linked to this assistant.
+      await tx
+        .delete(capabilities)
+        .where(eq(capabilities.promptChainToolId, id));
+
+      // 0i. Gather navigation item IDs for this assistant.
+      const navLink = `/tools/assistant-architect/${id}`;
+      const navItemRows = await tx
+        .select({ id: navigationItems.id })
+        .from(navigationItems)
+        .where(eq(navigationItems.link, navLink));
+
+      if (navItemRows.length > 0) {
+        // 0j. Delete navigation_item_roles (FK to navigation_items, no cascade).
+        await tx
+          .delete(navigationItemRoles)
+          .where(inArray(navigationItemRoles.navigationItemId, navItemRows.map((r) => r.id)));
+      }
+
+      // 0k. Delete navigation_items.
+      await tx
+        .delete(navigationItems)
+        .where(eq(navigationItems.link, navLink));
+
       // 1. Delete prompt_results (references chain_prompts via prompt_id)
       await tx
         .delete(promptResults)
@@ -385,14 +576,24 @@ export async function deleteAssistantArchitect(id: number) {
         .delete(toolExecutions)
         .where(eq(toolExecutions.assistantArchitectId, id));
 
-      // 5. Finally delete the assistant architect itself
+      // 5. Delete tool_edits (audit log rows — FK with no onDelete cascade)
+      await tx
+        .delete(toolEdits)
+        .where(eq(toolEdits.assistantArchitectId, id));
+
+      // 6. Delete scheduled_executions (FK with no onDelete cascade)
+      await tx
+        .delete(scheduledExecutions)
+        .where(eq(scheduledExecutions.assistantArchitectId, id));
+
+      // 7. Finally delete the assistant architect itself
       const result = await tx
         .delete(assistantArchitects)
         .where(eq(assistantArchitects.id, id))
         .returning();
 
       return result[0];
-    }),
+    },
     "deleteAssistantArchitectTransaction"
   );
 }
@@ -406,8 +607,10 @@ export async function deleteAssistantArchitect(id: number) {
  * Also creates the corresponding tool entry if it doesn't exist
  */
 export async function approveAssistantArchitect(id: number) {
-  return executeQuery(
-    (db) => db.transaction(async (tx) => {
+  // Use executeTransaction directly (never nest db.transaction inside
+  // executeQuery — the wrapper's retry could replay a partially-committed tx).
+  return executeTransaction(
+    async (tx) => {
       // Update status to approved
       const result = await tx
         .update(assistantArchitects)
@@ -430,15 +633,40 @@ export async function approveAssistantArchitect(id: number) {
 
       // Create tool entry if it doesn't already exist
       // Use INSERT ... ON CONFLICT DO NOTHING to handle race conditions
-      // If another transaction creates the tool first, this silently succeeds
-      const toolIdentifier = assistant.name
-        .toLowerCase()
-        .replace(/\s+/g, "-")
-        .replace(/[^\da-z-]/g, "");
+      // If another transaction creates the tool first, this silently succeeds.
+      // A name that slugifies to a code-manifest identifier is disambiguated with
+      // an id suffix so the approval upsert can never hijack a manifest-owned
+      // capability row (which would overwrite its source/promptChainToolId).
+      let toolIdentifier = buildAssistantToolIdentifier(
+        assistant.name,
+        assistant.id
+      );
 
-      // Race condition safety: If concurrent approvals happen, onConflictDoNothing
-      // prevents duplicate key errors. Tool identifier is unique, so conflicts are
-      // handled gracefully without throwing errors.
+      // Guard against two different assistants whose names slugify to the same
+      // identifier (e.g. both "Weekly Report" -> "weekly-report"). Without this,
+      // the upsert below would re-stamp the FIRST assistant's capability row with
+      // THIS assistant's promptChainToolId, silently stealing its tool mapping
+      // (assistant_architects.name is not unique). If the identifier is already
+      // owned by a different assistant, disambiguate with this assistant's id.
+      const [conflicting] = await tx
+        .select({ promptChainToolId: capabilities.promptChainToolId })
+        .from(capabilities)
+        .where(eq(capabilities.identifier, toolIdentifier))
+        .limit(1);
+      if (
+        conflicting &&
+        conflicting.promptChainToolId !== null &&
+        conflicting.promptChainToolId !== assistant.id
+      ) {
+        toolIdentifier = `${toolIdentifier}-${assistant.id}`;
+      }
+
+      // Race condition safety: concurrent approvals can't produce duplicate key
+      // errors because the tool identifier is unique. On conflict we upsert (not
+      // skip) so a re-approved AA — whose tool row was deactivated during an edit
+      // — is re-activated and its promptChainToolId is re-stamped. The
+      // post-approval code looks the tool up by promptChainToolId, so a skipped
+      // insert that left a stale/NULL promptChainToolId would break the lookup.
       await tx
         .insert(tools)
         .values({
@@ -448,12 +676,56 @@ export async function approveAssistantArchitect(id: number) {
           promptChainToolId: assistant.id,
           isActive: true,
         })
-        .onConflictDoNothing({
+        .onConflictDoUpdate({
           target: tools.identifier,
+          set: {
+            name: assistant.name,
+            description: assistant.description,
+            promptChainToolId: assistant.id,
+            isActive: true,
+            updatedAt: new Date(),
+          },
+        });
+
+      // Issue #923: dual-write the capability row in the same transaction so the
+      // post-approval role grant (which now targets role_capabilities) and the
+      // hasToolAccess() read path (which now reads capabilities) stay consistent.
+      // AA-generated capabilities are source='manual' (admin-editable, like the
+      // legacy tool row).
+      //
+      // On conflict we MUST upsert, not skip: an AA that was approved, edited
+      // (which deactivates this row via updateAssistantArchitectAction), then
+      // re-approved would otherwise stay is_active=false forever — the row exists,
+      // so the insert is skipped, and hasCapabilityAccess (which filters
+      // is_active=true) would deny access permanently. Re-stamp promptChainToolId
+      // so the post-approval lookup-by-promptChainToolId always resolves, even if
+      // the identifier was first claimed by the manifest sync (which leaves
+      // prompt_chain_tool_id NULL). We intentionally re-sync name/description from
+      // the assistant so the capability stays in step with the AA on re-approval.
+      await tx
+        .insert(capabilities)
+        .values({
+          identifier: toolIdentifier,
+          name: assistant.name,
+          description: assistant.description,
+          promptChainToolId: assistant.id,
+          isActive: true,
+          source: "manual",
+        })
+        .onConflictDoUpdate({
+          target: capabilities.identifier,
+          set: {
+            name: assistant.name,
+            description: assistant.description,
+            promptChainToolId: assistant.id,
+            isActive: true,
+            source: "manual",
+            updatedAt: new Date(),
+          },
         });
 
       return assistant;
-    }),
+    },
     "approveAssistantArchitectTransaction"
   );
 }
