@@ -40,7 +40,7 @@ cd layers/processing/nodejs
 if [ ! -f "package.json" ]; then
     echo '{"name":"processing-layer","version":"1.0.0","private":true}' > package.json
 fi
-bun install pdf-parse mammoth xlsx csv-parse marked cheerio node-fetch @types/node-fetch
+bun install pdf-parse mammoth @e965/xlsx csv-parse marked cheerio node-fetch @types/node-fetch
 cd ../../..
 
 echo "Lambda build complete!"
