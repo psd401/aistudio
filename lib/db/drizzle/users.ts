@@ -16,11 +16,12 @@ import {
   users,
   userRoles,
   roles,
-  roleTools,
-  tools,
 } from "@/lib/db/schema";
-import { createLogger, generateRequestId, startTimer } from "@/lib/logger";
 import { ErrorFactories } from "@/lib/error-utils";
+import {
+  hasCapabilityAccess,
+  getUserCapabilities,
+} from "@/lib/db/drizzle/capabilities";
 
 // ============================================
 // Types
@@ -376,81 +377,27 @@ export async function getAllUserRoles() {
 // ============================================
 
 /**
- * Check if user has access to a specific tool by Cognito sub
+ * Check if a user has access to a specific tool by Cognito sub.
+ *
+ * Issue #923: the legacy `tools`/`role_tools` tables were renamed to
+ * `capabilities`/`role_capabilities`. This function keeps its name and signature
+ * as a compat shim during the migration window (call-site rename is workstream
+ * #6) and delegates to `hasCapabilityAccess`, which reads the new tables. Reads
+ * stay a single DB round-trip — there is no join across old and new tables.
  */
 export async function hasToolAccess(
   cognitoSub: string,
   toolIdentifier: string
 ): Promise<boolean> {
-  const requestId = generateRequestId();
-  const timer = startTimer("drizzle.hasToolAccess");
-  const log = createLogger({ requestId, function: "drizzle.hasToolAccess" });
-
-  log.debug("Checking tool access in database", {
-    cognitoSub,
-    toolIdentifier,
-  });
-
-  try {
-    const result = await executeQuery(
-      (db) =>
-        db
-          .select({ exists: sql<boolean>`true` })
-          .from(users)
-          .innerJoin(userRoles, eq(users.id, userRoles.userId))
-          .innerJoin(roleTools, eq(userRoles.roleId, roleTools.roleId))
-          .innerJoin(tools, eq(roleTools.toolId, tools.id))
-          .where(
-            and(
-              eq(users.cognitoSub, cognitoSub),
-              eq(tools.identifier, toolIdentifier)
-            )
-          )
-          .limit(1),
-      "hasToolAccess"
-    );
-
-    const hasAccess = result.length > 0;
-
-    if (hasAccess) {
-      log.info("Database: Tool access granted", {
-        cognitoSub,
-        toolIdentifier,
-      });
-    } else {
-      log.warn("Database: Tool access denied", {
-        cognitoSub,
-        toolIdentifier,
-      });
-    }
-
-    timer({ status: "success", hasAccess });
-    return hasAccess;
-  } catch (error) {
-    log.error("Database error checking tool access", {
-      error: error instanceof Error ? error.message : "Unknown error",
-      cognitoSub,
-      toolIdentifier,
-    });
-    timer({ status: "error" });
-    throw error;
-  }
+  return hasCapabilityAccess(cognitoSub, toolIdentifier);
 }
 
 /**
- * Get all tool identifiers accessible by a user
+ * Get all tool identifiers accessible by a user.
+ *
+ * Issue #923: compat shim delegating to `getUserCapabilities` (reads the new
+ * `capabilities`/`role_capabilities` tables).
  */
 export async function getUserTools(cognitoSub: string): Promise<string[]> {
-  const result = await executeQuery(
-    (db) =>
-      db
-        .selectDistinct({ identifier: tools.identifier })
-        .from(users)
-        .innerJoin(userRoles, eq(users.id, userRoles.userId))
-        .innerJoin(roleTools, eq(userRoles.roleId, roleTools.roleId))
-        .innerJoin(tools, eq(roleTools.toolId, tools.id))
-        .where(eq(users.cognitoSub, cognitoSub)),
-    "getUserTools"
-  );
-  return result.map((r) => r.identifier);
+  return getUserCapabilities(cognitoSub);
 }

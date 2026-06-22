@@ -21,6 +21,7 @@ import { execSync } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import type { Handler } from 'aws-lambda';
+import { findMalformedToolVersionPins } from './frontmatter-tools';
 
 const REGION = process.env.AWS_REGION || 'us-east-1';
 const ENVIRONMENT = process.env.ENVIRONMENT || 'dev';
@@ -390,6 +391,16 @@ async function scanSkill(skillDir: string): Promise<ScanFindings> {
         }
         if (!frontmatter.includes('name:')) {
           findings.skillMdLint.push('SKILL.md frontmatter missing required "name" field');
+        }
+        // Validate versioned tool references in `allowed-tools` (Issue #927). A
+        // pin of the form `identifier@version` must use a well-formed `vN`
+        // version token; a malformed pin (e.g. `tool@2`, `tool@latest`) is a typo
+        // that would silently fail to match any real tool, so flag it at scan time.
+        for (const badPin of findMalformedToolVersionPins(frontmatter)) {
+          findings.skillMdLint.push(
+            `SKILL.md allowed-tools has a malformed version pin "${badPin}" ` +
+              '(expected "identifier@vN", e.g. "documents.create@v2")'
+          );
         }
       }
     }

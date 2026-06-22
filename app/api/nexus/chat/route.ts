@@ -43,6 +43,12 @@ import {
 import { eq, and } from 'drizzle-orm';
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { nexusConversations } from '@/lib/db/schema';
+import { getScopesForRoles } from '@/lib/api-keys/scopes';
+import { toolCatalogInstance } from '@/lib/tools/catalog/catalog';
+import {
+  intersectSkillAllowedTools,
+  getApprovedSkillAllowedTools,
+} from '@/lib/skills/skill-tool-enforcement';
 
 // Allow streaming responses up to 30 minutes. Deep Research runs take 5–25
 // minutes; standard chat and image-gen finish well within this window.
@@ -271,6 +277,9 @@ const ChatRequestSchema = z.object({
   conversationId: z.string().nullable().optional(),
   enabledTools: z.array(z.string()).optional(),
   enabledConnectors: z.array(z.string().uuid()).max(10).optional(),
+  // When the session is bound to a published skill ("use in chat"), the skill's
+  // `allowed-tools` pin is enforced server-side over the client tool list (#925 AC#6).
+  skillId: z.string().uuid().optional(),
   reasoningEffort: z.enum(['minimal', 'low', 'medium', 'high']).optional(),
   responseMode: z.enum(['standard', 'priority', 'flex']).optional()
 });
@@ -828,6 +837,25 @@ function extractPartText(part: Record<string, unknown>): string | null {
 }
 
 /**
+ * Collect extractable text from document/file parts of a message, paired with
+ * their part index. Extracted from scanAttachmentPII to keep that function's
+ * cyclomatic complexity within bounds.
+ */
+function collectAttachmentTexts(
+  parts: unknown[]
+): Array<{ partIdx: number; text: string }> {
+  const out: Array<{ partIdx: number; text: string }> = [];
+  for (const [partIdx, part] of parts.entries()) {
+    const p = part as Record<string, unknown>;
+    if (p.type === 'document' || p.type === 'file') {
+      const text = extractPartText(p);
+      if (text) out.push({ partIdx, text });
+    }
+  }
+  return out;
+}
+
+/**
  * Scan PII in file / document attachment parts of the last user message BEFORE
  * processMessagesWithAttachments moves their content to S3. Returns token
  * mappings produced by the scan and mutates `messagesWithParts` in-place so
@@ -856,14 +884,7 @@ async function scanAttachmentPII(
   const lastUserMsg = messagesWithParts[lastUserIdx];
   if (!Array.isArray(lastUserMsg.parts)) return [];
 
-  const attachmentTexts: Array<{ partIdx: number; text: string }> = [];
-  lastUserMsg.parts.forEach((part, partIdx) => {
-    const p = part as Record<string, unknown>;
-    if (p.type === 'document' || p.type === 'file') {
-      const text = extractPartText(p);
-      if (text) attachmentTexts.push({ partIdx, text });
-    }
-  });
+  const attachmentTexts = collectAttachmentTexts(lastUserMsg.parts);
 
   if (attachmentTexts.length === 0) return [];
 
@@ -930,6 +951,99 @@ async function scanAttachmentPII(
 }
 
 /**
+ * Resolve MCP connector tools for all enabled connectors (parallel fetch). Pure:
+ * returns the resolved results and the list of connector IDs that failed, without
+ * mutating any caller-supplied array. Extracted from POST to keep the route
+ * handler's cyclomatic complexity within bounds.
+ */
+async function resolveConnectorTools(params: {
+  enabledConnectors: string[];
+  userId: number;
+  userRoleNames: string[];
+  idToken?: string;
+  log: ReturnType<typeof createLogger>;
+}): Promise<{ resolved: McpConnectorToolsResult[]; failedIds: string[] }> {
+  const { enabledConnectors, userId, userRoleNames, idToken, log } = params;
+  const resolved: McpConnectorToolsResult[] = [];
+  const failedIds: string[] = [];
+  if (enabledConnectors.length === 0) return { resolved, failedIds };
+
+  log.info('Resolving MCP connector tools', { connectorCount: enabledConnectors.length });
+  const connectorOptions = idToken ? { idToken } : undefined;
+  const results = await Promise.allSettled(
+    enabledConnectors.map(serverId => getConnectorTools(serverId, userId, userRoleNames, connectorOptions))
+  );
+  for (const [i, result] of results.entries()) {
+    if (result.status === 'fulfilled') {
+      resolved.push(result.value);
+    } else {
+      failedIds.push(enabledConnectors[i]);
+      log.warn('Failed to resolve connector tools', {
+        serverId: enabledConnectors[i],
+        error: result.reason instanceof Error ? result.reason.message : String(result.reason)
+      });
+    }
+  }
+  log.info('MCP connector tools resolved', {
+    requested: enabledConnectors.length,
+    resolved: resolved.length,
+    failed: failedIds.length,
+    totalTools: resolved.reduce((sum, r) => sum + Object.keys(r.tools).length, 0)
+  });
+  return { resolved, failedIds };
+}
+
+/**
+ * Scope-gate built-in (AI SDK) tools via the unified tool catalog (#924). The
+ * client-supplied `enabledTools` is untrusted; the catalog drops any AI SDK tool
+ * the caller's role-derived scopes don't permit. Uncataloged tool names pass
+ * through unchanged (downstream model-capability filtering still applies).
+ */
+async function scopeFilterEnabledTools(
+  enabledTools: string[],
+  userRoleNames: string[],
+  log: ReturnType<typeof createLogger>
+): Promise<string[]> {
+  const callerScopes = getScopesForRoles(userRoleNames);
+  const scoped = await toolCatalogInstance.filterAiSdkToolNames(enabledTools, callerScopes);
+  if (scoped.length !== enabledTools.length) {
+    log.info('Tool catalog filtered enabled tools by scope', {
+      requested: enabledTools.length,
+      allowed: scoped.length,
+    });
+  }
+  return scoped;
+}
+
+/**
+ * Enforce a bound skill's `allowed-tools` pin over the (already scope-filtered)
+ * tool list (#925 AC#6). The client tool list is untrusted, so the pin is
+ * re-applied here whenever the session is bound to a skill. A skill with no pin
+ * (empty allowed-tools) or an unknown/unapproved id leaves the list unchanged.
+ */
+async function enforceSkillAllowedTools(
+  scopedEnabledTools: string[],
+  skillId: string | undefined,
+  log: ReturnType<typeof createLogger>
+): Promise<string[]> {
+  if (!skillId) return scopedEnabledTools;
+  const allowed = await getApprovedSkillAllowedTools(skillId);
+  if (allowed === null) {
+    log.warn('Session bound to unknown/unapproved skill; not enforcing tool pin', { skillId });
+    return scopedEnabledTools;
+  }
+  const enforced = intersectSkillAllowedTools(scopedEnabledTools, allowed);
+  if (enforced.length !== scopedEnabledTools.length) {
+    log.info('Skill allowed-tools pin applied', {
+      skillId,
+      before: scopedEnabledTools.length,
+      after: enforced.length,
+    });
+  }
+  return enforced;
+}
+
+/**
  * Nexus Chat API - Native Streaming with AI SDK v5
  */
 export async function POST(req: Request) {
@@ -948,7 +1062,7 @@ export async function POST(req: Request) {
     const validation = validateRequest(body, requestId, log);
     if (!validation.valid) return validation.error;
 
-    const { messages, modelId, provider = 'openai', conversationId: existingConversationId, enabledTools = [], enabledConnectors = [] } = validation.data;
+    const { messages, modelId, provider = 'openai', conversationId: existingConversationId, enabledTools = [], enabledConnectors = [], skillId } = validation.data;
     const conversationIdValue = existingConversationId || undefined;
 
     // 2. Validate conversation ID format
@@ -1006,32 +1120,22 @@ export async function POST(req: Request) {
       messagesWithParts
     );
 
-    // 8. Resolve MCP connector tools (parallel fetch for all enabled connectors)
-    const failedConnectorIds: string[] = [];
-    if (enabledConnectors.length > 0) {
-      log.info('Resolving MCP connector tools', { connectorCount: enabledConnectors.length });
-      const connectorOptions = session.idToken ? { idToken: session.idToken } : undefined;
-      const results = await Promise.allSettled(
-        enabledConnectors.map(serverId => getConnectorTools(serverId, userId, userRoleNames, connectorOptions))
-      );
-      for (const [i, result] of results.entries()) {
-        if (result.status === 'fulfilled') {
-          connectorToolResults.push(result.value);
-        } else {
-          failedConnectorIds.push(enabledConnectors[i]);
-          log.warn('Failed to resolve connector tools', {
-            serverId: enabledConnectors[i],
-            error: result.reason instanceof Error ? result.reason.message : String(result.reason)
-          });
-        }
-      }
-      log.info('MCP connector tools resolved', {
-        requested: enabledConnectors.length,
-        resolved: connectorToolResults.length,
-        failed: failedConnectorIds.length,
-        totalTools: connectorToolResults.reduce((sum, r) => sum + Object.keys(r.tools).length, 0)
+    // 8. Resolve MCP connector tools (parallel fetch for all enabled connectors).
+    // connectorToolResults is hoisted for catch-block cleanup; append the resolved
+    // results rather than mutating inside the helper.
+    const { resolved: resolvedConnectorTools, failedIds: failedConnectorIds } =
+      await resolveConnectorTools({
+        enabledConnectors, userId, userRoleNames, idToken: session.idToken, log,
       });
-    }
+    connectorToolResults.push(...resolvedConnectorTools);
+
+    // 8b. Scope-gate built-in (AI SDK) tools via the unified tool catalog (#924),
+    // then enforce the bound skill's allowed-tools pin if the session loaded one (#925).
+    const scopedEnabledTools = await enforceSkillAllowedTools(
+      await scopeFilterEnabledTools(enabledTools, userRoleNames, log),
+      skillId,
+      log
+    );
 
     // 9. Execute streaming and return response
     // Once executeStreaming returns successfully, the streaming Response is in flight.
@@ -1045,7 +1149,7 @@ export async function POST(req: Request) {
       conversationId,
       conversationIdValue,
       conversationTitle,
-      enabledTools,
+      enabledTools: scopedEnabledTools,
       enabledConnectors,
       connectorToolResults,
       failedConnectorIds,
@@ -1064,35 +1168,46 @@ export async function POST(req: Request) {
     // is handled by onFinish inside the stream — AI SDK v6 guarantees onFinish is called
     // for all terminal states including errors (verified against ai@6.x).
     await closeMcpClients(connectorToolResults, log, 'catch');
+    return buildChatErrorResponse(error, requestId, log, timer);
+  }
+}
 
-    if (error instanceof ContentSafetyBlockedError) {
-      log.warn('Content blocked by safety guardrails', {
-        error: { message: error.message, name: error.name },
-        categories: error.blockedCategories,
-        source: error.source
-      });
-      timer({ status: 'blocked' });
-      return new Response(
-        JSON.stringify({
-          error: error.message,
-          code: 'CONTENT_BLOCKED',
-          categories: error.blockedCategories,
-          source: error.source,
-          requestId,
-        }),
-        { status: 400, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
-      );
-    }
-
-    log.error('Nexus chat API error', {
-      error: error instanceof Error ? { message: error.message, name: error.name } : String(error)
+/**
+ * Map a pre-stream POST error to an HTTP Response. Content-safety blocks return
+ * 400 with category detail; everything else returns a generic 500. Extracted
+ * from POST to keep the route handler's cyclomatic complexity within bounds.
+ */
+function buildChatErrorResponse(
+  error: unknown,
+  requestId: string,
+  log: ReturnType<typeof createLogger>,
+  timer: (data: Record<string, unknown>) => void
+): Response {
+  if (error instanceof ContentSafetyBlockedError) {
+    log.warn('Content blocked by safety guardrails', {
+      error: { message: error.message, name: error.name },
+      categories: error.blockedCategories,
+      source: error.source
     });
-
-    timer({ status: 'error' });
-
+    timer({ status: 'blocked' });
     return new Response(
-      JSON.stringify({ error: 'Failed to process chat request', requestId }),
-      { status: 500, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
+      JSON.stringify({
+        error: error.message,
+        code: 'CONTENT_BLOCKED',
+        categories: error.blockedCategories,
+        source: error.source,
+        requestId,
+      }),
+      { status: 400, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
     );
   }
+
+  log.error('Nexus chat API error', {
+    error: error instanceof Error ? { message: error.message, name: error.name } : String(error)
+  });
+  timer({ status: 'error' });
+  return new Response(
+    JSON.stringify({ error: 'Failed to process chat request', requestId }),
+    { status: 500, headers: { 'Content-Type': 'application/json', 'X-Request-Id': requestId } }
+  );
 }

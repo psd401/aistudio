@@ -105,7 +105,7 @@ export {
   createRole,
   updateRole,
   deleteRole,
-  // Tool operations
+  // Tool operations (compat shims — delegate to capabilities, #923)
   getTools,
   getToolsByIds,
   getRoleTools,
@@ -113,6 +113,53 @@ export {
   removeToolFromRole,
   setRoleTools,
 } from "./roles";
+
+// ============================================
+// Capability Operations (Issue #923)
+// ============================================
+
+export {
+  // Types
+  type CapabilityData,
+  type UpdateCapabilityData,
+  // Access check operations
+  hasCapabilityAccess,
+  getUserCapabilities,
+  // Query operations
+  getCapabilities,
+  getCapabilityById,
+  getCapabilityByIdentifier,
+  getCapabilitiesByIds,
+  // CRUD operations
+  createCapability,
+  updateCapability,
+  upsertCapabilityByIdentifier,
+  setCapabilityActive,
+  // Role-capability assignment operations
+  getRoleCapabilities,
+  getCapabilityRoleIds,
+  assignCapabilityToRole,
+  removeCapabilityFromRole,
+  getRoleIdByName,
+} from "./capabilities";
+
+// ============================================
+// Tool Catalog Version Lifecycle (Issue #927)
+// ============================================
+
+export {
+  type ToolVersionUsage,
+  type ToolVersionWithUsage,
+  getToolCatalogVersions,
+  getToolCatalogVersion,
+  listToolCatalogIdentifiers,
+  getToolVersionUsage,
+  getToolVersionsWithUsage,
+  deprecateToolVersion,
+  undeprecateToolVersion,
+  removeToolVersion,
+  removeToolVersionWithPolicy,
+} from "./tool-catalog";
 
 // ============================================
 // Notification Operations

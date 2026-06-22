@@ -15,6 +15,8 @@ import {
 // CoreMessage import removed - AI completion now handled by Lambda workers
 import { parseRepositoryIds } from "@/lib/utils/repository-utils"
 import { getAvailableToolsForModel, getAllTools } from "@/lib/tools/tool-registry"
+import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
+import { getScopesForRoles } from "@/lib/api-keys/scopes"
 
 import { handleError, createSuccess, ErrorFactories, createError } from "@/lib/error-utils";
 import { ActionState, ErrorLevel } from "@/types";
@@ -54,9 +56,9 @@ import {
   assignToolToRole,
   createNavigationItem
 } from "@/lib/db/drizzle";
-import { executeQuery } from "@/lib/db/drizzle-client";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
-import { tools, navigationItems, toolInputFields, chainPrompts, assistantArchitects, roleTools, userRoles, toolExecutions, promptResults } from "@/lib/db/schema";
+import { tools, navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities } from "@/lib/db/schema";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -156,6 +158,169 @@ async function validateEnabledTools(
   }
 }
 
+/**
+ * Validate an agentic assistant's `agentEnabledTools` (catalog `domain.action`
+ * identifiers) against the unified catalog (#924). A tool is valid only if it is
+ * exposed on the `internal` surface, is `agentCallable`, and the AUTHOR's
+ * role-derived scopes permit it — so an author cannot enable a tool they could
+ * not themselves invoke. The caller's scopes are re-checked at execution time
+ * (resolveAgentTools), giving the required dual scope intersection (#926).
+ */
+async function validateAgentTools(
+  agentEnabledTools: string[],
+  authorRoleNames: string[]
+): Promise<{ isValid: boolean; invalidTools: string[]; message?: string }> {
+  if (!agentEnabledTools || agentEnabledTools.length === 0) {
+    return { isValid: true, invalidTools: [] };
+  }
+  try {
+    const authorScopes = getScopesForRoles(authorRoleNames);
+    const allowed = await toolCatalogInstance.list({
+      surface: "internal",
+      scopes: authorScopes,
+      agentOnly: true,
+    });
+    const allowedIdentifiers = new Set(allowed.map((e) => e.identifier));
+    const invalidTools = agentEnabledTools.filter(
+      (id) => !allowedIdentifiers.has(id)
+    );
+    if (invalidTools.length > 0) {
+      return {
+        isValid: false,
+        invalidTools,
+        // Report a count rather than echoing the caller-supplied identifiers back
+        // in the message (avoids reflecting arbitrary input into the response).
+        message: `Tools not available for agentic use with your permissions: ${invalidTools.length} not accessible`,
+      };
+    }
+    return { isValid: true, invalidTools: [] };
+  } catch (error) {
+    return {
+      isValid: false,
+      invalidTools: agentEnabledTools,
+      message: `Error validating agent tools: ${error instanceof Error ? error.message : "Unknown error"}`,
+    };
+  }
+}
+
+/** Agentic-mode columns an update may set (Issue #926). */
+type AgenticUpdateFields = Partial<{
+  mode: "prompt_chain" | "agentic";
+  agentEnabledTools: string[];
+  agentEnabledConnectors: string[];
+  agentMaxSteps: number;
+  agentTimeoutSeconds: number;
+  agentCostCapCents: number | null;
+  agentMaxRequestsPerHour: number | null;
+}>;
+
+/**
+ * Resolve + validate the agentic-mode fields from an update payload (Issue #926).
+ * Enforces the one-way mode transition (prompt_chain -> agentic only), validates
+ * the agent tool list against the catalog with the AUTHOR's scopes, and clamps
+ * the numeric limits to their DB CHECK ranges. Returns either the partial fields
+ * to merge or a user-facing error string.
+ */
+async function resolveAgenticUpdateFields(
+  data: Partial<InsertAssistantArchitect>,
+  currentMode: string | null | undefined,
+  authorRoleNames: string[],
+  authorUserId: number
+): Promise<{ fields: AgenticUpdateFields } | { error: string }> {
+  const fields: AgenticUpdateFields = {};
+
+  if (data.mode !== undefined) {
+    // Validate at runtime rather than blind-casting: a malformed payload would
+    // otherwise reach the DB and surface as a generic constraint failure instead
+    // of a clear validation error.
+    if (data.mode !== "prompt_chain" && data.mode !== "agentic") {
+      return { error: `Invalid assistant mode: ${String(data.mode)}` };
+    }
+    const nextMode = data.mode;
+    // Mode is one-way: agentic -> prompt_chain is not supported.
+    if (currentMode === "agentic" && nextMode === "prompt_chain") {
+      return { error: "Cannot convert an agentic assistant back to prompt-chain mode" };
+    }
+    fields.mode = nextMode;
+  }
+  if (data.agentEnabledTools !== undefined) {
+    const toolValidation = await validateAgentTools(data.agentEnabledTools, authorRoleNames);
+    if (!toolValidation.isValid) {
+      return { error: toolValidation.message || "Invalid agent tools" };
+    }
+    fields.agentEnabledTools = data.agentEnabledTools;
+  }
+  if (data.agentEnabledConnectors !== undefined) {
+    const connectorError = await validateAgentConnectors(
+      data.agentEnabledConnectors,
+      authorUserId,
+      authorRoleNames
+    );
+    if (connectorError) return { error: connectorError };
+    fields.agentEnabledConnectors = data.agentEnabledConnectors;
+  }
+  if (data.agentMaxSteps !== undefined) {
+    fields.agentMaxSteps = clampIntInRange(data.agentMaxSteps, 1, 50, 10);
+  }
+  if (data.agentTimeoutSeconds !== undefined) {
+    fields.agentTimeoutSeconds = clampIntInRange(data.agentTimeoutSeconds, 1, 900, 300);
+  }
+  // null/<=0/non-finite => no cap. Keeps NaN out of the DB (which would surface
+  // as a generic insert failure) and avoids a negative becoming a 1-unit cap.
+  if (data.agentCostCapCents !== undefined) {
+    fields.agentCostCapCents = nullablePositiveInt(data.agentCostCapCents);
+  }
+  if (data.agentMaxRequestsPerHour !== undefined) {
+    fields.agentMaxRequestsPerHour = nullablePositiveInt(data.agentMaxRequestsPerHour);
+  }
+
+  return { fields };
+}
+
+/**
+ * Validate that every connector ID is one the author can access (parity with
+ * agentEnabledTools). Returns a user-facing error string when one or more IDs are
+ * not accessible, or null when all are valid (or none were supplied).
+ *
+ * Execution-time resolution already filters connectors by the CALLER's access, so
+ * an unowned connector can't be invoked regardless — this is defense in depth plus
+ * a clear authoring-time error. Reports a count rather than echoing the raw IDs.
+ */
+async function validateAgentConnectors(
+  connectorIds: string[],
+  authorUserId: number,
+  authorRoleNames: string[]
+): Promise<string | null> {
+  if (connectorIds.length === 0) return null;
+  const { getAvailableConnectors } = await import("@/lib/mcp/connector-service");
+  const accessible = await getAvailableConnectors(authorUserId, authorRoleNames);
+  const accessibleIds = new Set(accessible.map(c => c.id));
+  const invalidCount = connectorIds.filter(id => !accessibleIds.has(id)).length;
+  if (invalidCount > 0) {
+    return `Connectors not available with your permissions: ${invalidCount} not accessible`;
+  }
+  return null;
+}
+
+/** Normalize a nullable numeric limit to a positive integer, or null for no cap. */
+function nullablePositiveInt(value: number | null): number | null {
+  if (value === null) return null;
+  const n = Math.floor(Number(value));
+  return Number.isFinite(n) && n > 0 ? n : null;
+}
+
+/** Parse + clamp an integer into [min, max]; falls back for non-finite input. */
+function clampIntInRange(
+  value: unknown,
+  min: number,
+  max: number,
+  fallback: number
+): number {
+  const n = Math.floor(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
 // Input validation and sanitization function for Assistant Architect
 // The missing function needed by page.tsx
 export async function getAssistantArchitectAction(
@@ -212,12 +377,30 @@ export async function createAssistantArchitectAction(
       userId: currentUser.data.user.id
     })
 
+    // Agentic fields (Issue #926). Resolved + validated in a helper (shared
+    // clamping/validation with the update path) to persist agentic config on the
+    // initial create — previously dropped (PR review) — without inflating this
+    // action's complexity. Mode transition guard is N/A on create (no prior mode).
+    const agentResult = await resolveAgenticUpdateFields(
+      assistant,
+      undefined,
+      currentUser.data.roles.map(r => r.name),
+      currentUser.data.user.id
+    )
+    if ("error" in agentResult) {
+      throw ErrorFactories.validationFailed([{
+        field: 'agentEnabledTools',
+        message: agentResult.error
+      }])
+    }
+
     const architect = await drizzleCreateAssistantArchitect({
       name: assistant.name,
       description: assistant.description || null,
       userId: currentUser.data.user.id,
       status: (assistant.status || 'draft') as "draft" | "pending_approval" | "approved" | "rejected" | "disabled",
-      imagePath: assistant.imagePath || null
+      imagePath: assistant.imagePath || null,
+      ...agentResult.fields,
     });
 
     log.info("Assistant architect created successfully", {
@@ -285,6 +468,14 @@ export async function getAssistantArchitectsAction(): Promise<
           timeoutSeconds: architect.timeoutSeconds,
           createdAt: architect.createdAt,
           updatedAt: architect.updatedAt,
+          // Agentic mode fields (Issue #926)
+          mode: architect.mode,
+          agentEnabledTools: architect.agentEnabledTools,
+          agentEnabledConnectors: architect.agentEnabledConnectors,
+          agentMaxSteps: architect.agentMaxSteps,
+          agentTimeoutSeconds: architect.agentTimeoutSeconds,
+          agentCostCapCents: architect.agentCostCapCents,
+          agentMaxRequestsPerHour: architect.agentMaxRequestsPerHour,
           inputFields,
           prompts: transformedPrompts,
           creator: architect.creator ? {
@@ -487,13 +678,23 @@ export async function updateAssistantArchitectAction(
     // If the tool was approved and is being edited, set status to pending_approval and deactivate it in the tools table
     if (currentTool.status === "approved") {
       data.status = "pending_approval"
-      await executeQuery(
-        (db) =>
-          db
+      // Issue #923: deactivate the legacy tools row AND the renamed capabilities
+      // row atomically. hasToolAccess() now reads `capabilities`, so a partial
+      // failure (tools deactivated, capabilities still active) would leave a user
+      // with access to an architect that is back in pending_approval. One
+      // transaction guarantees both flip together or neither does.
+      await executeTransaction(
+        async (tx) => {
+          await tx
             .update(tools)
-            .set({ isActive: false })
-            .where(eq(tools.promptChainToolId, idInt)),
-        "deactivateApprovedTool"
+            .set({ isActive: false, updatedAt: new Date() })
+            .where(eq(tools.promptChainToolId, idInt));
+          await tx
+            .update(capabilities)
+            .set({ isActive: false, updatedAt: new Date() })
+            .where(eq(capabilities.promptChainToolId, idInt));
+        },
+        "deactivateApprovedToolAndCapability"
       );
     }
 
@@ -505,6 +706,14 @@ export async function updateAssistantArchitectAction(
       imagePath: string | null;
       isParallel: boolean;
       timeoutSeconds: number | null;
+      // Agentic mode (Issue #926)
+      mode: "prompt_chain" | "agentic";
+      agentEnabledTools: string[];
+      agentEnabledConnectors: string[];
+      agentMaxSteps: number;
+      agentTimeoutSeconds: number;
+      agentCostCapCents: number | null;
+      agentMaxRequestsPerHour: number | null;
     }> = {};
 
     if (data.name !== undefined) updateData.name = data.name;
@@ -514,6 +723,19 @@ export async function updateAssistantArchitectAction(
     // Handle isParallel and timeoutSeconds if present in data
     if ('isParallel' in data) updateData.isParallel = Boolean(data.isParallel);
     if ('timeoutSeconds' in data) updateData.timeoutSeconds = data.timeoutSeconds as number | null;
+
+    // Agentic mode fields (Issue #926) — resolved + validated in a helper to keep
+    // this action's cyclomatic complexity bounded.
+    const agentResult = await resolveAgenticUpdateFields(
+      data,
+      currentTool.mode,
+      currentUser.data.roles.map(r => r.name),
+      currentUser.data.user.id
+    );
+    if ("error" in agentResult) {
+      return { isSuccess: false, message: agentResult.error }
+    }
+    Object.assign(updateData, agentResult.fields);
 
     if (Object.keys(updateData).length === 0) {
       return { isSuccess: false, message: "No fields to update" }
@@ -582,20 +804,8 @@ export async function deleteAssistantArchitectAction(
       ownerId: architect.userId
     })
 
-    // Check if the assistant can be deleted based on status
-    if (architect.status !== 'draft' && architect.status !== 'rejected') {
-      log.warn("Attempted to delete non-deletable assistant", {
-        id,
-        status: architect.status
-      })
-      timer({ status: "error" })
-      return {
-        isSuccess: false,
-        message: "Only draft or rejected assistants can be deleted"
-      }
-    }
-
-    // Get current user to check ownership
+    // Get current user and admin status before applying the status guard so
+    // that admins can bypass the draft/rejected restriction (issue #1000).
     const { getCurrentUserAction } = await import("@/actions/db/get-current-user-action");
     const currentUserResult = await getCurrentUserAction();
 
@@ -607,8 +817,6 @@ export async function deleteAssistantArchitectAction(
 
     const currentUser = currentUserResult.data.user;
     const isOwner = architect.userId === currentUser.id;
-    
-    // Check if user is an administrator
     const isAdmin = await hasRole("administrator");
 
     log.debug("Permission check", {
@@ -617,7 +825,21 @@ export async function deleteAssistantArchitectAction(
       isOwner,
       isAdmin
     })
-    
+
+    // Non-admins may only delete assistants they own that are in draft or
+    // rejected state. Admins can delete any assistant regardless of status.
+    if (!isAdmin && architect.status !== 'draft' && architect.status !== 'rejected') {
+      log.warn("Attempted to delete non-deletable assistant", {
+        id,
+        status: architect.status
+      })
+      timer({ status: "error" })
+      return {
+        isSuccess: false,
+        message: "Only draft or rejected assistants can be deleted"
+      }
+    }
+
     // Check permissions: owner OR admin can delete
     if (!isOwner && !isAdmin) {
       log.warn("Unauthorized deletion attempt", {
@@ -639,26 +861,8 @@ export async function deleteAssistantArchitectAction(
       isOwnerDeletion: isOwner,
       isAdminDeletion: !isOwner && isAdmin
     })
-    
-    // Delete from tools table (using prompt_chain_tool_id which references assistant_architect)
-    await executeQuery(
-      (db) =>
-        db
-          .delete(tools)
-          .where(eq(tools.promptChainToolId, idInt)),
-      "deleteToolsByAssistantArchitect"
-    );
 
-    // Delete from navigation_items
-    await executeQuery(
-      (db) =>
-        db
-          .delete(navigationItems)
-          .where(eq(navigationItems.link, `/tools/assistant-architect/${id}`)),
-      "deleteNavigationItemByLink"
-    );
-
-    // Use the deleteAssistantArchitect function which handles all the cascade deletes properly
+    // deleteAssistantArchitect handles all FK-constrained cleanup atomically in one transaction
     await drizzleDeleteAssistantArchitect(idInt);
 
     log.info("Assistant architect deleted successfully", { 
@@ -1503,7 +1707,8 @@ export async function approveAssistantArchitectAction(
     // Approve the assistant architect and create tool entry (transaction)
     const updatedTool = await drizzleApproveAssistantArchitect(idInt)
 
-    // Query for the tool ID that was just created
+    // Query for the tool ID that was just created (used for the navigation item,
+    // whose navigation_items.tool_id FK still references the legacy tools table).
     const [tool] = await executeQuery(
       (db) =>
         db
@@ -1514,12 +1719,32 @@ export async function approveAssistantArchitectAction(
       "getToolByPromptChainToolId"
     )
 
+    // Issue #923: role grants now target role_capabilities.capability_id, so we
+    // need the capability row's id (created in the same approval transaction).
+    // It may differ from the legacy tools.id, so fetch it explicitly rather than
+    // assuming they match.
+    const [capability] = await executeQuery(
+      (db) =>
+        db
+          .select({ id: capabilities.id })
+          .from(capabilities)
+          .where(eq(capabilities.promptChainToolId, idInt))
+          .limit(1),
+      "getCapabilityByPromptChainToolId"
+    )
+
     if (!tool) {
       log.error("Tool not created after approval", { assistantArchitectId: idInt })
       return { isSuccess: false, message: "Tool creation failed" }
     }
 
+    if (!capability) {
+      log.error("Capability not created after approval", { assistantArchitectId: idInt })
+      return { isSuccess: false, message: "Capability creation failed" }
+    }
+
     const finalToolId = tool.id
+    const finalCapabilityId = capability.id
 
     // Create navigation item if it doesn't exist
     const navLink = `/tools/assistant-architect/${id}`
@@ -1554,7 +1779,9 @@ export async function approveAssistantArchitectAction(
 
     for (const role of rolesToAssign) {
       if (role) {
-        await assignToolToRole(role.id, finalToolId)
+        // Issue #923: assignToolToRole now writes role_capabilities.capability_id,
+        // so pass the capability id (not the legacy tools.id).
+        await assignToolToRole(role.id, finalCapabilityId)
       }
     }
 
@@ -1645,15 +1872,16 @@ export async function getApprovedAssistantArchitectsAction(): Promise<
     }
     const currentUserId = currentUserResult.data.user.id
 
-    // Get all tools the user has access to via role assignments
+    // Get all capabilities the user has access to via role assignments
+    // (#923 — reads the renamed capabilities/role_capabilities tables).
     const userTools = await executeQuery(
       (db) =>
         db
-          .selectDistinct({ identifier: tools.identifier, promptChainToolId: tools.promptChainToolId })
-          .from(tools)
-          .innerJoin(roleTools, eq(tools.id, roleTools.toolId))
-          .innerJoin(userRoles, eq(roleTools.roleId, userRoles.roleId))
-          .where(and(eq(userRoles.userId, currentUserId), eq(tools.isActive, true))),
+          .selectDistinct({ identifier: capabilities.identifier, promptChainToolId: capabilities.promptChainToolId })
+          .from(capabilities)
+          .innerJoin(roleCapabilities, eq(capabilities.id, roleCapabilities.capabilityId))
+          .innerJoin(userRoles, eq(roleCapabilities.roleId, userRoles.roleId))
+          .where(and(eq(userRoles.userId, currentUserId), eq(capabilities.isActive, true))),
       "getUserAccessibleTools"
     )
 
@@ -1927,6 +2155,63 @@ export async function getToolsAction(): Promise<ActionState<SelectTool[]>> {
     timer({ status: "error" })
     log.error("Error getting tools:", error)
     return { isSuccess: false, message: "Failed to get tools" }
+  }
+}
+
+/** A tool the current user may enable for an agentic assistant (Issue #926). */
+export interface AvailableAgentTool {
+  /** Catalog `domain.action` identifier — what `agentEnabledTools` stores. */
+  identifier: string;
+  /** Model/human-facing tool name. */
+  name: string;
+  /** Description shown in the tools picker. */
+  description: string;
+}
+
+/**
+ * List the agent-callable tools the CURRENT user may enable for an agentic
+ * assistant (Issue #926). Resolved from the unified catalog on the `internal`
+ * surface, filtered by the user's role-derived scopes and `agentOnly`. The author
+ * can only pick tools they themselves could invoke; the caller's scopes are
+ * re-checked at execution time.
+ */
+export async function getAvailableAgentToolsAction(): Promise<ActionState<AvailableAgentTool[]>> {
+  const requestId = generateRequestId()
+  const timer = startTimer("getAvailableAgentTools")
+  const log = createLogger({ requestId, action: "getAvailableAgentTools" })
+
+  try {
+    const session = await getServerSession();
+    if (!session || !session.sub) {
+      return { isSuccess: false, message: "Unauthorized" }
+    }
+    const currentUser = await getCurrentUserAction();
+    if (!currentUser.isSuccess || !currentUser.data) {
+      return { isSuccess: false, message: "User not found" }
+    }
+    const roleNames = currentUser.data.roles.map(r => r.name);
+    const scopes = getScopesForRoles(roleNames);
+
+    const entries = await toolCatalogInstance.list({
+      surface: "internal",
+      scopes,
+      agentOnly: true,
+    });
+    const tools: AvailableAgentTool[] = entries.map(e => ({
+      identifier: e.identifier,
+      name: e.name,
+      description: e.description,
+    }));
+
+    log.info("Available agent tools retrieved", { count: tools.length })
+    timer({ status: "success", count: tools.length })
+    return createSuccess(tools, "Available agent tools retrieved")
+  } catch (error) {
+    timer({ status: "error" })
+    return handleError(error, "Failed to get available agent tools", {
+      context: "getAvailableAgentTools",
+      requestId,
+    })
   }
 }
 

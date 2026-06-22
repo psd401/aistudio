@@ -180,6 +180,9 @@ Server-Sent Events for Assistant Architect execution.
 #### [features/assistant-architect-tools.md](./features/assistant-architect-tools.md)
 Tool integration for Assistant Architect prompts.
 
+#### [features/tool-versioning.md](./features/tool-versioning.md)
+**Tool & skill versioning contract** — `v1`/`v2` versions, `identifier@version` addressing, deprecation lifecycle (90-day grace period, `replaced_by`, removal), MCP/REST visibility, and SKILL.md version pinning.
+
 #### [features/assistant-architect-json-import-spec.md](./features/assistant-architect-json-import-spec.md)
 **Complete JSON import specification** for generating valid assistant import files. Includes schema reference, field types, variable substitution, execution patterns, and comprehensive examples.
 

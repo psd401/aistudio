@@ -5,13 +5,16 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 // import * as lambdaNodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as lambdaEventSources from 'aws-cdk-lib/aws-lambda-event-sources';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as snsSubscriptions from 'aws-cdk-lib/aws-sns-subscriptions';
 import * as path from 'path';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
+import { execSync } from 'child_process';
 import { ServiceRoleFactory } from './constructs/security';
+import { VPCProvider, EnvironmentConfig } from './constructs';
 
 export interface ProcessingStackProps extends cdk.StackProps {
   environment: 'dev' | 'prod';
@@ -31,20 +34,29 @@ export class ProcessingStack extends cdk.Stack {
     super(scope, id, props);
 
     // Retrieve values from SSM Parameter Store (or use provided props for backward compatibility)
-    const documentsBucketName = props.documentsBucketName || 
+    const documentsBucketName = props.documentsBucketName ||
       ssm.StringParameter.valueForStringParameter(
         this, `/aistudio/${props.environment}/documents-bucket-name`
       );
-    
+
     const databaseResourceArn = props.databaseResourceArn ||
       ssm.StringParameter.valueForStringParameter(
         this, `/aistudio/${props.environment}/db-cluster-arn`
       );
-    
+
     const databaseSecretArn = props.databaseSecretArn ||
       ssm.StringParameter.valueForStringParameter(
         this, `/aistudio/${props.environment}/db-secret-arn`
       );
+
+    // Aurora hostname for direct postgres.js connection (embedding-generator)
+    const databaseHost = ssm.StringParameter.valueForStringParameter(
+      this, `/aistudio/${props.environment}/db-host`
+    );
+
+    // VPC + config — required by embedding-generator Lambda (postgres.js needs direct TCP to Aurora)
+    const config = EnvironmentConfig.get(props.environment);
+    const vpc = VPCProvider.getOrCreate(this, props.environment, config);
 
     // Import the documents bucket
     const documentsBucket = s3.Bucket.fromBucketName(
@@ -250,56 +262,94 @@ export class ProcessingStack extends cdk.Stack {
       role: urlProcessorRole,
     });
 
-    // Embedding Generator Lambda
+    // Embedding Generator Lambda — uses postgres.js + Drizzle (Issue #578), must be in VPC
     const embeddingGeneratorRole = ServiceRoleFactory.createLambdaRole(this, 'EmbeddingGeneratorRole', {
       functionName: 'embedding-generator',
       environment: props.environment,
       region: this.region,
       account: this.account,
+      // vpcEnabled: false — VPC access added manually via managed policy below
+      // to avoid ServiceRoleFactory's policy validator flagging ENI wildcard resources.
       vpcEnabled: false,
-      secrets: [databaseSecretArn],
+      sqsQueues: [this.embeddingQueue.queueArn],
+      // secrets[] uses tag-conditional access which won't match the DatabaseStack secret.
+      // Add an explicit statement without tag conditions instead (same as AgentHealthDailyRole).
       additionalPolicies: [
         new iam.PolicyDocument({
-          statements: [
-            // RDS Data API permissions
-            new iam.PolicyStatement({
-              effect: iam.Effect.ALLOW,
-              actions: [
-                'rds-data:ExecuteStatement',
-                'rds-data:BatchExecuteStatement',
-                'rds-data:BeginTransaction',
-                'rds-data:CommitTransaction',
-                'rds-data:RollbackTransaction',
-              ],
-              resources: [databaseResourceArn],
-              conditions: {
-                StringEquals: {
-                  'aws:ResourceTag/Environment': props.environment,
-                  'aws:ResourceTag/ManagedBy': 'cdk',
-                },
-              },
-            }),
-          ],
+          statements: [new iam.PolicyStatement({
+            sid: 'AuroraSecretAccess',
+            effect: iam.Effect.ALLOW,
+            actions: ['secretsmanager:GetSecretValue'],
+            resources: [databaseSecretArn],
+          })],
         }),
       ],
+    });
+    // Aurora via VPC — same managed policy pattern as AgentHealthDailyRole, RouterLambda, etc.
+    embeddingGeneratorRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('service-role/AWSLambdaVPCAccessExecutionRole'),
+    );
+
+    const embeddingGeneratorSg = new ec2.SecurityGroup(this, 'EmbeddingGeneratorSg', {
+      vpc,
+      description: 'Security group for embedding-generator Lambda (postgres.js → Aurora)',
+      allowAllOutbound: true,
     });
 
     const embeddingGenerator = new lambda.Function(this, 'EmbeddingGenerator', {
       runtime: lambda.Runtime.NODEJS_20_X,
       handler: 'index.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '../lambdas/embedding-generator')),
+      code: lambda.Code.fromAsset(
+        path.join(__dirname, '../lambdas/embedding-generator'),
+        {
+          assetHashType: cdk.AssetHashType.SOURCE,
+          bundling: {
+            image: lambda.Runtime.NODEJS_20_X.bundlingImage,
+            local: {
+              tryBundle(outputDir: string): boolean {
+                try {
+                  const inputDir = path.join(__dirname, '..', 'lambdas', 'embedding-generator');
+                  execSync('bun install && bunx tsc', { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp -r dist/* ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync(`cp package.json ${outputDir}/`, { cwd: inputDir, stdio: 'inherit' });
+                  execSync('bun install --production', { cwd: outputDir, stdio: 'inherit' });
+                  return true;
+                } catch (e) {
+                  process.stderr.write(`Local bundling failed, falling back to Docker: ${e}\n`);
+                  return false;
+                }
+              },
+            },
+            command: [
+              'bash', '-c',
+              [
+                'npm install', 'npm run build',
+                'cp -r dist/* /asset-output/',
+                'cp package.json /asset-output/',
+                'cd /asset-output && npm install --production',
+              ].join(' && '),
+            ],
+          },
+        },
+      ),
       timeout: cdk.Duration.minutes(5),
       memorySize: 1024, // 1GB
+      vpc,
+      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+      securityGroups: [embeddingGeneratorSg],
       environment: {
         NODE_OPTIONS: '--enable-source-maps',
-        DB_CLUSTER_ARN: databaseResourceArn,
-        DB_SECRET_ARN: databaseSecretArn,
-        DB_NAME: 'aistudio',
+        DATABASE_HOST: databaseHost,
+        DATABASE_SECRET_ARN: databaseSecretArn,
+        DATABASE_NAME: 'aistudio',
+        DATABASE_PORT: '5432',
         ENVIRONMENT: props.environment,
       },
       layers: [processingLayer],
       role: embeddingGeneratorRole,
     });
+    cdk.Tags.of(embeddingGenerator).add('Environment', props.environment);
+    cdk.Tags.of(embeddingGenerator).add('ManagedBy', 'cdk');
 
     // Textract Processor Lambda
     const textractProcessorRole = ServiceRoleFactory.createLambdaRole(this, 'TextractProcessorRole', {

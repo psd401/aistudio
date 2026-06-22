@@ -41,6 +41,24 @@ export function extractStringParam(url: string, segmentName: string): string | n
   return segments[idx + 1] || null
 }
 
+/** Default cap for user-controlled values reflected into error messages. */
+const ERROR_REFLECTION_MAX_LENGTH = 80
+
+/**
+ * Bound a user-controlled value (path segment, query param) before reflecting it
+ * into an error message. Reflecting an unbounded, caller-supplied string risks
+ * log/response bloat and awkward downstream handling; truncating keeps the error
+ * actionable without echoing an arbitrarily long input. Appends an ellipsis when
+ * truncated.
+ */
+export function truncateForError(
+  value: string,
+  maxLength: number = ERROR_REFLECTION_MAX_LENGTH
+): string {
+  if (value.length <= maxLength) return value
+  return `${value.slice(0, maxLength)}…`
+}
+
 // ============================================
 // Admin Detection (API key + session compatible)
 // ============================================
