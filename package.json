@@ -220,6 +220,7 @@
     "ai": "~6.0.208",
     "@ai-sdk/provider": "~3.0.10",
     "@ai-sdk/provider-utils": "~4.0.30",
-    "@ai-sdk/react": "~3.0.210"
+    "@ai-sdk/react": "~3.0.210",
+    "@assistant-ui/core": "0.2.18"
   }
 }
