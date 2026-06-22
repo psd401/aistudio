@@ -33,8 +33,15 @@
  * - `source` — `code` (manifest-managed) | `assistant` | `skill`.
  * - `handler_ref` — for `source = 'code'`, the manifest handler key; for
  *   `assistant`/`skill`, a pointer (e.g. `assistant:42`) the dispatcher resolves.
- * - `deprecated_at` / `replaced_by` — version lifecycle (replaced_by points at a
- *   newer `identifier@version`).
+ * - `deprecated_at` / `replaced_by` / `removal_date` / `grace_period_days` —
+ *   version deprecation lifecycle (Issue #927). `deprecated_at` is the timestamp a
+ *   version was marked deprecated; `replaced_by` points at the successor
+ *   `identifier@version`; `grace_period_days` is the minimum number of days a
+ *   deprecated version stays callable (default 90); `removal_date` is the computed
+ *   `deprecated_at + grace_period_days` snapshot, after which an admin may remove
+ *   the version. A non-deprecated version has deprecated_at / replaced_by /
+ *   removal_date all NULL; grace_period_days always has a value (default 90) but
+ *   is only semantically meaningful once deprecated_at is set.
  *
  * NOTE: No PL/pgSQL triggers / DO $$ blocks for `updated_at` — the RDS Data API
  * migration runner's statement splitter cannot handle dollar-quoted blocks (see
@@ -47,6 +54,7 @@ import {
   boolean,
   check,
   index,
+  integer,
   jsonb,
   pgTable,
   serial,
@@ -55,6 +63,13 @@ import {
   uniqueIndex,
   varchar,
 } from "drizzle-orm/pg-core";
+
+/**
+ * Default deprecation grace period (days) — the minimum window a deprecated tool
+ * version stays callable before an admin may remove it (Issue #927). Per-tool
+ * overridable via `grace_period_days`. 90 days is the issue-confirmed default.
+ */
+export const DEFAULT_GRACE_PERIOD_DAYS = 90;
 
 /** Surfaces a catalog tool can be exposed on. */
 export type ToolSurface = "mcp" | "ai_sdk" | "rest" | "internal";
@@ -91,7 +106,21 @@ export const toolCatalog = pgTable(
     handlerRef: varchar("handler_ref", { length: 200 }),
     isActive: boolean("is_active").default(true).notNull(),
     deprecatedAt: timestamp("deprecated_at"),
-    replacedBy: varchar("replaced_by", { length: 170 }),
+    replacedBy: varchar("replaced_by", { length: 200 }),
+    /**
+     * Computed `deprecated_at + grace_period_days` snapshot, set when a version is
+     * deprecated. After this date an admin may remove the version. NULL while the
+     * version is not deprecated. (Issue #927.)
+     */
+    removalDate: timestamp("removal_date"),
+    /**
+     * Minimum days a deprecated version stays callable before removal. Snapshotted
+     * at deprecation time so changing the global default never retroactively
+     * shortens an in-flight grace window. Default 90. (Issue #927.)
+     */
+    gracePeriodDays: integer("grace_period_days")
+      .default(DEFAULT_GRACE_PERIOD_DAYS)
+      .notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
   },

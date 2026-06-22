@@ -58,23 +58,31 @@ function safeParseJsonArray(value: unknown, fallback: string[] = []): string[] {
 export function useFilteredModels({
   models,
   requiredCapabilities = [],
+  anyOfCapabilities = [],
   allowedRoles = [],
   userRoles = [],
   searchQuery = "",
   hideRoleRestricted = false,
   hideCapabilityMissing = false
 }: UseFilteredModelsOptions): UseFilteredModelsResult {
-  
+
   const result = useMemo(() => {
     let filteredModels: FilteredModel[] = models.map(model => {
       // Safely parse capabilities
       const modelCapabilities = safeParseJsonArray(model.capabilities, [])
 
-      // Check capability requirements
+      // Check required capabilities (AND logic — all must be present)
       const missingCapabilities = requiredCapabilities.filter(
         cap => !modelCapabilities.includes(cap)
       )
-      const matchesCapabilities = missingCapabilities.length === 0
+      const matchesRequiredCapabilities = missingCapabilities.length === 0
+
+      // Check anyOf capabilities (OR logic — at least one must be present)
+      const matchesAnyOfCapabilities =
+        anyOfCapabilities.length === 0 ||
+        anyOfCapabilities.some(cap => modelCapabilities.includes(cap))
+
+      const matchesCapabilities = matchesRequiredCapabilities && matchesAnyOfCapabilities
 
       // Safely parse allowed roles for the model
       const modelAllowedRoles = safeParseJsonArray(model.allowedRoles, [])
@@ -90,9 +98,24 @@ export function useFilteredModels({
 
       const isAccessible = matchesCapabilities && hasRoleAccess && meetsAllowedRoles
 
+      // Combine AND-missing and anyOf-missing capabilities for accurate UI feedback
+      const allMissingCapabilities = [
+        ...missingCapabilities,
+        ...(anyOfCapabilities.length > 0 && !matchesAnyOfCapabilities
+          ? [`one of: ${anyOfCapabilities.join(', ')}`]
+          : [])
+      ]
+
       let accessDeniedReason: string | undefined
       if (!matchesCapabilities) {
-        accessDeniedReason = `Missing capabilities: ${missingCapabilities.join(', ')}`
+        if (missingCapabilities.length === 0 && anyOfCapabilities.length > 0 && !matchesAnyOfCapabilities) {
+          // Only the OR-capability check failed — use a cleaner message
+          accessDeniedReason = `Requires at least one of: ${anyOfCapabilities.join(', ')}`
+        } else if (allMissingCapabilities.length > 0) {
+          accessDeniedReason = `Missing capabilities: ${allMissingCapabilities.join(', ')}`
+        } else {
+          accessDeniedReason = `Missing required capabilities`
+        }
       } else if (!hasRoleAccess) {
         accessDeniedReason = `Requires role: ${modelAllowedRoles.join(' or ')}`
       } else if (!meetsAllowedRoles) {
@@ -105,7 +128,7 @@ export function useFilteredModels({
         accessDeniedReason,
         matchesCapabilities,
         hasRoleAccess,
-        missingCapabilities: missingCapabilities.length > 0 ? missingCapabilities : undefined
+        missingCapabilities: allMissingCapabilities.length > 0 ? allMissingCapabilities : undefined
       } as FilteredModel
     })
 
@@ -161,7 +184,7 @@ export function useFilteredModels({
       totalCount,
       accessibleCount
     }
-  }, [models, requiredCapabilities, allowedRoles, userRoles, searchQuery, hideRoleRestricted, hideCapabilityMissing])
+  }, [models, requiredCapabilities, anyOfCapabilities, allowedRoles, userRoles, searchQuery, hideRoleRestricted, hideCapabilityMissing])
 
   return result
 }

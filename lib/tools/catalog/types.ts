@@ -24,6 +24,31 @@ export type { ToolSurface, ToolCatalogSource };
 export type RestMethod = "get" | "post" | "put" | "patch" | "delete";
 
 /**
+ * Who is invoking a tool, recorded in the `deprecated_tool_invocation` telemetry
+ * event (Issue #927) so we can track which class of caller still pins a deprecated
+ * version. Mirrors the issue's `caller_type` enum.
+ */
+export type CatalogCallerType =
+  | "skill"
+  | "assistant"
+  | "api_key"
+  | "mcp_client"
+  | "internal";
+
+/**
+ * Result of {@link ToolCatalog.resolve} — version resolution layered on top of
+ * the catalog (Issue #927). On success carries the resolved entry plus whether it
+ * is deprecated; on failure carries a typed reason the caller maps to a clear,
+ * actionable error for a pinned consumer.
+ */
+export type CatalogResolution =
+  | { ok: true; entry: ToolCatalogEntry; deprecated: boolean }
+  | {
+      ok: false;
+      reason: "malformed_ref" | "unknown_identifier" | "unknown_version";
+    };
+
+/**
  * REST binding for a `rest`-surfaced catalog tool — the metadata the
  * catalog→OpenAPI generator needs to emit the tool's path + operation. Kept on
  * the manifest entry (code tools); the generator reads `TOOL_MANIFEST` directly.
@@ -115,6 +140,22 @@ export interface ToolCatalogEntry {
   source: ToolCatalogSource;
   /** Whether the tool is currently exposed. */
   isActive: boolean;
+  /**
+   * Deprecation timestamp (Issue #927). Set when this version was marked
+   * deprecated; the version remains callable but a `deprecated_tool_invocation`
+   * telemetry event is emitted on dispatch. `null`/absent = not deprecated.
+   */
+  deprecatedAt?: Date | null;
+  /**
+   * Successor `identifier@version` a deprecated version points at (Issue #927).
+   * Surfaced to callers/telemetry so they can migrate to the replacement.
+   */
+  replacedBy?: string | null;
+  /**
+   * Computed `deprecated_at + grace_period_days` snapshot (Issue #927). After
+   * this date an admin may hard-remove the version; it stays callable until then.
+   */
+  removalDate?: Date | null;
   /**
    * UI metadata for selectable `ai_sdk` chat tools — present only for tools the
    * Nexus tool selector renders. Lets the catalog be the single source for tool
@@ -215,4 +256,10 @@ export interface ToolCatalogFilter {
   agentOnly?: boolean;
   /** Include inactive tools (default: active only). */
   includeInactive?: boolean;
+  /**
+   * When true, exclude deprecated versions (Issue #927). Used by MCP `tools/list`
+   * to hide deprecated tools by default (opt-in via `?include=all`). Independent
+   * of `includeInactive`: a tool can be active AND deprecated.
+   */
+  excludeDeprecated?: boolean;
 }
