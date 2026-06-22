@@ -30,10 +30,17 @@ import type { McpToolHandler, McpToolContext } from "@/lib/mcp/types";
 import { TOOL_MANIFEST } from "@/lib/tools/catalog/manifest";
 import { compareVersionsDesc } from "@/lib/tools/catalog/utils";
 import {
+  parseToolRef,
+  resolveVersion,
+  type VersionResolution,
+} from "@/lib/tools/catalog/version-resolver";
+import {
   getFriendlyToolName,
   getAllToolNamesForUI,
 } from "@/lib/tools/tool-name-mapping";
 import type {
+  CatalogCallerType,
+  CatalogResolution,
   ToolCatalogEntry,
   ToolCatalogFilter,
   ToolDispatchResult,
@@ -46,6 +53,13 @@ const log = createLogger({ module: "tool-catalog" });
 /** DB cache TTL — matches settings-manager's 5-minute cache. */
 const DB_CACHE_TTL_MS = 5 * 60 * 1000;
 
+/** Deprecation lifecycle state for a code-managed row (Issue #927). */
+interface CodeDeprecationState {
+  deprecatedAt: Date | null;
+  replacedBy: string | null;
+  removalDate: Date | null;
+}
+
 interface DbState {
   /** Non-code (assistant/skill) DB entries, merged into the runtime catalog. */
   entries: ToolCatalogEntry[];
@@ -56,6 +70,13 @@ interface DbState {
    * as inactive are tracked; absence means active.
    */
   inactiveCodeKeys: Set<string>;
+  /**
+   * Deprecation state of code-managed rows, keyed by `identifier@version` (Issue
+   * #927). The manifest projection always reports a code tool as non-deprecated,
+   * so an admin's DB-level deprecation of a code tool version is merged in here.
+   * Only deprecated rows are tracked; absence means not deprecated.
+   */
+  deprecatedCodeKeys: Map<string, CodeDeprecationState>;
 }
 
 interface DbCache {
@@ -75,9 +96,14 @@ function entryKey(identifier: string, version: string): string {
  */
 function manifestToEntry(
   entry: ToolManifestEntry,
-  inactiveCodeKeys: Set<string>
+  inactiveCodeKeys: Set<string>,
+  deprecatedCodeKeys: Map<string, CodeDeprecationState>
 ): ToolCatalogEntry {
   const version = entry.version ?? "v1";
+  const key = entryKey(entry.identifier, version);
+  // A code tool version is never deprecated by the manifest itself; deprecation
+  // is a runtime admin (DB) action recorded in deprecatedCodeKeys (#927).
+  const deprecation = deprecatedCodeKeys.get(key);
   return {
     identifier: entry.identifier,
     version,
@@ -91,13 +117,98 @@ function manifestToEntry(
     agentCallable: entry.agentCallable ?? true,
     destructive: entry.destructive ?? false,
     source: "code",
-    isActive: !inactiveCodeKeys.has(entryKey(entry.identifier, version)),
+    isActive: !inactiveCodeKeys.has(key),
+    deprecatedAt: deprecation?.deprecatedAt ?? null,
+    replacedBy: deprecation?.replacedBy ?? null,
+    removalDate: deprecation?.removalDate ?? null,
     handlerRef: entry.identifier,
     displayName: entry.displayName,
     friendlyName: entry.friendlyName,
     category: entry.category,
     requiredCapabilities: entry.requiredCapabilities,
   };
+}
+
+/** Row shape returned by the `tool_catalog` select (Drizzle infers the columns). */
+type ToolCatalogDbRow = {
+  identifier: string;
+  version: string;
+  name: string;
+  description: string;
+  inputSchema: unknown;
+  outputSchema: Record<string, unknown> | null;
+  surfaces: ToolSurface[] | null;
+  requiredScopes: string[] | null;
+  agentCallable: boolean;
+  source: ToolCatalogEntry["source"];
+  isActive: boolean;
+  deprecatedAt: Date | null;
+  replacedBy: string | null;
+  removalDate: Date | null;
+  handlerRef: string | null;
+};
+
+/**
+ * Project a non-code (assistant/skill) DB row into a runtime catalog entry.
+ * Extracted from {@link ToolCatalog.dbState} to keep that method's complexity low.
+ */
+function dbRowToEntry(r: ToolCatalogDbRow): ToolCatalogEntry {
+  return {
+    identifier: r.identifier,
+    version: r.version,
+    name: r.name,
+    description: r.description,
+    inputSchema:
+      (r.inputSchema as ToolCatalogEntry["inputSchema"]) ?? {
+        type: "object",
+        properties: {},
+      },
+    outputSchema: r.outputSchema ?? undefined,
+    surfaces: r.surfaces ?? [],
+    requiredScopes: r.requiredScopes ?? [],
+    // No `surfaceScopes` here on purpose: per-surface scope overrides are a
+    // manifest (code-tool) concept and have no `tool_catalog` column. DB
+    // (assistant/skill) rows use the same scope on every surface.
+    agentCallable: r.agentCallable,
+    // No `destructive` column on tool_catalog: DB-sourced (assistant/skill) tools
+    // default to non-destructive. The destructive gate is a code-tool (manifest)
+    // concept for now. (#926.)
+    destructive: false,
+    source: r.source,
+    isActive: r.isActive,
+    // Version deprecation lifecycle (#927). Threaded through so the runtime can
+    // resolve "latest non-deprecated", emit a deprecation telemetry event at
+    // dispatch, and surface the successor to callers.
+    deprecatedAt: r.deprecatedAt ?? null,
+    replacedBy: r.replacedBy ?? null,
+    removalDate: r.removalDate ?? null,
+    handlerRef: r.handlerRef ?? undefined,
+  };
+}
+
+/**
+ * Record a code/retired row's runtime-relevant DB state (is_active + deprecation)
+ * into the manifest-projection overlays. Extracted from {@link ToolCatalog.dbState}
+ * to keep that method's complexity low.
+ */
+function recordCodeRowState(
+  r: ToolCatalogDbRow,
+  inactiveCodeKeys: Set<string>,
+  deprecatedCodeKeys: Map<string, CodeDeprecationState>
+): void {
+  const key = entryKey(r.identifier, r.version);
+  if (!r.isActive) {
+    inactiveCodeKeys.add(key);
+  }
+  // Merge an admin's DB-level deprecation of a code tool version into the
+  // manifest projection (which always reports code as live). (#927.)
+  if (r.deprecatedAt) {
+    deprecatedCodeKeys.set(key, {
+      deprecatedAt: r.deprecatedAt,
+      replacedBy: r.replacedBy ?? null,
+      removalDate: r.removalDate ?? null,
+    });
+  }
 }
 
 /** True when `scopes` grant access to a tool requiring `requiredScopes`. */
@@ -160,8 +271,13 @@ export class ToolCatalog {
   }
 
   /** Manifest-derived runtime entries (no DB round-trip). */
-  private manifestEntries(inactiveCodeKeys: Set<string>): ToolCatalogEntry[] {
-    return TOOL_MANIFEST.map((e) => manifestToEntry(e, inactiveCodeKeys));
+  private manifestEntries(
+    inactiveCodeKeys: Set<string>,
+    deprecatedCodeKeys: Map<string, CodeDeprecationState>
+  ): ToolCatalogEntry[] {
+    return TOOL_MANIFEST.map((e) =>
+      manifestToEntry(e, inactiveCodeKeys, deprecatedCodeKeys)
+    );
   }
 
   /**
@@ -191,48 +307,25 @@ export class ToolCatalog {
         // rows' is_active so an admin DB disable is honored at runtime.
         const entries: ToolCatalogEntry[] = [];
         const inactiveCodeKeys = new Set<string>();
-        for (const r of rows) {
-          // Treat both 'code' and 'retired' rows as code-managed for is_active
-          // tracking. A retired row is a code tool removed from the manifest;
-          // if it is later re-added, its admin-disabled state must still be
-          // honored. Without including 'retired' here, the row would leak into
-          // the non-code `entries` list and its key would never reach
-          // `inactiveCodeKeys`, so a re-added tool would spuriously project as
-          // active. (PR #1032 review finding #1.)
+        const deprecatedCodeKeys = new Map<string, CodeDeprecationState>();
+        for (const r of rows as ToolCatalogDbRow[]) {
+          // Treat both 'code' and 'retired' rows as code-managed: track their
+          // is_active + deprecation state for the manifest projection rather than
+          // listing them as standalone (assistant/skill) entries. A retired row
+          // is a code tool removed from the manifest; its admin-disabled state
+          // must survive a later re-add (PR #1032 review finding #1).
           if (r.source === "code" || r.source === "retired") {
-            if (!r.isActive) {
-              inactiveCodeKeys.add(entryKey(r.identifier, r.version));
-            }
+            recordCodeRowState(r, inactiveCodeKeys, deprecatedCodeKeys);
             continue;
           }
-          entries.push({
-            identifier: r.identifier,
-            version: r.version,
-            name: r.name,
-            description: r.description,
-            inputSchema:
-              (r.inputSchema as ToolCatalogEntry["inputSchema"]) ?? {
-                type: "object",
-                properties: {},
-              },
-            outputSchema: r.outputSchema ?? undefined,
-            surfaces: r.surfaces ?? [],
-            requiredScopes: r.requiredScopes ?? [],
-            // No `surfaceScopes` here on purpose: per-surface scope overrides are
-            // a manifest (code-tool) concept and have no `tool_catalog` column.
-            // DB (assistant/skill) rows use the same scope on every surface.
-            agentCallable: r.agentCallable,
-            // No `destructive` column on tool_catalog: DB-sourced (assistant/skill)
-            // tools default to non-destructive. The destructive gate is a code-tool
-            // (manifest) concept for now. (#926.)
-            destructive: false,
-            source: r.source,
-            isActive: r.isActive,
-            handlerRef: r.handlerRef ?? undefined,
-          });
+          entries.push(dbRowToEntry(r));
         }
 
-        const state: DbState = { entries, inactiveCodeKeys };
+        const state: DbState = {
+          entries,
+          inactiveCodeKeys,
+          deprecatedCodeKeys,
+        };
         this.dbCache = { state, expiresAt: Date.now() + DB_CACHE_TTL_MS };
         return state;
       } catch (error) {
@@ -256,7 +349,11 @@ export class ToolCatalog {
           "Failed to load DB tool catalog entries on cold start; admin DB disables NOT honored until DB recovers",
           { error: error instanceof Error ? error.message : String(error) }
         );
-        return { entries: [], inactiveCodeKeys: new Set() };
+        return {
+          entries: [],
+          inactiveCodeKeys: new Set(),
+          deprecatedCodeKeys: new Map(),
+        };
       } finally {
         this.dbPromise = null;
       }
@@ -287,14 +384,16 @@ export class ToolCatalog {
    * identifier@version collision with a DB row.
    */
   async list(filter: ToolCatalogFilter = {}): Promise<ToolCatalogEntry[]> {
-    const { entries: dbEntries, inactiveCodeKeys } = await this.dbState();
+    const { entries: dbEntries, inactiveCodeKeys, deprecatedCodeKeys } =
+      await this.dbState();
     const merged = new Map<string, ToolCatalogEntry>();
     for (const e of dbEntries) {
       merged.set(entryKey(e.identifier, e.version), e);
     }
     // Manifest entries override DB rows for the same key (code is authoritative),
-    // but honor an admin's DB is_active=false via inactiveCodeKeys.
-    for (const e of this.manifestEntries(inactiveCodeKeys)) {
+    // but honor an admin's DB is_active=false via inactiveCodeKeys and DB-level
+    // deprecation via deprecatedCodeKeys (#927).
+    for (const e of this.manifestEntries(inactiveCodeKeys, deprecatedCodeKeys)) {
       merged.set(entryKey(e.identifier, e.version), e);
     }
 
@@ -302,6 +401,9 @@ export class ToolCatalog {
 
     if (!filter.includeInactive) {
       entries = entries.filter((e) => e.isActive);
+    }
+    if (filter.excludeDeprecated) {
+      entries = entries.filter((e) => e.deprecatedAt == null);
     }
     if (filter.surface) {
       entries = entries.filter((e) => e.surfaces.includes(filter.surface!));
@@ -432,6 +534,84 @@ export class ToolCatalog {
   }
 
   /**
+   * All catalog versions of a single tool identifier, highest version first
+   * (Issue #927). Includes inactive and deprecated versions so the admin version-
+   * history view and the version-resolution path see the complete set. Returns an
+   * empty array when the identifier is unknown.
+   */
+  async listVersions(identifier: string): Promise<ToolCatalogEntry[]> {
+    const all = await this.list({ includeInactive: true });
+    return all
+      .filter((e) => e.identifier === identifier)
+      .sort((a, b) => compareVersionsDesc(a.version, b.version));
+  }
+
+  /**
+   * Resolve a tool reference using `identifier@version` addressing (Issue #927).
+   *
+   * - Unpinned (`documents.create`): resolves to the latest non-deprecated
+   *   version, falling back to the latest deprecated version only when every
+   *   version is deprecated.
+   * - Pinned (`documents.create@v2`): resolves to that exact version, or
+   *   `unknown_version` when it has been removed / never existed.
+   * - Malformed (`documents.create@2`): `malformed_ref`.
+   *
+   * Resolution is over the COMPLETE version set (inactive + deprecated included);
+   * the caller decides what to do with `entry.isActive` / `deprecated`. When a
+   * deprecated version is resolved AND a `context` is supplied, a structured
+   * `deprecated_tool_invocation` telemetry event is emitted (fire-and-forget).
+   */
+  async resolve(
+    ref: string,
+    context?: { callerType: CatalogCallerType; callerId?: string }
+  ): Promise<CatalogResolution> {
+    const parsed = parseToolRef(ref);
+    if (!parsed) {
+      return { ok: false, reason: "malformed_ref" };
+    }
+    const candidates = await this.listVersions(parsed.identifier);
+    const resolution: VersionResolution<ToolCatalogEntry> = resolveVersion(
+      parsed,
+      candidates
+    );
+    if (!resolution.ok) {
+      return { ok: false, reason: resolution.reason };
+    }
+    if (resolution.deprecated && context) {
+      this.emitDeprecationWarning(resolution.entry, context);
+    }
+    return {
+      ok: true,
+      entry: resolution.entry,
+      deprecated: resolution.deprecated,
+    };
+  }
+
+  /**
+   * Emit a structured `deprecated_tool_invocation` telemetry event (Issue #927).
+   * Fire-and-forget: a `log.warn` line (serialized to JSON in prod -> CloudWatch)
+   * so we can track which callers still use a deprecated version, without adding
+   * latency to the invocation path. Safe to call repeatedly.
+   */
+  private emitDeprecationWarning(
+    entry: ToolCatalogEntry,
+    context: { callerType: CatalogCallerType; callerId?: string }
+  ): void {
+    log.warn("deprecated_tool_invocation", {
+      tool: `${entry.identifier}@${entry.version}`,
+      identifier: entry.identifier,
+      version: entry.version,
+      callerType: context.callerType,
+      callerId: context.callerId ?? null,
+      replacedBy: entry.replacedBy ?? null,
+      deprecatedAt: entry.deprecatedAt
+        ? entry.deprecatedAt.toISOString()
+        : null,
+      removalDate: entry.removalDate ? entry.removalDate.toISOString() : null,
+    });
+  }
+
+  /**
    * Resolve the scopes a caller must hold to invoke a tool on a given surface —
    * the single source REST routes use instead of hardcoding a scope string.
    * Returns `undefined` when the tool is not cataloged (caller may fall back to a
@@ -471,7 +651,8 @@ export class ToolCatalog {
     toolName: string,
     args: Record<string, unknown>,
     context: McpToolContext,
-    surface: ToolSurface = "mcp"
+    surface: ToolSurface = "mcp",
+    callerType?: CatalogCallerType
   ): Promise<ToolDispatchResult> {
     // `get()` returns inactive entries too, so re-check `isActive` here: a
     // found-but-disabled tool must report as unknown (not leak its existence).
@@ -491,6 +672,18 @@ export class ToolCatalog {
     const handler = handlers[entry.name];
     if (!handler) {
       return { ok: false, reason: "no_handler" };
+    }
+    // Emit the deprecation telemetry event AFTER confirming a handler exists —
+    // only tools that will actually be invoked should count as deprecated usage.
+    // Fire-and-forget; does not gate or delay dispatch. (#927.)
+    if (entry.deprecatedAt) {
+      this.emitDeprecationWarning(entry, {
+        // Default to the surface-implied caller type when not explicitly passed:
+        // mcp -> mcp_client, internal -> internal, else fall back to the surface.
+        callerType:
+          callerType ?? (surface === "mcp" ? "mcp_client" : "internal"),
+        callerId: String(context.userId),
+      });
     }
     return { ok: true, result: await handler(args, context) };
   }
