@@ -125,7 +125,9 @@ async function main(): Promise<void> {
   }
 
   // Clean up temp directory
-  fs.rmdirSync(tmpDir, { recursive: true });
+  // fs.rmSync replaces the deprecated fs.rmdirSync({ recursive }); @types/node 26
+  // dropped the recursive option from rmdirSync. force:true ignores a missing dir.
+  fs.rmSync(tmpDir, { recursive: true, force: true });
 
   log.section("Sync complete!");
   log.info("Note: User data was NOT synced for privacy.");
