@@ -145,7 +145,7 @@
     "openai": "^6.17.0",
     "pdf-lib": "^1.17.1",
     "pdf-parse": "^2.4.5",
-    "pdfjs-dist": "^5.4.624",
+    "pdfjs-dist": "^6.0.227",
     "postgres": "^3.4.3",
     "pptxgenjs": "^4.0.1",
     "react": "^19.2.4",
