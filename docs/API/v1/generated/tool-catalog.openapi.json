@@ -1,0 +1,99 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "AI Studio API — catalog-generated tool endpoints",
+    "version": "1.0",
+    "description": "GENERATED from the tool catalog (lib/tools/catalog/manifest.ts) by scripts/openapi/generate-from-catalog.ts. Do not edit by hand; run `bun run openapi:generate`. This fragment covers tool-backed REST endpoints (surfaces include `rest`); the hand-authored docs/API/v1/openapi.yaml covers the rest of the surface."
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    }
+  },
+  "paths": {
+    "/api/v1/assistants": {
+      "get": {
+        "operationId": "listAssistants",
+        "summary": "List assistants available for API execution",
+        "x-tool-identifier": "assistants.list",
+        "x-tool-version": "v1",
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "assistants:list"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success"
+          },
+          "401": {
+            "description": "Missing or invalid API credentials."
+          },
+          "403": {
+            "description": "Authenticated but missing a required scope."
+          },
+          "500": {
+            "description": "Internal error."
+          }
+        }
+      }
+    },
+    "/api/v1/assistants/{id}/execute": {
+      "post": {
+        "operationId": "executeAssistant",
+        "summary": "Execute an assistant",
+        "description": "Execute an assistant architect by id. Returns an SSE stream (default) or a 202 job (Accept: application/json).",
+        "x-tool-identifier": "assistants.execute",
+        "x-tool-version": "v1",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            }
+          }
+        ],
+        "security": [
+          {
+            "ApiKeyAuth": [
+              "assistants:execute"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "SSE stream of execution events (default Accept: text/event-stream)."
+          },
+          "202": {
+            "description": "Async job accepted; poll for completion (Accept: application/json)."
+          },
+          "400": {
+            "description": "Validation error — malformed body or invalid inputs."
+          },
+          "401": {
+            "description": "Missing or invalid API credentials."
+          },
+          "403": {
+            "description": "Authenticated but missing a required scope."
+          },
+          "404": {
+            "description": "Resource not found, or the tool is disabled in the catalog."
+          },
+          "429": {
+            "description": "Concurrent-execution or rate limit exceeded."
+          },
+          "500": {
+            "description": "Internal error."
+          }
+        }
+      }
+    }
+  }
+}

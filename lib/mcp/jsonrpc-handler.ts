@@ -15,8 +15,11 @@ import {
   JSONRPC_ERRORS,
   MCP_PROTOCOL_VERSION,
 } from "./types"
-import { getToolsForScopes, hasToolScope } from "./tool-registry"
-import { TOOL_HANDLERS } from "./tool-handlers"
+import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
+import {
+  pickLatestNonDeprecated,
+  type VersionedEntry,
+} from "@/lib/tools/catalog/version-resolver"
 import { createLogger } from "@/lib/logger"
 
 // ============================================
@@ -80,10 +83,10 @@ export async function handleJsonRpcRequest(
       return handleInitialize(rpcRequest)
 
     case "tools/list":
-      return handleToolsList(rpcRequest, context)
+      return await handleToolsList(rpcRequest, context, log)
 
     case "tools/call":
-      return handleToolsCall(rpcRequest, context, log)
+      return await handleToolsCall(rpcRequest, context, log)
 
     case "ping":
       return successResponse(rpcRequest.id, {})
@@ -128,19 +131,100 @@ function handleInitialize(rpcRequest: JsonRpcRequest): JsonRpcResponse {
 // tools/list
 // ============================================
 
-function handleToolsList(
+async function handleToolsList(
   rpcRequest: JsonRpcRequest,
-  context: McpToolContext
-): JsonRpcResponse {
-  const tools = getToolsForScopes(context.scopes)
+  context: McpToolContext,
+  log: ReturnType<typeof createLogger>
+): Promise<JsonRpcResponse> {
+  // Versioning (#927): by DEFAULT, return only the latest non-deprecated version
+  // of each tool. The opt-in `include: "all"` param returns every version
+  // including deprecated ones, each tagged with a `deprecated` boolean so a
+  // client can distinguish them. `include` arrives either as a JSON-RPC param
+  // (`params.include`) or, for convenience, the `?include=all` query string the
+  // route merges into params.
+  const includeAll =
+    (rpcRequest.params as { include?: unknown } | undefined)?.include === "all"
+
+  // Catalog-backed: list active tools exposed on the `mcp` surface and filtered
+  // by the caller's scopes. The catalog merges code-manifest tools (the 5
+  // migrated MCP tools) with any assistant/skill-derived MCP tools.
+  //
+  // We intentionally DO NOT pass `excludeDeprecated` here, even for the default
+  // view: `selectListedTools` applies the same per-identifier policy `resolve()`
+  // uses (latest non-deprecated, falling back to the latest deprecated only when
+  // EVERY version is deprecated). Pre-filtering deprecated rows away would hide
+  // an all-deprecated tool from `tools/list` entirely while `tools/call`/
+  // `resolve()` would still happily dispatch its latest deprecated version — a
+  // silent list-vs-call divergence (#1044 review). Listing the full set and
+  // collapsing with the shared helper keeps the two paths in agreement.
+  const tools = await toolCatalogInstance.list({
+    surface: "mcp",
+    scopes: context.scopes,
+  })
+
+  // Default view: collapse to one entry per identifier via the shared
+  // `pickLatestNonDeprecated` policy. With `include: "all"` we keep every version
+  // (the client opted into the full set). `selectListedTools` is pure +
+  // unit-tested.
+  const listed = selectListedTools(tools, includeAll)
+
+  log.debug("tools/list resolved from catalog", {
+    count: listed.length,
+    includeAll,
+  })
 
   return successResponse(rpcRequest.id, {
-    tools: tools.map((t) => ({
+    tools: listed.map((t) => ({
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
+      // Version metadata so clients can pin / detect deprecation. In the default
+      // view `deprecated` is normally absent (the latest non-deprecated version
+      // is chosen); it appears with `include: "all"`, OR when every version of a
+      // tool is deprecated and the latest deprecated one is surfaced as the
+      // fallback (so an all-deprecated-but-callable tool is still flagged).
+      version: t.version,
+      identifier: t.identifier,
+      ...(t.deprecatedAt
+        ? { deprecated: true, replacedBy: t.replacedBy ?? null }
+        : {}),
     })),
   })
+}
+
+/**
+ * Choose which catalog entries `tools/list` returns (#927).
+ *
+ * - `includeAll = false` (default): one entry per identifier, chosen by the SAME
+ *   policy `resolve()` uses for an unpinned reference — the latest non-deprecated
+ *   version, falling back to the latest deprecated version only when EVERY
+ *   version of that identifier is deprecated. Sharing `pickLatestNonDeprecated`
+ *   guarantees `tools/list` and `tools/call`/`resolve()` never disagree on an
+ *   all-deprecated tool (which would otherwise be invisible here yet invocable).
+ *   The input is expected to be the FULL version set (not deprecation-filtered),
+ *   so this can apply the fallback itself.
+ * - `includeAll = true`: every entry as-is (all versions, incl. deprecated).
+ *
+ * Pure so the collapse logic is unit-testable without the catalog/DB. Exported
+ * for tests.
+ */
+export function selectListedTools<T extends VersionedEntry>(
+  tools: readonly T[],
+  includeAll: boolean
+): T[] {
+  if (includeAll) return [...tools]
+  const byIdentifier = new Map<string, T[]>()
+  for (const tool of tools) {
+    const group = byIdentifier.get(tool.identifier)
+    if (group) group.push(tool)
+    else byIdentifier.set(tool.identifier, [tool])
+  }
+  const selected: T[] = []
+  for (const group of byIdentifier.values()) {
+    const pick = pickLatestNonDeprecated(group)
+    if (pick) selected.push(pick)
+  }
+  return selected
 }
 
 // ============================================
@@ -162,32 +246,47 @@ async function handleToolsCall(
     )
   }
 
-  // Scope check
-  if (!hasToolScope(context.scopes, params.name)) {
-    log.warn("MCP tool scope denied", {
-      tool: params.name,
-      userId: context.userId,
-    })
-    return errorResponse(
-      rpcRequest.id,
-      JSONRPC_ERRORS.INVALID_PARAMS.code,
-      `Insufficient scope for tool: ${params.name}`
-    )
-  }
-
-  // Find handler
-  const handler = TOOL_HANDLERS[params.name]
-  if (!handler) {
-    return errorResponse(
-      rpcRequest.id,
-      JSONRPC_ERRORS.METHOD_NOT_FOUND.code,
-      `Unknown tool: ${params.name}`
-    )
-  }
-
   try {
-    const result = await handler(params.arguments ?? {}, context)
-    return successResponse(rpcRequest.id, result)
+    // Catalog dispatch owns the full flow: it resolves the MCP-surfaced tool,
+    // checks scope, and invokes the code handler, returning a typed discriminant
+    // so we map each failure to the correct JSON-RPC error code without sniffing
+    // message text.
+    const dispatchResult = await toolCatalogInstance.dispatch(
+      params.name,
+      params.arguments ?? {},
+      context
+    )
+
+    if (!dispatchResult.ok) {
+      switch (dispatchResult.reason) {
+        case "scope_denied":
+          log.warn("MCP tool scope denied", {
+            tool: params.name,
+            userId: context.userId,
+          })
+          return errorResponse(
+            rpcRequest.id,
+            JSONRPC_ERRORS.INVALID_PARAMS.code,
+            `Insufficient scope for tool: ${params.name}`
+          )
+        case "no_handler":
+          log.warn("MCP tool has no dispatchable handler", { tool: params.name })
+          return errorResponse(
+            rpcRequest.id,
+            JSONRPC_ERRORS.METHOD_NOT_FOUND.code,
+            `Tool not dispatchable: ${params.name}`
+          )
+        case "unknown":
+        default:
+          return errorResponse(
+            rpcRequest.id,
+            JSONRPC_ERRORS.METHOD_NOT_FOUND.code,
+            `Unknown tool: ${params.name}`
+          )
+      }
+    }
+
+    return successResponse(rpcRequest.id, dispatchResult.result)
   } catch (error) {
     log.error("MCP tool execution error", {
       tool: params.name,

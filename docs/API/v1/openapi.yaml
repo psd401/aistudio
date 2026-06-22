@@ -37,6 +37,20 @@ info:
     previous response's `meta.nextCursor` to fetch the next page.
     Cursors are opaque base64url-encoded strings. Do not construct them manually.
 
+    ## Tool-backed endpoints (catalog-generated)
+
+    Endpoints backed by a unified tool-catalog entry (surfaces include `rest`) —
+    e.g. `POST /api/v1/assistants/{id}/execute`, `GET /api/v1/assistants` — are
+    also described by a spec GENERATED from the catalog manifest at
+    `docs/API/v1/generated/tool-catalog.openapi.json` (run `bun run
+    openapi:generate`; CI runs `openapi:check`). Each generated operation carries
+    `x-tool-identifier`/`x-tool-version`, the REST scope resolved from the
+    catalog, its success responses (e.g. execute emits `200` SSE and `202` async),
+    and the shared auth/validation error codes (`401`/`403`/`500`, plus
+    `400`/`404`/`429` on write methods). This hand-authored file covers the
+    remainder of the surface (graph, conversations, jobs, health). See issue #924
+    (Epic #922).
+
   contact:
     name: AI Studio Team
   license:
@@ -61,6 +75,8 @@ tags:
     description: Async job polling and cancellation
   - name: Voice
     description: Real-time voice conversations via WebSocket with Gemini Live API
+  - name: Tools
+    description: Tool catalog inspection — versions, deprecation state, and metadata
 
 # ============================================
 # Paths
@@ -965,6 +981,125 @@ paths:
         "409":
           description: Job cannot be cancelled (already completed/failed)
 
+  # ============================================
+  # Tool catalog versioning (Issue #927)
+  # ============================================
+
+  /tools/{identifier}:
+    get:
+      operationId: getTool
+      tags: [Tools]
+      summary: Get a tool (latest version, or all versions)
+      description: |
+        Returns the latest **non-deprecated** version of a tool by its stable
+        `identifier` (e.g. `documents.create`). Tool versions are addressed as
+        `identifier@version` in the catalog; the REST API stays at `/api/v1`.
+
+        Pass `?include=all` to return every version (including deprecated ones)
+        under a `versions` array. Use `/tools/{identifier}/versions/{n}` to fetch
+        one specific version.
+
+        Requires the `tools:read` scope.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: identifier
+          in: path
+          required: true
+          description: Stable tool identifier (e.g. `assistants.execute`).
+          schema:
+            type: string
+        - name: include
+          in: query
+          required: false
+          description: Set to `all` to return every version including deprecated.
+          schema:
+            type: string
+            enum: [all]
+      responses:
+        "200":
+          description: The latest version, or (with include=all) all versions.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    oneOf:
+                      - $ref: "#/components/schemas/ToolVersion"
+                      - type: object
+                        properties:
+                          identifier:
+                            type: string
+                          versions:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/ToolVersion"
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /tools/{identifier}/versions/{version}:
+    get:
+      operationId: getToolVersion
+      tags: [Tools]
+      summary: Get a specific tool version
+      description: |
+        Returns the exact `identifier@version` catalog entry. `version` may be
+        supplied as `v2` or a bare `2`.
+
+        If the version has been **removed** (past its deprecation grace period),
+        this returns `404` with an actionable message — this is the error a
+        consumer pinned to a removed version sees. Requires the `tools:read`
+        scope.
+      security:
+        - BearerAuth: []
+        - SessionAuth: []
+      parameters:
+        - name: identifier
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: version
+          in: path
+          required: true
+          description: Version token (`v2`) or bare integer (`2`).
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The requested tool version.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: "#/components/schemas/ToolVersion"
+                  meta:
+                    type: object
+                    properties:
+                      requestId:
+                        type: string
+        "400":
+          $ref: "#/components/responses/ValidationError"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
 # ============================================
 # Components
 # ============================================
@@ -1580,6 +1715,70 @@ components:
           properties:
             requestId:
               type: string
+
+    # -- Tool catalog version (Issue #927) --
+    ToolVersion:
+      type: object
+      description: A single version of a catalog tool.
+      required:
+        - identifier
+        - version
+        - name
+        - description
+        - surfaces
+        - requiredScopes
+        - agentCallable
+        - isActive
+        - deprecated
+      properties:
+        identifier:
+          type: string
+          description: Stable `domain.action` identifier.
+          example: documents.create
+        version:
+          type: string
+          description: Version token.
+          example: v1
+        name:
+          type: string
+          description: Wire/model-facing tool name.
+        description:
+          type: string
+        inputSchema:
+          type: object
+          description: JSON Schema for the tool input.
+        outputSchema:
+          type: object
+          nullable: true
+        surfaces:
+          type: array
+          items:
+            type: string
+            enum: [mcp, ai_sdk, rest, internal]
+        requiredScopes:
+          type: array
+          items:
+            type: string
+        agentCallable:
+          type: boolean
+        isActive:
+          type: boolean
+        deprecated:
+          type: boolean
+        deprecatedAt:
+          type: string
+          format: date-time
+          nullable: true
+        replacedBy:
+          type: string
+          nullable: true
+          description: Successor `identifier@version`, when deprecated.
+          example: documents.create@v2
+        removalDate:
+          type: string
+          format: date-time
+          nullable: true
+          description: Date after which this version may be removed.
 
     # -- Error --
     ErrorResponse:

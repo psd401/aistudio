@@ -15,6 +15,7 @@ interface StreamUsage {
  *  only appear on the correct event type. */
 export type DualStreamEvent =
   | { modelId: 'model1' | 'model2'; type: 'content'; chunk: string }
+  | { modelId: 'model1' | 'model2'; type: 'image'; imageUrl: string }
   | { modelId: 'model1' | 'model2'; type: 'finish'; finishReason: string; usage?: StreamUsage }
   | { modelId: 'model1' | 'model2'; type: 'error'; error: string }
   | { modelId: 'model1' | 'model2'; type: 'warning'; warning: string };
@@ -269,6 +270,37 @@ async function* processStream<T extends ToolSet>(
       // Emit finish so the client knows this model is done, consistent with all other error paths.
       const finishEvent: DualStreamEvent = { modelId, type: 'finish', finishReason: 'error' };
       yield finishEvent;
+    }
+  }
+}
+
+/**
+ * Merge two pre-built DualStreamEvent generators into a single SSE byte stream.
+ * Used when caller manages its own per-model generators (e.g. mixed text/image).
+ */
+export async function* mergeResponseGenerators(
+  gen1: AsyncGenerator<DualStreamEvent>,
+  gen2: AsyncGenerator<DualStreamEvent>
+): AsyncGenerator<Uint8Array> {
+  const requestId = generateRequestId();
+  const encoder = new TextEncoder();
+
+  log.info('Starting response generator merge', { requestId });
+
+  try {
+    for await (const eventData of mergeAsyncIterables([gen1, gen2])) {
+      yield encoder.encode(`data: ${JSON.stringify(eventData)}\n\n`);
+    }
+    log.info('Response generator merge completed', { requestId });
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    log.error('Response generator merge failed', { requestId, error: errorMessage });
+
+    for (const modelId of ['model1', 'model2'] as const) {
+      const errorEvent: DualStreamEvent = { modelId, type: 'error', error: CLIENT_MESSAGES.mergeFailed };
+      yield encoder.encode(`data: ${JSON.stringify(errorEvent)}\n\n`);
+      const finishEvent: DualStreamEvent = { modelId, type: 'finish', finishReason: 'error' };
+      yield encoder.encode(`data: ${JSON.stringify(finishEvent)}\n\n`);
     }
   }
 }

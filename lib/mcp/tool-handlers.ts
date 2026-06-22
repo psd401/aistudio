@@ -24,6 +24,7 @@ import { isValidationError } from "@/types/error-types"
 import { executeAssistantForJobCompletion } from "@/lib/api/assistant-execution-service"
 import { listAccessibleAssistants } from "@/lib/api/assistant-service"
 import { isAdminByUserId } from "@/lib/api/route-helpers"
+import { AGENT_TOOL_HANDLERS } from "@/lib/agents/agent-tools"
 
 // ============================================
 // Handler Map
@@ -35,6 +36,11 @@ export const TOOL_HANDLERS: Record<string, McpToolHandler> = {
   execute_assistant: handleExecuteAssistant,
   list_assistants: handleListAssistants,
   get_decision_graph: handleGetDecisionGraph,
+  // Agent platform tools (#926): image gen, web fetch, document gen. Exposed on
+  // the `internal` surface only (see lib/tools/catalog/manifest.ts) so they are
+  // callable from the agentic Assistant Architect runtime but not the external
+  // MCP server.
+  ...AGENT_TOOL_HANDLERS,
 }
 
 // ============================================

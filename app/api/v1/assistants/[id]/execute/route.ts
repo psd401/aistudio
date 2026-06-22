@@ -12,13 +12,14 @@ import { NextRequest, NextResponse } from "next/server"
 import { z } from "zod"
 import {
   withApiAuth,
-  requireAssistantScope,
+  requireScope,
   createApiResponse,
   createErrorResponse,
   extractNumericParam,
   verifyAssistantAccess,
   parseRequestBody,
   isErrorResponse,
+  type ApiAuthContext,
 } from "@/lib/api"
 import {
   executeAssistant,
@@ -27,6 +28,7 @@ import {
   isContentSafetyBlocked,
 } from "@/lib/api/assistant-execution-service"
 import { jobManagementService } from "@/lib/streaming/job-management-service"
+import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 import { createLogger, startTimer } from "@/lib/logger"
 
 // Allow streaming responses up to 15 minutes for long chains
@@ -39,6 +41,58 @@ export const maxDuration = 900
 const executeBodySchema = z.object({
   inputs: z.record(z.string(), z.unknown()).default({}),
 })
+
+const EXECUTE_TOOL_IDENTIFIER = "assistants.execute"
+
+/**
+ * Gate execution on the tool catalog (single source of truth — issue #924 AC
+ * #4/#7) and scope. Two checks, in order:
+ *
+ *  1. Active state. The catalog row for `assistants.execute` carries an
+ *     `is_active` flag an admin can flip in the DB control plane. The MCP
+ *     surface enforces this via `ToolCatalog.dispatch()`, but this REST route
+ *     calls `executeAssistant()` directly, so it must re-check `isActive` itself
+ *     (the catalog `get()` returns inactive entries by design). Without this,
+ *     disabling the tool would silently block MCP yet leave REST callable —
+ *     a deceptive admin control. Returns 404 (not 403) so a disabled tool is
+ *     indistinguishable from a non-existent one and does not leak its state.
+ *  2. Scope. The per-assistant `assistant:{id}:execute` variant short-circuits
+ *     first (avoids a spurious requireScope denial log). Otherwise every REST
+ *     scope the catalog declares must be held (all-of semantics) — the literal
+ *     fallback is only used if the tool is absent from the catalog (e.g. a DB
+ *     outage that also lost the manifest projection).
+ *
+ * Returns a NextResponse to short-circuit (403/404), or null if allowed.
+ */
+async function requireExecuteScope(
+  auth: ApiAuthContext,
+  assistantId: number,
+  requestId: string
+): Promise<NextResponse | null> {
+  // Active-state gate. If the tool is cataloged but disabled, deny regardless of
+  // scope. An absent entry (undefined) means the catalog could not resolve it;
+  // fall through to the scope check, whose literal fallback still enforces auth.
+  const entry = await toolCatalogInstance.get(EXECUTE_TOOL_IDENTIFIER)
+  if (entry && !entry.isActive) {
+    return createErrorResponse(requestId, 404, "NOT_FOUND", "Assistant execution is not available")
+  }
+
+  if (auth.scopes.includes(`assistant:${assistantId}:execute`)) return null
+
+  // The REST surface may declare more than one required scope (all-of semantics).
+  // requireScope only checks a single scope, so enforce every returned scope —
+  // indexing [0] would silently drop any additional required scopes. Resolve the
+  // surface scopes from the already-fetched `entry` (mirrors
+  // requiredScopesForSurface) rather than calling getRequiredScopes, which would
+  // re-fetch the same entry from the catalog.
+  const restScopes = entry ? (entry.surfaceScopes?.rest ?? entry.requiredScopes) : undefined
+  const scopesToCheck = restScopes?.length ? restScopes : ["assistants:execute"]
+  for (const scope of scopesToCheck) {
+    const scopeError = requireScope(auth, scope, requestId)
+    if (scopeError) return scopeError
+  }
+  return null
+}
 
 // ============================================
 // POST — Execute Assistant
@@ -53,8 +107,8 @@ export const POST = withApiAuth(async (request: NextRequest, auth, requestId) =>
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Invalid assistant ID")
   }
 
-  // 2. Check scope (assistants:execute or assistant:{id}:execute)
-  const scopeError = requireAssistantScope(auth, assistantId, requestId)
+  // 2. Check scope (catalog-resolved REST scope or per-assistant variant).
+  const scopeError = await requireExecuteScope(auth, assistantId, requestId)
   if (scopeError) return scopeError
 
   // 3. Verify assistant exists and user has access

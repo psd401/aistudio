@@ -1,11 +1,11 @@
-import { describe, it, expect, jest, beforeEach, afterEach } from '@jest/globals';
-import { NextRequest } from 'next/server';
+import { describe, it, expect, beforeEach, afterEach } from '@jest/globals';
+import type { NextRequest } from 'next/server';
 
 // Mock AWS SDK clients BEFORE importing modules that use them
-const mockDynamoSend = jest.fn() as jest.MockedFunction<any>;
-const mockS3Send = jest.fn() as jest.MockedFunction<any>;
-const mockSQSSend = jest.fn() as jest.MockedFunction<any>;
-const mockGetSignedUrl = jest.fn() as jest.MockedFunction<any>;
+const mockDynamoSend = jest.fn();
+const mockS3Send = jest.fn();
+const mockSQSSend = jest.fn();
+const mockGetSignedUrl = jest.fn();
 
 jest.mock('@aws-sdk/client-dynamodb', () => ({
   DynamoDBClient: jest.fn(() => ({
@@ -48,24 +48,29 @@ jest.mock('@/lib/logger', () => ({
   sanitizeForLogging: jest.fn(data => data)
 }));
 
-// Mock dependencies BEFORE any imports of our code  
+// Mock dependencies BEFORE any imports of our code
 jest.mock('@/lib/auth/server-session', () => ({
   getServerSession: jest.fn()
 }));
 
+// Use only inline jest.fn() inside factories — outer-scope const variables are in TDZ
+// when SWC executes the hoisted factory before static imports run. Tests configure
+// return values via require() + .mockResolvedValue() inside each test body.
 jest.mock('@/lib/services/document-job-service', () => ({
   createDocumentJob: jest.fn(),
-  getJobStatus: jest.fn(), 
-  confirmDocumentUpload: jest.fn()
+  getJobStatus: jest.fn(),
+  confirmDocumentUpload: jest.fn(),
+  fetchResultFromS3: jest.fn(),
 }));
 
 jest.mock('@/lib/aws/document-upload', () => ({
   generatePresignedUrl: jest.fn(),
-  generateMultipartUrls: jest.fn()
+  generateMultipartUrls: jest.fn(),
+  sanitizeFileName: jest.fn().mockImplementation((name) => name),
 }));
 
 jest.mock('@/lib/aws/lambda-trigger', () => ({
-  sendToProcessingQueue: jest.fn()
+  sendToProcessingQueue: jest.fn(),
 }));
 
 import { POST as initiateUpload } from '@/app/api/documents/v2/initiate-upload/route';
@@ -94,7 +99,7 @@ afterEach(() => {
   mockGetSignedUrl.mockReset();
 });
 
-describe.skip('Documents v2 API Routes', () => {
+describe('Documents v2 API Routes', () => {
   const mockSession = {
     sub: 'user-123',
     userId: 'user-123',
@@ -115,11 +120,10 @@ describe.skip('Documents v2 API Routes', () => {
         method: 'single',
       });
 
-      const request = new NextRequest('http://localhost:3000/api/documents/v2/initiate-upload', {
-        method: 'POST',
-        body: JSON.stringify({
+      const request = {
+        json: async () => ({
           fileName: 'test.pdf',
-          fileSize: 1024 * 1024, // 1MB
+          fileSize: 1024 * 1024,
           fileType: 'application/pdf',
           purpose: 'chat',
           processingOptions: {
@@ -130,7 +134,7 @@ describe.skip('Documents v2 API Routes', () => {
             ocrEnabled: true,
           },
         }),
-      });
+      } as unknown as NextRequest;
 
       const response = await initiateUpload(request);
       const data = await response.json();
@@ -145,15 +149,14 @@ describe.skip('Documents v2 API Routes', () => {
       const { getServerSession } = require('@/lib/auth/server-session');
       getServerSession.mockResolvedValue(null);
 
-      const request = new NextRequest('http://localhost:3000/api/documents/v2/initiate-upload', {
-        method: 'POST',
-        body: JSON.stringify({
+      const request = {
+        json: async () => ({
           fileName: 'test.pdf',
           fileSize: 1024 * 1024,
           fileType: 'application/pdf',
           purpose: 'chat',
         }),
-      });
+      } as unknown as NextRequest;
 
       const response = await initiateUpload(request);
       expect(response.status).toBe(401);
@@ -163,15 +166,14 @@ describe.skip('Documents v2 API Routes', () => {
       const { getServerSession } = require('@/lib/auth/server-session');
       getServerSession.mockResolvedValue(mockSession);
 
-      const request = new NextRequest('http://localhost:3000/api/documents/v2/initiate-upload', {
-        method: 'POST',
-        body: JSON.stringify({
+      const request = {
+        json: async () => ({
           fileName: 'huge-file.pdf',
-          fileSize: 600 * 1024 * 1024, // 600MB - exceeds 500MB limit
+          fileSize: 600 * 1024 * 1024,
           fileType: 'application/pdf',
           purpose: 'chat',
         }),
-      });
+      } as unknown as NextRequest;
 
       const response = await initiateUpload(request);
       expect(response.status).toBe(400);
@@ -181,15 +183,14 @@ describe.skip('Documents v2 API Routes', () => {
       const { getServerSession } = require('@/lib/auth/server-session');
       getServerSession.mockResolvedValue(mockSession);
 
-      const request = new NextRequest('http://localhost:3000/api/documents/v2/initiate-upload', {
-        method: 'POST',
-        body: JSON.stringify({
+      const request = {
+        json: async () => ({
           fileName: 'malicious.exe',
           fileSize: 1024,
           fileType: 'application/x-msdownload',
           purpose: 'chat',
         }),
-      });
+      } as unknown as NextRequest;
 
       const response = await initiateUpload(request);
       expect(response.status).toBe(400);
@@ -211,15 +212,14 @@ describe.skip('Documents v2 API Routes', () => {
         ],
       });
 
-      const request = new NextRequest('http://localhost:3000/api/documents/v2/initiate-upload', {
-        method: 'POST',
-        body: JSON.stringify({
+      const request = {
+        json: async () => ({
           fileName: 'large-document.pdf',
-          fileSize: 50 * 1024 * 1024, // 50MB
+          fileSize: 50 * 1024 * 1024,
           fileType: 'application/pdf',
           purpose: 'repository',
         }),
-      });
+      } as unknown as NextRequest;
 
       const response = await initiateUpload(request);
       const data = await response.json();
@@ -250,7 +250,7 @@ describe.skip('Documents v2 API Routes', () => {
         completedAt: '2023-01-01T00:01:00Z',
       });
 
-      const request = new NextRequest('http://localhost:3000/api/documents/v2/jobs/job-123');
+      const request = {} as unknown as NextRequest;
       const response = await getJobStatusRoute(request, { params: Promise.resolve({ jobId: 'job-123' }) });
       const data = await response.json();
 
@@ -267,7 +267,7 @@ describe.skip('Documents v2 API Routes', () => {
       getServerSession.mockResolvedValue(mockSession);
       getJobStatusService.mockResolvedValue(null);
 
-      const request = new NextRequest('http://localhost:3000/api/documents/v2/jobs/non-existent');
+      const request = {} as unknown as NextRequest;
       const response = await getJobStatusRoute(request, { params: Promise.resolve({ jobId: 'non-existent' }) });
 
       expect(response.status).toBe(404);
@@ -277,7 +277,7 @@ describe.skip('Documents v2 API Routes', () => {
       const { getServerSession } = require('@/lib/auth/server-session');
       getServerSession.mockResolvedValue(null);
 
-      const request = new NextRequest('http://localhost:3000/api/documents/v2/jobs/job-123');
+      const request = {} as unknown as NextRequest;
       const response = await getJobStatusRoute(request, { params: Promise.resolve({ jobId: 'job-123' }) });
 
       expect(response.status).toBe(401);
@@ -301,13 +301,12 @@ describe.skip('Documents v2 API Routes', () => {
       confirmDocumentUpload.mockResolvedValue(undefined);
       sendToProcessingQueue.mockResolvedValue(undefined);
 
-      const request = new NextRequest('http://localhost:3000/api/documents/v2/confirm-upload', {
-        method: 'POST',
-        body: JSON.stringify({
+      const request = {
+        json: async () => ({
           uploadId: 'job-123',
-          jobId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479', // Valid UUID
+          jobId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
         }),
-      });
+      } as unknown as NextRequest;
 
       const response = await confirmUpload(request);
       const data = await response.json();
@@ -323,13 +322,12 @@ describe.skip('Documents v2 API Routes', () => {
       const { getServerSession } = require('@/lib/auth/server-session');
       getServerSession.mockResolvedValue(mockSession);
 
-      const request = new NextRequest('http://localhost:3000/api/documents/v2/confirm-upload', {
-        method: 'POST',
-        body: JSON.stringify({
+      const request = {
+        json: async () => ({
           uploadId: 'upload-123',
           jobId: 'invalid-uuid',
         }),
-      });
+      } as unknown as NextRequest;
 
       const response = await confirmUpload(request);
       expect(response.status).toBe(400);
@@ -342,13 +340,12 @@ describe.skip('Documents v2 API Routes', () => {
       getServerSession.mockResolvedValue(mockSession);
       getJobStatusService.mockResolvedValue(null);
 
-      const request = new NextRequest('http://localhost:3000/api/documents/v2/confirm-upload', {
-        method: 'POST',
-        body: JSON.stringify({
+      const request = {
+        json: async () => ({
           uploadId: 'upload-123',
           jobId: 'f47ac10b-58cc-4372-a567-0e02b2c3d479',
         }),
-      });
+      } as unknown as NextRequest;
 
       const response = await confirmUpload(request);
       expect(response.status).toBe(404);

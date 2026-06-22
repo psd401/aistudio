@@ -102,6 +102,9 @@ export async function createFreshserviceTicketAction(
     
     let response: Response
 
+    const requesterName = (typeof session.name === 'string' ? session.name.trim() : '')
+      || [session.givenName, session.familyName].filter(Boolean).join(' ').trim()
+
     // Reconstruct screenshot from base64 data URL if provided
     const hasAttachment = screenshotData && screenshotData.startsWith('data:')
 
@@ -148,6 +151,9 @@ export async function createFreshserviceTicketAction(
       freshserviceFormData.append('subject', title)
       freshserviceFormData.append('description', description)
       freshserviceFormData.append('email', session.email || 'noreply@psd401.org')
+      if (requesterName) {
+        freshserviceFormData.append('name', requesterName)
+      }
       freshserviceFormData.append('priority', settings.priority)
       freshserviceFormData.append('status', settings.status)
       freshserviceFormData.append('department_id', settings.departmentId)
@@ -190,6 +196,10 @@ export async function createFreshserviceTicketAction(
         type: settings.ticketType
       }
       
+      if (requesterName) {
+        ticketData.name = requesterName
+      }
+
       // Add workspace_id for JSON requests
       if (settings.workspaceId) {
         ticketData.workspace_id = Number.parseInt(settings.workspaceId)

@@ -24,6 +24,7 @@ import { AgentHealthTable } from "./agent-health-table"
 import { AgentCostView } from "./agent-cost-view"
 import { AgentPatternsTable } from "./agent-patterns-table"
 import { SkillsListClient } from "../skills/_components/skills-list-client"
+import { SkillReviewClient } from "../skills/review/_components/skill-review-client"
 import { CredentialsClient } from "../credentials/_components/credentials-client"
 import { AgentWorkspaceTable } from "./agent-workspace-table"
 import { AgentFailuresClient } from "./agent-failures-client"
@@ -72,6 +73,7 @@ type DashboardTab =
   | "cost"
   | "patterns"
   | "skills"
+  | "skillReview"
   | "credentials"
   | "workspace"
   | "failures"
@@ -195,6 +197,7 @@ function buildLoaders(
     // Skills, credentials, workspace, failures, and conversations tabs are
     // self-contained — their client components handle their own loading.
     skills: async () => {},
+    skillReview: async () => {},
     credentials: async () => {},
     workspace: async () => {},
     failures: async () => {},
@@ -302,6 +305,7 @@ function DashboardTabs({
         <TabsTrigger value="patterns">Patterns</TabsTrigger>
         <TabsTrigger value="feedback">Feedback</TabsTrigger>
         <TabsTrigger value="skills">Skills</TabsTrigger>
+        <TabsTrigger value="skillReview">Skill Review</TabsTrigger>
         <TabsTrigger value="credentials">Credentials</TabsTrigger>
         <TabsTrigger value="workspace">Workspace</TabsTrigger>
         <TabsTrigger value="triage">Triage</TabsTrigger>
@@ -344,6 +348,10 @@ function DashboardTabs({
 
       <TabsContent value="skills" className="mt-4">
         <SkillsListClient />
+      </TabsContent>
+
+      <TabsContent value="skillReview" className="mt-4">
+        <SkillReviewClient />
       </TabsContent>
 
       <TabsContent value="credentials" className="mt-4">

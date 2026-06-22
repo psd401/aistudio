@@ -123,11 +123,13 @@ export function withRateLimit<T extends unknown[], R>(
     // Call original handler
     const response = await handler(...args);
     
-    // Add rate limit headers to successful responses
-    if (response instanceof NextResponse) {
+    // Add rate limit headers to successful responses.
+    // Guard with typeof first: in test environments NextResponse may be mocked as a
+    // plain object (not a constructor), which would cause `instanceof` to throw TypeError.
+    if (typeof NextResponse === 'function' && response instanceof NextResponse) {
       const identifier = await getIdentifier(request, config.skipAuth || false);
       const entry = rateLimitStore.get(identifier);
-      
+
       if (entry) {
         response.headers.set('X-RateLimit-Limit', String(config.uniqueTokenPerInterval));
         response.headers.set('X-RateLimit-Remaining', String(config.uniqueTokenPerInterval - entry.count));
