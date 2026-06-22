@@ -11,7 +11,14 @@
  * Auth: Bearer token with the `tools:read` scope.
  */
 
-import { withApiAuth, requireScope, createApiResponse, createErrorResponse } from "@/lib/api"
+import {
+  withApiAuth,
+  requireScope,
+  createApiResponse,
+  createErrorResponse,
+  extractStringParam,
+  truncateForError,
+} from "@/lib/api"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 import { serializeToolEntry, normalizeVersionParam } from "@/lib/tools/catalog/rest-serializer"
 import { createLogger } from "@/lib/logger"
@@ -22,11 +29,15 @@ export const GET = withApiAuth(async (request, auth, requestId) => {
 
   const log = createLogger({ requestId, route: "api.v1.tools.version.get" })
 
-  // Path: /api/v1/tools/{identifier}/versions/{version}
-  const segments = new URL(request.url).pathname.split("/").filter(Boolean)
-  const versionRaw = decodeURIComponent(segments.pop() ?? "")
-  segments.pop() // drop the literal "versions" segment
-  const identifier = decodeURIComponent(segments.pop() ?? "")
+  // Path: /api/v1/tools/{identifier}/versions/{version}. Anchor extraction to the
+  // known `tools` and `versions` path segments rather than positional slicing, so
+  // a base-path prefix / reverse proxy can't shift the indices. (#1044 review.)
+  const identifier = decodeURIComponent(
+    extractStringParam(request.url, "tools") ?? ""
+  )
+  const versionRaw = decodeURIComponent(
+    extractStringParam(request.url, "versions") ?? ""
+  )
 
   if (!identifier || !versionRaw) {
     return createErrorResponse(
@@ -43,7 +54,7 @@ export const GET = withApiAuth(async (request, auth, requestId) => {
       requestId,
       400,
       "VALIDATION_ERROR",
-      `Invalid version '${versionRaw}'. Expected a version like 'v2' or '2'.`
+      `Invalid version '${truncateForError(versionRaw)}'. Expected a version like 'v2' or '2'.`
     )
   }
 
@@ -64,7 +75,7 @@ export const GET = withApiAuth(async (request, auth, requestId) => {
         requestId,
         404,
         "NOT_FOUND",
-        `No tool found with identifier '${identifier}'`
+        `No tool found with identifier '${truncateForError(identifier)}'`
       )
     }
 

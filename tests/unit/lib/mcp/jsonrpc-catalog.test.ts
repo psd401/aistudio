@@ -198,6 +198,66 @@ describe("MCP JSON-RPC via catalog", () => {
       expect(multi[0].deprecated).toBeUndefined()
     })
 
+    // All versions of one identifier deprecated (no live successor). `tools/call`
+    // / `resolve()` would still dispatch the latest deprecated version, so the
+    // default `tools/list` must surface it too — hiding it would make a callable
+    // tool invisible (#1044 review: list-vs-call divergence).
+    function allDeprecatedRows() {
+      return [
+        {
+          identifier: "assistants.alldep",
+          version: "v1",
+          name: "alldep_v1",
+          description: "old",
+          inputSchema: { type: "object", properties: {} },
+          outputSchema: null,
+          surfaces: ["mcp"],
+          requiredScopes: [],
+          agentCallable: true,
+          source: "assistant",
+          isActive: true,
+          deprecatedAt: new Date("2026-01-01T00:00:00Z"),
+          replacedBy: null,
+          removalDate: new Date("2026-04-01T00:00:00Z"),
+          handlerRef: "assistant:3",
+        },
+        {
+          identifier: "assistants.alldep",
+          version: "v2",
+          name: "alldep_v2",
+          description: "newer but also deprecated",
+          inputSchema: { type: "object", properties: {} },
+          outputSchema: null,
+          surfaces: ["mcp"],
+          requiredScopes: [],
+          agentCallable: true,
+          source: "assistant",
+          isActive: true,
+          deprecatedAt: new Date("2026-02-01T00:00:00Z"),
+          replacedBy: null,
+          removalDate: new Date("2026-05-01T00:00:00Z"),
+          handlerRef: "assistant:4",
+        },
+      ]
+    }
+
+    it("default tools/list surfaces the latest deprecated version when ALL versions are deprecated", async () => {
+      dbRows = allDeprecatedRows()
+      const res = await handleJsonRpcRequest(
+        { jsonrpc: "2.0", method: "tools/list", id: 8 },
+        ctx(["*"])
+      )
+      const result = res.result as {
+        tools: { name: string; version: string; deprecated?: boolean }[]
+      }
+      const allDep = result.tools.filter((t) => t.name.startsWith("alldep_"))
+      // Visible (NOT hidden) and flagged deprecated — agrees with tools/call.
+      expect(allDep).toHaveLength(1)
+      expect(allDep[0].name).toBe("alldep_v2")
+      expect(allDep[0].version).toBe("v2")
+      expect(allDep[0].deprecated).toBe(true)
+    })
+
     it("include:'all' returns every version, tagging deprecated ones", async () => {
       dbRows = multiVersionRows()
       const res = await handleJsonRpcRequest(
@@ -240,5 +300,42 @@ describe("selectListedTools (#927)", () => {
   it("returns every entry when includeAll is true", () => {
     const result = selectListedTools(tools, true)
     expect(result).toHaveLength(3)
+  })
+
+  it("falls back to the latest deprecated version when every version is deprecated", () => {
+    const allDeprecated = [
+      {
+        identifier: "c.z",
+        version: "v1",
+        name: "cz1",
+        deprecatedAt: new Date("2026-01-01T00:00:00Z"),
+      },
+      {
+        identifier: "c.z",
+        version: "v2",
+        name: "cz2",
+        deprecatedAt: new Date("2026-02-01T00:00:00Z"),
+      },
+    ]
+    const result = selectListedTools(allDeprecated, false)
+    expect(result).toHaveLength(1)
+    expect(result[0].version).toBe("v2")
+    expect(result[0].deprecatedAt).not.toBeNull()
+  })
+
+  it("prefers a live version over a higher deprecated version", () => {
+    const mixed = [
+      { identifier: "d.w", version: "v1", name: "dw1", deprecatedAt: null },
+      {
+        identifier: "d.w",
+        version: "v2",
+        name: "dw2",
+        deprecatedAt: new Date("2026-02-01T00:00:00Z"),
+      },
+    ]
+    const result = selectListedTools(mixed, false)
+    expect(result).toHaveLength(1)
+    // Latest NON-deprecated wins even though v2 is a higher version.
+    expect(result[0].version).toBe("v1")
   })
 })

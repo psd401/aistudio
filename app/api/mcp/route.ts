@@ -84,14 +84,16 @@ export async function POST(request: NextRequest): Promise<NextResponse | Respons
 
   // Versioning (#927): allow `?include=all` on the URL as a convenience for
   // `tools/list` (in addition to the JSON-RPC `params.include`). Merge it into
-  // the request params so the handler sees a single source. The explicit
-  // JSON-RPC param wins if both are present.
+  // the request params so the handler sees a single source. Build a NEW request
+  // object rather than mutating `rpcRequest` in place (CLAUDE.md: don't mutate
+  // request args). The explicit JSON-RPC param wins if both are present —
+  // `{ include, ...params }` lets an existing `params.include` override the URL.
+  let dispatchRequest = rpcRequest
   if (rpcRequest.method === "tools/list") {
     const include = request.nextUrl.searchParams.get("include")
     if (include) {
       const params = (rpcRequest.params ?? {}) as Record<string, unknown>
-      if (params.include === undefined) params.include = include
-      rpcRequest.params = params
+      dispatchRequest = { ...rpcRequest, params: { include, ...params } }
     }
   }
 
@@ -111,7 +113,7 @@ export async function POST(request: NextRequest): Promise<NextResponse | Respons
 
   // --- Dispatch ---
   try {
-    const rpcResponse = await handleJsonRpcRequest(rpcRequest, context)
+    const rpcResponse = await handleJsonRpcRequest(dispatchRequest, context)
 
     const statusCode = rpcResponse.error ? mapRpcErrorToHttp(rpcResponse.error.code) : 200
 

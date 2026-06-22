@@ -10,8 +10,11 @@ var mockRequireRole: jest.Mock
 var mockGetToolCatalogVersion: jest.Mock
 var mockDeprecateToolVersion: jest.Mock
 var mockUndeprecateToolVersion: jest.Mock
-var mockRemoveToolVersion: jest.Mock
+var mockRemoveToolVersionWithPolicy: jest.Mock
 var mockInvalidate: jest.Mock
+// The row the transactional-remove mock runs the action's assertRemovable
+// callback against (mirrors the real fn reading the FOR UPDATE locked row).
+var removeRowFixture: Record<string, unknown> | undefined
 /* eslint-enable no-var */
 
 mockRequireRole = jest.fn(() => Promise.resolve({ user: { id: 1 } }))
@@ -20,7 +23,19 @@ mockDeprecateToolVersion = jest.fn((p: Record<string, unknown>) =>
   Promise.resolve({ ...p, removalDate: p.removalDate })
 )
 mockUndeprecateToolVersion = jest.fn(() => Promise.resolve({ id: 1 }))
-mockRemoveToolVersion = jest.fn(() => Promise.resolve({ id: 1 }))
+// Faithfully run the action's assertRemovable policy against the staged row,
+// like the real transactional remove (read locked row -> policy -> delete). A
+// policy violation throws out of the callback, exactly as in production.
+mockRemoveToolVersionWithPolicy = jest.fn(
+  (
+    _identifier: string,
+    _version: string,
+    assertRemovable: (existing: unknown) => boolean
+  ) => {
+    const pastRemoval = assertRemovable(removeRowFixture)
+    return Promise.resolve({ removed: removeRowFixture, pastRemoval })
+  }
+)
 mockInvalidate = jest.fn()
 
 jest.mock("@/lib/auth/role-helpers", () => ({
@@ -34,7 +49,8 @@ jest.mock("@/lib/db/drizzle", () => ({
   deprecateToolVersion: (...args: unknown[]) => mockDeprecateToolVersion(...args),
   undeprecateToolVersion: (...args: unknown[]) =>
     mockUndeprecateToolVersion(...args),
-  removeToolVersion: (...args: unknown[]) => mockRemoveToolVersion(...args),
+  removeToolVersionWithPolicy: (...args: unknown[]) =>
+    mockRemoveToolVersionWithPolicy(...args),
 }))
 
 jest.mock("@/lib/tools/catalog/catalog", () => ({
@@ -162,74 +178,70 @@ describe("undeprecateToolVersionAction (#927)", () => {
 
 describe("removeToolVersionAction (#927)", () => {
   beforeEach(() => {
-    mockGetToolCatalogVersion.mockReset()
-    mockRemoveToolVersion.mockClear()
+    removeRowFixture = undefined
+    mockRemoveToolVersionWithPolicy.mockClear()
     mockInvalidate.mockClear()
   })
 
   it("refuses to remove a code-managed version", async () => {
-    mockGetToolCatalogVersion.mockResolvedValue(row({ source: "code" }))
+    removeRowFixture = row({ source: "code" })
     const result = await removeToolVersionAction({
       identifier: "documents.create",
       version: "v1",
     })
     expect(result.isSuccess).toBe(false)
-    expect(mockRemoveToolVersion).not.toHaveBeenCalled()
+    // Policy rejected inside the transaction -> never reaches cache invalidation.
+    expect(mockInvalidate).not.toHaveBeenCalled()
   })
 
   it("refuses to remove a non-deprecated version without force", async () => {
-    mockGetToolCatalogVersion.mockResolvedValue(row({ deprecatedAt: null }))
+    removeRowFixture = row({ deprecatedAt: null })
     const result = await removeToolVersionAction({
       identifier: "documents.create",
       version: "v1",
     })
     expect(result.isSuccess).toBe(false)
-    expect(mockRemoveToolVersion).not.toHaveBeenCalled()
+    expect(mockInvalidate).not.toHaveBeenCalled()
   })
 
   it("refuses to remove a version still within its grace period", async () => {
-    mockGetToolCatalogVersion.mockResolvedValue(
-      row({
-        deprecatedAt: new Date("2026-06-01"),
-        removalDate: new Date("2099-01-01"), // far future
-      })
-    )
+    removeRowFixture = row({
+      deprecatedAt: new Date("2026-06-01"),
+      removalDate: new Date("2099-01-01"), // far future
+    })
     const result = await removeToolVersionAction({
       identifier: "documents.create",
       version: "v1",
     })
     expect(result.isSuccess).toBe(false)
+    expect(mockInvalidate).not.toHaveBeenCalled()
   })
 
   it("removes a deprecated version past its removal date", async () => {
-    mockGetToolCatalogVersion.mockResolvedValue(
-      row({
-        deprecatedAt: new Date("2026-01-01"),
-        removalDate: new Date("2026-02-01"), // past
-      })
-    )
+    removeRowFixture = row({
+      deprecatedAt: new Date("2026-01-01"),
+      removalDate: new Date("2026-02-01"), // past
+    })
     const result = await removeToolVersionAction({
       identifier: "documents.create",
       version: "v1",
     })
     expect(result.isSuccess).toBe(true)
-    expect(mockRemoveToolVersion).toHaveBeenCalledTimes(1)
+    expect(mockRemoveToolVersionWithPolicy).toHaveBeenCalledTimes(1)
     expect(mockInvalidate).toHaveBeenCalledTimes(1)
   })
 
   it("removes within grace period when force is set", async () => {
-    mockGetToolCatalogVersion.mockResolvedValue(
-      row({
-        deprecatedAt: new Date("2026-06-01"),
-        removalDate: new Date("2099-01-01"),
-      })
-    )
+    removeRowFixture = row({
+      deprecatedAt: new Date("2026-06-01"),
+      removalDate: new Date("2099-01-01"),
+    })
     const result = await removeToolVersionAction({
       identifier: "documents.create",
       version: "v1",
       force: true,
     })
     expect(result.isSuccess).toBe(true)
-    expect(mockRemoveToolVersion).toHaveBeenCalledTimes(1)
+    expect(mockRemoveToolVersionWithPolicy).toHaveBeenCalledTimes(1)
   })
 })

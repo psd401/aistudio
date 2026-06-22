@@ -12,7 +12,14 @@
  * Auth: Bearer token with the `tools:read` scope.
  */
 
-import { withApiAuth, requireScope, createApiResponse, createErrorResponse } from "@/lib/api"
+import {
+  withApiAuth,
+  requireScope,
+  createApiResponse,
+  createErrorResponse,
+  extractStringParam,
+  truncateForError,
+} from "@/lib/api"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
 import { serializeToolEntry, type SerializedToolVersion } from "@/lib/tools/catalog/rest-serializer"
 import { createLogger } from "@/lib/logger"
@@ -22,12 +29,13 @@ export const GET = withApiAuth(async (request, auth, requestId) => {
   if (scopeError) return scopeError
 
   const log = createLogger({ requestId, route: "api.v1.tools.get" })
-  const { pathname, searchParams } = new URL(request.url)
-  // The identifier is the last non-empty path segment; decode it (identifiers
-  // contain dots, which are URL-safe, but decode defensively for any
-  // percent-encoding).
+  const { searchParams } = new URL(request.url)
+  // Anchor extraction to the known `tools` path segment (robust against a
+  // base-path prefix / reverse proxy, unlike positional slicing). Decode
+  // defensively for any percent-encoding (identifiers contain dots, which are
+  // URL-safe). (#1044 review.)
   const identifier = decodeURIComponent(
-    pathname.split("/").filter(Boolean).pop() ?? ""
+    extractStringParam(request.url, "tools") ?? ""
   )
   if (!identifier) {
     return createErrorResponse(requestId, 400, "VALIDATION_ERROR", "Missing tool identifier")
@@ -42,7 +50,7 @@ export const GET = withApiAuth(async (request, auth, requestId) => {
         requestId,
         404,
         "NOT_FOUND",
-        `No tool found with identifier '${identifier}'`
+        `No tool found with identifier '${truncateForError(identifier)}'`
       )
     }
 
@@ -66,7 +74,7 @@ export const GET = withApiAuth(async (request, auth, requestId) => {
         requestId,
         404,
         "NOT_FOUND",
-        `No resolvable version for tool '${identifier}'`
+        `No resolvable version for tool '${truncateForError(identifier)}'`
       )
     }
 

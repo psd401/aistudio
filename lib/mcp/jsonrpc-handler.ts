@@ -16,7 +16,10 @@ import {
   MCP_PROTOCOL_VERSION,
 } from "./types"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
-import { compareVersionsDesc } from "@/lib/tools/catalog/utils"
+import {
+  pickLatestNonDeprecated,
+  type VersionedEntry,
+} from "@/lib/tools/catalog/version-resolver"
 import { createLogger } from "@/lib/logger"
 
 // ============================================
@@ -144,17 +147,24 @@ async function handleToolsList(
 
   // Catalog-backed: list active tools exposed on the `mcp` surface and filtered
   // by the caller's scopes. The catalog merges code-manifest tools (the 5
-  // migrated MCP tools) with any assistant/skill-derived MCP tools. Deprecated
-  // tools are excluded unless `include: "all"`.
+  // migrated MCP tools) with any assistant/skill-derived MCP tools.
+  //
+  // We intentionally DO NOT pass `excludeDeprecated` here, even for the default
+  // view: `selectListedTools` applies the same per-identifier policy `resolve()`
+  // uses (latest non-deprecated, falling back to the latest deprecated only when
+  // EVERY version is deprecated). Pre-filtering deprecated rows away would hide
+  // an all-deprecated tool from `tools/list` entirely while `tools/call`/
+  // `resolve()` would still happily dispatch its latest deprecated version — a
+  // silent list-vs-call divergence (#1044 review). Listing the full set and
+  // collapsing with the shared helper keeps the two paths in agreement.
   const tools = await toolCatalogInstance.list({
     surface: "mcp",
     scopes: context.scopes,
-    excludeDeprecated: !includeAll,
   })
 
-  // Default view: collapse to the latest version per identifier so a client sees
-  // exactly one entry per logical tool. With `include: "all"` we keep every
-  // version (the client opted into the full set). `selectListedTools` is pure +
+  // Default view: collapse to one entry per identifier via the shared
+  // `pickLatestNonDeprecated` policy. With `include: "all"` we keep every version
+  // (the client opted into the full set). `selectListedTools` is pure +
   // unit-tested.
   const listed = selectListedTools(tools, includeAll)
 
@@ -168,8 +178,11 @@ async function handleToolsList(
       name: t.name,
       description: t.description,
       inputSchema: t.inputSchema,
-      // Version metadata so clients can pin / detect deprecation. `deprecated`
-      // is only ever true in the include=all view (default hides deprecated).
+      // Version metadata so clients can pin / detect deprecation. In the default
+      // view `deprecated` is normally absent (the latest non-deprecated version
+      // is chosen); it appears with `include: "all"`, OR when every version of a
+      // tool is deprecated and the latest deprecated one is surfaced as the
+      // fallback (so an all-deprecated-but-callable tool is still flagged).
       version: t.version,
       identifier: t.identifier,
       ...(t.deprecatedAt
@@ -182,25 +195,36 @@ async function handleToolsList(
 /**
  * Choose which catalog entries `tools/list` returns (#927).
  *
- * - `includeAll = false` (default): one entry per identifier — the highest
- *   version present (already deprecation-filtered upstream).
+ * - `includeAll = false` (default): one entry per identifier, chosen by the SAME
+ *   policy `resolve()` uses for an unpinned reference — the latest non-deprecated
+ *   version, falling back to the latest deprecated version only when EVERY
+ *   version of that identifier is deprecated. Sharing `pickLatestNonDeprecated`
+ *   guarantees `tools/list` and `tools/call`/`resolve()` never disagree on an
+ *   all-deprecated tool (which would otherwise be invisible here yet invocable).
+ *   The input is expected to be the FULL version set (not deprecation-filtered),
+ *   so this can apply the fallback itself.
  * - `includeAll = true`: every entry as-is (all versions, incl. deprecated).
  *
- * Pure so the collapse-to-latest logic is unit-testable without the catalog/DB.
- * Exported for tests.
+ * Pure so the collapse logic is unit-testable without the catalog/DB. Exported
+ * for tests.
  */
-export function selectListedTools<
-  T extends { identifier: string; version: string }
->(tools: readonly T[], includeAll: boolean): T[] {
+export function selectListedTools<T extends VersionedEntry>(
+  tools: readonly T[],
+  includeAll: boolean
+): T[] {
   if (includeAll) return [...tools]
-  const latestByIdentifier = new Map<string, T>()
+  const byIdentifier = new Map<string, T[]>()
   for (const tool of tools) {
-    const current = latestByIdentifier.get(tool.identifier)
-    if (!current || compareVersionsDesc(tool.version, current.version) < 0) {
-      latestByIdentifier.set(tool.identifier, tool)
-    }
+    const group = byIdentifier.get(tool.identifier)
+    if (group) group.push(tool)
+    else byIdentifier.set(tool.identifier, [tool])
   }
-  return [...latestByIdentifier.values()]
+  const selected: T[] = []
+  for (const group of byIdentifier.values()) {
+    const pick = pickLatestNonDeprecated(group)
+    if (pick) selected.push(pick)
+  }
+  return selected
 }
 
 // ============================================

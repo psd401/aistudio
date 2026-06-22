@@ -11,7 +11,7 @@
  */
 
 import { and, eq, or, sql, type SQL, type AnyColumn } from "drizzle-orm";
-import { executeQuery } from "@/lib/db/drizzle-client";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import {
   toolCatalog,
   psdAgentSkills,
@@ -279,6 +279,14 @@ export async function deprecateToolVersion(params: {
  * Clear a tool version's deprecation (un-deprecate). Nulls all four lifecycle
  * fields and resets the grace period to the default. Returns the updated row.
  *
+ * NOTE: resetting `grace_period_days` to the default is intentional. The grace
+ * period is meaningless while a version is live, and a subsequent re-deprecation
+ * always snapshots a fresh grace period from the admin's input (or the default if
+ * none is supplied — see {@link deprecateToolVersion}'s `CASE WHEN ... IS NULL`).
+ * So an admin who originally chose a custom grace period (e.g. 180 days) and then
+ * undeprecates must re-specify it on re-deprecation; it is NOT preserved across an
+ * undeprecate. (#1044 review observation.)
+ *
  * @throws {DatabaseError} when the (identifier, version) does not exist.
  */
 export async function undeprecateToolVersion(
@@ -340,4 +348,68 @@ export async function removeToolVersion(
     "removeToolVersion"
   );
   return result[0];
+}
+
+/**
+ * Transactionally remove a tool version under a removal policy (Issue #927).
+ *
+ * Reads the row `FOR UPDATE` inside the transaction, runs the caller's policy
+ * assertion against the locked row, then deletes it — closing the read-then-delete
+ * TOCTOU window the separate {@link getToolCatalogVersion} + {@link removeToolVersion}
+ * calls left open. Without the lock, a concurrent admin deletion between the
+ * existence check and the delete would surface as a confusing undefined-state
+ * success; here the second remover blocks on the lock, then re-reads the row gone
+ * and gets a clean `dbRecordNotFound`. (#1044 review.)
+ *
+ * `assertRemovable` enforces the policy (throws when removal is disallowed) and
+ * returns the audit's `pastRemoval` flag, which is threaded back to the caller.
+ *
+ * @throws {DatabaseError} when the (identifier, version) does not exist.
+ */
+export async function removeToolVersionWithPolicy(
+  identifier: string,
+  version: string,
+  assertRemovable: (existing: ToolCatalogRow) => boolean
+): Promise<{ removed: ToolCatalogRow; pastRemoval: boolean }> {
+  return executeTransaction(async (tx) => {
+    const locked = await tx
+      .select()
+      .from(toolCatalog)
+      .where(
+        and(
+          eq(toolCatalog.identifier, identifier),
+          eq(toolCatalog.version, version)
+        )
+      )
+      .limit(1)
+      .for("update");
+    const existing = locked[0];
+    if (!existing) {
+      throw ErrorFactories.dbRecordNotFound(
+        "tool_catalog",
+        `${identifier}@${version}`
+      );
+    }
+
+    const pastRemoval = assertRemovable(existing);
+
+    const deleted = await tx
+      .delete(toolCatalog)
+      .where(
+        and(
+          eq(toolCatalog.identifier, identifier),
+          eq(toolCatalog.version, version)
+        )
+      )
+      .returning();
+    // The row is lock-held from the SELECT above, so the delete cannot race; a
+    // missing return here would indicate a logic error, not a concurrent delete.
+    if (!deleted[0]) {
+      throw ErrorFactories.dbRecordNotFound(
+        "tool_catalog",
+        `${identifier}@${version}`
+      );
+    }
+    return { removed: deleted[0], pastRemoval };
+  }, "removeToolVersionWithPolicy");
 }

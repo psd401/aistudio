@@ -15,7 +15,7 @@ import {
   getToolCatalogVersion,
   deprecateToolVersion,
   undeprecateToolVersion,
-  removeToolVersion,
+  removeToolVersionWithPolicy,
   type ToolVersionWithUsage,
 } from "@/lib/db/drizzle"
 import { toolCatalogInstance } from "@/lib/tools/catalog/catalog"
@@ -41,7 +41,9 @@ export async function listToolIdentifiersAction(): Promise<
 > {
   const requestId = generateRequestId()
   const timer = startTimer("listToolIdentifiersAction")
+  const log = createLogger({ requestId, action: "listToolIdentifiersAction" })
   try {
+    log.info("Action started")
     await requireRole("administrator")
     const identifiers = await listToolCatalogIdentifiers()
     timer({ status: "success" })
@@ -62,7 +64,9 @@ export async function getToolVersionHistoryAction(
 ): Promise<ActionState<ToolVersionWithUsage[]>> {
   const requestId = generateRequestId()
   const timer = startTimer("getToolVersionHistoryAction")
+  const log = createLogger({ requestId, action: "getToolVersionHistoryAction" })
   try {
+    log.info("Action started", { identifier })
     await requireRole("administrator")
     if (!identifier?.trim()) {
       throw ErrorFactories.missingRequiredField("identifier")
@@ -224,6 +228,9 @@ export async function undeprecateToolVersionAction(
       throw ErrorFactories.dbRecordNotFound("tool_catalog", `${id}@${ver}`)
     }
 
+    // Undeprecating resets the grace period to the default by design — a custom
+    // grace period is NOT preserved across an undeprecate; the admin re-specifies
+    // it on the next deprecation. See undeprecateToolVersion's JSDoc. (#1044.)
     const updated = await undeprecateToolVersion(id, ver, DEFAULT_GRACE_PERIOD_DAYS)
     // AUDIT: written after the successful DB write so a not-found never produces a
     // false-positive "tool_version_undeprecated" entry in the audit log.
@@ -304,14 +311,15 @@ export async function removeToolVersionAction(params: {
     if (!identifier) throw ErrorFactories.missingRequiredField("identifier")
     if (!version) throw ErrorFactories.missingRequiredField("version")
 
-    const existing = await getToolCatalogVersion(identifier, version)
-    if (!existing) {
-      throw ErrorFactories.dbRecordNotFound("tool_catalog", `${identifier}@${version}`)
-    }
-
-    const pastRemoval = assertRemovable(existing, params.force === true)
-
-    await removeToolVersion(identifier, version)
+    // Read (FOR UPDATE) + policy check + delete in ONE transaction so a concurrent
+    // admin deletion can't interleave between the existence check and the delete.
+    // assertRemovable enforces the removal policy and returns the `pastRemoval`
+    // audit flag. (#1044 review — TOCTOU.)
+    const { pastRemoval } = await removeToolVersionWithPolicy(
+      identifier,
+      version,
+      (existing) => assertRemovable(existing, params.force === true)
+    )
 
     log.warn("tool_version_removed", {
       tool: `${identifier}@${version}`,

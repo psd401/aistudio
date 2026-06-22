@@ -158,6 +158,7 @@ export {
   deprecateToolVersion,
   undeprecateToolVersion,
   removeToolVersion,
+  removeToolVersionWithPolicy,
 } from "./tool-catalog";
 
 // ============================================
