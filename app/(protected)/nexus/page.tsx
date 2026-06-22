@@ -19,6 +19,7 @@ import { ConnectorToolProvider, useConnectorTools } from './_components/tools/co
 import { ConnectorReconnectPrompt, ConnectorToolFallback } from './_components/tools/connector-tool-ui'
 import { useModelsWithPersistence } from '@/lib/hooks/use-models'
 import { createEnhancedNexusAttachmentAdapter } from '@/lib/nexus/enhanced-attachment-adapters'
+import { UploadClassifiedError } from '@/lib/errors/upload-errors'
 import { validateConversationId } from '@/lib/nexus/conversation-navigation'
 import type { SelectAiModel } from '@/types'
 import { createLogger } from '@/lib/client-logger'
@@ -675,6 +676,35 @@ function NexusPageContent() {
     log.debug('Attachment processing completed', { attachmentId })
   }, [])
 
+  const handleAttachmentError = useCallback((attachmentId: string, error: UploadClassifiedError | Error) => {
+    log.warn('Attachment processing failed', {
+      attachmentId,
+      code: error instanceof UploadClassifiedError ? error.code : undefined,
+      error: error.message,
+    })
+
+    if (error instanceof UploadClassifiedError && error.code === 'UNAUTHORIZED') {
+      toast.error('Session expired', {
+        description: 'Your session expired during file upload. Please sign in again.',
+        duration: 8000,
+        action: {
+          label: 'Sign in',
+          onClick: () => {
+            const callbackUrl = encodeURIComponent(window.location.pathname + window.location.search)
+            window.location.href = `/api/auth/signin?callbackUrl=${callbackUrl}`
+          },
+        },
+      })
+    } else {
+      toast.error('File upload failed', {
+        description: error instanceof UploadClassifiedError
+          ? `Upload error: ${error.code.replace(/_/g, ' ').toLowerCase()}.`
+          : 'The file could not be uploaded. Please try again.',
+        duration: 6000,
+      })
+    }
+  }, [])
+
   // Conversation ID callback for maintaining conversation continuity
   const handleConversationIdChange = useCallback((newConversationId: string) => {
     setConversationId(newConversationId)
@@ -714,8 +744,9 @@ function NexusPageContent() {
     return createEnhancedNexusAttachmentAdapter({
       onProcessingStart: handleAttachmentProcessingStart,
       onProcessingComplete: handleAttachmentProcessingComplete,
+      onError: handleAttachmentError,
     })
-  }, [handleAttachmentProcessingStart, handleAttachmentProcessingComplete])
+  }, [handleAttachmentProcessingStart, handleAttachmentProcessingComplete, handleAttachmentError])
 
   // Voice mode — check availability (adapter created inside NexusRuntimeWrapper via useVoiceSession)
   const voiceAvailability = useVoiceAvailability()

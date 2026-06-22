@@ -22,6 +22,7 @@ jest.mock("drizzle-orm", () => ({
 import {
   intersectSkillAllowedTools,
   getApprovedSkillAllowedTools,
+  parseSkillAllowedTools,
 } from "@/lib/skills/skill-tool-enforcement"
 
 describe("intersectSkillAllowedTools", () => {
@@ -66,6 +67,58 @@ describe("intersectSkillAllowedTools", () => {
     expect(
       intersectSkillAllowedTools(["a", "b", "c"], ["b"])
     ).toEqual(["b"])
+  })
+
+  // Issue #927: @version pins match on the version-stripped base name (the
+  // client-supplied available names carry no version).
+  it("matches a versioned pin on the base name", () => {
+    expect(
+      intersectSkillAllowedTools(
+        ["documents.create", "web.fetch"],
+        ["documents.create@v1"]
+      )
+    ).toEqual(["documents.create"])
+  })
+
+  it("mixes versioned and unversioned pins", () => {
+    expect(
+      intersectSkillAllowedTools(
+        ["a", "b", "c"],
+        ["a@v2", "c"]
+      )
+    ).toEqual(["a", "c"])
+  })
+
+  it("a malformed version pin fails closed (matches nothing)", () => {
+    // `a@2` is malformed -> kept as the literal name `a@2`, which no real tool
+    // name equals, so it is excluded rather than silently widening to `a`.
+    expect(intersectSkillAllowedTools(["a", "b"], ["a@2"])).toEqual([])
+  })
+})
+
+describe("parseSkillAllowedTools (#927)", () => {
+  it("splits identifier@version into name + version", () => {
+    expect(parseSkillAllowedTools(["documents.create@v2"])).toEqual([
+      { name: "documents.create", version: "v2", raw: "documents.create@v2" },
+    ])
+  })
+
+  it("treats an unversioned entry as version null", () => {
+    expect(parseSkillAllowedTools(["web.fetch"])).toEqual([
+      { name: "web.fetch", version: null, raw: "web.fetch" },
+    ])
+  })
+
+  it("keeps a malformed pin as a literal name (fail-closed)", () => {
+    expect(parseSkillAllowedTools(["tool@latest"])).toEqual([
+      { name: "tool@latest", version: null, raw: "tool@latest" },
+    ])
+  })
+
+  it("drops blank entries and trims", () => {
+    expect(parseSkillAllowedTools(["", "  a@v1  ", "   "])).toEqual([
+      { name: "a", version: "v1", raw: "a@v1" },
+    ])
   })
 })
 

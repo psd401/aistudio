@@ -5,12 +5,14 @@ import { Button } from "@/components/ui/button"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { ResponseDisplay } from "./response-display"
-import { IconPlayerStop, IconCopy, IconCheck, IconLoader2 } from "@tabler/icons-react"
+import { IconPlayerStop, IconCopy, IconCheck, IconLoader2, IconExternalLink } from "@tabler/icons-react"
 import type { SelectAiModel } from "@/types"
 
-interface ModelResponse {
+export interface ModelResponse {
   model: SelectAiModel | null
   response: string
+  imageUrl?: string
+  isImageModel?: boolean
   status: 'ready' | 'streaming' | 'error'
   error?: string
 }
@@ -41,7 +43,8 @@ export function DualResponse({
   }
 
   const renderResponse = (response: ModelResponse, modelKey: 'model1' | 'model2', onStop: () => void) => {
-    const hasContent = response.response || response.error || response.status !== 'ready'
+    const hasContent = response.response || response.imageUrl || response.error || response.status !== 'ready'
+    const loadingLabel = response.isImageModel ? 'Generating image...' : `${response.model?.name || 'Model'} is thinking...`
 
     return (
       <div className="flex flex-col h-full">
@@ -61,7 +64,20 @@ export function DualResponse({
                 <IconPlayerStop className="h-3 w-3" />
               </Button>
             )}
-            {response.response && (
+            {response.imageUrl && (
+              // The `download` attribute is ignored by browsers for cross-origin URLs
+              // (S3 presigned URLs). Open in a new tab instead of mislabelling as download.
+              <a
+                href={response.imageUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center justify-center h-7 w-7 rounded-md hover:bg-accent hover:text-accent-foreground"
+                aria-label="Open generated image in new tab"
+              >
+                <IconExternalLink className="h-3 w-3" />
+              </a>
+            )}
+            {response.response && !response.imageUrl && (
               <Button
                 onClick={() => handleCopy(response.response, modelKey)}
                 size="sm"
@@ -77,33 +93,42 @@ export function DualResponse({
             )}
           </div>
         </div>
-        
+
         <ScrollArea className="flex-1 p-4">
           {!hasContent && (
             <div className="text-center text-muted-foreground py-8">
               <p className="text-sm">Responses will appear here</p>
             </div>
           )}
-          
+
           {response.error && (
             <div className="rounded-md bg-destructive/10 p-4 text-sm text-destructive">
               {response.error}
             </div>
           )}
-          
-          {response.status === 'streaming' && !response.response && (
+
+          {response.status === 'streaming' && !response.response && !response.imageUrl && (
             <div className="flex items-center gap-2 text-muted-foreground">
               <IconLoader2 className="h-4 w-4 animate-spin" />
-              <span className="text-sm">
-                {response.model?.name || 'Model'} is thinking...
-              </span>
+              <span className="text-sm">{loadingLabel}</span>
             </div>
           )}
 
-          {response.response && (
-            <ResponseDisplay
-              content={response.response}
-            />
+          {response.imageUrl && (
+            <div className="space-y-2">
+              {/* Image rendered directly — Next.js Image component doesn't support external S3 domains without next.config allowlisting */}
+              <img
+                src={response.imageUrl}
+                alt="AI-generated result"
+                loading="lazy"
+                className="w-full rounded-md border border-border object-contain"
+                style={{ maxHeight: '600px' }}
+              />
+            </div>
+          )}
+
+          {response.response && !response.imageUrl && (
+            <ResponseDisplay content={response.response} />
           )}
         </ScrollArea>
       </div>
@@ -131,7 +156,7 @@ export function DualResponse({
           </TabsContent>
         </Tabs>
       </div>
-      
+
       {/* Desktop view - Side by side */}
       <div className="hidden md:grid grid-cols-2 divide-x divide-gray-200 h-full">
         {renderResponse(model1, 'model1', onStopModel1)}

@@ -23,6 +23,7 @@ export function ModelSelector({
   value,
   onChange,
   requiredCapabilities = [],
+  anyOfCapabilities = [],
   placeholder = "Select a model",
   disabled = false,
   className,
@@ -78,14 +79,15 @@ export function ModelSelector({
     fetchUserRoles()
   }, [])
 
-  const { 
-    filteredModels, 
-    groupedModels, 
-    totalCount, 
-    accessibleCount 
+  const {
+    filteredModels,
+    groupedModels,
+    totalCount,
+    accessibleCount
   } = useFilteredModels({
     models,
     requiredCapabilities,
+    anyOfCapabilities,
     allowedRoles,
     userRoles,
     searchQuery: debouncedSearch,

@@ -144,6 +144,24 @@ export {
 } from "./capabilities";
 
 // ============================================
+// Tool Catalog Version Lifecycle (Issue #927)
+// ============================================
+
+export {
+  type ToolVersionUsage,
+  type ToolVersionWithUsage,
+  getToolCatalogVersions,
+  getToolCatalogVersion,
+  listToolCatalogIdentifiers,
+  getToolVersionUsage,
+  getToolVersionsWithUsage,
+  deprecateToolVersion,
+  undeprecateToolVersion,
+  removeToolVersion,
+  removeToolVersionWithPolicy,
+} from "./tool-catalog";
+
+// ============================================
 // Notification Operations
 // ============================================
 

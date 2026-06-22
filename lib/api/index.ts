@@ -39,6 +39,7 @@ export { withApiAuth } from "./with-api-auth";
 export {
   extractNumericParam,
   extractStringParam,
+  truncateForError,
   isAdminByUserId,
   verifyAssistantAccess,
   parseRequestBody,

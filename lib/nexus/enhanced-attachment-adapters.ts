@@ -15,6 +15,12 @@ const log = createLogger({ moduleName: 'enhanced-attachment-adapters' });
 export interface AttachmentProcessingCallbacks {
   onProcessingStart?: (attachmentId: string) => void;
   onProcessingComplete?: (attachmentId: string) => void;
+  /**
+   * Called when background processing fails (network error, 401, 5xx, etc.).
+   * The caller can show a toast, redirect to sign-in, or take other recovery actions.
+   * The error is the original (unredacted) error — do NOT pass to LLM context.
+   */
+  onError?: (attachmentId: string, error: UploadClassifiedError | Error) => void;
 }
 
 /**
@@ -222,6 +228,14 @@ export class HybridDocumentAdapter implements AttachmentAdapter {
       // Only controlled strings reach the LLM — unknown errors get a generic
       // message to prevent indirect prompt injection (OWASP LLM Top 10).
       const safeMessage = HybridDocumentAdapter.toSafeErrorMessage(rawMessage, errorCode);
+
+      // Notify caller of the error so they can show a toast or redirect.
+      // Pass the original error (not the redacted message) so callers can
+      // distinguish auth failures (UploadClassifiedError with code UNAUTHORIZED)
+      // from transient infrastructure errors and act accordingly.
+      if (this.callbacks?.onError) {
+        this.callbacks.onError(attachment.id, error instanceof Error ? error : new Error(rawMessage));
+      }
 
       return {
         id: attachment.id,

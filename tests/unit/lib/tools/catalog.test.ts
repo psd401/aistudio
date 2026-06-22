@@ -468,6 +468,206 @@ describe("ToolCatalog", () => {
     })
   })
 
+  // Issue #927: version resolution + deprecation lifecycle.
+  describe("version resolution + deprecation (#927)", () => {
+    function deprecatedDbRow(
+      identifier: string,
+      version: string,
+      opts: { replacedBy?: string; removalDate?: string } = {}
+    ) {
+      return {
+        identifier,
+        version,
+        name: `${identifier}_${version}`,
+        description: "x",
+        inputSchema: { type: "object", properties: {} },
+        outputSchema: null,
+        surfaces: ["mcp"],
+        requiredScopes: [],
+        agentCallable: true,
+        source: "assistant",
+        isActive: true,
+        deprecatedAt: new Date("2026-01-01T00:00:00Z"),
+        replacedBy: opts.replacedBy ?? null,
+        removalDate: opts.removalDate ? new Date(opts.removalDate) : null,
+        handlerRef: "assistant:1",
+      }
+    }
+
+    it("listVersions returns all versions of an identifier, highest first", async () => {
+      dbRows = [
+        deprecatedDbRow("assistants.multi", "v1", { replacedBy: "assistants.multi@v2" }),
+        {
+          ...deprecatedDbRow("assistants.multi", "v2"),
+          deprecatedAt: null,
+        },
+      ]
+      const catalog = new ToolCatalog()
+      const versions = await catalog.listVersions("assistants.multi")
+      expect(versions.map((v) => v.version)).toEqual(["v2", "v1"])
+    })
+
+    it("resolve() with no pin returns the latest non-deprecated version", async () => {
+      dbRows = [
+        deprecatedDbRow("assistants.multi", "v1"),
+        {
+          ...deprecatedDbRow("assistants.multi", "v2"),
+          deprecatedAt: null,
+        },
+      ]
+      const catalog = new ToolCatalog()
+      const r = await catalog.resolve("assistants.multi")
+      expect(r.ok).toBe(true)
+      expect(r.ok && r.entry.version).toBe("v2")
+      expect(r.ok && r.deprecated).toBe(false)
+    })
+
+    it("resolve() with an explicit @version returns that version", async () => {
+      dbRows = [
+        deprecatedDbRow("assistants.multi", "v1", { replacedBy: "assistants.multi@v2" }),
+        { ...deprecatedDbRow("assistants.multi", "v2"), deprecatedAt: null },
+      ]
+      const catalog = new ToolCatalog()
+      const r = await catalog.resolve("assistants.multi@v1")
+      expect(r.ok).toBe(true)
+      expect(r.ok && r.entry.version).toBe("v1")
+      expect(r.ok && r.deprecated).toBe(true)
+    })
+
+    it("resolve() returns unknown_version for a removed pin", async () => {
+      dbRows = [{ ...deprecatedDbRow("assistants.multi", "v1"), deprecatedAt: null }]
+      const catalog = new ToolCatalog()
+      const r = await catalog.resolve("assistants.multi@v9")
+      expect(r.ok).toBe(false)
+      expect(r.ok === false && r.reason).toBe("unknown_version")
+    })
+
+    it("resolve() returns malformed_ref for an invalid reference", async () => {
+      const catalog = new ToolCatalog()
+      const r = await catalog.resolve("assistants.multi@2")
+      expect(r.ok).toBe(false)
+      expect(r.ok === false && r.reason).toBe("malformed_ref")
+    })
+
+    it("resolve() returns unknown_identifier for an unknown tool", async () => {
+      const catalog = new ToolCatalog()
+      const r = await catalog.resolve("no.such.tool")
+      expect(r.ok).toBe(false)
+      expect(r.ok === false && r.reason).toBe("unknown_identifier")
+    })
+
+    it("resolve() emits deprecated_tool_invocation telemetry when context is supplied", async () => {
+      const { createLogger } = jest.requireMock("@/lib/logger") as {
+        createLogger: () => { warn: jest.Mock }
+      }
+      const mockLogger = createLogger()
+      mockLogger.warn.mockClear()
+
+      dbRows = [
+        deprecatedDbRow("assistants.multi", "v1", {
+          replacedBy: "assistants.multi@v2",
+          removalDate: "2026-04-01T00:00:00Z",
+        }),
+      ]
+      const catalog = new ToolCatalog()
+      const r = await catalog.resolve("assistants.multi@v1", {
+        callerType: "skill",
+        callerId: "skill-42",
+      })
+      expect(r.ok).toBe(true)
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        "deprecated_tool_invocation",
+        expect.objectContaining({
+          tool: "assistants.multi@v1",
+          identifier: "assistants.multi",
+          version: "v1",
+          callerType: "skill",
+          callerId: "skill-42",
+          replacedBy: "assistants.multi@v2",
+        })
+      )
+    })
+
+    it("resolve() does NOT emit telemetry when no context is supplied", async () => {
+      const { createLogger } = jest.requireMock("@/lib/logger") as {
+        createLogger: () => { warn: jest.Mock }
+      }
+      const mockLogger = createLogger()
+      mockLogger.warn.mockClear()
+
+      dbRows = [deprecatedDbRow("assistants.multi", "v1")]
+      const catalog = new ToolCatalog()
+      await catalog.resolve("assistants.multi@v1")
+      const deprecationCalls = mockLogger.warn.mock.calls.filter(
+        (c) => c[0] === "deprecated_tool_invocation"
+      )
+      expect(deprecationCalls.length).toBe(0)
+    })
+
+    it("list({excludeDeprecated}) hides deprecated versions", async () => {
+      dbRows = [
+        deprecatedDbRow("assistants.multi", "v1"),
+        { ...deprecatedDbRow("assistants.multi", "v2"), deprecatedAt: null },
+      ]
+      const catalog = new ToolCatalog()
+      const all = await catalog.list({ surface: "mcp", scopes: ["*"] })
+      const filtered = await catalog.list({
+        surface: "mcp",
+        scopes: ["*"],
+        excludeDeprecated: true,
+      })
+      expect(all.some((t) => t.identifier === "assistants.multi" && t.version === "v1")).toBe(true)
+      expect(filtered.some((t) => t.identifier === "assistants.multi" && t.version === "v1")).toBe(false)
+      expect(filtered.some((t) => t.identifier === "assistants.multi" && t.version === "v2")).toBe(true)
+    })
+
+    it("dispatch emits deprecation telemetry for an authorized deprecated tool call", async () => {
+      const { createLogger } = jest.requireMock("@/lib/logger") as {
+        createLogger: () => { warn: jest.Mock }
+      }
+      const mockLogger = createLogger()
+      mockLogger.warn.mockClear()
+
+      // A deprecated CODE tool (search_decisions v1) — admin deprecated it in DB.
+      dbRows = [
+        {
+          identifier: "decisions.search",
+          version: "v1",
+          name: "search_decisions",
+          description: "x",
+          inputSchema: { type: "object", properties: {} },
+          outputSchema: null,
+          surfaces: ["mcp"],
+          requiredScopes: ["mcp:search_decisions"],
+          agentCallable: true,
+          source: "code",
+          isActive: true,
+          deprecatedAt: new Date("2026-01-01T00:00:00Z"),
+          replacedBy: "decisions.search@v2",
+          removalDate: new Date("2026-04-01T00:00:00Z"),
+          handlerRef: "decisions.search",
+        },
+      ]
+      const catalog = new ToolCatalog()
+      const result = await catalog.dispatch(
+        "search_decisions",
+        {},
+        { userId: 7, cognitoSub: "s", scopes: ["*"], requestId: "r" }
+      )
+      // The mocked handler returns undefined; the key check is it dispatched.
+      expect(result.ok === false && result.reason === "unknown").toBe(false)
+      expect(mockLogger.warn).toHaveBeenCalledWith(
+        "deprecated_tool_invocation",
+        expect.objectContaining({
+          tool: "decisions.search@v1",
+          callerType: "mcp_client",
+          callerId: "7",
+          replacedBy: "decisions.search@v2",
+        })
+      )
+    })
+  })
+
   // Issue #926: destructive flag drives the human-in-the-loop confirmation gate.
   describe("destructive flag (#926)", () => {
     it("marks decisions.capture (a writing tool) destructive", () => {

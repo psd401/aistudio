@@ -5,6 +5,8 @@ export interface ModelSelectorProps {
   value?: SelectAiModel | null
   onChange: (model: SelectAiModel) => void
   requiredCapabilities?: string[]
+  /** Model must have at least one of these capabilities (OR logic). Combined with requiredCapabilities (AND). */
+  anyOfCapabilities?: string[]
   placeholder?: string
   disabled?: boolean
   className?: string
@@ -41,6 +43,8 @@ export interface FilteredModel extends SelectAiModel {
 export interface UseFilteredModelsOptions {
   models: SelectAiModel[]
   requiredCapabilities?: string[]
+  /** Model must have at least one of these capabilities (OR logic). Combined with requiredCapabilities (AND). */
+  anyOfCapabilities?: string[]
   allowedRoles?: string[]
   userRoles?: string[]
   searchQuery?: string
