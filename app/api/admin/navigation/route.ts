@@ -24,8 +24,16 @@ interface NavigationItemBody {
 
 async function updateExistingNavigationItem(body: NavigationItemBody, requestId: string, log: RequestLogger, timer: RequestTimer) {
   const { id, ...data } = body;
+  // Normalize numeric FK fields so string IDs from JSON don't cause type mismatches
+  const updatePayload: Partial<NavigationItemData> = { ...data } as Partial<NavigationItemData>
+  if (data.parentId !== undefined && data.parentId !== null) {
+    updatePayload.parentId = Number(data.parentId)
+  }
+  if (data.capabilityId !== undefined && data.capabilityId !== null) {
+    updatePayload.capabilityId = Number(data.capabilityId)
+  }
   try {
-    const updatedItem = await updateNavigationItem(Number(id), data as Partial<NavigationItemData>)
+    const updatedItem = await updateNavigationItem(Number(id), updatePayload)
 
     log.info("Navigation item updated successfully", { itemId: id });
     timer({ status: "success", action: "update" });
