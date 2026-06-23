@@ -1,6 +1,6 @@
 "use server"
 
-import { hasCapabilityAccess } from "@/lib/db/drizzle"
+import { hasCapabilityAccess } from "@/utils/roles"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
 import { getServerSession } from "@/lib/auth/server-session"
@@ -289,28 +289,33 @@ function validateCustomCronExpression(cron: string): string[] {
   // Validate each field individually to prevent bypass attempts
   const [minute, hour, day, month, dayOfWeek] = cronFields
 
-  // Validate minute field (0-59) - ReDoS-safe pattern
-  if (!/^\*$|^[0-5]?\d$|^[0-5]?\d-[0-5]?\d$|^[0-5]?\d\/\d+$|^\*\/\d+$/.test(minute)) {
+  // Validate minute field (0-59) - supports comma-separated lists, ReDoS-safe
+  const minuteRegex = /^\*$|^[0-5]?\d$|^[0-5]?\d-[0-5]?\d$|^[0-5]?\d\/\d+$|^\*\/\d+$/
+  if (minute.split(',').some(p => !minuteRegex.test(p))) {
     errors.push('Invalid minute field in cron expression')
   }
 
-  // Validate hour field (0-23) - ReDoS-safe pattern
-  if (!/^\*$|^(?:[01]?\d|2[0-3])$|^(?:[01]?\d|2[0-3])-(?:[01]?\d|2[0-3])$|^(?:[01]?\d|2[0-3])\/\d+$|^\*\/\d+$/.test(hour)) {
+  // Validate hour field (0-23) - supports comma-separated lists, ReDoS-safe
+  const hourRegex = /^\*$|^(?:[01]?\d|2[0-3])$|^(?:[01]?\d|2[0-3])-(?:[01]?\d|2[0-3])$|^(?:[01]?\d|2[0-3])\/\d+$|^\*\/\d+$/
+  if (hour.split(',').some(p => !hourRegex.test(p))) {
     errors.push('Invalid hour field in cron expression')
   }
 
-  // Validate day field (1-31) - ReDoS-safe pattern
-  if (!/^\*$|^(?:[12]?\d|3[01])$|^(?:[12]?\d|3[01])-(?:[12]?\d|3[01])$|^(?:[12]?\d|3[01])\/\d+$|^\*\/\d+$/.test(day)) {
+  // Validate day field (1-31) - supports comma-separated lists, ReDoS-safe
+  const dayRegex = /^\*$|^(?:[12]?\d|3[01])$|^(?:[12]?\d|3[01])-(?:[12]?\d|3[01])$|^(?:[12]?\d|3[01])\/\d+$|^\*\/\d+$/
+  if (day.split(',').some(p => !dayRegex.test(p))) {
     errors.push('Invalid day field in cron expression')
   }
 
-  // Validate month field (1-12) - ReDoS-safe pattern
-  if (!/^\*$|^(?:[1-9]|1[0-2])$|^(?:[1-9]|1[0-2])-(?:[1-9]|1[0-2])$|^(?:[1-9]|1[0-2])\/\d+$|^\*\/\d+$/.test(month)) {
+  // Validate month field (1-12) - supports comma-separated lists, ReDoS-safe
+  const monthRegex = /^\*$|^(?:[1-9]|1[0-2])$|^(?:[1-9]|1[0-2])-(?:[1-9]|1[0-2])$|^(?:[1-9]|1[0-2])\/\d+$|^\*\/\d+$/
+  if (month.split(',').some(p => !monthRegex.test(p))) {
     errors.push('Invalid month field in cron expression')
   }
 
-  // Validate day-of-week field (0-6) - ReDoS-safe pattern
-  if (!/^\*$|^[0-6]$|^[0-6]-[0-6]$|^[0-6]\/\d+$|^\*\/\d+$/.test(dayOfWeek)) {
+  // Validate day-of-week field (0-6) - supports comma-separated lists, ReDoS-safe
+  const dayOfWeekRegex = /^\*$|^[0-6]$|^[0-6]-[0-6]$|^[0-6]\/\d+$|^\*\/\d+$/
+  if (dayOfWeek.split(',').some(p => !dayOfWeekRegex.test(p))) {
     errors.push('Invalid day-of-week field in cron expression')
   }
 
@@ -725,7 +730,7 @@ export async function createScheduleAction(params: CreateScheduleRequest): Promi
     }
 
     // Check if user has access to assistant-architect tool
-    const hasAccess = await hasCapabilityAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
       log.warn("User lacks assistant-architect access")
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
@@ -844,7 +849,7 @@ export async function getSchedulesAction(): Promise<ActionState<Schedule[]>> {
     }
 
     // Check if user has access to assistant-architect tool
-    const hasAccess = await hasCapabilityAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
       log.warn("User lacks assistant-architect access")
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
@@ -954,7 +959,7 @@ async function buildScheduleUpdateData(
   if (params.assistantArchitectId !== undefined) {
     // Security: Pre-validate user access BEFORE sanitization to prevent bypass
     // First verify user has general assistant architect access
-    const hasAccess = await hasCapabilityAccess(cognitoSub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
       throw ErrorFactories.authzToolAccessDenied("assistant-architect")
     }
@@ -1036,7 +1041,7 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
     }
 
     // Check if user has access to assistant-architect tool
-    const hasAccess = await hasCapabilityAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
       log.warn("User lacks assistant-architect access")
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
@@ -1155,7 +1160,7 @@ export async function deleteScheduleAction(id: number): Promise<ActionState<{ su
     }
 
     // Check if user has access to assistant-architect tool
-    const hasAccess = await hasCapabilityAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
       log.warn("User lacks assistant-architect access")
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
@@ -1231,7 +1236,7 @@ export async function getScheduleAction(id: number): Promise<ActionState<Schedul
     }
 
     // Check if user has access to assistant-architect tool
-    const hasAccess = await hasCapabilityAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
       log.warn("User lacks assistant-architect access")
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
