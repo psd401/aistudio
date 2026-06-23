@@ -78,6 +78,7 @@
     "080-tool-catalog.sql",
     "081-skill-platform-catalog.sql",
     "082-assistant-architect-agentic-mode.sql",
-    "083-tool-version-deprecation.sql"
+    "083-tool-version-deprecation.sql",
+    "084-drop-legacy-tools-tables.sql"
   ]
 }
