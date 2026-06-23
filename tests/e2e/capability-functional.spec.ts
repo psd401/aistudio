@@ -20,7 +20,7 @@ import { authenticateContext } from './helpers/session-auth'
 
 test.describe('Capability functional flows (authenticated)', () => {
   test.skip(
-    !process.env.PLAYWRIGHT_AUTH_ENABLED,
+    process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
     'Requires authenticated session — set PLAYWRIGHT_AUTH_ENABLED=true and run against the host dev server (see docs/guides/e2e-authenticated-testing.md)'
   )
 

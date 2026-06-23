@@ -66,9 +66,14 @@ test.describe('Capability layout guards — unauthenticated redirect (always-run
 
 test.describe('Capability layout guards — authorized access (auth-gated)', () => {
   test.skip(
-    !process.env.PLAYWRIGHT_AUTH_ENABLED,
+    process.env.PLAYWRIGHT_AUTH_ENABLED !== 'true',
     'Requires an authenticated session with the capability — set PLAYWRIGHT_AUTH_ENABLED=true and seed a user'
   )
+
+  test.beforeEach(async ({ page }) => {
+    const { authenticateContext } = await import('./helpers/session-auth')
+    await authenticateContext(page.context())
+  })
 
   // With a seeded session that HOLDS the capability, the guard must NOT redirect:
   // the visitor should remain on the protected route. Asserts the migration did
