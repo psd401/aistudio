@@ -28,8 +28,8 @@ import { ErrorFactories } from "@/lib/error-utils";
 export interface NavigationItemData {
   label: string;
   icon: string;
-  link?: string;
-  description?: string;
+  link?: string | null;
+  description?: string | null;
   type: "link" | "section" | "page";
   // Clearable relation/role fields accept null so an update can REMOVE the gate
   // (e.g. ungate a nav item). The DB column is nullable; passing null clears it.

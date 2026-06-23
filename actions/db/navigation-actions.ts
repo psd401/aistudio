@@ -41,8 +41,8 @@ function parseOptionalNumericField(
 type NavigationUpdateData = Partial<{
   label: string;
   icon: string;
-  link: string;
-  description: string;
+  link: string | null;
+  description: string | null;
   type: "link" | "section" | "page";
   // Clearable relation/role fields accept null so callers can REMOVE the gate.
   parentId: number | null;
@@ -61,8 +61,8 @@ function applyNavigationStringFields(
 ): void {
   if (data.label !== undefined) updateData.label = data.label
   if (data.icon !== undefined) updateData.icon = data.icon
-  if (data.link !== undefined && data.link !== null) updateData.link = data.link
-  if (data.description !== undefined && data.description !== null) updateData.description = data.description
+  if (data.link !== undefined) updateData.link = data.link ?? null
+  if (data.description !== undefined) updateData.description = data.description ?? null
   if (data.type !== undefined && (data.type === "link" || data.type === "section" || data.type === "page")) updateData.type = data.type
 }
 

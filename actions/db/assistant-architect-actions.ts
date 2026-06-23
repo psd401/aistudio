@@ -54,7 +54,7 @@ import {
   assignCapabilityToRole,
   createNavigationItem
 } from "@/lib/db/drizzle";
-import { executeQuery } from "@/lib/db/drizzle-client";
+import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
 import { navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities } from "@/lib/db/schema";
 
@@ -739,20 +739,13 @@ export async function updateAssistantArchitectAction(
     }
     const currentUserData = authResult.data;
 
-    // If the architect was approved and is being edited, set status to
-    // pending_approval and deactivate its capability so users lose access while
-    // it is back in review. hasCapabilityAccess() filters is_active=true, so
-    // flipping the flag is sufficient to gate the feature.
-    if (currentTool.status === "approved") {
-      data.status = "pending_approval"
-      await executeQuery(
-        (db) =>
-          db
-            .update(capabilities)
-            .set({ isActive: false, updatedAt: new Date() })
-            .where(eq(capabilities.promptChainToolId, idInt)),
-        "deactivateApprovedCapability"
-      );
+    // Track whether this edit must atomically deactivate the capability.
+    // Decoupling the capability-deactivate from the architect-update creates an
+    // unrecoverable inconsistency: capability appears active but architect is back
+    // in review, locking users out of a feature until manual DB intervention.
+    const needsCapabilityDeactivation = currentTool.status === "approved";
+    if (needsCapabilityDeactivation) {
+      data.status = "pending_approval";
     }
 
     // Build update data object with only provided fields. Branch logic is
@@ -776,8 +769,28 @@ export async function updateAssistantArchitectAction(
       return { isSuccess: false, message: "No fields to update" }
     }
 
-    // Update via Drizzle
-    const updatedTool = await drizzleUpdateAssistantArchitect(idInt, updateData);
+    // Update via Drizzle — atomically deactivate capability when transitioning
+    // from approved so the two writes either both succeed or both roll back.
+    let updatedTool;
+    if (needsCapabilityDeactivation) {
+      updatedTool = await executeTransaction(
+        async (tx) => {
+          await tx
+            .update(capabilities)
+            .set({ isActive: false, updatedAt: new Date() })
+            .where(eq(capabilities.promptChainToolId, idInt));
+          const result = await tx
+            .update(assistantArchitects)
+            .set({ ...updateData, updatedAt: new Date() })
+            .where(eq(assistantArchitects.id, idInt))
+            .returning();
+          return result[0];
+        },
+        "deactivateAndUpdateApprovedArchitect"
+      );
+    } else {
+      updatedTool = await drizzleUpdateAssistantArchitect(idInt, updateData);
+    }
 
     if (!updatedTool) {
       return { isSuccess: false, message: "Failed to update assistant" }

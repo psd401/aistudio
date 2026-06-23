@@ -58,7 +58,7 @@ export function NavigationItemForm({
 }: NavigationItemFormProps) {
   const router = useRouter()
   const [parents, setParents] = useState<SelectNavigationItem[]>([])
-  const [tools, setTools] = useState<{ id: string; name: string }[]>([])
+  const [capabilities, setCapabilities] = useState<{ id: string; name: string }[]>([])
   const [roles, setRoles] = useState<{ id: string; name: string }[]>([])
 
   const form = useForm<FormValues>({
@@ -101,11 +101,11 @@ export function NavigationItemForm({
         }
       }
 
-      // Fetch tools
-      const toolsResponse = await fetch("/api/admin/tools")
-      const toolsData = await toolsResponse.json()
-      if (toolsData.isSuccess) {
-        setTools(toolsData.data)
+      // Fetch capabilities
+      const capabilitiesResponse = await fetch("/api/admin/tools")
+      const capabilitiesData = await capabilitiesResponse.json()
+      if (capabilitiesData.isSuccess) {
+        setCapabilities(capabilitiesData.data)
       }
 
       // Fetch roles
@@ -362,9 +362,9 @@ export function NavigationItemForm({
                           </FormControl>
                           <SelectContent>
                             <SelectItem value="none">None</SelectItem>
-                            {tools.map((tool) => (
-                              <SelectItem key={tool.id} value={String(tool.id)}>
-                                {tool.name}
+                            {capabilities.map((capability) => (
+                              <SelectItem key={capability.id} value={String(capability.id)}>
+                                {capability.name}
                               </SelectItem>
                             ))}
                           </SelectContent>

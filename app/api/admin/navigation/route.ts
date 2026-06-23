@@ -23,15 +23,20 @@ interface NavigationItemBody {
 }
 
 async function updateExistingNavigationItem(body: NavigationItemBody, requestId: string, log: RequestLogger, timer: RequestTimer) {
-  const { id, ...data } = body;
-  // Normalize numeric FK fields so string IDs from JSON don't cause type mismatches
-  const updatePayload: Partial<NavigationItemData> = { ...data } as Partial<NavigationItemData>
-  if (data.parentId !== undefined && data.parentId !== null) {
-    updatePayload.parentId = Number(data.parentId)
-  }
-  if (data.capabilityId !== undefined && data.capabilityId !== null) {
-    updatePayload.capabilityId = Number(data.capabilityId)
-  }
+  const { id, label, icon, link, description, type, parentId, capabilityId, requiresRole, position, isActive } = body;
+  // Build payload from known fields only — prevents unknown keys (e.g. a stale
+  // toolId from a cached client bundle) from being spread via the index signature.
+  const updatePayload: Partial<NavigationItemData> = {}
+  if (label !== undefined) updatePayload.label = label as string
+  if (icon !== undefined) updatePayload.icon = icon as string
+  if (link !== undefined) updatePayload.link = link as string
+  if (description !== undefined) updatePayload.description = description as string
+  if (type !== undefined) updatePayload.type = type as "link" | "section" | "page"
+  if (requiresRole !== undefined) updatePayload.requiresRole = requiresRole as string | null
+  if (position !== undefined) updatePayload.position = Number(position)
+  if (isActive !== undefined) updatePayload.isActive = Boolean(isActive)
+  if (parentId !== undefined) updatePayload.parentId = parentId !== null ? Number(parentId) : null
+  if (capabilityId !== undefined) updatePayload.capabilityId = capabilityId !== null ? Number(capabilityId) : null
   try {
     const updatedItem = await updateNavigationItem(Number(id), updatePayload)
 
