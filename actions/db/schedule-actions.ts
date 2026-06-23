@@ -957,14 +957,9 @@ async function buildScheduleUpdateData(
   }
 
   if (params.assistantArchitectId !== undefined) {
-    // Security: Pre-validate user access BEFORE sanitization to prevent bypass
-    // First verify user has general assistant architect access
-    const hasAccess = await hasCapabilityAccess("assistant-architect")
-    if (!hasAccess) {
-      throw ErrorFactories.authzToolAccessDenied("assistant-architect")
-    }
-
     // Security: Sanitize ID with CodeQL-compliant pattern that breaks taint flow
+    // Capability access is enforced by the caller (updateScheduleAction) before
+    // this function is invoked — no per-field re-check needed here.
     let cleanArchitectId: number
     try {
       cleanArchitectId = sanitizeNumericId(params.assistantArchitectId)
