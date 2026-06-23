@@ -29,10 +29,10 @@ if (!session) {
 ### Tool Access Control
 
 ```typescript
-import { hasToolAccess } from '@/utils/roles';
+import { hasCapabilityAccess } from '@/utils/roles';
 
-// Check if user has permission for specific tool
-const hasAccess = await hasToolAccess('assistant-architect');
+// Check if user has permission for specific capability
+const hasAccess = await hasCapabilityAccess('assistant-architect');
 if (!hasAccess) {
   return new Response('Forbidden', { status: 403 });
 }

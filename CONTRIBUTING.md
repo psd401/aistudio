@@ -43,7 +43,7 @@ Thank you for contributing to this project! Please follow these standards to ens
 ### Authentication & Authorization
 - **JWT Configuration**: When using NextAuth, explicitly set `session: { strategy: "jwt" }` in configuration.
 - **Session Security**: Always configure NextAuth with appropriate callbacks for JWT and session management.
-- **Role-Based Access**: Use the `hasToolAccess()` function to check permissions before allowing access to protected resources.
+- **Role-Based Access**: Use the `hasCapabilityAccess()` function to check permissions before allowing access to protected resources.
 - **Middleware Protection**: Implement authentication checks in `middleware.ts` for protected routes.
 
 ### AWS Infrastructure (CDK)
