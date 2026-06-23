@@ -273,9 +273,10 @@ export async function actionName(params: ParamsType): Promise<ActionState<Return
 
 ## 🧪 Testing
 
-**E2E Testing**:
+**E2E Testing** (config: `playwright.config.ts`; `baseURL` via `PLAYWRIGHT_BASE_URL`, default `:3000`):
 - Run locally: `bunx playwright test tests/e2e/`
 - Add specs to `tests/e2e/`
+- **Two tiers**: *guard* specs run unauthenticated (CI-safe); *functional* specs mint a session and are gated by `PLAYWRIGHT_AUTH_ENABLED`. To run authenticated functional tests (drive the real UI as a logged-in user), use the host `:3100` dev server + `tests/e2e/helpers/session-auth.ts` — see **`docs/guides/e2e-authenticated-testing.md`** (covers the migration/seed prereqs and the `tokenLifetimeMs` + `addCookies` auth gotchas).
 - See `docs/guides/TESTING.md` (E2E Expectations section) for when tests are required
 
 ## 🏗️ Infrastructure Patterns
