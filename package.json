@@ -48,15 +48,15 @@
     "dev:voice": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run server.ts"
   },
   "dependencies": {
-    "@ai-sdk/amazon-bedrock": "~4.0.61",
-    "@ai-sdk/azure": "~3.0.31",
-    "@ai-sdk/google": "~3.0.29",
+    "@ai-sdk/amazon-bedrock": "~4.0.120",
+    "@ai-sdk/azure": "~3.0.77",
+    "@ai-sdk/google": "~3.0.83",
     "@ai-sdk/mcp": "1.0.52",
-    "@ai-sdk/openai": "~3.0.30",
-    "@ai-sdk/react": "~3.0.93",
-    "@assistant-ui/react": "^0.14.20",
+    "@ai-sdk/openai": "~3.0.74",
+    "@ai-sdk/react": "~3.0.210",
+    "@assistant-ui/react": "^0.14.23",
     "@assistant-ui/react-ai-sdk": "^1.3.37",
-    "@assistant-ui/react-markdown": "^0.14.3",
+    "@assistant-ui/react-markdown": "^0.14.4",
     "@aws-sdk/client-bedrock-runtime": "^3.982.0",
     "@aws-sdk/client-cloudwatch-logs": "^3.982.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.982.0",
@@ -114,7 +114,7 @@
     "@types/uuid": "^11.0.0",
     "@uiw/react-markdown-preview": "^5.1.5",
     "@xyflow/react": "^12.9.2",
-    "ai": "~6.0.91",
+    "ai": "~6.0.208",
     "argon2": "^0.44.0",
     "aws-amplify": "^6.16.0",
     "aws-jwt-verify": "^5.1.1",
@@ -217,8 +217,10 @@
     "openai": {
       "zod": "^4.1.11"
     },
-    "ai": "~6.0.91",
-    "@ai-sdk/provider": "~3.0.8",
-    "@ai-sdk/provider-utils": "~4.0.15"
+    "ai": "~6.0.208",
+    "@ai-sdk/provider": "~3.0.10",
+    "@ai-sdk/provider-utils": "~4.0.30",
+    "@ai-sdk/react": "~3.0.210",
+    "@assistant-ui/core": "0.2.18"
   }
 }
