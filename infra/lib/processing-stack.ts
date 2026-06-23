@@ -292,7 +292,7 @@ export class ProcessingStack extends cdk.Stack {
 
     const embeddingGeneratorSg = new ec2.SecurityGroup(this, 'EmbeddingGeneratorSg', {
       vpc,
-      description: 'Security group for embedding-generator Lambda (postgres.js → Aurora)',
+      description: 'Security group for embedding-generator Lambda (postgres.js to Aurora)',
       allowAllOutbound: true,
     });
 
