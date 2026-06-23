@@ -1,7 +1,90 @@
 import { NextResponse } from "next/server"
 import { requireAdmin } from "@/lib/auth/admin-check"
 import { getNavigationItems, createNavigationItem, updateNavigationItem } from "@/lib/db/drizzle"
+import type { NavigationItemData } from "@/lib/db/drizzle"
 import { createLogger, generateRequestId, startTimer } from "@/lib/logger"
+
+type RequestLogger = ReturnType<typeof createLogger>
+type RequestTimer = ReturnType<typeof startTimer>
+
+interface NavigationItemBody {
+  id?: number | string
+  label?: string
+  icon?: string
+  link?: string
+  description?: string
+  type?: string
+  parentId?: number | string
+  capabilityId?: number | string
+  requiresRole?: string
+  position?: number
+  isActive?: boolean
+  [key: string]: unknown
+}
+
+async function updateExistingNavigationItem(body: NavigationItemBody, requestId: string, log: RequestLogger, timer: RequestTimer) {
+  const { id, ...data } = body;
+  try {
+    const updatedItem = await updateNavigationItem(Number(id), data as Partial<NavigationItemData>)
+
+    log.info("Navigation item updated successfully", { itemId: id });
+    timer({ status: "success", action: "update" });
+
+    return NextResponse.json(
+      {
+        isSuccess: true,
+        message: "Navigation item updated successfully",
+        data: updatedItem
+      },
+      { headers: { "X-Request-Id": requestId } }
+    )
+  } catch (error) {
+    timer({ status: "error" });
+    log.error("Error updating navigation item", error);
+    const errorMessage = error instanceof Error ? error.message : "Failed to update navigation item";
+    return NextResponse.json(
+      { isSuccess: false, message: errorMessage },
+      { status: 500, headers: { "X-Request-Id": requestId } }
+    )
+  }
+}
+
+async function createNewNavigationItem(body: NavigationItemBody, requestId: string, log: RequestLogger, timer: RequestTimer) {
+  try {
+    const newItem = await createNavigationItem({
+      label: body.label,
+      icon: body.icon,
+      link: body.link,
+      description: body.description,
+      type: body.type,
+      parentId: body.parentId ? Number(body.parentId) : undefined,
+      capabilityId: body.capabilityId ? Number(body.capabilityId) : undefined,
+      requiresRole: body.requiresRole,
+      position: body.position || 0,
+      isActive: body.isActive ?? true
+    } as NavigationItemData)
+
+    log.info("Navigation item created successfully", { itemId: newItem.id });
+    timer({ status: "success", action: "create" });
+
+    return NextResponse.json(
+      {
+        isSuccess: true,
+        message: "Navigation item created successfully",
+        data: newItem
+      },
+      { headers: { "X-Request-Id": requestId } }
+    )
+  } catch (error) {
+    timer({ status: "error" });
+    log.error("Error creating navigation item", error);
+    const errorMessage = error instanceof Error ? error.message : "Failed to create navigation item";
+    return NextResponse.json(
+      { isSuccess: false, message: errorMessage },
+      { status: 500, headers: { "X-Request-Id": requestId } }
+    )
+  }
+}
 
 export async function GET() {
   const requestId = generateRequestId();
@@ -87,72 +170,16 @@ export async function POST(request: Request) {
       // First check if this ID exists in the database
       const existingItems = await getNavigationItems();
       const itemExists = existingItems.some(item => item.id === Number(body.id));
-      
+
       if (itemExists) {
         // This is an update operation
-        const { id, ...data } = body;
-        try {
-          const updatedItem = await updateNavigationItem(Number(id), data)
-
-          log.info("Navigation item updated successfully", { itemId: id });
-          timer({ status: "success", action: "update" });
-          
-          return NextResponse.json(
-            {
-              isSuccess: true,
-              message: "Navigation item updated successfully",
-              data: updatedItem
-            },
-            { headers: { "X-Request-Id": requestId } }
-          )
-        } catch (error) {
-          timer({ status: "error" });
-          log.error("Error updating navigation item", error);
-          const errorMessage = error instanceof Error ? error.message : "Failed to update navigation item";
-          return NextResponse.json(
-            { isSuccess: false, message: errorMessage },
-            { status: 500, headers: { "X-Request-Id": requestId } }
-          )
-        }
+        return updateExistingNavigationItem(body, requestId, log, timer)
       }
       // If the item doesn't exist, fall through to create it
     }
-    
-    // Create new item (ID will be auto-generated)
-    try {
-      const newItem = await createNavigationItem({
-        label: body.label,
-        icon: body.icon,
-        link: body.link,
-        description: body.description,
-        type: body.type,
-        parentId: body.parentId ? Number(body.parentId) : undefined,
-        capabilityId: body.capabilityId ? Number(body.capabilityId) : undefined,
-        requiresRole: body.requiresRole,
-        position: body.position || 0,
-        isActive: body.isActive ?? true
-      })
 
-      log.info("Navigation item created successfully", { itemId: newItem.id });
-      timer({ status: "success", action: "create" });
-      
-      return NextResponse.json(
-        {
-          isSuccess: true,
-          message: "Navigation item created successfully",
-          data: newItem
-        },
-        { headers: { "X-Request-Id": requestId } }
-      )
-    } catch (error) {
-      timer({ status: "error" });
-      log.error("Error creating navigation item", error);
-      const errorMessage = error instanceof Error ? error.message : "Failed to create navigation item";
-      return NextResponse.json(
-        { isSuccess: false, message: errorMessage },
-        { status: 500, headers: { "X-Request-Id": requestId } }
-      )
-    }
+    // Create new item (ID will be auto-generated)
+    return createNewNavigationItem(body, requestId, log, timer)
   } catch (error) {
     timer({ status: "error" });
     log.error("Error handling navigation item request", error);

@@ -61,6 +61,55 @@ export interface UpdateRepositoryInput {
   metadata?: Record<string, unknown>
 }
 
+// Raw repository row shape returned by the Drizzle accessors
+type RawRepository = NonNullable<Awaited<ReturnType<typeof drizzleUpdateRepository>>>
+
+// Convert a raw Drizzle repository row to the action-layer Repository type
+function mapToRepository(resultRaw: RawRepository): Repository {
+  return {
+    id: resultRaw.id,
+    name: resultRaw.name,
+    description: resultRaw.description,
+    ownerId: resultRaw.ownerId,
+    isPublic: resultRaw.isPublic ?? false,
+    metadata: resultRaw.metadata ?? {},
+    createdAt: resultRaw.createdAt ?? new Date(),
+    updatedAt: resultRaw.updatedAt ?? new Date()
+  }
+}
+
+// True when the update input carries at least one mutable field
+function hasRepositoryUpdates(input: UpdateRepositoryInput): boolean {
+  return (
+    input.name !== undefined ||
+    input.description !== undefined ||
+    input.isPublic !== undefined ||
+    input.metadata !== undefined
+  )
+}
+
+// Build the partial update payload from only the provided fields
+function buildRepositoryUpdateData(input: UpdateRepositoryInput): {
+  name?: string;
+  description?: string | null;
+  isPublic?: boolean;
+  metadata?: Record<string, unknown> | null;
+} {
+  const updateData: {
+    name?: string;
+    description?: string | null;
+    isPublic?: boolean;
+    metadata?: Record<string, unknown> | null;
+  } = {}
+
+  if (input.name !== undefined) updateData.name = input.name
+  if (input.description !== undefined) updateData.description = input.description ?? null
+  if (input.isPublic !== undefined) updateData.isPublic = input.isPublic
+  if (input.metadata !== undefined) updateData.metadata = input.metadata
+
+  return updateData
+}
+
 
 export async function createRepository(
   input: CreateRepositoryInput
@@ -186,13 +235,7 @@ export async function updateRepository(
     }
 
     // Check if any fields provided
-    const hasUpdates =
-      input.name !== undefined ||
-      input.description !== undefined ||
-      input.isPublic !== undefined ||
-      input.metadata !== undefined
-
-    if (!hasUpdates) {
+    if (!hasRepositoryUpdates(input)) {
       log.warn("No fields provided for update")
       return createSuccess(null as unknown as Repository, "No changes to apply")
     }
@@ -202,17 +245,7 @@ export async function updateRepository(
     })
 
     // Build update data object with only provided fields
-    const updateData: {
-      name?: string;
-      description?: string | null;
-      isPublic?: boolean;
-      metadata?: Record<string, unknown> | null;
-    } = {}
-
-    if (input.name !== undefined) updateData.name = input.name
-    if (input.description !== undefined) updateData.description = input.description ?? null
-    if (input.isPublic !== undefined) updateData.isPublic = input.isPublic
-    if (input.metadata !== undefined) updateData.metadata = input.metadata
+    const updateData = buildRepositoryUpdateData(input)
 
     const resultRaw = await drizzleUpdateRepository(input.id, updateData)
 
@@ -222,16 +255,7 @@ export async function updateRepository(
     }
 
     // Convert to expected type
-    const result: Repository = {
-      id: resultRaw.id,
-      name: resultRaw.name,
-      description: resultRaw.description,
-      ownerId: resultRaw.ownerId,
-      isPublic: resultRaw.isPublic ?? false,
-      metadata: resultRaw.metadata ?? {},
-      createdAt: resultRaw.createdAt ?? new Date(),
-      updatedAt: resultRaw.updatedAt ?? new Date()
-    }
+    const result: Repository = mapToRepository(resultRaw)
 
     log.info("Repository updated successfully", {
       repositoryId: result.id,

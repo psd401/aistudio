@@ -22,6 +22,83 @@ import {
 } from "@/lib/logger"
 // UUID import removed - using auto-increment IDs
 
+// Parse an optional numeric field, throwing invalidInput on NaN.
+// Returns undefined when the value is null/undefined (no conversion needed).
+function parseOptionalNumericField(
+  field: string,
+  value: number | string | null | undefined
+): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined
+  }
+  const numValue = Number(value)
+  if (Number.isNaN(numValue)) {
+    throw ErrorFactories.invalidInput(field, value, 'Must be a valid number')
+  }
+  return numValue
+}
+
+type NavigationUpdateData = Partial<{
+  label: string;
+  icon: string;
+  link: string;
+  description: string;
+  type: "link" | "section" | "page";
+  parentId: number;
+  capabilityId: number;
+  requiresRole: string;
+  position: number;
+  isActive: boolean;
+}>
+
+// Map string/typed fields (label, icon, link, description, type) onto the
+// update payload, preserving the original null/undefined and type-narrowing
+// rules.
+function applyNavigationStringFields(
+  data: Partial<InsertNavigationItem>,
+  updateData: NavigationUpdateData
+): void {
+  if (data.label !== undefined) updateData.label = data.label
+  if (data.icon !== undefined) updateData.icon = data.icon
+  if (data.link !== undefined && data.link !== null) updateData.link = data.link
+  if (data.description !== undefined && data.description !== null) updateData.description = data.description
+  if (data.type !== undefined && (data.type === "link" || data.type === "section" || data.type === "page")) updateData.type = data.type
+}
+
+// Map relational/role fields (parentId, capabilityId, requiresRole) onto the
+// update payload, converting null to omission.
+function applyNavigationRelationFields(
+  data: Partial<InsertNavigationItem>,
+  updateData: NavigationUpdateData
+): void {
+  if (data.parentId !== undefined && data.parentId !== null) updateData.parentId = data.parentId
+  if (data.capabilityId !== undefined && data.capabilityId !== null) updateData.capabilityId = data.capabilityId
+  if (data.requiresRole !== undefined && data.requiresRole !== null) updateData.requiresRole = data.requiresRole
+}
+
+// Map simple scalar fields (position, isActive) onto the update payload.
+function applyNavigationScalarFields(
+  data: Partial<InsertNavigationItem>,
+  updateData: NavigationUpdateData
+): void {
+  if (data.position !== undefined) updateData.position = data.position
+  if (data.isActive !== undefined) updateData.isActive = data.isActive
+}
+
+// Build the database update payload from a partial input, converting null
+// values to undefined (omission) for updateNavigationItem.
+function buildNavigationUpdateData(
+  data: Partial<InsertNavigationItem>
+): NavigationUpdateData {
+  const updateData: NavigationUpdateData = {}
+
+  applyNavigationStringFields(data, updateData)
+  applyNavigationRelationFields(data, updateData)
+  applyNavigationScalarFields(data, updateData)
+
+  return updateData
+}
+
 export async function getNavigationItemsAction(): Promise<ActionState<SelectNavigationItem[]>> {
   const requestId = generateRequestId()
   const timer = startTimer("getNavigationItems")
@@ -105,23 +182,8 @@ export async function createNavigationItemAction(
     })
     
     // Validate numeric conversions
-    let parentId: number | undefined
-    if (data.parentId !== undefined && data.parentId !== null) {
-      const numParentId = Number(data.parentId)
-      if (Number.isNaN(numParentId)) {
-        throw ErrorFactories.invalidInput('parentId', data.parentId, 'Must be a valid number')
-      }
-      parentId = numParentId
-    }
-
-    let capabilityId: number | undefined
-    if (data.capabilityId !== undefined && data.capabilityId !== null) {
-      const numCapabilityId = Number(data.capabilityId)
-      if (Number.isNaN(numCapabilityId)) {
-        throw ErrorFactories.invalidInput('capabilityId', data.capabilityId, 'Must be a valid number')
-      }
-      capabilityId = numCapabilityId
-    }
+    const parentId = parseOptionalNumericField('parentId', data.parentId)
+    const capabilityId = parseOptionalNumericField('capabilityId', data.capabilityId)
 
     const newItem = await createNavigationItem({
       label: data.label,
@@ -194,30 +256,8 @@ export async function updateNavigationItemAction(
     
     log.debug("User authenticated", { userId: session.sub })
     // Convert null values to undefined for updateNavigationItem
-    const updateData: Partial<{
-      label: string;
-      icon: string;
-      link: string;
-      description: string;
-      type: "link" | "section" | "page";
-      parentId: number;
-      capabilityId: number;
-      requiresRole: string;
-      position: number;
-      isActive: boolean;
-    }> = {}
-    
-    if (data.label !== undefined) updateData.label = data.label
-    if (data.icon !== undefined) updateData.icon = data.icon
-    if (data.link !== undefined && data.link !== null) updateData.link = data.link
-    if (data.description !== undefined && data.description !== null) updateData.description = data.description
-    if (data.type !== undefined && (data.type === "link" || data.type === "section" || data.type === "page")) updateData.type = data.type
-    if (data.parentId !== undefined && data.parentId !== null) updateData.parentId = data.parentId
-    if (data.capabilityId !== undefined && data.capabilityId !== null) updateData.capabilityId = data.capabilityId
-    if (data.requiresRole !== undefined && data.requiresRole !== null) updateData.requiresRole = data.requiresRole
-    if (data.position !== undefined) updateData.position = data.position
-    if (data.isActive !== undefined) updateData.isActive = data.isActive
-    
+    const updateData = buildNavigationUpdateData(data)
+
     log.info("Updating navigation item in database", {
       itemId: id,
       fieldsUpdated: Object.keys(updateData).length
