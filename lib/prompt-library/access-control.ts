@@ -5,17 +5,24 @@
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { sql, eq } from "drizzle-orm"
 import { users } from "@/lib/db/schema"
-import { hasToolAccess, hasRole } from "@/utils/roles"
+import { hasCapabilityAccess, hasRole } from "@/utils/roles"
 import { createLogger, generateRequestId } from "@/lib/logger"
 
 /**
- * Check if user can access the Prompt Library feature
+ * Check if the CURRENT SESSION user can access the Prompt Library feature.
+ *
+ * NOTE: hasCapabilityAccess() resolves the current session internally, so this
+ * only ever reflects the signed-in user. The `userId` parameter is an early-exit
+ * guard (anonymous → false) and is NOT threaded into the capability check; do not
+ * call this to check a *different* user's access — it would return the session
+ * user's result. All call sites pass session.userId, matching this contract.
+ * (Same pattern as canModeratePrompts below.)
  */
 export async function canAccessPromptLibrary(userId?: number): Promise<boolean> {
   if (!userId) return false
 
-  // Using existing tool access system
-  return await hasToolAccess("knowledge-repositories")
+  // Capability check is session-scoped (see note above).
+  return await hasCapabilityAccess("knowledge-repositories")
 }
 
 /**

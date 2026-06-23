@@ -3,7 +3,7 @@
  *
  * Fetches GET /api/nexus/voice/availability to verify:
  * - Global voice enabled setting (admin kill switch)
- * - User has hasToolAccess("voice-mode") permission
+ * - User has hasCapabilityAccess("voice-mode") permission
  * - Voice provider and model are configured
  * - Google API key exists
  *

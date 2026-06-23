@@ -28,7 +28,7 @@ jest.mock('@/lib/db/drizzle', () => ({
 
 jest.mock('@/utils/roles', () => ({
   hasRole: mockHasRole,
-  hasToolAccess: jest.fn(),
+  hasCapabilityAccess: jest.fn(),
 }))
 
 jest.mock('@/actions/db/get-current-user-action', () => ({
@@ -48,9 +48,7 @@ jest.mock('@/lib/logger', () => ({
 }))
 
 jest.mock('@/lib/db/schema', () => ({
-  tools: { id: 'id', promptChainToolId: 'prompt_chain_tool_id' },
   capabilities: { promptChainToolId: 'prompt_chain_tool_id' },
-  roleTools: { toolId: 'tool_id' },
   navigationItems: { link: 'link' },
   navigationItemRoles: { navigationItemId: 'navigation_item_id' },
   toolInputFields: { assistantArchitectId: 'assistant_architect_id' },

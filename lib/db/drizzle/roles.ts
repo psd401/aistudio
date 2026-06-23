@@ -11,15 +11,9 @@
  */
 
 import { eq, and, asc, inArray } from "drizzle-orm";
-import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
-import { roles, roleCapabilities, tools } from "@/lib/db/schema";
+import { executeQuery } from "@/lib/db/drizzle-client";
+import { roles, capabilities } from "@/lib/db/schema";
 import { ErrorFactories } from "@/lib/error-utils";
-import {
-  getCapabilities,
-  getRoleCapabilities,
-  assignCapabilityToRole,
-  removeCapabilityFromRole,
-} from "@/lib/db/drizzle/capabilities";
 
 // ============================================
 // Types
@@ -197,60 +191,32 @@ export async function deleteRole(id: number) {
 }
 
 // ============================================
-// Role-Tool Assignment Operations
-//
-// Issue #923: the legacy `tools`/`role_tools` tables were renamed to
-// `capabilities`/`role_capabilities`. These functions keep their names and
-// signatures as a compat shim during the migration window (call-site rename is
-// workstream #6) and delegate to the capability accessors, which read/write the
-// new tables. The capability `id` space matches the legacy tool `id` space
-// (migration 079 backfills preserving ids), so downstream FK usage is unchanged.
+// Capability id -> identifier resolution
 // ============================================
 
 /**
- * Get all capabilities assigned to a role.
- * @deprecated Prefer `getRoleCapabilities`. Retained as a compat shim (#923).
- */
-export async function getRoleTools(roleId: number) {
-  return getRoleCapabilities(roleId);
-}
-
-/**
- * Get all active capabilities (for the capability/tool selection UI).
- * @deprecated Prefer `getCapabilities({ activeOnly: true })`. Compat shim (#923).
- */
-export async function getTools() {
-  return getCapabilities({ activeOnly: true });
-}
-
-/**
- * Get legacy tool identifiers by their IDs. Returns a map of id -> identifier.
+ * Resolve a set of capability database IDs to their stable identifiers.
+ * Returns a map of capability id -> identifier.
  *
- * IMPORTANT (#923): this MUST query the legacy `tools` table, NOT `capabilities`.
- * The sole caller (the navigation API) passes `navigation_items.tool_id` values,
- * and that column is an FK into `tools.id`. Migration 079 backfilled
- * `capabilities` preserving the legacy ids, but the two tables have INDEPENDENT
- * identity sequences: any `tools` row inserted after the migration (e.g. a newly
- * approved Assistant Architect) gets an id from the `tools` sequence while its
- * paired `capabilities` row gets a different id from the `capabilities` sequence.
- * Resolving a `tools.id` against `capabilities.id` would therefore return the
- * wrong identifier (or none) and silently hide the nav item. Stay on `tools`
- * until navigation_items.tool_id is migrated to capability_id (workstream #6).
+ * Issue #928: the sole caller is the navigation API, which resolves
+ * `navigation_items.capability_id` (migrated from the legacy `tools.id` FK in
+ * migration 084) to a capability identifier, then runs `hasCapabilityAccess`
+ * to decide whether the nav item is visible.
  */
-export async function getToolsByIds(
-  toolIds: number[]
+export async function getCapabilitiesByIdsMap(
+  capabilityIds: number[]
 ): Promise<Map<number, string>> {
-  if (toolIds.length === 0) {
+  if (capabilityIds.length === 0) {
     return new Map();
   }
 
   const result = await executeQuery(
     (db) =>
       db
-        .select({ id: tools.id, identifier: tools.identifier })
-        .from(tools)
-        .where(inArray(tools.id, toolIds)),
-    "getToolsByIds"
+        .select({ id: capabilities.id, identifier: capabilities.identifier })
+        .from(capabilities)
+        .where(inArray(capabilities.id, capabilityIds)),
+    "getCapabilitiesByIdsMap"
   );
 
   const map = new Map<number, string>();
@@ -258,58 +224,4 @@ export async function getToolsByIds(
     map.set(row.id, row.identifier);
   }
   return map;
-}
-
-/**
- * Assign a capability to a role. Idempotent.
- * @deprecated Prefer `assignCapabilityToRole`. Compat shim (#923).
- */
-export async function assignToolToRole(
-  roleId: number,
-  toolId: number
-): Promise<boolean> {
-  return assignCapabilityToRole(roleId, toolId);
-}
-
-/**
- * Remove a capability from a role.
- * @deprecated Prefer `removeCapabilityFromRole`. Compat shim (#923).
- */
-export async function removeToolFromRole(
-  roleId: number,
-  toolId: number
-): Promise<boolean> {
-  return removeCapabilityFromRole(roleId, toolId);
-}
-
-/**
- * Set all capabilities for a role (replaces existing assignments).
- * @deprecated Compat shim (#923) — writes to role_capabilities.
- *
- * @param roleId - Role database ID
- * @param toolIds - Array of capability database IDs
- */
-export async function setRoleTools(
-  roleId: number,
-  toolIds: number[]
-): Promise<{ success: boolean }> {
-  return executeTransaction(
-    async (tx) => {
-      await tx
-        .delete(roleCapabilities)
-        .where(eq(roleCapabilities.roleId, roleId));
-
-      if (toolIds.length > 0) {
-        await tx.insert(roleCapabilities).values(
-          toolIds.map((capabilityId) => ({
-            roleId,
-            capabilityId,
-          }))
-        );
-      }
-
-      return { success: true };
-    },
-    "setRoleTools"
-  );
 }

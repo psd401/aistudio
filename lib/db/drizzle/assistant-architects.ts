@@ -50,14 +50,12 @@ import {
   toolInputFields,
   toolExecutions,
   promptResults,
-  tools,
   capabilities,
   users,
   toolEdits,
   scheduledExecutions,
   executionResults,
   userNotifications,
-  roleTools,
   navigationItems,
   navigationItemRoles,
 } from "@/lib/db/schema";
@@ -512,25 +510,10 @@ export async function deleteAssistantArchitect(id: number) {
           .where(inArray(executionResults.scheduledExecutionId, schedIdList));
       }
 
-      // 0e. Gather tool IDs linked to this assistant via prompt_chain_tool_id.
-      const toolRows = await tx
-        .select({ id: tools.id })
-        .from(tools)
-        .where(eq(tools.promptChainToolId, id));
-
-      if (toolRows.length > 0) {
-        // 0f. Delete role_tools (FK to tools, no cascade).
-        await tx
-          .delete(roleTools)
-          .where(inArray(roleTools.toolId, toolRows.map((r) => r.id)));
-      }
-
-      // 0g. Delete tools linked to this assistant.
-      await tx
-        .delete(tools)
-        .where(eq(tools.promptChainToolId, id));
-
-      // 0h. Delete capabilities linked to this assistant.
+      // 0e. Delete capabilities linked to this assistant via prompt_chain_tool_id.
+      // role_capabilities rows cascade (FK ON DELETE CASCADE); navigation_items
+      // referencing this capability have their capability_id nulled (FK ON DELETE
+      // SET NULL) — the nav row itself is deleted below by link.
       await tx
         .delete(capabilities)
         .where(eq(capabilities.promptChainToolId, id));
@@ -661,38 +644,13 @@ export async function approveAssistantArchitect(id: number) {
         toolIdentifier = `${toolIdentifier}-${assistant.id}`;
       }
 
-      // Race condition safety: concurrent approvals can't produce duplicate key
-      // errors because the tool identifier is unique. On conflict we upsert (not
-      // skip) so a re-approved AA — whose tool row was deactivated during an edit
-      // — is re-activated and its promptChainToolId is re-stamped. The
-      // post-approval code looks the tool up by promptChainToolId, so a skipped
-      // insert that left a stale/NULL promptChainToolId would break the lookup.
-      await tx
-        .insert(tools)
-        .values({
-          identifier: toolIdentifier,
-          name: assistant.name,
-          description: assistant.description,
-          promptChainToolId: assistant.id,
-          isActive: true,
-        })
-        .onConflictDoUpdate({
-          target: tools.identifier,
-          set: {
-            name: assistant.name,
-            description: assistant.description,
-            promptChainToolId: assistant.id,
-            isActive: true,
-            updatedAt: new Date(),
-          },
-        });
-
-      // Issue #923: dual-write the capability row in the same transaction so the
-      // post-approval role grant (which now targets role_capabilities) and the
-      // hasToolAccess() read path (which now reads capabilities) stay consistent.
-      // AA-generated capabilities are source='manual' (admin-editable, like the
-      // legacy tool row).
+      // Write the capability row in the same transaction so the post-approval
+      // role grant (role_capabilities) and the hasCapabilityAccess() read path
+      // stay consistent. AA-generated capabilities are source='manual'
+      // (admin-editable).
       //
+      // Race condition safety: concurrent approvals can't produce duplicate key
+      // errors because the identifier is unique.
       // On conflict we MUST upsert, not skip: an AA that was approved, edited
       // (which deactivates this row via updateAssistantArchitectAction), then
       // re-approved would otherwise stay is_active=false forever — the row exists,

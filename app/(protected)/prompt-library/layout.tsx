@@ -1,6 +1,6 @@
 import { ReactNode } from 'react'
 import { redirect } from "next/navigation"
-import { hasToolAccess } from "@/utils/roles"
+import { hasCapabilityAccess } from "@/utils/roles"
 import { getServerSession } from "@/lib/auth/server-session"
 import { NavbarNested } from "@/components/navigation/navbar-nested"
 
@@ -16,7 +16,7 @@ export default async function PromptLibraryLayout({
   }
 
   // Check if user has access to the knowledge-repositories tool
-  const hasAccess = await hasToolAccess("knowledge-repositories")
+  const hasAccess = await hasCapabilityAccess("knowledge-repositories")
   if (!hasAccess) {
     redirect("/dashboard")
   }

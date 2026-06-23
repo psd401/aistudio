@@ -5,9 +5,9 @@
  * the role-gated UI-feature registry (renamed from the legacy `tools` table).
  *
  * This module is the source of truth for all reads of the `capabilities` /
- * `role_capabilities` tables. During the migration window (Issue #923, Epic #922)
- * the legacy `hasToolAccess()` access checks are redirected here so existing call
- * sites keep working against the new tables without a second DB round-trip.
+ * `role_capabilities` tables. `hasCapabilityAccess()` is the single access-check
+ * entry point (the legacy `hasToolAccess()` shim and the `tools`/`role_tools`
+ * tables were removed in workstream #6, Issue #928).
  *
  * All functions use executeQuery() wrapper with circuit breaker and retry logic.
  *
@@ -69,8 +69,8 @@ const CAPABILITY_COLUMNS = {
 /**
  * Check if a user has access to a capability by Cognito sub.
  *
- * This is the new-table backing query for the legacy `hasToolAccess()` access
- * check. Joins users -> user_roles -> role_capabilities -> capabilities.
+ * Joins users -> user_roles -> role_capabilities -> capabilities. This is the
+ * single backing query for role-gated capability access checks.
  */
 export async function hasCapabilityAccess(
   cognitoSub: string,
@@ -331,11 +331,17 @@ export async function updateCapability(
 }
 
 /**
- * Upsert a capability by identifier (used by the manifest sync).
+ * Upsert a capability by identifier.
  *
  * On conflict (identifier already exists): updates name, description, source and
- * re-activates the row. This is how the manifest claims ownership of a
- * previously backfilled `source: 'manual'` row, flipping it to `source: 'code'`.
+ * re-activates the row.
+ *
+ * @internal Do NOT call directly to reconcile the manifest. The boot-time
+ * manifest sync (lib/capabilities/sync.ts) runs its own inline upsert inside a
+ * `pg_advisory_xact_lock` transaction so concurrently booting ECS replicas
+ * serialize. A bare call here bypasses that lock and can race. This is exported
+ * for completeness/tests only — prefer syncCapabilityManifest() for ownership
+ * reconciliation.
  */
 export async function upsertCapabilityByIdentifier(data: CapabilityData) {
   const result = await executeQuery(

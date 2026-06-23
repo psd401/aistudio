@@ -42,10 +42,6 @@ export type {
   InsertRole,
   SelectUserRole,
   InsertUserRole,
-  SelectTool,
-  InsertTool,
-  SelectRoleTool,
-  InsertRoleTool,
   // AI Models
   SelectAiModel,
   InsertAiModel,

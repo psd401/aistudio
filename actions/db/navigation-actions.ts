@@ -22,6 +22,88 @@ import {
 } from "@/lib/logger"
 // UUID import removed - using auto-increment IDs
 
+// Parse an optional numeric field, throwing invalidInput on NaN.
+// Returns undefined when the value is null/undefined (no conversion needed).
+function parseOptionalNumericField(
+  field: string,
+  value: number | string | null | undefined
+): number | undefined {
+  if (value === undefined || value === null) {
+    return undefined
+  }
+  const numValue = Number(value)
+  if (Number.isNaN(numValue)) {
+    throw ErrorFactories.invalidInput(field, value, 'Must be a valid number')
+  }
+  return numValue
+}
+
+type NavigationUpdateData = Partial<{
+  label: string;
+  icon: string;
+  link: string | null;
+  description: string | null;
+  type: "link" | "section" | "page";
+  // Clearable relation/role fields accept null so callers can REMOVE the gate.
+  parentId: number | null;
+  capabilityId: number | null;
+  requiresRole: string | null;
+  position: number;
+  isActive: boolean;
+}>
+
+// Map string/typed fields (label, icon, link, description, type) onto the
+// update payload, preserving the original null/undefined and type-narrowing
+// rules.
+function applyNavigationStringFields(
+  data: Partial<InsertNavigationItem>,
+  updateData: NavigationUpdateData
+): void {
+  if (data.label !== undefined) updateData.label = data.label
+  if (data.icon !== undefined) updateData.icon = data.icon
+  if (data.link !== undefined) updateData.link = data.link ?? null
+  if (data.description !== undefined) updateData.description = data.description ?? null
+  if (data.type !== undefined && (data.type === "link" || data.type === "section" || data.type === "page")) updateData.type = data.type
+}
+
+// Map relational/role fields (parentId, capabilityId, requiresRole) onto the
+// update payload. An explicit null is PRESERVED (not omitted) so callers can
+// clear the gate — e.g. ungate a nav item by setting capabilityId to null.
+// Only `undefined` (field absent) is treated as "leave unchanged".
+function applyNavigationRelationFields(
+  data: Partial<InsertNavigationItem>,
+  updateData: NavigationUpdateData
+): void {
+  if (data.parentId !== undefined) updateData.parentId = data.parentId ?? null
+  if (data.capabilityId !== undefined) updateData.capabilityId = data.capabilityId ?? null
+  if (data.requiresRole !== undefined) updateData.requiresRole = data.requiresRole ?? null
+}
+
+// Map simple scalar fields (position, isActive) onto the update payload.
+function applyNavigationScalarFields(
+  data: Partial<InsertNavigationItem>,
+  updateData: NavigationUpdateData
+): void {
+  if (data.position !== undefined) updateData.position = data.position
+  if (data.isActive !== undefined) updateData.isActive = data.isActive
+}
+
+// Build the database update payload from a partial input. Absent fields
+// (undefined) are omitted ("leave unchanged"); explicit null is PRESERVED so a
+// caller can clear a relation/gate — e.g. ungate a nav item via capabilityId:
+// null. See applyNavigationRelationFields for the null-preservation detail.
+function buildNavigationUpdateData(
+  data: Partial<InsertNavigationItem>
+): NavigationUpdateData {
+  const updateData: NavigationUpdateData = {}
+
+  applyNavigationStringFields(data, updateData)
+  applyNavigationRelationFields(data, updateData)
+  applyNavigationScalarFields(data, updateData)
+
+  return updateData
+}
+
 export async function getNavigationItemsAction(): Promise<ActionState<SelectNavigationItem[]>> {
   const requestId = generateRequestId()
   const timer = startTimer("getNavigationItems")
@@ -57,7 +139,7 @@ export async function getNavigationItemsAction(): Promise<ActionState<SelectNavi
       description: item.description ?? null,
       type: item.type,
       parentId: item.parentId ?? null,
-      toolId: item.toolId ?? null,
+      capabilityId: item.capabilityId ?? null,
       requiresRole: item.requiresRole ?? null,
       position: item.position,
       isActive: item.isActive,
@@ -105,23 +187,8 @@ export async function createNavigationItemAction(
     })
     
     // Validate numeric conversions
-    let parentId: number | undefined
-    if (data.parentId !== undefined && data.parentId !== null) {
-      const numParentId = Number(data.parentId)
-      if (Number.isNaN(numParentId)) {
-        throw ErrorFactories.invalidInput('parentId', data.parentId, 'Must be a valid number')
-      }
-      parentId = numParentId
-    }
-
-    let toolId: number | undefined
-    if (data.toolId !== undefined && data.toolId !== null) {
-      const numToolId = Number(data.toolId)
-      if (Number.isNaN(numToolId)) {
-        throw ErrorFactories.invalidInput('toolId', data.toolId, 'Must be a valid number')
-      }
-      toolId = numToolId
-    }
+    const parentId = parseOptionalNumericField('parentId', data.parentId)
+    const capabilityId = parseOptionalNumericField('capabilityId', data.capabilityId)
 
     const newItem = await createNavigationItem({
       label: data.label,
@@ -130,7 +197,7 @@ export async function createNavigationItemAction(
       description: data.description ?? undefined,
       type: data.type || 'page',
       parentId,
-      toolId,
+      capabilityId,
       requiresRole: data.requiresRole ?? undefined,
       position: data.position,
       isActive: data.isActive ?? true
@@ -152,7 +219,7 @@ export async function createNavigationItemAction(
       description: newItem.description ?? null,
       type: newItem.type,
       parentId: newItem.parentId ?? null,
-      toolId: newItem.toolId ?? null,
+      capabilityId: newItem.capabilityId ?? null,
       requiresRole: newItem.requiresRole ?? null,
       position: newItem.position,
       isActive: newItem.isActive,
@@ -194,30 +261,8 @@ export async function updateNavigationItemAction(
     
     log.debug("User authenticated", { userId: session.sub })
     // Convert null values to undefined for updateNavigationItem
-    const updateData: Partial<{
-      label: string;
-      icon: string;
-      link: string;
-      description: string;
-      type: "link" | "section" | "page";
-      parentId: number;
-      toolId: number;
-      requiresRole: string;
-      position: number;
-      isActive: boolean;
-    }> = {}
-    
-    if (data.label !== undefined) updateData.label = data.label
-    if (data.icon !== undefined) updateData.icon = data.icon
-    if (data.link !== undefined && data.link !== null) updateData.link = data.link
-    if (data.description !== undefined && data.description !== null) updateData.description = data.description
-    if (data.type !== undefined && (data.type === "link" || data.type === "section" || data.type === "page")) updateData.type = data.type
-    if (data.parentId !== undefined && data.parentId !== null) updateData.parentId = data.parentId
-    if (data.toolId !== undefined && data.toolId !== null) updateData.toolId = data.toolId
-    if (data.requiresRole !== undefined && data.requiresRole !== null) updateData.requiresRole = data.requiresRole
-    if (data.position !== undefined) updateData.position = data.position
-    if (data.isActive !== undefined) updateData.isActive = data.isActive
-    
+    const updateData = buildNavigationUpdateData(data)
+
     log.info("Updating navigation item in database", {
       itemId: id,
       fieldsUpdated: Object.keys(updateData).length
@@ -247,7 +292,7 @@ export async function updateNavigationItemAction(
       description: updatedItem.description ?? null,
       type: updatedItem.type,
       parentId: updatedItem.parentId ?? null,
-      toolId: updatedItem.toolId ?? null,
+      capabilityId: updatedItem.capabilityId ?? null,
       requiresRole: updatedItem.requiresRole ?? null,
       position: updatedItem.position,
       isActive: updatedItem.isActive,

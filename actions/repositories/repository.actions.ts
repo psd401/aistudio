@@ -2,7 +2,7 @@
 
 import { getServerSession } from "@/lib/auth/server-session"
 import { type ActionState } from "@/types/actions-types"
-import { hasToolAccess } from "@/utils/roles"
+import { hasCapabilityAccess } from "@/utils/roles"
 import { getUserIdFromSession, canModifyRepository } from "@/actions/repositories/repository-permissions"
 import {
   createRepository as drizzleCreateRepository,
@@ -61,6 +61,55 @@ export interface UpdateRepositoryInput {
   metadata?: Record<string, unknown>
 }
 
+// Raw repository row shape returned by the Drizzle accessors
+type RawRepository = NonNullable<Awaited<ReturnType<typeof drizzleUpdateRepository>>>
+
+// Convert a raw Drizzle repository row to the action-layer Repository type
+function mapToRepository(resultRaw: RawRepository): Repository {
+  return {
+    id: resultRaw.id,
+    name: resultRaw.name,
+    description: resultRaw.description,
+    ownerId: resultRaw.ownerId,
+    isPublic: resultRaw.isPublic ?? false,
+    metadata: resultRaw.metadata ?? {},
+    createdAt: resultRaw.createdAt ?? new Date(),
+    updatedAt: resultRaw.updatedAt ?? new Date()
+  }
+}
+
+// True when the update input carries at least one mutable field
+function hasRepositoryUpdates(input: UpdateRepositoryInput): boolean {
+  return (
+    input.name !== undefined ||
+    input.description !== undefined ||
+    input.isPublic !== undefined ||
+    input.metadata !== undefined
+  )
+}
+
+// Build the partial update payload from only the provided fields
+function buildRepositoryUpdateData(input: UpdateRepositoryInput): {
+  name?: string;
+  description?: string | null;
+  isPublic?: boolean;
+  metadata?: Record<string, unknown> | null;
+} {
+  const updateData: {
+    name?: string;
+    description?: string | null;
+    isPublic?: boolean;
+    metadata?: Record<string, unknown> | null;
+  } = {}
+
+  if (input.name !== undefined) updateData.name = input.name
+  if (input.description !== undefined) updateData.description = input.description ?? null
+  if (input.isPublic !== undefined) updateData.isPublic = input.isPublic
+  if (input.metadata !== undefined) updateData.metadata = input.metadata
+
+  return updateData
+}
+
 
 export async function createRepository(
   input: CreateRepositoryInput
@@ -81,7 +130,7 @@ export async function createRepository(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Repository creation denied - insufficient permissions", {
         userId: session.sub
@@ -161,7 +210,7 @@ export async function updateRepository(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Repository update denied - insufficient permissions", {
         userId: session.sub,
@@ -186,13 +235,7 @@ export async function updateRepository(
     }
 
     // Check if any fields provided
-    const hasUpdates =
-      input.name !== undefined ||
-      input.description !== undefined ||
-      input.isPublic !== undefined ||
-      input.metadata !== undefined
-
-    if (!hasUpdates) {
+    if (!hasRepositoryUpdates(input)) {
       log.warn("No fields provided for update")
       return createSuccess(null as unknown as Repository, "No changes to apply")
     }
@@ -202,17 +245,7 @@ export async function updateRepository(
     })
 
     // Build update data object with only provided fields
-    const updateData: {
-      name?: string;
-      description?: string | null;
-      isPublic?: boolean;
-      metadata?: Record<string, unknown> | null;
-    } = {}
-
-    if (input.name !== undefined) updateData.name = input.name
-    if (input.description !== undefined) updateData.description = input.description ?? null
-    if (input.isPublic !== undefined) updateData.isPublic = input.isPublic
-    if (input.metadata !== undefined) updateData.metadata = input.metadata
+    const updateData = buildRepositoryUpdateData(input)
 
     const resultRaw = await drizzleUpdateRepository(input.id, updateData)
 
@@ -222,16 +255,7 @@ export async function updateRepository(
     }
 
     // Convert to expected type
-    const result: Repository = {
-      id: resultRaw.id,
-      name: resultRaw.name,
-      description: resultRaw.description,
-      ownerId: resultRaw.ownerId,
-      isPublic: resultRaw.isPublic ?? false,
-      metadata: resultRaw.metadata ?? {},
-      createdAt: resultRaw.createdAt ?? new Date(),
-      updatedAt: resultRaw.updatedAt ?? new Date()
-    }
+    const result: Repository = mapToRepository(resultRaw)
 
     log.info("Repository updated successfully", {
       repositoryId: result.id,
@@ -273,7 +297,7 @@ export async function deleteRepository(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Repository deletion denied - insufficient permissions", {
         userId: session.sub,
@@ -371,7 +395,7 @@ export async function listRepositories(): Promise<ActionState<Repository[]>> {
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Repository list denied - insufficient permissions", {
         userId: session.sub
@@ -437,7 +461,7 @@ export async function getRepository(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Repository access denied - insufficient permissions", {
         userId: session.sub,
@@ -507,7 +531,7 @@ export async function getRepositoryAccess(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Repository access list denied - insufficient permissions", {
         userId: session.sub,
@@ -554,7 +578,7 @@ export async function grantRepositoryAccess(
       return { isSuccess: false, message: "Unauthorized" }
     }
 
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       return { isSuccess: false, message: "Access denied. You need knowledge repository access." }
     }
@@ -596,7 +620,7 @@ export async function revokeRepositoryAccess(
       return { isSuccess: false, message: "Unauthorized" }
     }
 
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       return { isSuccess: false, message: "Access denied. You need knowledge repository access." }
     }
@@ -660,7 +684,7 @@ export async function getUserAccessibleRepositoriesAction(): Promise<ActionState
       return { isSuccess: false, message: "Unauthorized" }
     }
 
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Access denied - missing knowledge-repositories tool access")
       return { isSuccess: false, message: "Access denied. You need knowledge repository access." }

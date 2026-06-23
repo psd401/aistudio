@@ -12,7 +12,7 @@ import {
   updateRepositoryItemStatus
 } from "@/lib/db/drizzle"
 import { type ActionState } from "@/types/actions-types"
-import { hasToolAccess } from "@/utils/roles"
+import { hasCapabilityAccess } from "@/utils/roles"
 import {
   handleError,
   ErrorFactories,
@@ -96,6 +96,78 @@ function sanitizeFilename(filename: string): string {
     .slice(0, 255); // Limit length
 }
 
+// Raw repository item row shape returned by the Drizzle accessors
+type RawRepositoryItem = NonNullable<Awaited<ReturnType<typeof getRepositoryItemById>>>
+
+// Convert a raw Drizzle repository item row to the action-layer RepositoryItem type
+function mapToRepositoryItem(itemRaw: RawRepositoryItem): RepositoryItem {
+  return {
+    id: itemRaw.id,
+    repositoryId: itemRaw.repositoryId,
+    type: itemRaw.type as 'document' | 'url' | 'text',
+    name: itemRaw.name,
+    source: itemRaw.source,
+    metadata: itemRaw.metadata ?? {},
+    processingStatus: itemRaw.processingStatus ?? 'pending',
+    processingError: itemRaw.processingError,
+    createdAt: itemRaw.createdAt ?? new Date(),
+    updatedAt: itemRaw.updatedAt ?? new Date()
+  }
+}
+
+// Validate addDocumentItem input; returns a user-facing error message or null when valid
+function validateAddDocumentInput(input: AddDocumentInput): string | null {
+  if (!input.name || input.name.trim().length === 0) {
+    return "Name is required"
+  }
+
+  if (!input.file || !input.file.content) {
+    return "File content is required"
+  }
+
+  return null
+}
+
+// Normalize uploaded file content (base64 string from client or raw bytes) to a Buffer
+function toFileBuffer(content: Buffer | Uint8Array | string): Buffer {
+  if (typeof content === 'string') {
+    // It's a base64 string from the client
+    return Buffer.from(content, 'base64')
+  }
+  // It's already a Buffer or Uint8Array
+  return Buffer.from(content)
+}
+
+// Determine the file extension from original filename metadata, falling back to the S3 key
+function resolveDownloadExtension(item: RepositoryItem): string {
+  const metadata = item.metadata as Record<string, unknown> | null
+
+  if (metadata && typeof metadata === 'object' && 'originalFileName' in metadata && typeof metadata.originalFileName === 'string') {
+    // Use the original filename's extension
+    return metadata.originalFileName.split('.').pop() || ''
+  }
+
+  // Extract from S3 key
+  const urlParts = item.source.split('/')
+  const s3Filename = urlParts[urlParts.length - 1]
+  return s3Filename.split('.').pop() || ''
+}
+
+// Resolve the download filename, appending the source/original extension when missing
+function resolveDownloadFilename(item: RepositoryItem): string {
+  let filename = item.name
+
+  // Try to get extension from original filename or S3 key
+  const extension = resolveDownloadExtension(item)
+
+  // Add extension if not already present in the name
+  if (extension && !filename.toLowerCase().endsWith(`.${extension.toLowerCase()}`)) {
+    filename = `${filename}.${extension}`
+  }
+
+  return filename
+}
+
 
 export async function addDocumentItem(
   input: AddDocumentInput
@@ -118,7 +190,7 @@ export async function addDocumentItem(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Document upload denied - insufficient permissions", {
         userId: session.sub,
@@ -128,14 +200,11 @@ export async function addDocumentItem(
     }
     
     // Validate and sanitize inputs
-    if (!input.name || input.name.trim().length === 0) {
-      return { isSuccess: false, message: "Name is required" }
+    const validationError = validateAddDocumentInput(input)
+    if (validationError) {
+      return { isSuccess: false, message: validationError }
     }
-    
-    if (!input.file || !input.file.content) {
-      return { isSuccess: false, message: "File content is required" }
-    }
-    
+
     // Sanitize the filename
     const sanitizedFilename = sanitizeFilename(input.file.fileName || input.name);
 
@@ -155,14 +224,7 @@ export async function addDocumentItem(
     }
 
     // Convert base64 string back to Buffer if needed
-    let fileContent: Buffer
-    if (typeof input.file.content === 'string') {
-      // It's a base64 string from the client
-      fileContent = Buffer.from(input.file.content, 'base64')
-    } else {
-      // It's already a Buffer or Uint8Array
-      fileContent = Buffer.from(input.file.content)
-    }
+    const fileContent = toFileBuffer(input.file.content)
 
     // Upload to S3
     log.info("Uploading document to S3", {
@@ -206,18 +268,7 @@ export async function addDocumentItem(
     })
 
     // Convert to action type
-    const item: RepositoryItem = {
-      id: itemRaw.id,
-      repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'url' | 'text',
-      name: itemRaw.name,
-      source: itemRaw.source,
-      metadata: itemRaw.metadata ?? {},
-      processingStatus: itemRaw.processingStatus ?? 'pending',
-      processingError: itemRaw.processingError,
-      createdAt: itemRaw.createdAt ?? new Date(),
-      updatedAt: itemRaw.updatedAt ?? new Date()
-    }
+    const item: RepositoryItem = mapToRepositoryItem(itemRaw)
 
     // Queue the document for processing
     log.info("Queueing document for processing", {
@@ -282,7 +333,7 @@ export async function addDocumentWithPresignedUrl(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Presigned upload denied - insufficient permissions", {
         userId: session.sub,
@@ -423,7 +474,7 @@ export async function addUrlItem(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("URL addition denied - insufficient permissions", {
         userId: session.sub,
@@ -549,7 +600,7 @@ export async function addTextItem(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Text addition denied - insufficient permissions", {
         userId: session.sub,
@@ -673,7 +724,7 @@ export async function removeRepositoryItem(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Item removal denied - insufficient permissions", {
         userId: session.sub,
@@ -787,7 +838,7 @@ export async function listRepositoryItems(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("List items denied - insufficient permissions", {
         userId: session.sub,
@@ -858,7 +909,7 @@ export async function searchRepositoryItems(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Search denied - insufficient permissions", {
         userId: session.sub,
@@ -978,7 +1029,7 @@ export async function getItemChunks(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Get chunks denied - insufficient permissions", {
         userId: session.sub,
@@ -1046,7 +1097,7 @@ export async function updateItemProcessingStatus(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Status update denied - insufficient permissions", {
         userId: session.sub,
@@ -1098,7 +1149,7 @@ export async function getDocumentDownloadUrl(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Download URL denied - insufficient permissions", {
         userId: session.sub,
@@ -1117,18 +1168,7 @@ export async function getDocumentDownloadUrl(
     }
 
     // Convert to action type
-    const item: RepositoryItem = {
-      id: itemRaw.id,
-      repositoryId: itemRaw.repositoryId,
-      type: itemRaw.type as 'document' | 'url' | 'text',
-      name: itemRaw.name,
-      source: itemRaw.source,
-      metadata: itemRaw.metadata ?? {},
-      processingStatus: itemRaw.processingStatus ?? 'pending',
-      processingError: itemRaw.processingError,
-      createdAt: itemRaw.createdAt ?? new Date(),
-      updatedAt: itemRaw.updatedAt ?? new Date()
-    }
+    const item: RepositoryItem = mapToRepositoryItem(itemRaw)
 
     if (item.type !== 'document') {
       log.warn("Download URL requested for non-document item", {
@@ -1150,26 +1190,7 @@ export async function getDocumentDownloadUrl(
     }
 
     // Extract file extension from the original S3 key or metadata
-    let filename = item.name
-    const metadata = item.metadata as Record<string, unknown> | null
-
-    // Try to get extension from original filename or S3 key
-    let extension = ''
-
-    if (metadata && typeof metadata === 'object' && 'originalFileName' in metadata && typeof metadata.originalFileName === 'string') {
-      // Use the original filename's extension
-      extension = metadata.originalFileName.split('.').pop() || ''
-    } else {
-      // Extract from S3 key
-      const urlParts = item.source.split('/')
-      const s3Filename = urlParts[urlParts.length - 1]
-      extension = s3Filename.split('.').pop() || ''
-    }
-    
-    // Add extension if not already present in the name
-    if (extension && !filename.toLowerCase().endsWith(`.${extension.toLowerCase()}`)) {
-      filename = `${filename}.${extension}`
-    }
+    const filename = resolveDownloadFilename(item)
 
     const command = new GetObjectCommand({
       Bucket: bucketName,

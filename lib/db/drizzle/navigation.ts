@@ -28,12 +28,14 @@ import { ErrorFactories } from "@/lib/error-utils";
 export interface NavigationItemData {
   label: string;
   icon: string;
-  link?: string;
-  description?: string;
+  link?: string | null;
+  description?: string | null;
   type: "link" | "section" | "page";
-  parentId?: number;
-  toolId?: number;
-  requiresRole?: string;
+  // Clearable relation/role fields accept null so an update can REMOVE the gate
+  // (e.g. ungate a nav item). The DB column is nullable; passing null clears it.
+  parentId?: number | null;
+  capabilityId?: number | null;
+  requiresRole?: string | null;
   position?: number;
   isActive?: boolean;
 }
@@ -60,7 +62,7 @@ export async function getNavigationItems(activeOnly: boolean = false) {
             parentId: navigationItems.parentId,
             description: navigationItems.description,
             type: navigationItems.type,
-            toolId: navigationItems.toolId,
+            capabilityId: navigationItems.capabilityId,
             requiresRole: navigationItems.requiresRole,
             position: navigationItems.position,
             isActive: navigationItems.isActive,
@@ -84,7 +86,7 @@ export async function getNavigationItems(activeOnly: boolean = false) {
           parentId: navigationItems.parentId,
           description: navigationItems.description,
           type: navigationItems.type,
-          toolId: navigationItems.toolId,
+          capabilityId: navigationItems.capabilityId,
           requiresRole: navigationItems.requiresRole,
           position: navigationItems.position,
           isActive: navigationItems.isActive,
@@ -112,7 +114,7 @@ export async function getNavigationItemById(id: number) {
           parentId: navigationItems.parentId,
           description: navigationItems.description,
           type: navigationItems.type,
-          toolId: navigationItems.toolId,
+          capabilityId: navigationItems.capabilityId,
           requiresRole: navigationItems.requiresRole,
           position: navigationItems.position,
           isActive: navigationItems.isActive,
@@ -149,7 +151,7 @@ export async function getNavigationItemsByRole(roleName: string) {
           parentId: navigationItems.parentId,
           description: navigationItems.description,
           type: navigationItems.type,
-          toolId: navigationItems.toolId,
+          capabilityId: navigationItems.capabilityId,
           requiresRole: navigationItems.requiresRole,
           position: navigationItems.position,
           isActive: navigationItems.isActive,
@@ -189,7 +191,7 @@ export async function getNavigationItemsByUser(cognitoSub: string) {
           parentId: navigationItems.parentId,
           description: navigationItems.description,
           type: navigationItems.type,
-          toolId: navigationItems.toolId,
+          capabilityId: navigationItems.capabilityId,
           requiresRole: navigationItems.requiresRole,
           position: navigationItems.position,
           isActive: navigationItems.isActive,
@@ -233,7 +235,7 @@ export async function createNavigationItem(data: NavigationItemData) {
           description: data.description,
           type: data.type,
           parentId: data.parentId,
-          toolId: data.toolId,
+          capabilityId: data.capabilityId,
           requiresRole: data.requiresRole,
           position: data.position ?? 0,
           isActive: data.isActive ?? true,
@@ -271,7 +273,7 @@ export async function updateNavigationItem(
   if (data.description !== undefined) updateData.description = data.description;
   if (data.type !== undefined) updateData.type = data.type;
   if (data.parentId !== undefined) updateData.parentId = data.parentId;
-  if (data.toolId !== undefined) updateData.toolId = data.toolId;
+  if (data.capabilityId !== undefined) updateData.capabilityId = data.capabilityId;
   if (data.requiresRole !== undefined) updateData.requiresRole = data.requiresRole;
   if (data.position !== undefined) updateData.position = data.position;
   if (data.isActive !== undefined) updateData.isActive = data.isActive;

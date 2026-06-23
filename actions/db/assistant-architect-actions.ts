@@ -8,7 +8,6 @@ import {
   type InsertToolExecution,
   type SelectToolInputField,
   type SelectChainPrompt,
-  type SelectTool,
   type SelectAiModel,
   type ToolInputFieldOptions
 } from "@/types/db-types"
@@ -27,7 +26,7 @@ import {
   startTimer
 } from "@/lib/logger"
 import { getServerSession } from "@/lib/auth/server-session";
-import { hasToolAccess, hasRole } from "@/utils/roles";
+import { hasCapabilityAccess, hasRole } from "@/utils/roles";
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action";
 import {
   getAssistantArchitects as drizzleGetAssistantArchitects,
@@ -48,17 +47,16 @@ import {
   createChainPrompt,
   updateChainPrompt,
   deleteChainPrompt,
-  getTools,
   getAIModels,
   getAIModelById,
   getAssistantArchitectsByStatus,
   getRoleByName,
-  assignToolToRole,
+  assignCapabilityToRole,
   createNavigationItem
 } from "@/lib/db/drizzle";
 import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
-import { tools, navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities } from "@/lib/db/schema";
+import { navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities } from "@/lib/db/schema";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -631,6 +629,73 @@ export async function getPendingAssistantArchitectsAction(): Promise<
   }
 }
 
+/** Resolved current-user data (roles + user) for an authorized architect edit. */
+type CurrentUserData = NonNullable<
+  Awaited<ReturnType<typeof getCurrentUserAction>>["data"]
+>;
+
+/**
+ * Authorize an assistant-architect edit: the caller must resolve to a current user
+ * and be either an administrator or the tool's creator. Returns the resolved user
+ * data on success or a user-facing error message. Extracted from
+ * updateAssistantArchitectAction to keep that action's cyclomatic complexity bounded.
+ */
+function resolveArchitectEditAuthorization(
+  currentUser: Awaited<ReturnType<typeof getCurrentUserAction>>,
+  toolUserId: number | null,
+  isAdmin: boolean
+): { data: CurrentUserData } | { error: string } {
+  if (!currentUser.isSuccess || !currentUser.data) {
+    return { error: "User not found" };
+  }
+  const isCreator = toolUserId === currentUser.data.user.id;
+  if (!isAdmin && !isCreator) {
+    return { error: "Unauthorized" };
+  }
+  return { data: currentUser.data };
+}
+
+/** Base (non-agentic) update fields an assistant-architect update may set. */
+type AssistantArchitectBaseUpdates = Partial<{
+  name: string;
+  description: string | null;
+  status: "draft" | "pending_approval" | "approved" | "rejected" | "disabled";
+  imagePath: string | null;
+  isParallel: boolean;
+  timeoutSeconds: number | null;
+  // Agentic mode (Issue #926)
+  mode: "prompt_chain" | "agentic";
+  agentEnabledTools: string[];
+  agentEnabledConnectors: string[];
+  agentMaxSteps: number;
+  agentTimeoutSeconds: number;
+  agentCostCapCents: number | null;
+  agentMaxRequestsPerHour: number | null;
+}>;
+
+/**
+ * Build the base (non-agentic) update object from the provided payload, including
+ * only fields that were supplied. Extracted from updateAssistantArchitectAction to
+ * keep that action's cyclomatic complexity bounded; behavior is identical to the
+ * inline branches.
+ */
+function buildAssistantArchitectBaseUpdates(
+  data: Partial<InsertAssistantArchitect>
+): AssistantArchitectBaseUpdates {
+  const updateData: AssistantArchitectBaseUpdates = {};
+
+  if (data.name !== undefined) updateData.name = data.name;
+  if (data.description !== undefined) updateData.description = data.description || null;
+  if (data.status !== undefined) updateData.status = data.status as "draft" | "pending_approval" | "approved" | "rejected" | "disabled";
+  if (data.imagePath !== undefined) updateData.imagePath = data.imagePath || null;
+  // Handle isParallel and timeoutSeconds if provided. Use `!== undefined` for
+  // consistency with the fields above (an explicit `undefined` means "not set").
+  if (data.isParallel !== undefined) updateData.isParallel = Boolean(data.isParallel);
+  if (data.timeoutSeconds !== undefined) updateData.timeoutSeconds = data.timeoutSeconds as number | null;
+
+  return updateData;
+}
+
 export async function updateAssistantArchitectAction(
   id: string,
   data: Partial<InsertAssistantArchitect>
@@ -666,71 +731,35 @@ export async function updateAssistantArchitectAction(
 
     // Get the current user's database ID
     const currentUser = await getCurrentUserAction();
-    if (!currentUser.isSuccess || !currentUser.data) {
-      return { isSuccess: false, message: "User not found" }
+
+    // Authorization: caller must be an admin or the tool's creator. Branch logic
+    // is extracted to keep this action's cyclomatic complexity bounded.
+    const authResult = resolveArchitectEditAuthorization(currentUser, currentTool.userId, isAdmin);
+    if ("error" in authResult) {
+      return { isSuccess: false, message: authResult.error }
+    }
+    const currentUserData = authResult.data;
+
+    // Track whether this edit must atomically deactivate the capability.
+    // Decoupling the capability-deactivate from the architect-update creates an
+    // unrecoverable inconsistency: capability appears active but architect is back
+    // in review, locking users out of a feature until manual DB intervention.
+    const needsCapabilityDeactivation = currentTool.status === "approved";
+    if (needsCapabilityDeactivation) {
+      data.status = "pending_approval";
     }
 
-    const isCreator = currentTool.userId === currentUser.data.user.id
-    if (!isAdmin && !isCreator) {
-      return { isSuccess: false, message: "Unauthorized" }
-    }
-
-    // If the tool was approved and is being edited, set status to pending_approval and deactivate it in the tools table
-    if (currentTool.status === "approved") {
-      data.status = "pending_approval"
-      // Issue #923: deactivate the legacy tools row AND the renamed capabilities
-      // row atomically. hasToolAccess() now reads `capabilities`, so a partial
-      // failure (tools deactivated, capabilities still active) would leave a user
-      // with access to an architect that is back in pending_approval. One
-      // transaction guarantees both flip together or neither does.
-      await executeTransaction(
-        async (tx) => {
-          await tx
-            .update(tools)
-            .set({ isActive: false, updatedAt: new Date() })
-            .where(eq(tools.promptChainToolId, idInt));
-          await tx
-            .update(capabilities)
-            .set({ isActive: false, updatedAt: new Date() })
-            .where(eq(capabilities.promptChainToolId, idInt));
-        },
-        "deactivateApprovedToolAndCapability"
-      );
-    }
-
-    // Build update data object with only provided fields
-    const updateData: Partial<{
-      name: string;
-      description: string | null;
-      status: "draft" | "pending_approval" | "approved" | "rejected" | "disabled";
-      imagePath: string | null;
-      isParallel: boolean;
-      timeoutSeconds: number | null;
-      // Agentic mode (Issue #926)
-      mode: "prompt_chain" | "agentic";
-      agentEnabledTools: string[];
-      agentEnabledConnectors: string[];
-      agentMaxSteps: number;
-      agentTimeoutSeconds: number;
-      agentCostCapCents: number | null;
-      agentMaxRequestsPerHour: number | null;
-    }> = {};
-
-    if (data.name !== undefined) updateData.name = data.name;
-    if (data.description !== undefined) updateData.description = data.description || null;
-    if (data.status !== undefined) updateData.status = data.status as "draft" | "pending_approval" | "approved" | "rejected" | "disabled";
-    if (data.imagePath !== undefined) updateData.imagePath = data.imagePath || null;
-    // Handle isParallel and timeoutSeconds if present in data
-    if ('isParallel' in data) updateData.isParallel = Boolean(data.isParallel);
-    if ('timeoutSeconds' in data) updateData.timeoutSeconds = data.timeoutSeconds as number | null;
+    // Build update data object with only provided fields. Branch logic is
+    // extracted to keep this action's cyclomatic complexity bounded.
+    const updateData = buildAssistantArchitectBaseUpdates(data);
 
     // Agentic mode fields (Issue #926) — resolved + validated in a helper to keep
     // this action's cyclomatic complexity bounded.
     const agentResult = await resolveAgenticUpdateFields(
       data,
       currentTool.mode,
-      currentUser.data.roles.map(r => r.name),
-      currentUser.data.user.id
+      currentUserData.roles.map(r => r.name),
+      currentUserData.user.id
     );
     if ("error" in agentResult) {
       return { isSuccess: false, message: agentResult.error }
@@ -741,8 +770,28 @@ export async function updateAssistantArchitectAction(
       return { isSuccess: false, message: "No fields to update" }
     }
 
-    // Update via Drizzle
-    const updatedTool = await drizzleUpdateAssistantArchitect(idInt, updateData);
+    // Update via Drizzle — atomically deactivate capability when transitioning
+    // from approved so the two writes either both succeed or both roll back.
+    let updatedTool;
+    if (needsCapabilityDeactivation) {
+      updatedTool = await executeTransaction(
+        async (tx) => {
+          await tx
+            .update(capabilities)
+            .set({ isActive: false, updatedAt: new Date() })
+            .where(eq(capabilities.promptChainToolId, idInt));
+          const result = await tx
+            .update(assistantArchitects)
+            .set({ ...updateData, updatedAt: new Date() })
+            .where(eq(assistantArchitects.id, idInt))
+            .returning();
+          return result[0];
+        },
+        "deactivateAndUpdateApprovedArchitect"
+      );
+    } else {
+      updatedTool = await drizzleUpdateAssistantArchitect(idInt, updateData);
+    }
 
     if (!updatedTool) {
       return { isSuccess: false, message: "Failed to update assistant" }
@@ -1002,6 +1051,38 @@ export async function deleteInputFieldAction(
   }
 }
 
+/** Update payload shape accepted by `updateToolInputField`. */
+type ToolInputFieldUpdates = {
+  name?: string;
+  label?: string;
+  fieldType?: "short_text" | "long_text" | "select" | "multi_select" | "file_upload";
+  position?: number;
+  options?: { values?: string[]; multiSelect?: boolean; placeholder?: string };
+};
+
+/**
+ * Build the input-field update object from the provided payload, including only
+ * fields that were supplied and defaulting an unset label to the name. Extracted
+ * from updateInputFieldAction to keep that action's cyclomatic complexity bounded;
+ * behavior is identical to the inline branches.
+ */
+function buildInputFieldUpdates(data: Partial<InsertToolInputField>): ToolInputFieldUpdates {
+  const updates: ToolInputFieldUpdates = {};
+
+  if (data.name !== undefined) updates.name = data.name;
+  if (data.label !== undefined) updates.label = data.label;
+  if (data.fieldType !== undefined) updates.fieldType = mapFieldTypeToDb(data.fieldType);
+  if (data.position !== undefined) updates.position = data.position;
+  if (data.options !== undefined && data.options !== null) updates.options = data.options;
+
+  // Always ensure label is set to name if not provided
+  if (!updates.label && updates.name) {
+    updates.label = updates.name;
+  }
+
+  return updates;
+}
+
 export async function updateInputFieldAction(
   id: string,
   data: Partial<InsertToolInputField>
@@ -1060,25 +1141,9 @@ export async function updateInputFieldAction(
       return { isSuccess: false, message: "Forbidden" }
     }
 
-    // Build update data
-    const updates: {
-      name?: string;
-      label?: string;
-      fieldType?: "short_text" | "long_text" | "select" | "multi_select" | "file_upload";
-      position?: number;
-      options?: { values?: string[]; multiSelect?: boolean; placeholder?: string };
-    } = {};
-
-    if (data.name !== undefined) updates.name = data.name;
-    if (data.label !== undefined) updates.label = data.label;
-    if (data.fieldType !== undefined) updates.fieldType = mapFieldTypeToDb(data.fieldType);
-    if (data.position !== undefined) updates.position = data.position;
-    if (data.options !== undefined && data.options !== null) updates.options = data.options;
-
-    // Always ensure label is set to name if not provided
-    if (!updates.label && updates.name) {
-      updates.label = updates.name;
-    }
+    // Build update data. Branch logic is extracted to keep this action's
+    // cyclomatic complexity bounded.
+    const updates = buildInputFieldUpdates(data);
 
     if (Object.keys(updates).length === 0) {
       return { isSuccess: false, message: "No fields to update" }
@@ -1205,7 +1270,7 @@ export async function addChainPromptAction(
         return { isSuccess: false, message: "Unauthorized" };
       }
 
-      const hasAccess = await hasToolAccess("knowledge-repositories");
+      const hasAccess = await hasCapabilityAccess("knowledge-repositories");
       if (!hasAccess) {
         return { isSuccess: false, message: "Access denied. You need knowledge repository access." };
       }
@@ -1235,6 +1300,144 @@ export async function addChainPromptAction(
     timer({ status: "error" })
     log.error("Error adding chain prompt:", error)
     return { isSuccess: false, message: "Failed to add chain prompt" }
+  }
+}
+
+/** Update payload shape accepted by `updateChainPrompt` (ChainPromptUpdateData). */
+type ChainPromptUpdates = {
+  name?: string;
+  content?: string;
+  modelId?: number;
+  position?: number;
+  parallelGroup?: number | null;
+  inputMapping?: Record<string, string> | null;
+  timeoutSeconds?: number | null;
+  systemContext?: string | null;
+  repositoryIds?: number[];
+  enabledTools?: string[];
+};
+
+/** True when a value is neither undefined nor null (matches `x !== undefined && x !== null`). */
+function isPresent<T>(value: T | null | undefined): value is T {
+  return value !== undefined && value !== null;
+}
+
+/**
+ * Assign the "present-only, copy-as-is" prompt fields. A field is copied only when
+ * it is neither undefined nor null, matching the original inline branches. Split
+ * out of buildChainPromptUpdates to keep cyclomatic complexity bounded.
+ */
+function assignPresentPromptUpdates(
+  data: Partial<InsertChainPrompt>,
+  updates: ChainPromptUpdates
+): void {
+  if (isPresent(data.name)) updates.name = data.name;
+  if (isPresent(data.content)) updates.content = data.content;
+  if (isPresent(data.modelId)) updates.modelId = data.modelId;
+  if (isPresent(data.position)) updates.position = data.position;
+  if (isPresent(data.repositoryIds)) updates.repositoryIds = data.repositoryIds;
+  if (isPresent(data.enabledTools)) updates.enabledTools = data.enabledTools;
+}
+
+/**
+ * Assign the "defined → coalesce null" prompt fields. A field is set whenever it is
+ * defined (including explicit null), coalescing null/undefined to null, matching the
+ * original inline branches. Split out of buildChainPromptUpdates to keep cyclomatic
+ * complexity bounded.
+ */
+function assignNullablePromptUpdates(
+  data: Partial<InsertChainPrompt>,
+  updates: ChainPromptUpdates
+): void {
+  if (data.systemContext !== undefined) updates.systemContext = data.systemContext ?? null;
+  if (data.parallelGroup !== undefined) updates.parallelGroup = data.parallelGroup ?? null;
+  if (data.timeoutSeconds !== undefined) updates.timeoutSeconds = data.timeoutSeconds ?? null;
+  if (data.inputMapping !== undefined) updates.inputMapping = data.inputMapping ?? null;
+}
+
+/**
+ * Build the prompt update object from the provided payload, including only fields
+ * that were supplied. Extracted from updatePromptAction to keep that action's
+ * cyclomatic complexity bounded; behavior is identical to the inline branches.
+ */
+function buildChainPromptUpdates(data: Partial<InsertChainPrompt>): ChainPromptUpdates {
+  const updates: ChainPromptUpdates = {};
+  assignPresentPromptUpdates(data, updates);
+  assignNullablePromptUpdates(data, updates);
+  return updates;
+}
+
+/**
+ * Validate a prompt's `enabledTools` update against the resolved model. Returns a
+ * user-facing error message plus warn-log metadata when validation fails, or null
+ * when there is nothing to validate or the tools are valid. Extracted from
+ * updatePromptAction to keep that action's cyclomatic complexity bounded.
+ */
+async function validatePromptEnabledToolsUpdate(
+  enabledTools: string[] | null | undefined,
+  dataModelId: number | null | undefined,
+  promptModelId: number | null | undefined
+): Promise<{ message: string; logMeta: { invalidTools: string[]; message?: string } } | null> {
+  if (!enabledTools) return null;
+
+  // Use provided modelId or fall back to existing prompt's modelId
+  const modelIdToValidate = dataModelId || promptModelId;
+  if (!modelIdToValidate) return null;
+
+  const toolValidation = await validateEnabledTools(enabledTools, Number(modelIdToValidate));
+  if (toolValidation.isValid) return null;
+
+  return {
+    message: toolValidation.message || `Invalid tools: ${toolValidation.invalidTools.join(', ')}`,
+    logMeta: { invalidTools: toolValidation.invalidTools, message: toolValidation.message }
+  };
+}
+
+/**
+ * Validate that the caller may attach the supplied repository IDs to a prompt.
+ * Returns a user-facing error message when access is denied, or null when there
+ * are no repository IDs to check or access is granted. Extracted from
+ * updatePromptAction to keep that action's cyclomatic complexity bounded.
+ */
+async function validatePromptRepositoryAccessUpdate(
+  repositoryIds: number[] | null | undefined
+): Promise<string | null> {
+  if (!repositoryIds || repositoryIds.length === 0) return null;
+  const hasAccess = await hasCapabilityAccess("knowledge-repositories");
+  if (!hasAccess) {
+    return "Access denied. You need knowledge repository access.";
+  }
+  return null;
+}
+
+/**
+ * Authorize a prompt mutation: resolve the current user (throwing authNoSession on
+ * failure) and require admin-or-creator access (throwing authzToolAccessDenied
+ * otherwise). Preserves the exact logging and thrown-error semantics of the inline
+ * block. Extracted from updatePromptAction to keep that action's cyclomatic
+ * complexity bounded.
+ */
+async function authorizePromptMutation(
+  architectUserId: number | null,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const isAdmin = await hasRole("administrator");
+
+  // Get current user with proper error handling
+  const currentUser = await getCurrentUserAction();
+  if (!currentUser.isSuccess || !currentUser.data?.user?.id) {
+    log.error("Failed to get current user for authorization check");
+    throw ErrorFactories.authNoSession();
+  }
+
+  const currentUserId = currentUser.data.user.id;
+  if (!isAdmin && architectUserId !== currentUserId) {
+    log.warn("Authorization failed - user doesn't own resource", {
+      userId: currentUserId,
+      resourceOwnerId: architectUserId,
+      isAdmin
+    });
+    throw ErrorFactories.authzToolAccessDenied("assistant_architect");
   }
 }
 
@@ -1285,74 +1488,32 @@ export async function updatePromptAction(
       return { isSuccess: false, message: "Tool not found" }
     }
 
-    // Only tool creator or admin can update prompts
-    const isAdmin = await hasRole("administrator");
+    // Only tool creator or admin can update prompts. Auth resolution (admin/creator
+    // check, with the original throwing semantics) is extracted to keep this action's
+    // cyclomatic complexity bounded.
+    await authorizePromptMutation(architect.userId, log);
 
-    // Get current user with proper error handling
-    const currentUser = await getCurrentUserAction();
-    if (!currentUser.isSuccess || !currentUser.data?.user?.id) {
-      log.error("Failed to get current user for authorization check");
-      throw ErrorFactories.authNoSession();
+    // Validate enabled tools if being updated. Branch logic is extracted to keep
+    // this action's cyclomatic complexity bounded.
+    const enabledToolsError = await validatePromptEnabledToolsUpdate(
+      data.enabledTools,
+      data.modelId,
+      prompt.modelId
+    );
+    if (enabledToolsError) {
+      log.warn("Invalid tools provided for update", enabledToolsError.logMeta);
+      return { isSuccess: false, message: enabledToolsError.message };
     }
 
-    const currentUserId = currentUser.data.user.id;
-    if (!isAdmin && architect.userId !== currentUserId) {
-      log.warn("Authorization failed - user doesn't own resource", {
-        userId: currentUserId,
-        resourceOwnerId: architect.userId,
-        isAdmin
-      });
-      throw ErrorFactories.authzToolAccessDenied("assistant_architect");
+    // If repository IDs are being updated, validate user has access.
+    const repositoryAccessError = await validatePromptRepositoryAccessUpdate(data.repositoryIds);
+    if (repositoryAccessError) {
+      return { isSuccess: false, message: repositoryAccessError };
     }
 
-    // Validate enabled tools if being updated
-    if (data.enabledTools) {
-      // Use provided modelId or fall back to existing prompt's modelId
-      const modelIdToValidate = data.modelId || prompt.modelId;
-      if (modelIdToValidate) {
-        const toolValidation = await validateEnabledTools(data.enabledTools, Number(modelIdToValidate));
-        if (!toolValidation.isValid) {
-          log.warn("Invalid tools provided for update", { invalidTools: toolValidation.invalidTools, message: toolValidation.message });
-          return {
-            isSuccess: false,
-            message: toolValidation.message || `Invalid tools: ${toolValidation.invalidTools.join(', ')}`
-          };
-        }
-      }
-    }
-
-    // If repository IDs are being updated, validate user has access
-    if (data.repositoryIds && data.repositoryIds.length > 0) {
-      const hasAccess = await hasToolAccess("knowledge-repositories");
-      if (!hasAccess) {
-        return { isSuccess: false, message: "Access denied. You need knowledge repository access." };
-      }
-    }
-    
-    // Build update data matching ChainPromptUpdateData type
-    const updates: {
-      name?: string;
-      content?: string;
-      modelId?: number;
-      position?: number;
-      parallelGroup?: number | null;
-      inputMapping?: Record<string, string> | null;
-      timeoutSeconds?: number | null;
-      systemContext?: string | null;
-      repositoryIds?: number[];
-      enabledTools?: string[];
-    } = {};
-
-    if (data.name !== undefined && data.name !== null) updates.name = data.name;
-    if (data.content !== undefined && data.content !== null) updates.content = data.content;
-    if (data.systemContext !== undefined) updates.systemContext = data.systemContext ?? null;
-    if (data.modelId !== undefined && data.modelId !== null) updates.modelId = data.modelId;
-    if (data.position !== undefined && data.position !== null) updates.position = data.position;
-    if (data.parallelGroup !== undefined) updates.parallelGroup = data.parallelGroup ?? null;
-    if (data.timeoutSeconds !== undefined) updates.timeoutSeconds = data.timeoutSeconds ?? null;
-    if (data.inputMapping !== undefined) updates.inputMapping = data.inputMapping ?? null;
-    if (data.repositoryIds !== undefined && data.repositoryIds !== null) updates.repositoryIds = data.repositoryIds;
-    if (data.enabledTools !== undefined && data.enabledTools !== null) updates.enabledTools = data.enabledTools;
+    // Build update data matching ChainPromptUpdateData type. The branch logic is
+    // extracted to keep this action's cyclomatic complexity bounded.
+    const updates = buildChainPromptUpdates(data);
 
     if (Object.keys(updates).length === 0) {
       return { isSuccess: false, message: "No fields to update" }
@@ -1704,25 +1865,12 @@ export async function approveAssistantArchitectAction(
       return { isSuccess: false, message: "Invalid ID format" }
     }
 
-    // Approve the assistant architect and create tool entry (transaction)
+    // Approve the assistant architect and create its capability entry (transaction)
     const updatedTool = await drizzleApproveAssistantArchitect(idInt)
 
-    // Query for the tool ID that was just created (used for the navigation item,
-    // whose navigation_items.tool_id FK still references the legacy tools table).
-    const [tool] = await executeQuery(
-      (db) =>
-        db
-          .select({ id: tools.id })
-          .from(tools)
-          .where(eq(tools.promptChainToolId, idInt))
-          .limit(1),
-      "getToolByPromptChainToolId"
-    )
-
-    // Issue #923: role grants now target role_capabilities.capability_id, so we
-    // need the capability row's id (created in the same approval transaction).
-    // It may differ from the legacy tools.id, so fetch it explicitly rather than
-    // assuming they match.
+    // Fetch the capability row created in the same approval transaction. Its id
+    // backs both the navigation item (navigation_items.capability_id) and the
+    // role grants (role_capabilities.capability_id).
     const [capability] = await executeQuery(
       (db) =>
         db
@@ -1733,17 +1881,11 @@ export async function approveAssistantArchitectAction(
       "getCapabilityByPromptChainToolId"
     )
 
-    if (!tool) {
-      log.error("Tool not created after approval", { assistantArchitectId: idInt })
-      return { isSuccess: false, message: "Tool creation failed" }
-    }
-
     if (!capability) {
       log.error("Capability not created after approval", { assistantArchitectId: idInt })
       return { isSuccess: false, message: "Capability creation failed" }
     }
 
-    const finalToolId = tool.id
     const finalCapabilityId = capability.id
 
     // Create navigation item if it doesn't exist
@@ -1759,19 +1901,19 @@ export async function approveAssistantArchitectAction(
     )
 
     if (existingNav.length === 0) {
-      // Original code had bugs trying to insert string IDs into integer columns
-      // This corrected version lets the database auto-generate the ID
+      // Let the database auto-generate the navigation item id; gate the item on
+      // the architect's capability (navigation_items.capability_id, #928).
       await createNavigationItem({
         label: updatedTool.name,
         icon: "IconWand",
         link: navLink,
         type: "link",
-        toolId: finalToolId,
+        capabilityId: finalCapabilityId,
         isActive: true
       })
     }
 
-    // Assign tool to staff and administrator roles
+    // Grant the capability to the staff and administrator roles.
     const staffRole = await getRoleByName("staff")
     const adminRole = await getRoleByName("administrator")
 
@@ -1779,9 +1921,7 @@ export async function approveAssistantArchitectAction(
 
     for (const role of rolesToAssign) {
       if (role) {
-        // Issue #923: assignToolToRole now writes role_capabilities.capability_id,
-        // so pass the capability id (not the legacy tools.id).
-        await assignToolToRole(role.id, finalCapabilityId)
+        await assignCapabilityToRole(role.id, finalCapabilityId)
       }
     }
 
@@ -2130,31 +2270,6 @@ export async function migratePromptChainsToAssistantArchitectAction(): Promise<A
       isSuccess: false, 
       message: "Failed to migrate prompt chains to assistant architect"
     }
-  }
-}
-
-export async function getToolsAction(): Promise<ActionState<SelectTool[]>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("getTools")
-  const log = createLogger({ requestId, action: "getTools" })
-  
-  try {
-    log.info("Action started: Getting tools")
-
-    const tools = await getTools();
-
-    log.info("Tools retrieved successfully", { count: tools.length })
-    timer({ status: "success", count: tools.length })
-
-    return {
-      isSuccess: true,
-      message: "Tools retrieved successfully",
-      data: tools
-    }
-  } catch (error) {
-    timer({ status: "error" })
-    log.error("Error getting tools:", error)
-    return { isSuccess: false, message: "Failed to get tools" }
   }
 }
 

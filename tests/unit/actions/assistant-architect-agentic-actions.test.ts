@@ -14,7 +14,7 @@ jest.mock("@/actions/db/get-current-user-action", () => ({
 
 jest.mock("@/utils/roles", () => ({
   hasRole: jest.fn(() => Promise.resolve(false)),
-  hasToolAccess: jest.fn(() => Promise.resolve(false)),
+  hasCapabilityAccess: jest.fn(() => Promise.resolve(false)),
 }))
 
 jest.mock("@/lib/tools/catalog/catalog", () => ({
@@ -57,12 +57,11 @@ jest.mock("@/lib/db/drizzle", () => ({
   createChainPrompt: jest.fn(),
   updateChainPrompt: jest.fn(),
   deleteChainPrompt: jest.fn(),
-  getTools: jest.fn(() => Promise.resolve([])),
   getAIModels: jest.fn(() => Promise.resolve([])),
   getAIModelById: jest.fn(() => Promise.resolve(null)),
   getAssistantArchitectsByStatus: jest.fn(() => Promise.resolve([])),
   getRoleByName: jest.fn(() => Promise.resolve(null)),
-  assignToolToRole: jest.fn(),
+  assignCapabilityToRole: jest.fn(),
   createNavigationItem: jest.fn(),
 }))
 
@@ -86,7 +85,6 @@ jest.mock("drizzle-orm", () => ({
 jest.mock("@/lib/db/schema", () => {
   const table = (name: string) => ({ _: { name }, id: {}, isActive: {}, updatedAt: {} })
   return {
-    tools: table("tools"),
     navigationItems: table("navigation_items"),
     toolInputFields: table("tool_input_fields"),
     chainPrompts: table("chain_prompts"),

@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
-import { getUserTools } from "@/utils/roles"
+import { getUserCapabilities } from "@/utils/roles"
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
 export async function GET() {
@@ -23,8 +23,8 @@ export async function GET() {
     
     log.debug("User authenticated", { userId: session.sub });
 
-    // Get user's tools - the getUserTools function already gets the session internally
-    const tools = await getUserTools()
+    // Get user's capabilities - getUserCapabilities resolves the session internally
+    const tools = await getUserCapabilities()
     
     log.info("User tools retrieved successfully", { count: tools.length });
     timer({ status: "success", count: tools.length });

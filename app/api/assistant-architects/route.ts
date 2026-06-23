@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server"
 import { getAssistantArchitectsAction } from "@/actions/db/assistant-architect-actions"
 import { getServerSession } from "@/lib/auth/server-session"
-import { hasToolAccess } from "@/lib/db/drizzle"
+import { hasCapabilityAccess } from "@/lib/db/drizzle"
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 
 export const dynamic = 'force-dynamic'
@@ -25,7 +25,7 @@ export async function GET() {
     }
 
     // Check if user has access to the assistant-architect tool
-    const hasAccess = await hasToolAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess(session.sub, "assistant-architect")
     if (!hasAccess) {
       log.warn("Forbidden - User lacks assistant-architect access");
       timer({ status: "error", reason: "forbidden" });

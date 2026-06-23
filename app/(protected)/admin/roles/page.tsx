@@ -1,15 +1,17 @@
 import { RolesPageClient } from "./_components/roles-page-client"
 import { requireRole } from "@/lib/auth/role-helpers"
-import { getRoles, getTools, getCapabilities } from "@/lib/db/drizzle"
+import { getRoles, getCapabilities } from "@/lib/db/drizzle"
 import { PageBranding } from "@/components/ui/page-branding"
 
 export default async function RolesPage() {
   await requireRole("administrator");
 
-  // Fetch roles, tools (legacy selection list), and capabilities.
+  // Fetch roles, the active-capability selection list (RolesTable), and the full
+  // capability registry (CapabilitiesTable). Both lists come from `capabilities`
+  // now that the legacy `tools` table is gone (#928).
   const [roles, tools, capabilities] = await Promise.all([
     getRoles(),
-    getTools(),
+    getCapabilities({ activeOnly: true }),
     getCapabilities()
   ]);
 

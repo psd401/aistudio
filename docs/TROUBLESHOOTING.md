@@ -176,7 +176,7 @@ http://localhost:3000/api/auth/callback/cognito
 
 **Symptoms:**
 - User logged in but gets 403 Forbidden
-- `hasToolAccess()` returns false
+- `hasCapabilityAccess()` returns false
 
 **Solutions:**
 1. Verify user has correct role assigned:

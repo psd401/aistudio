@@ -4,8 +4,8 @@
  * Issue #923 (Epic #922) — single source of truth for code-managed capabilities.
  *
  * A "capability" is a role-gated UI feature (Nexus access, Assistant Architect
- * access, admin pages, etc.) checked via `hasToolAccess()` /
- * `hasCapabilityAccess()`. Historically each capability was registered by a
+ * access, admin pages, etc.) checked via `hasCapabilityAccess()`.
+ * Historically each capability was registered by a
  * hand-written SQL migration. This manifest replaces that: add an entry here,
  * restart the server, and the boot-time sync (lib/capabilities/sync.ts) registers
  * it in the `capabilities` table with `source = 'code'`. No SQL migration needed.
@@ -21,7 +21,7 @@
  *
  * ## Rules
  *
- * - `identifier` is the stable string ID used by `hasToolAccess(identifier)`.
+ * - `identifier` is the stable string ID used by `hasCapabilityAccess(identifier)`.
  *   Never change an identifier once shipped (it would orphan existing grants).
  * - `name` / `description` are managed here; for `source = 'code'` rows they are
  *   read-only in the admin UI (only role assignment is editable).
@@ -39,7 +39,7 @@ import type { CapabilitySource } from "@/lib/db/schema";
 
 /** A single code-managed capability entry. */
 export interface CapabilityManifestEntry {
-  /** Stable string ID checked by hasToolAccess(). Immutable once shipped. */
+  /** Stable string ID checked by hasCapabilityAccess(). Immutable once shipped. */
   identifier: string;
   /** Human-readable name (managed here; read-only in admin UI). */
   name: string;
@@ -58,7 +58,7 @@ export const MANIFEST_SOURCE: CapabilitySource = "code";
 /**
  * The code-managed capability catalog.
  *
- * These identifiers are referenced by static `hasToolAccess(...)` call sites
+ * These identifiers are referenced by static `hasCapabilityAccess(...)` call sites
  * across the app (route layouts, API routes, server actions). Keep this list in
  * sync with those call sites; the boot-time sync reconciles the DB to match.
  */

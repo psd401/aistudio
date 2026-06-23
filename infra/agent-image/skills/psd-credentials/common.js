@@ -394,9 +394,8 @@ async function logCredentialPut(credentialName, userEmail, action) {
 /**
  * Check whether a given user email has been granted a capability via
  * their role assignments. Source-of-truth tables are `users` (email →
- * id), `user_roles` (id → role_id), `role_tools` (role_id → tool_id),
- * and `tools` (capability identifier; the table will be renamed to
- * `capabilities` under epic #922 / issue #923).
+ * id), `user_roles` (id → role_id), `role_capabilities` (role_id →
+ * capability_id), and `capabilities` (capability identifier).
  *
  * Returns `true` if at least one matching grant exists and the
  * capability is still active. Returns `false` if no grant is found or
@@ -415,11 +414,11 @@ async function userHasCapability(userEmail, capabilityIdentifier) {
       sql: `SELECT 1
               FROM users u
               JOIN user_roles ur ON ur.user_id = u.id
-              JOIN role_tools rt ON rt.role_id = ur.role_id
-              JOIN tools t ON t.id = rt.tool_id
+              JOIN role_capabilities rc ON rc.role_id = ur.role_id
+              JOIN capabilities c ON c.id = rc.capability_id
              WHERE u.email = :email
-               AND t.identifier = :cap
-               AND t.is_active = true
+               AND c.identifier = :cap
+               AND c.is_active = true
              LIMIT 1`,
       parameters: [
         { name: 'email', value: { stringValue: userEmail } },

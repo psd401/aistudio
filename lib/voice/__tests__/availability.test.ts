@@ -21,10 +21,10 @@ jest.mock("@/lib/settings-manager", () => ({
   },
 }))
 
-// Mock hasToolAccess
-const mockHasToolAccess = jest.fn()
-jest.mock("@/lib/db/drizzle/users", () => ({
-  hasToolAccess: (...args: unknown[]) => mockHasToolAccess(...args),
+// Mock hasCapabilityAccess
+const mockHasCapabilityAccess = jest.fn()
+jest.mock("@/lib/db/drizzle/capabilities", () => ({
+  hasCapabilityAccess: (...args: unknown[]) => mockHasCapabilityAccess(...args),
 }))
 
 // Mock provider factory
@@ -48,7 +48,7 @@ describe("getVoiceAvailability", () => {
       voiceName: null,
       enabled: true,
     })
-    mockHasToolAccess.mockResolvedValue(true)
+    mockHasCapabilityAccess.mockResolvedValue(true)
     mockIsSupportedVoiceProvider.mockReturnValue(true)
     mockGetGoogleAI.mockResolvedValue("test-google-api-key")
   })
@@ -65,7 +65,7 @@ describe("getVoiceAvailability", () => {
       apiKey: "test-google-api-key",
     })
     expect(mockGetVoice).toHaveBeenCalled()
-    expect(mockHasToolAccess).toHaveBeenCalledWith(TEST_SUB, "voice-mode")
+    expect(mockHasCapabilityAccess).toHaveBeenCalledWith(TEST_SUB, "voice-mode")
     expect(mockIsSupportedVoiceProvider).toHaveBeenCalledWith("gemini-live")
     expect(mockGetGoogleAI).toHaveBeenCalled()
   })
@@ -85,12 +85,12 @@ describe("getVoiceAvailability", () => {
     expect(result.reason).toBe("Voice mode is disabled by administrator")
     expect(result.type).toBe("permission")
     // Should short-circuit — no tool access or config checks
-    expect(mockHasToolAccess).not.toHaveBeenCalled()
+    expect(mockHasCapabilityAccess).not.toHaveBeenCalled()
     expect(mockGetGoogleAI).not.toHaveBeenCalled()
   })
 
   it("should return role reason when user lacks voice-mode access", async () => {
-    mockHasToolAccess.mockResolvedValue(false)
+    mockHasCapabilityAccess.mockResolvedValue(false)
 
     const result = await getVoiceAvailability(TEST_SUB)
 
@@ -200,8 +200,8 @@ describe("getVoiceAvailability", () => {
     await expect(getVoiceAvailability(TEST_SUB)).rejects.toThrow("DB connection timeout")
   })
 
-  it("should propagate errors when hasToolAccess() throws", async () => {
-    mockHasToolAccess.mockRejectedValue(new Error("Database unavailable"))
+  it("should propagate errors when hasCapabilityAccess() throws", async () => {
+    mockHasCapabilityAccess.mockRejectedValue(new Error("Database unavailable"))
 
     await expect(getVoiceAvailability(TEST_SUB)).rejects.toThrow("Database unavailable")
   })
@@ -225,7 +225,7 @@ describe("getVoiceAvailability", () => {
     await getVoiceAvailability(TEST_SUB)
 
     expect(mockGetVoice).toHaveBeenCalledTimes(1)
-    expect(mockHasToolAccess).not.toHaveBeenCalled()
+    expect(mockHasCapabilityAccess).not.toHaveBeenCalled()
     expect(mockIsSupportedVoiceProvider).not.toHaveBeenCalled()
     expect(mockGetGoogleAI).not.toHaveBeenCalled()
   })

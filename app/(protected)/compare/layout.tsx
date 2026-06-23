@@ -1,5 +1,5 @@
 import { redirect } from "next/navigation"
-import { hasToolAccess } from "@/utils/roles"
+import { hasCapabilityAccess } from "@/utils/roles"
 import { getServerSession } from "@/lib/auth/server-session"
 import { NavbarNested } from "@/components/navigation/navbar-nested"
 
@@ -15,7 +15,7 @@ export default async function CompareLayout({
   }
 
   // Check if user has access to the model-compare tool
-  const hasAccess = await hasToolAccess("model-compare")
+  const hasAccess = await hasCapabilityAccess("model-compare")
   if (!hasAccess) {
     redirect("/dashboard")
   }

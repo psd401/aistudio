@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { UIMessage } from 'ai';
+import type { ToolSet } from 'ai';
 import { getServerSession } from '@/lib/auth/server-session';
 import { getCurrentUserAction } from '@/actions/db/get-current-user-action';
 import { getAssistantArchitectByIdAction } from '@/actions/db/assistant-architect-actions';
@@ -9,7 +10,7 @@ import { executeQuery } from '@/lib/db/drizzle-client';
 import { sql } from 'drizzle-orm';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from '@/lib/assistant-architect/knowledge-retrieval';
-import { hasToolAccess, hasRole } from '@/utils/roles';
+import { hasCapabilityAccess, hasRole } from '@/utils/roles';
 import { ErrorFactories } from '@/lib/error-utils';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
 import { getScopesForRoles } from '@/lib/api-keys/scopes';
@@ -149,6 +150,540 @@ function buildExecutionMetadata(
 }
 
 /**
+ * Discriminated result for a POST phase helper: either it produced a value the
+ * caller continues with, or it produced an HTTP Response the caller must return
+ * immediately (short-circuit). Keeps every early-return response path explicit
+ * so POST never accidentally swallows one.
+ */
+type PhaseResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; response: Response };
+
+type RouteLogger = ReturnType<typeof createLogger>;
+type RouteTimer = ReturnType<typeof startTimer>;
+type ValidatedRequest = z.infer<typeof ExecuteRequestSchema>;
+type LoadedArchitect = NonNullable<
+  Awaited<ReturnType<typeof getAssistantArchitectByIdAction>>['data']
+>;
+// `architect.prompts` is optional on the row; after `(architect.prompts || [])`
+// the value is always a defined array, so the loaded/validated list is non-null.
+type LoadedPrompts = NonNullable<LoadedArchitect['prompts']>;
+type CurrentUserData = NonNullable<
+  Awaited<ReturnType<typeof getCurrentUserAction>>['data']
+>;
+
+/**
+ * Phase (a): parse + validate the request body. Returns a 400 Response for an
+ * empty/malformed body or a schema-validation failure; otherwise the parsed
+ * data. Preserves the exact log lines and response shapes of the original POST.
+ */
+async function parseAndValidateRequest(
+  req: Request,
+  requestId: string,
+  log: RouteLogger
+): Promise<PhaseResult<ValidatedRequest>> {
+  // Issue #657: Handle empty/malformed request body gracefully
+  let body: unknown;
+  try {
+    body = await req.json();
+  } catch (parseError) {
+    log.warn('Failed to parse request body', {
+      error: parseError instanceof Error ? parseError.message : String(parseError),
+      contentLength: req.headers.get('content-length'),
+      contentType: req.headers.get('content-type')
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Invalid request body',
+          message: 'Request body is empty or not valid JSON. Please try again.',
+          requestId
+        }),
+        {
+          status: 400,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Request-Id': requestId
+          }
+        }
+      )
+    };
+  }
+
+  const validationResult = ExecuteRequestSchema.safeParse(body);
+
+  if (!validationResult.success) {
+    log.warn('Invalid request format', {
+      errors: validationResult.error.issues.map(issue => ({
+        path: issue.path.join('.'),
+        message: issue.message
+      }))
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Invalid request format',
+          details: validationResult.error.issues,
+          requestId
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      )
+    };
+  }
+
+  const { toolId, inputs, conversationId } = validationResult.data;
+  log.info('Request parsed', sanitizeForLogging({
+    toolId,
+    hasInputs: Object.keys(inputs).length > 0,
+    inputKeys: Object.keys(inputs),
+    conversationId
+  }));
+
+  return { ok: true, value: validationResult.data };
+}
+
+/**
+ * Phase (b): authenticate the user, check tool access + per-architect
+ * authorization, load the architect, and validate its prompt chain. Returns the
+ * appropriate 401/403/404/400 Response on any failure; otherwise the
+ * authenticated user, architect, and sorted prompt list. Behavior (including the
+ * unauthorized timer call) is identical to the original inline POST logic.
+ */
+async function authorizeAndLoadArchitect(
+  toolId: number,
+  requestId: string,
+  log: RouteLogger,
+  timer: RouteTimer
+): Promise<PhaseResult<{
+  session: NonNullable<Awaited<ReturnType<typeof getServerSession>>>;
+  currentUserData: CurrentUserData;
+  userId: number;
+  architect: LoadedArchitect;
+  prompts: LoadedPrompts;
+}>> {
+  // 2. Authenticate user
+  const session = await getServerSession();
+  if (!session) {
+    log.warn('Unauthorized request - no session');
+    timer({ status: 'error', reason: 'unauthorized' });
+    return { ok: false, response: new Response('Unauthorized', { status: 401 }) };
+  }
+
+  log.debug('User authenticated', sanitizeForLogging({ userId: session.sub }));
+
+  // 3. Check tool access permission
+  const hasAccess = await hasCapabilityAccess('assistant-architect');
+  if (!hasAccess) {
+    log.warn('User does not have assistant-architect tool access', { userId: session.sub });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Access denied',
+          message: 'You do not have permission to use the Assistant Architect tool',
+          requestId
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      )
+    };
+  }
+
+  // 4. Get current user
+  const currentUser = await getCurrentUserAction();
+  if (!currentUser.isSuccess) {
+    log.error('Failed to get current user');
+    return { ok: false, response: new Response('Unauthorized', { status: 401 }) };
+  }
+
+  const userId = currentUser.data.user.id;
+
+  // 5. Load assistant architect configuration with prompts
+  const architectResult = await getAssistantArchitectByIdAction(toolId.toString());
+  if (!architectResult.isSuccess || !architectResult.data) {
+    log.error('Assistant architect not found', { toolId });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Assistant architect not found',
+          requestId
+        }),
+        { status: 404, headers: { 'Content-Type': 'application/json' } }
+      )
+    };
+  }
+
+  const architect = architectResult.data;
+
+  // SECURITY: Verify user has permission to execute this assistant architect
+  // Allow execution if:
+  // 1. User is the owner (can execute any of their own, regardless of status)
+  // 2. User is an admin (can execute any assistant)
+  // 3. The assistant is approved (any user with assistant-architect access can execute)
+  const isOwner = architect.userId === userId;
+  const isAdmin = await hasRole('administrator');
+  const isApproved = architect.status === 'approved';
+
+  // Determine access reason for logging
+  let accessReason: string | null = null;
+  if (isOwner) {
+    accessReason = 'owner';
+  } else if (isAdmin) {
+    accessReason = 'admin';
+  } else if (isApproved) {
+    accessReason = 'approved';
+  }
+
+  if (!accessReason) {
+    // No valid access path - deny execution
+    log.warn('User does not have access to this assistant architect', {
+      userId,
+      toolId,
+      architectOwnerId: architect.userId,
+      status: architect.status,
+      isOwner,
+      isAdmin,
+      isApproved
+    });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Access denied',
+          message: 'You do not have permission to execute this assistant architect',
+          requestId
+        }),
+        { status: 403, headers: { 'Content-Type': 'application/json' } }
+      )
+    };
+  }
+
+  // Log successful authorization for audit trail
+  log.info('Authorization granted for assistant architect execution', {
+    userId,
+    toolId,
+    architectOwnerId: architect.userId,
+    status: architect.status,
+    accessReason
+  });
+
+  const prompts = (architect.prompts || []).sort((a, b) => a.position - b.position);
+
+  if (!prompts || prompts.length === 0) {
+    log.error('No prompts configured for assistant architect', { toolId });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'No prompts configured for this assistant architect',
+          requestId
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      )
+    };
+  }
+
+  // Validate prompt chain length to prevent resource exhaustion
+  if (prompts.length > MAX_PROMPT_CHAIN_LENGTH) {
+    log.warn('Prompt chain too long', { promptCount: prompts.length, toolId, maxAllowed: MAX_PROMPT_CHAIN_LENGTH });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Prompt chain too long',
+          message: `Maximum ${MAX_PROMPT_CHAIN_LENGTH} prompts allowed per execution`,
+          requestId
+        }),
+        { status: 400, headers: { 'Content-Type': 'application/json' } }
+      )
+    };
+  }
+
+  log.info('Assistant architect loaded', sanitizeForLogging({
+    toolId,
+    name: architect.name,
+    promptCount: prompts.length,
+    userId
+  }));
+
+  return { ok: true, value: { session, currentUserData: currentUser.data, userId, architect, prompts } };
+}
+
+/**
+ * Phase (c): create the tool_execution record. For an agentic assistant with a
+ * per-assistant hourly cap (Issue #926), the insert is GUARDED atomically:
+ * INSERT ... SELECT ... WHERE <window count> < cap. Collapsing the count +
+ * insert into ONE statement removes the prior check-then-insert TOCTOU. A
+ * guarded insert that returns no row means the cap is reached -> 429. NULL/unset
+ * cap => unguarded insert.
+ *
+ * input_data is bound (${...}::jsonb) — postgres.js is the active driver, which
+ * binds parameterized casts correctly (the old sql.raw() JSONB workaround was
+ * for the retired RDS Data API driver). See Issue #599.
+ */
+async function createToolExecutionRecord(args: {
+  architect: LoadedArchitect;
+  toolId: number;
+  userId: number;
+  inputs: Record<string, unknown>;
+  requestId: string;
+  log: RouteLogger;
+  timer: RouteTimer;
+}): Promise<PhaseResult<{ executionId: number }>> {
+  const { architect, toolId, userId, inputs, requestId, log, timer } = args;
+  const inputData = Object.keys(inputs).length > 0 ? inputs : { __no_inputs: true };
+  const inputDataJson = JSON.stringify(inputData);
+  const startedAtIso = new Date().toISOString();
+
+  const rateCap = architect.mode === 'agentic'
+    ? (architect as { agentMaxRequestsPerHour?: number | null }).agentMaxRequestsPerHour
+    : null;
+  const rateCapped = typeof rateCap === 'number' && rateCap > 0;
+
+  const executionResult = await executeQuery(
+    (db) => {
+      if (rateCapped) {
+        const windowStartIso = new Date(Date.now() - AGENT_RATE_LIMIT_WINDOW_MS).toISOString();
+        return db.execute(sql`
+          INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
+          SELECT ${userId}, ${inputDataJson}::jsonb, 'running', ${startedAtIso}::timestamp, ${toolId}
+          WHERE (
+            SELECT count(*) FROM tool_executions
+            WHERE assistant_architect_id = ${toolId} AND started_at >= ${windowStartIso}::timestamp
+          ) < ${rateCap}
+          RETURNING id
+        `);
+      }
+      return db.execute(sql`
+        INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
+        VALUES (${userId}, ${inputDataJson}::jsonb, 'running', ${startedAtIso}::timestamp, ${toolId})
+        RETURNING id
+      `);
+    },
+    'createToolExecution'
+  );
+
+  // postgres.js returns result directly as array-like object (no .rows property - Issue #603)
+  const rows = executionResult as unknown as Array<{ id: number }>;
+  if (!rows || rows.length === 0 || !rows[0]?.id) {
+    if (rateCapped) {
+      // Guarded insert added no row => the assistant is at/over its hourly cap.
+      log.warn('Assistant rate limit exceeded', { toolId, rateCap });
+      timer({ status: 'rate_limited' });
+      return {
+        ok: false,
+        response: new Response(
+          JSON.stringify({
+            error: 'Rate limit exceeded',
+            message: `This assistant is limited to ${rateCap} run(s) per hour. Please try again later.`,
+            requestId
+          }),
+          {
+            status: 429,
+            headers: {
+              'Content-Type': 'application/json',
+              'Retry-After': '3600',
+              'X-Request-Id': requestId
+            }
+          }
+        )
+      };
+    }
+    log.error('Failed to create tool execution', { toolId });
+    return {
+      ok: false,
+      response: new Response(
+        JSON.stringify({
+          error: 'Failed to create execution record',
+          requestId
+        }),
+        { status: 500, headers: { 'Content-Type': 'application/json' } }
+      )
+    };
+  }
+
+  const executionId = Number(rows[0].id);
+  log.info('Tool execution created', { executionId, toolId });
+  return { ok: true, value: { executionId } };
+}
+
+/**
+ * Phase (d): create the nexus conversation for this execution and persist the
+ * user inputs as the first message. Non-fatal: any failure is logged and
+ * `undefined` is returned so the execution continues without conversation
+ * tracking. Mirrors the pattern in
+ * /api/v1/assistants/[id]/conversations/route.ts.
+ */
+async function createNexusConversationForExecution(args: {
+  architect: LoadedArchitect;
+  toolId: number;
+  userId: number;
+  inputs: Record<string, unknown>;
+  executionId: number;
+  log: RouteLogger;
+}): Promise<string | undefined> {
+  const { architect, toolId, userId, inputs, executionId, log } = args;
+  try {
+    const conversation = await createConversation({
+      userId,
+      title: `${architect.name} — ${new Date().toLocaleDateString()}`,
+      provider: 'assistant-architect',
+      metadata: buildExecutionMetadata(toolId, architect.name, executionId, 'running'),
+    });
+
+    // Save user inputs as the first message
+    // Sanitize and truncate inputs for safe storage
+    const userContent = Object.keys(inputs).length > 0
+      ? Object.entries(inputs)
+          .map(([key, value]) => {
+            const safeKey = String(key).substring(0, 100);
+            const safeValue = typeof value === 'string'
+              ? value.substring(0, 5000)
+              : String(sanitizeForLogging(value)).substring(0, 5000);
+            return `${safeKey}: ${safeValue}`;
+          })
+          .join('\n')
+          .substring(0, 10000)
+      : '(Assistant executed with default inputs)';
+
+    await createMessageWithStats({
+      conversationId: conversation.id,
+      role: 'user',
+      content: userContent,
+      parts: [{ type: 'text', text: userContent }],
+      metadata: { inputs, source: 'app' },
+    });
+
+    log.info('Nexus conversation created for execution', {
+      conversationId: conversation.id,
+      executionId,
+      toolId,
+    });
+
+    return conversation.id;
+  } catch (conversationError) {
+    // Non-fatal: log and continue execution without conversation tracking
+    log.error('Failed to create nexus conversation for execution', {
+      error: conversationError instanceof Error ? conversationError.message : String(conversationError),
+      executionId,
+      toolId,
+    });
+    return undefined;
+  }
+}
+
+/**
+ * Phase (e): run the execution (agentic or prompt-chain), build the streaming
+ * Response, and on a synchronous pre-stream failure roll back the
+ * tool_executions row, emit the execution-error event, reconcile the nexus
+ * conversation, then re-throw so the outer POST catch maps the error to a
+ * Response. The returned Response is the exact SSE stream the original POST
+ * produced (identical headers and ordering).
+ */
+async function runExecutionAndBuildResponse(args: {
+  architect: LoadedArchitect;
+  prompts: LoadedPrompts;
+  inputs: Record<string, unknown>;
+  context: PromptExecutionContext;
+  executionId: number;
+  toolId: number;
+  userId: number;
+  nexusConversationId: string | undefined;
+  approveDestructiveTools: boolean;
+  requestId: string;
+  log: RouteLogger;
+}): Promise<Response> {
+  const {
+    architect, prompts, inputs, context, executionId, toolId, userId,
+    nexusConversationId, approveDestructiveTools, requestId, log,
+  } = args;
+  try {
+    // Issue #926: branch on assistant mode. Agentic assistants run a model loop
+    // with tool access; prompt-chain assistants keep the original sequential
+    // template execution untouched.
+    const isAgentic = architect.mode === 'agentic';
+    const streamResponse = isAgentic
+      ? await executeAgenticAssistant({ architect, prompts: prompts as ChainPrompt[], inputs, context, requestId, log, approveDestructiveTools })
+      : await executePromptChain(prompts as ChainPrompt[], inputs, context, requestId, log);
+
+    // 9. Update execution status to completed on stream completion
+    // This is done in the onFinish callback of the last prompt
+
+    // Return SSE stream with headers
+    log.info('Returning streaming response', {
+      executionId,
+      toolId,
+      promptCount: prompts.length,
+      requestId,
+      hasStreamResponse: !!streamResponse
+    });
+
+    if (!streamResponse) {
+      throw ErrorFactories.sysInternalError('No stream response generated from prompt execution');
+    }
+
+    return streamResponse.result.toUIMessageStreamResponse({
+      headers: {
+        'X-Execution-Id': executionId.toString(),
+        'X-Tool-Id': toolId.toString(),
+        'X-Prompt-Count': prompts.length.toString(),
+        'X-Request-Id': requestId,
+        ...(context.conversation?.conversationId && { 'X-Conversation-Id': context.conversation.conversationId }),
+      }
+    });
+
+  } catch (executionError) {
+    // Update execution status to failed
+    // CRITICAL: Drizzle's AWS Data API driver has issues with timestamp serialization.
+    // Must use raw SQL with db.execute() for reliable parameter binding.
+    // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+    const errMsg = executionError instanceof Error ? executionError.message : String(executionError);
+    await executeQuery(
+      (db) => db.execute(sql`
+        UPDATE tool_executions
+        SET status = 'failed', error_message = ${errMsg}, completed_at = ${new Date().toISOString()}::timestamp
+        WHERE id = ${executionId}
+      `),
+      'updateToolExecutionFailed'
+    );
+
+    // Emit execution-error event
+    await storeExecutionEvent(executionId, 'execution-error', {
+      executionId,
+      error: executionError instanceof Error ? executionError.message : String(executionError),
+      recoverable: false,
+      details: executionError instanceof Error ? executionError.stack : undefined
+    }).catch(err => log.error('Failed to store execution-error event', { error: err }));
+
+    // Update nexus conversation executionStatus to failed
+    if (nexusConversationId) {
+      try {
+        // Fetch existing metadata and merge to preserve other fields
+        const existing = await getConversationById(nexusConversationId, userId);
+        await updateConversation(nexusConversationId, userId, {
+          metadata: {
+            ...existing.metadata,
+            ...buildExecutionMetadata(toolId, architect.name, executionId, 'failed'),
+          },
+        });
+        // Reconcile stats for messages saved before the failure (#719)
+        await updateConversationStats(nexusConversationId);
+      } catch (err) {
+        log.error('Failed to update conversation status to failed', {
+          error: err instanceof Error ? err.message : String(err),
+          conversationId: nexusConversationId,
+          executionId
+        });
+      }
+    }
+
+    throw executionError;
+  }
+}
+
+/**
  * Assistant Architect Execution API - Native SSE Streaming
  *
  * Replaces polling-based execution with native streaming, supporting:
@@ -166,270 +701,20 @@ export async function POST(req: Request) {
   log.info('POST /api/assistant-architect/execute - Processing execution request with streaming');
 
   try {
-    // 1. Parse and validate request
-    // Issue #657: Handle empty/malformed request body gracefully
-    let body: unknown;
-    try {
-      body = await req.json();
-    } catch (parseError) {
-      log.warn('Failed to parse request body', {
-        error: parseError instanceof Error ? parseError.message : String(parseError),
-        contentLength: req.headers.get('content-length'),
-        contentType: req.headers.get('content-type')
-      });
-      return new Response(
-        JSON.stringify({
-          error: 'Invalid request body',
-          message: 'Request body is empty or not valid JSON. Please try again.',
-          requestId
-        }),
-        {
-          status: 400,
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Request-Id': requestId
-          }
-        }
-      );
-    }
+    // 1. Parse and validate request (Issue #657: empty/malformed body handled)
+    const parsed = await parseAndValidateRequest(req, requestId, log);
+    if (!parsed.ok) return parsed.response;
+    const { toolId, inputs, approveDestructiveTools } = parsed.value;
 
-    const validationResult = ExecuteRequestSchema.safeParse(body);
+    // 2-5. Authenticate, authorize, load architect + validate prompt chain
+    const authorized = await authorizeAndLoadArchitect(toolId, requestId, log, timer);
+    if (!authorized.ok) return authorized.response;
+    const { session, currentUserData, userId, architect, prompts } = authorized.value;
 
-    if (!validationResult.success) {
-      log.warn('Invalid request format', {
-        errors: validationResult.error.issues.map(issue => ({
-          path: issue.path.join('.'),
-          message: issue.message
-        }))
-      });
-      return new Response(
-        JSON.stringify({
-          error: 'Invalid request format',
-          details: validationResult.error.issues,
-          requestId
-        }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    const { toolId, inputs, conversationId, approveDestructiveTools } = validationResult.data;
-
-    log.info('Request parsed', sanitizeForLogging({
-      toolId,
-      hasInputs: Object.keys(inputs).length > 0,
-      inputKeys: Object.keys(inputs),
-      conversationId
-    }));
-
-    // 2. Authenticate user
-    const session = await getServerSession();
-    if (!session) {
-      log.warn('Unauthorized request - no session');
-      timer({ status: 'error', reason: 'unauthorized' });
-      return new Response('Unauthorized', { status: 401 });
-    }
-
-    log.debug('User authenticated', sanitizeForLogging({ userId: session.sub }));
-
-    // 3. Check tool access permission
-    const hasAccess = await hasToolAccess('assistant-architect');
-    if (!hasAccess) {
-      log.warn('User does not have assistant-architect tool access', { userId: session.sub });
-      return new Response(
-        JSON.stringify({
-          error: 'Access denied',
-          message: 'You do not have permission to use the Assistant Architect tool',
-          requestId
-        }),
-        { status: 403, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // 4. Get current user
-    const currentUser = await getCurrentUserAction();
-    if (!currentUser.isSuccess) {
-      log.error('Failed to get current user');
-      return new Response('Unauthorized', { status: 401 });
-    }
-
-    const userId = currentUser.data.user.id;
-
-    // 5. Load assistant architect configuration with prompts
-    const architectResult = await getAssistantArchitectByIdAction(toolId.toString());
-    if (!architectResult.isSuccess || !architectResult.data) {
-      log.error('Assistant architect not found', { toolId });
-      return new Response(
-        JSON.stringify({
-          error: 'Assistant architect not found',
-          requestId
-        }),
-        { status: 404, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    const architect = architectResult.data;
-
-    // SECURITY: Verify user has permission to execute this assistant architect
-    // Allow execution if:
-    // 1. User is the owner (can execute any of their own, regardless of status)
-    // 2. User is an admin (can execute any assistant)
-    // 3. The assistant is approved (any user with assistant-architect access can execute)
-    const isOwner = architect.userId === userId;
-    const isAdmin = await hasRole('administrator');
-    const isApproved = architect.status === 'approved';
-
-    // Determine access reason for logging
-    let accessReason: string | null = null;
-    if (isOwner) {
-      accessReason = 'owner';
-    } else if (isAdmin) {
-      accessReason = 'admin';
-    } else if (isApproved) {
-      accessReason = 'approved';
-    }
-
-    if (!accessReason) {
-      // No valid access path - deny execution
-      log.warn('User does not have access to this assistant architect', {
-        userId,
-        toolId,
-        architectOwnerId: architect.userId,
-        status: architect.status,
-        isOwner,
-        isAdmin,
-        isApproved
-      });
-      return new Response(
-        JSON.stringify({
-          error: 'Access denied',
-          message: 'You do not have permission to execute this assistant architect',
-          requestId
-        }),
-        { status: 403, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // Log successful authorization for audit trail
-    log.info('Authorization granted for assistant architect execution', {
-      userId,
-      toolId,
-      architectOwnerId: architect.userId,
-      status: architect.status,
-      accessReason
-    });
-
-    const prompts = (architect.prompts || []).sort((a, b) => a.position - b.position);
-
-    if (!prompts || prompts.length === 0) {
-      log.error('No prompts configured for assistant architect', { toolId });
-      return new Response(
-        JSON.stringify({
-          error: 'No prompts configured for this assistant architect',
-          requestId
-        }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    // Validate prompt chain length to prevent resource exhaustion
-    if (prompts.length > MAX_PROMPT_CHAIN_LENGTH) {
-      log.warn('Prompt chain too long', { promptCount: prompts.length, toolId, maxAllowed: MAX_PROMPT_CHAIN_LENGTH });
-      return new Response(
-        JSON.stringify({
-          error: 'Prompt chain too long',
-          message: `Maximum ${MAX_PROMPT_CHAIN_LENGTH} prompts allowed per execution`,
-          requestId
-        }),
-        { status: 400, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    log.info('Assistant architect loaded', sanitizeForLogging({
-      toolId,
-      name: architect.name,
-      promptCount: prompts.length,
-      userId
-    }));
-
-    // 6. Create the tool_execution record.
-    // For an agentic assistant with a per-assistant hourly cap (Issue #926), the
-    // insert is GUARDED atomically: INSERT ... SELECT ... WHERE <window count> < cap.
-    // Collapsing the count + insert into ONE statement removes the prior
-    // check-then-insert TOCTOU (two near-simultaneous requests could both pass a
-    // separate pre-check before either row landed). A guarded insert that returns
-    // no row means the cap is reached -> 429. NULL/unset cap => unguarded insert.
-    // (Correctness review.)
-    //
-    // input_data is bound (${...}::jsonb) — postgres.js is the active driver, which
-    // binds parameterized casts correctly (the old sql.raw() JSONB workaround was
-    // for the retired RDS Data API driver). See Issue #599.
-    const inputData = Object.keys(inputs).length > 0 ? inputs : { __no_inputs: true };
-    const inputDataJson = JSON.stringify(inputData);
-    const startedAtIso = new Date().toISOString();
-
-    const rateCap = architect.mode === 'agentic'
-      ? (architect as { agentMaxRequestsPerHour?: number | null }).agentMaxRequestsPerHour
-      : null;
-    const rateCapped = typeof rateCap === 'number' && rateCap > 0;
-
-    const executionResult = await executeQuery(
-      (db) => {
-        if (rateCapped) {
-          const windowStartIso = new Date(Date.now() - AGENT_RATE_LIMIT_WINDOW_MS).toISOString();
-          return db.execute(sql`
-            INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
-            SELECT ${userId}, ${inputDataJson}::jsonb, 'running', ${startedAtIso}::timestamp, ${toolId}
-            WHERE (
-              SELECT count(*) FROM tool_executions
-              WHERE assistant_architect_id = ${toolId} AND started_at >= ${windowStartIso}::timestamp
-            ) < ${rateCap}
-            RETURNING id
-          `);
-        }
-        return db.execute(sql`
-          INSERT INTO tool_executions (user_id, input_data, status, started_at, assistant_architect_id)
-          VALUES (${userId}, ${inputDataJson}::jsonb, 'running', ${startedAtIso}::timestamp, ${toolId})
-          RETURNING id
-        `);
-      },
-      'createToolExecution'
-    );
-
-    // postgres.js returns result directly as array-like object (no .rows property - Issue #603)
-    const rows = executionResult as unknown as Array<{ id: number }>;
-    if (!rows || rows.length === 0 || !rows[0]?.id) {
-      if (rateCapped) {
-        // Guarded insert added no row => the assistant is at/over its hourly cap.
-        log.warn('Assistant rate limit exceeded', { toolId, rateCap });
-        timer({ status: 'rate_limited' });
-        return new Response(
-          JSON.stringify({
-            error: 'Rate limit exceeded',
-            message: `This assistant is limited to ${rateCap} run(s) per hour. Please try again later.`,
-            requestId
-          }),
-          {
-            status: 429,
-            headers: {
-              'Content-Type': 'application/json',
-              'Retry-After': '3600',
-              'X-Request-Id': requestId
-            }
-          }
-        );
-      }
-      log.error('Failed to create tool execution', { toolId });
-      return new Response(
-        JSON.stringify({
-          error: 'Failed to create execution record',
-          requestId
-        }),
-        { status: 500, headers: { 'Content-Type': 'application/json' } }
-      );
-    }
-
-    const executionId = Number(rows[0].id);
-    log.info('Tool execution created', { executionId, toolId });
+    // 6. Create the tool_execution record (rate-cap guarded for agentic mode)
+    const created = await createToolExecutionRecord({ architect, toolId, userId, inputs, requestId, log, timer });
+    if (!created.ok) return created.response;
+    const { executionId } = created.value;
 
     // 7. Emit execution-start event
     await storeExecutionEvent(executionId, 'execution-start', {
@@ -438,58 +723,14 @@ export async function POST(req: Request) {
       toolName: architect.name
     });
 
-    // 7.5. Create nexus conversation for this execution
-    // Mirrors the pattern in /api/v1/assistants/[id]/conversations/route.ts
-    let nexusConversationId: string | undefined;
-    try {
-      const conversation = await createConversation({
-        userId,
-        title: `${architect.name} — ${new Date().toLocaleDateString()}`,
-        provider: 'assistant-architect',
-        metadata: buildExecutionMetadata(toolId, architect.name, executionId, 'running'),
-      });
-      nexusConversationId = conversation.id;
-
-      // Save user inputs as the first message
-      // Sanitize and truncate inputs for safe storage
-      const userContent = Object.keys(inputs).length > 0
-        ? Object.entries(inputs)
-            .map(([key, value]) => {
-              const safeKey = String(key).substring(0, 100);
-              const safeValue = typeof value === 'string'
-                ? value.substring(0, 5000)
-                : String(sanitizeForLogging(value)).substring(0, 5000);
-              return `${safeKey}: ${safeValue}`;
-            })
-            .join('\n')
-            .substring(0, 10000)
-        : '(Assistant executed with default inputs)';
-
-      await createMessageWithStats({
-        conversationId: conversation.id,
-        role: 'user',
-        content: userContent,
-        parts: [{ type: 'text', text: userContent }],
-        metadata: { inputs, source: 'app' },
-      });
-
-      log.info('Nexus conversation created for execution', {
-        conversationId: conversation.id,
-        executionId,
-        toolId,
-      });
-    } catch (conversationError) {
-      // Non-fatal: log and continue execution without conversation tracking
-      log.error('Failed to create nexus conversation for execution', {
-        error: conversationError instanceof Error ? conversationError.message : String(conversationError),
-        executionId,
-        toolId,
-      });
-    }
+    // 7.5. Create nexus conversation for this execution (non-fatal)
+    const nexusConversationId = await createNexusConversationForExecution({
+      architect, toolId, userId, inputs, executionId, log
+    });
 
     // 8. Execute with streaming. Caller scopes (role-derived) are needed for
     // agentic tool resolution; harmless to compute for prompt-chain mode too.
-    const callerRoleNames = currentUser.data.roles.map(r => r.name);
+    const callerRoleNames = currentUserData.roles.map(r => r.name);
     const context: PromptExecutionContext = {
       previousOutputs: new Map(),
       accumulatedMessages: [],
@@ -510,88 +751,21 @@ export async function POST(req: Request) {
       },
     };
 
-    try {
-      // Issue #926: branch on assistant mode. Agentic assistants run a model loop
-      // with tool access; prompt-chain assistants keep the original sequential
-      // template execution untouched.
-      const isAgentic = architect.mode === 'agentic';
-      const streamResponse = isAgentic
-        ? await executeAgenticAssistant({ architect, prompts: prompts as ChainPrompt[], inputs, context, requestId, log, approveDestructiveTools: approveDestructiveTools === true })
-        : await executePromptChain(prompts as ChainPrompt[], inputs, context, requestId, log);
-
-      // 9. Update execution status to completed on stream completion
-      // This is done in the onFinish callback of the last prompt
-
-      // Return SSE stream with headers
-      log.info('Returning streaming response', {
-        executionId,
-        toolId,
-        promptCount: prompts.length,
-        requestId,
-        hasStreamResponse: !!streamResponse
-      });
-
-      if (!streamResponse) {
-        throw ErrorFactories.sysInternalError('No stream response generated from prompt execution');
-      }
-
-      return streamResponse.result.toUIMessageStreamResponse({
-        headers: {
-          'X-Execution-Id': executionId.toString(),
-          'X-Tool-Id': toolId.toString(),
-          'X-Prompt-Count': prompts.length.toString(),
-          'X-Request-Id': requestId,
-          ...(context.conversation?.conversationId && { 'X-Conversation-Id': context.conversation.conversationId }),
-        }
-      });
-
-    } catch (executionError) {
-      // Update execution status to failed
-      // CRITICAL: Drizzle's AWS Data API driver has issues with timestamp serialization.
-      // Must use raw SQL with db.execute() for reliable parameter binding.
-      // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
-      const errMsg = executionError instanceof Error ? executionError.message : String(executionError);
-      await executeQuery(
-        (db) => db.execute(sql`
-          UPDATE tool_executions
-          SET status = 'failed', error_message = ${errMsg}, completed_at = ${new Date().toISOString()}::timestamp
-          WHERE id = ${executionId}
-        `),
-        'updateToolExecutionFailed'
-      );
-
-      // Emit execution-error event
-      await storeExecutionEvent(executionId, 'execution-error', {
-        executionId,
-        error: executionError instanceof Error ? executionError.message : String(executionError),
-        recoverable: false,
-        details: executionError instanceof Error ? executionError.stack : undefined
-      }).catch(err => log.error('Failed to store execution-error event', { error: err }));
-
-      // Update nexus conversation executionStatus to failed
-      if (nexusConversationId) {
-        try {
-          // Fetch existing metadata and merge to preserve other fields
-          const existing = await getConversationById(nexusConversationId, userId);
-          await updateConversation(nexusConversationId, userId, {
-            metadata: {
-              ...existing.metadata,
-              ...buildExecutionMetadata(toolId, architect.name, executionId, 'failed'),
-            },
-          });
-          // Reconcile stats for messages saved before the failure (#719)
-          await updateConversationStats(nexusConversationId);
-        } catch (err) {
-          log.error('Failed to update conversation status to failed', {
-            error: err instanceof Error ? err.message : String(err),
-            conversationId: nexusConversationId,
-            executionId
-          });
-        }
-      }
-
-      throw executionError;
-    }
+    // Run execution + build the SSE stream response; on a pre-stream failure the
+    // helper rolls back the execution row and re-throws to the outer catch.
+    return await runExecutionAndBuildResponse({
+      architect,
+      prompts,
+      inputs,
+      context,
+      executionId,
+      toolId,
+      userId,
+      nexusConversationId,
+      approveDestructiveTools: approveDestructiveTools === true,
+      requestId,
+      log,
+    });
 
   } catch (error) {
     // Issue #657/#835: Handle ContentSafetyBlockedError at warn level (expected behavior)
@@ -645,6 +819,118 @@ export async function POST(req: Request) {
       }
     );
   }
+}
+
+/** Resolved value of executeSinglePromptWithCompletion (UI stream or undefined). */
+type SinglePromptResult = Awaited<ReturnType<typeof executeSinglePromptWithCompletion>>;
+
+/**
+ * Execute every prompt at one position IN PARALLEL. On any rejection, logs the
+ * failed prompt ids (mapped positionally to the original prompts) and throws a
+ * wrapped sysInternalError. On success, returns the UI stream response from the
+ * prompt explicitly marked for UI streaming (only one is), or undefined.
+ * Behavior matches the original inline `if (isParallel)` branch exactly.
+ */
+async function executeParallelPositionGroup(args: {
+  promptsAtPosition: ChainPrompt[];
+  position: number;
+  isLastPosition: boolean;
+  inputs: Record<string, unknown>;
+  context: PromptExecutionContext;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+  totalPrompts: number;
+}): Promise<SinglePromptResult> {
+  const { promptsAtPosition, position, isLastPosition, inputs, context, requestId, log, totalPrompts } = args;
+
+  // Validate parallelGroup field usage
+  const uniqueGroups = new Set(promptsAtPosition.map(p => p.parallelGroup).filter(g => g !== null));
+  if (uniqueGroups.size > 1) {
+    log.warn('Multiple parallel groups at same position - not yet supported', {
+      position,
+      groups: Array.from(uniqueGroups),
+      promptIds: promptsAtPosition.map(p => p.id)
+    });
+  }
+
+  const parallelPromises = promptsAtPosition.map((prompt, idx) =>
+    executeSinglePromptWithCompletion({
+      prompt,
+      inputs,
+      context,
+      requestId,
+      log,
+      totalPrompts,
+      // First prompt in last position gets stream response for UI
+      isLastPrompt: isLastPosition && idx === 0
+    })
+  );
+
+  // Wait for ALL prompts at this position to complete
+  const results = await Promise.allSettled(parallelPromises);
+
+  // Check for failures
+  const failures = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[];
+  if (failures.length > 0) {
+    const firstError = failures[0].reason;
+    // Map failures back to their ORIGINAL prompt by index into `results`
+    // (which is positionally aligned with `promptsAtPosition`). Indexing
+    // `promptsAtPosition` by the filtered `failures` index would mis-attribute
+    // IDs when an earlier prompt succeeded. (Correctness review.)
+    const failedPromptIds = results
+      .map((r, idx) => (r.status === 'rejected' ? promptsAtPosition[idx]?.id : undefined))
+      .filter((id): id is number => typeof id === 'number');
+
+    log.error('Parallel prompt execution failed', {
+      position,
+      failureCount: failures.length,
+      failedPromptIds,
+      errors: failures.map(f => {
+        const errMsg = f.reason instanceof Error ? f.reason.message : String(f.reason);
+        return errMsg.length > 200 ? errMsg.substring(0, 197) + '...' : errMsg;
+      })
+    });
+
+    // Wrap error in ErrorFactory for consistent error handling
+    const firstErrorMsg = firstError instanceof Error ? firstError.message : String(firstError);
+    const truncatedMsg = firstErrorMsg.length > 200 ? firstErrorMsg.substring(0, 197) + '...' : firstErrorMsg;
+
+    throw ErrorFactories.sysInternalError(
+      `${failures.length} of ${promptsAtPosition.length} parallel prompt(s) failed at position ${position}: ${truncatedMsg}`,
+      {
+        details: {
+          position,
+          failureCount: failures.length,
+          totalPrompts: promptsAtPosition.length,
+          failedPromptIds
+        },
+        cause: firstError instanceof Error ? firstError : undefined
+      }
+    );
+  }
+
+  // Extract successful stream responses
+  const successResults = results.filter(r => r.status === 'fulfilled') as PromiseFulfilledResult<SinglePromptResult>[];
+  // Find the result explicitly marked for UI streaming (isLastPosition && idx === 0)
+  // Only one parallel prompt gets isLastPrompt=true, so only one result has value !== undefined
+  const uiStreamResult = successResults.find(r => r.value !== undefined);
+  const lastStreamResponse: SinglePromptResult = uiStreamResult?.value;
+
+  // Verify UI stream was assigned for last position
+  if (isLastPosition && !lastStreamResponse) {
+    throw ErrorFactories.sysInternalError(
+      'Failed to assign UI stream response from last parallel group',
+      {
+        details: {
+          position,
+          successfulPrompts: successResults.length,
+          totalPrompts: promptsAtPosition.length
+        }
+      }
+    );
+  }
+
+  return lastStreamResponse;
 }
 
 /**
@@ -703,96 +989,21 @@ async function executePromptChain(
     });
 
     if (isParallel) {
-      // Validate parallelGroup field usage
-      const uniqueGroups = new Set(promptsAtPosition.map(p => p.parallelGroup).filter(g => g !== null));
-      if (uniqueGroups.size > 1) {
-        log.warn('Multiple parallel groups at same position - not yet supported', {
-          position,
-          groups: Array.from(uniqueGroups),
-          promptIds: promptsAtPosition.map(p => p.id)
-        });
-      }
-
-      // Execute prompts at this position in parallel
+      // Execute prompts at this position in parallel (extracted helper preserves
+      // the exact failure handling and UI-stream selection).
       const isLastPosition = position === sortedPositions[sortedPositions.length - 1];
-
-      const parallelPromises = promptsAtPosition.map((prompt, idx) =>
-        executeSinglePromptWithCompletion(
-          prompt,
-          inputs,
-          context,
-          requestId,
-          log,
-          prompts.length,
-          // First prompt in last position gets stream response for UI
-          isLastPosition && idx === 0
-        )
-      );
-
-      // Wait for ALL prompts at this position to complete
-      const results = await Promise.allSettled(parallelPromises);
-
-      // Check for failures
-      const failures = results.filter(r => r.status === 'rejected') as PromiseRejectedResult[];
-      if (failures.length > 0) {
-        const firstError = failures[0].reason;
-        // Map failures back to their ORIGINAL prompt by index into `results`
-        // (which is positionally aligned with `promptsAtPosition`). Indexing
-        // `promptsAtPosition` by the filtered `failures` index would mis-attribute
-        // IDs when an earlier prompt succeeded. (Correctness review.)
-        const failedPromptIds = results
-          .map((r, idx) => (r.status === 'rejected' ? promptsAtPosition[idx]?.id : undefined))
-          .filter((id): id is number => typeof id === 'number');
-
-        log.error('Parallel prompt execution failed', {
-          position,
-          failureCount: failures.length,
-          failedPromptIds,
-          errors: failures.map(f => {
-            const errMsg = f.reason instanceof Error ? f.reason.message : String(f.reason);
-            return errMsg.length > 200 ? errMsg.substring(0, 197) + '...' : errMsg;
-          })
-        });
-
-        // Wrap error in ErrorFactory for consistent error handling
-        const firstErrorMsg = firstError instanceof Error ? firstError.message : String(firstError);
-        const truncatedMsg = firstErrorMsg.length > 200 ? firstErrorMsg.substring(0, 197) + '...' : firstErrorMsg;
-
-        throw ErrorFactories.sysInternalError(
-          `${failures.length} of ${promptsAtPosition.length} parallel prompt(s) failed at position ${position}: ${truncatedMsg}`,
-          {
-            details: {
-              position,
-              failureCount: failures.length,
-              totalPrompts: promptsAtPosition.length,
-              failedPromptIds
-            },
-            cause: firstError instanceof Error ? firstError : undefined
-          }
-        );
-      }
-
-      // Extract successful stream responses
-      const successResults = results.filter(r => r.status === 'fulfilled') as PromiseFulfilledResult<typeof lastStreamResponse>[];
-      // Find the result explicitly marked for UI streaming (isLastPosition && idx === 0)
-      // Only one parallel prompt gets isLastPrompt=true, so only one result has value !== undefined
-      const uiStreamResult = successResults.find(r => r.value !== undefined);
-      if (uiStreamResult?.value) {
-        lastStreamResponse = uiStreamResult.value;
-      }
-
-      // Verify UI stream was assigned for last position
-      if (isLastPosition && !lastStreamResponse) {
-        throw ErrorFactories.sysInternalError(
-          'Failed to assign UI stream response from last parallel group',
-          {
-            details: {
-              position,
-              successfulPrompts: successResults.length,
-              totalPrompts: promptsAtPosition.length
-            }
-          }
-        );
+      const parallelStreamResponse = await executeParallelPositionGroup({
+        promptsAtPosition,
+        position,
+        isLastPosition,
+        inputs,
+        context,
+        requestId,
+        log,
+        totalPrompts: prompts.length
+      });
+      if (parallelStreamResponse) {
+        lastStreamResponse = parallelStreamResponse;
       }
 
     } else {
@@ -800,15 +1011,15 @@ async function executePromptChain(
       const prompt = promptsAtPosition[0];
       const isLastPrompt = position === sortedPositions[sortedPositions.length - 1] && promptsAtPosition.length === 1;
 
-      const streamResponse = await executeSinglePromptWithCompletion(
+      const streamResponse = await executeSinglePromptWithCompletion({
         prompt,
         inputs,
         context,
         requestId,
         log,
-        prompts.length,
+        totalPrompts: prompts.length,
         isLastPrompt
-      );
+      });
 
       if (streamResponse) {
         lastStreamResponse = streamResponse;
@@ -1294,19 +1505,623 @@ async function executeAgenticAssistant(args: {
   });
 }
 
+/** Grouped options for a single prompt-chain execution and its sub-steps. */
+interface SinglePromptOptions {
+  prompt: ChainPrompt;
+  inputs: Record<string, unknown>;
+  context: PromptExecutionContext;
+  requestId: string;
+  log: ReturnType<typeof createLogger>;
+  totalPrompts: number;
+  isLastPrompt: boolean;
+}
+
+/**
+ * Steps 4-5: resolve the prompt's AI model row (throwing dbRecordNotFound when
+ * missing/invalid) and build the per-prompt tool set (repository search tools
+ * when repositories are configured). Returns the model id/provider strings, the
+ * enabledTools list, and the resolved tools object. Throws/validates identically
+ * to the original inline blocks. Caller guarantees prompt.modelId is non-null.
+ */
+async function resolvePromptModelAndTools(
+  prompt: ChainPrompt,
+  modelDbId: number,
+  context: PromptExecutionContext,
+  log: ReturnType<typeof createLogger>
+): Promise<{ modelId: string; provider: string; enabledTools: string[]; promptTools: ToolSet }> {
+  // 4. Get AI model configuration
+  const modelData = await getAIModelById(modelDbId);
+
+  if (!modelData) {
+    throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
+      details: { promptId: prompt.id, modelId: prompt.modelId }
+    });
+  }
+
+  // Validate model data
+  if (!modelData.modelId || !modelData.provider) {
+    throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
+      details: { promptId: prompt.id, modelId: prompt.modelId, reason: 'Invalid model data' }
+    });
+  }
+
+  const modelId = String(modelData.modelId);
+  const provider = String(modelData.provider);
+
+  // 5. Prepare tools for this prompt
+  const enabledTools: string[] = [...(prompt.enabledTools || [])];
+  let promptTools = {};
+
+  // Create repository search tools if repositories are configured
+  if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
+    log.debug('Creating repository search tools', {
+      promptId: prompt.id,
+      repositoryIds: prompt.repositoryIds
+    });
+
+    const repoTools = createRepositoryTools({
+      repositoryIds: prompt.repositoryIds,
+      userCognitoSub: context.userCognitoSub,
+      assistantOwnerSub: context.assistantOwnerSub
+    });
+
+    // Merge repository tools
+    promptTools = { ...promptTools, ...repoTools };
+  }
+
+  log.debug('Tools configured for prompt', {
+    promptId: prompt.id,
+    enabledTools,
+    toolCount: Object.keys(promptTools).length,
+    tools: Object.keys(promptTools)
+  });
+
+  return { modelId, provider, enabledTools, promptTools };
+}
+
+/**
+ * Step 1: inject repository context if the prompt has repositories configured.
+ * Emits the knowledge-retrieval-start / knowledge-retrieved events and returns
+ * the formatted context string ('' when no repositories or no chunks). Logic and
+ * event ordering are identical to the original inline block.
+ */
+async function injectRepositoryKnowledge(
+  prompt: ChainPrompt,
+  context: PromptExecutionContext,
+  requestId: string,
+  log: ReturnType<typeof createLogger>
+): Promise<string> {
+  let repositoryContext = '';
+  if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
+    log.debug('Retrieving repository knowledge', {
+      promptId: prompt.id,
+      repositoryIds: prompt.repositoryIds
+    });
+
+    // Emit knowledge-retrieval-start event
+    await storeExecutionEvent(context.executionId, 'knowledge-retrieval-start', {
+      promptId: prompt.id,
+      repositories: prompt.repositoryIds,
+      searchType: 'hybrid'
+    });
+
+    const knowledgeChunks = await retrieveKnowledgeForPrompt(
+      prompt.content,
+      prompt.repositoryIds,
+      context.userCognitoSub,
+      context.assistantOwnerSub,
+      {
+        maxChunks: 10,
+        maxTokens: 4000,
+        similarityThreshold: 0.7,
+        searchType: 'hybrid',
+        vectorWeight: 0.8
+      },
+      requestId
+    );
+
+    if (knowledgeChunks.length > 0) {
+      repositoryContext = '\n\n' + formatKnowledgeContext(knowledgeChunks);
+      log.debug('Repository context retrieved', {
+        promptId: prompt.id,
+        chunkCount: knowledgeChunks.length
+      });
+
+      // Emit knowledge-retrieved event
+      // NOTE: Token estimation uses rough approximation (character count / 4)
+      // For precise token counts, consider using js-tiktoken encoder
+      const totalTokens = knowledgeChunks.reduce((sum, chunk) => sum + Math.ceil(chunk.content.length / 4), 0);
+
+      // Calculate average similarity score (safe due to length > 0 check above)
+      const avgRelevance = knowledgeChunks.reduce((sum, chunk) => sum + chunk.similarity, 0) / knowledgeChunks.length;
+
+      await storeExecutionEvent(context.executionId, 'knowledge-retrieved', {
+        promptId: prompt.id,
+        documentsFound: knowledgeChunks.length,
+        relevanceScore: avgRelevance,
+        tokens: totalTokens
+      });
+    }
+  }
+  return repositoryContext;
+}
+
+/**
+ * Step 2 (event side-effect): emit the variable-substitution event when any
+ * variables were actually used. Extracted to flatten the per-variable branch
+ * nesting. Identical substituted-var extraction and event payload to the
+ * original inline block.
+ */
+async function emitVariableSubstitutionEvent(
+  prompt: ChainPrompt,
+  inputs: Record<string, unknown>,
+  context: PromptExecutionContext,
+  inputMapping: Record<string, string>,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  const substitutedVars: Record<string, string> = {};
+  const sourcePrompts: number[] = [];
+
+  // Extract which variables were substituted
+  for (const [varName, mappedPath] of Object.entries(inputMapping)) {
+    const promptMatch = mappedPath.match(/^prompt_(\d+)\.output$/);
+    if (promptMatch) {
+      const sourcePromptId = Number.parseInt(promptMatch[1], 10);
+      sourcePrompts.push(sourcePromptId);
+      const value = context.previousOutputs.get(sourcePromptId);
+      if (value) {
+        substitutedVars[varName] = String(sanitizeForLogging(value)).substring(0, 500);
+        log.debug('Variable substituted from previous output', {
+          varName,
+          sourcePromptId,
+          fullLength: value.length,
+          truncated: value.length > 500
+        });
+      }
+    } else if (varName in inputs) {
+      const inputValue = String(inputs[varName]);
+      substitutedVars[varName] = String(sanitizeForLogging(inputValue)).substring(0, 500);
+      if (inputValue.length > 500) {
+        log.debug('Variable substituted from input (truncated)', {
+          varName,
+          fullLength: inputValue.length
+        });
+      }
+    }
+  }
+
+  await storeExecutionEvent(context.executionId, 'variable-substitution', {
+    promptId: prompt.id,
+    variables: substitutedVars,
+    sourcePrompts: Array.from(new Set(sourcePrompts))
+  });
+}
+
+/**
+ * onFinish sub-step: persist the successful prompt_result row. Uses the exact
+ * same sql.raw() JSONB/ENUM workaround and parameter ordering as the original
+ * inline INSERT.
+ */
+async function savePromptResultRow(args: {
+  prompt: ChainPrompt;
+  context: PromptExecutionContext;
+  processedContent: string;
+  repositoryContext: string;
+  text: string;
+  startedAt: Date;
+  executionTimeMs: number;
+}): Promise<void> {
+  const { prompt, context, processedContent, repositoryContext, text, startedAt, executionTimeMs } = args;
+  // CRITICAL: Drizzle's AWS Data API driver corrupts JSONB values during parameter binding.
+  // Must use sql.raw() to embed stringified JSON directly in SQL, bypassing parameter binding.
+  // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+  const promptInputData = {
+    originalContent: prompt.content,
+    processedContent,
+    repositoryContext: repositoryContext ? 'included' : 'none'
+  };
+  const inputDataJson = JSON.stringify(promptInputData);
+  // Only escape single quotes for SQL string literal (PostgreSQL treats backslashes literally)
+  const escapedInputJson = inputDataJson.replace(/'/g, "''");
+  // CRITICAL: Use sql.raw() for ENUM values - RDS Data API driver corrupts ENUM parameter binding
+  // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+  await executeQuery(
+    (db) => db.execute(sql`
+      INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, started_at, completed_at, execution_time_ms)
+      VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedInputJson}'::jsonb`)}, ${text}, ${sql.raw("'completed'::execution_status")}, ${startedAt.toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
+    `),
+    'savePromptResult'
+  );
+}
+
+/** Usage shape passed to the prompt-chain onFinish callback. */
+interface PromptFinishUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+/**
+ * onFinish sub-step: persist this prompt's output as a Nexus conversation
+ * message (#699). Non-fatal — logs and continues on failure. Only runs when a
+ * conversation exists. Identical metadata, tokenUsage, and error handling to the
+ * original inline block.
+ */
+async function savePromptConversationMessage(args: {
+  prompt: ChainPrompt;
+  context: PromptExecutionContext;
+  text: string;
+  usage: PromptFinishUsage | undefined;
+  executionTimeMs: number;
+  log: ReturnType<typeof createLogger>;
+}): Promise<void> {
+  const { prompt, context, text, usage, executionTimeMs, log } = args;
+  if (!context.conversation) return;
+  try {
+    const metadata: AssistantArchitectMessageMetadata = {
+      source: 'assistant-architect-execution',
+      executionId: context.executionId,
+      promptId: prompt.id,
+      promptName: prompt.name,
+      position: prompt.position,
+      executionTimeMs,
+    };
+
+    await createMessageWithStats({
+      conversationId: context.conversation.conversationId,
+      role: 'assistant',
+      content: text || '',
+      parts: [{ type: 'text', text: text || '' }],
+      tokenUsage: usage ? {
+        promptTokens: usage.promptTokens,
+        completionTokens: usage.completionTokens,
+        totalTokens: usage.totalTokens,
+      } : undefined,
+      metadata: metadata as unknown as Record<string, unknown>,
+    });
+
+    log.info('Prompt result saved as conversation message', {
+      promptId: prompt.id,
+      promptName: prompt.name,
+      conversationId: context.conversation.conversationId,
+      executionId: context.executionId,
+    });
+  } catch (msgErr) {
+    // Non-fatal: log and continue — prompt_results table still has the data
+    log.error('Failed to save prompt result as conversation message', {
+      error: msgErr instanceof Error ? msgErr.message : String(msgErr),
+      promptId: prompt.id,
+      conversationId: context.conversation.conversationId,
+      executionId: context.executionId,
+    });
+  }
+}
+
+/**
+ * onFinish sub-step (last prompt only): mark the execution completed, emit the
+ * execution-complete event, and finalize the conversation (metadata merge +
+ * stats reconciliation). Identical writes/order to the original inline
+ * `if (isLastPrompt)` block.
+ */
+async function finalizeExecutionOnLastPrompt(
+  context: PromptExecutionContext,
+  usage: PromptFinishUsage | undefined,
+  totalPrompts: number,
+  log: ReturnType<typeof createLogger>
+): Promise<void> {
+  // CRITICAL: Drizzle's AWS Data API driver has issues with timestamp serialization.
+  // Must use raw SQL with db.execute() for reliable parameter binding.
+  // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+  await executeQuery(
+    (db) => db.execute(sql`
+      UPDATE tool_executions
+      SET status = 'completed', completed_at = ${new Date().toISOString()}::timestamp
+      WHERE id = ${context.executionId}
+    `),
+    'updateToolExecutionCompleted'
+  );
+
+  // Emit execution-complete event
+  const totalDuration = Date.now() - context.executionStartTime;
+  await storeExecutionEvent(context.executionId, 'execution-complete', {
+    executionId: context.executionId,
+    totalTokens: usage?.totalTokens || 0,
+    duration: totalDuration,
+    success: true
+  }).catch(err => log.error('Failed to store execution-complete event', { error: err }));
+
+  log.info('Execution completed successfully', {
+    executionId: context.executionId,
+    totalPrompts
+  });
+
+  // Update nexus conversation executionStatus to completed
+  if (context.conversation) {
+    try {
+      // Fetch existing metadata and merge to preserve other fields
+      const existing = await getConversationById(context.conversation.conversationId, context.userId);
+      await updateConversation(context.conversation.conversationId, context.userId, {
+        metadata: {
+          ...existing.metadata,
+          ...buildExecutionMetadata(
+            context.conversation.assistantId,
+            context.conversation.assistantName,
+            context.executionId,
+            'completed'
+          ),
+        },
+      });
+
+      // Reconcile message_count and last_message_at (#719)
+      // Intermediate createMessageWithStats calls may have failed silently
+      // (errors caught as non-fatal), leaving message_count at 0.
+      // This single reconciliation call guarantees correct stats.
+      await updateConversationStats(context.conversation.conversationId);
+
+      log.info('Conversation stats reconciled after execution', {
+        conversationId: context.conversation.conversationId,
+        executionId: context.executionId,
+      });
+    } catch (err) {
+      log.error('Failed to complete conversation updates', {
+        error: err instanceof Error ? err.message : String(err),
+        conversationId: context.conversation.conversationId,
+        executionId: context.executionId
+      });
+    }
+  }
+}
+
+/**
+ * onFinish tail: resolve the outer prompt promise once persistence is done. The
+ * last prompt waits for the stream response (so the route can return it) and
+ * resolves with it (or rejects if the stream failed); non-last prompts resolve
+ * with undefined. Identical control flow to the original inline tail.
+ */
+async function resolveOnFinish(args: {
+  isLastPrompt: boolean;
+  streamResponsePromise: Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>>>;
+  resolve: (value: Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined) => void;
+  reject: (reason?: unknown) => void;
+  prompt: ChainPrompt;
+  log: ReturnType<typeof createLogger>;
+}): Promise<void> {
+  const { isLastPrompt, streamResponsePromise, resolve, reject, prompt, log } = args;
+  if (!isLastPrompt) {
+    resolve(undefined);
+    return;
+  }
+  try {
+    const streamResponse = await streamResponsePromise;
+    resolve(streamResponse);
+  } catch (streamError) {
+    // Stream creation failed, propagate error
+    log.error('Stream response promise rejected', {
+      error: streamError,
+      promptId: prompt.id
+    });
+    reject(streamError);
+  }
+}
+
+/**
+ * The prompt-chain streaming onFinish callback body. Extracted from the inline
+ * arrow to keep both the Promise executor and this callback under the
+ * complexity/line limits. CAREFULLY preserves the EXACT order of persistence
+ * writes (prompt_result row -> previousOutputs -> accumulatedMessages ->
+ * prompt-complete event -> conversation message -> last-prompt finalize) and the
+ * resolve/reject control flow. Highest-risk path — see #699/#719.
+ */
+async function runPromptOnFinish(args: {
+  options: SinglePromptOptions;
+  finish: { text?: string; usage?: PromptFinishUsage; finishReason: string };
+  promptStartTime: number;
+  promptTimer: ReturnType<typeof startTimer>;
+  processedContent: string;
+  repositoryContext: string;
+  userMessage: UIMessage;
+  streamResponsePromise: Promise<Awaited<ReturnType<typeof unifiedStreamingService.stream>>>;
+  resolve: (value: Awaited<ReturnType<typeof unifiedStreamingService.stream>> | undefined) => void;
+  reject: (reason?: unknown) => void;
+}): Promise<void> {
+  const {
+    options, finish, promptStartTime, promptTimer, processedContent,
+    repositoryContext, userMessage, streamResponsePromise, resolve, reject,
+  } = args;
+  const { prompt, context, totalPrompts, isLastPrompt, log } = options;
+  const { text, usage, finishReason } = finish;
+  // Compute once and reuse — identical to the original repeated `text || ''` and
+  // `text?.length || 0` expressions (both map undefined/'' to the same value).
+  const safeText = text || '';
+  const outputLength = text?.length || 0;
+
+  log.info('Prompt execution finished', {
+    promptId: prompt.id,
+    promptName: prompt.name,
+    hasText: !!text,
+    textLength: outputLength,
+    hasUsage: !!usage,
+    finishReason,
+    executionId: context.executionId
+  });
+
+  try {
+    // Calculate execution time as milliseconds
+    const executionTimeMs = Date.now() - promptStartTime;
+
+    // Log completion
+    promptTimer({
+      status: 'success',
+      tokensUsed: usage?.totalTokens
+    });
+
+    // Save prompt result
+    if (!text || text.length === 0) {
+      log.warn('No text content from prompt execution', { promptId: prompt.id });
+    }
+
+    const startedAt = new Date(Date.now() - executionTimeMs);
+
+    await savePromptResultRow({ prompt, context, processedContent, repositoryContext, text: safeText, startedAt, executionTimeMs });
+
+    // Store output for next prompt's variable substitution
+    context.previousOutputs.set(prompt.id, safeText);
+
+    // Accumulate messages for context (only include reasonable text)
+    const assistantMessage: UIMessage = {
+      id: `assistant-${prompt.id}-${Date.now()}`,
+      role: 'assistant',
+      parts: [{ type: 'text', text: safeText }]
+    };
+    context.accumulatedMessages.push(userMessage, assistantMessage);
+
+    log.info('Prompt result saved successfully', {
+      promptId: prompt.id,
+      executionId: context.executionId,
+      outputLength,
+      executionTimeMs
+    });
+
+    // Emit prompt-complete event
+    await storeExecutionEvent(context.executionId, 'prompt-complete', {
+      promptId: prompt.id,
+      outputTokens: usage?.completionTokens || 0,
+      duration: executionTimeMs,
+      cached: false // TODO: detect if response was cached
+    }).catch(err => log.error('Failed to store prompt-complete event', { error: err }));
+
+    // Save prompt result as a Nexus conversation message (#699)
+    // Each prompt in the chain gets its own message for later resumption
+    await savePromptConversationMessage({ prompt, context, text: safeText, usage, executionTimeMs, log });
+
+    // If this is the last prompt, update execution status to completed
+    if (isLastPrompt) {
+      await finalizeExecutionOnLastPrompt(context, usage, totalPrompts, log);
+    }
+
+    // CRITICAL: Wait for stream response to be ready, then resolve. This ensures
+    // no race condition between stream assignment and onFinish (extracted to keep
+    // this callback under the complexity limit; control flow is identical).
+    await resolveOnFinish({ isLastPrompt, streamResponsePromise, resolve, reject, prompt, log });
+
+  } catch (saveError) {
+    log.error('Failed to save prompt result', {
+      error: saveError,
+      promptId: prompt.id,
+      executionId: context.executionId
+    });
+    // Reject promise on save error
+    reject(saveError);
+  }
+}
+
+/**
+ * Handle a prompt-chain prompt failure: emit the execution-error event, persist
+ * a failed prompt_result row, save a failure conversation message (non-fatal),
+ * then throw the wrapped sysInternalError. Identical side-effects/order to the
+ * original inline catch block. Always throws (never returns normally).
+ */
+async function handlePromptFailure(
+  options: SinglePromptOptions,
+  promptTimer: ReturnType<typeof startTimer>,
+  promptError: unknown
+): Promise<never> {
+  const { prompt, context, log } = options;
+  promptTimer({ status: 'error' });
+
+  log.error('Prompt execution failed', {
+    error: promptError,
+    promptId: prompt.id,
+    promptName: prompt.name,
+    executionId: context.executionId
+  });
+
+  // Emit execution-error event for prompt failure
+  await storeExecutionEvent(context.executionId, 'execution-error', {
+    executionId: context.executionId,
+    error: promptError instanceof Error ? promptError.message : String(promptError),
+    promptId: prompt.id,
+    recoverable: false,
+    details: promptError instanceof Error ? promptError.stack : undefined
+  }).catch(err => log.error('Failed to store prompt error event', { error: err }));
+
+  // Save failed prompt result
+  // CRITICAL: Drizzle's AWS Data API driver corrupts JSONB values during parameter binding.
+  // Must use sql.raw() to embed stringified JSON directly in SQL, bypassing parameter binding.
+  // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
+  const now = new Date();
+  const failedInputData = { prompt: prompt.content };
+  const failedInputJson = JSON.stringify(failedInputData);
+  // Only escape single quotes for SQL string literal (PostgreSQL treats backslashes literally)
+  const escapedFailedJson = failedInputJson.replace(/'/g, "''");
+  const errorMsg = promptError instanceof Error ? promptError.message : String(promptError);
+  // CRITICAL: Use sql.raw() for ENUM values - RDS Data API driver corrupts ENUM parameter binding
+  await executeQuery(
+    (db) => db.execute(sql`
+      INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, error_message, started_at, completed_at)
+      VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedFailedJson}'::jsonb`)}, '', ${sql.raw("'failed'::execution_status")}, ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
+    `),
+    'saveFailedPromptResult'
+  );
+
+  // Save failed prompt result as a conversation message (#699)
+  if (context.conversation) {
+    try {
+      // Sanitize error message for safe storage (remove file paths, limit length)
+      const sanitizedPromptName = String(prompt.name).substring(0, 100).replace(/["&'<>]/g, '');
+      const sanitizedError = String(sanitizeForLogging(errorMsg))
+        .substring(0, 500)
+        .replace(/\/[a-zA-Z0-9/_-]+\/[a-zA-Z0-9/_-]+\.ts/g, '[file]');
+
+      const failureContent = `⚠️ Prompt "${sanitizedPromptName}" failed: ${sanitizedError}`;
+
+      const failureMetadata: AssistantArchitectMessageMetadata = {
+        source: 'assistant-architect-execution',
+        executionId: context.executionId,
+        promptId: prompt.id,
+        promptName: prompt.name,
+        position: prompt.position,
+        failed: true,
+        error: sanitizedError,
+      };
+
+      await createMessageWithStats({
+        conversationId: context.conversation.conversationId,
+        role: 'assistant',
+        content: failureContent,
+        parts: [{ type: 'text', text: failureContent }],
+        metadata: failureMetadata as unknown as Record<string, unknown>,
+      });
+    } catch (msgErr) {
+      log.error('Failed to save failed prompt as conversation message', {
+        error: msgErr instanceof Error ? msgErr.message : String(msgErr),
+        promptId: prompt.id,
+        conversationId: context.conversation.conversationId,
+      });
+    }
+  }
+
+  // For now, stop execution on first error
+  // Future enhancement: check prompt.stop_on_error field
+  throw ErrorFactories.sysInternalError(
+    `Prompt ${prompt.id} (${prompt.name}) failed: ${
+      promptError instanceof Error ? promptError.message : String(promptError)
+    }`,
+    {
+      details: { promptId: prompt.id, promptName: prompt.name },
+      cause: promptError instanceof Error ? promptError : undefined
+    }
+  );
+}
+
 /**
  * Execute a single prompt and wait for completion
  * Returns Promise that resolves when streaming finishes (onFinish callback completes)
  */
 async function executeSinglePromptWithCompletion(
-  prompt: ChainPrompt,
-  inputs: Record<string, unknown>,
-  context: PromptExecutionContext,
-  requestId: string,
-  log: ReturnType<typeof createLogger>,
-  totalPrompts: number,
-  isLastPrompt: boolean
+  options: SinglePromptOptions
 ) {
+  const { prompt, inputs, context, requestId, log, totalPrompts, isLastPrompt } = options;
   const promptStartTime = Date.now();
   const promptTimer = startTimer(`prompt.${prompt.id}.execution`);
 
@@ -1341,58 +2156,7 @@ async function executeSinglePromptWithCompletion(
     }
 
     // 1. Inject repository context if configured
-    let repositoryContext = '';
-    if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
-      log.debug('Retrieving repository knowledge', {
-        promptId: prompt.id,
-        repositoryIds: prompt.repositoryIds
-      });
-
-      // Emit knowledge-retrieval-start event
-      await storeExecutionEvent(context.executionId, 'knowledge-retrieval-start', {
-        promptId: prompt.id,
-        repositories: prompt.repositoryIds,
-        searchType: 'hybrid'
-      });
-
-      const knowledgeChunks = await retrieveKnowledgeForPrompt(
-        prompt.content,
-        prompt.repositoryIds,
-        context.userCognitoSub,
-        context.assistantOwnerSub,
-        {
-          maxChunks: 10,
-          maxTokens: 4000,
-          similarityThreshold: 0.7,
-          searchType: 'hybrid',
-          vectorWeight: 0.8
-        },
-        requestId
-      );
-
-      if (knowledgeChunks.length > 0) {
-        repositoryContext = '\n\n' + formatKnowledgeContext(knowledgeChunks);
-        log.debug('Repository context retrieved', {
-          promptId: prompt.id,
-          chunkCount: knowledgeChunks.length
-        });
-
-        // Emit knowledge-retrieved event
-        // NOTE: Token estimation uses rough approximation (character count / 4)
-        // For precise token counts, consider using js-tiktoken encoder
-        const totalTokens = knowledgeChunks.reduce((sum, chunk) => sum + Math.ceil(chunk.content.length / 4), 0);
-
-        // Calculate average similarity score (safe due to length > 0 check above)
-        const avgRelevance = knowledgeChunks.reduce((sum, chunk) => sum + chunk.similarity, 0) / knowledgeChunks.length;
-
-        await storeExecutionEvent(context.executionId, 'knowledge-retrieved', {
-          promptId: prompt.id,
-          documentsFound: knowledgeChunks.length,
-          relevanceScore: avgRelevance,
-          tokens: totalTokens
-        });
-      }
-    }
+    const repositoryContext = await injectRepositoryKnowledge(prompt, context, requestId, log);
 
     // 2. Apply variable substitution
     const inputMapping = (prompt.inputMapping || {}) as Record<string, string>;
@@ -1411,42 +2175,7 @@ async function executeSinglePromptWithCompletion(
 
     // Emit variable-substitution event if variables were used
     if (Object.keys(inputMapping).length > 0 || processedContent !== prompt.content) {
-      const substitutedVars: Record<string, string> = {};
-      const sourcePrompts: number[] = [];
-
-      // Extract which variables were substituted
-      for (const [varName, mappedPath] of Object.entries(inputMapping)) {
-        const promptMatch = mappedPath.match(/^prompt_(\d+)\.output$/);
-        if (promptMatch) {
-          const sourcePromptId = Number.parseInt(promptMatch[1], 10);
-          sourcePrompts.push(sourcePromptId);
-          const value = context.previousOutputs.get(sourcePromptId);
-          if (value) {
-            substitutedVars[varName] = String(sanitizeForLogging(value)).substring(0, 500);
-            log.debug('Variable substituted from previous output', {
-              varName,
-              sourcePromptId,
-              fullLength: value.length,
-              truncated: value.length > 500
-            });
-          }
-        } else if (varName in inputs) {
-          const inputValue = String(inputs[varName]);
-          substitutedVars[varName] = String(sanitizeForLogging(inputValue)).substring(0, 500);
-          if (inputValue.length > 500) {
-            log.debug('Variable substituted from input (truncated)', {
-              varName,
-              fullLength: inputValue.length
-            });
-          }
-        }
-      }
-
-      await storeExecutionEvent(context.executionId, 'variable-substitution', {
-        promptId: prompt.id,
-        variables: substitutedVars,
-        sourcePrompts: Array.from(new Set(sourcePrompts))
-      });
+      await emitVariableSubstitutionEvent(prompt, inputs, context, inputMapping, log);
     }
 
     // 3. Build messages with accumulated context
@@ -1458,52 +2187,10 @@ async function executeSinglePromptWithCompletion(
 
     const messages = [...context.accumulatedMessages, userMessage];
 
-    // 4. Get AI model configuration
-    const modelData = await getAIModelById(prompt.modelId);
-
-    if (!modelData) {
-      throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
-        details: { promptId: prompt.id, modelId: prompt.modelId }
-      });
-    }
-
-    // Validate model data
-    if (!modelData.modelId || !modelData.provider) {
-      throw ErrorFactories.dbRecordNotFound('ai_models', prompt.modelId || 'unknown', {
-        details: { promptId: prompt.id, modelId: prompt.modelId, reason: 'Invalid model data' }
-      });
-    }
-
-    const modelId = String(modelData.modelId);
-    const provider = String(modelData.provider);
-
-    // 5. Prepare tools for this prompt
-    const enabledTools: string[] = [...(prompt.enabledTools || [])];
-    let promptTools = {};
-
-    // Create repository search tools if repositories are configured
-    if (prompt.repositoryIds && prompt.repositoryIds.length > 0) {
-      log.debug('Creating repository search tools', {
-        promptId: prompt.id,
-        repositoryIds: prompt.repositoryIds
-      });
-
-      const repoTools = createRepositoryTools({
-        repositoryIds: prompt.repositoryIds,
-        userCognitoSub: context.userCognitoSub,
-        assistantOwnerSub: context.assistantOwnerSub
-      });
-
-      // Merge repository tools
-      promptTools = { ...promptTools, ...repoTools };
-    }
-
-    log.debug('Tools configured for prompt', {
-      promptId: prompt.id,
-      enabledTools,
-      toolCount: Object.keys(promptTools).length,
-      tools: Object.keys(promptTools)
-    });
+    // 4-5. Resolve AI model configuration + prepare per-prompt tools
+    // (prompt.modelId is narrowed to a number by the guard above)
+    const { modelId, provider, enabledTools, promptTools } =
+      await resolvePromptModelAndTools(prompt, prompt.modelId, context, log);
 
     // 6. Wrap streaming in Promise that resolves on completion
     // Use Promise-based pattern to avoid race condition between stream creation and onFinish
@@ -1529,218 +2216,21 @@ async function executeSinglePromptWithCompletion(
         enabledTools, // Keep for backward compatibility with other tools
         tools: Object.keys(promptTools).length > 0 ? promptTools : undefined, // Repository search tools
         callbacks: {
-          onFinish: async ({ text, usage, finishReason }) => {
-
-            log.info('Prompt execution finished', {
-              promptId: prompt.id,
-              promptName: prompt.name,
-              hasText: !!text,
-              textLength: text?.length || 0,
-              hasUsage: !!usage,
-              finishReason,
-              executionId: context.executionId
-            });
-
-            try {
-              // Calculate execution time as milliseconds
-              const executionTimeMs = Date.now() - promptStartTime;
-
-              // Log completion
-              promptTimer({
-                status: 'success',
-                tokensUsed: usage?.totalTokens
-              });
-
-              // Save prompt result
-              if (!text || text.length === 0) {
-                log.warn('No text content from prompt execution', { promptId: prompt.id });
-              }
-
-              const startedAt = new Date(Date.now() - executionTimeMs);
-
-              // CRITICAL: Drizzle's AWS Data API driver corrupts JSONB values during parameter binding.
-              // Must use sql.raw() to embed stringified JSON directly in SQL, bypassing parameter binding.
-              // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
-              const promptInputData = {
-                originalContent: prompt.content,
-                processedContent,
-                repositoryContext: repositoryContext ? 'included' : 'none'
-              };
-              const inputDataJson = JSON.stringify(promptInputData);
-              // Only escape single quotes for SQL string literal (PostgreSQL treats backslashes literally)
-              const escapedInputJson = inputDataJson.replace(/'/g, "''");
-              // CRITICAL: Use sql.raw() for ENUM values - RDS Data API driver corrupts ENUM parameter binding
-              // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
-              await executeQuery(
-                (db) => db.execute(sql`
-                  INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, started_at, completed_at, execution_time_ms)
-                  VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedInputJson}'::jsonb`)}, ${text || ''}, ${sql.raw("'completed'::execution_status")}, ${startedAt.toISOString()}::timestamp, ${new Date().toISOString()}::timestamp, ${executionTimeMs})
-                `),
-                'savePromptResult'
-              );
-
-              // Store output for next prompt's variable substitution
-              context.previousOutputs.set(prompt.id, text || '');
-
-              // Accumulate messages for context (only include reasonable text)
-              const assistantMessage: UIMessage = {
-                id: `assistant-${prompt.id}-${Date.now()}`,
-                role: 'assistant',
-                parts: [{ type: 'text', text: text || '' }]
-              };
-              context.accumulatedMessages.push(userMessage, assistantMessage);
-
-              log.info('Prompt result saved successfully', {
-                promptId: prompt.id,
-                executionId: context.executionId,
-                outputLength: text?.length || 0,
-                executionTimeMs
-              });
-
-              // Emit prompt-complete event
-              await storeExecutionEvent(context.executionId, 'prompt-complete', {
-                promptId: prompt.id,
-                outputTokens: usage?.completionTokens || 0,
-                duration: executionTimeMs,
-                cached: false // TODO: detect if response was cached
-              }).catch(err => log.error('Failed to store prompt-complete event', { error: err }));
-
-              // Save prompt result as a Nexus conversation message (#699)
-              // Each prompt in the chain gets its own message for later resumption
-              if (context.conversation) {
-                try {
-                  const metadata: AssistantArchitectMessageMetadata = {
-                    source: 'assistant-architect-execution',
-                    executionId: context.executionId,
-                    promptId: prompt.id,
-                    promptName: prompt.name,
-                    position: prompt.position,
-                    executionTimeMs,
-                  };
-
-                  await createMessageWithStats({
-                    conversationId: context.conversation.conversationId,
-                    role: 'assistant',
-                    content: text || '',
-                    parts: [{ type: 'text', text: text || '' }],
-                    tokenUsage: usage ? {
-                      promptTokens: usage.promptTokens,
-                      completionTokens: usage.completionTokens,
-                      totalTokens: usage.totalTokens,
-                    } : undefined,
-                    metadata: metadata as unknown as Record<string, unknown>,
-                  });
-
-                  log.info('Prompt result saved as conversation message', {
-                    promptId: prompt.id,
-                    promptName: prompt.name,
-                    conversationId: context.conversation.conversationId,
-                    executionId: context.executionId,
-                  });
-                } catch (msgErr) {
-                  // Non-fatal: log and continue — prompt_results table still has the data
-                  log.error('Failed to save prompt result as conversation message', {
-                    error: msgErr instanceof Error ? msgErr.message : String(msgErr),
-                    promptId: prompt.id,
-                    conversationId: context.conversation.conversationId,
-                    executionId: context.executionId,
-                  });
-                }
-              }
-
-              // If this is the last prompt, update execution status to completed
-              // CRITICAL: Drizzle's AWS Data API driver has issues with timestamp serialization.
-              // Must use raw SQL with db.execute() for reliable parameter binding.
-              // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
-              if (isLastPrompt) {
-                await executeQuery(
-                  (db) => db.execute(sql`
-                    UPDATE tool_executions
-                    SET status = 'completed', completed_at = ${new Date().toISOString()}::timestamp
-                    WHERE id = ${context.executionId}
-                  `),
-                  'updateToolExecutionCompleted'
-                );
-
-                // Emit execution-complete event
-                const totalDuration = Date.now() - context.executionStartTime;
-                await storeExecutionEvent(context.executionId, 'execution-complete', {
-                  executionId: context.executionId,
-                  totalTokens: usage?.totalTokens || 0,
-                  duration: totalDuration,
-                  success: true
-                }).catch(err => log.error('Failed to store execution-complete event', { error: err }));
-
-                log.info('Execution completed successfully', {
-                  executionId: context.executionId,
-                  totalPrompts
-                });
-
-                // Update nexus conversation executionStatus to completed
-                if (context.conversation) {
-                  try {
-                    // Fetch existing metadata and merge to preserve other fields
-                    const existing = await getConversationById(context.conversation.conversationId, context.userId);
-                    await updateConversation(context.conversation.conversationId, context.userId, {
-                      metadata: {
-                        ...existing.metadata,
-                        ...buildExecutionMetadata(
-                          context.conversation.assistantId,
-                          context.conversation.assistantName,
-                          context.executionId,
-                          'completed'
-                        ),
-                      },
-                    });
-
-                    // Reconcile message_count and last_message_at (#719)
-                    // Intermediate createMessageWithStats calls may have failed silently
-                    // (errors caught as non-fatal), leaving message_count at 0.
-                    // This single reconciliation call guarantees correct stats.
-                    await updateConversationStats(context.conversation.conversationId);
-
-                    log.info('Conversation stats reconciled after execution', {
-                      conversationId: context.conversation.conversationId,
-                      executionId: context.executionId,
-                    });
-                  } catch (err) {
-                    log.error('Failed to complete conversation updates', {
-                      error: err instanceof Error ? err.message : String(err),
-                      conversationId: context.conversation.conversationId,
-                      executionId: context.executionId
-                    });
-                  }
-                }
-              }
-
-              // CRITICAL: Wait for stream response to be ready, then resolve
-              // This ensures no race condition between stream assignment and onFinish
-              if (isLastPrompt) {
-                try {
-                  const streamResponse = await streamResponsePromise;
-                  resolve(streamResponse);
-                } catch (streamError) {
-                  // Stream creation failed, propagate error
-                  log.error('Stream response promise rejected', {
-                    error: streamError,
-                    promptId: prompt.id
-                  });
-                  reject(streamError);
-                }
-              } else {
-                resolve(undefined);
-              }
-
-            } catch (saveError) {
-              log.error('Failed to save prompt result', {
-                error: saveError,
-                promptId: prompt.id,
-                executionId: context.executionId
-              });
-              // Reject promise on save error
-              reject(saveError);
-            }
-          },
+          onFinish: ({ text, usage, finishReason }) =>
+            // Persistence + resolve/reject extracted to keep this callback under
+            // the complexity/line limits; order of writes is preserved exactly.
+            runPromptOnFinish({
+              options,
+              finish: { text, usage, finishReason },
+              promptStartTime,
+              promptTimer,
+              processedContent,
+              repositoryContext,
+              userMessage,
+              streamResponsePromise,
+              resolve,
+              reject,
+            }),
           onError: (error) => {
             promptTimer({ status: 'error' });
             log.error('Prompt streaming error', { error, promptId: prompt.id });
@@ -1789,91 +2279,9 @@ async function executeSinglePromptWithCompletion(
     });
 
   } catch (promptError) {
-    promptTimer({ status: 'error' });
-
-    log.error('Prompt execution failed', {
-      error: promptError,
-      promptId: prompt.id,
-      promptName: prompt.name,
-      executionId: context.executionId
-    });
-
-    // Emit execution-error event for prompt failure
-    await storeExecutionEvent(context.executionId, 'execution-error', {
-      executionId: context.executionId,
-      error: promptError instanceof Error ? promptError.message : String(promptError),
-      promptId: prompt.id,
-      recoverable: false,
-      details: promptError instanceof Error ? promptError.stack : undefined
-    }).catch(err => log.error('Failed to store prompt error event', { error: err }));
-
-    // Save failed prompt result
-    // CRITICAL: Drizzle's AWS Data API driver corrupts JSONB values during parameter binding.
-    // Must use sql.raw() to embed stringified JSON directly in SQL, bypassing parameter binding.
-    // See: Issue #599, https://github.com/drizzle-team/drizzle-orm/issues/724
-    const now = new Date();
-    const failedInputData = { prompt: prompt.content };
-    const failedInputJson = JSON.stringify(failedInputData);
-    // Only escape single quotes for SQL string literal (PostgreSQL treats backslashes literally)
-    const escapedFailedJson = failedInputJson.replace(/'/g, "''");
-    const errorMsg = promptError instanceof Error ? promptError.message : String(promptError);
-    // CRITICAL: Use sql.raw() for ENUM values - RDS Data API driver corrupts ENUM parameter binding
-    await executeQuery(
-      (db) => db.execute(sql`
-        INSERT INTO prompt_results (execution_id, prompt_id, input_data, output_data, status, error_message, started_at, completed_at)
-        VALUES (${context.executionId}, ${prompt.id}, ${sql.raw(`'${escapedFailedJson}'::jsonb`)}, '', ${sql.raw("'failed'::execution_status")}, ${errorMsg}, ${now.toISOString()}::timestamp, ${now.toISOString()}::timestamp)
-      `),
-      'saveFailedPromptResult'
-    );
-
-    // Save failed prompt result as a conversation message (#699)
-    if (context.conversation) {
-      try {
-        // Sanitize error message for safe storage (remove file paths, limit length)
-        const sanitizedPromptName = String(prompt.name).substring(0, 100).replace(/["&'<>]/g, '');
-        const sanitizedError = String(sanitizeForLogging(errorMsg))
-          .substring(0, 500)
-          .replace(/\/[a-zA-Z0-9/_-]+\/[a-zA-Z0-9/_-]+\.ts/g, '[file]');
-
-        const failureContent = `⚠️ Prompt "${sanitizedPromptName}" failed: ${sanitizedError}`;
-
-        const failureMetadata: AssistantArchitectMessageMetadata = {
-          source: 'assistant-architect-execution',
-          executionId: context.executionId,
-          promptId: prompt.id,
-          promptName: prompt.name,
-          position: prompt.position,
-          failed: true,
-          error: sanitizedError,
-        };
-
-        await createMessageWithStats({
-          conversationId: context.conversation.conversationId,
-          role: 'assistant',
-          content: failureContent,
-          parts: [{ type: 'text', text: failureContent }],
-          metadata: failureMetadata as unknown as Record<string, unknown>,
-        });
-      } catch (msgErr) {
-        log.error('Failed to save failed prompt as conversation message', {
-          error: msgErr instanceof Error ? msgErr.message : String(msgErr),
-          promptId: prompt.id,
-          conversationId: context.conversation.conversationId,
-        });
-      }
-    }
-
-    // For now, stop execution on first error
-    // Future enhancement: check prompt.stop_on_error field
-    throw ErrorFactories.sysInternalError(
-      `Prompt ${prompt.id} (${prompt.name}) failed: ${
-        promptError instanceof Error ? promptError.message : String(promptError)
-      }`,
-      {
-        details: { promptId: prompt.id, promptName: prompt.name },
-        cause: promptError instanceof Error ? promptError : undefined
-      }
-    );
+    // Failure side-effects (events, failed prompt_result, failure message) and
+    // the wrapped throw are extracted; order/behavior is identical.
+    await handlePromptFailure(options, promptTimer, promptError);
   }
 }
 

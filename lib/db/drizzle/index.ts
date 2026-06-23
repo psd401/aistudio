@@ -48,9 +48,6 @@ export {
   checkUserRoleByCognitoSub,
   getUserRolesByCognitoSub,
   getAllUserRoles,
-  // Tool access operations
-  hasToolAccess,
-  getUserTools,
 } from "./users";
 
 // ============================================
@@ -105,13 +102,8 @@ export {
   createRole,
   updateRole,
   deleteRole,
-  // Tool operations (compat shims — delegate to capabilities, #923)
-  getTools,
-  getToolsByIds,
-  getRoleTools,
-  assignToolToRole,
-  removeToolFromRole,
-  setRoleTools,
+  // Capability id -> identifier resolution (navigation guard)
+  getCapabilitiesByIdsMap,
 } from "./roles";
 
 // ============================================

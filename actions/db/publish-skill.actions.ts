@@ -4,7 +4,7 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { handleError, createSuccess, ErrorFactories } from "@/lib/error-utils"
 import type { ActionState } from "@/types"
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
-import { hasToolAccess } from "@/utils/roles"
+import { hasCapabilityAccess } from "@/utils/roles"
 import { executeTransaction } from "@/lib/db/drizzle-client"
 import { eq, and, sql } from "drizzle-orm"
 import { psdAgentSkills } from "@/lib/db/schema/tables/agent-skills"
@@ -67,7 +67,7 @@ export async function publishAssistantArchitectAsSkillAction(
       )
     }
 
-    const canUse = await hasToolAccess("assistant-architect")
+    const canUse = await hasCapabilityAccess("assistant-architect")
     if (!canUse) {
       log.warn("User lacks assistant-architect access", { ownerUserId })
       throw ErrorFactories.authzToolAccessDenied("assistant-architect")

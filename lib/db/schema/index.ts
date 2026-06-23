@@ -21,8 +21,6 @@ export * from "./enums";
 export * from "./tables/users";
 export * from "./tables/roles";
 export * from "./tables/user-roles";
-export * from "./tables/tools";
-export * from "./tables/role-tools";
 export * from "./tables/capabilities";
 export * from "./tables/role-capabilities";
 export * from "./tables/tool-catalog";

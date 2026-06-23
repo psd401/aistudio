@@ -322,6 +322,32 @@ Before deploying database changes, complete this checklist:
 - [ ] Confirmed HTTP endpoint is enabled on RDS cluster
 - [ ] Tested migration SQL with MCP tools (if applicable)
 - [ ] Reviewed `MIGRATION_FILES` array in `db-init-handler.ts`
+- [ ] For column renames / drops: confirmed migration runs **before/with** the code deploy (see below)
+
+### ⚠️ Column-Rename / Drop Migrations: Deploy Ordering
+
+When a migration **renames or drops a column the app code queries** (e.g. migration
+084 renamed `navigation_items.tool_id` → `capability_id`), the migration MUST land
+before or atomically with the code deploy. Old ECS Fargate tasks query the new
+column name against an un-migrated schema and silently return empty/incorrect
+results — for migration 084 the symptom was **no navigation for any user**.
+
+The migration runs in a Lambda during CDK deploy while ECS tasks roll
+independently, so there is a window where these can race. To be safe:
+
+```bash
+# 1. Apply and verify the migration FIRST
+mcp__awslabs-postgres-mcp-server__run_query --sql \
+  "SELECT description, status FROM migration_log WHERE description LIKE '084%';"
+# expect status = 'completed' before proceeding
+
+# 2. Only then deploy the app code
+cd infra && bunx cdk deploy AIStudio-FrontendStack-Dev
+```
+
+For destructive migrations, also run any orphan-detection query the migration's
+header comment calls out (e.g. 084 leaves unmatched `navigation_items` with a NULL
+`capability_id`, which un-gates them — verify zero orphans before deploy).
 
 ### Before Deployment Safety Checks
 
