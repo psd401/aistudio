@@ -3,7 +3,7 @@ import { getServerSession } from "@/lib/auth/server-session"
 import { getNavigationItems, getAllNavigationItemRoles, getCapabilitiesByIdsMap } from "@/lib/db/drizzle"
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger'
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
-import { hasCapabilityAccess } from "@/utils/roles";
+import { getUserCapabilities } from "@/utils/roles";
 
 /**
  * Navigation API
@@ -104,15 +104,16 @@ function isAllowedByRoles(
 }
 
 /**
- * Determine whether the current user has access to the capability gating an item.
- * Returns false for invalid, unknown, or denied capabilities. Items without a
- * capability requirement should not be passed here.
+ * Synchronously check whether the user's pre-fetched capability set grants
+ * access to the capability gating a nav item. Eliminates N+1 DB queries.
+ * Returns false for invalid, unknown, or denied capabilities.
  */
-async function isAllowedByCapability(
+function isAllowedByCapability(
   item: NavItem,
   capabilitiesMap: Map<number, string>,
+  userCapabilitiesSet: Set<string>,
   log: NavLogger
-): Promise<boolean> {
+): boolean {
   const capabilityId = Number(item.capabilityId);
   if (Number.isNaN(capabilityId)) {
     log.warn("Invalid capability ID for navigation item", {
@@ -133,39 +134,29 @@ async function isAllowedByCapability(
     return false;
   }
 
-  try {
-    const granted = await hasCapabilityAccess(capabilityIdentifier);
-    log.debug("Capability access check for navigation item", {
-      itemId: item.id,
-      label: item.label,
-      capabilityId,
-      capabilityIdentifier,
-      granted
-    });
-    return granted;
-  } catch (capabilityError) {
-    log.error("Error checking capability access", {
-      itemId: item.id,
-      label: item.label,
-      capabilityId,
-      capabilityIdentifier,
-      error: capabilityError instanceof Error ? capabilityError.message : 'Unknown error'
-    });
-    return false;
-  }
+  const granted = userCapabilitiesSet.has(capabilityIdentifier);
+  log.debug("Capability access check for navigation item", {
+    itemId: item.id,
+    label: item.label,
+    capabilityId,
+    capabilityIdentifier,
+    granted
+  });
+  return granted;
 }
 
 /**
  * Filter navigation items by role and capability, then keep parent sections only
  * when they have visible children or a direct link. Preserves source ordering.
  */
-async function buildVisibleNavItems(
+function buildVisibleNavItems(
   navItems: NavItem[],
   navItemRolesMap: Map<number, string[]>,
   userRoles: string[],
   capabilitiesMap: Map<number, string>,
+  userCapabilitiesSet: Set<string>,
   log: NavLogger
-): Promise<NavItem[]> {
+): NavItem[] {
   const filteredNavItems: NavItem[] = [];
   const parentIds = new Set<NavItem["id"]>();
 
@@ -173,7 +164,7 @@ async function buildVisibleNavItems(
     let shouldInclude = isAllowedByRoles(item, navItemRolesMap, userRoles, log);
 
     if (shouldInclude && item.capabilityId) {
-      shouldInclude = await isAllowedByCapability(item, capabilitiesMap, log);
+      shouldInclude = isAllowedByCapability(item, capabilitiesMap, userCapabilitiesSet, log);
     }
 
     if (shouldInclude) {
@@ -187,16 +178,10 @@ async function buildVisibleNavItems(
 
   // Include parent items if they have visible children
   return filteredNavItems.filter(item => {
-    // Keep items that are either:
-    // 1. Not parent items (have a parent_id)
-    // 2. Parent items that have visible children
-    // 3. Parent items with direct links (standalone pages)
     if (item.parentId !== null) return true; // Child item
     if (parentIds.has(item.id)) return true; // Parent with visible children
     if (item.link) return true; // Parent with direct link
-
-    // Don't include empty parent sections
-    return false;
+    return false; // Empty parent section — hide
   });
 }
 
@@ -336,12 +321,17 @@ export async function GET() {
         ? await getCapabilitiesByIdsMap(Array.from(capabilityIdsToLookup))
         : new Map<number, string>();
 
+      // Fetch user's granted capabilities once — avoids N+1 DB queries in filter
+      const userCapabilities = await getUserCapabilities();
+      const userCapabilitiesSet = new Set(userCapabilities);
+
       // Filter navigation items based on user permissions
-      const finalNavItems = await buildVisibleNavItems(
+      const finalNavItems = buildVisibleNavItems(
         navItems,
         navItemRolesMap,
         userRoles,
         capabilitiesMap,
+        userCapabilitiesSet,
         log
       );
 
