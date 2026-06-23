@@ -9,7 +9,9 @@ import type {
   MessageFormatItem,
   GenericThreadHistoryAdapter
 } from '@assistant-ui/react'
-import { INTERNAL } from '@assistant-ui/react'
+// @assistant-ui/react 0.14.23 moved fromThreadMessageLike from the INTERNAL
+// namespace to a top-level export.
+import { fromThreadMessageLike } from '@assistant-ui/react'
 
 // Import ExportedMessageRepository type and utility
 type ExportedMessageRepository = {
@@ -175,7 +177,7 @@ const createExportedMessageRepository = (messages: MessageData[]): ExportedMessa
       const msgDate = safeDate(msg.createdAt as string | Date | undefined)
 
       try {
-        const converted = INTERNAL.fromThreadMessageLike({
+        const converted = fromThreadMessageLike({
           id: msg.id,
           role: msgRole,
           content: content as unknown as string,  // Cast needed for tool-result parts
@@ -205,7 +207,7 @@ const createExportedMessageRepository = (messages: MessageData[]): ExportedMessa
         // with a static content array could throw again and escape the outer catch.
         try {
           return {
-            message: INTERNAL.fromThreadMessageLike({
+            message: fromThreadMessageLike({
               id: msg.id,
               role: msgRole,
               content: [{ type: 'text', text: '[Message could not be loaded]' }] as unknown as string,
@@ -361,7 +363,7 @@ export function createNexusHistoryAdapter(getConversationId: () => string | null
           // Ensure at least one content part
           const content = textParts.length > 0 ? textParts : [{ type: 'text' as const, text: '' }]
 
-          const threadMessage = INTERNAL.fromThreadMessageLike({
+          const threadMessage = fromThreadMessageLike({
             id: formatAdapter.getId(item.message),
             role: encodedAny.role,
             content,
