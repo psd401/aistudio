@@ -286,7 +286,15 @@ function validateCustomCronExpression(cron: string): string[] {
     return errors
   }
 
-  // Validate each field individually to prevent bypass attempts
+  // Validate each field individually to prevent bypass attempts.
+  //
+  // Note: each field is split on commas and every part is regex-checked, so
+  // comma lists (e.g. "1,15,30") are accepted — AWS EventBridge supports them.
+  // This validation is intentionally permissive about combining list parts with
+  // step values (e.g. "*/2,*/3"): such corner cases pass here but EventBridge is
+  // the final authority and will reject anything it does not accept at
+  // create/update time. We do not attempt to fully replicate EventBridge's cron
+  // grammar; we only block obviously malformed input and ReDoS vectors.
   const [minute, hour, day, month, dayOfWeek] = cronFields
 
   // Validate minute field (0-59) - supports comma-separated lists, ReDoS-safe
@@ -957,9 +965,11 @@ async function buildScheduleUpdateData(
   }
 
   if (params.assistantArchitectId !== undefined) {
-    // Security: Sanitize ID with CodeQL-compliant pattern that breaks taint flow
-    // Capability access is enforced by the caller (updateScheduleAction) before
-    // this function is invoked — no per-field re-check needed here.
+    // Security: Sanitize ID with CodeQL-compliant pattern that breaks taint flow.
+    // General assistant-architect capability access is already enforced by the
+    // caller (updateScheduleAction) before this helper runs, so it is not
+    // re-checked here — this avoids a redundant DB round-trip and keeps the
+    // capability gate out of a user-controlled (params-driven) branch.
     let cleanArchitectId: number
     try {
       cleanArchitectId = sanitizeNumericId(params.assistantArchitectId)

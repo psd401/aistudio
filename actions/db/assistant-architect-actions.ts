@@ -688,9 +688,10 @@ function buildAssistantArchitectBaseUpdates(
   if (data.description !== undefined) updateData.description = data.description || null;
   if (data.status !== undefined) updateData.status = data.status as "draft" | "pending_approval" | "approved" | "rejected" | "disabled";
   if (data.imagePath !== undefined) updateData.imagePath = data.imagePath || null;
-  // Handle isParallel and timeoutSeconds if present in data
-  if ('isParallel' in data) updateData.isParallel = Boolean(data.isParallel);
-  if ('timeoutSeconds' in data) updateData.timeoutSeconds = data.timeoutSeconds as number | null;
+  // Handle isParallel and timeoutSeconds if provided. Use `!== undefined` for
+  // consistency with the fields above (an explicit `undefined` means "not set").
+  if (data.isParallel !== undefined) updateData.isParallel = Boolean(data.isParallel);
+  if (data.timeoutSeconds !== undefined) updateData.timeoutSeconds = data.timeoutSeconds as number | null;
 
   return updateData;
 }

@@ -4,6 +4,11 @@ import { requireAdmin } from "@/lib/auth/admin-check"
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger';
 import { getErrorMessage } from "@/types/errors";
 
+/**
+ * Route path preserves the legacy `/tools/[toolId]` segment for client backward
+ * compatibility. `toolId` carries a capability ID since the tools -> capabilities
+ * migration (#928); do not "fix" the path or param name.
+ */
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ roleId: string; toolId: string }> }

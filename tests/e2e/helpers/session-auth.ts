@@ -7,12 +7,16 @@ import type { BrowserContext } from '@playwright/test'
  * Mints a NextAuth (Auth.js v5) session cookie directly so authenticated UI
  * flows can run locally WITHOUT the Cognito login round-trip.
  *
- * The minted token's `sub` is 'e2e-test-user' and capability guards
+ * The minted token's `sub` defaults to 'e2e-test-user' and capability guards
  * (hasCapabilityAccess) join DIRECTLY on `users.cognito_sub = session.sub` —
  * there is NO email fallback in that path. The seed (`bun run db:seed`) therefore
  * sets the admin test user's `cognito_sub = 'e2e-test-user'` so the join matches
  * and every capability resolves. If you change this `sub`, update
  * scripts/db/seed-local.sql to match or all gated routes will redirect.
+ *
+ * Pass a different `sub`/`email` to mint a session for a lower-privilege seeded
+ * user — e.g. SEEDED_NO_CAPABILITY_SUB (the student user, which holds no
+ * capabilities) to exercise the 403 capability-denied path.
  *
  * Requires AUTH_SECRET in the environment (source .env.local before running):
  *   set -a && source .env.local && set +a
@@ -29,9 +33,18 @@ const DEV_SESSION_COOKIE = 'authjs.session-token'
 const SESSION_LIFETIME_MS = 12 * 60 * 60 * 1000
 
 export const SEEDED_ADMIN_EMAIL = 'test@example.com'
+// cognito_sub of the seeded admin user (see scripts/db/seed-local.sql). Holds
+// every capability, so capability guards resolve to 200.
+export const SEEDED_ADMIN_SUB = 'e2e-test-user'
+// cognito_sub of the seeded student user. The student role is granted NO
+// role_capabilities, so capability guards resolve to 403 for this identity —
+// used to exercise the capability-denied path (Issue #928).
+export const SEEDED_NO_CAPABILITY_SUB = 'e2e-student-user'
+export const SEEDED_NO_CAPABILITY_EMAIL = 'student@example.com'
 
 export async function mintSessionToken(
-  email: string = SEEDED_ADMIN_EMAIL
+  email: string = SEEDED_ADMIN_EMAIL,
+  sub: string = SEEDED_ADMIN_SUB
 ): Promise<string> {
   const secret = process.env.AUTH_SECRET
   if (!secret) {
@@ -45,7 +58,7 @@ export async function mintSessionToken(
     secret,
     maxAge: SESSION_LIFETIME_MS / 1000,
     token: {
-      sub: 'e2e-test-user',
+      sub,
       email,
       name: 'E2E Test',
       expiresAt: Date.now() + SESSION_LIFETIME_MS,
@@ -63,7 +76,8 @@ export async function mintSessionToken(
 /** Inject a minted session cookie into a Playwright browser context. */
 export async function authenticateContext(
   context: BrowserContext,
-  email: string = SEEDED_ADMIN_EMAIL
+  email: string = SEEDED_ADMIN_EMAIL,
+  sub: string = SEEDED_ADMIN_SUB
 ): Promise<void> {
   // This harness mints a NON-secure dev cookie ('authjs.session-token'). A
   // production build uses the secure '__Secure-' prefixed cookie, so injecting
@@ -77,7 +91,7 @@ export async function authenticateContext(
         `is non-secure and is ignored by production builds. PLAYWRIGHT_BASE_URL=${baseUrl}`
     )
   }
-  const value = await mintSessionToken(email)
+  const value = await mintSessionToken(email, sub)
   await context.addCookies([
     {
       name: DEV_SESSION_COOKIE,
