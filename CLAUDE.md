@@ -351,10 +351,30 @@ metrics.addMetric('customMetric', 'Count', 1)
 
 ### Application Security
 - Routes under `/(protected)` require authentication
-- Role-based access via `hasToolAccess("tool-name")` - checks if user has permission
+- Role-based UI access via `hasCapabilityAccess("capability-id")` - checks if the user's roles grant a capability (see Permissions below)
 - Parameterized queries prevent SQL injection
 - All secrets in AWS Secrets Manager with automatic rotation
 - `sanitizeForLogging()` for PII protection
+
+### Permissions
+
+Two **separate** authorization systems — never collapse them. See
+`docs/architecture/capabilities-and-scopes.md` for the full split, decision
+tree, and anti-patterns.
+
+- **Capabilities** — role-gated **UI features** for logged-in humans (Nexus,
+  Assistant Architect, admin pages). Check with `hasCapabilityAccess(identifier)`
+  (`utils/roles.ts`). Backed by `capabilities` / `role_capabilities`; registry in
+  `lib/capabilities/manifest.ts`.
+- **Scopes** — permissions on **API keys** for programmatic/MCP callers (e.g.
+  `assistants:execute`, `chat:read`). Check with `requireScope(auth, scope)`
+  (`lib/api/auth-middleware.ts`). Backed by `api_keys.scopes`; defined in
+  `lib/api-keys/scopes.ts`.
+- **Don't** gate API/MCP endpoints with `hasCapabilityAccess()`, **don't** gate
+  UI features with `requireScope()`, and **don't** share an identifier across the
+  two systems.
+- Note: `hasCapabilityAccess` (user access) is unrelated to `hasCapability` in
+  `lib/ai/capability-utils.ts` (AI-model feature flags).
 
 ### Infrastructure Security (IAM Least Privilege)
 **CRITICAL**: All new Lambda/ECS roles MUST use `ServiceRoleFactory`:
