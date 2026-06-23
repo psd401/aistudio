@@ -45,9 +45,12 @@ export async function mintSessionToken(
       name: 'E2E Test',
       expiresAt: Date.now() + SESSION_LIFETIME_MS,
       tokenLifetimeMs: SESSION_LIFETIME_MS,
-      accessToken: 'x',
-      idToken: 'x',
-      refreshToken: 'x',
+      // Explicitly-labeled placeholders (not 'x'): if any code path ever forwards
+      // these to Cognito or a downstream AWS service, it fails loudly with a
+      // recognizable value instead of silently passing a single-char token.
+      accessToken: 'e2e-placeholder-not-a-real-token',
+      idToken: 'e2e-placeholder-not-a-real-token',
+      refreshToken: 'e2e-placeholder-not-a-real-token',
     },
   })
 }
@@ -57,6 +60,18 @@ export async function authenticateContext(
   context: BrowserContext,
   email: string = SEEDED_ADMIN_EMAIL
 ): Promise<void> {
+  // This harness mints a NON-secure dev cookie ('authjs.session-token'). A
+  // production build uses the secure '__Secure-' prefixed cookie, so injecting
+  // this cookie against a non-localhost target is silently ignored and every
+  // request 401s — a failure mode indistinguishable from a missing AUTH_SECRET.
+  // Fail loudly instead.
+  const baseUrl = process.env.PLAYWRIGHT_BASE_URL
+  if (baseUrl && !/^https?:\/\/(localhost|127\.0\.0\.1)(:|\/|$)/.test(baseUrl)) {
+    throw new Error(
+      `Authenticated E2E tests must run against localhost — the dev session cookie ` +
+        `is non-secure and is ignored by production builds. PLAYWRIGHT_BASE_URL=${baseUrl}`
+    )
+  }
   const value = await mintSessionToken(email)
   await context.addCookies([
     {

@@ -31,9 +31,11 @@ export interface NavigationItemData {
   link?: string;
   description?: string;
   type: "link" | "section" | "page";
-  parentId?: number;
-  capabilityId?: number;
-  requiresRole?: string;
+  // Clearable relation/role fields accept null so an update can REMOVE the gate
+  // (e.g. ungate a nav item). The DB column is nullable; passing null clears it.
+  parentId?: number | null;
+  capabilityId?: number | null;
+  requiresRole?: string | null;
   position?: number;
   isActive?: boolean;
 }

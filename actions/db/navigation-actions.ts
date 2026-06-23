@@ -44,9 +44,10 @@ type NavigationUpdateData = Partial<{
   link: string;
   description: string;
   type: "link" | "section" | "page";
-  parentId: number;
-  capabilityId: number;
-  requiresRole: string;
+  // Clearable relation/role fields accept null so callers can REMOVE the gate.
+  parentId: number | null;
+  capabilityId: number | null;
+  requiresRole: string | null;
   position: number;
   isActive: boolean;
 }>
@@ -66,14 +67,16 @@ function applyNavigationStringFields(
 }
 
 // Map relational/role fields (parentId, capabilityId, requiresRole) onto the
-// update payload, converting null to omission.
+// update payload. An explicit null is PRESERVED (not omitted) so callers can
+// clear the gate — e.g. ungate a nav item by setting capabilityId to null.
+// Only `undefined` (field absent) is treated as "leave unchanged".
 function applyNavigationRelationFields(
   data: Partial<InsertNavigationItem>,
   updateData: NavigationUpdateData
 ): void {
-  if (data.parentId !== undefined && data.parentId !== null) updateData.parentId = data.parentId
-  if (data.capabilityId !== undefined && data.capabilityId !== null) updateData.capabilityId = data.capabilityId
-  if (data.requiresRole !== undefined && data.requiresRole !== null) updateData.requiresRole = data.requiresRole
+  if (data.parentId !== undefined) updateData.parentId = data.parentId ?? null
+  if (data.capabilityId !== undefined) updateData.capabilityId = data.capabilityId ?? null
+  if (data.requiresRole !== undefined) updateData.requiresRole = data.requiresRole ?? null
 }
 
 // Map simple scalar fields (position, isActive) onto the update payload.

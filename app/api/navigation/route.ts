@@ -376,7 +376,10 @@ export async function GET() {
         {
           isSuccess: false,
           message: "Failed to fetch navigation items",
-          error: error instanceof Error ? error.message : "Unknown error",
+          // Raw error.message is intentionally NOT returned in the response body:
+          // it can leak AWS SDK credential errors, DB table/column names, or
+          // connection strings to any authenticated user. Full detail is logged
+          // above and exposed via `debug` in non-production only.
           debug: process.env.NODE_ENV !== 'production' ? errorDetails : undefined
         },
         { status: 500, headers: { "X-Request-Id": requestId } }
@@ -395,10 +398,9 @@ export async function GET() {
       });
     }
     return NextResponse.json(
-      {
-        isSuccess: false,
-        message: error instanceof Error ? error.message : "Failed to fetch navigation"
-      },
+      // Generic message only — raw error.message can leak infrastructure detail
+      // to authenticated users. Full error is logged above.
+      { isSuccess: false, message: "Failed to fetch navigation" },
       { status: 500, headers: { "X-Request-Id": requestId } }
     )
   }

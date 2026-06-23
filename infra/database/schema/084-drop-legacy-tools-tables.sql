@@ -23,6 +23,22 @@
 -- remap navigation_items by joining tools -> capabilities on identifier, never
 -- by assuming tool_id == capability_id.
 --
+-- ⚠️ ORPHAN PRE-CHECK (run BEFORE deploying this migration):
+--   A nav item whose tool_id has NO matching capabilities.identifier gets
+--   capability_id = NULL and the navigation route treats NULL as "not gated" —
+--   i.e. it becomes visible to EVERY user. This matches the prior
+--   ON DELETE SET NULL behavior, but for a destructive migration it is worth
+--   confirming there are zero such orphans so nothing is silently un-gated:
+--
+--     SELECT ni.id, ni.label, ni.tool_id
+--     FROM navigation_items ni
+--     LEFT JOIN tools t        ON ni.tool_id = t.id
+--     LEFT JOIN capabilities c ON c.identifier = t.identifier
+--     WHERE ni.tool_id IS NOT NULL AND c.id IS NULL;
+--
+--   If rows are returned, add the missing capabilities or delete the nav items
+--   before deploying. Zero rows = safe.
+--
 -- NO PL/pgSQL / DO $$ blocks. The RDS Data API migration runner's statement
 -- splitter cannot handle dollar-quoted blocks. Plain DDL/DML only.
 
