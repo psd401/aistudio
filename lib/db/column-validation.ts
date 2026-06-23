@@ -12,8 +12,8 @@ export const ALLOWED_UPDATE_COLUMNS = {
   ],
   
   navigation_items: [
-    'label', 'icon', 'link', 'description', 'type', 
-    'parent_id', 'tool_id', 'requires_role', 'position', 
+    'label', 'icon', 'link', 'description', 'type',
+    'parent_id', 'capability_id', 'requires_role', 'position',
     'is_active', 'updated_at'
   ],
   
@@ -30,10 +30,6 @@ export const ALLOWED_UPDATE_COLUMNS = {
   assistant_architects: [
     'name', 'description', 'status', 'image_path', 
     'input_schema', 'output_schema', 'updated_at'
-  ],
-  
-  tools: [
-    'name', 'description', 'is_active', 'updated_at'
   ],
   
   jobs: [

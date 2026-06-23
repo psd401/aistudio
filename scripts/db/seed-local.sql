@@ -15,15 +15,28 @@
 -- Create a local test user for development (bypasses Cognito auth locally)
 -- Email: test@example.com
 -- This user is pre-assigned the administrator role for full access
-
-INSERT INTO users (email, first_name, last_name, last_sign_in_at)
+--
+-- cognito_sub = 'e2e-test-user' is REQUIRED for the Playwright auth harness:
+-- mintSessionToken() (tests/e2e/helpers/session-auth.ts) mints a session with
+-- sub='e2e-test-user', and hasCapabilityAccess() joins directly on
+-- users.cognito_sub. Without this value the test user's cognito_sub is NULL, the
+-- capability join returns zero rows, and every capability-gated route redirects —
+-- making the functional E2E specs fail on a freshly seeded DB. cognito_sub is the
+-- table's unique key (email is NOT unique), so it is also the correct conflict
+-- target for idempotency.
+INSERT INTO users (email, first_name, last_name, cognito_sub, last_sign_in_at)
 VALUES (
     'test@example.com',
     'Test',
     'User',
+    'e2e-test-user',
     CURRENT_TIMESTAMP
 )
-ON CONFLICT DO NOTHING;
+ON CONFLICT (cognito_sub) DO UPDATE SET
+    email = EXCLUDED.email,
+    first_name = EXCLUDED.first_name,
+    last_name = EXCLUDED.last_name,
+    last_sign_in_at = EXCLUDED.last_sign_in_at;
 
 -- Assign administrator role to test user
 INSERT INTO user_roles (user_id, role_id)
@@ -40,14 +53,21 @@ ON CONFLICT (user_id, role_id) DO NOTHING;
 -- Additional Test Users (optional)
 -- ============================================================================
 
--- Staff user for testing staff-level access
-INSERT INTO users (email, first_name, last_name)
+-- Staff user for testing staff-level access.
+-- cognito_sub is the unique key (email is not), so set a deterministic value to
+-- make this seed idempotent — ON CONFLICT DO NOTHING with no target would
+-- otherwise insert a duplicate row on every re-run.
+INSERT INTO users (email, first_name, last_name, cognito_sub)
 VALUES (
     'staff@example.com',
     'Staff',
-    'Member'
+    'Member',
+    'e2e-staff-user'
 )
-ON CONFLICT DO NOTHING;
+ON CONFLICT (cognito_sub) DO UPDATE SET
+    email = EXCLUDED.email,
+    first_name = EXCLUDED.first_name,
+    last_name = EXCLUDED.last_name;
 
 INSERT INTO user_roles (user_id, role_id)
 SELECT u.id, r.id
@@ -55,14 +75,20 @@ FROM users u CROSS JOIN roles r
 WHERE u.email = 'staff@example.com' AND r.name = 'staff'
 ON CONFLICT (user_id, role_id) DO NOTHING;
 
--- Student user for testing student-level access
-INSERT INTO users (email, first_name, last_name)
+-- Student user for testing student-level access.
+-- cognito_sub is the unique key (email is not); deterministic value keeps the
+-- seed idempotent (see staff user note above).
+INSERT INTO users (email, first_name, last_name, cognito_sub)
 VALUES (
     'student@example.com',
     'Student',
-    'Test'
+    'Test',
+    'e2e-student-user'
 )
-ON CONFLICT DO NOTHING;
+ON CONFLICT (cognito_sub) DO UPDATE SET
+    email = EXCLUDED.email,
+    first_name = EXCLUDED.first_name,
+    last_name = EXCLUDED.last_name;
 
 INSERT INTO user_roles (user_id, role_id)
 SELECT u.id, r.id
@@ -73,22 +99,27 @@ ON CONFLICT (user_id, role_id) DO NOTHING;
 -- ============================================================================
 -- Capabilities (role-gated UI features; successor to the legacy tools table)
 -- ============================================================================
--- hasCapabilityAccess() reads from capabilities/role_capabilities. Seed the
--- code-referenced identifiers so local test users keep access:
+-- hasCapabilityAccess() reads from capabilities/role_capabilities. Seed ALL 7
+-- identifiers from CAPABILITY_MANIFEST (lib/capabilities/manifest.ts) so local
+-- test users keep access immediately on a freshly seeded DB — before the
+-- boot-time manifest sync has run:
 -- - assistant-architect: schedules, execute API
 -- - model-compare: compare feature
 -- - knowledge-repositories: repositories, prompt library
 -- - decision-capture, voice-mode: Nexus features
--- These are marked source='manual' here; the boot-time manifest sync
--- (lib/capabilities/manifest.ts) flips manifest-managed identifiers to
--- source='code' when the dev server starts.
+-- - internal-performance-monitoring, internal-system-administration: internal
+--   monitoring/admin APIs (would 403 for admin until first server boot otherwise)
+-- These are marked source='manual' here; the boot-time manifest sync flips
+-- manifest-managed identifiers to source='code' when the dev server starts.
 
 INSERT INTO capabilities (identifier, name, description, is_active, source) VALUES
 ('assistant-architect', 'Assistant Architect', 'Build and schedule custom AI assistants', true, 'manual'),
 ('model-compare', 'Model Compare', 'Compare AI model responses side-by-side', true, 'manual'),
 ('knowledge-repositories', 'Knowledge Repositories', 'Manage knowledge bases for AI assistants', true, 'manual'),
 ('decision-capture', 'Decision Capture', 'Extract and capture decisions from meeting transcripts into the context graph', true, 'manual'),
-('voice-mode', 'Voice Mode', 'Real-time voice conversations in Nexus using AI speech providers', true, 'manual')
+('voice-mode', 'Voice Mode', 'Real-time voice conversations in Nexus using AI speech providers', true, 'manual'),
+('internal-performance-monitoring', 'Internal Performance Monitoring', 'Access internal performance monitoring dashboards and metrics.', true, 'manual'),
+('internal-system-administration', 'Internal System Administration', 'Access internal system administration tooling and diagnostics.', true, 'manual')
 ON CONFLICT (identifier) DO UPDATE SET
     name = EXCLUDED.name,
     description = EXCLUDED.description,
@@ -101,7 +132,7 @@ SELECT r.id, c.id
 FROM roles r
 CROSS JOIN capabilities c
 WHERE r.name = 'administrator'
-  AND c.identifier IN ('assistant-architect', 'model-compare', 'knowledge-repositories', 'decision-capture', 'voice-mode')
+  AND c.identifier IN ('assistant-architect', 'model-compare', 'knowledge-repositories', 'decision-capture', 'voice-mode', 'internal-performance-monitoring', 'internal-system-administration')
 ON CONFLICT (role_id, capability_id) DO NOTHING;
 
 -- Grant assistant-architect and model-compare to staff role
@@ -149,13 +180,20 @@ INSERT INTO navigation_items (id, label, icon, link, parent_id, capability_id, r
 (13, 'System Settings', 'IconTools', '/admin/settings', 11, NULL, 'administrator', 90, true, '', 'link'),
 (15, 'User Management', 'IconUser', '/admin/users', 11, NULL, 'administrator', 100, true, '', 'link');
 
--- Utilities sub-items
+-- Utilities sub-items.
+-- capability_id gates each item by the capability the route enforces. A NULL
+-- capability_id reads as "not gated" in the navigation API (see app/api/
+-- navigation/route.ts: `if (!item.capabilityId) continue`), which in local dev
+-- would expose these items to low-privilege roles — the inverse of production
+-- and a vacuous pass for any "user CANNOT see gated nav" E2E assertion. Resolve
+-- each capability by identifier (decoupled from id sequencing); the capabilities
+-- above are seeded before this INSERT so every subquery returns a row.
 INSERT INTO navigation_items (id, label, icon, link, parent_id, capability_id, requires_role, position, is_active, description, type) VALUES
-(40, 'Assistant Scheduler', 'IconCalendar', '/schedules', 19, NULL, NULL, 0, true, '', 'link'),
-(7, 'Assistant Architect', 'IconBraces', '/utilities/assistant-architect', 19, NULL, NULL, 10, true, NULL, 'link'),
-(37, 'Model Compare', 'IconRobot', '/compare', 19, NULL, NULL, 20, true, 'Compare AI model responses side-by-side', 'link'),
-(36, 'Repositories', 'IconBuildingBank', '/repositories', 19, NULL, NULL, 30, true, '', 'link'),
-(47, 'Decision Capture', 'IconGitBranch', '/nexus/decision-capture', 19, NULL, NULL, 40, true, 'Extract decisions from meeting transcripts', 'link');
+(40, 'Assistant Scheduler', 'IconCalendar', '/schedules', 19, (SELECT id FROM capabilities WHERE identifier = 'assistant-architect'), NULL, 0, true, '', 'link'),
+(7, 'Assistant Architect', 'IconBraces', '/utilities/assistant-architect', 19, (SELECT id FROM capabilities WHERE identifier = 'assistant-architect'), NULL, 10, true, NULL, 'link'),
+(37, 'Model Compare', 'IconRobot', '/compare', 19, (SELECT id FROM capabilities WHERE identifier = 'model-compare'), NULL, 20, true, 'Compare AI model responses side-by-side', 'link'),
+(36, 'Repositories', 'IconBuildingBank', '/repositories', 19, (SELECT id FROM capabilities WHERE identifier = 'knowledge-repositories'), NULL, 30, true, '', 'link'),
+(47, 'Decision Capture', 'IconGitBranch', '/nexus/decision-capture', 19, (SELECT id FROM capabilities WHERE identifier = 'decision-capture'), NULL, 40, true, 'Extract decisions from meeting transcripts', 'link');
 
 -- Update sequence to max id + 1
 SELECT setval('navigation_items_id_seq', (SELECT MAX(id) FROM navigation_items));

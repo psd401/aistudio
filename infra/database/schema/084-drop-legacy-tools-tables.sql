@@ -39,10 +39,16 @@
 --
 -- NO PL/pgSQL / DO $$ blocks. The RDS Data API migration runner's statement
 -- splitter cannot handle dollar-quoted blocks. Plain DDL/DML only.
-
--- Mark any previous failed attempts as completed so the runner stops retrying.
-UPDATE migration_log SET status = 'completed'
-WHERE description = '084-drop-legacy-tools-tables.sql' AND status = 'failed';
+--
+-- RETRY SAFETY: every statement below is idempotent (IF EXISTS / IF NOT EXISTS,
+-- plus the FK is dropped before re-adding), so a partial failure can simply be
+-- re-run — the migration runner retries any file whose latest migration_log row
+-- is not 'completed'. We deliberately do NOT pre-mark prior 'failed' rows as
+-- 'completed': checkMigrationRun() gates on a single 'completed' row, so writing
+-- one before the DDL runs would make a second partial failure skip the migration
+-- forever (tool_id never dropped, capability_id never wired). If a DDL failure
+-- ever proves unrecoverable, clear it manually: DELETE FROM migration_log WHERE
+-- description = '084-drop-legacy-tools-tables.sql' AND status = 'failed';
 
 -- ---------------------------------------------------------------------------
 -- 1. Re-point navigation_items.tool_id (FK -> tools) to capability_id (-> capabilities)
@@ -80,6 +86,11 @@ ALTER TABLE navigation_items DROP COLUMN IF EXISTS tool_id;
 -- 1d. Add the FK to capabilities. ON DELETE SET NULL mirrors the legacy
 -- navigation_items_tool_id_fkey behavior so deleting a capability (e.g. on
 -- Assistant Architect delete) nulls the reference instead of blocking the delete.
+-- Drop first so a retry after a prior partial run (where the constraint was
+-- already added) does not abort with "constraint already exists" — PostgreSQL
+-- has no ADD CONSTRAINT IF NOT EXISTS, so DROP IF EXISTS + ADD is the idempotent
+-- equivalent.
+ALTER TABLE navigation_items DROP CONSTRAINT IF EXISTS navigation_items_capability_id_fkey;
 ALTER TABLE navigation_items
     ADD CONSTRAINT navigation_items_capability_id_fkey
     FOREIGN KEY (capability_id) REFERENCES capabilities(id) ON DELETE SET NULL;

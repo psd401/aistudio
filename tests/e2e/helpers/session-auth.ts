@@ -5,9 +5,14 @@ import type { BrowserContext } from '@playwright/test'
  * Authenticated-E2E helper (Issue #928 functional coverage).
  *
  * Mints a NextAuth (Auth.js v5) session cookie directly so authenticated UI
- * flows can run locally WITHOUT the Cognito login round-trip. The app resolves
- * the user by cognito_sub then falls back to EMAIL, so email 'test@example.com'
- * maps to the seeded admin (run `bun run db:seed`), which holds every capability.
+ * flows can run locally WITHOUT the Cognito login round-trip.
+ *
+ * The minted token's `sub` is 'e2e-test-user' and capability guards
+ * (hasCapabilityAccess) join DIRECTLY on `users.cognito_sub = session.sub` —
+ * there is NO email fallback in that path. The seed (`bun run db:seed`) therefore
+ * sets the admin test user's `cognito_sub = 'e2e-test-user'` so the join matches
+ * and every capability resolves. If you change this `sub`, update
+ * scripts/db/seed-local.sql to match or all gated routes will redirect.
  *
  * Requires AUTH_SECRET in the environment (source .env.local before running):
  *   set -a && source .env.local && set +a

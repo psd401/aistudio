@@ -331,11 +331,17 @@ export async function updateCapability(
 }
 
 /**
- * Upsert a capability by identifier (used by the manifest sync).
+ * Upsert a capability by identifier.
  *
  * On conflict (identifier already exists): updates name, description, source and
- * re-activates the row. This is how the manifest claims ownership of a
- * previously backfilled `source: 'manual'` row, flipping it to `source: 'code'`.
+ * re-activates the row.
+ *
+ * @internal Do NOT call directly to reconcile the manifest. The boot-time
+ * manifest sync (lib/capabilities/sync.ts) runs its own inline upsert inside a
+ * `pg_advisory_xact_lock` transaction so concurrently booting ECS replicas
+ * serialize. A bare call here bypasses that lock and can race. This is exported
+ * for completeness/tests only — prefer syncCapabilityManifest() for ownership
+ * reconciliation.
  */
 export async function upsertCapabilityByIdentifier(data: CapabilityData) {
   const result = await executeQuery(

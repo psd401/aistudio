@@ -88,8 +88,10 @@ function applyNavigationScalarFields(
   if (data.isActive !== undefined) updateData.isActive = data.isActive
 }
 
-// Build the database update payload from a partial input, converting null
-// values to undefined (omission) for updateNavigationItem.
+// Build the database update payload from a partial input. Absent fields
+// (undefined) are omitted ("leave unchanged"); explicit null is PRESERVED so a
+// caller can clear a relation/gate — e.g. ungate a nav item via capabilityId:
+// null. See applyNavigationRelationFields for the null-preservation detail.
 function buildNavigationUpdateData(
   data: Partial<InsertNavigationItem>
 ): NavigationUpdateData {
