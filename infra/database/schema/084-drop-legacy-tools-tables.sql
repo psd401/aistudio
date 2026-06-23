@@ -23,21 +23,19 @@
 -- remap navigation_items by joining tools -> capabilities on identifier, never
 -- by assuming tool_id == capability_id.
 --
--- ⚠️ ORPHAN PRE-CHECK (run BEFORE deploying this migration):
---   A nav item whose tool_id has NO matching capabilities.identifier gets
---   capability_id = NULL and the navigation route treats NULL as "not gated" —
---   i.e. it becomes visible to EVERY user. This matches the prior
---   ON DELETE SET NULL behavior, but for a destructive migration it is worth
---   confirming there are zero such orphans so nothing is silently un-gated:
+-- ⚠️ ORPHANS (audit S4): a nav item whose tool_id has NO matching
+--   capabilities.identifier gets capability_id = NULL, which the navigation
+--   route treats as "not gated" — i.e. it would become visible to EVERY user.
+--   Step 1b.5 below makes this SAFE by DEACTIVATING such orphans (is_active =
+--   false) before tool_id is dropped, so nothing is silently un-gated. No manual
+--   pre-check is required. To see what WILL be deactivated (and add capabilities
+--   / re-gate instead, if preferred), run this before deploying:
 --
 --     SELECT ni.id, ni.label, ni.tool_id
 --     FROM navigation_items ni
 --     LEFT JOIN tools t        ON ni.tool_id = t.id
 --     LEFT JOIN capabilities c ON c.identifier = t.identifier
 --     WHERE ni.tool_id IS NOT NULL AND c.id IS NULL;
---
---   If rows are returned, add the missing capabilities or delete the nav items
---   before deploying. Zero rows = safe.
 --
 -- NO PL/pgSQL / DO $$ blocks. The RDS Data API migration runner's statement
 -- splitter cannot handle dollar-quoted blocks. Plain DDL/DML only.
@@ -63,6 +61,17 @@ FROM tools t
 JOIN capabilities c ON c.identifier = t.identifier
 WHERE ni.tool_id = t.id
   AND ni.capability_id IS NULL;
+
+-- 1b.5. SAFETY (audit S4): deactivate any orphan — a nav item that WAS
+-- tool-gated (tool_id IS NOT NULL) but did NOT map to a capability (capability_id
+-- still NULL after the backfill). Left active, its NULL capability_id reads as
+-- "not gated" and the item would become visible to EVERY user. Deactivating
+-- hides it instead; an admin can re-gate it (set a capability) and re-activate it
+-- via the navigation manager. MUST run before 1c drops tool_id (the orphan key).
+-- No-op when there are no orphans.
+UPDATE navigation_items
+SET is_active = false
+WHERE tool_id IS NOT NULL AND capability_id IS NULL;
 
 -- 1c. Drop the old FK constraint and column (idempotent).
 ALTER TABLE navigation_items DROP CONSTRAINT IF EXISTS navigation_items_tool_id_fkey;
