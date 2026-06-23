@@ -2431,7 +2431,7 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(healthLambda).add('ManagedBy', 'cdk');
 
     new events.Rule(this, 'AgentHealthDailySchedule', {
-      description: 'Daily S3 workspace scan → agent_health_snapshots',
+      description: 'Daily S3 workspace scan to agent_health_snapshots',
       schedule: events.Schedule.rate(cdk.Duration.days(1)),
       targets: [new eventsTargets.LambdaFunction(healthLambda)],
     });
@@ -2745,7 +2745,7 @@ export class AgentPlatformStack extends cdk.Stack {
     cdk.Tags.of(pruneLambda).add('ManagedBy', 'cdk');
 
     const pruneSchedule = new events.Rule(this, 'AgentTelemetryPruneSchedule', {
-      description: 'Daily 04:00 UTC — prune agent_message_content + agent_tool_invocations older than 90 days',
+      description: 'Daily 04:00 UTC - prune agent_message_content + agent_tool_invocations older than 90 days',
       schedule: events.Schedule.cron({ minute: '0', hour: '4' }),
       targets: [new eventsTargets.LambdaFunction(pruneLambda)],
     });
