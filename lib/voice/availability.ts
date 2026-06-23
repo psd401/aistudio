@@ -15,7 +15,7 @@
  */
 
 import { Settings } from "@/lib/settings-manager"
-import { hasToolAccess } from "@/lib/db/drizzle/users"
+import { hasCapabilityAccess } from "@/lib/db/drizzle/capabilities"
 import { isSupportedVoiceProvider } from "./provider-factory"
 
 /** Categorizes the type of unavailability for downstream close-code decisions */
@@ -58,7 +58,7 @@ export async function getVoiceAvailability(cognitoSub: string): Promise<VoiceAva
   }
 
   // 2. Check user has voice-mode permission
-  const hasAccess = await hasToolAccess(cognitoSub, "voice-mode")
+  const hasAccess = await hasCapabilityAccess(cognitoSub, "voice-mode")
   if (!hasAccess) {
     return { available: false, reason: "Voice mode is not enabled for your role", type: "permission" }
   }

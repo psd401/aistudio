@@ -2,7 +2,7 @@
 
 import { getServerSession } from "@/lib/auth/server-session"
 import { type ActionState } from "@/types/actions-types"
-import { hasToolAccess } from "@/utils/roles"
+import { hasCapabilityAccess } from "@/utils/roles"
 import { getUserIdFromSession, canModifyRepository } from "@/actions/repositories/repository-permissions"
 import {
   createRepository as drizzleCreateRepository,
@@ -81,7 +81,7 @@ export async function createRepository(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Repository creation denied - insufficient permissions", {
         userId: session.sub
@@ -161,7 +161,7 @@ export async function updateRepository(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Repository update denied - insufficient permissions", {
         userId: session.sub,
@@ -273,7 +273,7 @@ export async function deleteRepository(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Repository deletion denied - insufficient permissions", {
         userId: session.sub,
@@ -371,7 +371,7 @@ export async function listRepositories(): Promise<ActionState<Repository[]>> {
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Repository list denied - insufficient permissions", {
         userId: session.sub
@@ -437,7 +437,7 @@ export async function getRepository(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Repository access denied - insufficient permissions", {
         userId: session.sub,
@@ -507,7 +507,7 @@ export async function getRepositoryAccess(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Repository access list denied - insufficient permissions", {
         userId: session.sub,
@@ -554,7 +554,7 @@ export async function grantRepositoryAccess(
       return { isSuccess: false, message: "Unauthorized" }
     }
 
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       return { isSuccess: false, message: "Access denied. You need knowledge repository access." }
     }
@@ -596,7 +596,7 @@ export async function revokeRepositoryAccess(
       return { isSuccess: false, message: "Unauthorized" }
     }
 
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       return { isSuccess: false, message: "Access denied. You need knowledge repository access." }
     }
@@ -660,7 +660,7 @@ export async function getUserAccessibleRepositoriesAction(): Promise<ActionState
       return { isSuccess: false, message: "Unauthorized" }
     }
 
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Access denied - missing knowledge-repositories tool access")
       return { isSuccess: false, message: "Access denied. You need knowledge repository access." }

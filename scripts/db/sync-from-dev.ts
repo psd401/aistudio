@@ -39,8 +39,11 @@ const EXCLUDED_TABLES = [
 // since we only iterate over this known-safe list
 const TABLES_TO_SYNC = [
   "roles",
-  "tools",
-  "role_tools",
+  // capabilities/role_capabilities replaced the legacy tools/role_tools tables
+  // (#928). They must precede navigation_items, which FKs navigation_items
+  // .capability_id -> capabilities.id.
+  "capabilities",
+  "role_capabilities",
   "ai_models",
   "ai_model_tiers",
   "model_role_restrictions",

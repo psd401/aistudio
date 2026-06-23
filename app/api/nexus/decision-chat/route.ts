@@ -21,7 +21,7 @@ import { ContentSafetyBlockedError } from '@/lib/streaming/types';
 import { getDecisionFrameworkPrompt } from '@/lib/graph/decision-framework';
 import { getRequiredSetting } from '@/lib/settings-manager';
 import { createDecisionCaptureTools } from '@/lib/tools/decision-capture-tools';
-import { hasToolAccess } from '@/utils/roles';
+import { hasCapabilityAccess } from '@/utils/roles';
 
 import {
   generateConversationTitle,
@@ -183,7 +183,7 @@ async function authenticateAndAuthorize(params: {
   const userId = currentUser.data.user.id;
 
   // Defense in depth — UI layout also checks, but API must enforce independently
-  const hasAccess = await hasToolAccess('decision-capture');
+  const hasAccess = await hasCapabilityAccess('decision-capture');
   if (!hasAccess) {
     log.warn('User does not have decision-capture tool access', { userId });
     timer({ status: 'error', reason: 'forbidden' });

@@ -6,7 +6,7 @@ import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from 
 import { executeQuery } from '@/lib/db/drizzle-client';
 import { eq, inArray } from 'drizzle-orm';
 import { modelComparisons, aiModels } from '@/lib/db/schema';
-import { hasToolAccess } from '@/utils/roles';
+import { hasCapabilityAccess } from '@/utils/roles';
 import { createProviderModel } from '@/lib/ai/provider-factory';
 import { hasCapability } from '@/lib/ai/capability-utils';
 import { generateImageForNexus } from '@/lib/ai/image-generation-service';
@@ -313,7 +313,7 @@ export async function POST(req: Request) {
     }
 
     // 3. Check tool access
-    const hasAccess = await hasToolAccess("model-compare");
+    const hasAccess = await hasCapabilityAccess("model-compare");
     if (!hasAccess) {
       log.warn('Model compare access denied', { userId: session.sub });
       timer({ status: 'error', reason: 'access_denied' });

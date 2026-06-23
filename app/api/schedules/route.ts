@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server"
 import { getSchedulesAction, createScheduleAction } from "@/actions/db/schedule-actions"
 import { getServerSession } from "@/lib/auth/server-session"
-import { hasToolAccess } from "@/utils/roles"
+import { hasCapabilityAccess } from "@/utils/roles"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from '@/lib/logger'
 export const dynamic = 'force-dynamic'
 
@@ -27,7 +27,7 @@ export async function GET() {
     }
 
     // Check if user has access to the assistant-architect tool
-    const hasAccess = await hasToolAccess("assistant-architect")
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
       log.warn("Forbidden - User lacks assistant-architect access")
       timer({ status: "error", reason: "forbidden" })
@@ -91,7 +91,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Check if user has access to the assistant-architect tool
-    const hasAccess = await hasToolAccess("assistant-architect")
+    const hasAccess = await hasCapabilityAccess("assistant-architect")
     if (!hasAccess) {
       log.warn("Forbidden - User lacks assistant-architect access")
       timer({ status: "error", reason: "forbidden" })

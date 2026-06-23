@@ -5,7 +5,7 @@
 import { executeQuery } from "@/lib/db/drizzle-client"
 import { sql, eq } from "drizzle-orm"
 import { users } from "@/lib/db/schema"
-import { hasToolAccess, hasRole } from "@/utils/roles"
+import { hasCapabilityAccess, hasRole } from "@/utils/roles"
 import { createLogger, generateRequestId } from "@/lib/logger"
 
 /**
@@ -15,7 +15,7 @@ export async function canAccessPromptLibrary(userId?: number): Promise<boolean> 
   if (!userId) return false
 
   // Using existing tool access system
-  return await hasToolAccess("knowledge-repositories")
+  return await hasCapabilityAccess("knowledge-repositories")
 }
 
 /**

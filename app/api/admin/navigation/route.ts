@@ -127,7 +127,7 @@ export async function POST(request: Request) {
         description: body.description,
         type: body.type,
         parentId: body.parentId ? Number(body.parentId) : undefined,
-        toolId: body.toolId ? Number(body.toolId) : undefined,
+        capabilityId: body.capabilityId ? Number(body.capabilityId) : undefined,
         requiresRole: body.requiresRole,
         position: body.position || 0,
         isActive: body.isActive ?? true

@@ -16,8 +16,6 @@ import { relations } from "drizzle-orm";
 import { users } from "./tables/users";
 import { roles } from "./tables/roles";
 import { userRoles } from "./tables/user-roles";
-import { tools } from "./tables/tools";
-import { roleTools } from "./tables/role-tools";
 import { capabilities } from "./tables/capabilities";
 import { roleCapabilities } from "./tables/role-capabilities";
 
@@ -147,7 +145,6 @@ export const usersRelations = relations(users, ({ one, many }) => ({
 
 export const rolesRelations = relations(roles, ({ many }) => ({
   userRoles: many(userRoles),
-  roleTools: many(roleTools),
   roleCapabilities: many(roleCapabilities),
   repositoryAccess: many(repositoryAccess),
 }));
@@ -163,24 +160,9 @@ export const userRolesRelations = relations(userRoles, ({ one }) => ({
   }),
 }));
 
-export const toolsRelations = relations(tools, ({ many }) => ({
-  roleTools: many(roleTools),
-  navigationItems: many(navigationItems),
-}));
-
-export const roleToolsRelations = relations(roleTools, ({ one }) => ({
-  role: one(roles, {
-    fields: [roleTools.roleId],
-    references: [roles.id],
-  }),
-  tool: one(tools, {
-    fields: [roleTools.toolId],
-    references: [tools.id],
-  }),
-}));
-
 export const capabilitiesRelations = relations(capabilities, ({ many }) => ({
   roleCapabilities: many(roleCapabilities),
+  navigationItems: many(navigationItems),
 }));
 
 export const roleCapabilitiesRelations = relations(
@@ -728,9 +710,9 @@ export const ideaNotesRelations = relations(ideaNotes, ({ one }) => ({
 export const navigationItemsRelations = relations(
   navigationItems,
   ({ one, many }) => ({
-    tool: one(tools, {
-      fields: [navigationItems.toolId],
-      references: [tools.id],
+    capability: one(capabilities, {
+      fields: [navigationItems.capabilityId],
+      references: [capabilities.id],
     }),
     parent: one(navigationItems, {
       fields: [navigationItems.parentId],

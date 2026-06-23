@@ -57,7 +57,7 @@ export async function getNavigationItemsAction(): Promise<ActionState<SelectNavi
       description: item.description ?? null,
       type: item.type,
       parentId: item.parentId ?? null,
-      toolId: item.toolId ?? null,
+      capabilityId: item.capabilityId ?? null,
       requiresRole: item.requiresRole ?? null,
       position: item.position,
       isActive: item.isActive,
@@ -114,13 +114,13 @@ export async function createNavigationItemAction(
       parentId = numParentId
     }
 
-    let toolId: number | undefined
-    if (data.toolId !== undefined && data.toolId !== null) {
-      const numToolId = Number(data.toolId)
-      if (Number.isNaN(numToolId)) {
-        throw ErrorFactories.invalidInput('toolId', data.toolId, 'Must be a valid number')
+    let capabilityId: number | undefined
+    if (data.capabilityId !== undefined && data.capabilityId !== null) {
+      const numCapabilityId = Number(data.capabilityId)
+      if (Number.isNaN(numCapabilityId)) {
+        throw ErrorFactories.invalidInput('capabilityId', data.capabilityId, 'Must be a valid number')
       }
-      toolId = numToolId
+      capabilityId = numCapabilityId
     }
 
     const newItem = await createNavigationItem({
@@ -130,7 +130,7 @@ export async function createNavigationItemAction(
       description: data.description ?? undefined,
       type: data.type || 'page',
       parentId,
-      toolId,
+      capabilityId,
       requiresRole: data.requiresRole ?? undefined,
       position: data.position,
       isActive: data.isActive ?? true
@@ -152,7 +152,7 @@ export async function createNavigationItemAction(
       description: newItem.description ?? null,
       type: newItem.type,
       parentId: newItem.parentId ?? null,
-      toolId: newItem.toolId ?? null,
+      capabilityId: newItem.capabilityId ?? null,
       requiresRole: newItem.requiresRole ?? null,
       position: newItem.position,
       isActive: newItem.isActive,
@@ -201,7 +201,7 @@ export async function updateNavigationItemAction(
       description: string;
       type: "link" | "section" | "page";
       parentId: number;
-      toolId: number;
+      capabilityId: number;
       requiresRole: string;
       position: number;
       isActive: boolean;
@@ -213,7 +213,7 @@ export async function updateNavigationItemAction(
     if (data.description !== undefined && data.description !== null) updateData.description = data.description
     if (data.type !== undefined && (data.type === "link" || data.type === "section" || data.type === "page")) updateData.type = data.type
     if (data.parentId !== undefined && data.parentId !== null) updateData.parentId = data.parentId
-    if (data.toolId !== undefined && data.toolId !== null) updateData.toolId = data.toolId
+    if (data.capabilityId !== undefined && data.capabilityId !== null) updateData.capabilityId = data.capabilityId
     if (data.requiresRole !== undefined && data.requiresRole !== null) updateData.requiresRole = data.requiresRole
     if (data.position !== undefined) updateData.position = data.position
     if (data.isActive !== undefined) updateData.isActive = data.isActive
@@ -247,7 +247,7 @@ export async function updateNavigationItemAction(
       description: updatedItem.description ?? null,
       type: updatedItem.type,
       parentId: updatedItem.parentId ?? null,
-      toolId: updatedItem.toolId ?? null,
+      capabilityId: updatedItem.capabilityId ?? null,
       requiresRole: updatedItem.requiresRole ?? null,
       position: updatedItem.position,
       isActive: updatedItem.isActive,

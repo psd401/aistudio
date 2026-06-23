@@ -28,8 +28,6 @@ import {
   users,
   roles,
   userRoles,
-  tools,
-  roleTools,
   // AI Models
   aiModels,
   aiStreamingJobs,
@@ -127,8 +125,6 @@ export type {
 export type SelectUser = InferSelectModel<typeof users>;
 export type SelectRole = InferSelectModel<typeof roles>;
 export type SelectUserRole = InferSelectModel<typeof userRoles>;
-export type SelectTool = InferSelectModel<typeof tools>;
-export type SelectRoleTool = InferSelectModel<typeof roleTools>;
 
 // ============================================
 // Core Tables - Insert Types
@@ -136,8 +132,6 @@ export type SelectRoleTool = InferSelectModel<typeof roleTools>;
 export type InsertUser = InferInsertModel<typeof users>;
 export type InsertRole = InferInsertModel<typeof roles>;
 export type InsertUserRole = InferInsertModel<typeof userRoles>;
-export type InsertTool = InferInsertModel<typeof tools>;
-export type InsertRoleTool = InferInsertModel<typeof roleTools>;
 
 // ============================================
 // AI Models - Select Types

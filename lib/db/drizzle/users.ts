@@ -18,10 +18,6 @@ import {
   roles,
 } from "@/lib/db/schema";
 import { ErrorFactories } from "@/lib/error-utils";
-import {
-  hasCapabilityAccess,
-  getUserCapabilities,
-} from "@/lib/db/drizzle/capabilities";
 
 // ============================================
 // Types
@@ -372,32 +368,6 @@ export async function getAllUserRoles() {
   );
 }
 
-// ============================================
-// Tool Access Operations
-// ============================================
-
-/**
- * Check if a user has access to a specific tool by Cognito sub.
- *
- * Issue #923: the legacy `tools`/`role_tools` tables were renamed to
- * `capabilities`/`role_capabilities`. This function keeps its name and signature
- * as a compat shim during the migration window (call-site rename is workstream
- * #6) and delegates to `hasCapabilityAccess`, which reads the new tables. Reads
- * stay a single DB round-trip — there is no join across old and new tables.
- */
-export async function hasToolAccess(
-  cognitoSub: string,
-  toolIdentifier: string
-): Promise<boolean> {
-  return hasCapabilityAccess(cognitoSub, toolIdentifier);
-}
-
-/**
- * Get all tool identifiers accessible by a user.
- *
- * Issue #923: compat shim delegating to `getUserCapabilities` (reads the new
- * `capabilities`/`role_capabilities` tables).
- */
-export async function getUserTools(cognitoSub: string): Promise<string[]> {
-  return getUserCapabilities(cognitoSub);
-}
+// Capability access checks live in `lib/db/drizzle/capabilities.ts`
+// (`hasCapabilityAccess`, `getUserCapabilities`). The legacy `hasToolAccess` /
+// `getUserTools` compat shims were removed in workstream #6 (Issue #928).

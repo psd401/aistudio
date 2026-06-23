@@ -19,7 +19,6 @@ export type {
   SelectPromptResult,
   SelectJob,
   SelectNavigationItem,
-  SelectTool,
   SelectAiModel,
   InsertAssistantArchitect,
   InsertToolInputField,

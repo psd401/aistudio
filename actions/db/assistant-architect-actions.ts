@@ -8,7 +8,6 @@ import {
   type InsertToolExecution,
   type SelectToolInputField,
   type SelectChainPrompt,
-  type SelectTool,
   type SelectAiModel,
   type ToolInputFieldOptions
 } from "@/types/db-types"
@@ -27,7 +26,7 @@ import {
   startTimer
 } from "@/lib/logger"
 import { getServerSession } from "@/lib/auth/server-session";
-import { hasToolAccess, hasRole } from "@/utils/roles";
+import { hasCapabilityAccess, hasRole } from "@/utils/roles";
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action";
 import {
   getAssistantArchitects as drizzleGetAssistantArchitects,
@@ -48,17 +47,16 @@ import {
   createChainPrompt,
   updateChainPrompt,
   deleteChainPrompt,
-  getTools,
   getAIModels,
   getAIModelById,
   getAssistantArchitectsByStatus,
   getRoleByName,
-  assignToolToRole,
+  assignCapabilityToRole,
   createNavigationItem
 } from "@/lib/db/drizzle";
-import { executeQuery, executeTransaction } from "@/lib/db/drizzle-client";
+import { executeQuery } from "@/lib/db/drizzle-client";
 import { eq, and, inArray, desc, sql } from "drizzle-orm";
-import { tools, navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities } from "@/lib/db/schema";
+import { navigationItems, toolInputFields, chainPrompts, assistantArchitects, userRoles, toolExecutions, promptResults, capabilities, roleCapabilities } from "@/lib/db/schema";
 
 // Use inline type for architect with relations
 type ArchitectWithRelations = SelectAssistantArchitect & {
@@ -675,26 +673,19 @@ export async function updateAssistantArchitectAction(
       return { isSuccess: false, message: "Unauthorized" }
     }
 
-    // If the tool was approved and is being edited, set status to pending_approval and deactivate it in the tools table
+    // If the architect was approved and is being edited, set status to
+    // pending_approval and deactivate its capability so users lose access while
+    // it is back in review. hasCapabilityAccess() filters is_active=true, so
+    // flipping the flag is sufficient to gate the feature.
     if (currentTool.status === "approved") {
       data.status = "pending_approval"
-      // Issue #923: deactivate the legacy tools row AND the renamed capabilities
-      // row atomically. hasToolAccess() now reads `capabilities`, so a partial
-      // failure (tools deactivated, capabilities still active) would leave a user
-      // with access to an architect that is back in pending_approval. One
-      // transaction guarantees both flip together or neither does.
-      await executeTransaction(
-        async (tx) => {
-          await tx
-            .update(tools)
-            .set({ isActive: false, updatedAt: new Date() })
-            .where(eq(tools.promptChainToolId, idInt));
-          await tx
+      await executeQuery(
+        (db) =>
+          db
             .update(capabilities)
             .set({ isActive: false, updatedAt: new Date() })
-            .where(eq(capabilities.promptChainToolId, idInt));
-        },
-        "deactivateApprovedToolAndCapability"
+            .where(eq(capabilities.promptChainToolId, idInt)),
+        "deactivateApprovedCapability"
       );
     }
 
@@ -1205,7 +1196,7 @@ export async function addChainPromptAction(
         return { isSuccess: false, message: "Unauthorized" };
       }
 
-      const hasAccess = await hasToolAccess("knowledge-repositories");
+      const hasAccess = await hasCapabilityAccess("knowledge-repositories");
       if (!hasAccess) {
         return { isSuccess: false, message: "Access denied. You need knowledge repository access." };
       }
@@ -1323,7 +1314,7 @@ export async function updatePromptAction(
 
     // If repository IDs are being updated, validate user has access
     if (data.repositoryIds && data.repositoryIds.length > 0) {
-      const hasAccess = await hasToolAccess("knowledge-repositories");
+      const hasAccess = await hasCapabilityAccess("knowledge-repositories");
       if (!hasAccess) {
         return { isSuccess: false, message: "Access denied. You need knowledge repository access." };
       }
@@ -1704,25 +1695,12 @@ export async function approveAssistantArchitectAction(
       return { isSuccess: false, message: "Invalid ID format" }
     }
 
-    // Approve the assistant architect and create tool entry (transaction)
+    // Approve the assistant architect and create its capability entry (transaction)
     const updatedTool = await drizzleApproveAssistantArchitect(idInt)
 
-    // Query for the tool ID that was just created (used for the navigation item,
-    // whose navigation_items.tool_id FK still references the legacy tools table).
-    const [tool] = await executeQuery(
-      (db) =>
-        db
-          .select({ id: tools.id })
-          .from(tools)
-          .where(eq(tools.promptChainToolId, idInt))
-          .limit(1),
-      "getToolByPromptChainToolId"
-    )
-
-    // Issue #923: role grants now target role_capabilities.capability_id, so we
-    // need the capability row's id (created in the same approval transaction).
-    // It may differ from the legacy tools.id, so fetch it explicitly rather than
-    // assuming they match.
+    // Fetch the capability row created in the same approval transaction. Its id
+    // backs both the navigation item (navigation_items.capability_id) and the
+    // role grants (role_capabilities.capability_id).
     const [capability] = await executeQuery(
       (db) =>
         db
@@ -1733,17 +1711,11 @@ export async function approveAssistantArchitectAction(
       "getCapabilityByPromptChainToolId"
     )
 
-    if (!tool) {
-      log.error("Tool not created after approval", { assistantArchitectId: idInt })
-      return { isSuccess: false, message: "Tool creation failed" }
-    }
-
     if (!capability) {
       log.error("Capability not created after approval", { assistantArchitectId: idInt })
       return { isSuccess: false, message: "Capability creation failed" }
     }
 
-    const finalToolId = tool.id
     const finalCapabilityId = capability.id
 
     // Create navigation item if it doesn't exist
@@ -1759,19 +1731,19 @@ export async function approveAssistantArchitectAction(
     )
 
     if (existingNav.length === 0) {
-      // Original code had bugs trying to insert string IDs into integer columns
-      // This corrected version lets the database auto-generate the ID
+      // Let the database auto-generate the navigation item id; gate the item on
+      // the architect's capability (navigation_items.capability_id, #928).
       await createNavigationItem({
         label: updatedTool.name,
         icon: "IconWand",
         link: navLink,
         type: "link",
-        toolId: finalToolId,
+        capabilityId: finalCapabilityId,
         isActive: true
       })
     }
 
-    // Assign tool to staff and administrator roles
+    // Grant the capability to the staff and administrator roles.
     const staffRole = await getRoleByName("staff")
     const adminRole = await getRoleByName("administrator")
 
@@ -1779,9 +1751,7 @@ export async function approveAssistantArchitectAction(
 
     for (const role of rolesToAssign) {
       if (role) {
-        // Issue #923: assignToolToRole now writes role_capabilities.capability_id,
-        // so pass the capability id (not the legacy tools.id).
-        await assignToolToRole(role.id, finalCapabilityId)
+        await assignCapabilityToRole(role.id, finalCapabilityId)
       }
     }
 
@@ -2130,31 +2100,6 @@ export async function migratePromptChainsToAssistantArchitectAction(): Promise<A
       isSuccess: false, 
       message: "Failed to migrate prompt chains to assistant architect"
     }
-  }
-}
-
-export async function getToolsAction(): Promise<ActionState<SelectTool[]>> {
-  const requestId = generateRequestId()
-  const timer = startTimer("getTools")
-  const log = createLogger({ requestId, action: "getTools" })
-  
-  try {
-    log.info("Action started: Getting tools")
-
-    const tools = await getTools();
-
-    log.info("Tools retrieved successfully", { count: tools.length })
-    timer({ status: "success", count: tools.length })
-
-    return {
-      isSuccess: true,
-      message: "Tools retrieved successfully",
-      data: tools
-    }
-  } catch (error) {
-    timer({ status: "error" })
-    log.error("Error getting tools:", error)
-    return { isSuccess: false, message: "Failed to get tools" }
   }
 }
 

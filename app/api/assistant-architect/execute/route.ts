@@ -9,7 +9,7 @@ import { executeQuery } from '@/lib/db/drizzle-client';
 import { sql } from 'drizzle-orm';
 import { unifiedStreamingService } from '@/lib/streaming/unified-streaming-service';
 import { retrieveKnowledgeForPrompt, formatKnowledgeContext } from '@/lib/assistant-architect/knowledge-retrieval';
-import { hasToolAccess, hasRole } from '@/utils/roles';
+import { hasCapabilityAccess, hasRole } from '@/utils/roles';
 import { ErrorFactories } from '@/lib/error-utils';
 import { createRepositoryTools } from '@/lib/tools/repository-tools';
 import { getScopesForRoles } from '@/lib/api-keys/scopes';
@@ -232,7 +232,7 @@ export async function POST(req: Request) {
     log.debug('User authenticated', sanitizeForLogging({ userId: session.sub }));
 
     // 3. Check tool access permission
-    const hasAccess = await hasToolAccess('assistant-architect');
+    const hasAccess = await hasCapabilityAccess('assistant-architect');
     if (!hasAccess) {
       log.warn('User does not have assistant-architect tool access', { userId: session.sub });
       return new Response(

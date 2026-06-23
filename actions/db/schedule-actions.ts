@@ -1,6 +1,6 @@
 "use server"
 
-import { hasToolAccess } from "@/lib/db/drizzle"
+import { hasCapabilityAccess } from "@/lib/db/drizzle"
 import { createLogger, generateRequestId, startTimer, sanitizeForLogging } from "@/lib/logger"
 import { handleError, ErrorFactories, createSuccess } from "@/lib/error-utils"
 import { getServerSession } from "@/lib/auth/server-session"
@@ -597,7 +597,7 @@ export async function createScheduleAction(params: CreateScheduleRequest): Promi
     }
 
     // Check if user has access to assistant-architect tool
-    const hasAccess = await hasToolAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess(session.sub, "assistant-architect")
     if (!hasAccess) {
       log.warn("User lacks assistant-architect access")
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
@@ -784,7 +784,7 @@ export async function getSchedulesAction(): Promise<ActionState<Schedule[]>> {
     }
 
     // Check if user has access to assistant-architect tool
-    const hasAccess = await hasToolAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess(session.sub, "assistant-architect")
     if (!hasAccess) {
       log.warn("User lacks assistant-architect access")
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
@@ -871,7 +871,7 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
     }
 
     // Check if user has access to assistant-architect tool
-    const hasAccess = await hasToolAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess(session.sub, "assistant-architect")
     if (!hasAccess) {
       log.warn("User lacks assistant-architect access")
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
@@ -921,7 +921,7 @@ export async function updateScheduleAction(id: number, params: UpdateScheduleReq
     if (params.assistantArchitectId !== undefined) {
       // Security: Pre-validate user access BEFORE sanitization to prevent bypass
       // First verify user has general assistant architect access
-      const hasAccess = await hasToolAccess(session.sub, "assistant-architect")
+      const hasAccess = await hasCapabilityAccess(session.sub, "assistant-architect")
       if (!hasAccess) {
         throw ErrorFactories.authzToolAccessDenied("assistant-architect")
       }
@@ -1073,7 +1073,7 @@ export async function deleteScheduleAction(id: number): Promise<ActionState<{ su
     }
 
     // Check if user has access to assistant-architect tool
-    const hasAccess = await hasToolAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess(session.sub, "assistant-architect")
     if (!hasAccess) {
       log.warn("User lacks assistant-architect access")
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")
@@ -1149,7 +1149,7 @@ export async function getScheduleAction(id: number): Promise<ActionState<Schedul
     }
 
     // Check if user has access to assistant-architect tool
-    const hasAccess = await hasToolAccess(session.sub, "assistant-architect")
+    const hasAccess = await hasCapabilityAccess(session.sub, "assistant-architect")
     if (!hasAccess) {
       log.warn("User lacks assistant-architect access")
       throw ErrorFactories.authzInsufficientPermissions("assistant-architect")

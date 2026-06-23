@@ -71,50 +71,17 @@ WHERE u.email = 'student@example.com' AND r.name = 'student'
 ON CONFLICT (user_id, role_id) DO NOTHING;
 
 -- ============================================================================
--- Tools (ensuring all code-referenced tools exist)
+-- Capabilities (role-gated UI features; successor to the legacy tools table)
 -- ============================================================================
--- The codebase uses hasToolAccess() with these identifiers:
+-- hasCapabilityAccess() reads from capabilities/role_capabilities. Seed the
+-- code-referenced identifiers so local test users keep access:
 -- - assistant-architect: schedules, execute API
 -- - model-compare: compare feature
 -- - knowledge-repositories: repositories, prompt library
-
-INSERT INTO tools (identifier, name, description, is_active) VALUES
-('assistant-architect', 'Assistant Architect', 'Build and schedule custom AI assistants', true),
-('model-compare', 'Model Compare', 'Compare AI model responses side-by-side', true),
-('knowledge-repositories', 'Knowledge Repositories', 'Manage knowledge bases for AI assistants', true),
-('decision-capture', 'Decision Capture', 'Extract and capture decisions from meeting transcripts into the context graph', true),
-('voice-mode', 'Voice Mode', 'Real-time voice conversations in Nexus using AI speech providers', true)
-ON CONFLICT (identifier) DO UPDATE SET
-    name = EXCLUDED.name,
-    description = EXCLUDED.description,
-    is_active = EXCLUDED.is_active,
-    updated_at = CURRENT_TIMESTAMP;
-
--- Grant these tools to administrator role
-INSERT INTO role_tools (role_id, tool_id)
-SELECT r.id, t.id
-FROM roles r
-CROSS JOIN tools t
-WHERE r.name = 'administrator'
-  AND t.identifier IN ('assistant-architect', 'model-compare', 'knowledge-repositories', 'decision-capture', 'voice-mode')
-ON CONFLICT (role_id, tool_id) DO NOTHING;
-
--- Grant assistant-architect and model-compare to staff role
-INSERT INTO role_tools (role_id, tool_id)
-SELECT r.id, t.id
-FROM roles r
-CROSS JOIN tools t
-WHERE r.name = 'staff'
-  AND t.identifier IN ('assistant-architect', 'model-compare')
-ON CONFLICT (role_id, tool_id) DO NOTHING;
-
--- ============================================================================
--- Capabilities (Issue #923 — renamed successor to tools)
--- ============================================================================
--- hasToolAccess() now reads from capabilities/role_capabilities. Seed the same
--- identifiers so local test users keep access. These are marked source='manual'
--- here; the boot-time manifest sync (lib/capabilities/manifest.ts) flips
--- manifest-managed identifiers to source='code' when the dev server starts.
+-- - decision-capture, voice-mode: Nexus features
+-- These are marked source='manual' here; the boot-time manifest sync
+-- (lib/capabilities/manifest.ts) flips manifest-managed identifiers to
+-- source='code' when the dev server starts.
 
 INSERT INTO capabilities (identifier, name, description, is_active, source) VALUES
 ('assistant-architect', 'Assistant Architect', 'Build and schedule custom AI assistants', true, 'manual'),
@@ -157,7 +124,7 @@ DELETE FROM navigation_items;
 ALTER SEQUENCE navigation_items_id_seq RESTART WITH 1;
 
 -- Main sections
-INSERT INTO navigation_items (id, label, icon, link, parent_id, tool_id, requires_role, position, is_active, description, type) VALUES
+INSERT INTO navigation_items (id, label, icon, link, parent_id, capability_id, requires_role, position, is_active, description, type) VALUES
 (20, 'Dashboard', 'IconHome', '/dashboard', NULL, NULL, NULL, 0, true, '', 'link'),
 (39, 'Nexus', 'IconRobot', '/nexus', NULL, NULL, NULL, 10, true, '', 'link'),
 (21, 'Instructional', 'IconChalkboard', '', NULL, NULL, NULL, 20, true, '', 'section'),
@@ -169,7 +136,7 @@ INSERT INTO navigation_items (id, label, icon, link, parent_id, tool_id, require
 (11, 'Admin', 'IconShield', '', NULL, NULL, 'administrator', 80, true, '', 'section');
 
 -- Admin sub-items (alphabetical order)
-INSERT INTO navigation_items (id, label, icon, link, parent_id, tool_id, requires_role, position, is_active, description, type) VALUES
+INSERT INTO navigation_items (id, label, icon, link, parent_id, capability_id, requires_role, position, is_active, description, type) VALUES
 (46, 'Activity Dashboard', 'IconActivity', '/admin/activity', 11, NULL, 'administrator', 0, true, 'View activity across Nexus, Assistant Architect, and Model Compare', 'link'),
 (16, 'AI Models', 'IconRobot', '/admin/models', 11, NULL, 'administrator', 10, true, '', 'link'),
 (18, 'Assistant Administration', 'IconBraces', '/admin/assistants', 11, NULL, 'administrator', 20, true, '', 'link'),
@@ -183,7 +150,7 @@ INSERT INTO navigation_items (id, label, icon, link, parent_id, tool_id, require
 (15, 'User Management', 'IconUser', '/admin/users', 11, NULL, 'administrator', 100, true, '', 'link');
 
 -- Utilities sub-items
-INSERT INTO navigation_items (id, label, icon, link, parent_id, tool_id, requires_role, position, is_active, description, type) VALUES
+INSERT INTO navigation_items (id, label, icon, link, parent_id, capability_id, requires_role, position, is_active, description, type) VALUES
 (40, 'Assistant Scheduler', 'IconCalendar', '/schedules', 19, NULL, NULL, 0, true, '', 'link'),
 (7, 'Assistant Architect', 'IconBraces', '/utilities/assistant-architect', 19, NULL, NULL, 10, true, NULL, 'link'),
 (37, 'Model Compare', 'IconRobot', '/compare', 19, NULL, NULL, 20, true, 'Compare AI model responses side-by-side', 'link'),
@@ -480,14 +447,14 @@ DECLARE
     user_count INT;
     role_count INT;
     model_count INT;
-    tool_count INT;
+    capability_count INT;
     nav_count INT;
     settings_count INT;
 BEGIN
     SELECT COUNT(*) INTO user_count FROM users;
     SELECT COUNT(*) INTO role_count FROM roles;
     SELECT COUNT(*) INTO model_count FROM ai_models WHERE active = true;
-    SELECT COUNT(*) INTO tool_count FROM tools WHERE is_active = true;
+    SELECT COUNT(*) INTO capability_count FROM capabilities WHERE is_active = true;
     SELECT COUNT(*) INTO nav_count FROM navigation_items WHERE is_active = true;
     SELECT COUNT(*) INTO settings_count FROM settings;
 
@@ -498,7 +465,7 @@ BEGIN
     RAISE NOTICE 'Users: %', user_count;
     RAISE NOTICE 'Roles: %', role_count;
     RAISE NOTICE 'Active AI Models: %', model_count;
-    RAISE NOTICE 'Active Tools: %', tool_count;
+    RAISE NOTICE 'Active Capabilities: %', capability_count;
     RAISE NOTICE 'Navigation Items: %', nav_count;
     RAISE NOTICE 'Settings: %', settings_count;
     RAISE NOTICE '';

@@ -46,7 +46,7 @@ interface NavigationItem {
   type: 'link' | 'section' | 'page';
   parent_id: string | null;
   parent_label: string | null;
-  tool_id: string | null;
+  capability_id: string | null;
   position: number;
   color?: string;
 }

@@ -8,7 +8,7 @@ import { authPerformanceMonitor } from '@/lib/monitoring/auth-performance-monito
 import { getAuthCacheStats } from '@/lib/auth/optimized-polling-auth';
 import { createLogger, generateRequestId } from '@/lib/logger';
 import { getServerSession } from '@/lib/auth/server-session';
-import { hasToolAccess } from '@/utils/roles';
+import { hasCapabilityAccess } from '@/utils/roles';
 import { rateLimit } from '@/lib/rate-limit';
 
 const log = createLogger({ route: 'api.internal.performance.auth' });
@@ -50,7 +50,7 @@ export async function GET(request: NextRequest) {
     }
 
     // Check admin permissions for performance monitoring
-    const canAccess = await hasToolAccess('internal-performance-monitoring');
+    const canAccess = await hasCapabilityAccess('internal-performance-monitoring');
     if (!canAccess) {
       log.warn('Forbidden request to performance API', {
         requestId,
@@ -142,7 +142,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Check admin permissions for system administration (reset operations)
-    const canAccess = await hasToolAccess('internal-system-administration');
+    const canAccess = await hasCapabilityAccess('internal-system-administration');
     if (!canAccess) {
       log.warn('Forbidden request to performance API action', {
         requestId,

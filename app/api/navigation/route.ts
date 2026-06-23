@@ -1,16 +1,16 @@
 import { NextResponse } from "next/server"
 import { getServerSession } from "@/lib/auth/server-session"
-import { getNavigationItems, getAllNavigationItemRoles, getToolsByIds } from "@/lib/db/drizzle"
+import { getNavigationItems, getAllNavigationItemRoles, getCapabilitiesByIdsMap } from "@/lib/db/drizzle"
 import { createLogger, generateRequestId, startTimer } from '@/lib/logger'
 import { getCurrentUserAction } from "@/actions/db/get-current-user-action"
-import { hasToolAccess } from "@/utils/roles";
+import { hasCapabilityAccess } from "@/utils/roles";
 
 /**
  * Navigation API
  * 
  * Returns navigation items filtered by user permissions:
  * - Returns top-level items (parent_id = null) and their children
- * - Filters items requiring tools the user doesn't have access to
+ * - Filters items requiring a capability the user doesn't have access to
  * - Hides admin items for non-admin users
  * - Preserves the parent-child relationship for proper nesting in the UI
  * 
@@ -25,7 +25,7 @@ import { hasToolAccess } from "@/utils/roles";
  *       link: string | null, // If null, this is a dropdown section
  *       parent_id: string | null, // If null, this is a top-level item
  *       parent_label: string | null,
- *       tool_id: string | null, // If provided, requires tool access
+ *       capability_id: string | null, // If provided, requires capability access
  *       position: number // For ordering items
  *     },
  *     ...
@@ -98,20 +98,20 @@ export async function GET() {
       // Get navigation item roles from the junction table
       const navItemRolesMap = await getAllNavigationItemRoles();
 
-      // Collect all tool IDs that need to be looked up
-      const toolIdsToLookup = new Set<number>();
+      // Collect all capability IDs that need to be looked up
+      const capabilityIdsToLookup = new Set<number>();
       for (const item of navItems) {
-        if (item.toolId) {
-          const toolId = Number(item.toolId);
-          if (!Number.isNaN(toolId)) {
-            toolIdsToLookup.add(toolId);
+        if (item.capabilityId) {
+          const capabilityId = Number(item.capabilityId);
+          if (!Number.isNaN(capabilityId)) {
+            capabilityIdsToLookup.add(capabilityId);
           }
         }
       }
 
-      // Batch fetch all tool identifiers using Drizzle
-      const toolsMap = toolIdsToLookup.size > 0
-        ? await getToolsByIds(Array.from(toolIdsToLookup))
+      // Batch fetch all capability identifiers using Drizzle
+      const capabilitiesMap = capabilityIdsToLookup.size > 0
+        ? await getCapabilitiesByIdsMap(Array.from(capabilityIdsToLookup))
         : new Map<number, string>();
 
       // Filter navigation items based on user permissions
@@ -145,45 +145,45 @@ export async function GET() {
           });
         }
         
-        // Check if item requires tool access
-        if (shouldInclude && item.toolId) {
-          const toolId = Number(item.toolId);
-          if (Number.isNaN(toolId)) {
-            log.warn("Invalid tool ID for navigation item", {
+        // Check if item requires capability access
+        if (shouldInclude && item.capabilityId) {
+          const capabilityId = Number(item.capabilityId);
+          if (Number.isNaN(capabilityId)) {
+            log.warn("Invalid capability ID for navigation item", {
               itemId: item.id,
               label: item.label,
-              toolId: item.toolId
+              capabilityId: item.capabilityId
             });
             shouldInclude = false;
           } else {
-            const toolIdentifier = toolsMap.get(toolId);
-            if (toolIdentifier) {
+            const capabilityIdentifier = capabilitiesMap.get(capabilityId);
+            if (capabilityIdentifier) {
               try {
-                const toolAccess = await hasToolAccess(toolIdentifier);
-                shouldInclude = toolAccess;
-                
-                log.debug("Tool access check for navigation item", {
+                const capabilityAccess = await hasCapabilityAccess(capabilityIdentifier);
+                shouldInclude = capabilityAccess;
+
+                log.debug("Capability access check for navigation item", {
                   itemId: item.id,
                   label: item.label,
-                  toolId,
-                  toolIdentifier,
+                  capabilityId,
+                  capabilityIdentifier,
                   granted: shouldInclude
                 });
-              } catch (toolError) {
-                log.error("Error checking tool access", {
+              } catch (capabilityError) {
+                log.error("Error checking capability access", {
                   itemId: item.id,
                   label: item.label,
-                  toolId,
-                  toolIdentifier,
-                  error: toolError instanceof Error ? toolError.message : 'Unknown error'
+                  capabilityId,
+                  capabilityIdentifier,
+                  error: capabilityError instanceof Error ? capabilityError.message : 'Unknown error'
                 });
                 shouldInclude = false;
               }
             } else {
-              log.warn("Tool not found for navigation item", {
+              log.warn("Capability not found for navigation item", {
                 itemId: item.id,
                 label: item.label,
-                toolId
+                capabilityId
               });
               shouldInclude = false;
             }
@@ -221,7 +221,7 @@ export async function GET() {
         link: item.link,
         parent_id: item.parentId,
         parent_label: null, // This column doesn't exist in the table
-        tool_id: item.toolId,
+        capability_id: item.capabilityId,
         position: item.position,
         type: item.type || 'link',
         description: item.description || null,

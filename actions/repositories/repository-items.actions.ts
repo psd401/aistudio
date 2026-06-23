@@ -12,7 +12,7 @@ import {
   updateRepositoryItemStatus
 } from "@/lib/db/drizzle"
 import { type ActionState } from "@/types/actions-types"
-import { hasToolAccess } from "@/utils/roles"
+import { hasCapabilityAccess } from "@/utils/roles"
 import {
   handleError,
   ErrorFactories,
@@ -118,7 +118,7 @@ export async function addDocumentItem(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Document upload denied - insufficient permissions", {
         userId: session.sub,
@@ -282,7 +282,7 @@ export async function addDocumentWithPresignedUrl(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Presigned upload denied - insufficient permissions", {
         userId: session.sub,
@@ -423,7 +423,7 @@ export async function addUrlItem(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("URL addition denied - insufficient permissions", {
         userId: session.sub,
@@ -549,7 +549,7 @@ export async function addTextItem(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Text addition denied - insufficient permissions", {
         userId: session.sub,
@@ -673,7 +673,7 @@ export async function removeRepositoryItem(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Item removal denied - insufficient permissions", {
         userId: session.sub,
@@ -787,7 +787,7 @@ export async function listRepositoryItems(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("List items denied - insufficient permissions", {
         userId: session.sub,
@@ -858,7 +858,7 @@ export async function searchRepositoryItems(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Search denied - insufficient permissions", {
         userId: session.sub,
@@ -978,7 +978,7 @@ export async function getItemChunks(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Get chunks denied - insufficient permissions", {
         userId: session.sub,
@@ -1046,7 +1046,7 @@ export async function updateItemProcessingStatus(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Status update denied - insufficient permissions", {
         userId: session.sub,
@@ -1098,7 +1098,7 @@ export async function getDocumentDownloadUrl(
     }
 
     log.debug("Checking repository access permissions")
-    const hasAccess = await hasToolAccess("knowledge-repositories")
+    const hasAccess = await hasCapabilityAccess("knowledge-repositories")
     if (!hasAccess) {
       log.warn("Download URL denied - insufficient permissions", {
         userId: session.sub,

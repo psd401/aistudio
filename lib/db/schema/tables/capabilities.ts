@@ -13,8 +13,9 @@
  *                name/description are read-only in the admin UI; only role assignment is editable.
  *   - `manual` — created via the admin UI (legacy or experimental gates). Fully editable.
  *
- * The legacy `tools`/`role_tools` tables remain during the migration window
- * (dropped in workstream #6 once all `hasToolAccess()` call sites are renamed).
+ * The legacy `tools`/`role_tools` tables were dropped in workstream #6 (Issue
+ * #928, migration 084) after all access checks were migrated to
+ * `hasCapabilityAccess()`.
  */
 
 import { sql } from "drizzle-orm";

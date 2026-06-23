@@ -9,7 +9,7 @@
  *
  * WebSocket Protocol (ws://.../api/nexus/voice) — Two-Phase Handshake:
  *   1. Client connects with session cookie for authentication
- *   2. Server validates JWT, checks hasToolAccess("voice-mode")
+ *   2. Server validates JWT, checks hasCapabilityAccess("voice-mode")
  *   3. Server sends { type: "ready" } (Phase 1: auth complete)
  *   4. Client sends { type: "session_config", conversationId? }
  *   5. Server fetches messages from DB (verifying ownership), builds systemInstruction, connects to Gemini Live
