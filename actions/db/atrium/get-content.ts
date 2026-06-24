@@ -32,6 +32,12 @@ export async function getContentAction(
   try {
     log.info("Action started: get content", { idOrSlug });
 
+    // DELIBERATE: read actions are NOT gated by `hasCapabilityAccess`. Read
+    // access is bounded entirely by `contentService.get` → `visibilityService.canView`
+    // (public to anyone, `internal` to any authenticated user, `group`/`private`
+    // by explicit grant). A user without the Atrium *authoring* capability can
+    // still legitimately read content visible to them. Do not add a capability
+    // gate here without a product decision — write actions are the gated ones.
     const requester = await getUserRequester();
     const result = await contentService.get(requester, idOrSlug);
 

@@ -173,3 +173,68 @@ describe("canView — unauthenticated", () => {
     expect(await visibilityService.canView(anonymous, obj("private"))).toBe(false);
   });
 });
+
+describe("applyGrants — value validation", () => {
+  /** Minimal tx whose delete/insert builders resolve and record inserted rows. */
+  function fakeTx() {
+    const inserted: unknown[] = [];
+    const tx = {
+      delete: () => ({ where: async () => undefined }),
+      insert: () => ({
+        values: async (rows: unknown) => {
+          inserted.push(rows);
+        },
+      }),
+    };
+    return { tx: tx as never, inserted };
+  }
+
+  it("rejects an empty grant value", async () => {
+    const { tx } = fakeTx();
+    await expect(
+      visibilityService.applyGrants(tx, "obj-1", [{ kind: "role", value: "" }])
+    ).rejects.toThrow(/required/i);
+  });
+
+  it("rejects a non-numeric 'user' grant value", async () => {
+    const { tx } = fakeTx();
+    await expect(
+      visibilityService.applyGrants(tx, "obj-1", [
+        { kind: "user", value: "not-an-id" },
+      ])
+    ).rejects.toThrow(/positive-integer/i);
+  });
+
+  it("rejects a non-positive 'role' grant value", async () => {
+    const { tx } = fakeTx();
+    await expect(
+      visibilityService.applyGrants(tx, "obj-1", [{ kind: "role", value: "0" }])
+    ).rejects.toThrow(/positive-integer/i);
+  });
+
+  it("rejects a grant value over 255 chars", async () => {
+    const { tx } = fakeTx();
+    await expect(
+      visibilityService.applyGrants(tx, "obj-1", [
+        { kind: "building", value: "x".repeat(256) },
+      ])
+    ).rejects.toThrow(/maximum length/i);
+  });
+
+  it("accepts valid numeric user/role and opaque building values", async () => {
+    const { tx, inserted } = fakeTx();
+    await visibilityService.applyGrants(tx, "obj-1", [
+      { kind: "user", value: "42" },
+      { kind: "role", value: "7" },
+      { kind: "building", value: "High School" },
+    ]);
+    expect(inserted).toHaveLength(1);
+    expect((inserted[0] as unknown[]).length).toBe(3);
+  });
+
+  it("clears grants (no insert) when given an empty set", async () => {
+    const { tx, inserted } = fakeTx();
+    await visibilityService.applyGrants(tx, "obj-1", []);
+    expect(inserted).toHaveLength(0);
+  });
+});

@@ -119,7 +119,9 @@ export async function snapshotInTx(
   obj: { id: string; kind: "document" | "artifact" },
   input: SnapshotInput
 ): Promise<SnapshotResult> {
-  if (typeof input.body !== "string" || input.body.length === 0) {
+  // Reject empty AND whitespace-only bodies, mirroring the `.trim()` title check
+  // in content-service so "   " is not silently snapshotted as content.
+  if (typeof input.body !== "string" || input.body.trim().length === 0) {
     throw new ValidationError("Version body is required");
   }
   const bodyFormat = input.bodyFormat ?? defaultBodyFormat(obj.kind);
@@ -311,33 +313,43 @@ export const versionService = {
     toVersionId: string
   ): Promise<void> {
     const log = createLogger({ action: "content.rollback" });
-    await executeTransaction(async (tx) => {
-      // Load the owner + visibility to enforce permission at the service boundary.
-      const owner = await tx
-        .select({
-          ownerUserId: contentObjects.ownerUserId,
-          visibilityLevel: contentObjects.visibilityLevel,
-        })
-        .from(contentObjects)
-        .where(eq(contentObjects.id, objectId))
-        .limit(1);
-      if (!owner[0]) {
-        throw new NotFoundError("Content not found", { objectId });
-      }
-      // Mask existence from callers who cannot view the object *before* revealing
-      // edit state: a non-viewable object must 404 (not 403), mirroring
-      // `content-service.createVersion`/`update`. Otherwise `rollback` lets an
-      // attacker enumerate private object ids (403 = exists, 404 = absent).
-      const viewable = await visibilityService.canView(req, {
-        id: objectId,
-        ownerUserId: owner[0].ownerUserId,
-        visibilityLevel: owner[0].visibilityLevel,
-      });
-      if (!viewable) {
-        throw new NotFoundError("Content not found", { objectId });
-      }
-      assertCanEdit(req, owner[0].ownerUserId);
 
+    // Load owner + visibility and run the permission checks OUTSIDE the
+    // transaction. `canView` may issue its own `executeQuery` (grant lookup),
+    // which acquires a second pooled connection — doing that inside an
+    // `executeTransaction` callback (which already holds one connection) risks a
+    // pool deadlock under concurrency (every slot held by a transaction waiting
+    // for a second slot). The owner row read here is also used by `canView`.
+    const owner = await executeQuery(
+      (db) =>
+        db
+          .select({
+            ownerUserId: contentObjects.ownerUserId,
+            visibilityLevel: contentObjects.visibilityLevel,
+          })
+          .from(contentObjects)
+          .where(eq(contentObjects.id, objectId))
+          .limit(1),
+      "content.rollback.loadOwner"
+    );
+    if (!owner[0]) {
+      throw new NotFoundError("Content not found", { objectId });
+    }
+    // Mask existence from callers who cannot view the object *before* revealing
+    // edit state: a non-viewable object must 404 (not 403), mirroring
+    // `content-service.createVersion`/`update`. Otherwise `rollback` lets an
+    // attacker enumerate private object ids (403 = exists, 404 = absent).
+    const viewable = await visibilityService.canView(req, {
+      id: objectId,
+      ownerUserId: owner[0].ownerUserId,
+      visibilityLevel: owner[0].visibilityLevel,
+    });
+    if (!viewable) {
+      throw new NotFoundError("Content not found", { objectId });
+    }
+    assertCanEdit(req, owner[0].ownerUserId);
+
+    await executeTransaction(async (tx) => {
       // Single query: the target must exist AND belong to this object.
       const target = await tx
         .select({ id: contentVersions.id })

@@ -36,8 +36,11 @@ import { JSDOM } from "jsdom";
  */
 const SAFE_URL_SCHEME = /^(?:https?:|mailto:|tel:|#|\/|\.\/|\.\.\/)/i;
 
-/** URL-bearing attributes whose values are checked against the scheme allowlist. */
-const URL_ATTRS = ["href", "src", "xlink:href"] as const;
+/** Plain URL-bearing attributes checked against the scheme allowlist. */
+const URL_ATTRS = ["href", "src"] as const;
+
+/** The XLink namespace SVG `xlink:href` lives in (set via setAttributeNS). */
+const XLINK_NS = "http://www.w3.org/1999/xlink";
 
 /**
  * Lazily-constructed DOMPurify instance bound to a jsdom window. Built once per
@@ -65,6 +68,15 @@ function getPurifier(): DOMPurify {
         if (value && !SAFE_URL_SCHEME.test(value)) {
           el.removeAttribute(attr);
         }
+      }
+    }
+    // SVG `xlink:href` lives in the XLink namespace; the unprefixed
+    // has/get/removeAttribute calls above cannot see it. Use the *NS variants so
+    // this defense-in-depth scheme check actually covers it.
+    if (typeof el.getAttributeNS === "function") {
+      const xlink = (el.getAttributeNS(XLINK_NS, "href") ?? "").trim();
+      if (xlink && !SAFE_URL_SCHEME.test(xlink)) {
+        el.removeAttributeNS(XLINK_NS, "href");
       }
     }
   });

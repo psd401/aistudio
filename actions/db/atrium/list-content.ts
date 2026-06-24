@@ -34,6 +34,12 @@ export async function listContentAction(
       filter: sanitizeForLogging(filter),
     });
 
+    // DELIBERATE: list is NOT gated by `hasCapabilityAccess`. Results are bounded
+    // by the permission-pushed `canView` SQL in `visibilityService.listVisible`
+    // (a row is returned only if the requester could view it). A user without the
+    // Atrium *authoring* capability still legitimately lists content visible to
+    // them. Do not add a capability gate here without a product decision — write
+    // actions are the gated ones.
     const requester = await getUserRequester();
     const result = await contentService.list(requester, filter);
 

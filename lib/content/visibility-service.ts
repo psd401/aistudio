@@ -23,6 +23,7 @@ import {
 } from "@/lib/db/schema";
 import { principalOf } from "./helpers";
 import { objectSelectFields, rowToObjectDTO } from "./mappers";
+import { ValidationError } from "./errors";
 import type {
   ContentObjectDTO,
   ListFilter,
@@ -33,6 +34,39 @@ import type {
 
 /** Upper bound on a `listVisible` tag filter, mirroring the tags column width. */
 const MAX_TAG_LENGTH = 100;
+
+/** A positive-integer ID string (no leading zeros required, no sign, no spaces). */
+const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
+
+/** Upper bound on a grant value, mirroring the `grant_value varchar(255)` column. */
+const MAX_GRANT_VALUE_LENGTH = 255;
+
+/**
+ * Validate a grant before it is persisted. `user`/`role` values are numeric IDs
+ * stored as strings (§12.2); the rest are non-empty opaque tokens. Rejecting an
+ * empty or malformed value here prevents, e.g., an empty-string role grant from
+ * matching unintended principals once the `g.grant_value = ''` comparison runs.
+ */
+function assertValidGrant(grant: VisibilityGrant): void {
+  const value = grant.value;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new ValidationError("Grant value is required", { kind: grant.kind });
+  }
+  if (value.length > MAX_GRANT_VALUE_LENGTH) {
+    throw new ValidationError("Grant value exceeds maximum length", {
+      kind: grant.kind,
+    });
+  }
+  if (
+    (grant.kind === "user" || grant.kind === "role") &&
+    !POSITIVE_INT_RE.test(value)
+  ) {
+    throw new ValidationError(
+      `Grant value for '${grant.kind}' must be a positive-integer id`,
+      { kind: grant.kind, value }
+    );
+  }
+}
 
 /**
  * The SQL form of `canView` for the permission-pushed `listVisible` query. Built
@@ -184,6 +218,9 @@ export const visibilityService = {
     objectId: string,
     grants: VisibilityGrant[]
   ): Promise<void> {
+    // Validate every grant value before touching the DB so a bad value aborts
+    // the whole replace (no partial application).
+    for (const grant of grants) assertValidGrant(grant);
     await tx
       .delete(contentVisibilityGrants)
       .where(eq(contentVisibilityGrants.objectId, objectId));

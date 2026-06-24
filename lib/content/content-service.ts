@@ -47,8 +47,6 @@ import type {
   VisibilityLevel,
 } from "./types";
 
-const MAX_SLUG_ATTEMPTS = 25;
-
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -67,10 +65,13 @@ function isUniqueViolation(error: unknown): boolean {
  *
  * Fetches all slugs that collide with the base (`base` and `base-N`) in a single
  * query, then picks the first free candidate in memory — avoiding the previous
- * up-to-25 sequential round-trips while the transaction held a pooled connection.
- * The final guard is the `content_objects.slug` unique constraint, which the
- * INSERT's `isUniqueViolation` catch translates into a `ConflictError` on the
- * rare concurrent-create race.
+ * sequential per-candidate round-trips while the transaction held a pooled
+ * connection. Scanning is bounded by `taken.size + 1`: among that many distinct
+ * candidates at least one must be free, so no fixed low ceiling can spuriously
+ * reject a bulk import of similarly-titled documents. The final guard is the
+ * `content_objects.slug` unique constraint, whose violation the INSERT's
+ * `isUniqueViolation` catch translates into a `ConflictError` on the rare
+ * concurrent-create race.
  */
 async function uniqueSlug(tx: DbTransaction, title: string): Promise<string> {
   const base = slugifyTitle(title);
@@ -84,10 +85,13 @@ async function uniqueSlug(tx: DbTransaction, title: string): Promise<string> {
         .where(like(contentObjects.slug, `${base}%`))
     ).map((r) => r.slug)
   );
-  for (let attempt = 0; attempt < MAX_SLUG_ATTEMPTS; attempt++) {
+  // `taken.size + 1` distinct candidates guarantees at least one free slot.
+  const maxAttempts = taken.size + 1;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
     const candidate = slugCandidate(base, attempt);
     if (!taken.has(candidate)) return candidate;
   }
+  // Unreachable given the bound above; kept as a defensive guard.
   throw new ConflictError("Could not allocate a unique slug", { base });
 }
 
@@ -332,7 +336,10 @@ export const contentService = {
       if (!patch.title.trim()) throw new ValidationError("Title cannot be empty");
       setValues.title = patch.title;
     }
-    if (patch.tags !== undefined) setValues.tags = patch.tags ?? null;
+    // Coerce to `[]` (never NULL) so updated rows match the `create()` invariant
+    // (tags is always an array). Downstream `.length`/`.filter()` callers would
+    // otherwise throw a TypeError on a null tags column.
+    if (patch.tags !== undefined) setValues.tags = patch.tags ?? [];
     if (patch.collectionId !== undefined)
       setValues.collectionId = patch.collectionId ?? null;
     if (patch.status !== undefined) setValues.status = patch.status;
