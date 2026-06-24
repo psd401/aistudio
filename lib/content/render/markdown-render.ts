@@ -48,20 +48,51 @@ function stripDangerousElements(html: string): string {
   return out;
 }
 
-/** Strip inline event-handler attributes: on*="…" / on*='…' / on*=value. */
+/**
+ * Strip inline event-handler attributes: on*="…" / on*='…' / on*=value.
+ * The leading boundary is `[\s/]` (whitespace OR `/`) rather than just `\s`, so
+ * an attribute packed against the previous one without a space — e.g.
+ * `<img src='x'onerror='evil()'>` — is still caught. We also catch the case
+ * where the handler follows a closing quote of the prior attribute by running
+ * the pass to a fixed point (repeat until no further change), since a single
+ * pass can leave adjacent handlers behind after the preceding attribute's quote.
+ */
 function stripEventHandlers(html: string): string {
-  return html.replace(
-    /\son[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi,
-    ""
-  );
+  const pattern = /[\s/'"]on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi;
+  let out = html;
+  let prev: string;
+  do {
+    prev = out;
+    // Keep the boundary char (it belongs to the prior token) and drop the handler.
+    out = out.replace(pattern, (m) => m.charAt(0));
+  } while (out !== prev);
+  return out;
 }
 
-/** Neutralize dangerous URL schemes in href/src attributes. */
+/**
+ * Neutralize dangerous URL schemes (javascript:/vbscript:/data:) in href/src.
+ * Handled in three forms so a `>` inside a quoted value cannot terminate the
+ * match early (the prior single-regex `[^"'\s>]*` form failed on
+ * `src="data:text/html,<h1>x</h1>"`):
+ *  - double-quoted: capture through the matching `"`.
+ *  - single-quoted: capture through the matching `'`.
+ *  - unquoted: capture to whitespace or `>`.
+ */
 function neutralizeUrls(html: string): string {
-  return html.replace(
-    /\b(href|src)\s*=\s*(["']?)\s*(javascript|vbscript|data)\s*:[^"'\s>]*\2/gi,
-    '$1=$2#$2'
+  let out = html;
+  out = out.replace(
+    /\b(href|src)\s*=\s*"\s*(?:javascript|vbscript|data)\s*:[^"]*"/gi,
+    '$1="#"'
   );
+  out = out.replace(
+    /\b(href|src)\s*=\s*'\s*(?:javascript|vbscript|data)\s*:[^']*'/gi,
+    "$1='#'"
+  );
+  out = out.replace(
+    /\b(href|src)\s*=\s*(?:javascript|vbscript|data)\s*:[^\s>]*/gi,
+    "$1=#"
+  );
+  return out;
 }
 
 /** Sanitize a fragment of HTML for safe serving. Exported for unit tests. */

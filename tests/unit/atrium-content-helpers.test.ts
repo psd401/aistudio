@@ -180,6 +180,34 @@ describe("canEdit", () => {
   it("blocks an autonomous agent from editing content it does not own", () => {
     expect(canEdit(autonomousReq, 42)).toBe(false);
   });
+
+  describe("autonomous agent ownership via ATRIUM_SYSTEM_USER_ID", () => {
+    const prev = process.env.ATRIUM_SYSTEM_USER_ID;
+    afterEach(() => {
+      if (prev === undefined) delete process.env.ATRIUM_SYSTEM_USER_ID;
+      else process.env.ATRIUM_SYSTEM_USER_ID = prev;
+    });
+
+    it("lets an autonomous agent edit content owned by the system user when it holds content:update", () => {
+      process.env.ATRIUM_SYSTEM_USER_ID = "9";
+      const withUpdate: Requester = {
+        ...autonomousReq,
+        scopes: ["content:create", "content:update"],
+      };
+      expect(canEdit(withUpdate, 9)).toBe(true); // owns via system user
+      expect(canEdit(withUpdate, 42)).toBe(false); // not the system user's content
+      expect(canEdit(autonomousReq, 9)).toBe(false); // lacks content:update
+    });
+
+    it("denies (does not throw) when ATRIUM_SYSTEM_USER_ID is unset", () => {
+      delete process.env.ATRIUM_SYSTEM_USER_ID;
+      const withUpdate: Requester = {
+        ...autonomousReq,
+        scopes: ["content:update"],
+      };
+      expect(canEdit(withUpdate, 9)).toBe(false);
+    });
+  });
 });
 
 describe("canPublishPublic (§26.4)", () => {
@@ -229,6 +257,20 @@ describe("sanitizeHtml (§31.1)", () => {
   it("neutralizes data: URLs in src", () => {
     const out = sanitizeHtml('<img src="data:text/html,evil">');
     expect(out).not.toMatch(/src\s*=\s*["']?data:text\/html/i);
+  });
+  it("strips an event handler packed against the previous attribute (no space)", () => {
+    // Regression: `<img src='x'onerror=...>` has no whitespace before onerror.
+    const out = sanitizeHtml("<img src='x'onerror='steal()'>");
+    expect(out).not.toMatch(/onerror/i);
+  });
+  it("neutralizes a data: URI whose value contains '>' characters", () => {
+    // Regression: a '>' inside the quoted value used to terminate the match early.
+    const out = sanitizeHtml('<img src="data:text/html,<h1>x</h1>">');
+    expect(out).not.toMatch(/src\s*=\s*"data:text\/html/i);
+  });
+  it("neutralizes javascript: in a single-quoted href", () => {
+    const out = sanitizeHtml("<a href='javascript:alert(1)'>x</a>");
+    expect(out).not.toMatch(/javascript:alert/i);
   });
   it("leaves benign markup intact", () => {
     expect(sanitizeHtml("<h1>Title</h1><p><strong>bold</strong></p>")).toBe(

@@ -141,6 +141,12 @@ export interface ContentVersionDTO {
   authorAgentId: string | null;
   bodyFormat: BodyFormat;
   bodyLocation: string;
+  /**
+   * Raw artifact code (HTML/JS/JSX) for small inline artifacts. SECURITY: this
+   * is UNTRUSTED code. It must only be displayed in a code editor (CodeMirror)
+   * or rendered inside the cross-origin sandboxed iframe (§28.1). Never pass it
+   * to `dangerouslySetInnerHTML` and never serve it directly as text/html.
+   */
   bodyInline: string | null;
   renderLocation: string | null;
   proofDocRef: string | null;

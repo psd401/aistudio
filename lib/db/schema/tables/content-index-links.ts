@@ -27,6 +27,7 @@ import {
   uuid,
 } from "drizzle-orm/pg-core";
 import { contentObjects } from "./content-objects";
+import { contentVersions } from "./content-versions";
 import { repositoryItems } from "./repository-items";
 
 export const contentIndexLinks = pgTable(
@@ -39,7 +40,10 @@ export const contentIndexLinks = pgTable(
     repositoryItemId: integer("repository_item_id")
       .references(() => repositoryItems.id, { onDelete: "cascade" })
       .notNull(),
-    indexedVersionId: uuid("indexed_version_id"),
+    indexedVersionId: uuid("indexed_version_id").references(
+      () => contentVersions.id,
+      { onDelete: "set null" }
+    ),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
   },
   (t) => [unique("uq_index_object").on(t.objectId)]

@@ -25,6 +25,7 @@ import {
   assertCanEdit,
   slugCandidate,
   slugifyTitle,
+  systemUserId,
 } from "./helpers";
 import { rowToObjectDTO, type ObjectRowAsText } from "./mappers";
 import { snapshotInTx, versionService } from "./version-service";
@@ -64,6 +65,16 @@ const objectSelectFields = {
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Postgres unique-violation (SQLSTATE 23505) detector for typed-error mapping. */
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: string }).code === "23505"
+  );
+}
 
 /** Allocate a unique slug for a title within the create transaction. */
 async function uniqueSlug(tx: DbTransaction, title: string): Promise<string> {
@@ -138,54 +149,86 @@ export const contentService = {
     const createdByAgentId =
       req.kind === "agent-autonomous" ? req.agentId : null;
 
-    const { object, version } = await executeTransaction(async (tx) => {
-      const slug = await uniqueSlug(tx, input.title);
-      const visibilityLevel: VisibilityLevel =
-        input.visibility?.level ??
-        (await collectionDefault(tx, input.collectionId)) ??
-        "private";
-
-      const [row] = await tx
-        .insert(contentObjects)
-        .values({
-          kind: input.kind,
-          title: input.title,
-          slug,
-          ownerUserId,
-          createdByActor,
-          createdByAgentId,
-          collectionId: input.collectionId ?? null,
-          visibilityLevel,
-          status: "draft",
-          // Typed JSONB must use the postgres.js cast pattern.
-          sourceRef: sql`${safeJsonbStringify(
-            input.sourceRef ?? { type: "none" }
-          )}::jsonb`,
-          tags: input.tags ?? [],
-        })
-        .returning(objectSelectFields);
-
-      await visibilityService.applyGrants(
-        tx,
-        row.id,
-        input.visibility?.grants ?? []
+    // A group object with no grants is invisible to everyone but the owner/admin
+    // (equivalent to private without the semantics) — almost always a mistake.
+    if (
+      input.visibility?.level === "group" &&
+      (input.visibility.grants?.length ?? 0) === 0
+    ) {
+      throw new ValidationError(
+        "group visibility requires at least one grant"
       );
+    }
 
-      const dto = rowToObjectDTO(row as ObjectRowAsText);
+    const { object, version, s3Writes } = await executeTransaction(
+      async (tx) => {
+        const slug = await uniqueSlug(tx, input.title);
+        const visibilityLevel: VisibilityLevel =
+          input.visibility?.level ??
+          (await collectionDefault(tx, input.collectionId)) ??
+          "private";
 
-      if (input.body !== undefined) {
-        const v = await snapshotInTx(
+        // Translate a slug unique-violation that slips past uniqueSlug (a
+        // concurrent create racing the SELECT) into a typed ConflictError.
+        const inserted = await tx
+          .insert(contentObjects)
+          .values({
+            kind: input.kind,
+            title: input.title,
+            slug,
+            ownerUserId,
+            createdByActor,
+            createdByAgentId,
+            collectionId: input.collectionId ?? null,
+            visibilityLevel,
+            status: "draft",
+            // Typed JSONB must use the postgres.js cast pattern.
+            sourceRef: sql`${safeJsonbStringify(
+              input.sourceRef ?? { type: "none" }
+            )}::jsonb`,
+            tags: input.tags ?? [],
+          })
+          .returning(objectSelectFields)
+          .catch((e: unknown) => {
+            if (isUniqueViolation(e)) {
+              throw new ConflictError("A content object with this slug already exists", {
+                slug,
+              });
+            }
+            throw e;
+          });
+
+        const row = inserted[0];
+        if (!row) {
+          throw new ConflictError("Failed to create content object", { slug });
+        }
+
+        await visibilityService.applyGrants(
           tx,
-          req,
-          { id: dto.id, kind: input.kind },
-          { body: input.body, bodyFormat: input.bodyFormat }
+          row.id,
+          input.visibility?.grants ?? []
         );
-        // Reflect the new head id without a re-select.
-        dto.currentVersionId = v.id;
-        return { object: dto, version: v };
-      }
-      return { object: dto, version: null };
-    }, "content.create");
+
+        const dto = rowToObjectDTO(row as ObjectRowAsText);
+
+        if (input.body !== undefined) {
+          const snap = await snapshotInTx(
+            tx,
+            req,
+            { id: dto.id, kind: input.kind },
+            { body: input.body, bodyFormat: input.bodyFormat }
+          );
+          // Reflect the new head id without a re-select.
+          dto.currentVersionId = snap.version.id;
+          return { object: dto, version: snap.version, s3Writes: snap.s3Writes };
+        }
+        return { object: dto, version: null, s3Writes: [] };
+      },
+      "content.create"
+    );
+
+    // S3 IO happens AFTER the transaction commits (never inside it).
+    await versionService.flushSnapshotWrites(s3Writes);
 
     return { ...object, version };
   },
@@ -202,6 +245,8 @@ export const contentService = {
   ): Promise<ContentObjectWithVersion> {
     const obj = await loadByIdOrSlug(id);
     if (!obj) throw new NotFoundError("Content not found", { id });
+    // Mask existence from callers who cannot view it before revealing edit state.
+    await assertViewable(req, obj, id);
     assertCanEdit(req, obj.ownerUserId);
 
     const version = await versionService.snapshot(
@@ -256,6 +301,7 @@ export const contentService = {
   ): Promise<ContentObjectDTO> {
     const existing = await loadByIdOrSlug(id);
     if (!existing) throw new NotFoundError("Content not found", { id });
+    await assertViewable(req, existing, id);
     assertCanEdit(req, existing.ownerUserId);
 
     const setValues: Record<string, unknown> = { updatedAt: new Date() };
@@ -277,9 +323,26 @@ export const contentService = {
           .returning(objectSelectFields),
       "content.update"
     );
+    // Guard against a concurrent delete between load and update (TOCTOU): the
+    // RETURNING yields no row, so surface a clean NotFoundError, not a TypeError.
+    if (!rows[0]) throw new NotFoundError("Content not found", { id });
     return rowToObjectDTO(rows[0] as ObjectRowAsText);
   },
 };
+
+/** Throw NotFoundError (not Forbidden) when the requester cannot view the object. */
+async function assertViewable(
+  req: Requester,
+  obj: ContentObjectDTO,
+  ref: string
+): Promise<void> {
+  const viewable = await visibilityService.canView(req, {
+    id: obj.id,
+    ownerUserId: obj.ownerUserId,
+    visibilityLevel: obj.visibilityLevel,
+  });
+  if (!viewable) throw new NotFoundError("Content not found", { ref });
+}
 
 /**
  * The user id that owns content created by this requester. Delegated agents own
@@ -289,14 +352,8 @@ export const contentService = {
 function ownerFor(req: Requester): number {
   if (req.kind === "user") return req.userId;
   if (req.kind === "agent-delegated") return req.actingForUserId;
-  // Autonomous: owned by the configured system user.
-  const systemUserId = Number(process.env.ATRIUM_SYSTEM_USER_ID);
-  if (!Number.isInteger(systemUserId) || systemUserId <= 0) {
-    throw new ValidationError(
-      "ATRIUM_SYSTEM_USER_ID must be configured for autonomous-agent content"
-    );
-  }
-  return systemUserId;
+  // Autonomous: owned by the configured system user (§26.5).
+  return systemUserId();
 }
 
 // Re-export the filtered list type for convenience.

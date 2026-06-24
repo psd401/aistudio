@@ -42,6 +42,7 @@ export const contentCollections = pgTable(
     navItemId: integer("nav_item_id").references(() => navigationItems.id),
     position: integer("position").default(0).notNull(),
     createdAt: timestamp("created_at").defaultNow().notNull(),
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
   },
   (t) => [index("idx_collection_parent").on(t.parentId)]
 );

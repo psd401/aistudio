@@ -20,7 +20,7 @@
  * overwritable object.
  */
 
-import { desc, eq, sql } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 import {
   executeQuery,
   executeTransaction,
@@ -29,7 +29,7 @@ import {
 import { contentObjects, contentVersions } from "@/lib/db/schema";
 import { pgTimestampAsText } from "@/lib/db/drizzle-helpers";
 import { createLogger } from "@/lib/logger";
-import { actorKindOf, agentIdOf, authorUserIdOf } from "./helpers";
+import { actorKindOf, agentIdOf, assertCanEdit, authorUserIdOf } from "./helpers";
 import { rowToVersionDTO, type VersionRowAsText } from "./mappers";
 import { renderMarkdownToHtml } from "./render/markdown-render";
 import { s3Store } from "./storage/s3-store";
@@ -79,18 +79,42 @@ async function maxVersion(
   return rows[0]?.max ?? 0;
 }
 
+/** A single S3 object to write after the snapshot transaction commits. */
+interface PendingS3Write {
+  key: string;
+  body: string;
+  contentType: string;
+}
+
+/** Result of the DB-only snapshot step: the version + its post-commit S3 writes. */
+export interface SnapshotResult {
+  version: ContentVersionDTO;
+  s3Writes: PendingS3Write[];
+}
+
 /**
- * Core snapshot routine that runs inside an existing transaction. Used by
- * `content-service.create` (sharing its transaction) and by the public
- * `snapshot` wrapper below.
+ * DB-only snapshot step that runs inside an existing transaction: allocates the
+ * next version number, inserts the immutable version row, and advances the
+ * object's working head. **Does no S3 IO** — it returns the body/render blobs
+ * the caller must persist *after* the transaction commits (see
+ * `flushSnapshotWrites`).
+ *
+ * Keeping S3 IO out of the transaction matters: the repo's `executeTransaction`
+ * retries on transient DB errors and holds a pooled connection for the whole
+ * callback. External-storage writes inside it would be retried (amplified),
+ * could orphan blobs on rollback, and would pin a connection during slow IO —
+ * all flagged by the drizzle-client JSDoc as an anti-pattern.
+ *
+ * Used by `content-service.create` (sharing its transaction) and by the public
+ * `snapshot` wrapper below; both flush the returned writes post-commit.
  */
 export async function snapshotInTx(
   tx: DbTransaction,
   req: Requester,
   obj: { id: string; kind: "document" | "artifact" },
   input: SnapshotInput
-): Promise<ContentVersionDTO> {
-  if (typeof input.body !== "string") {
+): Promise<SnapshotResult> {
+  if (typeof input.body !== "string" || input.body.length === 0) {
     throw new ValidationError("Version body is required");
   }
   const bodyFormat = input.bodyFormat ?? defaultBodyFormat(obj.kind);
@@ -100,23 +124,44 @@ export async function snapshotInTx(
   const inline =
     !isDocument && Buffer.byteLength(input.body, "utf8") <= INLINE_ARTIFACT_MAX_BYTES;
 
+  const s3Writes: PendingS3Write[] = [];
   let bodyLocation: string;
   let bodyInline: string | null = null;
+  let renderLocation: string | null = null;
 
   if (isDocument) {
     // Document live state belongs to the Proof doc-store (Phase 1). Phase 0
     // persists the canonical markdown + a rendered snapshot to S3 so content is
     // legible/round-trippable before any editor exists.
     bodyLocation = "proof";
+    renderLocation = s3Store.key(obj.id, next, "render.html");
+    s3Writes.push({
+      key: s3Store.key(obj.id, next, "source.md"),
+      body: input.body,
+      contentType: "text/markdown",
+    });
+    s3Writes.push({
+      key: renderLocation,
+      body: renderMarkdownToHtml(input.body),
+      contentType: "text/html",
+    });
   } else if (inline) {
     bodyLocation = "inline";
     bodyInline = input.body;
   } else {
+    // SECURITY: artifact code is UNTRUSTED. It is stored verbatim and must only
+    // be rendered inside the cross-origin sandboxed iframe (§28.1) — never served
+    // directly as text/html nor injected as innerHTML. The sandbox is Phase 2.
     bodyLocation = s3Store.key(obj.id, next, artifactFileName(bodyFormat));
+    s3Writes.push({
+      key: bodyLocation,
+      body: input.body,
+      contentType: bodyFormat === "jsx" ? "text/jsx" : "text/html",
+    });
   }
 
-  // Insert the version row first so a uniqueness violation aborts before S3 IO.
-  const [versionRow] = await tx
+  // The unique (object_id, version_number) constraint guards concurrent writers.
+  const inserted = await tx
     .insert(contentVersions)
     .values({
       objectId: obj.id,
@@ -127,29 +172,15 @@ export async function snapshotInTx(
       bodyFormat,
       bodyLocation,
       bodyInline,
-      // renderLocation filled in below for documents (deterministic key).
-      renderLocation: isDocument ? s3Store.key(obj.id, next, "render.html") : null,
+      renderLocation,
       summary: input.summary ?? null,
     })
     .returning(versionSelectFields);
 
-  // S3 writes (deterministic keys; safe to overwrite on retry).
-  if (isDocument) {
-    const html = renderMarkdownToHtml(input.body);
-    await s3Store.putText(
-      s3Store.key(obj.id, next, "source.md"),
-      input.body,
-      "text/markdown"
-    );
-    if (versionRow.renderLocation) {
-      await s3Store.putText(versionRow.renderLocation, html, "text/html");
-    }
-  } else if (!inline) {
-    await s3Store.putText(
-      bodyLocation,
-      input.body,
-      bodyFormat === "jsx" ? "text/jsx" : "text/html"
-    );
+  const versionRow = inserted[0];
+  if (!versionRow) {
+    // INSERT ... RETURNING should always yield a row; guard rather than crash.
+    throw new ValidationError("Failed to create version", { objectId: obj.id });
   }
 
   // Advance the object's working head.
@@ -158,25 +189,45 @@ export async function snapshotInTx(
     .set({ currentVersionId: versionRow.id, updatedAt: new Date() })
     .where(eq(contentObjects.id, obj.id));
 
-  return rowToVersionDTO(versionRow as VersionRowAsText);
+  return {
+    version: rowToVersionDTO(versionRow as VersionRowAsText),
+    s3Writes,
+  };
+}
+
+/**
+ * Persist a snapshot's S3 blobs. Run AFTER the snapshot transaction commits.
+ * Keys are deterministic and content-addressed, so a retry overwrites the same
+ * object harmlessly.
+ */
+export async function flushSnapshotWrites(
+  writes: PendingS3Write[]
+): Promise<void> {
+  for (const w of writes) {
+    await s3Store.putText(w.key, w.body, w.contentType);
+  }
 }
 
 export const versionService = {
   snapshotInTx,
+  flushSnapshotWrites,
 
   /**
    * Snapshot a new version of an existing object (standalone transaction).
    * Body-change entry point for `create-version` server actions / surfaces.
+   * The DB row commits first, then the S3 blobs are flushed.
    */
   async snapshot(
     req: Requester,
     obj: { id: string; kind: "document" | "artifact" },
     input: SnapshotInput
   ): Promise<ContentVersionDTO> {
-    return executeTransaction(
+    const { version, s3Writes } = await executeTransaction(
       (tx) => snapshotInTx(tx, req, obj, input),
       "content.snapshot"
     );
+    await flushSnapshotWrites(s3Writes);
+    return version;
   },
 
   /** Load the current (head) version of an object, or null if none exists. */
@@ -212,35 +263,47 @@ export const versionService = {
   },
 
   /**
-   * Point the object's working head at an earlier version. Validates the target
-   * version belongs to the object. Re-publishing the rolled-back version is an
-   * explicit, separate step (publish service, Phase 5/7).
+   * Point the object's working head at an earlier version, enforcing edit
+   * permission. Validates the target version belongs to the object.
+   * Re-publishing the rolled-back version is an explicit, separate step
+   * (publish service, Phase 5/7).
    */
-  async rollback(objectId: string, toVersionId: string): Promise<void> {
+  async rollback(
+    req: Requester,
+    objectId: string,
+    toVersionId: string
+  ): Promise<void> {
     const log = createLogger({ action: "content.rollback" });
     await executeTransaction(async (tx) => {
+      // Load the owner to enforce edit permission at the service boundary.
+      const owner = await tx
+        .select({ ownerUserId: contentObjects.ownerUserId })
+        .from(contentObjects)
+        .where(eq(contentObjects.id, objectId))
+        .limit(1);
+      if (!owner[0]) {
+        throw new NotFoundError("Content not found", { objectId });
+      }
+      assertCanEdit(req, owner[0].ownerUserId);
+
+      // Single query: the target must exist AND belong to this object.
       const target = await tx
         .select({ id: contentVersions.id })
         .from(contentVersions)
-        .where(eq(contentVersions.id, toVersionId))
-        .limit(1);
-      if (!target[0]) {
-        throw new NotFoundError("Target version not found", { toVersionId });
-      }
-      // Ensure the version belongs to this object.
-      const belongs = await tx
-        .select({ id: contentVersions.id })
-        .from(contentVersions)
         .where(
-          sql`${contentVersions.id} = ${toVersionId} AND ${contentVersions.objectId} = ${objectId}`
+          and(
+            eq(contentVersions.id, toVersionId),
+            eq(contentVersions.objectId, objectId)
+          )
         )
         .limit(1);
-      if (!belongs[0]) {
+      if (!target[0]) {
         throw new ValidationError(
-          "Target version does not belong to this object",
+          "Target version not found for this object",
           { objectId, toVersionId }
         );
       }
+
       await tx
         .update(contentObjects)
         .set({ currentVersionId: toVersionId, updatedAt: new Date() })

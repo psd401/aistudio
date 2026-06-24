@@ -37,6 +37,10 @@ export interface ObjectRowAsText {
   updatedAt: string | null;
 }
 
+// The `as <union>` casts below narrow enum-backed columns that the row type
+// carries as `string`. The values are constrained by the pgEnum column at the
+// DB level, so the cast is sound unless the DB enum diverges from the TS union
+// (which schema-drift detection guards).
 export function rowToObjectDTO(row: ObjectRowAsText): ContentObjectDTO {
   return {
     id: row.id,

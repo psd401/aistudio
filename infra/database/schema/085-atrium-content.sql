@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS content_collections (
   default_visibility_level visibility_level NOT NULL DEFAULT 'internal',
   nav_item_id integer REFERENCES navigation_items(id),
   position integer NOT NULL DEFAULT 0,
-  created_at timestamp NOT NULL DEFAULT now()
+  created_at timestamp NOT NULL DEFAULT now(),
+  updated_at timestamp NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_collection_parent ON content_collections(parent_id);
 
@@ -143,6 +144,8 @@ CREATE TABLE IF NOT EXISTS content_publications (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   object_id uuid NOT NULL REFERENCES content_objects(id) ON DELETE CASCADE,
   destination publish_destination NOT NULL,
+  -- RESTRICT (the default) is intentional: a version that is live at a
+  -- destination must not be deletable out from under its publication record.
   published_version_id uuid NOT NULL REFERENCES content_versions(id),
   external_ref text,
   status publication_status NOT NULL DEFAULT 'live',
@@ -183,7 +186,9 @@ CREATE TABLE IF NOT EXISTS content_index_links (
   id serial PRIMARY KEY,
   object_id uuid NOT NULL REFERENCES content_objects(id) ON DELETE CASCADE,
   repository_item_id integer NOT NULL REFERENCES repository_items(id) ON DELETE CASCADE,
-  indexed_version_id uuid,
+  -- ON DELETE SET NULL: if the indexed version is removed, the link survives but
+  -- is flagged stale (null) so the indexer (Phase 6) knows to re-index.
+  indexed_version_id uuid REFERENCES content_versions(id) ON DELETE SET NULL,
   updated_at timestamp NOT NULL DEFAULT now(),
   CONSTRAINT uq_index_object UNIQUE (object_id)
 );

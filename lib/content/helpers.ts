@@ -7,8 +7,33 @@
  * See docs/features/atrium-design-spec.md §11 / §26.3.
  */
 
-import { ForbiddenError } from "./errors";
+import { ForbiddenError, ValidationError } from "./errors";
 import type { Principal, Requester } from "./types";
+
+/**
+ * The configured system user id that owns autonomous-agent content (§26.5), or
+ * `null` when unset/invalid. Use this on read/permission paths where a missing
+ * config should deny rather than throw.
+ */
+export function systemUserIdOrNull(): number | null {
+  const id = Number(process.env.ATRIUM_SYSTEM_USER_ID);
+  return Number.isInteger(id) && id > 0 ? id : null;
+}
+
+/**
+ * The configured system user id that owns autonomous-agent content (§26.5).
+ * Throws `ValidationError` when unset/invalid so the failure is explicit rather
+ * than silently owning content as user 0 / NaN. Use on the write path.
+ */
+export function systemUserId(): number {
+  const id = systemUserIdOrNull();
+  if (id == null) {
+    throw new ValidationError(
+      "ATRIUM_SYSTEM_USER_ID must be configured for autonomous-agent content"
+    );
+  }
+  return id;
+}
 
 /**
  * Slugify a title into a URL-safe, lowercase, hyphenated string capped at the
@@ -115,16 +140,32 @@ export function assertCanCreate(req: Requester): void {
 
 /**
  * Whether a requester may edit an object's body/metadata: the owner, an admin,
- * or a delegated agent acting for the owner. Autonomous agents may edit content
- * they own (the system user) — owner equality covers that. Requires the
- * `content:update` scope for any agent caller.
+ * or a delegated agent acting for the owner. Requires the `content:update` scope
+ * for any agent caller.
+ *
+ * Autonomous agents have no `userId` (their access is role-driven), so the
+ * owner-equality branch can never fire for them; they own content via the
+ * configured system user, so their ownership is checked explicitly against
+ * `systemUserId()`.
  */
 export function canEdit(req: Requester, ownerUserId: number): boolean {
   const principal = principalOf(req);
   if (principal.isAdmin) return true;
+
+  if (req.kind === "agent-autonomous") {
+    // Owns via the system user; must also hold the update scope. A missing
+    // system-user config denies rather than throws (read/permission path).
+    const sysId = systemUserIdOrNull();
+    return (
+      sysId != null &&
+      ownerUserId === sysId &&
+      scopesOf(req).includes("content:update")
+    );
+  }
+
   if (principal.userId != null && principal.userId === ownerUserId) {
-    // Agents additionally need the update scope.
     if (req.kind === "user") return true;
+    // Delegated agents additionally need the update scope.
     return scopesOf(req).includes("content:update");
   }
   return false;

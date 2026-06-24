@@ -69,6 +69,7 @@ export async function getNavigationItems(activeOnly: boolean = false) {
             position: navigationItems.position,
             isActive: navigationItems.isActive,
             createdAt: navigationItems.createdAt,
+            contentObjectId: navigationItems.contentObjectId,
           })
           .from(navigationItems)
           .where(eq(navigationItems.isActive, true))
@@ -93,6 +94,7 @@ export async function getNavigationItems(activeOnly: boolean = false) {
           position: navigationItems.position,
           isActive: navigationItems.isActive,
           createdAt: navigationItems.createdAt,
+          contentObjectId: navigationItems.contentObjectId,
         })
         .from(navigationItems)
         .orderBy(asc(navigationItems.position)),
@@ -121,6 +123,7 @@ export async function getNavigationItemById(id: number) {
           position: navigationItems.position,
           isActive: navigationItems.isActive,
           createdAt: navigationItems.createdAt,
+          contentObjectId: navigationItems.contentObjectId,
         })
         .from(navigationItems)
         .where(eq(navigationItems.id, id))

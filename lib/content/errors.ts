@@ -20,6 +20,14 @@ export class ContentError extends Error {
   readonly code: string;
   readonly status: number;
   readonly details?: Record<string, unknown>;
+  /**
+   * Log level. Present so the repo's `handleError` (which routes any Error with
+   * a `code` through its TypedError branch and switches on `level`) actually
+   * logs these errors. Without it the switch would fall through and the error
+   * would be silently dropped from the logs. 5xx -> ERROR, everything else
+   * (client/validation/approval) -> WARN.
+   */
+  readonly level: ErrorLevel;
 
   constructor(
     message: string,
@@ -32,6 +40,7 @@ export class ContentError extends Error {
     this.code = code;
     this.status = status;
     this.details = details;
+    this.level = status >= 500 ? ErrorLevel.ERROR : ErrorLevel.WARN;
     // Maintain a proper prototype chain when targeting ES5-ish output.
     Object.setPrototypeOf(this, new.target.prototype);
   }
