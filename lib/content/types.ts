@@ -55,7 +55,14 @@ export interface Principal {
 export type Requester =
   | {
       kind: "user";
-      userId: number;
+      /**
+       * Integer `users.id`, or `null` for an unauthenticated guest. A guest
+       * requester carries no userId and no roles, so `canView` admits only
+       * `public` content (visibility-service.ts §11.2). Guests reach read
+       * actions only; write paths (`ownerFor`, `authorUserIdOf`) reject a null
+       * userId rather than silently coercing it.
+       */
+      userId: number | null;
       roles: string[];
       building?: string | null;
       department?: string | null;

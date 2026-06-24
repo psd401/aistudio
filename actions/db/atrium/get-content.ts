@@ -20,7 +20,7 @@ import { createSuccess, handleError } from "@/lib/error-utils";
 import { contentService } from "@/lib/content";
 import type { ContentObjectWithVersion } from "@/lib/content";
 import type { ActionState } from "@/types";
-import { getUserRequester } from "./requester";
+import { getOptionalRequester } from "./requester";
 
 export async function getContentAction(
   idOrSlug: string
@@ -38,7 +38,8 @@ export async function getContentAction(
     // by explicit grant). A user without the Atrium *authoring* capability can
     // still legitimately read content visible to them. Do not add a capability
     // gate here without a product decision — write actions are the gated ones.
-    const requester = await getUserRequester();
+    // A guest (no session) can read `public` content via `canView`.
+    const requester = await getOptionalRequester(requestId);
     const result = await contentService.get(requester, idOrSlug);
 
     timer({ status: "success" });

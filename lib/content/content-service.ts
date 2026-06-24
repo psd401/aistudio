@@ -35,7 +35,7 @@ import {
 } from "./mappers";
 import { snapshotInTx, versionService } from "./version-service";
 import { visibilityService } from "./visibility-service";
-import { ConflictError, NotFoundError, ValidationError } from "./errors";
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from "./errors";
 import type {
   ContentObjectDTO,
   ContentObjectWithVersion,
@@ -291,15 +291,8 @@ export const contentService = {
     const obj = await loadByIdOrSlug(idOrSlug);
     if (!obj) throw new NotFoundError("Content not found", { idOrSlug });
 
-    const viewable = await visibilityService.canView(req, {
-      id: obj.id,
-      ownerUserId: obj.ownerUserId,
-      visibilityLevel: obj.visibilityLevel,
-    });
-    if (!viewable) {
-      // 404 (not 403) to avoid leaking existence of non-viewable content.
-      throw new NotFoundError("Content not found", { idOrSlug });
-    }
+    // 404 (not 403) on a non-viewable object to avoid leaking existence.
+    await assertViewable(req, obj, idOrSlug);
 
     const version = obj.currentVersionId
       ? await versionService.current(obj.id)
@@ -380,7 +373,14 @@ async function assertViewable(
  * system user (§26.5).
  */
 function ownerFor(req: Requester): number {
-  if (req.kind === "user") return req.userId;
+  if (req.kind === "user") {
+    // A guest (userId null) cannot own content; create is never reached by a
+    // guest, but fail loudly rather than coerce to a bogus owner id.
+    if (req.userId == null) {
+      throw new ForbiddenError("Authentication required to own content");
+    }
+    return req.userId;
+  }
   if (req.kind === "agent-delegated") return req.actingForUserId;
   // Autonomous: owned by the configured system user (§26.5).
   return systemUserId();

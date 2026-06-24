@@ -89,6 +89,8 @@ interface PendingS3Write {
   key: string;
   body: string;
   contentType: string;
+  /** "attachment" for active-markup keys (render.html, artifact html). */
+  contentDisposition?: string;
 }
 
 /** Result of the DB-only snapshot step: the version + its post-commit S3 writes. */
@@ -165,6 +167,9 @@ export async function snapshotInTx(
       key: renderLocation,
       body: renderMarkdownToHtml(input.body),
       contentType: "text/html",
+      // Force download (not inline render) when served from a presigned URL, so
+      // the rendered HTML is never executed on the S3/CloudFront origin.
+      contentDisposition: "attachment",
     });
   } else if (inline) {
     bodyLocation = "inline";
@@ -178,6 +183,9 @@ export async function snapshotInTx(
       key: bodyLocation,
       body: input.body,
       contentType: bodyFormat === "jsx" ? "text/jsx" : "text/html",
+      // Untrusted artifact code: never let a presigned URL render it as a live
+      // document. It is served only inside the cross-origin sandbox (§28.1).
+      contentDisposition: "attachment",
     });
   }
 
@@ -234,7 +242,9 @@ export async function flushSnapshotWrites(
   writes: PendingS3Write[]
 ): Promise<void> {
   const results = await Promise.allSettled(
-    writes.map((w) => s3Store.putText(w.key, w.body, w.contentType))
+    writes.map((w) =>
+      s3Store.putText(w.key, w.body, w.contentType, w.contentDisposition)
+    )
   );
   const rejected = results.filter(
     (r): r is PromiseRejectedResult => r.status === "rejected"
@@ -368,10 +378,19 @@ export const versionService = {
         );
       }
 
-      await tx
+      const updated = await tx
         .update(contentObjects)
         .set({ currentVersionId: toVersionId, updatedAt: new Date() })
-        .where(eq(contentObjects.id, objectId));
+        .where(eq(contentObjects.id, objectId))
+        .returning({ id: contentObjects.id });
+      // The object row could be deleted between the outer permission check
+      // (loaded via executeQuery, outside this tx) and this UPDATE. The
+      // target-version SELECT above guards the version row, not the object row,
+      // so without this check a concurrent object delete would log a successful
+      // rollback that affected 0 rows.
+      if (!updated[0]) {
+        throw new NotFoundError("Content not found", { objectId });
+      }
     }, "content.rollback");
     log.info("Rolled back content head", { objectId, toVersionId });
   },

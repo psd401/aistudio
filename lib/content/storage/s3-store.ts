@@ -104,11 +104,20 @@ export const s3Store = {
     return `${ATRIUM_PREFIX}/objects/${objectId}/assets/${assetId}`;
   },
 
-  /** Write a text body to S3 at the given key. */
+  /**
+   * Write a text body to S3 at the given key.
+   *
+   * `contentDisposition` should be `"attachment"` for any key that holds active
+   * markup (e.g. `render.html`, artifact html). A presigned read URL for an
+   * object stored as `text/html` would otherwise render as a live document on
+   * the S3/CloudFront origin; `attachment` forces a download instead, keeping
+   * rendering on the app origin where the security model lives.
+   */
   async putText(
     key: string,
     body: string,
-    contentType: string
+    contentType: string,
+    contentDisposition?: string
   ): Promise<void> {
     const client = await getClient();
     const { bucket } = await getConfig();
@@ -118,6 +127,7 @@ export const s3Store = {
         Key: key,
         Body: body,
         ContentType: contentType,
+        ...(contentDisposition ? { ContentDisposition: contentDisposition } : {}),
       })
     );
   },

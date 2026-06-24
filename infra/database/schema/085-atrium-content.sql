@@ -218,9 +218,18 @@ ALTER TABLE navigation_items
   FOREIGN KEY (content_object_id) REFERENCES content_objects(id);
 
 -- ============================================================================
--- 10. Seed data (idempotent; §10). Root collections + a nav section per
---     collection + conservative autonomous agent identities. None seed with
---     content:publish_public.
+-- 10. Seed data (idempotent; §10). Root collections + conservative autonomous
+--     agent identities. None seed with content:publish_public.
+--
+--     NOTE (Phase 0): navigation_items are intentionally NOT seeded here. Phase 0
+--     ships no browsable Atrium route, so a seeded `type='content'` nav item has
+--     no valid destination: with link=NULL and no children it is silently
+--     dropped by buildVisibleNavItems (app/api/navigation/route.ts) — an
+--     invisible, confusing row — and pointing it at a not-yet-existing `/atrium`
+--     route would render a 404. Nav seeding + the collection↔nav wiring move to
+--     Phase 1, where they land together with the route. The `content` enum value,
+--     the navigation_items.content_object_id column (§9 above), and the admin/UI
+--     `content`-type handling are all in place now so Phase 1 only adds rows.
 -- ============================================================================
 
 -- 10a. Root collections (slugs are stable; names editable).
@@ -244,54 +253,11 @@ INSERT INTO content_collections (name, slug, default_visibility_level, position)
 SELECT 'Public site', 'public-site', 'public', 4
 WHERE NOT EXISTS (SELECT 1 FROM content_collections WHERE slug = 'public-site');
 
--- 10b. A nav section per collection (type='content'), linked via nav_item_id.
---      Created under no parent (top-level sections); link is wired back onto the
---      collection after insert. Idempotent on the nav label.
-INSERT INTO navigation_items (label, icon, link, type, position, is_active, description)
-SELECT 'District handbook', 'IconBook', NULL, 'content', 100, true, 'Atrium collection: District handbook'
-WHERE NOT EXISTS (SELECT 1 FROM navigation_items WHERE label = 'District handbook' AND type = 'content');
-
-INSERT INTO navigation_items (label, icon, link, type, position, is_active, description)
-SELECT 'High School', 'IconSchool', NULL, 'content', 101, true, 'Atrium collection: High School'
-WHERE NOT EXISTS (SELECT 1 FROM navigation_items WHERE label = 'High School' AND type = 'content');
-
-INSERT INTO navigation_items (label, icon, link, type, position, is_active, description)
-SELECT 'Special Education', 'IconAccessible', NULL, 'content', 102, true, 'Atrium collection: Special Education'
-WHERE NOT EXISTS (SELECT 1 FROM navigation_items WHERE label = 'Special Education' AND type = 'content');
-
-INSERT INTO navigation_items (label, icon, link, type, position, is_active, description)
-SELECT 'Assessment & data', 'IconChartBar', NULL, 'content', 103, true, 'Atrium collection: Assessment & data'
-WHERE NOT EXISTS (SELECT 1 FROM navigation_items WHERE label = 'Assessment & data' AND type = 'content');
-
-INSERT INTO navigation_items (label, icon, link, type, position, is_active, description)
-SELECT 'Public site', 'IconWorld', NULL, 'content', 104, true, 'Atrium collection: Public site'
-WHERE NOT EXISTS (SELECT 1 FROM navigation_items WHERE label = 'Public site' AND type = 'content');
-
--- 10c. Wire each collection to its nav item (only where not already linked).
-UPDATE content_collections c
-SET nav_item_id = n.id
-FROM navigation_items n
-WHERE n.type = 'content' AND n.label = 'District handbook' AND c.slug = 'district-handbook' AND c.nav_item_id IS NULL;
-
-UPDATE content_collections c
-SET nav_item_id = n.id
-FROM navigation_items n
-WHERE n.type = 'content' AND n.label = 'High School' AND c.slug = 'high-school' AND c.nav_item_id IS NULL;
-
-UPDATE content_collections c
-SET nav_item_id = n.id
-FROM navigation_items n
-WHERE n.type = 'content' AND n.label = 'Special Education' AND c.slug = 'special-education' AND c.nav_item_id IS NULL;
-
-UPDATE content_collections c
-SET nav_item_id = n.id
-FROM navigation_items n
-WHERE n.type = 'content' AND n.label = 'Assessment & data' AND c.slug = 'assessment-data' AND c.nav_item_id IS NULL;
-
-UPDATE content_collections c
-SET nav_item_id = n.id
-FROM navigation_items n
-WHERE n.type = 'content' AND n.label = 'Public site' AND c.slug = 'public-site' AND c.nav_item_id IS NULL;
+-- 10b/10c (navigation_items seeding + collection↔nav wiring): deferred to Phase 1.
+--   See the section-10 note above. Phase 0 ships no Atrium route, so seeding nav
+--   rows now produces either invisible (link=NULL, dropped by the nav filter) or
+--   broken (404) entries. The collections above carry nav_item_id = NULL until
+--   Phase 1 wires them to nav rows alongside the route.
 
 -- 10d. Autonomous agent identities with conservative scopes. None hold
 --      content:publish_public. role_id defaults to the 'staff' role so their

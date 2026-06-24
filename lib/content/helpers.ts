@@ -108,7 +108,9 @@ export function principalOf(req: Requester): Principal {
   switch (req.kind) {
     case "user":
       return {
-        userId: req.userId,
+        // A guest user requester carries a null userId; the Principal model uses
+        // `undefined` for "no user", and canView treats both identically.
+        userId: req.userId ?? undefined,
         roles: req.roles,
         building: req.building,
         department: req.department,

@@ -46,7 +46,7 @@ export async function createContentAction(
       }),
     });
 
-    const requester = await getUserRequester();
+    const requester = await getUserRequester(requestId);
     // UI write path: gate on the Atrium content capability. The service-layer
     // `assertCanCreate` intentionally defers user gating to the surface, so this
     // is the gate for logged-in humans (students without the capability cannot

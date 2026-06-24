@@ -42,7 +42,7 @@ export async function createVersionAction(
       }),
     });
 
-    const requester = await getUserRequester();
+    const requester = await getUserRequester(requestId);
     // UI write path: gate on the Atrium content capability (see create-content).
     if (!(await hasCapabilityAccess("atrium-content"))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");

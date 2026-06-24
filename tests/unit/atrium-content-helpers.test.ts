@@ -247,6 +247,15 @@ describe("sanitizeHtml (§31.1)", () => {
     );
     expect(out).not.toMatch(/<(style|iframe|object|embed)/i);
   });
+  it("strips <base> (relative-URL hijacking)", () => {
+    // A surviving <base> would re-root every relative link/image/stylesheet in
+    // the stored render.html snapshot against the attacker origin.
+    const out = sanitizeHtml(
+      '<base href="https://attacker.com/"><a href="/foo">x</a>'
+    );
+    expect(out).not.toMatch(/<base/i);
+    expect(out).not.toMatch(/attacker\.com/i);
+  });
   it("strips inline event-handler attributes", () => {
     const out = sanitizeHtml('<a href="#" onclick="steal()">x</a>');
     expect(out).not.toMatch(/onclick/i);

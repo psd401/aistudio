@@ -20,7 +20,7 @@ import { createSuccess, handleError } from "@/lib/error-utils";
 import { contentService } from "@/lib/content";
 import type { ContentObjectDTO, ListFilter } from "@/lib/content";
 import type { ActionState } from "@/types";
-import { getUserRequester } from "./requester";
+import { getOptionalRequester } from "./requester";
 
 export async function listContentAction(
   filter: ListFilter = {}
@@ -39,8 +39,9 @@ export async function listContentAction(
     // (a row is returned only if the requester could view it). A user without the
     // Atrium *authoring* capability still legitimately lists content visible to
     // them. Do not add a capability gate here without a product decision — write
-    // actions are the gated ones.
-    const requester = await getUserRequester();
+    // actions are the gated ones. A guest (no session) lists only `public`
+    // content via the same SQL filter.
+    const requester = await getOptionalRequester(requestId);
     const result = await contentService.list(requester, filter);
 
     timer({ status: "success" });

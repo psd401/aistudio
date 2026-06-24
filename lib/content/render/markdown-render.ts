@@ -90,14 +90,17 @@ function getPurifier(): DOMPurify {
  * allowlist, and serializes back to a string. Exported for unit tests.
  *
  * Forbidden tags (beyond DOMPurify's defaults) keep document HTML to inert,
- * presentational markup: no <style> (CSS exfiltration / layout attacks), no
- * embedding tags (<iframe>/<object>/<embed>), no form controls. <script> and all
- * `on*` event handlers are stripped by DOMPurify's defaults.
+ * presentational markup: no <base> (relative-URL hijacking — a single
+ * `<base href="https://attacker.com/">` would re-root every relative link, image,
+ * and stylesheet in the stored snapshot against an attacker origin), no <style>
+ * (CSS exfiltration / layout attacks), no embedding tags
+ * (<iframe>/<object>/<embed>), no form controls. <script> and all `on*` event
+ * handlers are stripped by DOMPurify's defaults.
  */
 export function sanitizeHtml(html: string): string {
   if (!html) return "";
   return getPurifier().sanitize(html, {
-    FORBID_TAGS: ["style", "iframe", "object", "embed", "form", "input", "button"],
+    FORBID_TAGS: ["base", "style", "iframe", "object", "embed", "form", "input", "button"],
     FORBID_ATTR: ["style"],
   });
 }
