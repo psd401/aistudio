@@ -131,7 +131,7 @@ export interface ContentObjectDTO {
   visibilityLevel: VisibilityLevel;
   currentVersionId: string | null;
   sourceRef: SourceRef | null;
-  tags: string[] | null;
+  tags: string[];
   status: "draft" | "published" | "archived";
   indexedAt: string | null;
   createdAt: string | null;

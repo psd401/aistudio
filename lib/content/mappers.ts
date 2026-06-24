@@ -55,7 +55,7 @@ export interface ObjectRowAsText {
   visibilityLevel: string;
   currentVersionId: string | null;
   sourceRef: SourceRef | null;
-  tags: string[] | null;
+  tags: string[];
   status: string;
   indexedAt: string | null;
   createdAt: string | null;
@@ -79,7 +79,7 @@ export function rowToObjectDTO(row: ObjectRowAsText): ContentObjectDTO {
     visibilityLevel: row.visibilityLevel as VisibilityLevel,
     currentVersionId: row.currentVersionId,
     sourceRef: row.sourceRef,
-    tags: row.tags,
+    tags: row.tags ?? [],
     status: row.status as "draft" | "published" | "archived",
     indexedAt: stripJsonQuotes(row.indexedAt),
     createdAt: stripJsonQuotes(row.createdAt),

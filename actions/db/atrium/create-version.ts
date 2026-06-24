@@ -42,11 +42,11 @@ export async function createVersionAction(
       }),
     });
 
-    const requester = await getUserRequester(requestId);
-    // UI write path: gate on the Atrium content capability (see create-content).
+    // Capability gate first: avoids DB queries for non-authorized callers.
     if (!(await hasCapabilityAccess("atrium-content"))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
+    const requester = await getUserRequester(requestId);
     const result = await contentService.createVersion(
       requester,
       objectId,

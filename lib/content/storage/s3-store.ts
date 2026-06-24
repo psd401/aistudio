@@ -127,6 +127,7 @@ export const s3Store = {
         Key: key,
         Body: body,
         ContentType: contentType,
+        CacheControl: "no-store",
         ...(contentDisposition ? { ContentDisposition: contentDisposition } : {}),
       })
     );

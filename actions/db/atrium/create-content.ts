@@ -46,14 +46,12 @@ export async function createContentAction(
       }),
     });
 
-    const requester = await getUserRequester(requestId);
-    // UI write path: gate on the Atrium content capability. The service-layer
-    // `assertCanCreate` intentionally defers user gating to the surface, so this
-    // is the gate for logged-in humans (students without the capability cannot
-    // create content). Read actions stay ungated — they are bounded by canView.
+    // Capability gate first: avoids two DB queries (user + roles) for callers
+    // who don't have the atrium-content capability (e.g. students).
     if (!(await hasCapabilityAccess("atrium-content"))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
+    const requester = await getUserRequester(requestId);
     const result = await contentService.create(requester, input);
 
     timer({ status: "success" });

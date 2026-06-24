@@ -254,7 +254,7 @@ describe("sanitizeHtml (§31.1)", () => {
       '<base href="https://attacker.com/"><a href="/foo">x</a>'
     );
     expect(out).not.toMatch(/<base/i);
-    expect(out).not.toMatch(/attacker\.com/i);
+    expect(out).not.toContain("attacker.com");
   });
   it("strips inline event-handler attributes", () => {
     const out = sanitizeHtml('<a href="#" onclick="steal()">x</a>');
