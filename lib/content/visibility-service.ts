@@ -22,7 +22,7 @@ import {
   contentVisibilityGrants,
 } from "@/lib/db/schema";
 import { principalOf } from "./helpers";
-import { objectSelectFields, rowToObjectDTO } from "./mappers";
+import { objectSelectFields, rowToObjectDTO, type ObjectRowAsText } from "./mappers";
 import { ValidationError } from "./errors";
 import type {
   ContentObjectDTO,
@@ -279,6 +279,10 @@ export const visibilityService = {
       "content.listVisible"
     );
 
-    return rows.map(rowToObjectDTO);
+    // Cast each row to the text-timestamp shape, matching content-service's
+    // per-call pattern: the Drizzle projection types `tags` as nullable and
+    // narrows enum columns, so it is not directly assignable to the mapper's
+    // ObjectRowAsText parameter.
+    return rows.map((row) => rowToObjectDTO(row as ObjectRowAsText));
   },
 };
