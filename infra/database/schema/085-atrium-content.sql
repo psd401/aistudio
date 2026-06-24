@@ -10,10 +10,14 @@
 --
 -- See docs/features/atrium-design-spec.md §7-§10.
 --
--- ADDITIVE and idempotent. No PL/pgSQL triggers / DO $$ blocks (the migration
--- runner's statement splitter cannot handle dollar-quoted blocks — see migration
--- 079). `updated_at` columns are maintained by application code via Drizzle
--- `.set({ updatedAt: new Date() })`, not by a trigger.
+-- ADDITIVE and idempotent. No DO $$ blocks / inline PL/pgSQL function bodies
+-- (the migration runner's statement splitter cannot handle dollar-quoted blocks
+-- — see migration 079). `updated_at` columns ARE backed by PostgreSQL triggers
+-- (section 11) that reference the pre-existing `update_updated_at_column()`
+-- function from migration 017 — a single-statement `CREATE TRIGGER` needs no
+-- dollar-quoting, so the splitter handles it (proven by migration 028). App
+-- code still sets `updatedAt` explicitly via Drizzle as the fast path; the
+-- trigger is the DB-level backstop for any write that bypasses it.
 --
 -- Ordering notes:
 --   * CREATE TYPE statements are each on a single line so the runner's splitter
@@ -306,3 +310,30 @@ INSERT INTO agent_identities (name, kind, role_id, scopes, is_active)
 SELECT 'tutorial-publisher', 'skill', (SELECT id FROM roles WHERE name = 'staff' LIMIT 1),
        ARRAY['content:create', 'content:update'], true
 WHERE NOT EXISTS (SELECT 1 FROM agent_identities WHERE name = 'tutorial-publisher');
+
+-- ============================================================================
+-- 11. updated_at triggers (CLAUDE.md: tables with updated_at MUST have the
+--     PostgreSQL trigger so DB-level writes — bulk sweeps, future migrations —
+--     never leave a stale timestamp. App-level `.set({ updatedAt })` is the
+--     fast path; this is the DB-level backstop. `listVisible` sorts by
+--     updated_at DESC, so stale timestamps would also corrupt list ordering.
+--
+--     These reference the pre-existing `update_updated_at_column()` function
+--     (migration 017), so no PL/pgSQL / DO $$ block is needed here — the runner's
+--     splitter handles a single `CREATE TRIGGER` statement (proven by migration
+--     028). Idempotent via DROP TRIGGER IF EXISTS, mirroring 028.
+-- ============================================================================
+DROP TRIGGER IF EXISTS update_content_collections_updated_at ON content_collections;
+CREATE TRIGGER update_content_collections_updated_at
+  BEFORE UPDATE ON content_collections
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_content_objects_updated_at ON content_objects;
+CREATE TRIGGER update_content_objects_updated_at
+  BEFORE UPDATE ON content_objects
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_content_index_links_updated_at ON content_index_links;
+CREATE TRIGGER update_content_index_links_updated_at
+  BEFORE UPDATE ON content_index_links
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();

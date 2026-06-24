@@ -33,6 +33,7 @@ import { actorKindOf, agentIdOf, assertCanEdit, authorUserIdOf } from "./helpers
 import { rowToVersionDTO, type VersionRowAsText } from "./mappers";
 import { renderMarkdownToHtml } from "./render/markdown-render";
 import { s3Store } from "./storage/s3-store";
+import { visibilityService } from "./visibility-service";
 import { NotFoundError, ValidationError } from "./errors";
 import type {
   BodyFormat,
@@ -307,13 +308,28 @@ export const versionService = {
   ): Promise<void> {
     const log = createLogger({ action: "content.rollback" });
     await executeTransaction(async (tx) => {
-      // Load the owner to enforce edit permission at the service boundary.
+      // Load the owner + visibility to enforce permission at the service boundary.
       const owner = await tx
-        .select({ ownerUserId: contentObjects.ownerUserId })
+        .select({
+          ownerUserId: contentObjects.ownerUserId,
+          visibilityLevel: contentObjects.visibilityLevel,
+        })
         .from(contentObjects)
         .where(eq(contentObjects.id, objectId))
         .limit(1);
       if (!owner[0]) {
+        throw new NotFoundError("Content not found", { objectId });
+      }
+      // Mask existence from callers who cannot view the object *before* revealing
+      // edit state: a non-viewable object must 404 (not 403), mirroring
+      // `content-service.createVersion`/`update`. Otherwise `rollback` lets an
+      // attacker enumerate private object ids (403 = exists, 404 = absent).
+      const viewable = await visibilityService.canView(req, {
+        id: objectId,
+        ownerUserId: owner[0].ownerUserId,
+        visibilityLevel: owner[0].visibilityLevel,
+      });
+      if (!viewable) {
         throw new NotFoundError("Content not found", { objectId });
       }
       assertCanEdit(req, owner[0].ownerUserId);
