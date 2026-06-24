@@ -36,6 +36,7 @@ import type {
   CreateObjectInput,
   ListFilter,
   Requester,
+  SnapshotInput,
   UpdatePatch,
   VisibilityLevel,
 } from "./types";
@@ -187,6 +188,28 @@ export const contentService = {
     }, "content.create");
 
     return { ...object, version };
+  },
+
+  /**
+   * Snapshot a new version of an existing object, enforcing edit permission.
+   * Body changes always flow through here (never through `update`). Returns the
+   * object with its new head version.
+   */
+  async createVersion(
+    req: Requester,
+    id: string,
+    input: SnapshotInput
+  ): Promise<ContentObjectWithVersion> {
+    const obj = await loadByIdOrSlug(id);
+    if (!obj) throw new NotFoundError("Content not found", { id });
+    assertCanEdit(req, obj.ownerUserId);
+
+    const version = await versionService.snapshot(
+      req,
+      { id: obj.id, kind: obj.kind },
+      input
+    );
+    return { ...obj, currentVersionId: version.id, version };
   },
 
   /**
