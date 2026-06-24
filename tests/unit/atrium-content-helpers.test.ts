@@ -101,6 +101,14 @@ describe("slugCandidate", () => {
     expect(candidate.length).toBeLessThanOrEqual(200);
     expect(candidate.endsWith("-12")).toBe(true);
   });
+  it("strips trailing hyphens left by the slice before appending the suffix", () => {
+    // The slice boundary lands mid hyphen-run: base = 196 'a's + '---'. With a
+    // '-10' suffix (room = 197) the slice keeps '...a-', which must be stripped
+    // so the result is not '...a---10' (a double/triple-hyphen artefact).
+    const candidate = slugCandidate("a".repeat(196) + "---", 10);
+    expect(candidate).toBe("a".repeat(196) + "-10");
+    expect(candidate).not.toMatch(/--/);
+  });
 });
 
 describe("actor / author / scope resolution", () => {

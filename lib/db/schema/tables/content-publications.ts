@@ -45,6 +45,10 @@ export const contentPublications = pgTable(
     status: publicationStatusEnum("status").default("live").notNull(),
     publishedBy: integer("published_by").references(() => users.id),
     publishedAt: timestamp("published_at").defaultNow().notNull(),
+    // Audit timestamp for status transitions (live -> unpublished -> failed);
+    // published_at records first-publish only. Backed by a DB trigger (migration
+    // 085 §11); app code sets it via Drizzle as the fast path.
+    updatedAt: timestamp("updated_at").defaultNow().notNull(),
   },
   (t) => [unique("uq_pub_object_destination").on(t.objectId, t.destination)]
 );

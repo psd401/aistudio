@@ -38,7 +38,7 @@ import { rowToVersionDTO, type VersionRowAsText } from "./mappers";
 import { renderMarkdownToHtml } from "./render/markdown-render";
 import { s3Store } from "./storage/s3-store";
 import { visibilityService } from "./visibility-service";
-import { NotFoundError, ValidationError } from "./errors";
+import { ConflictError, NotFoundError, ValidationError } from "./errors";
 import type {
   BodyFormat,
   ContentVersionDTO,
@@ -71,6 +71,16 @@ function defaultBodyFormat(kind: "document" | "artifact"): BodyFormat {
 
 function artifactFileName(format: BodyFormat): string {
   return format === "jsx" ? "artifact.jsx" : "artifact.html";
+}
+
+/** Postgres unique-violation (SQLSTATE 23505) detector for typed-error mapping. */
+function isUniqueViolation(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    (error as { code?: string }).code === "23505"
+  );
 }
 
 async function maxVersion(
@@ -189,7 +199,11 @@ export async function snapshotInTx(
     });
   }
 
-  // The unique (object_id, version_number) constraint guards concurrent writers.
+  // The unique (object_id, version_number) constraint guards concurrent writers:
+  // two transactions can both read maxVersion()=N and both try to insert N+1; the
+  // loser hits the constraint. Translate that raw 23505 into a typed ConflictError
+  // (HTTP 409) so surfaces return "retry" rather than leaking a raw PostgresError,
+  // mirroring content-service.create()'s slug-collision handling.
   const inserted = await tx
     .insert(contentVersions)
     .values({
@@ -204,7 +218,15 @@ export async function snapshotInTx(
       renderLocation,
       summary: input.summary ?? null,
     })
-    .returning(versionSelectFields);
+    .returning(versionSelectFields)
+    .catch((e: unknown) => {
+      if (isUniqueViolation(e)) {
+        throw new ConflictError("Concurrent version conflict; please retry", {
+          objectId: obj.id,
+        });
+      }
+      throw e;
+    });
 
   const versionRow = inserted[0];
   if (!versionRow) {

@@ -30,7 +30,12 @@ const ADMIN_ROLE = "administrator";
  * and the write-path helpers (`ownerFor`) reject a null userId, so a guest can
  * read public content but never author.
  */
-const GUEST_REQUESTER: Requester = {
+// Frozen: this single instance is returned to every guest caller, so freezing
+// makes the never-mutated invariant explicit and prevents an accidental shared
+// mutation (e.g. flipping isAdmin) from leaking across requests. The `roles`
+// array stays the declared mutable `string[]` for type compatibility; nothing
+// mutates it on the read paths that consume a guest requester.
+const GUEST_REQUESTER: Requester = Object.freeze({
   kind: "user",
   userId: null,
   roles: [],
@@ -38,7 +43,7 @@ const GUEST_REQUESTER: Requester = {
   department: null,
   gradeLevels: null,
   isAdmin: false,
-};
+});
 
 /**
  * Resolve the current session into an authenticated `user` Requester, or `null`

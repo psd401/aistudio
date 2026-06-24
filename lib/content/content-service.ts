@@ -50,6 +50,9 @@ import type {
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+/** Max title length, matching the `content_objects.title varchar(500)` column. */
+const TITLE_MAX_LENGTH = 500;
+
 /** Postgres unique-violation (SQLSTATE 23505) detector for typed-error mapping. */
 function isUniqueViolation(error: unknown): boolean {
   return (
@@ -113,6 +116,27 @@ async function collectionDefault(
 }
 
 /**
+ * Validate that a collection exists, throwing a typed `ValidationError` (400) on
+ * miss. Used by `update()` — which (unlike `create()`) does not call
+ * `collectionDefault` — so an invalid `collectionId` surfaces as a user-facing
+ * 400 rather than a raw Postgres FK violation (SQLSTATE 23503).
+ */
+async function assertCollectionExists(collectionId: string): Promise<void> {
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({ id: contentCollections.id })
+        .from(contentCollections)
+        .where(eq(contentCollections.id, collectionId))
+        .limit(1),
+    "content.assertCollectionExists"
+  );
+  if (!rows[0]) {
+    throw new ValidationError("Collection not found", { collectionId });
+  }
+}
+
+/**
  * Load an object by id (UUID) or slug. Returns the DTO or null.
  *
  * A UUID-shaped input is tried as an id first; if no row matches it falls back to
@@ -154,6 +178,13 @@ export const contentService = {
 
     if (!input.title?.trim()) {
       throw new ValidationError("Title is required");
+    }
+    // Enforce the varchar(500) column limit as a typed 400 rather than a raw
+    // Postgres 22001 ("value too long") error.
+    if (input.title.trim().length > TITLE_MAX_LENGTH) {
+      throw new ValidationError(
+        `Title must be ${TITLE_MAX_LENGTH} characters or fewer`
+      );
     }
     if (input.kind !== "document" && input.kind !== "artifact") {
       throw new ValidationError("kind must be 'document' or 'artifact'", {
@@ -327,14 +358,27 @@ export const contentService = {
     };
     if (patch.title !== undefined) {
       if (!patch.title.trim()) throw new ValidationError("Title cannot be empty");
+      // Mirror create()'s varchar(500) guard so an over-long title is a typed
+      // 400, not a raw Postgres 22001 error.
+      if (patch.title.trim().length > TITLE_MAX_LENGTH) {
+        throw new ValidationError(
+          `Title must be ${TITLE_MAX_LENGTH} characters or fewer`
+        );
+      }
       setValues.title = patch.title;
     }
     // Coerce to `[]` (never NULL) so updated rows match the `create()` invariant
     // (tags is always an array). Downstream `.length`/`.filter()` callers would
     // otherwise throw a TypeError on a null tags column.
     if (patch.tags !== undefined) setValues.tags = patch.tags ?? [];
-    if (patch.collectionId !== undefined)
+    if (patch.collectionId !== undefined) {
+      // Validate existence so an invalid id is a typed 400, not a raw FK
+      // violation. A null clears the collection (no existence check needed).
+      if (patch.collectionId != null) {
+        await assertCollectionExists(patch.collectionId);
+      }
       setValues.collectionId = patch.collectionId ?? null;
+    }
     if (patch.status !== undefined) setValues.status = patch.status;
 
     const rows = await executeQuery(

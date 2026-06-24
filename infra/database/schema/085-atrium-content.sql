@@ -105,6 +105,10 @@ CREATE INDEX IF NOT EXISTS idx_content_owner       ON content_objects(owner_user
 CREATE INDEX IF NOT EXISTS idx_content_collection  ON content_objects(collection_id);
 CREATE INDEX IF NOT EXISTS idx_content_status_kind ON content_objects(status, kind);
 CREATE INDEX IF NOT EXISTS idx_content_visibility  ON content_objects(visibility_level);
+-- Backs the listVisible ORDER BY updated_at DESC: without it Postgres falls back
+-- to a full-scan sort (worsened by the correlated EXISTS visibility predicate) as
+-- the table grows.
+CREATE INDEX IF NOT EXISTS idx_content_objects_updated ON content_objects(updated_at DESC);
 -- GIN index backing the listVisible tag filter (`<tag> = ANY(tags)`).
 CREATE INDEX IF NOT EXISTS idx_content_tags        ON content_objects USING gin(tags);
 
@@ -151,6 +155,12 @@ CREATE TABLE IF NOT EXISTS content_visibility_grants (
 );
 CREATE INDEX IF NOT EXISTS idx_cvg_object ON content_visibility_grants(object_id);
 CREATE INDEX IF NOT EXISTS idx_cvg_lookup ON content_visibility_grants(grant_kind, grant_value);
+-- The service path applies grants via delete-then-insert in a transaction, so the
+-- normal path cannot duplicate. This DB-level guard blocks duplicates from future
+-- code paths or direct SQL writes. Idempotent via DROP CONSTRAINT IF EXISTS.
+ALTER TABLE content_visibility_grants DROP CONSTRAINT IF EXISTS uq_cvg;
+ALTER TABLE content_visibility_grants
+  ADD CONSTRAINT uq_cvg UNIQUE (object_id, grant_kind, grant_value);
 
 -- ============================================================================
 -- 6. content_publications (where a version is live)
@@ -166,6 +176,10 @@ CREATE TABLE IF NOT EXISTS content_publications (
   status publication_status NOT NULL DEFAULT 'live',
   published_by integer REFERENCES users(id),
   published_at timestamp NOT NULL DEFAULT now(),
+  -- Status transitions (live -> unpublished -> failed, Phase 5/7) need an audit
+  -- timestamp; published_at records first-publish only. Backed by the trigger
+  -- in section 11 (DB-level backstop; app sets updatedAt via Drizzle too).
+  updated_at timestamp NOT NULL DEFAULT now(),
   CONSTRAINT uq_pub_object_destination UNIQUE (object_id, destination)
 );
 
@@ -297,6 +311,11 @@ CREATE TRIGGER update_content_collections_updated_at
 DROP TRIGGER IF EXISTS update_content_objects_updated_at ON content_objects;
 CREATE TRIGGER update_content_objects_updated_at
   BEFORE UPDATE ON content_objects
+  FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
+
+DROP TRIGGER IF EXISTS update_content_publications_updated_at ON content_publications;
+CREATE TRIGGER update_content_publications_updated_at
+  BEFORE UPDATE ON content_publications
   FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 DROP TRIGGER IF EXISTS update_content_index_links_updated_at ON content_index_links;

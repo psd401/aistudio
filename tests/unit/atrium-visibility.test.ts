@@ -99,13 +99,16 @@ describe("canView — internal", () => {
 });
 
 describe("canView — admin & owner", () => {
-  it("admin sees a private object they do not own", async () => {
-    withGrants([]);
+  // Both short-circuit at the isAdmin / ownerUserId-equality checks BEFORE any
+  // grant lookup, so no withGrants() setup is needed; assert grantsFor (which
+  // runs through executeQuery) is never called to make the short-circuit explicit.
+  it("admin sees a private object they do not own (no grant lookup)", async () => {
     expect(await visibilityService.canView(admin, obj("private"))).toBe(true);
+    expect(executeQueryMock).not.toHaveBeenCalled();
   });
-  it("owner sees their own private object", async () => {
-    withGrants([]);
+  it("owner sees their own private object (no grant lookup)", async () => {
     expect(await visibilityService.canView(owner, obj("private"))).toBe(true);
+    expect(executeQueryMock).not.toHaveBeenCalled();
   });
 });
 

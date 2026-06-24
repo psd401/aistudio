@@ -74,17 +74,26 @@ export class ConflictError extends ContentError {
 }
 
 /**
- * 202 — a public-facing publish was requested by a caller that lacks
+ * 409 — a public-facing publish was requested by a caller that lacks
  * `content:publish_public`; the request enters the approval queue rather than
  * publishing. Defined here for the service contract; the publish service that
  * throws it lands in Phase 5/7.
+ *
+ * Status is `409 Conflict` (an error code), NOT `202 Accepted`. `202` is an
+ * HTTP *success* code: a surface that maps `error.status` directly to the
+ * response would emit `202` on a thrown exception, which is contradictory, and
+ * clients expecting a `4xx` for "not permitted yet" would not recognise it.
+ * When the Phase 5/7 publish service *returns* an approval response normally
+ * (not by throwing), it may use `202` on that success path — but the thrown
+ * error here is a workflow gate (handled by `handleError` at WARN level via the
+ * `< 500` branch) and must carry a client-error status.
  */
 export class ApprovalRequiredError extends ContentError {
   constructor(
     message = "Approval required",
     details?: Record<string, unknown>
   ) {
-    super(message, "CONTENT_APPROVAL_REQUIRED", 202, details);
+    super(message, "CONTENT_APPROVAL_REQUIRED", 409, details);
   }
 }
 

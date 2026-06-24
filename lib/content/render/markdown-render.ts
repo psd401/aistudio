@@ -30,11 +30,19 @@ import { JSDOM } from "jsdom";
 
 /**
  * URL schemes permitted in `href`/`src`. Anything else (notably `javascript:`,
- * `vbscript:`, and `data:`) is stripped. Relative URLs and same-page anchors are
- * allowed. DOMPurify decodes HTML entities before this hook runs, so an
- * entity-encoded scheme is already normalized to its literal form here.
+ * `vbscript:`, and `data:`) is stripped. Absolute URLs, root-relative paths
+ * (`/foo`), same-document `./` references, and same-page anchors are allowed.
+ * DOMPurify decodes HTML entities before this hook runs, so an entity-encoded
+ * scheme is already normalized to its literal form here.
+ *
+ * NOTE: parent-traversal (`../`) is intentionally NOT allowed. Phase 0 serves
+ * render.html from S3 with Content-Disposition: attachment, so traversal is
+ * inert today — but if Phase 1 renders snapshots inline (iframe /
+ * dangerouslySetInnerHTML), a stored `[x](../../admin/reset)` link could walk
+ * app routes. Disallowing it now keeps already-stored snapshots safe for that
+ * future path. (See the Phase 1 render ticket: re-audit stored render.html.)
  */
-const SAFE_URL_SCHEME = /^(?:https?:|mailto:|tel:|#|\/|\.\/|\.\.\/)/i;
+const SAFE_URL_SCHEME = /^(?:https?:|mailto:|tel:|#|\/|\.\/)/i;
 
 /** Plain URL-bearing attributes checked against the scheme allowlist. */
 const URL_ATTRS = ["href", "src"] as const;

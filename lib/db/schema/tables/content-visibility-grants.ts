@@ -16,7 +16,14 @@
  *   string.
  */
 
-import { index, pgTable, serial, uuid, varchar } from "drizzle-orm/pg-core";
+import {
+  index,
+  pgTable,
+  serial,
+  unique,
+  uuid,
+  varchar,
+} from "drizzle-orm/pg-core";
 import { contentObjects } from "./content-objects";
 import { grantKindEnum } from "../enums";
 
@@ -33,6 +40,11 @@ export const contentVisibilityGrants = pgTable(
   (t) => [
     index("idx_cvg_object").on(t.objectId),
     index("idx_cvg_lookup").on(t.grantKind, t.grantValue),
+    // Mirrors the DB-level uq_cvg constraint (migration 085 §5): no duplicate
+    // (object, kind, value) grant. The service applies grants via
+    // delete-then-insert so the normal path never duplicates; this guards
+    // future paths / direct SQL.
+    unique("uq_cvg").on(t.objectId, t.grantKind, t.grantValue),
   ]
 );
 
