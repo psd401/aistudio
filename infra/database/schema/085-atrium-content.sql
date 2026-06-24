@@ -28,9 +28,13 @@
 --   * created_by_agent_id / author_agent_id -> agent_identities.id FKs are added
 --     after agent_identities exists.
 
--- Mark any previous failed attempts as completed so the runner stops retrying.
-UPDATE migration_log SET status = 'completed'
-WHERE description = '085-atrium-content.sql' AND status = 'failed';
+-- NOTE: this migration does NOT pre-mark prior failed runs as completed. Doing
+-- so before the DDL is unsafe: if a later statement in this file fails, the
+-- "completed" row would already be written and `checkMigrationRun` (which skips
+-- any file with a completed row) would permanently skip the migration, leaving
+-- the partial schema unrepaired. Instead, every statement below is idempotent
+-- (IF NOT EXISTS / DROP CONSTRAINT IF EXISTS / enum "already exists" handling),
+-- so the runner can safely re-enter and re-apply this file after a failed run.
 
 -- ============================================================================
 -- 1. Enums (each CREATE TYPE on one line; idempotent via runner's "already
@@ -97,6 +101,8 @@ CREATE INDEX IF NOT EXISTS idx_content_owner       ON content_objects(owner_user
 CREATE INDEX IF NOT EXISTS idx_content_collection  ON content_objects(collection_id);
 CREATE INDEX IF NOT EXISTS idx_content_status_kind ON content_objects(status, kind);
 CREATE INDEX IF NOT EXISTS idx_content_visibility  ON content_objects(visibility_level);
+-- GIN index backing the listVisible tag filter (`<tag> = ANY(tags)`).
+CREATE INDEX IF NOT EXISTS idx_content_tags        ON content_objects USING gin(tags);
 
 -- ============================================================================
 -- 4. content_versions (immutable history)
@@ -120,10 +126,15 @@ CREATE TABLE IF NOT EXISTS content_versions (
 CREATE INDEX IF NOT EXISTS idx_version_object ON content_versions(object_id);
 
 -- Deferred FK: content_objects.current_version_id -> content_versions.id.
+-- DEFERRABLE INITIALLY DEFERRED so a writer may set current_version_id in the
+-- same transaction that inserts the referenced content_versions row (the head
+-- can be advanced before the row is visible at statement time); enforcement
+-- runs at COMMIT. Matches the "DEFERRED FK" intent documented in the header.
 ALTER TABLE content_objects DROP CONSTRAINT IF EXISTS fk_current_version;
 ALTER TABLE content_objects
   ADD CONSTRAINT fk_current_version
-  FOREIGN KEY (current_version_id) REFERENCES content_versions(id);
+  FOREIGN KEY (current_version_id) REFERENCES content_versions(id)
+  DEFERRABLE INITIALLY DEFERRED;
 
 -- ============================================================================
 -- 5. content_visibility_grants (normalized group access)

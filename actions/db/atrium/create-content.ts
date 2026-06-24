@@ -17,13 +17,14 @@ import {
   startTimer,
   sanitizeForLogging,
 } from "@/lib/logger";
-import { createSuccess, handleError } from "@/lib/error-utils";
+import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { contentService } from "@/lib/content";
 import type {
   ContentObjectWithVersion,
   CreateObjectInput,
 } from "@/lib/content";
 import type { ActionState } from "@/types";
+import { hasCapabilityAccess } from "@/utils/roles";
 import { getUserRequester } from "./requester";
 
 export async function createContentAction(
@@ -46,6 +47,13 @@ export async function createContentAction(
     });
 
     const requester = await getUserRequester();
+    // UI write path: gate on the Atrium content capability. The service-layer
+    // `assertCanCreate` intentionally defers user gating to the surface, so this
+    // is the gate for logged-in humans (students without the capability cannot
+    // create content). Read actions stay ungated — they are bounded by canView.
+    if (!(await hasCapabilityAccess("atrium-content"))) {
+      throw ErrorFactories.authzToolAccessDenied("atrium-content");
+    }
     const result = await contentService.create(requester, input);
 
     timer({ status: "success" });

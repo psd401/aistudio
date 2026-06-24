@@ -8,9 +8,11 @@
  * See docs/features/atrium-design-spec.md §7.4 and §4 (domain model).
  *
  * ## Columns of note
- * - `parent_id` — a self-referential tree. The SQL self-FK is added in migration
- *   085 (Drizzle cannot express a self-reference at column-definition time without
- *   a forward reference, so it is left as a plain column here).
+ * - `parent_id` — a self-referential tree. Declared via the `foreignKey` helper
+ *   in the table-constraints callback (Drizzle supports self-references there even
+ *   though it cannot at column-definition time), so the relationship is visible to
+ *   the schema generator. The matching SQL constraint name `fk_collection_parent`
+ *   is created in migration 085.
  * - `nav_item_id` — links a collection to its `navigation_items` row so the
  *   collection surfaces in the sidebar.
  * - `default_visibility_level` — applied to objects created in the collection when
@@ -18,6 +20,7 @@
  */
 
 import {
+  foreignKey,
   index,
   integer,
   pgTable,
@@ -34,7 +37,7 @@ export const contentCollections = pgTable(
     id: uuid("id").defaultRandom().primaryKey(),
     name: varchar("name", { length: 200 }).notNull(),
     slug: varchar("slug", { length: 200 }).notNull().unique(),
-    // Self-referential tree; SQL FK added in migration 085.
+    // Self-referential tree (see foreignKey constraint below).
     parentId: uuid("parent_id"),
     defaultVisibilityLevel: visibilityLevelEnum("default_visibility_level")
       .default("internal")
@@ -44,7 +47,14 @@ export const contentCollections = pgTable(
     createdAt: timestamp("created_at").defaultNow().notNull(),
     updatedAt: timestamp("updated_at").defaultNow().notNull(),
   },
-  (t) => [index("idx_collection_parent").on(t.parentId)]
+  (t) => [
+    index("idx_collection_parent").on(t.parentId),
+    foreignKey({
+      columns: [t.parentId],
+      foreignColumns: [t.id],
+      name: "fk_collection_parent",
+    }),
+  ]
 );
 
 export type ContentCollectionRow = typeof contentCollections.$inferSelect;

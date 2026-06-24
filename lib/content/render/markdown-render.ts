@@ -10,104 +10,99 @@
  * minimal, safe renderer that satisfies the Phase 0 acceptance criterion and the
  * §31.1 sanitizer requirement ("`<script>` / event handlers are stripped").
  *
- * Sanitization runs server-side (no DOM), so it is a conservative deny-list over
- * the HTML `marked` produces:
- * - removes <script>, <style>, <iframe>, <object>, <embed> elements (and content)
- * - strips inline event-handler attributes (on*)
- * - neutralizes javascript:/vbscript:/data: URLs in href/src
+ * Sanitization runs server-side via DOMPurify on a jsdom window — an AST/DOM
+ * allowlist sanitizer, not a regex deny-list. The HTML is parsed into a real DOM
+ * before the allowlist runs, so entity-encoded scheme bypasses
+ * (`java&#x73;cript:`), malformed/unclosed tags (`</script\t\n bar>`), and
+ * attribute-injection vectors (`formaction`, SVG `xlink:href`, etc.) that defeat
+ * regex deny-lists are resolved at parse time. The previous implementation used a
+ * regex deny-list flagged by CodeQL (`js/bad-tag-filter`,
+ * `js/incomplete-multi-character-sanitization`) and by multiple reviewers; this
+ * DOM approach replaces it.
  *
  * Untrusted *artifact* code is never rendered through this path — artifacts run
  * only inside the cross-origin sandbox (§28.1). This renderer is for documents.
  */
 
 import { marked } from "marked";
+import createDOMPurify, { type DOMPurify } from "dompurify";
+import { JSDOM } from "jsdom";
 
 /**
- * Paired dangerous elements (open tag through matching close tag, content
- * included). Literal regexes so the patterns are static (no dynamic RegExp).
+ * URL schemes permitted in `href`/`src`. Anything else (notably `javascript:`,
+ * `vbscript:`, and `data:`) is stripped. Relative URLs and same-page anchors are
+ * allowed. DOMPurify decodes HTML entities before this hook runs, so an
+ * entity-encoded scheme is already normalized to its literal form here.
  */
-const PAIRED_DANGEROUS = [
-  /<script\b[^>]*>[\s\S]*?<\/script\s*>/gi,
-  /<style\b[^>]*>[\s\S]*?<\/style\s*>/gi,
-  /<iframe\b[^>]*>[\s\S]*?<\/iframe\s*>/gi,
-  /<object\b[^>]*>[\s\S]*?<\/object\s*>/gi,
-  /<embed\b[^>]*>[\s\S]*?<\/embed\s*>/gi,
-];
+const SAFE_URL_SCHEME = /^(?:https?:|mailto:|tel:|#|\/|\.\/|\.\.\/)/i;
 
-/** Lone/void dangerous tags (no content), plus any stragglers of the above. */
-const LONE_DANGEROUS =
-  /<\/?(?:script|style|iframe|object|embed|link|meta|base)\b[^>]*>/gi;
+/** URL-bearing attributes whose values are checked against the scheme allowlist. */
+const URL_ATTRS = ["href", "src", "xlink:href"] as const;
 
-/** Remove dangerous element blocks (open tag through matching close tag). */
-function stripDangerousElements(html: string): string {
-  let out = html;
-  for (const pattern of PAIRED_DANGEROUS) {
-    out = out.replace(pattern, "");
-  }
-  out = out.replace(LONE_DANGEROUS, "");
-  return out;
+/**
+ * Lazily-constructed DOMPurify instance bound to a jsdom window. Built once per
+ * process (jsdom window creation is non-trivial) and reused for every render.
+ * Created lazily so importing this module does not pay the jsdom cost unless a
+ * render actually happens.
+ */
+let purifier: DOMPurify | null = null;
+
+function getPurifier(): DOMPurify {
+  if (purifier) return purifier;
+  const { window } = new JSDOM("");
+  const instance = createDOMPurify(window as unknown as Window & typeof globalThis);
+
+  // Defense-in-depth on top of DOMPurify's own protocol allowlist: strip any
+  // URL-bearing attribute whose (entity-decoded) value is not an allowed scheme.
+  // This also removes `data:` URIs, which DOMPurify permits by default on some
+  // elements (e.g. <img src>).
+  instance.addHook("afterSanitizeAttributes", (node) => {
+    const el = node as Element;
+    if (typeof el.hasAttribute !== "function") return;
+    for (const attr of URL_ATTRS) {
+      if (el.hasAttribute(attr)) {
+        const value = (el.getAttribute(attr) ?? "").trim();
+        if (value && !SAFE_URL_SCHEME.test(value)) {
+          el.removeAttribute(attr);
+        }
+      }
+    }
+  });
+
+  purifier = instance;
+  return instance;
 }
 
 /**
- * Strip inline event-handler attributes: on*="…" / on*='…' / on*=value.
- * The leading boundary is `[\s/]` (whitespace OR `/`) rather than just `\s`, so
- * an attribute packed against the previous one without a space — e.g.
- * `<img src='x'onerror='evil()'>` — is still caught. We also catch the case
- * where the handler follows a closing quote of the prior attribute by running
- * the pass to a fixed point (repeat until no further change), since a single
- * pass can leave adjacent handlers behind after the preceding attribute's quote.
+ * Sanitize a fragment of HTML for safe serving. Parses into a DOM, applies the
+ * allowlist, and serializes back to a string. Exported for unit tests.
+ *
+ * Forbidden tags (beyond DOMPurify's defaults) keep document HTML to inert,
+ * presentational markup: no <style> (CSS exfiltration / layout attacks), no
+ * embedding tags (<iframe>/<object>/<embed>), no form controls. <script> and all
+ * `on*` event handlers are stripped by DOMPurify's defaults.
  */
-function stripEventHandlers(html: string): string {
-  const pattern = /[\s/'"]on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi;
-  let out = html;
-  let prev: string;
-  do {
-    prev = out;
-    // Keep the boundary char (it belongs to the prior token) and drop the handler.
-    out = out.replace(pattern, (m) => m.charAt(0));
-  } while (out !== prev);
-  return out;
-}
-
-/**
- * Neutralize dangerous URL schemes (javascript:/vbscript:/data:) in href/src.
- * Handled in three forms so a `>` inside a quoted value cannot terminate the
- * match early (the prior single-regex `[^"'\s>]*` form failed on
- * `src="data:text/html,<h1>x</h1>"`):
- *  - double-quoted: capture through the matching `"`.
- *  - single-quoted: capture through the matching `'`.
- *  - unquoted: capture to whitespace or `>`.
- */
-function neutralizeUrls(html: string): string {
-  let out = html;
-  out = out.replace(
-    /\b(href|src)\s*=\s*"\s*(?:javascript|vbscript|data)\s*:[^"]*"/gi,
-    '$1="#"'
-  );
-  out = out.replace(
-    /\b(href|src)\s*=\s*'\s*(?:javascript|vbscript|data)\s*:[^']*'/gi,
-    "$1='#'"
-  );
-  out = out.replace(
-    /\b(href|src)\s*=\s*(?:javascript|vbscript|data)\s*:[^\s>]*/gi,
-    "$1=#"
-  );
-  return out;
-}
-
-/** Sanitize a fragment of HTML for safe serving. Exported for unit tests. */
 export function sanitizeHtml(html: string): string {
-  let out = stripDangerousElements(html);
-  out = stripEventHandlers(out);
-  out = neutralizeUrls(out);
-  return out;
+  if (!html) return "";
+  return getPurifier().sanitize(html, {
+    FORBID_TAGS: ["style", "iframe", "object", "embed", "form", "input", "button"],
+    FORBID_ATTR: ["style"],
+  });
 }
 
 /**
- * Render markdown to a sanitized HTML string. Synchronous and dependency-light;
- * uses `marked` (already a project dependency) for parsing.
+ * Render markdown to a sanitized HTML string. Synchronous; uses `marked`
+ * (already a project dependency) for parsing, then the DOM sanitizer above.
+ * `marked` is configured for synchronous output; the result is asserted to be a
+ * string so a future async-mode regression fails loudly rather than silently
+ * serializing a Promise.
  */
 export function renderMarkdownToHtml(markdown: string): string {
-  const raw = marked.parse(markdown ?? "", { async: false }) as string;
+  const raw = marked.parse(markdown ?? "", { async: false });
+  if (typeof raw !== "string") {
+    throw new TypeError(
+      "marked.parse returned a non-string; expected sync output"
+    );
+  }
   return sanitizeHtml(raw);
 }

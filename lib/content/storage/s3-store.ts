@@ -29,29 +29,44 @@ import { ErrorFactories } from "@/lib/error-utils";
 /** The S3 key prefix all Atrium objects live under. */
 export const ATRIUM_PREFIX = "atrium";
 
-let cachedConfig: { bucket: string; region: string } | null = null;
-let cachedClient: S3Client | null = null;
+// No module-level config cache: `Settings.getS3()` already memoizes with a
+// 5-minute TTL, so a second indefinite cache here would pin a stale bucket/region
+// after a Settings change until container restart. The S3Client is cached but
+// keyed on its region and rebuilt when the region changes.
+let cachedClient: { region: string; client: S3Client } | null = null;
 
 async function getConfig(): Promise<{ bucket: string; region: string }> {
-  if (cachedConfig) return cachedConfig;
   const config = await Settings.getS3();
-  const bucket = config.bucket || "aistudio-documents";
-  const region = config.region || "us-east-1";
-  cachedConfig = { bucket, region };
-  return cachedConfig;
+  return {
+    bucket: config.bucket || "aistudio-documents",
+    region: config.region || "us-east-1",
+  };
 }
 
 async function getClient(): Promise<S3Client> {
-  if (cachedClient) return cachedClient;
   const { region } = await getConfig();
+  if (cachedClient && cachedClient.region === region) return cachedClient.client;
   // Credentials come from the IAM role in AWS, or the local AWS profile in dev.
-  cachedClient = new S3Client({ region });
-  return cachedClient;
+  const client = new S3Client({ region });
+  cachedClient = { region, client };
+  return client;
 }
 
-/** Clear cached config/client (call after S3 settings change). */
+/**
+ * Reject path segments that could escape the deterministic key layout (path
+ * traversal / prefix injection). Current callers pass hardcoded literals or
+ * enum-derived filenames, but assets (Phase 1) will pass externally-supplied ids.
+ */
+function assertSafeSegment(segment: string, field: string): void {
+  if (!segment || /[/\\]|\.\./.test(segment)) {
+    throw ErrorFactories.validationFailed([
+      { field, message: `Invalid ${field}: must not contain '/', '\\', or '..'` },
+    ]);
+  }
+}
+
+/** Clear the cached S3 client (call after S3 settings change). */
 export function clearAtriumS3Cache(): void {
-  cachedConfig = null;
   cachedClient = null;
 }
 
@@ -72,11 +87,20 @@ export const s3Store = {
    * @example s3Store.key("abc", 1, "source.md") // "atrium/objects/abc/v1/source.md"
    */
   key(objectId: string, version: number, file: string): string {
+    assertSafeSegment(objectId, "objectId");
+    assertSafeSegment(file, "file");
+    if (!Number.isInteger(version) || version < 1) {
+      throw ErrorFactories.validationFailed([
+        { field: "version", message: "version must be a positive integer" },
+      ]);
+    }
     return `${ATRIUM_PREFIX}/objects/${objectId}/v${version}/${file}`;
   },
 
   /** Build the S3 key for a content object's asset (image/upload). */
   assetKey(objectId: string, assetId: string): string {
+    assertSafeSegment(objectId, "objectId");
+    assertSafeSegment(assetId, "assetId");
     return `${ATRIUM_PREFIX}/objects/${objectId}/assets/${assetId}`;
   },
 

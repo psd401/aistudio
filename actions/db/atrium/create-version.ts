@@ -17,10 +17,11 @@ import {
   startTimer,
   sanitizeForLogging,
 } from "@/lib/logger";
-import { createSuccess, handleError } from "@/lib/error-utils";
+import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { contentService } from "@/lib/content";
 import type { ContentObjectWithVersion, SnapshotInput } from "@/lib/content";
 import type { ActionState } from "@/types";
+import { hasCapabilityAccess } from "@/utils/roles";
 import { getUserRequester } from "./requester";
 
 export async function createVersionAction(
@@ -42,6 +43,10 @@ export async function createVersionAction(
     });
 
     const requester = await getUserRequester();
+    // UI write path: gate on the Atrium content capability (see create-content).
+    if (!(await hasCapabilityAccess("atrium-content"))) {
+      throw ErrorFactories.authzToolAccessDenied("atrium-content");
+    }
     const result = await contentService.createVersion(
       requester,
       objectId,

@@ -7,7 +7,8 @@
  * See docs/features/atrium-design-spec.md §11 / §26.3.
  */
 
-import { ForbiddenError, ValidationError } from "./errors";
+import { ErrorFactories } from "@/lib/error-utils";
+import { ForbiddenError } from "./errors";
 import type { Principal, Requester } from "./types";
 
 /**
@@ -22,13 +23,14 @@ export function systemUserIdOrNull(): number | null {
 
 /**
  * The configured system user id that owns autonomous-agent content (§26.5).
- * Throws `ValidationError` when unset/invalid so the failure is explicit rather
- * than silently owning content as user 0 / NaN. Use on the write path.
+ * Throws a system *configuration* error (HTTP 500) when unset/invalid: a missing
+ * server-side env var is an operator misconfiguration, not bad client input, so
+ * it must not surface to callers as a 400. Use on the write path.
  */
 export function systemUserId(): number {
   const id = systemUserIdOrNull();
   if (id == null) {
-    throw new ValidationError(
+    throw ErrorFactories.sysConfigurationError(
       "ATRIUM_SYSTEM_USER_ID must be configured for autonomous-agent content"
     );
   }
@@ -66,9 +68,19 @@ export function slugCandidate(base: string, attempt: number): string {
   return `${base.slice(0, room).replace(/-+$/g, "")}${suffix}`;
 }
 
-/** The actor kind a requester writes as. */
+/**
+ * The actor kind a requester writes as.
+ *
+ * Only an *autonomous* agent records as `'agent'` — it has a stable
+ * `agent_identities` id (`agentIdOf`) and no human principal. A *delegated*
+ * agent acts on behalf of a human (its `author_user_id` is that human, via
+ * `authorUserIdOf`) and has no agent-identity id, so it records as `'human'`.
+ * This keeps the invariant `actor === 'agent'` ⟺ `author_agent_id IS NOT NULL`,
+ * which downstream provenance/audit queries rely on; the prior mapping recorded
+ * delegated writes as `'agent'` with a null `author_agent_id`.
+ */
 export function actorKindOf(req: Requester): "human" | "agent" {
-  return req.kind === "user" ? "human" : "agent";
+  return req.kind === "agent-autonomous" ? "agent" : "human";
 }
 
 /** The autonomous agent identity id for a requester, or null. */

@@ -12,7 +12,6 @@
  * `level`) so existing logging/serialization treats them consistently.
  */
 
-import { createError } from "@/lib/error-utils";
 import { ErrorLevel } from "@/types/actions-types";
 
 /** Base class for Atrium content errors, carrying an HTTP status for surfaces. */
@@ -92,19 +91,4 @@ export class ApprovalRequiredError extends ContentError {
 /** Type guard for the Atrium content error family. */
 export function isContentError(error: unknown): error is ContentError {
   return error instanceof ContentError;
-}
-
-/**
- * Convert any thrown value into the repo's typed-error shape so the shared
- * logger/serializer handles it. Pass-through for non-ContentError values.
- */
-export function toTypedContentError(error: unknown): Error {
-  if (isContentError(error)) {
-    return createError(error.message, {
-      code: error.code,
-      level: ErrorLevel.ERROR,
-      details: { status: error.status, ...error.details },
-    });
-  }
-  return error instanceof Error ? error : new Error(String(error));
 }

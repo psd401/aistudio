@@ -11,23 +11,28 @@
  * driver); JSONB columns insert via `sql\`${safeJsonbStringify(v)}::jsonb\``.
  */
 
-import { eq, sql } from "drizzle-orm";
+import { eq, like, sql } from "drizzle-orm";
 import {
   executeQuery,
   executeTransaction,
   type DbTransaction,
 } from "@/lib/db/drizzle-client";
 import { contentCollections, contentObjects } from "@/lib/db/schema";
-import { pgTimestampAsText } from "@/lib/db/drizzle-helpers";
 import { safeJsonbStringify } from "@/lib/db/json-utils";
 import {
+  actorKindOf,
+  agentIdOf,
   assertCanCreate,
   assertCanEdit,
   slugCandidate,
   slugifyTitle,
   systemUserId,
 } from "./helpers";
-import { rowToObjectDTO, type ObjectRowAsText } from "./mappers";
+import {
+  objectSelectFields,
+  rowToObjectDTO,
+  type ObjectRowAsText,
+} from "./mappers";
 import { snapshotInTx, versionService } from "./version-service";
 import { visibilityService } from "./visibility-service";
 import { ConflictError, NotFoundError, ValidationError } from "./errors";
@@ -44,25 +49,6 @@ import type {
 
 const MAX_SLUG_ATTEMPTS = 25;
 
-const objectSelectFields = {
-  id: contentObjects.id,
-  kind: contentObjects.kind,
-  title: contentObjects.title,
-  slug: contentObjects.slug,
-  ownerUserId: contentObjects.ownerUserId,
-  createdByActor: contentObjects.createdByActor,
-  createdByAgentId: contentObjects.createdByAgentId,
-  collectionId: contentObjects.collectionId,
-  visibilityLevel: contentObjects.visibilityLevel,
-  currentVersionId: contentObjects.currentVersionId,
-  sourceRef: contentObjects.sourceRef,
-  tags: contentObjects.tags,
-  status: contentObjects.status,
-  indexedAt: pgTimestampAsText(contentObjects.indexedAt),
-  createdAt: pgTimestampAsText(contentObjects.createdAt),
-  updatedAt: pgTimestampAsText(contentObjects.updatedAt),
-} as const;
-
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -76,17 +62,31 @@ function isUniqueViolation(error: unknown): boolean {
   );
 }
 
-/** Allocate a unique slug for a title within the create transaction. */
+/**
+ * Allocate a unique slug for a title within the create transaction.
+ *
+ * Fetches all slugs that collide with the base (`base` and `base-N`) in a single
+ * query, then picks the first free candidate in memory — avoiding the previous
+ * up-to-25 sequential round-trips while the transaction held a pooled connection.
+ * The final guard is the `content_objects.slug` unique constraint, which the
+ * INSERT's `isUniqueViolation` catch translates into a `ConflictError` on the
+ * rare concurrent-create race.
+ */
 async function uniqueSlug(tx: DbTransaction, title: string): Promise<string> {
   const base = slugifyTitle(title);
+  // `_` and `%` are not producible by slugifyTitle (it emits [a-z0-9-] only), so
+  // no LIKE-wildcard escaping is required for the base prefix.
+  const taken = new Set(
+    (
+      await tx
+        .select({ slug: contentObjects.slug })
+        .from(contentObjects)
+        .where(like(contentObjects.slug, `${base}%`))
+    ).map((r) => r.slug)
+  );
   for (let attempt = 0; attempt < MAX_SLUG_ATTEMPTS; attempt++) {
     const candidate = slugCandidate(base, attempt);
-    const existing = await tx
-      .select({ id: contentObjects.id })
-      .from(contentObjects)
-      .where(eq(contentObjects.slug, candidate))
-      .limit(1);
-    if (!existing[0]) return candidate;
+    if (!taken.has(candidate)) return candidate;
   }
   throw new ConflictError("Could not allocate a unique slug", { base });
 }
@@ -108,18 +108,31 @@ async function collectionDefault(
   return rows[0].level as VisibilityLevel;
 }
 
-/** Load an object by id (UUID) or slug. Returns the DTO or null. */
+/**
+ * Load an object by id (UUID) or slug. Returns the DTO or null.
+ *
+ * A UUID-shaped input is tried as an id first; if no row matches it falls back to
+ * a slug lookup. This keeps an object reachable by slug even in the (unusual)
+ * case where its slug is itself UUID-shaped — `slugifyTitle` can emit such a slug
+ * for an all-hex/hyphen title.
+ */
 async function loadByIdOrSlug(
   idOrSlug: string
 ): Promise<ContentObjectDTO | null> {
-  const where = UUID_RE.test(idOrSlug)
-    ? eq(contentObjects.id, idOrSlug)
-    : eq(contentObjects.slug, idOrSlug);
-  const rows = await executeQuery(
-    (db) => db.select(objectSelectFields).from(contentObjects).where(where).limit(1),
-    "content.loadByIdOrSlug"
-  );
-  return rows[0] ? rowToObjectDTO(rows[0] as ObjectRowAsText) : null;
+  const lookup = (where: ReturnType<typeof eq>) =>
+    executeQuery(
+      (db) =>
+        db.select(objectSelectFields).from(contentObjects).where(where).limit(1),
+      "content.loadByIdOrSlug"
+    );
+
+  if (UUID_RE.test(idOrSlug)) {
+    const byId = await lookup(eq(contentObjects.id, idOrSlug));
+    if (byId[0]) return rowToObjectDTO(byId[0] as ObjectRowAsText);
+    // Fall through to slug: the input is UUID-shaped but matches no id.
+  }
+  const bySlug = await lookup(eq(contentObjects.slug, idOrSlug));
+  return bySlug[0] ? rowToObjectDTO(bySlug[0] as ObjectRowAsText) : null;
 }
 
 export const contentService = {
@@ -145,9 +158,11 @@ export const contentService = {
     }
 
     const ownerUserId = ownerFor(req);
-    const createdByActor = req.kind === "user" ? "human" : "agent";
-    const createdByAgentId =
-      req.kind === "agent-autonomous" ? req.agentId : null;
+    // Use the shared resolvers so object-level provenance matches version-level
+    // (snapshotInTx uses the same helpers): actor === 'agent' iff an agent id is
+    // recorded (autonomous only); delegated agents record as 'human'.
+    const createdByActor = actorKindOf(req);
+    const createdByAgentId = agentIdOf(req);
 
     // A group object with no grants is invisible to everyone but the owner/admin
     // (equivalent to private without the semantics) — almost always a mistake.
@@ -254,7 +269,11 @@ export const contentService = {
       { id: obj.id, kind: obj.kind },
       input
     );
-    return { ...obj, currentVersionId: version.id, version };
+    // Re-load so the returned object carries the post-snapshot updatedAt and
+    // currentVersionId (snapshotInTx advances both); returning the pre-snapshot
+    // `obj` would hand callers a stale updatedAt for cache/optimistic-lock use.
+    const refreshed = await loadByIdOrSlug(obj.id);
+    return { ...(refreshed ?? obj), currentVersionId: version.id, version };
   },
 
   /**
@@ -304,7 +323,11 @@ export const contentService = {
     await assertViewable(req, existing, id);
     assertCanEdit(req, existing.ownerUserId);
 
-    const setValues: Record<string, unknown> = { updatedAt: new Date() };
+    // Typed against the table's insert shape so a column-name typo is a compile
+    // error (a `Record<string, unknown>` would silently no-op an unknown key).
+    const setValues: Partial<typeof contentObjects.$inferInsert> = {
+      updatedAt: new Date(),
+    };
     if (patch.title !== undefined) {
       if (!patch.title.trim()) throw new ValidationError("Title cannot be empty");
       setValues.title = patch.title;

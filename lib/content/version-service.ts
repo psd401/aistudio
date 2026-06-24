@@ -118,6 +118,20 @@ export async function snapshotInTx(
     throw new ValidationError("Version body is required");
   }
   const bodyFormat = input.bodyFormat ?? defaultBodyFormat(obj.kind);
+  // The downstream branches assume documents are markdown (rendered via
+  // renderMarkdownToHtml) and artifacts are html/jsx (content-type + filename).
+  // Reject mismatched formats so storage/rendering stay consistent rather than
+  // silently producing the wrong content-type or rendering artifact code.
+  if (obj.kind === "document" && bodyFormat !== "markdown") {
+    throw new ValidationError("Documents must use bodyFormat 'markdown'", {
+      bodyFormat,
+    });
+  }
+  if (obj.kind === "artifact" && bodyFormat === "markdown") {
+    throw new ValidationError("Artifacts must use bodyFormat 'html' or 'jsx'", {
+      bodyFormat,
+    });
+  }
   const next = (await maxVersion(tx, obj.id)) + 1;
 
   const isDocument = obj.kind === "document";
@@ -199,12 +213,30 @@ export async function snapshotInTx(
  * Persist a snapshot's S3 blobs. Run AFTER the snapshot transaction commits.
  * Keys are deterministic and content-addressed, so a retry overwrites the same
  * object harmlessly.
+ *
+ * Writes run concurrently (`Promise.allSettled`) rather than sequentially: the
+ * source/render blobs are independent, so this halves P99 latency and attempts
+ * both even if one fails. A partial failure (e.g. `source.md` written but
+ * `render.html` not) leaves the committed version row's `render_location`
+ * pointing at a key that is briefly absent — but `render.html` is deterministically
+ * derivable from the persisted `source.md`, so the Phase 1 render path can
+ * regenerate it on demand. We still throw on any failure so the caller learns the
+ * write did not fully succeed (an aggregate of the underlying errors).
  */
 export async function flushSnapshotWrites(
   writes: PendingS3Write[]
 ): Promise<void> {
-  for (const w of writes) {
-    await s3Store.putText(w.key, w.body, w.contentType);
+  const results = await Promise.allSettled(
+    writes.map((w) => s3Store.putText(w.key, w.body, w.contentType))
+  );
+  const rejected = results.filter(
+    (r): r is PromiseRejectedResult => r.status === "rejected"
+  );
+  if (rejected.length > 0) {
+    throw new AggregateError(
+      rejected.map((r) => r.reason),
+      `Failed to persist ${rejected.length} of ${writes.length} snapshot blob(s)`
+    );
   }
 }
 

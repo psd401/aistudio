@@ -7,8 +7,8 @@
  * with `stripJsonQuotes`.
  */
 
-import { stripJsonQuotes } from "@/lib/db/drizzle-helpers";
-import type { SourceRef } from "@/lib/db/schema";
+import { pgTimestampAsText, stripJsonQuotes } from "@/lib/db/drizzle-helpers";
+import { contentObjects, type SourceRef } from "@/lib/db/schema";
 import type {
   BodyFormat,
   ContentKind,
@@ -16,6 +16,31 @@ import type {
   ContentVersionDTO,
   VisibilityLevel,
 } from "./types";
+
+/**
+ * Drizzle `.select()` projection for a content object with timestamps rendered
+ * as text (so they round-trip through `rowToObjectDTO` -> `ObjectRowAsText`).
+ * Shared by `content-service` and `visibility-service.listVisible` so the two
+ * projections cannot drift as columns are added.
+ */
+export const objectSelectFields = {
+  id: contentObjects.id,
+  kind: contentObjects.kind,
+  title: contentObjects.title,
+  slug: contentObjects.slug,
+  ownerUserId: contentObjects.ownerUserId,
+  createdByActor: contentObjects.createdByActor,
+  createdByAgentId: contentObjects.createdByAgentId,
+  collectionId: contentObjects.collectionId,
+  visibilityLevel: contentObjects.visibilityLevel,
+  currentVersionId: contentObjects.currentVersionId,
+  sourceRef: contentObjects.sourceRef,
+  tags: contentObjects.tags,
+  status: contentObjects.status,
+  indexedAt: pgTimestampAsText(contentObjects.indexedAt),
+  createdAt: pgTimestampAsText(contentObjects.createdAt),
+  updatedAt: pgTimestampAsText(contentObjects.updatedAt),
+} as const;
 
 /** Shape of a content-object row selected with timestamps as text. */
 export interface ObjectRowAsText {

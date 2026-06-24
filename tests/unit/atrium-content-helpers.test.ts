@@ -106,7 +106,9 @@ describe("slugCandidate", () => {
 describe("actor / author / scope resolution", () => {
   it("maps requester kind to actor kind", () => {
     expect(actorKindOf(userReq)).toBe("human");
-    expect(actorKindOf(delegatedReq)).toBe("agent");
+    // A delegated agent acts on behalf of a human and has no agent-identity id,
+    // so it records as 'human' (keeping actor='agent' <=> author_agent_id set).
+    expect(actorKindOf(delegatedReq)).toBe("human");
     expect(actorKindOf(autonomousReq)).toBe("agent");
   });
   it("resolves the agent id only for autonomous agents", () => {
@@ -276,6 +278,54 @@ describe("sanitizeHtml (§31.1)", () => {
     expect(sanitizeHtml("<h1>Title</h1><p><strong>bold</strong></p>")).toBe(
       "<h1>Title</h1><p><strong>bold</strong></p>"
     );
+  });
+
+  // Regression: the prior regex deny-list matched the *literal* text
+  // "javascript" and could not see entity-encoded schemes. A DOM sanitizer
+  // decodes entities at parse time before evaluating the URL, closing these.
+  it("neutralizes an entity-encoded javascript: scheme (hex)", () => {
+    const out = sanitizeHtml('<a href="java&#x73;cript:alert(1)">x</a>');
+    expect(out).not.toMatch(/javascript:/i);
+    expect(out).not.toMatch(/java&#x73;cript/i);
+  });
+  it("neutralizes an entity-encoded javascript: scheme (decimal)", () => {
+    const out = sanitizeHtml('<a href="&#106;avascript:alert(1)">x</a>');
+    expect(out).not.toMatch(/javascript:/i);
+    expect(out).not.toMatch(/&#106;avascript/i);
+  });
+  it("strips a formaction javascript: payload", () => {
+    const out = sanitizeHtml(
+      '<form><button formaction="javascript:alert(1)">go</button></form>'
+    );
+    expect(out).not.toMatch(/javascript:/i);
+    expect(out).not.toMatch(/formaction/i);
+  });
+  it("strips a form action attribute", () => {
+    const out = sanitizeHtml('<form action="javascript:alert(1)"></form>');
+    expect(out).not.toMatch(/javascript:/i);
+  });
+  it("strips SVG with a javascript: animation vector", () => {
+    const out = sanitizeHtml(
+      '<svg><animate attributeName="href" values="javascript:alert(1)"/></svg>'
+    );
+    expect(out).not.toMatch(/javascript:/i);
+  });
+  it("strips an SVG xlink:href javascript: scheme", () => {
+    const out = sanitizeHtml(
+      '<svg><a xlink:href="javascript:alert(1)">x</a></svg>'
+    );
+    expect(out).not.toMatch(/javascript:/i);
+  });
+  it("survives a malformed/unclosed script tag (js/bad-tag-filter)", () => {
+    const out = sanitizeHtml("<p>ok</p><script\t\n>alert(1)</script\t\n bar>");
+    expect(out).not.toMatch(/<script/i);
+    expect(out).not.toMatch(/alert\(1\)/);
+  });
+  it("preserves safe https links and relative anchors", () => {
+    expect(sanitizeHtml('<a href="https://ok.test/p">x</a>')).toContain(
+      'href="https://ok.test/p"'
+    );
+    expect(sanitizeHtml('<a href="#section">x</a>')).toContain('href="#section"');
   });
 });
 

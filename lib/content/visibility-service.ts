@@ -21,9 +21,8 @@ import {
   contentObjects,
   contentVisibilityGrants,
 } from "@/lib/db/schema";
-import { pgTimestampAsText } from "@/lib/db/drizzle-helpers";
 import { principalOf } from "./helpers";
-import { rowToObjectDTO } from "./mappers";
+import { objectSelectFields, rowToObjectDTO } from "./mappers";
 import type {
   ContentObjectDTO,
   ListFilter,
@@ -31,6 +30,9 @@ import type {
   Requester,
   VisibilityGrant,
 } from "./types";
+
+/** Upper bound on a `listVisible` tag filter, mirroring the tags column width. */
+const MAX_TAG_LENGTH = 100;
 
 /**
  * The SQL form of `canView` for the permission-pushed `listVisible` query. Built
@@ -221,29 +223,17 @@ export const visibilityService = {
     ];
     if (filter.collectionId) filters.push(eq(o.collectionId, filter.collectionId));
     if (filter.kind) filters.push(eq(o.kind, filter.kind));
-    if (filter.tag) filters.push(sql`${filter.tag} = ANY(${o.tags})`);
+    if (filter.tag) {
+      // Bound parameter (injection-safe); cap length so an oversized tag string
+      // cannot be pushed to the driver on every list call.
+      const tag = filter.tag.slice(0, MAX_TAG_LENGTH);
+      filters.push(sql`${tag} = ANY(${o.tags})`);
+    }
 
     const rows = await executeQuery(
       (db: DrizzleDB) =>
         db
-          .select({
-            id: o.id,
-            kind: o.kind,
-            title: o.title,
-            slug: o.slug,
-            ownerUserId: o.ownerUserId,
-            createdByActor: o.createdByActor,
-            createdByAgentId: o.createdByAgentId,
-            collectionId: o.collectionId,
-            visibilityLevel: o.visibilityLevel,
-            currentVersionId: o.currentVersionId,
-            sourceRef: o.sourceRef,
-            tags: o.tags,
-            status: o.status,
-            indexedAt: pgTimestampAsText(o.indexedAt),
-            createdAt: pgTimestampAsText(o.createdAt),
-            updatedAt: pgTimestampAsText(o.updatedAt),
-          })
+          .select(objectSelectFields)
           .from(o)
           .where(and(...filters))
           .orderBy(desc(o.updatedAt))
