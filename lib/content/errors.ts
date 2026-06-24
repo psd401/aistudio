@@ -1,0 +1,101 @@
+/**
+ * Atrium content service error types
+ *
+ * Issue #1058 (Epic #1059, Atrium Phase 0). See docs/features/atrium-design-spec.md §29.
+ *
+ * These are the domain errors the content services throw. They carry a stable
+ * `code` and an HTTP `status` so each surface can map them uniformly:
+ * - Server actions wrap them with `handleError(...)` -> `ActionState`.
+ * - REST/MCP handlers map `status` to a response status and `code` to a body.
+ *
+ * They extend the repo's `createError` pattern (a typed Error with `code` and
+ * `level`) so existing logging/serialization treats them consistently.
+ */
+
+import { createError } from "@/lib/error-utils";
+import { ErrorLevel } from "@/types/actions-types";
+
+/** Base class for Atrium content errors, carrying an HTTP status for surfaces. */
+export class ContentError extends Error {
+  readonly code: string;
+  readonly status: number;
+  readonly details?: Record<string, unknown>;
+
+  constructor(
+    message: string,
+    code: string,
+    status: number,
+    details?: Record<string, unknown>
+  ) {
+    super(message);
+    this.name = new.target.name;
+    this.code = code;
+    this.status = status;
+    this.details = details;
+    // Maintain a proper prototype chain when targeting ES5-ish output.
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/** 403 — the requester may not perform this action / view this object. */
+export class ForbiddenError extends ContentError {
+  constructor(message = "Forbidden", details?: Record<string, unknown>) {
+    super(message, "CONTENT_FORBIDDEN", 403, details);
+  }
+}
+
+/** 404 — the object (or related row) does not exist. */
+export class NotFoundError extends ContentError {
+  constructor(message = "Not found", details?: Record<string, unknown>) {
+    super(message, "CONTENT_NOT_FOUND", 404, details);
+  }
+}
+
+/** 400 — the input failed validation. */
+export class ValidationError extends ContentError {
+  constructor(message = "Invalid input", details?: Record<string, unknown>) {
+    super(message, "CONTENT_VALIDATION", 400, details);
+  }
+}
+
+/** 409 — a uniqueness/version race (slug collision, version-number conflict). */
+export class ConflictError extends ContentError {
+  constructor(message = "Conflict", details?: Record<string, unknown>) {
+    super(message, "CONTENT_CONFLICT", 409, details);
+  }
+}
+
+/**
+ * 202 — a public-facing publish was requested by a caller that lacks
+ * `content:publish_public`; the request enters the approval queue rather than
+ * publishing. Defined here for the service contract; the publish service that
+ * throws it lands in Phase 5/7.
+ */
+export class ApprovalRequiredError extends ContentError {
+  constructor(
+    message = "Approval required",
+    details?: Record<string, unknown>
+  ) {
+    super(message, "CONTENT_APPROVAL_REQUIRED", 202, details);
+  }
+}
+
+/** Type guard for the Atrium content error family. */
+export function isContentError(error: unknown): error is ContentError {
+  return error instanceof ContentError;
+}
+
+/**
+ * Convert any thrown value into the repo's typed-error shape so the shared
+ * logger/serializer handles it. Pass-through for non-ContentError values.
+ */
+export function toTypedContentError(error: unknown): Error {
+  if (isContentError(error)) {
+    return createError(error.message, {
+      code: error.code,
+      level: ErrorLevel.ERROR,
+      details: { status: error.status, ...error.details },
+    });
+  }
+  return error instanceof Error ? error : new Error(String(error));
+}
