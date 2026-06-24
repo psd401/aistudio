@@ -50,6 +50,18 @@ function buildVisibilitySql(principal: Principal): SQL {
     userIdText != null
       ? sql`${o.ownerUserId} = ${principal.userId}`
       : sql`false`;
+  // `g.grant_value IN (...)` over a bound list. Empty lists render as `false`
+  // (postgres rejects both an empty `IN ()` and an empty `ANY(())`). Each value
+  // is a separate bound parameter, so this is injection-safe.
+  const inList = (values: string[]) =>
+    values.length > 0
+      ? sql`g.grant_value IN (${sql.join(
+          values.map((v) => sql`${v}`),
+          sql`, `
+        )})`
+      : sql`false`;
+  const roleMatch = inList(roleList);
+  const gradeMatch = inList(gradeList);
   const buildingMatch =
     principal.building != null
       ? sql`g.grant_value = ${principal.building}`
@@ -77,10 +89,10 @@ function buildVisibilitySql(principal: Principal): SQL {
     OR (${o.visibilityLevel} = 'group' AND EXISTS (
       SELECT 1 FROM ${contentVisibilityGrants} g
       WHERE g.object_id = ${o.id} AND (
-        (g.grant_kind = 'role'       AND g.grant_value = ANY(${roleList}))
+        (g.grant_kind = 'role'       AND ${roleMatch})
         OR (g.grant_kind = 'building'   AND ${buildingMatch})
         OR (g.grant_kind = 'department' AND ${departmentMatch})
-        OR (g.grant_kind = 'grade'      AND g.grant_value = ANY(${gradeList}))
+        OR (g.grant_kind = 'grade'      AND ${gradeMatch})
         OR (g.grant_kind = 'user'       AND ${userGrantMatch})
       )
     ))
