@@ -22,9 +22,14 @@
  *   defined in the migration.
  * - `source_ref` — typed JSONB; insert via `sql\`${safeJsonbStringify(v)}::jsonb\``.
  *
- * NOTE: No PL/pgSQL triggers / DO $$ blocks for `updated_at` — the migration
- * runner's statement splitter cannot handle dollar-quoted blocks. `updated_at` is
- * maintained by application code via Drizzle `.set({ updatedAt: new Date() })`.
+ * NOTE: `updated_at` is backed by a PostgreSQL trigger
+ * (`update_content_objects_updated_at`, migration 085 §11) that references the
+ * pre-existing `update_updated_at_column()` function from migration 017. It is a
+ * single-statement `CREATE TRIGGER` (no PL/pgSQL `DO $$` block), which the
+ * migration runner's statement splitter handles. Application code also sets
+ * `updated_at` via Drizzle `.set({ updatedAt: new Date() })`; the trigger is the
+ * DB-level backstop for any write that bypasses the app (bulk sweeps, future
+ * migrations).
  */
 
 import {
@@ -87,6 +92,9 @@ export const contentObjects = pgTable(
     index("idx_content_collection").on(t.collectionId),
     index("idx_content_status_kind").on(t.status, t.kind),
     index("idx_content_visibility").on(t.visibilityLevel),
+    // GIN index backing the `tags && ...` array-overlap filter in listVisible
+    // (migration 085 line 109: `CREATE INDEX idx_content_tags ... USING gin(tags)`).
+    index("idx_content_tags").using("gin", t.tags),
   ]
 );
 

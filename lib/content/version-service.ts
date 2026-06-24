@@ -14,10 +14,14 @@
  *
  * Version numbers are allocated inside a transaction and guarded by the
  * `uq_version_object_number` unique constraint so concurrent writers cannot
- * collide. S3 writes happen *after* the row insert inside the same transaction:
- * a unique-violation aborts before any blob is written; the deterministic,
- * content-addressed key means a rare post-write rollback only leaves a harmless,
- * overwritable object.
+ * collide. S3 writes happen *outside* (after) the transaction: `snapshotInTx`
+ * does only DB IO and returns the body/render blobs, which `flushSnapshotWrites`
+ * persists once the transaction has committed. A unique-violation therefore
+ * aborts before any blob is written, and the deterministic, content-addressed
+ * key means a rare post-commit retry only re-writes an identical, overwritable
+ * object. (Doing S3 IO inside the transaction is a drizzle-client anti-pattern:
+ * retries would be amplified, blobs could orphan on rollback, and the pooled
+ * connection would be pinned during slow external IO.)
  */
 
 import { and, desc, eq, sql } from "drizzle-orm";
