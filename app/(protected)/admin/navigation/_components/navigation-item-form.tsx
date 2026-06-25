@@ -32,16 +32,16 @@ const formSchema = z.object({
   icon: z.custom<IconName>((val) => Object.keys(iconMap).includes(val as string), "Invalid icon"),
   link: z.string().optional(),
   description: z.string().optional(),
-  type: z.enum(["link", "section", "page", "content"]),
+  type: z.enum(["link", "section", "page"]),
   parentId: z.union([z.string(), z.number()]).optional(),
   capabilityId: z.union([z.string(), z.number()]).optional().nullable(),
   requiresRole: z.string().optional().nullable(),
   position: z.number().optional(),
   isActive: z.boolean().optional()
 }).refine((data) => {
-  // Sections, pages, and content (Atrium collection) items group children and
-  // do not require a link; only plain links do.
-  if (data.type === "section" || data.type === "page" || data.type === "content") {
+  // Sections and pages group children and do not require a link; only plain
+  // links do.
+  if (data.type === "section" || data.type === "page") {
     return true;
   }
   return data.link && data.link.length > 0;
@@ -71,7 +71,7 @@ export function NavigationItemForm({
       icon: (initialData?.icon as IconName) || "IconHome",
       link: initialData?.link || "",
       description: initialData?.description || "",
-      type: (initialData?.type as "link" | "section" | "page" | "content") || "link",
+      type: (initialData?.type as "link" | "section" | "page") || "link",
       parentId: initialData?.parentId || undefined,
       capabilityId: initialData?.capabilityId || null,
       requiresRole: initialData?.requiresRole || null,
@@ -97,8 +97,8 @@ export function NavigationItemForm({
           setParents(navData.data.filter((item: SelectNavigationItem) => 
             item.type === "section" && item.id !== initialData?.id
           ))
-        } else if (form.getValues("type") === "section" || form.getValues("type") === "content") {
-          // Sections and content (Atrium collection) items are top-level only.
+        } else if (form.getValues("type") === "section") {
+          // Sections are top-level only.
           setParents([])
         }
       }

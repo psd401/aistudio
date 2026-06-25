@@ -30,9 +30,7 @@ export interface NavigationItemData {
   icon: string;
   link?: string | null;
   description?: string | null;
-  // Includes "content" (Issue #1058) so a nav item can point at an Atrium
-  // content object via navigation_items.content_object_id.
-  type: "link" | "section" | "page" | "content";
+  type: "link" | "section" | "page";
   // Clearable relation/role fields accept null so an update can REMOVE the gate
   // (e.g. ungate a nav item). The DB column is nullable; passing null clears it.
   parentId?: number | null;

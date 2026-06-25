@@ -43,7 +43,7 @@ type NavigationUpdateData = Partial<{
   icon: string;
   link: string | null;
   description: string | null;
-  type: "link" | "section" | "page" | "content";
+  type: "link" | "section" | "page";
   // Clearable relation/role fields accept null so callers can REMOVE the gate.
   parentId: number | null;
   capabilityId: number | null;
@@ -63,7 +63,7 @@ function applyNavigationStringFields(
   if (data.icon !== undefined) updateData.icon = data.icon
   if (data.link !== undefined) updateData.link = data.link ?? null
   if (data.description !== undefined) updateData.description = data.description ?? null
-  if (data.type !== undefined && (data.type === "link" || data.type === "section" || data.type === "page" || data.type === "content")) updateData.type = data.type
+  if (data.type !== undefined && (data.type === "link" || data.type === "section" || data.type === "page")) updateData.type = data.type
 }
 
 // Map relational/role fields (parentId, capabilityId, requiresRole) onto the

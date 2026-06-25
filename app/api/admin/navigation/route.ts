@@ -31,7 +31,7 @@ async function updateExistingNavigationItem(body: NavigationItemBody, requestId:
   if (icon !== undefined) updatePayload.icon = icon as string
   if (link !== undefined) updatePayload.link = link as string
   if (description !== undefined) updatePayload.description = description as string
-  if (type !== undefined) updatePayload.type = type as "link" | "section" | "page" | "content"
+  if (type !== undefined) updatePayload.type = type as "link" | "section" | "page"
   if (requiresRole !== undefined) updatePayload.requiresRole = requiresRole as string | null
   if (position !== undefined) updatePayload.position = Number(position)
   if (isActive !== undefined) updatePayload.isActive = Boolean(isActive)

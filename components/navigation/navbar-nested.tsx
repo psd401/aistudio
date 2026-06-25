@@ -43,7 +43,7 @@ interface NavigationItem {
   icon: IconName;
   link: string | null;
   description?: string;
-  type: 'link' | 'section' | 'page' | 'content';
+  type: 'link' | 'section' | 'page';
   parent_id: string | null;
   parent_label: string | null;
   capability_id: string | null;
@@ -58,7 +58,7 @@ interface ProcessedItem {
   id: string;
   label: string;
   icon: IconName;
-  type: 'link' | 'section' | 'page' | 'content';
+  type: 'link' | 'section' | 'page';
   link?: string;
   links?: {
     label: string;

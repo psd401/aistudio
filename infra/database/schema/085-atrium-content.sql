@@ -23,9 +23,13 @@
 --   * CREATE TYPE statements are each on a single line so the runner's splitter
 --     closes the enum block immediately (it treats a CREATE TYPE line as a block
 --     that ends only at a line ending with ");").
---   * `ALTER TYPE navigation_type ADD VALUE` runs as its own auto-committed
---     statement (the runner executes statements individually, never inside a
---     BEGIN/COMMIT), which Postgres requires for enum-value additions.
+--   * The `navigation_type` enum is intentionally NOT extended with a 'content'
+--     value: `ALTER TYPE ... ADD VALUE` requires ownership of the type, but
+--     navigation_type is owned by `postgres` (created in 001-enums.sql) while
+--     migrations run as `master`. On Aurora that fails with "must be owner of
+--     type navigation_type" (SQLSTATE 42501). Content nav items are identified by
+--     the content_object_id column (§9), not a dedicated enum value — deferred to
+--     Phase 4 (when nav wiring lands and the enum ownership can be addressed).
 --   * content_collections is created before content_objects (objects FK to it).
 --   * content_objects.current_version_id -> content_versions.id is a DEFERRED FK,
 --     added after content_versions exists.
@@ -55,9 +59,10 @@ CREATE TYPE publish_destination AS ENUM ('intranet', 'public_web', 'schoology', 
 CREATE TYPE publication_status AS ENUM ('live', 'scheduled', 'unpublished', 'failed');
 CREATE TYPE agent_identity_kind AS ENUM ('service', 'skill');
 
--- Extend the existing navigation_type enum. Must be its own statement and cannot
--- run inside a transaction block (the runner auto-commits each statement).
-ALTER TYPE navigation_type ADD VALUE IF NOT EXISTS 'content';
+-- (No navigation_type enum extension here — see the header note. Adding a
+--  'content' value needs ownership of the postgres-owned enum, which the migration
+--  role lacks on Aurora (SQLSTATE 42501). Content nav items use the
+--  content_object_id column added in §9 instead. Deferred to Phase 4.)
 
 -- ============================================================================
 -- 2. content_collections (created first; objects FK to it)
@@ -242,9 +247,11 @@ ALTER TABLE navigation_items
 --     dropped by buildVisibleNavItems (app/api/navigation/route.ts) — an
 --     invisible, confusing row — and pointing it at a not-yet-existing `/atrium`
 --     route would render a 404. Nav seeding + the collection↔nav wiring move to
---     Phase 1, where they land together with the route. The `content` enum value,
---     the navigation_items.content_object_id column (§9 above), and the admin/UI
---     `content`-type handling are all in place now so Phase 1 only adds rows.
+--     Phase 1, where they land together with the route. Only the
+--     navigation_items.content_object_id column (§9 above) is added now; the
+--     `content` navigation_type enum value is deferred to Phase 4 (ALTER TYPE
+--     ADD VALUE needs ownership of the postgres-owned enum — see header note).
+--     Content nav rows will set content_object_id rather than type='content'.
 -- ============================================================================
 
 -- 10a. Root collections (slugs are stable; names editable).

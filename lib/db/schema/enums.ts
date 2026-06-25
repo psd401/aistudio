@@ -69,16 +69,17 @@ export const jobStatusEnum = pgEnum("job_status", [
  * Navigation item types for the navigation system
  * Used in: navigation_items.type
  *
- * The `content` value (Issue #1058, Atrium Phase 0) lets a navigation item point
- * at an Atrium content object (`navigation_items.content_object_id`). The matching
- * SQL value is added via `ALTER TYPE navigation_type ADD VALUE 'content'` in
- * migration 085 — that statement must run outside a transaction block.
+ * Atrium (Issue #1058) lets a navigation item point at a content object via the
+ * `navigation_items.content_object_id` column (migration 085). A dedicated
+ * `content` enum value is intentionally NOT added: `ALTER TYPE ... ADD VALUE`
+ * needs ownership of this enum, which is owned by `postgres` while migrations run
+ * as `master` (fails 42501 on Aurora). Deferred to Phase 4; content nav items are
+ * identified by `content_object_id`, not the type value.
  */
 export const navigationTypeEnum = pgEnum("navigation_type", [
   "link",
   "section",
   "page",
-  "content",
 ]);
 
 // ============================================
