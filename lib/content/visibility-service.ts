@@ -245,8 +245,16 @@ export const visibilityService = {
     filter: ListFilter = {}
   ): Promise<ContentObjectDTO[]> {
     const principal = principalOf(req);
-    const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
-    const offset = Math.max(filter.offset ?? 0, 0);
+    // `?? N` only coalesces null/undefined, not NaN. A NaN from a query-string
+    // parse (e.g. parseInt('abc')) survives Math.min/Math.max — Math.max(NaN, 1)
+    // is NaN — and `.limit(NaN)` emits `LIMIT NaN`, a Postgres syntax error
+    // (unhandled 500). Treat any non-finite value as the default.
+    const limit = Number.isFinite(filter.limit)
+      ? Math.min(Math.max(filter.limit as number, 1), 200)
+      : 50;
+    const offset = Number.isFinite(filter.offset)
+      ? Math.max(filter.offset as number, 0)
+      : 0;
 
     const o = contentObjects;
     const visiblePredicate = buildVisibilitySql(principal);

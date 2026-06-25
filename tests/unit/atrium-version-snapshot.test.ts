@@ -56,7 +56,7 @@ jest.mock("@/lib/content/visibility-service", () => ({
 }));
 
 import { snapshotInTx } from "@/lib/content/version-service";
-import { ValidationError } from "@/lib/content/errors";
+import { ForbiddenError, ValidationError } from "@/lib/content/errors";
 import type { DbTransaction } from "@/lib/db/drizzle-client";
 import type { Requester } from "@/lib/content/types";
 
@@ -104,5 +104,24 @@ describe("snapshotInTx body-format validation", () => {
     await expect(
       snapshotInTx(tx, req, art, { body: "# code", bodyFormat: "markdown" })
     ).rejects.toThrow(/Artifacts must use bodyFormat 'html' or 'jsx'/);
+  });
+});
+
+describe("snapshotInTx human author-id invariant", () => {
+  // A `user` requester whose userId is null (guest) maps to actor_kind 'human'
+  // with a null author_user_id, violating `actor = 'human' ⟹ author_user_id NOT
+  // NULL`. The boundary guard must reject before any DB access (the tx proxy
+  // throws on access), even with a valid body + format.
+  const guest: Requester = {
+    kind: "user",
+    userId: null,
+    roles: [],
+    isAdmin: false,
+  };
+
+  it("rejects a guest (null userId) human author with a valid body", async () => {
+    await expect(
+      snapshotInTx(tx, guest, doc, { body: "# hello" })
+    ).rejects.toThrow(ForbiddenError);
   });
 });

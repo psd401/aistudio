@@ -38,7 +38,12 @@ import { rowToVersionDTO, type VersionRowAsText } from "./mappers";
 import { renderMarkdownToHtml } from "./render/markdown-render";
 import { s3Store } from "./storage/s3-store";
 import { visibilityService } from "./visibility-service";
-import { ConflictError, NotFoundError, ValidationError } from "./errors";
+import {
+  ConflictError,
+  ForbiddenError,
+  NotFoundError,
+  ValidationError,
+} from "./errors";
 import type {
   BodyFormat,
   ContentVersionDTO,
@@ -110,6 +115,26 @@ export interface SnapshotResult {
 }
 
 /**
+ * Enforce the DB invariant `actor_kind = 'human' ⟹ author_user_id IS NOT NULL`
+ * at the snapshot boundary. Current callers guard upstream (ownerFor /
+ * assertCanEdit), but `snapshotInTx` / `versionService.snapshot` are exported and
+ * Phase 5 adds REST/MCP callers — a misconfigured one skipping the upstream guard
+ * would otherwise silently insert a 'human' version with a null author_user_id
+ * (e.g. a guest `user` requester whose `userId` is null).
+ */
+function assertHumanAuthorId(
+  req: Requester,
+  authorActor: "human" | "agent",
+  authorUserId: number | null
+): void {
+  if (authorActor === "human" && authorUserId == null) {
+    throw new ForbiddenError("Authentication required to author a version", {
+      kind: req.kind,
+    });
+  }
+}
+
+/**
  * DB-only snapshot step that runs inside an existing transaction: allocates the
  * next version number, inserts the immutable version row, and advances the
  * object's working head. **Does no S3 IO** — it returns the body/render blobs
@@ -151,6 +176,12 @@ export async function snapshotInTx(
       bodyFormat,
     });
   }
+  // Enforce the DB invariant `actor_kind = 'human' ⟹ author_user_id IS NOT NULL`
+  // at this boundary (see `assertHumanAuthorId`).
+  const authorActor = actorKindOf(req);
+  const authorUserId = authorUserIdOf(req);
+  assertHumanAuthorId(req, authorActor, authorUserId);
+
   const next = (await maxVersion(tx, obj.id)) + 1;
 
   const isDocument = obj.kind === "document";
@@ -209,8 +240,8 @@ export async function snapshotInTx(
     .values({
       objectId: obj.id,
       versionNumber: next,
-      authorActor: actorKindOf(req),
-      authorUserId: authorUserIdOf(req),
+      authorActor,
+      authorUserId,
       authorAgentId: agentIdOf(req),
       bodyFormat,
       bodyLocation,

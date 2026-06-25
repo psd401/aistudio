@@ -24,7 +24,10 @@ jest.mock("drizzle-orm", () => ({
   and: (...a: unknown[]) => a,
   desc: (a: unknown) => a,
   eq: (...a: unknown[]) => a,
-  sql: Object.assign((..._a: unknown[]) => ({}), {}),
+  // `sql` is a tagged-template fn with a `.join` helper (used by buildVisibilitySql).
+  sql: Object.assign((..._a: unknown[]) => ({}), {
+    join: (..._a: unknown[]) => ({}),
+  }),
 }));
 
 import { visibilityService } from "@/lib/content/visibility-service";
@@ -239,5 +242,74 @@ describe("applyGrants — value validation", () => {
     const { tx, inserted } = fakeTx();
     await visibilityService.applyGrants(tx, "obj-1", []);
     expect(inserted).toHaveLength(0);
+  });
+});
+
+describe("listVisible — limit/offset clamping", () => {
+  /**
+   * Drive listVisible with a given filter and capture the `.limit()` / `.offset()`
+   * arguments the query builder receives. The query callback is invoked against a
+   * chainable spy `db`; the builder resolves to `[]` so no row mapping runs.
+   */
+  async function captureLimitOffset(
+    filter: Record<string, unknown>
+  ): Promise<{ limit: unknown; offset: unknown }> {
+    let captured: { limit: unknown; offset: unknown } = {
+      limit: undefined,
+      offset: undefined,
+    };
+    const builder: Record<string, unknown> = {};
+    for (const m of ["select", "from", "where", "orderBy"]) {
+      builder[m] = jest.fn(() => builder);
+    }
+    builder.limit = jest.fn((v: unknown) => {
+      captured.limit = v;
+      return builder;
+    });
+    builder.offset = jest.fn((v: unknown) => {
+      captured.offset = v;
+      // Final call in the chain — resolve to an empty result set.
+      return Promise.resolve([]);
+    });
+    executeQueryMock.mockImplementationOnce(
+      (cb: (db: unknown) => unknown) => cb(builder)
+    );
+    await visibilityService.listVisible(
+      staffUser,
+      filter as Parameters<typeof visibilityService.listVisible>[1]
+    );
+    return captured;
+  }
+
+  it("defaults to limit 50 / offset 0 when unset", async () => {
+    const { limit, offset } = await captureLimitOffset({});
+    expect(limit).toBe(50);
+    expect(offset).toBe(0);
+  });
+
+  it("coerces a NaN limit/offset to the defaults (no LIMIT NaN)", async () => {
+    // A query-string parse (e.g. parseInt('abc')) yields NaN, which `?? 50`
+    // would NOT coalesce — it must not reach `.limit()`.
+    const { limit, offset } = await captureLimitOffset({
+      limit: Number.NaN,
+      offset: Number.NaN,
+    });
+    expect(limit).toBe(50);
+    expect(offset).toBe(0);
+  });
+
+  it("clamps an over-max limit to 200 and a negative offset to 0", async () => {
+    const { limit, offset } = await captureLimitOffset({
+      limit: 10_000,
+      offset: -5,
+    });
+    expect(limit).toBe(200);
+    expect(offset).toBe(0);
+  });
+
+  it("clamps a sub-1 limit up to 1 and honours a valid offset", async () => {
+    const { limit, offset } = await captureLimitOffset({ limit: 0, offset: 25 });
+    expect(limit).toBe(1);
+    expect(offset).toBe(25);
   });
 });

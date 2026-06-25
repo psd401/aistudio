@@ -80,12 +80,23 @@ async function uniqueSlug(tx: DbTransaction, title: string): Promise<string> {
   const base = slugifyTitle(title);
   // `_` and `%` are not producible by slugifyTitle (it emits [a-z0-9-] only), so
   // no LIKE-wildcard escaping is required for the base prefix.
+  //
+  // Match only the actual collision candidates — the bare `base` and the
+  // suffixed `base-1`, `base-2`, … forms produced by `slugCandidate`. A bare
+  // `LIKE base%` over-fetches unrelated neighbours (`report` would pull in
+  // `reporter`, `report-card`, `reporting-2024`), loading rows we never compare
+  // against while the transaction holds a pooled connection.
   const taken = new Set(
     (
       await tx
         .select({ slug: contentObjects.slug })
         .from(contentObjects)
-        .where(like(contentObjects.slug, `${base}%`))
+        .where(
+          sql`${contentObjects.slug} = ${base} OR ${like(
+            contentObjects.slug,
+            `${base}-%`
+          )}`
+        )
     ).map((r) => r.slug)
   );
   // `taken.size + 1` distinct candidates guarantees at least one free slot.

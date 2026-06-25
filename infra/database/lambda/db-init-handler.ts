@@ -321,10 +321,25 @@ async function executeFileStatements(
              error.message?.includes('duplicate key'))) {
           console.log(`⚠️  Skipping (already exists): ${error.message}`);
         } else if (MIGRATION_FILES.includes(filename)) {
+          // CREATE TYPE … AS ENUM cannot be written `IF NOT EXISTS` (PostgreSQL
+          // has no such form) and the statement splitter cannot handle the
+          // DO $$ … $$ guard pattern (it closes the block on the inner `);`).
+          // So an enum CREATE TYPE is inherently non-idempotent: on a partial-
+          // failure re-run it raises "type … already exists" (SQLSTATE 42710),
+          // which would otherwise hit the throw below and permanently wedge the
+          // migration. Treat that specific case as already-applied, matching the
+          // idempotency the migration header promises. Scoped to CREATE TYPE so
+          // genuine "already exists" failures in other statements still surface.
+          const isCreateType = statement.trim().toUpperCase().startsWith('CREATE TYPE');
+          if (isCreateType && error.message?.includes('already exists')) {
+            console.log(`⚠️  Skipping (type already exists): ${error.message}`);
+            continue;
+          }
+
           // For migration files, check if it's an ALTER TABLE that actually succeeded
           // RDS Data API sometimes returns an error-like response for successful ALTER TABLEs
           const isAlterTable = statement.trim().toUpperCase().startsWith('ALTER TABLE');
-          
+
           if (isAlterTable) {
             // Verify if the ALTER actually succeeded by checking the table structure
             console.log(`⚠️  ALTER TABLE may have succeeded despite error response. Verifying...`);

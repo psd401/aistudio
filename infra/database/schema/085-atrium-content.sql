@@ -41,8 +41,9 @@
 -- so the runner can safely re-enter and re-apply this file after a failed run.
 
 -- ============================================================================
--- 1. Enums (each CREATE TYPE on one line; idempotent via runner's "already
---    exists" handling — these are wrapped to no-op on re-run).
+-- 1. Enums (each CREATE TYPE on one line; idempotent via the runner's
+--    CREATE TYPE "already exists" (SQLSTATE 42710) handling in
+--    db-init-handler.ts, which no-ops these on a re-run).
 -- ============================================================================
 CREATE TYPE content_kind AS ENUM ('document', 'artifact');
 CREATE TYPE content_status AS ENUM ('draft', 'published', 'archived');
