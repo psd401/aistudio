@@ -143,7 +143,8 @@ export async function getNavigationItemsAction(): Promise<ActionState<SelectNavi
       requiresRole: item.requiresRole ?? null,
       position: item.position,
       isActive: item.isActive,
-      createdAt: item.createdAt
+      createdAt: item.createdAt,
+      contentObjectId: item.contentObjectId ?? null
     }))
 
     return createSuccess(transformedItems, "Navigation items retrieved successfully")
@@ -223,7 +224,10 @@ export async function createNavigationItemAction(
       requiresRole: newItem.requiresRole ?? null,
       position: newItem.position,
       isActive: newItem.isActive,
-      createdAt: newItem.createdAt
+      createdAt: newItem.createdAt,
+      // This action does not create content-linked nav items; the Atrium
+      // migration (#1058) seeds those. Default to null here.
+      contentObjectId: null
     }
 
     return createSuccess(transformedItem, "Navigation item created successfully")
@@ -296,7 +300,8 @@ export async function updateNavigationItemAction(
       requiresRole: updatedItem.requiresRole ?? null,
       position: updatedItem.position,
       isActive: updatedItem.isActive,
-      createdAt: updatedItem.createdAt
+      createdAt: updatedItem.createdAt,
+      contentObjectId: updatedItem.contentObjectId ?? null
     }
 
     return createSuccess(transformedUpdatedItem, "Navigation item updated successfully")

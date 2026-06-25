@@ -105,4 +105,11 @@ export const CAPABILITY_MANIFEST: readonly CapabilityManifestEntry[] = [
     description: "Access internal system administration tooling and diagnostics.",
     defaultRoles: ["administrator"],
   },
+  {
+    identifier: "atrium-content",
+    name: "Atrium Content",
+    description:
+      "Create and version Atrium content objects (documents and artifacts).",
+    defaultRoles: ["administrator", "staff"],
+  },
 ] as const;

@@ -29,6 +29,16 @@ export const API_SCOPES = {
   "mcp:execute_assistant": "Execute an assistant via MCP",
   "mcp:list_assistants": "List available assistants via MCP",
   "mcp:get_decision_graph": "Get decision node details and connections via MCP",
+  // Atrium content scopes (Phase 5 — REST/MCP surfaces, Issue #1059).
+  // `content:read` is reserved now so the Phase 5 read endpoints
+  // (`GET /api/v1/content/:id`, MCP fetch) have a scope to gate agent
+  // read-access on without a scope-definition change landing alongside them.
+  // Users hold no content scopes — their reads are capability-gated.
+  "content:read": "Read Atrium content objects and versions",
+  "content:create": "Create Atrium content objects and initial versions",
+  "content:update": "Update Atrium content object metadata and create new versions",
+  "content:publish_internal": "Publish Atrium content to internal destinations",
+  "content:publish_public": "Publish Atrium content publicly",
 } as const;
 
 export type ApiScope = keyof typeof API_SCOPES;

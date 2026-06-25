@@ -68,11 +68,109 @@ export const jobStatusEnum = pgEnum("job_status", [
 /**
  * Navigation item types for the navigation system
  * Used in: navigation_items.type
+ *
+ * Atrium (Issue #1058) lets a navigation item point at a content object via the
+ * `navigation_items.content_object_id` column (migration 085). A dedicated
+ * `content` enum value is intentionally NOT added: `ALTER TYPE ... ADD VALUE`
+ * needs ownership of this enum, which is owned by `postgres` while migrations run
+ * as `master` (fails 42501 on Aurora). Deferred to Phase 4; content nav items are
+ * identified by `content_object_id`, not the type value.
  */
 export const navigationTypeEnum = pgEnum("navigation_type", [
   "link",
   "section",
   "page",
+]);
+
+// ============================================
+// Atrium content workspace (Issue #1058, Epic #1059)
+//
+// The content layer's enums. See docs/features/atrium-design-spec.md §7.1 / §35.2.
+// SQL types are created in migration 085-atrium-content.sql. Keep these value
+// lists byte-for-byte identical to the migration so schema-drift detection and
+// regeneration stay faithful.
+// ============================================
+
+/**
+ * Content object kind — the two grains of Atrium content.
+ * Used in: content_objects.kind
+ */
+export const contentKindEnum = pgEnum("content_kind", ["document", "artifact"]);
+
+/**
+ * Content lifecycle status.
+ * Used in: content_objects.status
+ */
+export const contentStatusEnum = pgEnum("content_status", [
+  "draft",
+  "published",
+  "archived",
+]);
+
+/**
+ * Actor kind — every creation/edit is attributed to a human or an agent.
+ * Used in: content_objects.created_by_actor, content_versions.author_actor
+ */
+export const actorKindEnum = pgEnum("actor_kind", ["human", "agent"]);
+
+/**
+ * Visibility level — who may consume an object.
+ * Used in: content_objects.visibility_level, content_collections.default_visibility_level
+ */
+export const visibilityLevelEnum = pgEnum("visibility_level", [
+  "private",
+  "group",
+  "internal",
+  "public",
+]);
+
+/**
+ * Grant kind — the dimension a group visibility grant keys on.
+ * Used in: content_visibility_grants.grant_kind
+ */
+export const grantKindEnum = pgEnum("grant_kind", [
+  "role",
+  "building",
+  "department",
+  "grade",
+  "user",
+]);
+
+/**
+ * Body format — how a version's body is encoded.
+ * Used in: content_versions.body_format
+ */
+export const bodyFormatEnum = pgEnum("body_format", ["markdown", "html", "jsx"]);
+
+/**
+ * Publish destination — where content is surfaced.
+ * Used in: content_publications.destination
+ */
+export const publishDestinationEnum = pgEnum("publish_destination", [
+  "intranet",
+  "public_web",
+  "schoology",
+  "google",
+]);
+
+/**
+ * Publication status — the lifecycle of a publication record.
+ * Used in: content_publications.status
+ */
+export const publicationStatusEnum = pgEnum("publication_status", [
+  "live",
+  "scheduled",
+  "unpublished",
+  "failed",
+]);
+
+/**
+ * Agent identity kind — the type of autonomous (non-delegated) agent.
+ * Used in: agent_identities.kind
+ */
+export const agentIdentityKindEnum = pgEnum("agent_identity_kind", [
+  "service",
+  "skill",
 ]);
 
 /**

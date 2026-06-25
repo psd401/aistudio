@@ -10,6 +10,7 @@ import {
   serial,
   text,
   timestamp,
+  uuid,
 } from "drizzle-orm/pg-core";
 import { navigationTypeEnum } from "../enums";
 import { capabilities } from "./capabilities";
@@ -33,4 +34,8 @@ export const navigationItems = pgTable("navigation_items", {
   createdAt: timestamp("created_at").defaultNow().notNull(),
   description: text("description"),
   type: navigationTypeEnum("type").default("link").notNull(),
+  // Atrium (#1058): when type='content', points at the content object this nav
+  // item surfaces. Plain column (no Drizzle .references) to avoid an import cycle
+  // with content-objects; the SQL FK fk_nav_content_object is in migration 085.
+  contentObjectId: uuid("content_object_id"),
 });

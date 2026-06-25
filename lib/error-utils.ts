@@ -493,6 +493,28 @@ export function handleError(
       }
     }
 
+    // Handle AggregateError (e.g. Promise.allSettled fan-outs) before the
+    // generic Error branch: the catch-all logs only `error.message`, discarding
+    // the per-failure `error.errors[]` array. Without this branch, a partial S3
+    // snapshot failure logs "Failed to persist N of M blob(s)" with no way to
+    // tell *which* key/error failed.
+    if (typeof AggregateError !== "undefined" && error instanceof AggregateError) {
+      log.error(sanitizeForLogging(error.message) as string, {
+        error: sanitizeForLogging(error),
+        stack: error.stack,
+        errors: Array.isArray(error.errors)
+          ? error.errors.map((e) => sanitizeForLogging(e))
+          : undefined,
+        ...metadata
+      })
+
+      return {
+        isSuccess: false,
+        message: userMessage,
+        ...(includeErrorInResponse && { error })
+      }
+    }
+
     // Handle standard Error objects
     if (error instanceof Error) {
       log.error(sanitizeForLogging(error.message) as string, {

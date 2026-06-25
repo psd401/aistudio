@@ -39,6 +39,8 @@ const formSchema = z.object({
   position: z.number().optional(),
   isActive: z.boolean().optional()
 }).refine((data) => {
+  // Sections and pages group children and do not require a link; only plain
+  // links do.
   if (data.type === "section" || data.type === "page") {
     return true;
   }
@@ -96,7 +98,7 @@ export function NavigationItemForm({
             item.type === "section" && item.id !== initialData?.id
           ))
         } else if (form.getValues("type") === "section") {
-          // Sections cannot have parents (top-level only)
+          // Sections are top-level only.
           setParents([])
         }
       }

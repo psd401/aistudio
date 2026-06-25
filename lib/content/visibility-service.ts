@@ -1,0 +1,314 @@
+/**
+ * Atrium visibility service
+ *
+ * Issue #1058 (Epic #1059, Atrium Phase 0). The permission boundary for content:
+ * `canView` (the predicate enforced everywhere), grant application, and the
+ * permission-pushed `listVisible` query (filtering in SQL, never load-then-drop).
+ *
+ * See docs/features/atrium-design-spec.md §12.
+ *
+ * Phase 0 ships the core read/grant/list logic the issue calls for. Publish-time
+ * visibility widening (`setLevel`) lands with the publish service in Phase 5/7.
+ */
+
+import { and, desc, eq, sql, type SQL } from "drizzle-orm";
+import {
+  executeQuery,
+  type DbTransaction,
+  type DrizzleDB,
+} from "@/lib/db/drizzle-client";
+import {
+  contentObjects,
+  contentVisibilityGrants,
+} from "@/lib/db/schema";
+import { principalOf } from "./helpers";
+import { objectSelectFields, rowToObjectDTO, type ObjectRowAsText } from "./mappers";
+import { ValidationError } from "./errors";
+import type {
+  ContentObjectDTO,
+  ListFilter,
+  Principal,
+  Requester,
+  VisibilityGrant,
+} from "./types";
+
+/** Upper bound on a `listVisible` tag filter, mirroring the tags column width. */
+const MAX_TAG_LENGTH = 100;
+
+/** A positive-integer ID string (no leading zeros required, no sign, no spaces). */
+const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
+
+/** Upper bound on a grant value, mirroring the `grant_value varchar(255)` column. */
+const MAX_GRANT_VALUE_LENGTH = 255;
+
+/**
+ * Validate a grant before it is persisted. `user`/`role` values are numeric IDs
+ * stored as strings (§12.2); the rest are non-empty opaque tokens. Rejecting an
+ * empty or malformed value here prevents, e.g., an empty-string role grant from
+ * matching unintended principals once the `g.grant_value = ''` comparison runs.
+ */
+function assertValidGrant(grant: VisibilityGrant): void {
+  const value = grant.value;
+  if (typeof value !== "string" || value.length === 0) {
+    throw new ValidationError("Grant value is required", { kind: grant.kind });
+  }
+  if (value.length > MAX_GRANT_VALUE_LENGTH) {
+    throw new ValidationError("Grant value exceeds maximum length", {
+      kind: grant.kind,
+    });
+  }
+  if (
+    (grant.kind === "user" || grant.kind === "role") &&
+    !POSITIVE_INT_RE.test(value)
+  ) {
+    throw new ValidationError(
+      `Grant value for '${grant.kind}' must be a positive-integer id`,
+      { kind: grant.kind, value }
+    );
+  }
+}
+
+/**
+ * The SQL form of `canView` for the permission-pushed `listVisible` query. Built
+ * once per request from the principal so listing/retrieval never load-then-drop
+ * (§12.3).
+ *
+ * MUST stay logically equivalent to `visibilityService.canView` below — the two
+ * implement the same visibility rules in two languages (SQL here, JS there). Any
+ * change to a visibility rule MUST be mirrored in BOTH or list and point-read
+ * will disagree (a divergence the mocked unit tests cannot catch). When you edit
+ * one, edit the other in the same commit.
+ */
+function buildVisibilitySql(principal: Principal): SQL {
+  if (principal.isAdmin) return sql`true`;
+
+  const o = contentObjects;
+  const userIdText = principal.userId != null ? String(principal.userId) : null;
+  const roleList = principal.roles;
+  const gradeList = principal.gradeLevels ?? [];
+
+  const authenticated = userIdText != null || roleList.length > 0;
+  // INVARIANT: owners always see their own content regardless of visibility level
+  // (encoded as the unconditional `OR (${ownerMatch})` in the predicate below).
+  // This MUST stay equivalent to `canView`'s owner check (the
+  // `principal.userId === obj.ownerUserId` branch). If owner visibility is ever
+  // restricted (e.g. an owner can no longer read archived content), this
+  // unconditional form would silently leak that content to owners in `listVisible`
+  // — scope it here AND in `canView` in the same commit.
+  const ownerMatch =
+    userIdText != null
+      ? sql`${o.ownerUserId} = ${principal.userId}`
+      : sql`false`;
+  // `g.grant_value IN (...)` over a bound list. Empty lists render as `false`
+  // (postgres rejects both an empty `IN ()` and an empty `ANY(())`). Each value
+  // is a separate bound parameter, so this is injection-safe.
+  const inList = (values: string[]) =>
+    values.length > 0
+      ? sql`g.grant_value IN (${sql.join(
+          values.map((v) => sql`${v}`),
+          sql`, `
+        )})`
+      : sql`false`;
+  const roleMatch = inList(roleList);
+  const gradeMatch = inList(gradeList);
+  const buildingMatch =
+    principal.building != null
+      ? sql`g.grant_value = ${principal.building}`
+      : sql`false`;
+  const departmentMatch =
+    principal.department != null
+      ? sql`g.grant_value = ${principal.department}`
+      : sql`false`;
+  const userGrantMatch =
+    userIdText != null ? sql`g.grant_value = ${userIdText}` : sql`false`;
+  const privateUserGrant =
+    userIdText != null
+      ? sql`EXISTS (
+          SELECT 1 FROM ${contentVisibilityGrants} g2
+          WHERE g2.object_id = ${o.id}
+            AND g2.grant_kind = 'user'
+            AND g2.grant_value = ${userIdText}
+        )`
+      : sql`false`;
+
+  return sql`(
+    ${o.visibilityLevel} = 'public'
+    OR (${o.visibilityLevel} = 'internal' AND ${authenticated ? sql`true` : sql`false`})
+    OR (${ownerMatch})
+    OR (${o.visibilityLevel} = 'group' AND EXISTS (
+      SELECT 1 FROM ${contentVisibilityGrants} g
+      WHERE g.object_id = ${o.id} AND (
+        (g.grant_kind = 'role'       AND ${roleMatch})
+        OR (g.grant_kind = 'building'   AND ${buildingMatch})
+        OR (g.grant_kind = 'department' AND ${departmentMatch})
+        OR (g.grant_kind = 'grade'      AND ${gradeMatch})
+        OR (g.grant_kind = 'user'       AND ${userGrantMatch})
+      )
+    ))
+    OR (${o.visibilityLevel} = 'private' AND ${privateUserGrant})
+  )`;
+}
+
+/** A loaded object's fields `canView` needs (subset of the DTO). */
+export interface ViewableObject {
+  id: string;
+  ownerUserId: number;
+  visibilityLevel: "private" | "group" | "internal" | "public";
+}
+
+/** Load the normalized grants for an object. */
+async function grantsFor(objectId: string): Promise<VisibilityGrant[]> {
+  const rows = await executeQuery(
+    (db) =>
+      db
+        .select({
+          kind: contentVisibilityGrants.grantKind,
+          value: contentVisibilityGrants.grantValue,
+        })
+        .from(contentVisibilityGrants)
+        .where(eq(contentVisibilityGrants.objectId, objectId)),
+    "content.grantsFor"
+  );
+  return rows.map((r) => ({ kind: r.kind, value: r.value }));
+}
+
+export const visibilityService = {
+  grantsFor,
+
+  /**
+   * The single predicate that gates every content read. Evaluated against the
+   * requester's principal.
+   *
+   * MUST stay logically equivalent to `buildVisibilitySql` above — the SQL path
+   * (`listVisible`) and this in-memory path implement the same rules. Any change
+   * to a visibility rule MUST be mirrored in BOTH or list and point-read will
+   * disagree and leak (the mocked unit tests cannot catch a SQL-only divergence).
+   * When you edit one, edit the other in the same commit.
+   */
+  async canView(req: Requester, obj: ViewableObject): Promise<boolean> {
+    if (obj.visibilityLevel === "public") return true;
+
+    const principal = principalOf(req);
+    // Unauthenticated (no user, no roles) can only ever see public.
+    if (principal.userId == null && principal.roles.length === 0) return false;
+
+    if (obj.visibilityLevel === "internal") {
+      // Any authenticated principal (a user, or an agent with a role).
+      return principal.userId != null || principal.roles.length > 0;
+    }
+    if (principal.isAdmin) return true;
+    if (principal.userId != null && principal.userId === obj.ownerUserId) {
+      return true;
+    }
+
+    const grants = await grantsFor(obj.id);
+
+    if (obj.visibilityLevel === "private") {
+      // Private is owner/admin only, plus any explicit per-user grant.
+      return grants.some(
+        (g) =>
+          g.kind === "user" &&
+          principal.userId != null &&
+          String(principal.userId) === g.value
+      );
+    }
+
+    // group:
+    return grants.some(
+      (g) =>
+        (g.kind === "role" && principal.roles.includes(g.value)) ||
+        (g.kind === "building" && principal.building === g.value) ||
+        (g.kind === "department" && principal.department === g.value) ||
+        (g.kind === "grade" &&
+          (principal.gradeLevels ?? []).includes(g.value)) ||
+        (g.kind === "user" &&
+          principal.userId != null &&
+          String(principal.userId) === g.value)
+    );
+  },
+
+  /**
+   * Replace an object's grants with the supplied set (delete-then-insert) inside
+   * the caller's transaction. A no-op (clears grants) when `grants` is empty.
+   */
+  async applyGrants(
+    tx: DbTransaction,
+    objectId: string,
+    grants: VisibilityGrant[]
+  ): Promise<void> {
+    // Validate every grant value before touching the DB so a bad value aborts
+    // the whole replace (no partial application).
+    for (const grant of grants) assertValidGrant(grant);
+    await tx
+      .delete(contentVisibilityGrants)
+      .where(eq(contentVisibilityGrants.objectId, objectId));
+    if (grants.length > 0) {
+      await tx.insert(contentVisibilityGrants).values(
+        grants.map((g) => ({
+          objectId,
+          grantKind: g.kind,
+          grantValue: g.value,
+        }))
+      );
+    }
+  },
+
+  /**
+   * Permission-pushed listing: returns exactly the objects visible to the
+   * requester, filtering in SQL. Mirrors `canView`'s logic (§12.3). Optional
+   * filters narrow by collection/kind/tag/status.
+   */
+  async listVisible(
+    req: Requester,
+    filter: ListFilter = {}
+  ): Promise<ContentObjectDTO[]> {
+    const principal = principalOf(req);
+    // `?? N` only coalesces null/undefined, not NaN. A NaN from a query-string
+    // parse (e.g. parseInt('abc')) survives Math.min/Math.max — Math.max(NaN, 1)
+    // is NaN — and `.limit(NaN)` emits `LIMIT NaN`, a Postgres syntax error
+    // (unhandled 500). Treat any non-finite value as the default.
+    const limit = Number.isFinite(filter.limit)
+      ? Math.min(Math.max(filter.limit as number, 1), 200)
+      : 50;
+    const offset = Number.isFinite(filter.offset)
+      ? Math.max(filter.offset as number, 0)
+      : 0;
+
+    const o = contentObjects;
+    const visiblePredicate = buildVisibilitySql(principal);
+
+    const filters = [
+      // archived objects are excluded unless explicitly requested.
+      filter.status
+        ? eq(o.status, filter.status)
+        : sql`${o.status} <> 'archived'`,
+      visiblePredicate,
+    ];
+    if (filter.collectionId) filters.push(eq(o.collectionId, filter.collectionId));
+    if (filter.kind) filters.push(eq(o.kind, filter.kind));
+    if (filter.tag) {
+      // Bound parameter (injection-safe); cap length so an oversized tag string
+      // cannot be pushed to the driver on every list call.
+      const tag = filter.tag.slice(0, MAX_TAG_LENGTH);
+      filters.push(sql`${tag} = ANY(${o.tags})`);
+    }
+
+    const rows = await executeQuery(
+      (db: DrizzleDB) =>
+        db
+          .select(objectSelectFields)
+          .from(o)
+          .where(and(...filters))
+          .orderBy(desc(o.updatedAt))
+          .limit(limit)
+          .offset(offset),
+      "content.listVisible"
+    );
+
+    // Cast each row to the text-timestamp shape, matching content-service's
+    // per-call pattern: the Drizzle projection types `tags` as nullable and
+    // narrows enum columns, so it is not directly assignable to the mapper's
+    // ObjectRowAsText parameter.
+    return rows.map((row) => rowToObjectDTO(row as ObjectRowAsText));
+  },
+};
