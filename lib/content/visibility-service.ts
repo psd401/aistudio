@@ -71,7 +71,13 @@ function assertValidGrant(grant: VisibilityGrant): void {
 /**
  * The SQL form of `canView` for the permission-pushed `listVisible` query. Built
  * once per request from the principal so listing/retrieval never load-then-drop
- * (§12.3). Kept logically equivalent to `visibilityService.canView`.
+ * (§12.3).
+ *
+ * MUST stay logically equivalent to `visibilityService.canView` below — the two
+ * implement the same visibility rules in two languages (SQL here, JS there). Any
+ * change to a visibility rule MUST be mirrored in BOTH or list and point-read
+ * will disagree (a divergence the mocked unit tests cannot catch). When you edit
+ * one, edit the other in the same commit.
  */
 function buildVisibilitySql(principal: Principal): SQL {
   if (principal.isAdmin) return sql`true`;
@@ -164,8 +170,13 @@ export const visibilityService = {
 
   /**
    * The single predicate that gates every content read. Evaluated against the
-   * requester's principal. The SQL form below (`listVisible`) must stay logically
-   * equivalent so list/retrieval never leak.
+   * requester's principal.
+   *
+   * MUST stay logically equivalent to `buildVisibilitySql` above — the SQL path
+   * (`listVisible`) and this in-memory path implement the same rules. Any change
+   * to a visibility rule MUST be mirrored in BOTH or list and point-read will
+   * disagree and leak (the mocked unit tests cannot catch a SQL-only divergence).
+   * When you edit one, edit the other in the same commit.
    */
   async canView(req: Requester, obj: ViewableObject): Promise<boolean> {
     if (obj.visibilityLevel === "public") return true;

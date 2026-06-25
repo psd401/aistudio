@@ -351,6 +351,10 @@ export const contentService = {
    * Metadata-only patch (title, tags, collection, status). Body changes go
    * through `versionService.snapshot`. Clearable fields use `?? null` so an
    * explicit clear is persisted (never `undefined` in `.set()`).
+   *
+   * NOT dead code: Phase 0 ships no server action for this (the PR exposes only
+   * create/get/list/create-version). It is invoked by the Phase 1 update action
+   * and the Phase 5 `PATCH /api/v1/content/:id` endpoint. Keep it.
    */
   async update(
     req: Requester,
@@ -440,6 +444,3 @@ function ownerFor(req: Requester): number {
   // Autonomous: owned by the configured system user (§26.5).
   return systemUserId();
 }
-
-// Re-export the filtered list type for convenience.
-export type { ListFilter } from "./types";
