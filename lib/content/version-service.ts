@@ -285,11 +285,18 @@ export async function snapshotInTx(
  * Writes run concurrently (`Promise.allSettled`) rather than sequentially: the
  * source/render blobs are independent, so this halves P99 latency and attempts
  * both even if one fails. A partial failure (e.g. `source.md` written but
- * `render.html` not) leaves the committed version row's `render_location`
- * pointing at a key that is briefly absent — but `render.html` is deterministically
- * derivable from the persisted `source.md`, so the Phase 1 render path can
- * regenerate it on demand. We still throw on any failure so the caller learns the
- * write did not fully succeed (an aggregate of the underlying errors).
+ * `render.html` not), OR a total failure after the row already committed (S3
+ * down/throttled), leaves the committed version row's `render_location` pointing
+ * at a key that is absent. `render.html` is deterministically derivable from the
+ * persisted `source.md`, so the Phase 1 render path can regenerate it on demand.
+ * We still throw on any failure so the caller learns the write did not fully
+ * succeed (an aggregate of the underlying errors).
+ *
+ * CONTRACT FOR PHASE 1+ CONSUMERS: `version.renderLocation` is NOT guaranteed to
+ * resolve to an existing S3 object. Treat a `NoSuchKey` as "not yet rendered" and
+ * regenerate from `source.md` (or fall back gracefully) — never surface the raw
+ * S3 error. Phase 0 has no render-serving consumer, so no live path dereferences
+ * it yet.
  */
 export async function flushSnapshotWrites(
   writes: PendingS3Write[]

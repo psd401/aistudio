@@ -42,11 +42,15 @@ export async function createVersionAction(
       }),
     });
 
-    // Capability gate first: avoids DB queries for non-authorized callers.
+    // Resolve the requester FIRST so an unauthenticated caller gets a 401
+    // (authNoSession → "please log in") rather than a 403 — `hasCapabilityAccess`
+    // returns false (not throws) on a missing session, so gating on it first would
+    // surface "access denied" to a caller who simply needs to log in. Ordering it
+    // first also removes the duplicate session-read + role-query.
+    const requester = await getUserRequester(requestId);
     if (!(await hasCapabilityAccess("atrium-content"))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
-    const requester = await getUserRequester(requestId);
     const result = await contentService.createVersion(
       requester,
       objectId,

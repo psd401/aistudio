@@ -310,16 +310,39 @@ export const contentService = {
     await assertViewable(req, obj, id);
     assertCanEdit(req, obj.ownerUserId);
 
-    const version = await versionService.snapshot(
-      req,
-      { id: obj.id, kind: obj.kind },
-      input
-    );
+    // The version-number allocation (`MAX(version_number) + 1`) is intentionally
+    // race-prone and the unique constraint maps a loser to ConflictError (409).
+    // Back-to-back writers (e.g. an autosave firing twice) would otherwise surface
+    // an unrecoverable error toast. A single transparent retry re-reads the head
+    // version and almost always wins the second time; a still-conflicting second
+    // attempt (sustained contention) re-throws so the caller can decide.
+    let version: Awaited<ReturnType<typeof versionService.snapshot>>;
+    try {
+      version = await versionService.snapshot(
+        req,
+        { id: obj.id, kind: obj.kind },
+        input
+      );
+    } catch (err) {
+      if (!(err instanceof ConflictError)) throw err;
+      version = await versionService.snapshot(
+        req,
+        { id: obj.id, kind: obj.kind },
+        input
+      );
+    }
     // Re-load so the returned object carries the post-snapshot updatedAt and
     // currentVersionId (snapshotInTx advances both); returning the pre-snapshot
     // `obj` would hand callers a stale updatedAt for cache/optimistic-lock use.
     const refreshed = await loadByIdOrSlug(obj.id);
-    return { ...(refreshed ?? obj), currentVersionId: version.id, version };
+    if (!refreshed) {
+      // The object was concurrently deleted between the snapshot commit and this
+      // reload. Falling back to the pre-snapshot `obj` would hand callers a stale
+      // `updatedAt`, silently corrupting any optimistic-lock or cache-invalidation
+      // consumer. Surface the deletion instead so the caller can react.
+      throw new NotFoundError("Content not found", { id: obj.id });
+    }
+    return { ...refreshed, currentVersionId: version.id, version };
   },
 
   /**

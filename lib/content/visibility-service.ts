@@ -88,6 +88,13 @@ function buildVisibilitySql(principal: Principal): SQL {
   const gradeList = principal.gradeLevels ?? [];
 
   const authenticated = userIdText != null || roleList.length > 0;
+  // INVARIANT: owners always see their own content regardless of visibility level
+  // (encoded as the unconditional `OR (${ownerMatch})` in the predicate below).
+  // This MUST stay equivalent to `canView`'s owner check (the
+  // `principal.userId === obj.ownerUserId` branch). If owner visibility is ever
+  // restricted (e.g. an owner can no longer read archived content), this
+  // unconditional form would silently leak that content to owners in `listVisible`
+  // — scope it here AND in `canView` in the same commit.
   const ownerMatch =
     userIdText != null
       ? sql`${o.ownerUserId} = ${principal.userId}`
