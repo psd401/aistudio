@@ -84,6 +84,17 @@ jobs:
       # Fixed, non-production secret shared by the dev server and the Playwright
       # auth harness (both must mint/verify the session cookie with the same value).
       AUTH_SECRET: ci-atrium-e2e-secret-not-for-production
+      # Dummy Cognito provider config. NextAuth v5 runs assertConfig() on EVERY
+      # action (including session reads): a Cognito provider with a falsy `issuer`
+      # throws InvalidEndpoints, which getServerSession() swallows -> null session
+      # -> every authed request 401s/403s. A non-empty issuer string satisfies the
+      # assertion (assert.js only checks truthiness); the JWT `session` action then
+      # decodes the harness-minted cookie locally and never performs OAuth discovery
+      # (that only runs in the signin/callback flow, which the harness bypasses).
+      # These are NOT real credentials — the session cookie is minted directly.
+      AUTH_COGNITO_ISSUER: https://cognito-idp.us-east-1.amazonaws.com/us-east-1_ciDummyPool
+      AUTH_COGNITO_CLIENT_ID: ci-dummy-client-id
+      AUTH_URL: http://localhost:3200
       PORT: "3200"
       HOSTNAME: 127.0.0.1
       PLAYWRIGHT_BASE_URL: http://localhost:3200
