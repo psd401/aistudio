@@ -98,7 +98,9 @@ function initRedis(): void {
 // Document lifecycle
 // ---------------------------------------------------------------------------
 function schedulePersist(docName: string, entry: DocEntry): void {
-  if (entry.persistTimer) return;
+  // Trailing-edge debounce: reschedule on every update so the most recent
+  // state is always what gets persisted, not an arbitrary prefix of the burst.
+  if (entry.persistTimer) clearTimeout(entry.persistTimer);
   entry.persistTimer = setTimeout(() => {
     entry.persistTimer = null;
     void saveDocState(
@@ -159,59 +161,64 @@ async function getOrCreateDoc(docName: string): Promise<DocEntry> {
   if (inflight) return inflight;
 
   const promise = (async (): Promise<DocEntry> => {
-    const ydoc = new Y.Doc();
-    const awareness = new awarenessProtocol.Awareness(ydoc);
-    const entry: DocEntry = {
-      ydoc,
-      awareness,
-      conns: new Set(),
-      awarenessIds: new Map(),
-      persistTimer: null,
-      markdown: null,
-    };
+    try {
+      const ydoc = new Y.Doc();
+      const awareness = new awarenessProtocol.Awareness(ydoc);
+      const entry: DocEntry = {
+        ydoc,
+        awareness,
+        conns: new Set(),
+        awarenessIds: new Map(),
+        persistTimer: null,
+        markdown: null,
+      };
 
-    // Hydrate from Postgres, or seed from the draft markdown on first open. Apply
-    // with origin "init" so the update handler (attached after) doesn't broadcast
-    // or persist the initial load back.
-    const state = await loadDocState(docName);
-    if (state) {
-      Y.applyUpdate(ydoc, new Uint8Array(state.yState), "init");
-      entry.markdown = state.markdown;
-    } else {
-      const seed = await seedAuthorAndMarkdown(docName);
-      if (seed) {
-        const seeded = seedYDocFromMarkdown(seed.markdown, seed.by);
-        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(seeded), "init");
-        entry.markdown = seed.markdown;
-        await saveDocState(docName, Y.encodeStateAsUpdate(ydoc), seed.markdown);
+      // Hydrate from Postgres, or seed from the draft markdown on first open. Apply
+      // with origin "init" so the update handler (attached after) doesn't broadcast
+      // or persist the initial load back.
+      const state = await loadDocState(docName);
+      if (state) {
+        Y.applyUpdate(ydoc, new Uint8Array(state.yState), "init");
+        entry.markdown = state.markdown;
+      } else {
+        const seed = await seedAuthorAndMarkdown(docName);
+        if (seed) {
+          const seeded = seedYDocFromMarkdown(seed.markdown, seed.by);
+          Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(seeded), "init");
+          entry.markdown = seed.markdown;
+          await saveDocState(docName, Y.encodeStateAsUpdate(ydoc), seed.markdown);
+        }
       }
+
+      ydoc.on("update", (update: Uint8Array, origin: unknown) => {
+        if (origin === "init") return;
+        // Broadcast to local connections (except the originator).
+        const enc = encoding.createEncoder();
+        encoding.writeVarUint(enc, MESSAGE_SYNC);
+        syncProtocol.writeUpdate(enc, update);
+        const msg = encoding.toUint8Array(enc);
+        for (const conn of entry.conns) {
+          if (conn !== origin && conn.readyState === 1) conn.send(msg);
+        }
+        // Fan out to other instances + persist (only for locally-originated edits;
+        // redis-origin updates were already persisted by the originating instance).
+        if (origin !== "redis") {
+          redisPub?.publish(
+            Buffer.from(`${REDIS_CHANNEL_PREFIX}${docName}`),
+            Buffer.from(update)
+          );
+          schedulePersist(docName, entry);
+        }
+      });
+
+      docs.set(docName, entry);
+      initRedis();
+      return entry;
+    } finally {
+      // Always clear the in-flight cache whether the load succeeded or threw,
+      // so a transient DB error doesn't permanently poison this document room.
+      loading.delete(docName);
     }
-
-    ydoc.on("update", (update: Uint8Array, origin: unknown) => {
-      if (origin === "init") return;
-      // Broadcast to local connections (except the originator).
-      const enc = encoding.createEncoder();
-      encoding.writeVarUint(enc, MESSAGE_SYNC);
-      syncProtocol.writeUpdate(enc, update);
-      const msg = encoding.toUint8Array(enc);
-      for (const conn of entry.conns) {
-        if (conn !== origin && conn.readyState === 1) conn.send(msg);
-      }
-      // Fan out to other instances + persist (only for locally-originated edits;
-      // redis-origin updates were already persisted by the originating instance).
-      if (origin !== "redis") {
-        redisPub?.publish(
-          Buffer.from(`${REDIS_CHANNEL_PREFIX}${docName}`),
-          Buffer.from(update)
-        );
-        schedulePersist(docName, entry);
-      }
-    });
-
-    docs.set(docName, entry);
-    loading.delete(docName);
-    initRedis();
-    return entry;
   })();
 
   loading.set(docName, promise);
@@ -243,11 +250,18 @@ export async function handleCollabConnection(
   // client (e.g. the agent bridge) never syncs. Frames are queued until the real
   // handler is ready, then replayed.
   let processFrame: ((u8: Uint8Array) => void) | null = null;
+  const MAX_PENDING_FRAMES = 16;
   const pending: Uint8Array[] = [];
   const onMessage = (data: Buffer): void => {
     const u8 = new Uint8Array(data);
-    if (processFrame) processFrame(u8);
-    else pending.push(u8);
+    if (processFrame) {
+      processFrame(u8);
+    } else if (pending.length < MAX_PENDING_FRAMES) {
+      pending.push(u8);
+    } else {
+      log.warn("Pre-auth frame buffer exceeded, closing connection", { docName });
+      try { ws.close(4429, "Too many pending frames"); } catch { /* already closing */ }
+    }
   };
   ws.on("message", onMessage);
 
@@ -303,7 +317,9 @@ export async function handleCollabConnection(
         encoding.writeVarUint(enc, MESSAGE_SYNC);
         syncProtocol.readSyncMessage(decoder, enc, entry.ydoc, ws);
         if (encoding.length(enc) > 1) send(ws, encoding.toUint8Array(enc));
-      } else if (messageType === MESSAGE_AWARENESS && canWrite) {
+      } else if (messageType === MESSAGE_AWARENESS) {
+        // Read-only connections may still broadcast cursor/presence awareness;
+        // awareness is separate from doc mutations and should not be gated on canWrite.
         awarenessProtocol.applyAwarenessUpdate(
           entry.awareness,
           decoding.readVarUint8Array(decoder),
@@ -318,7 +334,13 @@ export async function handleCollabConnection(
     }
   };
 
+  // 'error' always emits before 'close' on a socket error. Using ws.once('close')
+  // alone is sufficient — the close event fires in all cases (normal, error, timeout).
+  // A separate 'error' handler would cause cleanup to fire twice, racing saveDocState.
+  let cleaned = false;
   const cleanup = (): void => {
+    if (cleaned) return;
+    cleaned = true;
     entry.conns.delete(ws);
     entry.awareness.off("update", onAwarenessChange);
     const ids = entry.awarenessIds.get(ws);
@@ -326,14 +348,28 @@ export async function handleCollabConnection(
       awarenessProtocol.removeAwarenessStates(entry.awareness, [...ids], "conn-closed");
     }
     entry.awarenessIds.delete(ws);
-    if (entry.conns.size === 0 && entry.persistTimer) {
-      clearTimeout(entry.persistTimer);
-      entry.persistTimer = null;
-      void saveDocState(docName, Y.encodeStateAsUpdate(entry.ydoc), entry.markdown ?? undefined);
+    if (entry.conns.size === 0) {
+      // Always persist the final state and evict from the in-memory map, regardless
+      // of whether a pending persist timer exists. If the timer was running, cancel
+      // it to avoid a second (potentially staler) save racing the one below.
+      if (entry.persistTimer) {
+        clearTimeout(entry.persistTimer);
+        entry.persistTimer = null;
+      }
+      void saveDocState(
+        docName,
+        Y.encodeStateAsUpdate(entry.ydoc),
+        entry.markdown ?? undefined
+      ).catch((e) =>
+        log.error("Cleanup persist failed", {
+          docName,
+          error: e instanceof Error ? e.message : String(e),
+        })
+      );
+      docs.delete(docName);
     }
   };
-  ws.on("close", cleanup);
-  ws.on("error", cleanup);
+  ws.once("close", cleanup);
 
   // SyncStep1: ask the client for its state and offer ours.
   const syncEnc = encoding.createEncoder();

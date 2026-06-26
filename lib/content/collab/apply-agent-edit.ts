@@ -67,6 +67,10 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
   const ws = new WebSocket(url);
   ws.binaryType = "arraybuffer";
 
+  // Track the ydoc update listener so it can be removed in the finally block,
+  // preventing a stale listener from sending on a closing/closed socket.
+  let registeredOnUpdate: ((update: Uint8Array) => void) | null = null;
+
   const applyEdit = (): void => {
     const schema = getCollabSchema();
     const agentJson = stampAuthor(markdownToProseMirrorJSON(markdown), by);
@@ -89,6 +93,7 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
       syncProtocol.writeUpdate(enc, update);
       ws.send(encoding.toUint8Array(enc));
     };
+    registeredOnUpdate = onUpdate;
     ydoc.on("update", onUpdate);
     ydoc.transact(() => {
       updateYFragment(ydoc, ydoc.getXmlFragment(COLLAB_FIELD), node, {
@@ -98,51 +103,64 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
     }, "agent-bridge");
   };
 
-  await new Promise<void>((resolve, reject) => {
-    let applied = false;
-    const timer = setTimeout(() => {
-      reject(new Error("collab sync timeout"));
-    }, SYNC_TIMEOUT_MS);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let applied = false;
+      const timer = setTimeout(() => {
+        reject(new Error("collab sync timeout"));
+      }, SYNC_TIMEOUT_MS);
 
-    ws.addEventListener("open", () => {
-      // Ask the server for its current state.
-      const enc = encoding.createEncoder();
-      encoding.writeVarUint(enc, MESSAGE_SYNC);
-      syncProtocol.writeSyncStep1(enc, ydoc);
-      ws.send(encoding.toUint8Array(enc));
-    });
-
-    ws.addEventListener("message", (ev: MessageEvent) => {
-      try {
-        const u8 = new Uint8Array(ev.data as ArrayBuffer);
-        const decoder = decoding.createDecoder(u8);
-        if (decoding.readVarUint(decoder) !== MESSAGE_SYNC) return;
+      ws.addEventListener("open", () => {
+        // Ask the server for its current state.
         const enc = encoding.createEncoder();
         encoding.writeVarUint(enc, MESSAGE_SYNC);
-        const syncType = syncProtocol.readSyncMessage(decoder, enc, ydoc, ws);
-        if (encoding.length(enc) > 1) ws.send(encoding.toUint8Array(enc));
-        // Once the server's SyncStep2 has hydrated our doc, apply the edit once,
-        // then allow time for the update to flush before resolving.
-        if (!applied && syncType === SYNC_STEP_2) {
-          applied = true;
-          applyEdit();
-          setTimeout(() => {
-            clearTimeout(timer);
-            resolve();
-          }, 500);
+        syncProtocol.writeSyncStep1(enc, ydoc);
+        ws.send(encoding.toUint8Array(enc));
+      });
+
+      ws.addEventListener("message", (ev: MessageEvent) => {
+        try {
+          const u8 = new Uint8Array(ev.data as ArrayBuffer);
+          const decoder = decoding.createDecoder(u8);
+          if (decoding.readVarUint(decoder) !== MESSAGE_SYNC) return;
+          const enc = encoding.createEncoder();
+          encoding.writeVarUint(enc, MESSAGE_SYNC);
+          const syncType = syncProtocol.readSyncMessage(decoder, enc, ydoc, ws);
+          if (encoding.length(enc) > 1) ws.send(encoding.toUint8Array(enc));
+          // Once the server's SyncStep2 has hydrated our doc, apply the edit once,
+          // then allow time for the update to flush before resolving.
+          if (!applied && syncType === SYNC_STEP_2) {
+            applied = true;
+            applyEdit();
+            setTimeout(() => {
+              clearTimeout(timer);
+              resolve();
+            }, 500);
+          }
+        } catch (e) {
+          log.error("Agent bridge sync message error", {
+            msg: e instanceof Error ? e.message : String(e),
+          });
         }
-      } catch (e) {
-        log.error("Agent bridge sync message error", {
-          msg: e instanceof Error ? e.message : String(e),
-        });
-      }
-    });
+      });
 
-    ws.addEventListener("error", () => {
-      clearTimeout(timer);
-      reject(new Error("collab websocket error"));
-    });
-  });
+      ws.addEventListener("error", () => {
+        clearTimeout(timer);
+        reject(new Error("collab websocket error"));
+      });
 
-  try { ws.close(); } catch { /* already closed */ }
+      // Without a close listener, a server-side 4401 (expired/rejected token)
+      // fires 'close' — not 'error' — and the promise hangs for the full
+      // SYNC_TIMEOUT_MS before the timer fires.
+      ws.addEventListener("close", () => {
+        clearTimeout(timer);
+        reject(new Error("collab websocket closed"));
+      });
+    });
+  } finally {
+    // Remove the ydoc listener before closing so any internal Yjs update fired
+    // during close doesn't try to send on an already-closed socket.
+    if (registeredOnUpdate) ydoc.off("update", registeredOnUpdate);
+    try { ws.close(); } catch { /* already closed */ }
+  }
 }
