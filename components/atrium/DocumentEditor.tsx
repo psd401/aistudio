@@ -4,11 +4,11 @@
  * Atrium document editor (#1051)
  *
  * The live, real-time collaborative editor — the rebuilt Proof surface. TipTap on
- * ProseMirror + Yjs, synced through a HocuspocusProvider to the Atrium collab
+ * ProseMirror + Yjs, synced through a WebsocketProvider to the Atrium collab
  * server, with the green/purple provenance rail and human-edit attribution.
  *
  * Flow: fetch a per-document collab token (GET /api/content/[id]/collab) → open a
- * HocuspocusProvider bound to a Y.Doc → TipTap's Collaboration extension binds the
+ * WebsocketProvider bound to a Y.Doc → TipTap's Collaboration extension binds the
  * editor to that doc. The agent's draft arrives pre-stamped `ai:` (seeded server
  * side, purple); the AuthoredTracker stamps the local human's edits `human:`
  * (green). Snapshot serializes the editor to markdown and calls the snapshot

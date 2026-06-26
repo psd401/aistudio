@@ -15,7 +15,7 @@
  * purple = agent, green = human). Keep them in sync with that CSS.
  */
 
-import { desc, eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentVersions } from "@/lib/db/schema";
 
@@ -32,26 +32,27 @@ interface ProvenanceFooterProps {
 export async function ProvenanceFooter({
   objectId,
 }: ProvenanceFooterProps): Promise<React.JSX.Element> {
-  // Pull every version's author grain + number for this object. Ordered by
-  // version number desc so the first row is the head (highest version number).
-  const versions = await executeQuery(
+  // Aggregate query: only three facts needed, not every row. MAX + BOOL_OR avoids
+  // loading the full version history on objects with many versions.
+  const [agg] = await executeQuery(
     (db) =>
       db
         .select({
-          authorActor: contentVersions.authorActor,
-          versionNumber: contentVersions.versionNumber,
+          maxVersionNumber:
+            sql<number | null>`MAX(${contentVersions.versionNumber})`.as("max_version_number"),
+          aiDrafted:
+            sql<boolean>`BOOL_OR(${contentVersions.authorActor} = 'agent')`.as("ai_drafted"),
+          humanReviewed:
+            sql<boolean>`BOOL_OR(${contentVersions.authorActor} = 'human')`.as("human_reviewed"),
         })
         .from(contentVersions)
-        .where(eq(contentVersions.objectId, objectId))
-        .orderBy(desc(contentVersions.versionNumber)),
+        .where(eq(contentVersions.objectId, objectId)),
     "atrium.provenanceFooter"
   );
 
-  // AI-drafted = any version authored by an agent; human-reviewed = any version
-  // authored by a human. Both can be true (agent draft, human edit).
-  const aiDrafted = versions.some((v) => v.authorActor === "agent");
-  const humanReviewed = versions.some((v) => v.authorActor === "human");
-  const maxVersionNumber = versions[0]?.versionNumber ?? null;
+  const aiDrafted = agg?.aiDrafted ?? false;
+  const humanReviewed = agg?.humanReviewed ?? false;
+  const maxVersionNumber = agg?.maxVersionNumber ?? null;
 
   return (
     <footer className="atrium-provenance-footer">
