@@ -2,33 +2,38 @@
  * Atrium agent bridge — apply an agent edit to the live document
  *
  * Issue #1051 (Epic #1059, Atrium Phase 1). Lets a server-side agent push markdown
- * into the SAME live Y.Doc that browser clients are editing, attributed to the
- * agent (purple rail). This is the rebuilt equivalent of Proof's `rewrite` bridge
- * operation: the agent provides markdown, it is stamped `ai:<agentId>`, and the
- * change diffs into the live document so connected editors see it in real time.
+ * into the live collaborative document, attributed to the agent (purple rail). The
+ * rebuilt equivalent of Proof's `rewrite` bridge operation.
  *
- * The mutation runs through Hocuspocus `openDirectConnection().transact()` so it
- * shares the document the websocket clients hold; `updateYFragment` (y-prosemirror)
- * diffs the new ProseMirror tree into the existing Yjs fragment rather than
- * clobbering it, minimizing disruption to concurrent human cursors.
+ * It applies the edit as a y-sync CLIENT of the collab server (a raw `ws` socket
+ * speaking the y-protocols sync handshake — NOT y-websocket's WebsocketProvider,
+ * which does not sync inside the Next.js server runtime). This is deliberate: the
+ * agent-bridge route runs in the Next module graph while the websocket server runs
+ * in the server.ts / voice-server.js graph — separate module instances with
+ * separate in-memory doc registries (and separate bundles in prod). Connecting as a
+ * client guarantees the edit lands on the SAME doc the editors are connected to, so
+ * it broadcasts to them live (and persists + fans out via Redis). Works identically
+ * in dev (no Redis) and prod.
  *
- * Guardrails + PII screening happen in the route BEFORE this is called — by the
- * time markdown reaches here it is already cleared for persistence.
+ * Guardrails + PII screening happen in the route BEFORE this is called.
  */
 
-import { getSchema } from "@tiptap/core";
-import { prosemirrorJSONToYDoc, updateYFragment } from "y-prosemirror";
-import type { Doc as YDoc } from "yjs";
-import { getCollabServer } from "./collab-server";
-import { getSchemaExtensions } from "./editor-extensions";
+import * as Y from "yjs";
+import * as syncProtocol from "y-protocols/sync";
+import * as encoding from "lib0/encoding";
+import * as decoding from "lib0/decoding";
+import { updateYFragment } from "y-prosemirror";
+import { getCollabSchema } from "./editor-extensions";
 import {
   markdownToProseMirrorJSON,
   stampAuthor,
   yDocToProseMirrorJSON,
 } from "./markdown-bridge";
-import { saveDocState } from "./doc-state-store";
 import { COLLAB_FIELD, makeAuthorTag } from "./provenance";
-import * as Y from "yjs";
+import { signCollabToken } from "./collab-token";
+import { createLogger } from "@/lib/logger";
+
+const log = createLogger({ context: "agent-bridge-client" });
 
 export type AgentEditMode = "replace" | "append";
 
@@ -42,58 +47,102 @@ export interface AgentEditInput {
   mode?: AgentEditMode;
 }
 
-/**
- * Apply the agent's markdown to the live document. Returns the full markdown now
- * represented (so the caller can refresh the projection / snapshot if desired).
- */
-export async function applyAgentEdit(input: AgentEditInput): Promise<{ markdown: string }> {
+const COLLAB_WS_PATH = "/api/atrium-collab";
+const MESSAGE_SYNC = 0;
+const SYNC_STEP_2 = 1; // y-protocols/sync messageYjsSyncStep2
+const SYNC_TIMEOUT_MS = 10_000;
+
+/** Apply the agent's markdown to the live document via a short-lived y-sync client. */
+export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
   const { objectId, markdown, agentId, mode = "replace" } = input;
   const by = makeAuthorTag("agent", agentId);
-  const schema = getSchema(getSchemaExtensions());
+  const token = await signCollabToken({ sub: `agent:${agentId}`, oid: objectId, w: true });
 
-  const direct = await getCollabServer().openDirectConnection(objectId);
-  let resultMarkdown = markdown;
-  try {
-    await direct.transact((doc: YDoc) => {
-      const agentJson = stampAuthor(markdownToProseMirrorJSON(markdown), by);
+  const port = process.env.PORT ?? "3000";
+  const url = `ws://127.0.0.1:${port}${COLLAB_WS_PATH}/${objectId}?token=${encodeURIComponent(token)}`;
+  const ydoc = new Y.Doc();
+  // Use the runtime's native WebSocket (Node 22 / Bun) — the `ws` package has
+  // import-interop issues inside the Next.js server runtime ("Unexpected server
+  // response: 101"); the native client connects to our ws server like a browser.
+  const ws = new WebSocket(url);
+  ws.binaryType = "arraybuffer";
 
-      const nextJson =
-        mode === "append"
-          ? (() => {
-              const current = yDocToProseMirrorJSON(doc);
-              return {
-                ...current,
-                content: [...(current.content ?? []), ...(agentJson.content ?? [])],
-              };
-            })()
-          : agentJson;
+  const applyEdit = (): void => {
+    const schema = getCollabSchema();
+    const agentJson = stampAuthor(markdownToProseMirrorJSON(markdown), by);
+    const nextJson =
+      mode === "append"
+        ? (() => {
+            const current = yDocToProseMirrorJSON(ydoc);
+            return {
+              ...current,
+              content: [...(current.content ?? []), ...(agentJson.content ?? [])],
+            };
+          })()
+        : agentJson;
+    const node = schema.nodeFromJSON(nextJson);
 
-      const node = schema.nodeFromJSON(nextJson);
-      // y-prosemirror's BindingMetadata: a fresh mapping (PM node <-> Y type) and
-      // overlapping-mark set, both empty for a one-shot server-side apply.
-      updateYFragment(doc, doc.getXmlFragment(COLLAB_FIELD), node, {
+    // Send the resulting Yjs update to the server, which applies + broadcasts it.
+    const onUpdate = (update: Uint8Array): void => {
+      const enc = encoding.createEncoder();
+      encoding.writeVarUint(enc, MESSAGE_SYNC);
+      syncProtocol.writeUpdate(enc, update);
+      ws.send(encoding.toUint8Array(enc));
+    };
+    ydoc.on("update", onUpdate);
+    ydoc.transact(() => {
+      updateYFragment(ydoc, ydoc.getXmlFragment(COLLAB_FIELD), node, {
         mapping: new Map(),
         isOMark: new Map(),
       });
+    }, "agent-bridge");
+  };
 
-      // Persist the projection from inside the same logical operation. For
-      // append we cannot cheaply reconstruct the merged markdown here, so we
-      // store the encoded state only (markdown left to the next client snapshot).
-      const update = Y.encodeStateAsUpdate(doc);
-      void saveDocState(objectId, update, mode === "replace" ? markdown : undefined);
+  await new Promise<void>((resolve, reject) => {
+    let applied = false;
+    const timer = setTimeout(() => {
+      reject(new Error("collab sync timeout"));
+    }, SYNC_TIMEOUT_MS);
+
+    ws.addEventListener("open", () => {
+      // Ask the server for its current state.
+      const enc = encoding.createEncoder();
+      encoding.writeVarUint(enc, MESSAGE_SYNC);
+      syncProtocol.writeSyncStep1(enc, ydoc);
+      ws.send(encoding.toUint8Array(enc));
     });
-  } finally {
-    await direct.disconnect();
-  }
 
-  if (mode === "append") {
-    // The merged markdown is whatever the client serializes next; report the
-    // appended fragment as the change applied.
-    resultMarkdown = markdown;
-  }
-  return { markdown: resultMarkdown };
+    ws.addEventListener("message", (ev: MessageEvent) => {
+      try {
+        const u8 = new Uint8Array(ev.data as ArrayBuffer);
+        const decoder = decoding.createDecoder(u8);
+        if (decoding.readVarUint(decoder) !== MESSAGE_SYNC) return;
+        const enc = encoding.createEncoder();
+        encoding.writeVarUint(enc, MESSAGE_SYNC);
+        const syncType = syncProtocol.readSyncMessage(decoder, enc, ydoc, ws);
+        if (encoding.length(enc) > 1) ws.send(encoding.toUint8Array(enc));
+        // Once the server's SyncStep2 has hydrated our doc, apply the edit once,
+        // then allow time for the update to flush before resolving.
+        if (!applied && syncType === SYNC_STEP_2) {
+          applied = true;
+          applyEdit();
+          setTimeout(() => {
+            clearTimeout(timer);
+            resolve();
+          }, 500);
+        }
+      } catch (e) {
+        log.error("Agent bridge sync message error", {
+          msg: e instanceof Error ? e.message : String(e),
+        });
+      }
+    });
+
+    ws.addEventListener("error", () => {
+      clearTimeout(timer);
+      reject(new Error("collab websocket error"));
+    });
+  });
+
+  try { ws.close(); } catch { /* already closed */ }
 }
-
-// Re-exported for callers that build a doc from scratch without a live connection
-// (kept here so the bridge module is the single agent-write entry point).
-export { prosemirrorJSONToYDoc };

@@ -196,10 +196,11 @@ export default async function ReaderPage({
   const html = renderMarkdownToHtml(markdown);
 
   return (
-    <main>
-      <header>
-        <h1 className="atrium-content">{published.title}</h1>
+    <main className="mx-auto max-w-3xl px-4 py-8">
+      <header className="mb-6">
+        <h1 className="text-3xl font-semibold">{published.title}</h1>
       </header>
+      {/* `.atrium-content` is the single rendered-body sink (and the test anchor). */}
       <article
         className="atrium-content"
         dangerouslySetInnerHTML={{ __html: html }}

@@ -1,19 +1,21 @@
 # Atrium Phase 1 — verification runbook (#1051)
 
 Phase 1 ships the document path: a real-time collaborative editor (rebuilt from
-Proof's ideas with TipTap + Yjs + Hocuspocus + Redis), the agent bridge, the
+Proof's ideas with TipTap + Yjs + a y-websocket-protocol server + Redis), the agent bridge, the
 markdown render pipeline, the intranet publish layer, and the internal reader with
 a provenance footer. This runbook lists what is verified automatically and how to
 verify the live loop end to end.
 
 ## Architecture at a glance
 
-- **Editor** — TipTap (ProseMirror) bound to a Yjs `Y.Doc` via `HocuspocusProvider`
+- **Editor** — TipTap (ProseMirror) bound to a Yjs `Y.Doc` via `WebsocketProvider`
   (`components/atrium/DocumentEditor.tsx`). Provenance is the `atriumAuthored`
   mark; the green/purple rail is a per-block node decoration
   (`provenance-rail.ts`), and local edits are stamped `human:<id>` by
   `authored-tracker.ts`.
-- **Collab server** — a Hocuspocus instance (`lib/content/collab/collab-server.ts`)
+- **Collab server** — a hand-rolled y-websocket-protocol server (y-protocols/sync +
+  /awareness; `lib/content/collab/collab-server.ts`) — chosen over Hocuspocus, whose
+  crossws transport throws under Bun (our dev runtime). It
   multiplexed onto the app's websocket transport at `/api/content/collab`
   (`server.ts` dev, `voice-server.js` prod). Auth is a short-TTL per-document token
   (`GET /api/content/[id]/collab`). State persists to Postgres
@@ -86,7 +88,7 @@ steps 5–6 once the reference seed + an authenticated host server are in place
   (`scripts/build-collab-ws-handler.mjs`, built in the Dockerfile beside the voice
   bundle) and loaded by `voice-server.js`.
 - Real-time co-editing of the **same** document across **multiple** ECS tasks
-  requires Redis (`@hocuspocus/extension-redis`, enabled via `REDIS_HOST`). Without
+  requires Redis (the collab server's pub/sub, enabled via `REDIS_HOST`). Without
   it, two users editing one doc on different tasks would diverge (no data loss —
   Postgres persists state). The ElastiCache wiring lands with this phase; confirm
   `REDIS_HOST`/`REDIS_PORT` reach the ECS task before relying on multi-task collab.

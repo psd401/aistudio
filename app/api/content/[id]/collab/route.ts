@@ -20,7 +20,9 @@ import { visibilityService } from "@/lib/content/visibility-service";
 import { canEdit } from "@/lib/content/helpers";
 import { signCollabToken } from "@/lib/content/collab/collab-token";
 
-const COLLAB_WS_PATH = "/api/content/collab";
+// Dedicated WS path outside /api/content/* (Next dev intercepts upgrades there);
+// must match COLLAB_WS_PATH in server.ts / voice-server.js.
+const COLLAB_WS_PATH = "/api/atrium-collab";
 
 async function getHandler(
   _request: NextRequest,

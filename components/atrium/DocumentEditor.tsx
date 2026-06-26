@@ -25,7 +25,7 @@ import { useEditor, EditorContent } from "@tiptap/react";
 import { Collaboration } from "@tiptap/extension-collaboration";
 import { Markdown } from "tiptap-markdown";
 import * as Y from "yjs";
-import { HocuspocusProvider } from "@hocuspocus/provider";
+import { WebsocketProvider } from "y-websocket";
 import { getSchemaExtensions } from "@/lib/content/collab/editor-extensions";
 import { makeAuthorTag } from "@/lib/content/collab/provenance";
 import { snapshotDocumentAction } from "@/actions/db/atrium/snapshot-document";
@@ -54,7 +54,7 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
   const ydocRef = useRef<Y.Doc>(undefined as unknown as Y.Doc);
   if (!ydocRef.current) ydocRef.current = new Y.Doc();
 
-  const providerRef = useRef<HocuspocusProvider | null>(null);
+  const providerRef = useRef<WebsocketProvider | null>(null);
   const [status, setStatus] = useState<Status>("connecting");
   const [canEdit, setCanEdit] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -90,14 +90,17 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
 
         const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
         const url = `${proto}//${window.location.host}${session.wsPath}`;
-        const provider = new HocuspocusProvider({
-          url,
-          name: session.docName,
-          document: ydoc,
-          token: session.token,
-          onSynced: () => {
-            if (!cancelled) setStatus("ready");
-          },
+        // WebsocketProvider connects to `${url}/${docName}?token=...`. Separate
+        // browser tabs sync through the server (BroadcastChannel only links tabs
+        // in the same context).
+        const provider = new WebsocketProvider(url, session.docName, ydoc, {
+          params: { token: session.token },
+        });
+        provider.on("status", (event: { status: string }) => {
+          if (!cancelled && event.status === "connecting") setStatus("connecting");
+        });
+        provider.on("sync", (synced: boolean) => {
+          if (!cancelled && synced) setStatus("ready");
         });
         providerRef.current = provider;
         setCanEdit(session.canEdit);

@@ -22,9 +22,9 @@
 import { marked } from "marked";
 import { generateJSON } from "@tiptap/html";
 import type { JSONContent } from "@tiptap/core";
-import { TiptapTransformer } from "@hocuspocus/transformer";
+import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from "y-prosemirror";
 import type { Doc as YDoc } from "yjs";
-import { getSchemaExtensions } from "./editor-extensions";
+import { getSchemaExtensions, getCollabSchema } from "./editor-extensions";
 import { AUTHORED_MARK, COLLAB_FIELD } from "./provenance";
 
 /** Parse markdown into ProseMirror JSON against the shared Atrium schema. */
@@ -64,10 +64,10 @@ export function stampAuthor(node: JSONContent, by: string): JSONContent {
  */
 export function seedYDocFromMarkdown(markdown: string, by: string): YDoc {
   const json = stampAuthor(markdownToProseMirrorJSON(markdown), by);
-  return TiptapTransformer.toYdoc(json, COLLAB_FIELD, getSchemaExtensions());
+  return prosemirrorJSONToYDoc(getCollabSchema(), json, COLLAB_FIELD);
 }
 
 /** Convert a live Y.Doc back to ProseMirror JSON (for inspection / re-stamping). */
 export function yDocToProseMirrorJSON(doc: YDoc): JSONContent {
-  return TiptapTransformer.fromYdoc(doc, COLLAB_FIELD) as JSONContent;
+  return yDocToProsemirrorJSON(doc, COLLAB_FIELD) as JSONContent;
 }

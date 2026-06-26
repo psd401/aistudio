@@ -30,7 +30,8 @@ const VOICE_WS_PATH = '/api/nexus/voice'
 
 // Atrium collaboration (#1051): Yjs sync frames can far exceed the 64KB voice cap,
 // so collab uses its own WS server + larger payload limit. Kept in sync with server.ts.
-const COLLAB_WS_PATH = '/api/content/collab'
+// Dedicated path outside /api/content/* (see server.ts note).
+const COLLAB_WS_PATH = '/api/atrium-collab'
 const COLLAB_MAX_PAYLOAD = 16 * 1024 * 1024 // 16MB
 
 // WS handler module: pre-bundled CJS file built by esbuild during Docker build.
@@ -154,7 +155,9 @@ http.createServer = function (...args) {
         wss.handleUpgrade(request, socket, head, (ws) => {
           wss.emit('connection', ws, request)
         })
-      } else if (pathname === COLLAB_WS_PATH) {
+      } else if (pathname === COLLAB_WS_PATH || pathname.startsWith(`${COLLAB_WS_PATH}/`)) {
+        // HocuspocusProvider connects to `${url}/<docName>` — match the path as a
+        // prefix. The doc name is read from the Yjs protocol message, not the URL.
         if (!collabHandlerAvailable) {
           socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
           socket.destroy()

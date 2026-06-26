@@ -25,7 +25,10 @@ const WS_MAX_PAYLOAD = 65536 // 64KB
 // Atrium collaboration (#1051). Yjs sync frames (initial document state) can far
 // exceed the 64KB voice cap, so collab gets its own WS server with a larger
 // payload limit. Kept in sync with voice-server.js (prod).
-const COLLAB_WS_PATH = "/api/content/collab"
+// Dedicated path OUTSIDE /api/content/* — Next's dev server intercepts upgrades
+// in the /api/content/* namespace (where the collab-token + agent-bridge routes
+// live), so the WS transport gets its own top-level path.
+const COLLAB_WS_PATH = "/api/atrium-collab"
 const COLLAB_MAX_PAYLOAD = 16 * 1024 * 1024 // 16MB
 
 const dev = process.env.NODE_ENV !== "production"
@@ -70,6 +73,13 @@ async function main() {
 
   await app.prepare()
 
+  // Pre-load the collab handler at startup (NOT lazily inside the connection
+  // handler). HocuspocusProvider sends its first sync message immediately on open;
+  // a `await import()` in the connection path would delay attaching Hocuspocus's
+  // message listener past those first frames, dropping them so the protocol never
+  // starts. Pre-loading lets us call the handler synchronously on 'connection'.
+  const { handleCollabConnection } = await import("@/lib/content/collab/collab-server")
+
   const server = createServer((req, res) => {
     const parsedUrl = parse(req.url || "/", true)
     handle(req, res, parsedUrl)
@@ -94,7 +104,10 @@ async function main() {
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit("connection", ws, request)
       })
-    } else if (pathname === COLLAB_WS_PATH) {
+    } else if (pathname === COLLAB_WS_PATH || (pathname?.startsWith(`${COLLAB_WS_PATH}/`) ?? false)) {
+      // HocuspocusProvider connects to `${url}/<docName>`, so match the path as a
+      // prefix. The document name itself is read from the Yjs protocol message
+      // (the provider's `name`), not the URL, so no rewrite is needed.
       if (!isAllowedOrigin(request)) {
         socket.write("HTTP/1.1 403 Forbidden\r\n\r\n")
         socket.destroy()
@@ -103,6 +116,7 @@ async function main() {
       collabWss.handleUpgrade(request, socket, head, (ws) => {
         collabWss.emit("connection", ws, request)
       })
+      return
     } else {
       // Let Next.js handle non-voice WebSocket upgrades (e.g. HMR in dev)
       if (!dev) {
@@ -125,16 +139,16 @@ async function main() {
     }
   })
 
-  collabWss.on("connection", async (ws, req) => {
-    try {
-      const { handleCollabConnection } = await import("@/lib/content/collab/collab-server")
-      await handleCollabConnection(ws, req)
-    } catch (error) {
+  collabWss.on("connection", (ws, req) => {
+    // Synchronous call — getServer().handleConnection runs in this same tick and
+    // attaches Hocuspocus's message listener before the client's first frame is
+    // processed (see the pre-load note above).
+    Promise.resolve(handleCollabConnection(ws, req)).catch((error) => {
       const message = error instanceof Error ? error.message : String(error)
       // eslint-disable-next-line no-console -- Outside Next.js runtime
       console.error("[atrium-collab] Connection error:", message)
       try { ws.close(4500, "Internal error") } catch { /* already closed */ }
-    }
+    })
   })
 
   server.listen(port, hostname)

@@ -1,31 +1,39 @@
 /**
- * Atrium collaboration server (Hocuspocus)
+ * Atrium collaboration server (y-websocket protocol)
  *
  * Issue #1051 (Epic #1059, Atrium Phase 1). The real-time sync server that rebuilds
- * Proof's collab engine in-house: a Hocuspocus instance multiplexed onto the app's
- * websocket transport (same process/port as the app + voice — see server.ts /
- * voice-server.js), persisting to Postgres (atrium_doc_state) and fanning out
- * across ECS tasks via Redis when configured.
+ * Proof's collab engine in-house. It speaks the y-websocket binary protocol
+ * (y-protocols/sync + /awareness) over the app's existing websocket transport
+ * (same process/port as the app + voice — see server.ts / voice-server.js).
  *
- * - Auth: a short-TTL collab token (collab-token.ts) minted per document after a
- *   canView/canEdit check; read-only viewers get `connection.readOnly`.
- * - Load: hydrate the Y.Doc from atrium_doc_state, or SEED it on first open from
- *   the draft's markdown (stamped with the creator's author tag — an agent draft
- *   seeds purple, a human draft green).
- * - Store: persist the encoded Y.Doc (debounced by Hocuspocus) back to Postgres.
- * - Scale: Redis extension only when REDIS_HOST is set, so local dev runs
- *   single-process (in-memory) and prod fans out across tasks.
+ * Why not Hocuspocus: Hocuspocus v4 routes through `crossws`, whose Node adapter
+ * throws under Bun ("incompatible environment"), and our dev server runs under Bun
+ * (`bun run server.ts`). This hand-rolled y-protocol server is runtime-agnostic
+ * (works under Bun AND Node) and is the same protocol TipTap's Collaboration
+ * extension + y-websocket's `WebsocketProvider` speak.
  *
- * Imports the pure-ESM Yjs/TipTap stack (via markdown-bridge) and is not
- * jest-loadable; the dev path (bun server.ts) exercises it, and the prod path
- * loads it from a bundled CJS handler (scripts/build-collab-ws-handler.mjs).
+ * - Auth: a short-TTL collab token (collab-token.ts) passed as the `?token=` query
+ *   param, minted per document after a canView/canEdit check. The connection is
+ *   rejected unless the token's `oid` matches the requested room (= object id).
+ *   Read-only sessions (token `w=false`) may sync state but their inbound updates
+ *   are ignored server-side.
+ * - Load/seed: the Y.Doc hydrates from Postgres (atrium_doc_state) or, on first
+ *   open, is SEEDED from the draft markdown stamped with the creator's author tag
+ *   (agent draft -> purple, human draft -> green), then persisted.
+ * - Persist: debounced on change -> atrium_doc_state (y_state + markdown projection).
+ * - Scale: when REDIS_HOST is set, doc updates are published to / applied from a
+ *   Redis pub/sub channel so multiple ECS tasks converge (local dev runs without it).
  */
 
 import type { IncomingMessage } from "node:http";
+import { parse as parseUrl } from "node:url";
 import type WebSocket from "ws";
-import { Hocuspocus } from "@hocuspocus/server";
-import { Redis } from "@hocuspocus/extension-redis";
 import * as Y from "yjs";
+import * as syncProtocol from "y-protocols/sync";
+import * as awarenessProtocol from "y-protocols/awareness";
+import * as encoding from "lib0/encoding";
+import * as decoding from "lib0/decoding";
+import Redis from "ioredis";
 import { eq } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { contentObjects } from "@/lib/db/schema";
@@ -39,7 +47,71 @@ import { makeAuthorTag } from "./provenance";
 
 const log = createLogger({ context: "atrium-collab" });
 
-/** Resolve the author tag a freshly-seeded draft should carry (creator's). */
+const MESSAGE_SYNC = 0;
+const MESSAGE_AWARENESS = 1;
+const SYNC_STEP_1 = 0; // y-protocols/sync messageYjsSyncStep1
+const PERSIST_DEBOUNCE_MS = 1500;
+const REDIS_CHANNEL_PREFIX = "atrium:collab:";
+
+interface DocEntry {
+  ydoc: Y.Doc;
+  awareness: awarenessProtocol.Awareness;
+  conns: Set<WebSocket>;
+  /** awareness client ids owned by each connection (for cleanup on close). */
+  awarenessIds: Map<WebSocket, Set<number>>;
+  persistTimer: ReturnType<typeof setTimeout> | null;
+  markdown: string | null;
+}
+
+const docs = new Map<string, DocEntry>();
+const loading = new Map<string, Promise<DocEntry>>();
+
+// ---------------------------------------------------------------------------
+// Redis pub/sub (cross-instance fan-out). Lazily initialized when REDIS_HOST set.
+// ---------------------------------------------------------------------------
+let redisPub: Redis | null = null;
+let redisReady = false;
+
+function initRedis(): void {
+  if (redisReady || !process.env.REDIS_HOST) return;
+  redisReady = true;
+  const opts = {
+    host: process.env.REDIS_HOST,
+    port: Number(process.env.REDIS_PORT ?? 6379),
+    lazyConnect: false,
+    maxRetriesPerRequest: null,
+  };
+  redisPub = new Redis(opts);
+  const sub = new Redis(opts);
+  sub.psubscribe(`${REDIS_CHANNEL_PREFIX}*`).catch((e) =>
+    log.error("Redis psubscribe failed", { error: e instanceof Error ? e.message : String(e) })
+  );
+  // Binary payloads arrive via the *Buffer event variant.
+  sub.on("pmessageBuffer", (_pattern: Buffer, channel: Buffer, message: Buffer) => {
+    const docName = channel.toString("utf8").slice(REDIS_CHANNEL_PREFIX.length);
+    const entry = docs.get(docName);
+    if (entry) Y.applyUpdate(entry.ydoc, new Uint8Array(message), "redis");
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Document lifecycle
+// ---------------------------------------------------------------------------
+function schedulePersist(docName: string, entry: DocEntry): void {
+  if (entry.persistTimer) return;
+  entry.persistTimer = setTimeout(() => {
+    entry.persistTimer = null;
+    void saveDocState(
+      docName,
+      Y.encodeStateAsUpdate(entry.ydoc),
+      entry.markdown ?? undefined
+    ).catch((e) =>
+      log.error("Persist failed", { docName, error: e instanceof Error ? e.message : String(e) })
+    );
+  }, PERSIST_DEBOUNCE_MS);
+}
+
+/** Resolve the author tag + markdown a freshly-seeded draft should carry. */
 async function seedAuthorAndMarkdown(
   objectId: string
 ): Promise<{ by: string; markdown: string } | null> {
@@ -58,14 +130,11 @@ async function seedAuthorAndMarkdown(
   );
   const obj = rows[0];
   if (!obj) return null;
-
   const by =
     obj.createdByActor === "agent"
       ? makeAuthorTag("agent", obj.createdByAgentId ?? "agent")
       : makeAuthorTag("human", obj.ownerUserId);
 
-  // Read the current version's canonical markdown from S3 (source.md). Absent /
-  // unreadable -> seed an empty doc rather than failing the connection.
   let markdown = "";
   try {
     const current = await versionService.current(objectId);
@@ -83,81 +152,208 @@ async function seedAuthorAndMarkdown(
   return { by, markdown };
 }
 
-let server: Hocuspocus | null = null;
+async function getOrCreateDoc(docName: string): Promise<DocEntry> {
+  const existing = docs.get(docName);
+  if (existing) return existing;
+  const inflight = loading.get(docName);
+  if (inflight) return inflight;
 
-/** Lazily build the Hocuspocus singleton (avoids side effects at import time). */
-function getServer(): Hocuspocus {
-  if (server) return server;
+  const promise = (async (): Promise<DocEntry> => {
+    const ydoc = new Y.Doc();
+    const awareness = new awarenessProtocol.Awareness(ydoc);
+    const entry: DocEntry = {
+      ydoc,
+      awareness,
+      conns: new Set(),
+      awarenessIds: new Map(),
+      persistTimer: null,
+      markdown: null,
+    };
 
-  const extensions =
-    process.env.REDIS_HOST
-      ? [
-          new Redis({
-            host: process.env.REDIS_HOST,
-            port: Number(process.env.REDIS_PORT ?? 6379),
-          }),
-        ]
-      : [];
-
-  server = new Hocuspocus({
-    name: "atrium-collab",
-    extensions,
-
-    async onAuthenticate(data) {
-      const claims = await verifyCollabToken(data.token);
-      if (!claims || claims.oid !== data.documentName) {
-        // Throwing rejects the connection (Hocuspocus closes it 4401-style).
-        throw new Error("Unauthorized collab connection");
+    // Hydrate from Postgres, or seed from the draft markdown on first open. Apply
+    // with origin "init" so the update handler (attached after) doesn't broadcast
+    // or persist the initial load back.
+    const state = await loadDocState(docName);
+    if (state) {
+      Y.applyUpdate(ydoc, new Uint8Array(state.yState), "init");
+      entry.markdown = state.markdown;
+    } else {
+      const seed = await seedAuthorAndMarkdown(docName);
+      if (seed) {
+        const seeded = seedYDocFromMarkdown(seed.markdown, seed.by);
+        Y.applyUpdate(ydoc, Y.encodeStateAsUpdate(seeded), "init");
+        entry.markdown = seed.markdown;
+        await saveDocState(docName, Y.encodeStateAsUpdate(ydoc), seed.markdown);
       }
-      // Viewers connect read-only; only canEdit sessions may mutate the doc.
-      data.connectionConfig.readOnly = !claims.w;
-      return { userId: claims.sub };
-    },
+    }
 
-    async onLoadDocument(data) {
-      const existing = await loadDocState(data.documentName);
-      if (existing) {
-        Y.applyUpdate(data.document, new Uint8Array(existing.yState));
-        return data.document;
+    ydoc.on("update", (update: Uint8Array, origin: unknown) => {
+      if (origin === "init") return;
+      // Broadcast to local connections (except the originator).
+      const enc = encoding.createEncoder();
+      encoding.writeVarUint(enc, MESSAGE_SYNC);
+      syncProtocol.writeUpdate(enc, update);
+      const msg = encoding.toUint8Array(enc);
+      for (const conn of entry.conns) {
+        if (conn !== origin && conn.readyState === 1) conn.send(msg);
       }
-      // First open: seed from the draft markdown, then persist so subsequent
-      // loads are fast and every client converges on the same seed.
-      const seed = await seedAuthorAndMarkdown(data.documentName);
-      if (!seed) return data.document; // object vanished; hand back empty doc.
-      const seeded = seedYDocFromMarkdown(seed.markdown, seed.by);
-      const update = Y.encodeStateAsUpdate(seeded);
-      Y.applyUpdate(data.document, update);
-      await saveDocState(data.documentName, update, seed.markdown);
-      return data.document;
-    },
+      // Fan out to other instances + persist (only for locally-originated edits;
+      // redis-origin updates were already persisted by the originating instance).
+      if (origin !== "redis") {
+        redisPub?.publish(
+          Buffer.from(`${REDIS_CHANNEL_PREFIX}${docName}`),
+          Buffer.from(update)
+        );
+        schedulePersist(docName, entry);
+      }
+    });
 
-    async onStoreDocument(data) {
-      // Persist the authoritative encoded state. markdown projection is left to
-      // the seed / agent-bridge / client-snapshot paths (see doc-state-store).
-      const update = Y.encodeStateAsUpdate(data.document);
-      await saveDocState(data.documentName, update);
-    },
-  });
+    docs.set(docName, entry);
+    loading.delete(docName);
+    initRedis();
+    return entry;
+  })();
 
-  return server;
+  loading.set(docName, promise);
+  return promise;
 }
 
-/**
- * Route an upgraded websocket to the Atrium collab server. Mirrors
- * `handleVoiceConnection` — called from server.ts (dev) and the bundled CJS
- * handler loaded by voice-server.js (prod).
- */
+// ---------------------------------------------------------------------------
+// Connection handler (called from server.ts / voice-server.js on WS upgrade)
+// ---------------------------------------------------------------------------
+function send(ws: WebSocket, data: Uint8Array): void {
+  if (ws.readyState === 1) ws.send(data);
+}
+
 export async function handleCollabConnection(
   ws: WebSocket,
   req: IncomingMessage
 ): Promise<void> {
-  getServer().handleConnection(ws as never, req as never);
-}
+  const { pathname, query } = parseUrl(req.url || "", true);
+  const docName = decodeURIComponent(
+    (pathname || "").split("/").findLast((segment) => segment.length > 0) ?? ""
+  );
+  const rawToken = query.token;
+  const token = Array.isArray(rawToken) ? rawToken[0] : rawToken;
 
-/**
- * The Hocuspocus singleton, for server-side writers (the agent bridge) that need
- * `openDirectConnection` to mutate the same live Y.Doc clients are editing.
- */
-export function getCollabServer(): Hocuspocus {
-  return getServer();
+  // CRITICAL: attach the message listener SYNCHRONOUSLY, before the async setup
+  // (token verify + doc load). A client sends its first SyncStep1 immediately on
+  // open; without this, that frame arrives during the awaits below with no listener
+  // attached and is dropped — the server never replies with SyncStep2, so a raw
+  // client (e.g. the agent bridge) never syncs. Frames are queued until the real
+  // handler is ready, then replayed.
+  let processFrame: ((u8: Uint8Array) => void) | null = null;
+  const pending: Uint8Array[] = [];
+  const onMessage = (data: Buffer): void => {
+    const u8 = new Uint8Array(data);
+    if (processFrame) processFrame(u8);
+    else pending.push(u8);
+  };
+  ws.on("message", onMessage);
+
+  const claims = await verifyCollabToken(token);
+  if (!claims || !docName || claims.oid !== docName) {
+    log.warn("Rejected collab connection", { docName, hasClaims: !!claims });
+    try { ws.close(4401, "Unauthorized"); } catch { /* already closed */ }
+    return;
+  }
+  const canWrite = claims.w;
+
+  const entry = await getOrCreateDoc(docName);
+  entry.conns.add(ws);
+  entry.awarenessIds.set(ws, new Set());
+
+  // Track which awareness client ids this connection introduced, so we can clear
+  // them when it closes.
+  const onAwarenessChange = (
+    changes: { added: number[]; updated: number[]; removed: number[] },
+    origin: unknown
+  ): void => {
+    const ids = entry.awarenessIds.get(ws);
+    if (origin === ws && ids) {
+      for (const id of changes.added) ids.add(id);
+      for (const id of changes.removed) ids.delete(id);
+    }
+    const changed = [...changes.added, ...changes.updated, ...changes.removed];
+    if (changed.length === 0) return;
+    const enc = encoding.createEncoder();
+    encoding.writeVarUint(enc, MESSAGE_AWARENESS);
+    encoding.writeVarUint8Array(
+      enc,
+      awarenessProtocol.encodeAwarenessUpdate(entry.awareness, changed)
+    );
+    const msg = encoding.toUint8Array(enc);
+    for (const conn of entry.conns) send(conn, msg);
+  };
+  entry.awareness.on("update", onAwarenessChange);
+
+  processFrame = (u8: Uint8Array): void => {
+    try {
+      const decoder = decoding.createDecoder(u8);
+      const messageType = decoding.readVarUint(decoder);
+      if (messageType === MESSAGE_SYNC) {
+        // Read-only guard: a non-writer may only request state (SyncStep1); its
+        // SyncStep2/Update messages are ignored so it cannot mutate the doc.
+        if (!canWrite) {
+          const peek = decoding.createDecoder(u8);
+          decoding.readVarUint(peek);
+          if (decoding.readVarUint(peek) !== SYNC_STEP_1) return;
+        }
+        const enc = encoding.createEncoder();
+        encoding.writeVarUint(enc, MESSAGE_SYNC);
+        syncProtocol.readSyncMessage(decoder, enc, entry.ydoc, ws);
+        if (encoding.length(enc) > 1) send(ws, encoding.toUint8Array(enc));
+      } else if (messageType === MESSAGE_AWARENESS && canWrite) {
+        awarenessProtocol.applyAwarenessUpdate(
+          entry.awareness,
+          decoding.readVarUint8Array(decoder),
+          ws
+        );
+      }
+    } catch (error) {
+      log.error("Collab message error", {
+        docName,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  };
+
+  const cleanup = (): void => {
+    entry.conns.delete(ws);
+    entry.awareness.off("update", onAwarenessChange);
+    const ids = entry.awarenessIds.get(ws);
+    if (ids && ids.size > 0) {
+      awarenessProtocol.removeAwarenessStates(entry.awareness, [...ids], "conn-closed");
+    }
+    entry.awarenessIds.delete(ws);
+    if (entry.conns.size === 0 && entry.persistTimer) {
+      clearTimeout(entry.persistTimer);
+      entry.persistTimer = null;
+      void saveDocState(docName, Y.encodeStateAsUpdate(entry.ydoc), entry.markdown ?? undefined);
+    }
+  };
+  ws.on("close", cleanup);
+  ws.on("error", cleanup);
+
+  // SyncStep1: ask the client for its state and offer ours.
+  const syncEnc = encoding.createEncoder();
+  encoding.writeVarUint(syncEnc, MESSAGE_SYNC);
+  syncProtocol.writeSyncStep1(syncEnc, entry.ydoc);
+  send(ws, encoding.toUint8Array(syncEnc));
+
+  // Send current awareness states to the newcomer.
+  const states = entry.awareness.getStates();
+  if (states.size > 0) {
+    const aEnc = encoding.createEncoder();
+    encoding.writeVarUint(aEnc, MESSAGE_AWARENESS);
+    encoding.writeVarUint8Array(
+      aEnc,
+      awarenessProtocol.encodeAwarenessUpdate(entry.awareness, [...states.keys()])
+    );
+    send(ws, encoding.toUint8Array(aEnc));
+  }
+
+  // Replay frames that arrived during setup (e.g. the client's initial SyncStep1).
+  for (const u8 of pending) processFrame(u8);
+  pending.length = 0;
 }

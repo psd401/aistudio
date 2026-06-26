@@ -20,7 +20,12 @@ const nextConfig = {
   reactStrictMode: true,
   output: 'standalone',
   transpilePackages: ['recharts'],
-  serverExternalPackages: ['winston', 'logform', '@colors/colors', 'argon2', 'postgres', 'mammoth', 'pdf-parse', 'oidc-provider', 'ws'],
+  serverExternalPackages: ['winston', 'logform', '@colors/colors', 'argon2', 'postgres', 'mammoth', 'pdf-parse', 'oidc-provider', 'ws',
+    // Atrium collab (#1051): the agent-bridge route opens a y-websocket client to
+    // the collab server. These pure-ESM Yjs libs must run as real Node modules on
+    // the server, not webpack-bundled (bundling breaks the y-websocket client —
+    // it connects but never syncs). Server-only; the browser editor still bundles them.
+    'y-websocket', 'yjs', 'y-prosemirror', 'y-protocols', 'lib0'],
   outputFileTracingIncludes: {
     '/**': [
       './node_modules/argon2/**/*',

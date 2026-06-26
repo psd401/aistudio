@@ -3,8 +3,8 @@
  *
  * Issue #1051 (Epic #1059, Atrium Phase 1). The ProseMirror schema must be
  * IDENTICAL on the client editor and on the server (seeding + agent bridge via
- * @hocuspocus/transformer), or the Yjs document maps inconsistently and edits
- * corrupt. This module is the single source of that schema: StarterKit (with
+ * y-prosemirror), or the Yjs document maps inconsistently and edits corrupt.
+ * This module is the single source of that schema: StarterKit (with
  * undo/redo disabled — Collaboration supplies Yjs-aware undo) plus the
  * `atriumAuthored` provenance mark.
  *
@@ -17,7 +17,8 @@
  */
 
 import StarterKit from "@tiptap/starter-kit";
-import type { Extensions } from "@tiptap/core";
+import { getSchema, type Extensions } from "@tiptap/core";
+import type { Schema } from "@tiptap/pm/model";
 import { AtriumAuthored } from "./authored-mark";
 
 /**
@@ -34,4 +35,16 @@ export function getSchemaExtensions(): Extensions {
     }),
     AtriumAuthored,
   ];
+}
+
+let schemaCache: Schema | null = null;
+
+/**
+ * The ProseMirror schema for the shared extensions, cached. Used by the server
+ * (markdown<->Y.Doc bridge + agent edits) to build/read the collaborative doc
+ * without a live editor. Must be the SAME schema the client editor uses.
+ */
+export function getCollabSchema(): Schema {
+  if (!schemaCache) schemaCache = getSchema(getSchemaExtensions());
+  return schemaCache;
 }
