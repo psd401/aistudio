@@ -113,16 +113,13 @@ async function loadPublishedObject(slug: string): Promise<{
 }
 
 /**
- * Page metadata: the document title for a published, viewable object. Skips the
- * visibility gate (metadata is not a content disclosure) and falls back to a
- * generic title when the object is missing/unpublished.
+ * Page metadata: always returns a generic title. The real document title is NOT
+ * exposed here because Next.js calls generateMetadata before the page component's
+ * canView check runs — leaking a sensitive title (e.g. "H.R. Investigation #42")
+ * to any authenticated user via tab bar, browser history, and link previews.
  */
-export async function generateMetadata({
-  params,
-}: ReaderPageProps): Promise<Metadata> {
-  const { slug } = await params;
-  const published = await loadPublishedObject(slug);
-  return { title: published?.title ?? "Document" };
+export async function generateMetadata(): Promise<Metadata> {
+  return { title: "Atrium Document" };
 }
 
 /**
