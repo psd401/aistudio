@@ -20,8 +20,19 @@ import { defineConfig, devices } from '@playwright/test'
  *     and are gated behind PLAYWRIGHT_AUTH_ENABLED. See
  *     docs/guides/e2e-authenticated-testing.md.
  */
+/**
+ * Specs that drive LIVE external providers (Bedrock/Gemini/OpenAI chat + voice).
+ * They cannot run in keyless CI, so CI sets E2E_EXCLUDE_EXTERNAL=1 to skip them
+ * while running the entire rest of the suite. Run them via the host harness with
+ * provider credentials. Everything else (guards, admin, capability, scheduling,
+ * nexus CRUD/ownership, atrium) runs in CI.
+ */
+const EXTERNAL_PROVIDER_SPECS =
+  /(voice-mode|assistant-architect-(streaming|tools|agentic-mode)|nexus-chat-tools|nexus-tools|model-compare-polling|nexus\/(chat-core|advanced))\.spec\.ts$/
+
 export default defineConfig({
   testDir: './tests/e2e',
+  testIgnore: process.env.E2E_EXCLUDE_EXTERNAL ? EXTERNAL_PROVIDER_SPECS : undefined,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 2 : 0,

@@ -49,15 +49,17 @@ jobs:
     #   uses: codecov/codecov-action@v3
     #   if: always()
 
-  # Atrium Phase 1 deep regimen (#1051): Bun smokes + authenticated Playwright E2E
-  # that drives the real collab websocket server (editor purple/green rail, two-tab
-  # live sync, agent bridge, reader visibility/footer, route guards) against a fresh
-  # Postgres. S3 is intentionally not provisioned — the reader BODY render is covered
-  # by the Bun render smoke; the spec gates body assertions on ATRIUM_E2E_HAS_S3.
-  atrium-e2e:
-    name: Atrium E2E (Playwright + smokes)
+  # Full authenticated Playwright E2E regimen + Atrium Bun smokes against a fresh
+  # Postgres. Runs the ENTIRE tests/e2e/ suite (guards, admin, capability, scheduling,
+  # nexus CRUD/ownership, atrium editor/collab/reader) on the real dev server with
+  # the collab websocket. Specs that drive live external providers (AI chat / voice)
+  # are skipped via E2E_EXCLUDE_EXTERNAL (no keys in CI; run them via the host
+  # harness). S3 isn't provisioned — the reader BODY render is covered by the Bun
+  # render smoke, and the spec gates body assertions on ATRIUM_E2E_HAS_S3.
+  e2e:
+    name: E2E (Playwright + smokes)
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     permissions:
       contents: read
     services:
@@ -86,6 +88,8 @@ jobs:
       HOSTNAME: 127.0.0.1
       PLAYWRIGHT_BASE_URL: http://localhost:3200
       PLAYWRIGHT_AUTH_ENABLED: "true"
+      # Skip specs that require live external AI/voice providers (no keys in CI).
+      E2E_EXCLUDE_EXTERNAL: "1"
       CI: "true"
     steps:
       - name: Checkout code
@@ -142,7 +146,7 @@ jobs:
       - name: Install Playwright browser
         run: bunx playwright install --with-deps chromium
 
-      - name: Run Atrium Playwright E2E (server + collab WS)
+      - name: Run full Playwright E2E suite (server + collab WS)
         run: |
           set -uo pipefail
           bun run server.ts > /tmp/atrium-server.log 2>&1 &
@@ -152,11 +156,18 @@ jobs:
             if curl -sf http://localhost:3200/api/healthz > /dev/null; then echo "ready after ${i}s"; break; fi
             sleep 2
           done
-          # Warm the lazily-compiled routes (Next dev) before the timed assertions.
-          curl -s -o /dev/null "http://localhost:3200/atrium/a7100000-0000-4000-8000-000000004040/edit" || true
-          curl -s -o /dev/null "http://localhost:3200/c/board-procedure-4040" || true
+          # Warm the heaviest lazily-compiled routes (Next dev) up front so per-test
+          # first-hit compile doesn't blow individual timeouts.
+          for p in \
+            "/nexus" "/atrium/a7100000-0000-4000-8000-000000004040/edit" \
+            "/c/board-procedure-4040" "/admin/users" "/utilities/assistant-architect"; do
+            curl -s -o /dev/null "http://localhost:3200$p" || true
+          done
           curl -s -o /dev/null -X POST "http://localhost:3200/api/content/x/agent-bridge" || true
-          bunx playwright test tests/e2e/atrium-document.guard.spec.ts tests/e2e/atrium-phase1-verify.spec.ts --workers=1
+          # Run the ENTIRE suite (config testIgnore drops external-provider specs).
+          # --workers=2 overrides the config's CI default of 1 (faster on the single
+          # dev server) without overwhelming the lazy compiler.
+          bunx playwright test --workers=2
           EXIT=$?
           kill "$SERVER_PID" 2>/dev/null || true
           exit $EXIT
