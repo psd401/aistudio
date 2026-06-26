@@ -111,14 +111,25 @@ async function postHandler(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const body = (await request.json().catch(() => ({}))) as BridgeBody;
+    // `request.json()` can resolve to `null` (valid JSON) — coerce to {} so
+    // the BridgeBody destructure doesn't throw a TypeError on `null.markdown`.
+    const body = ((await request.json().catch(() => ({}))) ?? {}) as BridgeBody;
     const markdown = typeof body.markdown === "string" ? body.markdown : "";
     if (!markdown.trim()) {
       timer({ status: "error" });
       return NextResponse.json({ error: "markdown is required" }, { status: 400 });
     }
+    // Guard before Bedrock Guardrails: its internal limit is ~64 KB; oversized
+    // payloads degrade silently to "allowed" and would broadcast a huge Yjs update.
+    if (Buffer.byteLength(markdown, "utf8") > 512 * 1024) {
+      timer({ status: "error" });
+      return NextResponse.json({ error: "markdown too large (max 512 KB)" }, { status: 413 });
+    }
     const mode = parseMode(body.mode);
-    const agentId = (request.headers.get("x-agent-id") || "agent").trim() || "agent";
+    // Validate X-Agent-Id: it's stamped into every CRDT node and JWT sub.
+    // An unbounded value would bloat the Y.Doc and could overflow JWT headers.
+    const rawAgentId = (request.headers.get("x-agent-id") || "agent").trim();
+    const agentId = /^[\w-]{1,128}$/.test(rawAgentId) ? rawAgentId : "agent";
 
     const req = await getUserRequester(requestId);
     const loaded = await loadEditableObject(id, req);
