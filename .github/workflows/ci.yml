@@ -48,7 +48,131 @@ jobs:
     # - name: Upload coverage reports
     #   uses: codecov/codecov-action@v3
     #   if: always()
-  
+
+  # Atrium Phase 1 deep regimen (#1051): Bun smokes + authenticated Playwright E2E
+  # that drives the real collab websocket server (editor purple/green rail, two-tab
+  # live sync, agent bridge, reader visibility/footer, route guards) against a fresh
+  # Postgres. S3 is intentionally not provisioned — the reader BODY render is covered
+  # by the Bun render smoke; the spec gates body assertions on ATRIUM_E2E_HAS_S3.
+  atrium-e2e:
+    name: Atrium E2E (Playwright + smokes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    services:
+      postgres:
+        # pgvector image matches production Aurora (migration 010 enables the vector
+        # extension); plain postgres lacks it.
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: aistudio
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/aistudio
+      DB_SSL: "false"
+      # Fixed, non-production secret shared by the dev server and the Playwright
+      # auth harness (both must mint/verify the session cookie with the same value).
+      AUTH_SECRET: ci-atrium-e2e-secret-not-for-production
+      PORT: "3200"
+      HOSTNAME: 127.0.0.1
+      PLAYWRIGHT_BASE_URL: http://localhost:3200
+      PLAYWRIGHT_AUTH_ENABLED: "true"
+      CI: "true"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6  # v2
+        with:
+          bun-version: "1.2.x"
+          cache: true
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Install psql client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Bootstrap database schema (initial setup + migrations)
+        # ON_ERROR_STOP=0 matches scripts/db/init-local.sh: the schema files are
+        # idempotent and a couple of seed/extension statements are environment-
+        # tolerant. Missing tables surface downstream when the seeds / E2E fail.
+        run: |
+          set -uo pipefail
+          export PGPASSWORD=postgres
+          PSQL="psql -h localhost -U postgres -d aistudio -v ON_ERROR_STOP=0 -q"
+          for f in $(jq -r '.initialSetupFiles[]' infra/database/migrations.json); do
+            echo "== initial: $f"; $PSQL -f "infra/database/schema/$f"
+          done
+          for f in $(jq -r '.migrationFiles[]' infra/database/migrations.json); do
+            echo "== migration: $f"; $PSQL -f "infra/database/schema/$f"
+          done
+          # Fail fast if the tables the Atrium E2E needs did not get created.
+          psql -h localhost -U postgres -d aistudio -v ON_ERROR_STOP=1 -c \
+            "SELECT to_regclass('public.content_objects'), to_regclass('public.atrium_doc_state'), to_regclass('public.content_publications');" \
+            | grep -q content_objects || { echo "Schema bootstrap incomplete"; exit 1; }
+
+      - name: Seed test users + reference document
+        run: |
+          set -euo pipefail
+          export PGPASSWORD=postgres
+          PSQL="psql -h localhost -U postgres -d aistudio -v ON_ERROR_STOP=1"
+          $PSQL -f scripts/db/seed-local.sql
+          $PSQL -f tests/e2e/fixtures/atrium-reference-seed.sql
+
+      - name: Seed live collaborative doc state
+        run: bun run scripts/dev/seed-atrium-doc-state.ts
+
+      - name: Atrium Bun smokes (render pipeline, collab bridge, visibility)
+        run: |
+          bun run tests/smoke/atrium-markdown-render.smoke.ts
+          bun run tests/smoke/atrium-collab-bridge.smoke.ts
+          bun run tests/smoke/atrium-visibility-reference.smoke.ts
+
+      - name: Install Playwright browser
+        run: bunx playwright install --with-deps chromium
+
+      - name: Run Atrium Playwright E2E (server + collab WS)
+        run: |
+          set -uo pipefail
+          bun run server.ts > /tmp/atrium-server.log 2>&1 &
+          SERVER_PID=$!
+          echo "Waiting for server on :3200 ..."
+          for i in $(seq 1 90); do
+            if curl -sf http://localhost:3200/api/healthz > /dev/null; then echo "ready after ${i}s"; break; fi
+            sleep 2
+          done
+          # Warm the lazily-compiled routes (Next dev) before the timed assertions.
+          curl -s -o /dev/null "http://localhost:3200/atrium/a7100000-0000-4000-8000-000000004040/edit" || true
+          curl -s -o /dev/null "http://localhost:3200/c/board-procedure-4040" || true
+          curl -s -o /dev/null -X POST "http://localhost:3200/api/content/x/agent-bridge" || true
+          bunx playwright test tests/e2e/atrium-document.guard.spec.ts tests/e2e/atrium-phase1-verify.spec.ts --workers=1
+          EXIT=$?
+          kill "$SERVER_PID" 2>/dev/null || true
+          exit $EXIT
+
+      - name: Upload Playwright report + server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: atrium-playwright-report
+          path: |
+            playwright-report/
+            test-results/
+            /tmp/atrium-server.log
+          retention-days: 7
+          if-no-files-found: ignore
+
   # CDK validation job - checks infrastructure code
   cdk-validate:
     name: Validate CDK Infrastructure

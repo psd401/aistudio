@@ -64,13 +64,19 @@ test.describe("Atrium Phase 1 — authenticated surfaces", () => {
       const page = await context.newPage();
       const res = await page.goto(`/c/${SLUG}`);
       expect(res?.status()).toBe(200);
-      await expect(page.locator(".atrium-content")).toContainText("Board Procedure 4040");
-      // Render pipeline: the :::callout / :::warn directives became allowlisted divs.
-      await expect(page.locator(".atrium-content .atrium-callout").first()).toBeVisible();
-      await expect(page.locator(".atrium-content .atrium-callout-warn")).toBeVisible();
-      // Provenance footer: agent-drafted + human-reviewed.
+      // Provenance footer (DB-only — agent-drafted + human-reviewed) renders
+      // regardless of S3, so it's always asserted.
       await expect(page.locator('.atrium-provenance-badge[data-author="agent"]')).toBeVisible();
       await expect(page.locator('.atrium-provenance-badge[data-author="human"]')).toBeVisible();
+      // The rendered BODY comes from the S3 source.md snapshot. CI runs without S3,
+      // where the reader falls back to an empty article (the render pipeline itself
+      // is covered by tests/smoke/atrium-markdown-render.smoke.ts). Assert the body
+      // + callout/warn rendering only when S3 is available (set ATRIUM_E2E_HAS_S3).
+      if (process.env.ATRIUM_E2E_HAS_S3 === "true") {
+        await expect(page.locator(".atrium-content")).toContainText("Board Procedure 4040");
+        await expect(page.locator(".atrium-content .atrium-callout").first()).toBeVisible();
+        await expect(page.locator(".atrium-content .atrium-callout-warn")).toBeVisible();
+      }
       await page.screenshot({ path: `${SHOT}/01-reader-hs-staff.png`, fullPage: true });
     } finally {
       await context.close();
