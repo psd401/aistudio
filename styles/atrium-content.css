@@ -108,26 +108,30 @@
  * -------------------------------------------------------------------------- */
 .atrium-editor {
   position: relative;
-  padding-left: 1rem;
 }
-.atrium-provenance-rail {
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: var(--atrium-rail-width);
-  height: 100%;
-  pointer-events: none;
+.atrium-editor .ProseMirror {
+  outline: none;
+  min-height: 12rem;
 }
-.atrium-rail-segment {
-  position: absolute;
-  left: 0;
-  width: var(--atrium-rail-width);
-  border-radius: 2px;
+/*
+ * The rail: each top-level block gets a node decoration carrying
+ * data-author="human|agent" (see components/atrium/provenance-rail.ts). The
+ * colored left border IS the rail — green for human-dominant blocks, purple for
+ * agent-dominant. Padding leaves room for the border so text doesn't shift.
+ */
+.atrium-editor .ProseMirror > .atrium-rail-block {
+  padding-left: 0.75rem;
+  border-left: var(--atrium-rail-width) solid transparent;
+  margin-left: -0.75rem;
 }
-.atrium-rail-segment[data-author="human"] { background: var(--atrium-human); }
-.atrium-rail-segment[data-author="agent"] { background: var(--atrium-agent); }
+.atrium-editor .ProseMirror > .atrium-rail-block[data-author="human"] {
+  border-left-color: var(--atrium-human);
+}
+.atrium-editor .ProseMirror > .atrium-rail-block[data-author="agent"] {
+  border-left-color: var(--atrium-agent);
+}
 
-/* Inline tint of authored ranges inside the editor (subtle, optional). */
+/* Optional subtle inline tint of authored ranges (the atriumAuthored mark span). */
 .atrium-authored[data-author="human"] { background: var(--atrium-human-soft); }
 .atrium-authored[data-author="agent"] { background: var(--atrium-agent-soft); }
 
