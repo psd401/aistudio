@@ -14,6 +14,8 @@ import { test, expect } from '@playwright/test'
  * PLAYWRIGHT_AUTH_ENABLED=true is set.
  */
 
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
+
 test.describe('Agent Dashboard — Public Access', () => {
   test('non-admin user is redirected away from /admin/agents', async ({ page }) => {
     await page.goto('/admin/agents')

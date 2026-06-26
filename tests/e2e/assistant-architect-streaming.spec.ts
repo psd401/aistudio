@@ -3,7 +3,7 @@ import { test, expect } from '@playwright/test'
 test.describe('Assistant Architect Streaming API', () => {
   test.beforeEach(async ({ page }) => {
     // Go to assistant architect page
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
 
     // Wait for authentication if needed
     try {

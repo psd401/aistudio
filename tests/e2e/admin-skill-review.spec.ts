@@ -9,6 +9,8 @@ import { test, expect } from '@playwright/test'
  * through the existing Epic #910 pipeline. Resilient skip-if-absent style — the
  * environment may lack admin auth or a pending skill.
  */
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
+
 test.describe('Admin skill review', () => {
   test('review queue exposes approve/reject for pending skills', async ({ page }) => {
     await page.goto('/admin/agents/skills/review')

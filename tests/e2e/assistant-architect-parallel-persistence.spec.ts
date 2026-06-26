@@ -16,6 +16,8 @@ import { test, expect } from '@playwright/test'
 const MIN_NODE_SPACING = 50; // px - minimum horizontal spacing between parallel nodes
 const Y_POSITION_TOLERANCE = 10; // px - tolerance for grouping nodes at same vertical position
 
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
+
 test.describe('Assistant Architect - Parallel Execution Persistence', () => {
   test.describe('Edge Persistence', () => {
     test('should persist edge connections when navigating away and back', async ({ page }) => {

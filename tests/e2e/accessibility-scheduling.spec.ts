@@ -6,10 +6,12 @@ import { test, expect } from '@playwright/test'
  * Part of Issue #271: Testing: End-to-End Scheduling Workflows
  */
 
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
+
 test.describe('Accessibility Testing for Scheduling Components', () => {
   test.beforeEach(async ({ page }) => {
     // Navigate to assistant architect page
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
 
     // Wait for page load
     try {
