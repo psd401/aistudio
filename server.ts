@@ -22,6 +22,12 @@ const VOICE_WS_PATH = "/api/nexus/voice"
 // Must match WS_MAX_PAYLOAD in lib/voice/constants.ts and voice-server.js
 const WS_MAX_PAYLOAD = 65536 // 64KB
 
+// Atrium collaboration (#1051). Yjs sync frames (initial document state) can far
+// exceed the 64KB voice cap, so collab gets its own WS server with a larger
+// payload limit. Kept in sync with voice-server.js (prod).
+const COLLAB_WS_PATH = "/api/content/collab"
+const COLLAB_MAX_PAYLOAD = 16 * 1024 * 1024 // 16MB
+
 const dev = process.env.NODE_ENV !== "production"
 const hostname = process.env.HOSTNAME || "0.0.0.0"
 const port = Number.parseInt(process.env.PORT || "3000", 10)
@@ -71,6 +77,8 @@ async function main() {
 
   // WebSocket server with noServer mode and payload size limit
   const wss = new WebSocketServer({ noServer: true, maxPayload: WS_MAX_PAYLOAD })
+  // Separate WS server for Atrium collab (larger payload for Yjs sync frames).
+  const collabWss = new WebSocketServer({ noServer: true, maxPayload: COLLAB_MAX_PAYLOAD })
 
   server.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) => {
     const { pathname } = parse(request.url || "/")
@@ -85,6 +93,15 @@ async function main() {
 
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit("connection", ws, request)
+      })
+    } else if (pathname === COLLAB_WS_PATH) {
+      if (!isAllowedOrigin(request)) {
+        socket.write("HTTP/1.1 403 Forbidden\r\n\r\n")
+        socket.destroy()
+        return
+      }
+      collabWss.handleUpgrade(request, socket, head, (ws) => {
+        collabWss.emit("connection", ws, request)
       })
     } else {
       // Let Next.js handle non-voice WebSocket upgrades (e.g. HMR in dev)
@@ -104,6 +121,18 @@ async function main() {
       const message = error instanceof Error ? error.message : String(error)
       // eslint-disable-next-line no-console -- Outside Next.js runtime
       console.error("[voice-server] Connection error:", message)
+      try { ws.close(4500, "Internal error") } catch { /* already closed */ }
+    }
+  })
+
+  collabWss.on("connection", async (ws, req) => {
+    try {
+      const { handleCollabConnection } = await import("@/lib/content/collab/collab-server")
+      await handleCollabConnection(ws, req)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      // eslint-disable-next-line no-console -- Outside Next.js runtime
+      console.error("[atrium-collab] Connection error:", message)
       try { ws.close(4500, "Internal error") } catch { /* already closed */ }
     }
   })

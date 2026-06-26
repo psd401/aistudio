@@ -56,9 +56,10 @@ import rehypeKatex from "rehype-katex";
 import rehypeStringify from "rehype-stringify";
 import { visit } from "unist-util-visit";
 
-// Re-exported so existing `from "./render/markdown-render"` importers of the
-// sanitizer keep working after the split (it now lives in ./html-sanitize).
-export { sanitizeHtml } from "./html-sanitize";
+// NOTE: `sanitizeHtml` lives in ./html-sanitize (DOMPurify + jsdom). It is
+// intentionally NOT re-exported here: this module is imported by version-service
+// (and thus the collab server bundle), and re-exporting would drag jsdom into
+// that bundle. Import sanitizeHtml from "./html-sanitize" directly.
 
 /**
  * remark transform: render the two curated container/leaf directives

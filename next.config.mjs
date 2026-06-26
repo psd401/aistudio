@@ -88,6 +88,10 @@ const nextConfig = {
       bodySizeLimit: '100mb',
       timeout: 300,
     },
+    // Enables the `forbidden()` / `unauthorized()` navigation interrupts used by
+    // the Atrium reader (app/(protected)/c/[slug]) to return a true 403 for
+    // out-of-audience users (#1051).
+    authInterrupts: true,
   },
   webpack: (config, { isServer }) => {
     config.cache = {

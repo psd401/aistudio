@@ -12,7 +12,8 @@ export { contentService } from "./content-service";
 export { versionService } from "./version-service";
 export { visibilityService } from "./visibility-service";
 export { s3Store } from "./storage/s3-store";
-export { renderMarkdownToHtml, sanitizeHtml } from "./render/markdown-render";
+export { renderMarkdownToHtml } from "./render/markdown-render";
+export { sanitizeHtml } from "./render/html-sanitize";
 
 export {
   ContentError,

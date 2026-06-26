@@ -59,6 +59,10 @@ RUN --mount=type=cache,target=/app/.next/cache \
 # Writing into .next/standalone ensures the runner-stage COPY picks it up automatically.
 RUN node scripts/build-voice-ws-handler.mjs
 
+# Bundle the Atrium collaboration WebSocket handler the same way (#1051), so
+# voice-server.js can load ./collab-handler-bundle.cjs at runtime.
+RUN node scripts/build-collab-ws-handler.mjs
+
 # ============================================================================
 # Stage 3: Production Runner
 # ============================================================================
