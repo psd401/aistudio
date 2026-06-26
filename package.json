@@ -4,6 +4,8 @@
   "private": true,
   "packageManager": "bun@1.2.23",
   "scripts": {
+    "prepare": "git rev-parse --is-inside-work-tree >/dev/null 2>&1 && git config core.hooksPath .githooks || true",
+    "test:e2e:local": "bash scripts/test/e2e-local.sh",
     "dev": "next dev",
     "build": "next build --webpack",
     "build:voice-ws-handler": "node scripts/build-voice-ws-handler.mjs",

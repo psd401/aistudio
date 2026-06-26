@@ -39,6 +39,13 @@ test.describe("Atrium Phase 1 — route guards (always-run)", () => {
 });
 
 test.describe("Atrium Phase 1 — authenticated surfaces", () => {
+  // These tests all drive the SAME server-side collaborative document (one Y.Doc on
+  // the dev server). Running them concurrently makes them clobber each other — e.g.
+  // the agent-bridge "replace" wipes content another test is asserting on, and the
+  // two-tab sync test competes for the same doc. Serialize this block so the shared
+  // state is deterministic; other spec files still run in parallel on other workers.
+  test.describe.configure({ mode: "serial" });
+
   test.skip(
     process.env.PLAYWRIGHT_AUTH_ENABLED !== "true",
     "Requires the authed dev server — see docs/guides/atrium-phase1-verification.md"
