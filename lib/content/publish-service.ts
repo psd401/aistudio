@@ -169,26 +169,23 @@ export const publishService = {
 
     const publicationId = await executeTransaction(
       async (tx: DbTransaction) => {
-        // Optional visibility widening: replace grants (for group) and set the
-        // object's level + mark it published. Done inside the tx so the
-        // publication and the visibility it implies commit atomically.
-        if (input.visibility) {
-          if (input.visibility.level === "group") {
-            await visibilityService.applyGrants(
-              tx,
-              objectId,
-              input.visibility.grants ?? []
-            );
-          }
-          await tx
-            .update(contentObjects)
-            .set({
-              visibilityLevel: input.visibility.level,
-              status: "published",
-              updatedAt: new Date(),
-            })
-            .where(eq(contentObjects.id, objectId));
+        // Always mark the object as published. Optionally widen visibility in
+        // the same tx so the status change and any grant updates are atomic.
+        if (input.visibility?.level === "group") {
+          await visibilityService.applyGrants(
+            tx,
+            objectId,
+            input.visibility.grants ?? []
+          );
         }
+        await tx
+          .update(contentObjects)
+          .set({
+            ...(input.visibility ? { visibilityLevel: input.visibility.level } : {}),
+            status: "published",
+            updatedAt: new Date(),
+          })
+          .where(eq(contentObjects.id, objectId));
 
         // Idempotent upsert: republishing the same destination updates the live
         // version + status in place (unique on (object_id, destination)).
