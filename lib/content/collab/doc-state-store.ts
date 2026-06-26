@@ -2,14 +2,14 @@
  * Atrium live document state store (Postgres)
  *
  * Issue #1051 (Epic #1059, Atrium Phase 1). Durable persistence for the live Yjs
- * CRDT document in `atrium_doc_state` (migration 086). The Hocuspocus collab
- * server loads from here on cold start and writes back (debounced) on change.
+ * CRDT document in `atrium_doc_state` (migration 086). The y-websocket-protocol
+ * collab server loads from here on cold start and writes back (debounced) on change.
  *
  * `y_state` is the authoritative encoded Y.Doc (Y.encodeStateAsUpdate). `markdown`
- * is a best-effort projection: it is set on seed and on agent-bridge writes (both
- * of which already hold the markdown), but a pure human-typing persist leaves it
- * untouched — the authoritative markdown for a snapshot comes from the editor
- * client at snapshot time, so this column is a convenience/agent-bridge base only.
+ * is a best-effort projection: it is set on initial seed (which holds the draft
+ * markdown), but human-typing persists leave it untouched — the authoritative
+ * markdown for a snapshot comes from the editor client at snapshot time, so this
+ * column is a convenience/seed-base only.
  */
 
 import { eq, sql } from "drizzle-orm";

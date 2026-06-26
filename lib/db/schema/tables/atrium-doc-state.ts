@@ -2,18 +2,19 @@
  * Atrium live document state (Yjs CRDT)
  *
  * Issue #1051 (Epic #1059, Atrium Phase 1 — document path + real-time collab).
- * One live collaborative document per `document` content object. The Hocuspocus
- * collab server hydrates a `Y.Doc` from `yState` on first connection
- * (`onLoadDocument`) and persists the encoded state back here, debounced, on
- * change (`onStoreDocument`). Cross-ECS-task fan-out runs through Redis; this row
- * is the durable source of truth on cold load and the input to immutable version
- * snapshots (`content_versions`).
+ * One live collaborative document per `document` content object. The
+ * y-websocket-protocol collab server (`lib/content/collab/collab-server.ts`)
+ * hydrates a `Y.Doc` from `yState` on first connection and persists the encoded
+ * state back here, debounced, on change. Cross-ECS-task fan-out runs through
+ * Redis; this row is the durable source of truth on cold load and the input to
+ * immutable version snapshots (`content_versions`).
  *
  * - `yState`   — encoded full `Y.Doc` state (`Y.encodeStateAsUpdate`). bytea;
  *                postgres.js returns a `Buffer` directly usable by `Y.applyUpdate`.
- * - `markdown` — canonical markdown projection derived from the `Y.Doc` on each
- *                persist, so the reader/snapshot path reads legible content
- *                without standing up a Yjs runtime.
+ * - `markdown` — best-effort markdown projection, set on initial seed only.
+ *                Human-typing persists do NOT re-derive markdown from the Y.Doc;
+ *                the authoritative markdown for snapshots comes from the editor
+ *                client at snapshot time.
  * - `revision` — monotonic persist counter; the agent bridge's optimistic-
  *                concurrency token.
  *

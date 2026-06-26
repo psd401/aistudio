@@ -16,7 +16,7 @@ verify the live loop end to end.
 - **Collab server** — a hand-rolled y-websocket-protocol server (y-protocols/sync +
   /awareness; `lib/content/collab/collab-server.ts`) — chosen over Hocuspocus, whose
   crossws transport throws under Bun (our dev runtime). It
-  multiplexed onto the app's websocket transport at `/api/content/collab`
+  multiplexed onto the app's websocket transport at `/api/atrium-collab`
   (`server.ts` dev, `voice-server.js` prod). Auth is a short-TTL per-document token
   (`GET /api/content/[id]/collab`). State persists to Postgres
   (`atrium_doc_state`, migration 086); cross-task fan-out uses Redis when
