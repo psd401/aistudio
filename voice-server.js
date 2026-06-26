@@ -102,8 +102,15 @@ const handleCollabConnection = loadCollabHandler()
  */
 function isOriginAllowed(request) {
   const origin = request.headers.origin
-  // Browser WS requests always include Origin — missing = non-browser
-  if (!origin) return false
+
+  // Server-to-server loopback connections (e.g. the agent bridge calling the
+  // collab WS from within the same ECS task) send no Origin header. Validate
+  // by remote address instead — loopback is always trusted.
+  if (!origin) {
+    const addr = request.socket?.remoteAddress
+    const isLoopback = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
+    return isLoopback
+  }
 
   const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean)
   const appUrl = process.env.NEXTAUTH_URL || process.env.APP_URL
@@ -156,8 +163,9 @@ http.createServer = function (...args) {
           wss.emit('connection', ws, request)
         })
       } else if (pathname === COLLAB_WS_PATH || pathname.startsWith(`${COLLAB_WS_PATH}/`)) {
-        // HocuspocusProvider connects to `${url}/<docName>` — match the path as a
-        // prefix. The doc name is read from the Yjs protocol message, not the URL.
+        // WebsocketProvider connects to `${url}/<docName>` — match the path as a
+        // prefix. The doc name is extracted from the URL path segment in
+        // handleCollabConnection, not from the Yjs protocol message.
         if (!collabHandlerAvailable) {
           socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
           socket.destroy()

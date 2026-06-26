@@ -74,8 +74,8 @@ async function main() {
   await app.prepare()
 
   // Pre-load the collab handler at startup (NOT lazily inside the connection
-  // handler). HocuspocusProvider sends its first sync message immediately on open;
-  // a `await import()` in the connection path would delay attaching Hocuspocus's
+  // handler). WebsocketProvider sends its first sync message immediately on open;
+  // a `await import()` in the connection path would delay attaching the
   // message listener past those first frames, dropping them so the protocol never
   // starts. Pre-loading lets us call the handler synchronously on 'connection'.
   const { handleCollabConnection } = await import("@/lib/content/collab/collab-server")
@@ -105,9 +105,9 @@ async function main() {
         wss.emit("connection", ws, request)
       })
     } else if (pathname === COLLAB_WS_PATH || (pathname?.startsWith(`${COLLAB_WS_PATH}/`) ?? false)) {
-      // HocuspocusProvider connects to `${url}/<docName>`, so match the path as a
-      // prefix. The document name itself is read from the Yjs protocol message
-      // (the provider's `name`), not the URL, so no rewrite is needed.
+      // WebsocketProvider connects to `${url}/<docName>`, so match the path as a
+      // prefix. The document name is extracted from the URL path segment in
+      // handleCollabConnection — not from the Yjs protocol message.
       if (!isAllowedOrigin(request)) {
         socket.write("HTTP/1.1 403 Forbidden\r\n\r\n")
         socket.destroy()
