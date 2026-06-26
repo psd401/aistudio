@@ -58,8 +58,10 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
   const by = makeAuthorTag("agent", agentId);
   const token = await signCollabToken({ sub: `agent:${agentId}`, oid: objectId, w: true });
 
-  const port = process.env.PORT ?? "3000";
-  const url = `ws://127.0.0.1:${port}${COLLAB_WS_PATH}/${objectId}?token=${encodeURIComponent(token)}`;
+  // COLLAB_INTERNAL_URL allows overriding the loopback target in ECS task definitions
+  // where PORT may differ from the value server.ts actually binds on.
+  const base = process.env.COLLAB_INTERNAL_URL ?? `ws://127.0.0.1:${process.env.PORT ?? "3000"}`;
+  const url = `${base}${COLLAB_WS_PATH}/${objectId}?token=${encodeURIComponent(token)}`;
   const ydoc = new Y.Doc();
   // Use the runtime's native WebSocket (Node 22 / Bun) — the `ws` package has
   // import-interop issues inside the Next.js server runtime ("Unexpected server

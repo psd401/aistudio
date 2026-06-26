@@ -82,7 +82,13 @@ function initRedis(): void {
     maxRetriesPerRequest: null,
   };
   redisPub = new Redis(opts);
+  redisPub.on("error", (err: Error) =>
+    log.warn("Redis pub error", { error: err.message })
+  );
   const sub = new Redis(opts);
+  sub.on("error", (err: Error) =>
+    log.warn("Redis sub error", { error: err.message })
+  );
   sub.psubscribe(`${REDIS_CHANNEL_PREFIX}*`).catch((e) =>
     log.error("Redis psubscribe failed", { error: e instanceof Error ? e.message : String(e) })
   );
@@ -273,7 +279,17 @@ export async function handleCollabConnection(
   }
   const canWrite = claims.w;
 
-  const entry = await getOrCreateDoc(docName);
+  let entry: DocEntry;
+  try {
+    entry = await getOrCreateDoc(docName);
+  } catch (err) {
+    log.error("Failed to load collab doc, closing socket", {
+      docName,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    try { ws.close(4500, "Server error"); } catch { /* already closing */ }
+    return;
+  }
   entry.conns.add(ws);
   entry.awarenessIds.set(ws, new Set());
 
@@ -334,9 +350,6 @@ export async function handleCollabConnection(
     }
   };
 
-  // 'error' always emits before 'close' on a socket error. Using ws.once('close')
-  // alone is sufficient — the close event fires in all cases (normal, error, timeout).
-  // A separate 'error' handler would cause cleanup to fire twice, racing saveDocState.
   let cleaned = false;
   const cleanup = (): void => {
     if (cleaned) return;
@@ -356,19 +369,29 @@ export async function handleCollabConnection(
         clearTimeout(entry.persistTimer);
         entry.persistTimer = null;
       }
-      void saveDocState(
+      // Move docs.delete into .finally() so a new connection that arrives
+      // after the delete but before the DB write completes will re-load from
+      // the committed Postgres state rather than racing with stale in-memory state.
+      saveDocState(
         docName,
         Y.encodeStateAsUpdate(entry.ydoc),
         entry.markdown ?? undefined
-      ).catch((e) =>
-        log.error("Cleanup persist failed", {
-          docName,
-          error: e instanceof Error ? e.message : String(e),
-        })
-      );
-      docs.delete(docName);
+      )
+        .catch((e) =>
+          log.error("Cleanup persist failed", {
+            docName,
+            error: e instanceof Error ? e.message : String(e),
+          })
+        )
+        .finally(() => docs.delete(docName));
     }
   };
+  // The `ws` library emits 'error' before 'close' on a TCP RST or TLS error.
+  // Without an 'error' listener, Node.js throws an unhandled ERR_UNHANDLED_ERROR
+  // and terminates the process. The 'cleaned' guard already prevents double-execution.
+  ws.on("error", (err: Error) =>
+    log.warn("Collab socket error", { docName, error: err.message })
+  );
   ws.once("close", cleanup);
 
   // SyncStep1: ask the client for its state and offer ours.
