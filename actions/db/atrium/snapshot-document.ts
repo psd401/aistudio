@@ -24,6 +24,10 @@ import {
 } from "@/lib/logger";
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { versionService } from "@/lib/content";
+import { contentService } from "@/lib/content/content-service";
+import { visibilityService } from "@/lib/content/visibility-service";
+import { canEdit } from "@/lib/content/helpers";
+import { NotFoundError, ForbiddenError } from "@/lib/content/errors";
 import type { ContentVersionDTO } from "@/lib/content";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
@@ -38,11 +42,15 @@ export async function snapshotDocumentAction(
   const log = createLogger({ requestId, action: "snapshotDocumentAction" });
 
   try {
+    if (!input) {
+      throw new Error("Input parameters are required");
+    }
+
     log.info("Action started: snapshot document", {
       objectId,
       input: sanitizeForLogging({
-        hasBody: typeof input?.body === "string",
-        summary: input?.summary,
+        hasBody: typeof input.body === "string",
+        summary: input.summary,
       }),
     });
 
@@ -56,9 +64,24 @@ export async function snapshotDocumentAction(
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
 
+    // Enforce per-object edit authorization. The capability gate above checks
+    // feature access; this check ensures the caller may edit THIS specific object
+    // (owner or admin). Without it, any user with the atrium-content capability
+    // can overwrite any known object's working head via the snapshot action.
+    const obj = await contentService.loadByIdOrSlug(objectId);
+    if (!obj) throw new NotFoundError("Content object not found", { objectId });
+    const viewable = await visibilityService.canView(requester, {
+      id: obj.id,
+      ownerUserId: obj.ownerUserId,
+      visibilityLevel: obj.visibilityLevel,
+    });
+    if (!viewable || !canEdit(requester, obj.ownerUserId)) {
+      throw new ForbiddenError("Not permitted to edit this content");
+    }
+
     const version = await versionService.snapshot(
       requester,
-      { id: objectId, kind: "document" },
+      { id: obj.id, kind: "document" },
       { body: input.body, bodyFormat: "markdown", summary: input.summary }
     );
 

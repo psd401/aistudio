@@ -35,12 +35,16 @@ export async function publishDocumentAction(
   const log = createLogger({ requestId, action: "publishDocumentAction" });
 
   try {
+    if (!input) {
+      throw new Error("Input parameters are required");
+    }
+
     log.info("Action started: publish document", {
       objectId,
       input: sanitizeForLogging({
-        destination: input?.destination,
-        visibilityLevel: input?.visibility?.level,
-        grantCount: input?.visibility?.grants?.length ?? 0,
+        destination: input.destination,
+        visibilityLevel: input.visibility?.level,
+        grantCount: input.visibility?.grants?.length ?? 0,
       }),
     });
 
