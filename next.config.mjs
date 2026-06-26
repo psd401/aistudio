@@ -19,6 +19,12 @@ const nextConfig = {
   reactCompiler: true,
   reactStrictMode: true,
   output: 'standalone',
+  // Allow an isolated build directory (default '.next'). The local E2E runner
+  // builds a production bundle to '.next-e2e' so it can run a prod server on a
+  // dedicated port WITHOUT clobbering a developer's running `next dev` (.next),
+  // and without the dev server's lazy per-route compilation falling over under
+  // parallel Playwright load. See scripts/test/e2e-local.sh.
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   transpilePackages: ['recharts'],
   serverExternalPackages: ['winston', 'logform', '@colors/colors', 'argon2', 'postgres', 'mammoth', 'pdf-parse', 'oidc-provider', 'ws',
     // Atrium collab (#1051): the agent-bridge route opens a y-websocket client to

@@ -32,6 +32,9 @@ const EXTERNAL_PROVIDER_SPECS =
 
 export default defineConfig({
   testDir: './tests/e2e',
+  // Browser-based route warm-up (compiles dev client bundles before the parallel
+  // suite). No-op unless PLAYWRIGHT_WARM=1 — set by scripts/test/e2e-local.sh.
+  globalSetup: './tests/e2e/global-setup.ts',
   testIgnore: process.env.E2E_EXCLUDE_EXTERNAL ? EXTERNAL_PROVIDER_SPECS : undefined,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,

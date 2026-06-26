@@ -16,6 +16,7 @@
 
 # next.js
 /.next/
+/.next-e2e/
 /out/
 
 # production
@@ -66,3 +67,4 @@ infra/**/package-lock.json
 .claude/agent-memory/
 .claude/worktrees/
 docs/learnings/.evolve-state.json
+tests/e2e/.auth/

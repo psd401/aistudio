@@ -3,6 +3,10 @@ import { gotoNexus, sendMessage, waitForStreamingComplete, getConversationIdFrom
 
 // Nexus conversation management E2E tests — CRUD, archive/pin, sidebar, pagination.
 
+// Authenticated describes load the seeded admin session minted by
+// tests/e2e/global-setup.ts. The "Unauthenticated" describe deliberately omits it.
+const AUTH_A = 'tests/e2e/.auth/user-a.json'
+
 // ── Conversations API — Auth-independent ─────────────────────────────────────
 
 test.describe('Nexus Conversations API — Unauthenticated', () => {
@@ -41,6 +45,7 @@ test.describe('Nexus Conversations API — Unauthenticated', () => {
 // ── Conversations API — Authenticated ────────────────────────────────────────
 
 test.describe('Nexus Conversations API — Authenticated', () => {
+  test.use({ storageState: AUTH_A })
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
@@ -288,6 +293,7 @@ test.describe('Nexus Conversations API — Authenticated', () => {
 // ── Sidebar UI — Authenticated ────────────────────────────────────────────────
 
 test.describe('Nexus Sidebar — Authenticated', () => {
+  test.use({ storageState: AUTH_A })
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
@@ -352,6 +358,7 @@ test.describe('Nexus Sidebar — Authenticated', () => {
 // ── Input Validation ──────────────────────────────────────────────────────────
 
 test.describe('Nexus Conversations API — Input Validation', () => {
+  test.use({ storageState: AUTH_A })
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
