@@ -12,6 +12,7 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cloudwatch_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as autoscaling from 'aws-cdk-lib/aws-applicationautoscaling';
+import { RedisCache } from './cache/redis-cache';
 
 export interface EcsServiceConstructProps {
   vpc: ec2.IVpc;
@@ -777,6 +778,22 @@ export class EcsServiceConstruct extends Construct {
       ec2.Port.tcp(3000),
       'Allow traffic from ALB'
     );
+
+    // ============================================================================
+    // Atrium collaboration Redis cache (#1051)
+    // ============================================================================
+    // The Atrium collab server (lib/content/collab/collab-server.ts) only enables
+    // the Hocuspocus Redis extension when REDIS_HOST is set, which is what lets Yjs
+    // document updates fan out across multiple ECS tasks. The cache is created here
+    // (after ecsSecurityGroup exists) so its ingress can be scoped to the ECS
+    // service only, then REDIS_HOST/REDIS_PORT are injected into the container.
+    const redisCache = new RedisCache(this, 'AtriumRedis', {
+      vpc,
+      environment,
+      ingressSecurityGroup: ecsSecurityGroup,
+    });
+    container.addEnvironment('REDIS_HOST', redisCache.endpointAddress);
+    container.addEnvironment('REDIS_PORT', redisCache.endpointPort);
 
     this.service = new ecs.FargateService(this, 'Service', {
       cluster: this.cluster,
