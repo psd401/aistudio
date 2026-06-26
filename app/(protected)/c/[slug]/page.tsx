@@ -118,7 +118,10 @@ async function loadPublishedObject(slug: string): Promise<{
  * canView check runs — leaking a sensitive title (e.g. "H.R. Investigation #42")
  * to any authenticated user via tab bar, browser history, and link previews.
  */
-export async function generateMetadata(): Promise<Metadata> {
+export async function generateMetadata(_props: ReaderPageProps): Promise<Metadata> {
+  // Intentionally does NOT resolve the slug — the real document title must not be
+  // exposed here because canView hasn't run yet, and the title would leak via tab
+  // bar, browser history, and link previews to any authenticated user.
   return { title: "Atrium Document" };
 }
 

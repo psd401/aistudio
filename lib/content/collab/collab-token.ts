@@ -3,8 +3,9 @@
  *
  * A short-TTL signed token that authorizes one browser to open a specific
  * document's collaboration websocket. Minted by the `/api/content/[id]/collab`
- * route AFTER a `canView`/`canEdit` check, verified by the Hocuspocus collab
- * server's `onAuthenticate`. This mirrors Proof's `collab-session` token: the
+ * route AFTER a `canView`/`canEdit` check, verified by the y-websocket-protocol
+ * collab server's token verification step. This mirrors Proof's `collab-session`
+ * token: the
  * websocket itself carries no ambient cookie trust — authorization is an explicit,
  * per-document, expiring grant that also encodes write permission.
  *
@@ -16,7 +17,7 @@ import { SignJWT, jwtVerify } from "jose";
 
 const ISSUER = "atrium-collab";
 const AUDIENCE = "atrium-collab-ws";
-const TTL_SECONDS = 300; // 5 minutes; the provider refreshes by reconnecting.
+const TTL_SECONDS = 300; // 5 minutes; clients re-mint a token by reconnecting via the /collab REST endpoint.
 
 export interface CollabClaims {
   /** users.id as a string. */

@@ -80,6 +80,9 @@ function initRedis(): void {
     port: Number(process.env.REDIS_PORT ?? 6379),
     lazyConnect: false,
     maxRetriesPerRequest: null,
+    // REDIS_TLS=1 is set when the ElastiCache cluster has transitEncryptionEnabled.
+    // `tls: {}` tells ioredis to wrap the connection in TLS (same port 6379).
+    ...(process.env.REDIS_TLS === "1" ? { tls: {} } : {}),
   };
   redisPub = new Redis(opts);
   redisPub.on("error", (err: Error) =>

@@ -22,7 +22,12 @@ export interface DocStateRow {
   revision: number;
 }
 
-/** Load the persisted state for a document, or null if it has never been stored. */
+/**
+ * Load the persisted state for a document. Returns `null` when the document has
+ * never been stored (not-found). Throws on a real database error — callers must
+ * not use `.catch(() => null)` here, as that would collapse a DB outage into a
+ * silent "unseen document" and trigger an unnecessary seed write on every request.
+ */
 export async function loadDocState(objectId: string): Promise<DocStateRow | null> {
   const rows = await executeQuery(
     (db) =>

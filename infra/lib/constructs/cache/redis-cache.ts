@@ -7,10 +7,10 @@ import { Construct } from "constructs"
  * RedisCache — ElastiCache (Redis OSS) single-node cache for Atrium collaboration.
  *
  * Issue #1051 (Epic #1059, Atrium Phase 1). The Atrium collaboration server
- * (lib/content/collab/collab-server.ts) only attaches the Hocuspocus Redis
- * extension when REDIS_HOST is set, so this cache is what lets Yjs document
- * updates fan out across multiple ECS tasks. Without it, each ECS task keeps an
- * isolated in-memory Y.Doc and clients on different tasks diverge.
+ * (lib/content/collab/collab-server.ts) only enables Redis fan-out when
+ * REDIS_HOST is set, so this cache is what lets Yjs document updates fan out
+ * across multiple ECS tasks. Without it, each ECS task keeps an isolated
+ * in-memory Y.Doc and clients on different tasks diverge.
  *
  * The construct provisions:
  * - A dedicated Redis security group that only accepts TCP 6379 from the ECS
@@ -21,9 +21,14 @@ import { Construct } from "constructs"
  *
  * Phase 1 is intentionally a single node (no replication / automatic failover).
  * Production HA — a CfnReplicationGroup with Multi-AZ + a replica, or a
- * Serverless cache — is a follow-up. Hocuspocus tolerates a brief Redis outage
- * by falling back to per-task in-memory state, so a single node is acceptable
- * for the initial rollout.
+ * Serverless cache — is a follow-up. The collab server tolerates a brief Redis
+ * outage by falling back to per-task in-memory state, so a single node is
+ * acceptable for the initial rollout.
+ *
+ * Encryption: transit encryption is enabled (`transitEncryptionEnabled: true`)
+ * so Y.Doc CRDT updates (which may contain PII) travel over TLS. At-rest
+ * encryption requires migrating to CfnReplicationGroup (CfnCacheCluster does
+ * not expose atRestEncryptionEnabled) — tracked as a follow-up for Phase 2 HA.
  */
 export interface RedisCacheProps {
   /**
@@ -120,6 +125,9 @@ export class RedisCache extends Construct {
       cacheSubnetGroupName: subnetGroup.ref,
       // Apply patches in a low-traffic window; minor versions auto-upgrade.
       autoMinorVersionUpgrade: true,
+      // Y.Doc CRDT updates may contain PII — enforce TLS for data in transit.
+      // Port stays 6379; ElastiCache TLS does not change the default port.
+      transitEncryptionEnabled: true,
     })
     cluster.addDependency(subnetGroup)
 

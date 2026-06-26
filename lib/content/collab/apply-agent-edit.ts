@@ -154,9 +154,12 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
       // Without a close listener, a server-side 4401 (expired/rejected token)
       // fires 'close' — not 'error' — and the promise hangs for the full
       // SYNC_TIMEOUT_MS before the timer fires.
+      // Guard: if the update was already dispatched and the 500 ms settle timer
+      // is running, a clean server-side close is not an error — the edit landed.
       ws.addEventListener("close", () => {
         clearTimeout(timer);
-        reject(new Error("collab websocket closed"));
+        if (!applied) reject(new Error("collab websocket closed"));
+        else resolve();
       });
     });
   } finally {

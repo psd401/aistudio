@@ -783,10 +783,11 @@ export class EcsServiceConstruct extends Construct {
     // Atrium collaboration Redis cache (#1051)
     // ============================================================================
     // The Atrium collab server (lib/content/collab/collab-server.ts) only enables
-    // the Hocuspocus Redis extension when REDIS_HOST is set, which is what lets Yjs
-    // document updates fan out across multiple ECS tasks. The cache is created here
-    // (after ecsSecurityGroup exists) so its ingress can be scoped to the ECS
-    // service only, then REDIS_HOST/REDIS_PORT are injected into the container.
+    // Redis fan-out when REDIS_HOST is set, which is what lets Yjs document updates
+    // fan out across multiple ECS tasks. The cache is created here (after
+    // ecsSecurityGroup exists) so its ingress can be scoped to the ECS service only,
+    // then REDIS_HOST/REDIS_PORT/REDIS_TLS are injected into the container.
+    // REDIS_TLS=1 matches the transitEncryptionEnabled flag on the cluster.
     const redisCache = new RedisCache(this, 'AtriumRedis', {
       vpc,
       environment,
@@ -794,6 +795,7 @@ export class EcsServiceConstruct extends Construct {
     });
     container.addEnvironment('REDIS_HOST', redisCache.endpointAddress);
     container.addEnvironment('REDIS_PORT', redisCache.endpointPort);
+    container.addEnvironment('REDIS_TLS', '1');
 
     this.service = new ecs.FargateService(this, 'Service', {
       cluster: this.cluster,
