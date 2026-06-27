@@ -60,7 +60,14 @@ else
   DB_SSL="${DB_SSL:-false}" PORT="$E2E_PORT" HOSTNAME=127.0.0.1 \
     bun run server.ts > /tmp/e2e-local-server.log 2>&1 &
   STARTED_PID=$!
-  trap '[ -n "$STARTED_PID" ] && kill "$STARTED_PID" >/dev/null 2>&1 || true' EXIT INT TERM
+  # On exit: stop our server and undo Next's automatic tsconfig.json edit (running
+  # `next dev` with a custom distDir appends "<distDir>/types" to tsconfig include).
+  cleanup() {
+    [ -n "$STARTED_PID" ] && kill "$STARTED_PID" >/dev/null 2>&1
+    git checkout -- tsconfig.json >/dev/null 2>&1
+    return 0
+  }
+  trap cleanup EXIT INT TERM
   echo -n "e2e-local: waiting for $BASE "
   ready=0
   for _ in $(seq 1 90); do
