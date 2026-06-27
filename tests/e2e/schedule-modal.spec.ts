@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures'
 
 test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
 

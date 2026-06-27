@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures'
 
 /**
  * E2E tests for the catalog-backed MCP server (Issue #924, Epic #922 ws#2).

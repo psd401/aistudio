@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 
 /**
  * E2E guard: Atrium Phase 1 document endpoints (#1051) — always-run, CI-safe.

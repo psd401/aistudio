@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures'
 import {
   authenticateContext,
   SEEDED_NO_CAPABILITY_EMAIL,

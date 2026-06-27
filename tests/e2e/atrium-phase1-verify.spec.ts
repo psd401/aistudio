@@ -1,4 +1,4 @@
-import { test, expect, type BrowserContext } from "@playwright/test";
+import { test, expect, type BrowserContext } from "./fixtures";
 import { authenticateContext } from "./helpers/session-auth";
 
 /**
