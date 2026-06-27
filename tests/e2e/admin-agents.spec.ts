@@ -17,6 +17,8 @@ import { test, expect } from './fixtures'
 test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
 
 test.describe('Agent Dashboard — Public Access', () => {
+  test.use({ storageState: { cookies: [], origins: [] } })
+
   test('non-admin user is redirected away from /admin/agents', async ({ page }) => {
     await page.goto('/admin/agents')
 
