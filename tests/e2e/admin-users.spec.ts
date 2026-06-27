@@ -39,13 +39,26 @@ async function gotoAdminUsers(page: Page): Promise<void> {
     }
     throw new Error(`gotoAdminUsers: user-management-page not found within 15s. Current URL: ${url}`)
   }
-  // Let the initial data load settle (table rows render) so role tabs and filters
-  // are interactive — clicking a tab mid-load can drop the activation.
+  // Wait for the table rows to render.
   await page
     .locator('tbody tr')
     .first()
     .waitFor({ state: 'visible', timeout: 15_000 })
     .catch(() => {})
+}
+
+/**
+ * Click a role tab and wait until it is the active tab. The page is server-rendered,
+ * so the tab buttons exist in the initial HTML before React attaches their click
+ * handlers — a click fired pre-hydration is silently dropped. Retry the click until
+ * it registers (the tab activates).
+ */
+async function activateRoleTab(page: Page, label: string): Promise<void> {
+  const tab = page.locator('[role="tab"]').filter({ hasText: label })
+  await expect(async () => {
+    await tab.click()
+    await expect(tab).toHaveAttribute('data-state', 'active', { timeout: 1_000 })
+  }).toPass({ timeout: 15_000 })
 }
 
 async function openRowActionsMenu(page: Page, rowIndex = 0): Promise<void> {
@@ -250,47 +263,29 @@ test.describe('User Management — Role Tab Navigation', () => {
   })
 
   test('clicking Admins tab makes it active', async ({ page }) => {
-    const adminsTab = page.locator('[role="tab"]').filter({ hasText: 'Admins' })
-    await adminsTab.click()
-    await expect(adminsTab).toHaveAttribute('data-state', 'active', {
-      timeout: 10_000,
-    })
+    await activateRoleTab(page, 'Admins')
   })
 
   test('clicking Admins tab hides the role filter', async ({ page }) => {
-    await page.locator('[role="tab"]').filter({ hasText: 'Admins' }).click()
+    await activateRoleTab(page, 'Admins')
     await expect(page.locator('[aria-label="Filter by role"]')).not.toBeVisible({
       timeout: 5_000,
     })
   })
 
   test('clicking Staff tab makes it active', async ({ page }) => {
-    const staffTab = page.locator('[role="tab"]').filter({ hasText: 'Staff' })
-    await staffTab.click()
-    await expect(staffTab).toHaveAttribute('data-state', 'active', {
-      timeout: 10_000,
-    })
+    await activateRoleTab(page, 'Staff')
   })
 
   test('clicking Students tab makes it active', async ({ page }) => {
-    const studentsTab = page.locator('[role="tab"]').filter({ hasText: 'Students' })
-    await studentsTab.click()
-    await expect(studentsTab).toHaveAttribute('data-state', 'active', {
-      timeout: 10_000,
-    })
+    await activateRoleTab(page, 'Students')
   })
 
   test('returning to All Users tab restores the role filter', async ({
     page,
   }) => {
-    // Navigate away
-    await page.locator('[role="tab"]').filter({ hasText: 'Admins' }).click()
-    // Navigate back
-    const allTab = page.locator('[role="tab"]').filter({ hasText: 'All Users' })
-    await allTab.click()
-    await expect(allTab).toHaveAttribute('data-state', 'active', {
-      timeout: 10_000,
-    })
+    await activateRoleTab(page, 'Admins')
+    await activateRoleTab(page, 'All Users')
     await expect(page.locator('[aria-label="Filter by role"]')).toBeVisible({
       timeout: 5_000,
     })

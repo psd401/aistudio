@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useCallback, useEffect } from "react"
+import { useState, useCallback, useEffect, useRef } from "react"
 import { Input } from "@/components/ui/input"
 import {
   Select,
@@ -71,8 +71,18 @@ export function UserFilters({
     // Debounced value will trigger useEffect below
   }
 
-  // Notify parent when debounced search changes
+  // Notify parent when the DEBOUNCED SEARCH changes — but not on the initial
+  // mount. The mount-time notify re-ran the parent's data load (setLoading(true))
+  // every time this component mounted (initial load, and tab switches that toggle
+  // the role filter), which raced with tab/filter clicks: the parent's
+  // handleTabChange/handleFiltersChange bail with `if (loading) return`, so the
+  // click was dropped. (It also produced a "setState during render" warning.)
+  const didMountRef = useRef(false)
   useEffect(() => {
+    if (!didMountRef.current) {
+      didMountRef.current = true
+      return
+    }
     notifyChange({ search: debouncedSearch })
   }, [debouncedSearch, notifyChange])
 
