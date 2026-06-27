@@ -39,6 +39,13 @@ async function gotoAdminUsers(page: Page): Promise<void> {
     }
     throw new Error(`gotoAdminUsers: user-management-page not found within 15s. Current URL: ${url}`)
   }
+  // Let the initial data load settle (table rows render) so role tabs and filters
+  // are interactive — clicking a tab mid-load can drop the activation.
+  await page
+    .locator('tbody tr')
+    .first()
+    .waitFor({ state: 'visible', timeout: 15_000 })
+    .catch(() => {})
 }
 
 async function openRowActionsMenu(page: Page, rowIndex = 0): Promise<void> {
@@ -330,8 +337,10 @@ test.describe('User Management — Filters', () => {
     await page.locator('[aria-label="Filter by status"]').click()
 
     for (const label of ['All Statuses', 'Active', 'Inactive', 'Pending']) {
+      // Exact match — 'Active' is a substring of 'Inactive', so hasText would
+      // resolve to two options and trip Playwright strict mode.
       await expect(
-        page.locator('[role="option"]').filter({ hasText: label })
+        page.getByRole('option', { name: label, exact: true })
       ).toBeVisible({ timeout: 5_000 })
     }
 
@@ -340,7 +349,7 @@ test.describe('User Management — Filters', () => {
 
   test('selecting Active status shows Clear button', async ({ page }) => {
     await page.locator('[aria-label="Filter by status"]').click()
-    await page.locator('[role="option"]').filter({ hasText: 'Active' }).click()
+    await page.getByRole('option', { name: 'Active', exact: true }).click()
     await expect(
       page.locator('[aria-label="Clear all filters"]')
     ).toBeVisible({ timeout: 5_000 })
