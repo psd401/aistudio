@@ -64,12 +64,14 @@ test.describe('Agent Dashboard — Admin', () => {
   })
 
   test('stats cards section renders', async ({ page }) => {
-    // Wait for stats to load — skeleton or actual cards
+    // AgentStatsCards renders a grid of shadcn <Card>s. shadcn cards carry the
+    // 'bg-card' class (lowercase) — the old [class*="Card"] (capital C) matched
+    // nothing. Match the lowercase card class.
     const statsSection = page
       .locator('[class*="grid"]')
-      .filter({ has: page.locator('[class*="Card"]') })
+      .filter({ has: page.locator('[class*="card"]') })
       .first()
-    await expect(statsSection).toBeVisible({ timeout: 10000 })
+    await expect(statsSection).toBeVisible({ timeout: 15000 })
   })
 
   test('tab navigation renders all tabs', async ({ page }) => {

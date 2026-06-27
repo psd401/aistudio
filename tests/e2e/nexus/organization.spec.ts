@@ -300,6 +300,13 @@ test.describe('Nexus Sidebar — Authenticated', () => {
   )
 
   test('conversation created via chat appears in sidebar', async ({ page }) => {
+    // Sending a chat message requires a live AI model to respond (the conversation
+    // is created by the streamed turn). Gate behind E2E_RUN_EXTERNAL like the other
+    // live-provider specs so the keyless default run doesn't fail here.
+    test.skip(
+      process.env.E2E_RUN_EXTERNAL !== '1',
+      'Creating a conversation via chat needs a live model — set E2E_RUN_EXTERNAL=1'
+    )
     await gotoNexus(page)
 
     const uniqueMsg = `Sidebar test ${Date.now()}`
