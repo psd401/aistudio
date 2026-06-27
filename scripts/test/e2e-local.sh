@@ -89,6 +89,8 @@ if docker exec -i aistudio-postgres pg_isready -U postgres >/dev/null 2>&1; then
     < scripts/db/seed-local.sql >/dev/null 2>&1 || true
   docker exec -i aistudio-postgres psql -U postgres -d aistudio -v ON_ERROR_STOP=0 -q \
     < tests/e2e/fixtures/atrium-reference-seed.sql >/dev/null 2>&1 || true
+  docker exec -i aistudio-postgres psql -U postgres -d aistudio -v ON_ERROR_STOP=0 -q \
+    < tests/e2e/fixtures/assistant-architect-seed.sql >/dev/null 2>&1 || true
   DATABASE_URL="postgresql://postgres:postgres@localhost:5432/aistudio" DB_SSL=false \
     bun run scripts/dev/seed-atrium-doc-state.ts >/dev/null 2>&1 || true
 else
