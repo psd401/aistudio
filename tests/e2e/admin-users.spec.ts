@@ -47,10 +47,17 @@ async function openRowActionsMenu(page: Page, rowIndex = 0): Promise<void> {
   await actionsBtn.click()
 }
 
+// All suites below the gating one require the seeded admin session minted by
+// tests/e2e/global-setup.ts. The Auth Gating suite overrides this back to no
+// session (it asserts unauthenticated redirects + 401s).
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
+
 // ---------------------------------------------------------------------------
 // Suite 1 — Auth gating (always runs)
 // ---------------------------------------------------------------------------
 test.describe('User Management — Auth Gating', () => {
+  test.use({ storageState: { cookies: [], origins: [] } })
+
   test('unauthenticated access to /admin/users is redirected', async ({
     page,
   }) => {

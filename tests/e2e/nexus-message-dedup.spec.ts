@@ -22,6 +22,8 @@ async function gotoNexus(page: Page) {
   await page.waitForSelector('[data-testid="nexus-shell"]', { timeout: 10000 })
 }
 
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
+
 test.describe('Nexus Message Deduplication (#868)', () => {
   test.skip(!process.env.PLAYWRIGHT_AUTH_ENABLED, 'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run')
 

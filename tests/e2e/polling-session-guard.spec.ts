@@ -31,6 +31,8 @@ async function gotoNexus(page: Page) {
   await page.waitForURL((url) => !url.pathname.startsWith('/login'), { timeout: 10000 })
 }
 
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
+
 test.describe('Polling Session Guards — useExecutionResults', () => {
   test.skip(!process.env.PLAYWRIGHT_AUTH_ENABLED, 'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run')
 
