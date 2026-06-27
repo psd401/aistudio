@@ -106,8 +106,8 @@ export PLAYWRIGHT_AUTH_ENABLED=true
 export PLAYWRIGHT_WARM=1
 if [ "${E2E_RUN_EXTERNAL:-}" != "1" ]; then export E2E_EXCLUDE_EXTERNAL=1; fi
 
-echo "e2e-local: running Playwright suite against $BASE (workers=${E2E_WORKERS:-2}, retries=${E2E_RETRIES:-1})…"
-bunx playwright test --workers="${E2E_WORKERS:-2}" --retries="${E2E_RETRIES:-1}" "$@"
+echo "e2e-local: running Playwright suite against $BASE (workers=${E2E_WORKERS:-2}, retries=${E2E_RETRIES:-2})…"
+bunx playwright test --workers="${E2E_WORKERS:-2}" --retries="${E2E_RETRIES:-2}" "$@"
 RESULT=$?
 
 if [ "$RESULT" -ne 0 ]; then

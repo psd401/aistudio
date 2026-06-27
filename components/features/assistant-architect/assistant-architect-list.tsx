@@ -77,7 +77,7 @@ export function AssistantArchitectList({ tools }: AssistantArchitectListProps) {
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
       {tools.map((tool) => (
-        <Card key={tool.id} className="flex flex-col" data-testid="assistant-architect-card">
+        <Card key={tool.id} className="flex flex-col">
           <CardHeader>
             <div className="flex items-start justify-between">
               <div>

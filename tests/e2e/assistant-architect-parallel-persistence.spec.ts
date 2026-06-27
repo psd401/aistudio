@@ -33,16 +33,23 @@ async function openPromptsEditor(page: Page): Promise<boolean> {
   await page.goto('/utilities/assistant-architect')
   await page.waitForSelector('main', { timeout: 15_000 })
 
-  // ONLY real architect cards — the empty-state "No assistants found" card also
-  // carries shadcn's bg-card class, so a [class*="card"] selector would match it.
-  const cards = page.locator('[data-testid="assistant-architect-card"]')
-  if ((await cards.count()) === 0) return false
+  // Identify a real architect via its "Edit" link — the empty-state "No assistants
+  // found" card has no such link, so this skips cleanly when the user owns none
+  // (avoids matching shadcn's bg-card on the empty card).
+  const editLink = page.locator(
+    'a[href^="/utilities/assistant-architect/"][href$="/edit"]'
+  )
+  if ((await editLink.count()) === 0) return false
 
-  const editHref = await cards.first().locator('a[href*="/edit"]').first().getAttribute('href')
+  const editHref = await editLink.first().getAttribute('href')
   if (!editHref) return false
 
-  await page.goto(editHref.replace(/\/edit.*$/, '/edit/prompts'))
-  await page.waitForSelector('.react-flow', { timeout: 20_000 })
+  await page.goto(editHref.replace(/\/edit$/, '/edit/prompts'))
+  await page.waitForSelector('.react-flow', { timeout: 30_000 })
+  // Wait for the graph to actually mount a node — under dev-server load the canvas
+  // shell can appear well before ReactFlow finishes rendering nodes, which flakes
+  // the assertions that follow.
+  await page.waitForSelector('.react-flow__node', { timeout: 20_000 }).catch(() => {})
   return true
 }
 

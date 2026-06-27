@@ -35,7 +35,7 @@ test.describe('Admin skill review', () => {
     }
 
     // The review queue heading should be present for an admin.
-    await expect(page.locator('main, body')).toBeVisible()
+    await expect(page.locator('main').first()).toBeVisible()
 
     // If at least one skill is queued, the approve + reject controls must render.
     const approve = page.locator('button:has-text("Approve to Shared")')
