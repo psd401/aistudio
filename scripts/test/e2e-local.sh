@@ -70,7 +70,7 @@ else
   trap cleanup EXIT INT TERM
   echo -n "e2e-local: waiting for $BASE "
   ready=0
-  for _ in $(seq 1 90); do
+  for attempt in $(seq 1 90); do
     curl -sf "$BASE/api/healthz" >/dev/null 2>&1 && { ready=1; echo "— ready"; break; }
     echo -n "."; sleep 2
   done

@@ -40,7 +40,9 @@ bun run typecheck                      # 0 errors
 bun run lint                           # touched files clean
 bunx jest tests/unit/atrium-*.test.ts  # provenance + Phase 0 service contracts
 bun run test:smoke:atrium-render       # remark/rehype pipeline (Bun, 9 checks)
-bun run test:smoke:atrium-collab       # markdown<->Y.Doc round-trip + authorship (Bun, 4 checks)
+bun run test:smoke:atrium-collab       # markdown<->Y.Doc round-trip + authorship + adversarial-HTML drop (Bun, 8 checks)
+bun run test:smoke:atrium-collab-token # collab token sign/verify: expiry, issuer, audience, signature, read/write (Bun, 10 checks)
+bun run test:smoke:atrium-agent-bridge # agent-bridge failure paths: close-before-sync + error reject, token+URL shape (Bun, 3 checks)
 bunx playwright test tests/e2e/atrium-document.guard.spec.ts   # route auth guards (401)
 ```
 

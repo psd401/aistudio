@@ -100,6 +100,12 @@ function remarkAtriumDirectives() {
 // `[name, ...allowedValues]` tuple: hast-util-sanitize restricts `className` to
 // exactly these tokens (any other class is dropped). Typed as the same shape as
 // `defaultSchema` so it slots into rehype-sanitize without widening.
+// Only classes the pipeline actually GENERATES are listed. The directive
+// transform (`remarkAtriumDirectives`) emits exactly `atrium-callout` and
+// `atrium-callout-warn`; remark-math emits the `math*` classes. No directive
+// produces `atrium-callout-title`, so it is intentionally absent — allowing a
+// class no transform emits would only widen the surface for any future raw-HTML
+// path without a corresponding feature.
 const classAllow: [string, ...string[]] = [
   "className",
   "math",
@@ -107,7 +113,6 @@ const classAllow: [string, ...string[]] = [
   "math-display",
   "atrium-callout",
   "atrium-callout-warn",
-  "atrium-callout-title",
 ];
 
 const sanitizeSchema: typeof defaultSchema = {

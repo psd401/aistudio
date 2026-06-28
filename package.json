@@ -16,6 +16,8 @@
     "test": "jest",
     "test:smoke:atrium-render": "bun run tests/smoke/atrium-markdown-render.smoke.ts",
     "test:smoke:atrium-collab": "bun run tests/smoke/atrium-collab-bridge.smoke.ts",
+    "test:smoke:atrium-collab-token": "bun run tests/smoke/atrium-collab-token.smoke.ts",
+    "test:smoke:atrium-agent-bridge": "bun run tests/smoke/atrium-agent-bridge.smoke.ts",
     "test:smoke:atrium-visibility": "DATABASE_URL='postgresql://postgres:postgres@localhost:5432/aistudio' DB_SSL=false bun run tests/smoke/atrium-visibility-reference.smoke.ts",
     "test:ci": "jest --config=jest.config.ci.js",
     "test:watch": "jest --watch",

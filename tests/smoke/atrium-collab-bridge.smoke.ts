@@ -77,4 +77,48 @@ check("seeded Y.Doc round-trips back to JSON with content + authorship", () => {
   assert.ok(everyTextHasAuthor(json, "ai:bot-9"), "authorship survives the round-trip");
 });
 
+// --- Adversarial markdown: the seeding path must NOT carry raw HTML into the doc.
+// The ProseMirror schema is not a security boundary; markdownToProseMirrorJSON
+// drops raw HTML at the `marked` layer (editorMarked renderer.html -> ""). These
+// assert that no script/event-handler/embedding vector survives into the seeded
+// ProseMirror tree. (Regression guard for PR #1062 review finding #1.)
+function jsonContainsString(node: unknown, needle: string): boolean {
+  const s = JSON.stringify(node).toLowerCase();
+  return s.includes(needle.toLowerCase());
+}
+
+check("raw <script> in markdown is dropped from the seeded doc", () => {
+  const json = markdownToProseMirrorJSON("intro\n\n<script>alert(1)</script>\n\nend");
+  assert.ok(!jsonContainsString(json, "<script"), "no <script tag survives");
+  assert.ok(!jsonContainsString(json, "alert(1)"), "no script body survives");
+  const text = collectText(json).join(" ");
+  assert.match(text, /intro/);
+  assert.match(text, /end/);
+});
+
+check("inline <img onerror> is dropped, surrounding text preserved", () => {
+  const json = markdownToProseMirrorJSON('before <img src=x onerror="alert(1)"> after');
+  assert.ok(!jsonContainsString(json, "onerror"), "no onerror handler survives");
+  assert.ok(!jsonContainsString(json, "<img"), "no <img tag survives");
+  const text = collectText(json).join(" ");
+  assert.match(text, /before/);
+  assert.match(text, /after/);
+});
+
+check("raw <iframe>/<div onclick> embedding markup is dropped", () => {
+  const json = markdownToProseMirrorJSON(
+    "# Heading\n\n<iframe src=evil></iframe>\n\n<div onclick=\"x\">nope</div>"
+  );
+  assert.ok(!jsonContainsString(json, "<iframe"), "no <iframe tag survives");
+  assert.ok(!jsonContainsString(json, "onclick"), "no onclick handler survives");
+  assert.match(collectText(json).join(" "), /Heading/);
+});
+
+check("legitimate markdown formatting still parses (no over-stripping)", () => {
+  const json = markdownToProseMirrorJSON("normal **bold** and _em_ text");
+  const text = collectText(json).join(" ");
+  assert.match(text, /bold/);
+  assert.match(text, /em/);
+});
+
 console.log(`\natrium-collab-bridge smoke: ${passed} checks passed`);

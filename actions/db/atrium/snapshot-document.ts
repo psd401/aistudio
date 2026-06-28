@@ -31,6 +31,7 @@ import { NotFoundError, ForbiddenError } from "@/lib/content/errors";
 import type { ContentVersionDTO } from "@/lib/content";
 import type { ActionState } from "@/types";
 import { hasCapabilityAccess } from "@/utils/roles";
+import { getServerSession } from "@/lib/auth/server-session";
 import { getUserRequester } from "./requester";
 
 export async function snapshotDocumentAction(
@@ -42,17 +43,21 @@ export async function snapshotDocumentAction(
   const log = createLogger({ requestId, action: "snapshotDocumentAction" });
 
   try {
+    // Resolve the session ONCE and thread it through both the requester build and
+    // the capability check — avoids a double getServerSession() (JWT verify +
+    // cookie parse) per action and guarantees both reads see the same session.
+    const session = await getServerSession();
     // Resolve the requester FIRST so an unauthenticated caller gets a 401
     // (authNoSession → "please log in") rather than a 403 — `hasCapabilityAccess`
     // returns false (not throws) on a missing session, so gating on it first would
     // surface "access denied" to a caller who simply needs to log in.
-    const requester = await getUserRequester(requestId);
-    if (!(await hasCapabilityAccess("atrium-content"))) {
+    const requester = await getUserRequester(requestId, session);
+    if (!(await hasCapabilityAccess("atrium-content", session?.sub))) {
       throw ErrorFactories.authzToolAccessDenied("atrium-content");
     }
 
     if (!input) {
-      throw new Error("Input parameters are required");
+      throw ErrorFactories.missingRequiredField("input");
     }
 
     log.info("Action started: snapshot document", {

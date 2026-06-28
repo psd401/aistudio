@@ -7,19 +7,20 @@
  * stamping authorship as it goes.
  *
  * Seeding (markdown -> Y.Doc): an agent-drafted (or human-drafted) document's
- * markdown is parsed to editable HTML (via `marked`, plain — NOT the rich reader
- * pipeline, which adds KaTeX/sanitize artifacts unsuitable for editing), turned
- * into ProseMirror JSON against the shared schema, stamped with the creator's
- * author tag on every text node, then converted to a Y.Doc by y-prosemirror's
- * `prosemirrorJSONToYDoc`. The whole initial draft therefore reads as its
- * creator on the rail (purple for an agent draft, green for a human draft).
+ * markdown is parsed to editable HTML (via a `marked` instance that DROPS raw
+ * HTML — see `editorMarked` below — NOT the rich reader pipeline, which adds
+ * KaTeX/sanitize artifacts unsuitable for editing), turned into ProseMirror JSON
+ * against the shared schema, stamped with the creator's author tag on every text
+ * node, then converted to a Y.Doc by y-prosemirror's `prosemirrorJSONToYDoc`. The
+ * whole initial draft therefore reads as its creator on the rail (purple for an
+ * agent draft, green for a human draft).
  *
  * This module imports the pure-ESM TipTap/Yjs stack and is therefore NOT
  * jest-loadable (next/jest cannot transform it); it is covered by the Bun smoke
  * test tests/smoke/atrium-collab-bridge.smoke.ts.
  */
 
-import { marked } from "marked";
+import { Marked } from "marked";
 import { generateJSON } from "@tiptap/html";
 import type { JSONContent } from "@tiptap/core";
 import { prosemirrorJSONToYDoc, yDocToProsemirrorJSON } from "y-prosemirror";
@@ -28,16 +29,44 @@ import { getSchemaExtensions, getCollabSchema } from "./editor-extensions";
 import { AUTHORED_MARK, COLLAB_FIELD } from "./provenance";
 
 /**
+ * A `marked` instance whose renderer DROPS raw HTML tokens (both block and inline)
+ * instead of emitting them. This is the security boundary for the editor-seeding
+ * path: ProseMirror's schema parser (`generateJSON`) is NOT a sanitizer — it
+ * happily parses `<img onerror=...>` / `<script>` out of inline HTML, so any raw
+ * HTML in the source markdown would otherwise survive into every connected
+ * editor's DOM (the reader path is sanitized separately by rehype-sanitize).
+ *
+ * Why drop rather than route through DOMPurify: `html-sanitize.ts` pulls jsdom +
+ * DOMPurify, which we deliberately keep OUT of the collab-server bundle (see the
+ * note in markdown-render.ts). Authored Atrium content is canonical markdown, not
+ * HTML, so raw-HTML passthrough is not a supported feature here — dropping the
+ * `html` tokens neutralizes the vector at parse time with zero extra deps.
+ */
+const editorMarked = new Marked({ async: false });
+// A renderer `html` override drops BOTH block-level (`<div>`/`<script>` blocks)
+// and inline (`<img onerror=...>` mid-paragraph) raw-HTML tokens — marked routes
+// both through the same renderer method. Verified by the seeding-path smoke test.
+editorMarked.use({
+  renderer: {
+    html(): string {
+      return "";
+    },
+  },
+});
+
+/**
  * Parse markdown into ProseMirror JSON against the shared Atrium schema.
  *
- * Trust model: `marked` converts markdown to HTML; that HTML then passes through
- * `generateJSON` which parses it against the ProseMirror schema — the schema acts
- * as the sanitization boundary (unknown tags and attributes are dropped). Do NOT
- * pipe this through the reader's rich pipeline (KaTeX, DOMPurify, etc.) — those
- * add artifacts that are unsuitable for the editable TipTap model.
+ * Trust model: raw HTML is DROPPED by `editorMarked` (its renderer returns "" for
+ * every `html` token — see above) BEFORE the HTML string reaches `generateJSON`.
+ * The ProseMirror schema is an additional safety net (unknown tags/attrs are
+ * dropped), but it is NOT relied on as the sanitization boundary — the schema
+ * parser is not a security control. Do NOT pipe this through the reader's rich
+ * pipeline (KaTeX, DOMPurify, etc.) — those add artifacts unsuitable for the
+ * editable TipTap model.
  */
 export function markdownToProseMirrorJSON(markdown: string): JSONContent {
-  const html = marked.parse(markdown ?? "", { async: false });
+  const html = editorMarked.parse(markdown ?? "", { async: false });
   if (typeof html !== "string") {
     throw new TypeError("marked.parse returned a non-string; expected sync output");
   }
@@ -67,8 +96,8 @@ export function stampAuthor(node: JSONContent, by: string): JSONContent {
 
 /**
  * Build a Y.Doc for a fresh document from its markdown, stamped with the
- * creator's author tag. Returned doc is ready to hand back from Hocuspocus
- * `onLoadDocument` (its `COLLAB_FIELD` fragment is populated).
+ * creator's author tag. Returned doc is ready to seed a new collab room (its
+ * `COLLAB_FIELD` fragment is populated) — see `getOrCreateDoc` in collab-server.ts.
  */
 export function seedYDocFromMarkdown(markdown: string, by: string): YDoc {
   const json = stampAuthor(markdownToProseMirrorJSON(markdown), by);

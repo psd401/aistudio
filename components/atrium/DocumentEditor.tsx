@@ -58,6 +58,12 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
   const [status, setStatus] = useState<Status>("connecting");
   const [canEdit, setCanEdit] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
+  // The resolved object UUID from the collab session (`docName`). The component is
+  // mounted with `idOrSlug`, which MAY be a slug; the snapshot/publish actions must
+  // target the stable UUID so a slug change between load and save can't retarget a
+  // different object. Held in a ref so the action callbacks read the latest value
+  // without re-creating on every resolve.
+  const docNameRef = useRef<string | null>(null);
 
   // The editor binds to the Y.Doc directly; the provider syncs that same doc, so
   // the editor is created once (deps: []) and is unaffected by provider timing.
@@ -87,6 +93,8 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
         if (!res.ok) throw new Error(`collab token request failed: ${res.status}`);
         const session = (await res.json()) as CollabSession;
         if (cancelled) return;
+        // Capture the resolved UUID for the snapshot/publish action calls.
+        docNameRef.current = session.docName;
 
         const proto = window.location.protocol === "https:" ? "wss:" : "ws:";
         const url = `${proto}//${window.location.host}${session.wsPath}`;
@@ -113,6 +121,7 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
       cancelled = true;
       providerRef.current?.destroy();
       providerRef.current = null;
+      docNameRef.current = null;
     };
   }, [idOrSlug]);
 
@@ -123,13 +132,18 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
 
   const handleSnapshot = useCallback(async () => {
     if (!editor) return;
+    // Target the resolved UUID, not the (possibly slug) mount prop. Until the
+    // session resolves, fall back to idOrSlug — but the buttons only render once
+    // canEdit is true, which is set together with docName, so the ref is populated.
+    const target = docNameRef.current ?? idOrSlug;
     const body = editor.storage.markdown.getMarkdown();
-    const result = await snapshotDocumentAction(idOrSlug, { body });
+    const result = await snapshotDocumentAction(target, { body });
     setMessage(result.isSuccess ? "Snapshot saved" : result.message ?? "Snapshot failed");
   }, [editor, idOrSlug]);
 
   const handlePublish = useCallback(async () => {
-    const result = await publishDocumentAction(idOrSlug, { destination: "intranet" });
+    const target = docNameRef.current ?? idOrSlug;
+    const result = await publishDocumentAction(target, { destination: "intranet" });
     setMessage(result.isSuccess ? "Published to intranet" : result.message ?? "Publish failed");
   }, [idOrSlug]);
 

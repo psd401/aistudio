@@ -50,7 +50,22 @@ const log = createLogger({ context: "atrium-collab" });
 const MESSAGE_SYNC = 0;
 const MESSAGE_AWARENESS = 1;
 const SYNC_STEP_1 = 0; // y-protocols/sync messageYjsSyncStep1
-const PERSIST_DEBOUNCE_MS = 1500;
+
+/**
+ * Persist debounce window. Each room writes at most one DB row per window during
+ * active editing, so a smaller value means more writes/minute per room. Override
+ * with COLLAB_PERSIST_DEBOUNCE_MS (see .env.example); defaults to 1500 ms.
+ */
+const PERSIST_DEBOUNCE_MS = Number(process.env.COLLAB_PERSIST_DEBOUNCE_MS) || 1500;
+
+/**
+ * Max concurrent websocket connections per document room. A single client
+ * repeatedly opening sockets to one room would otherwise grow `DocEntry.conns`
+ * (and its awareness map) without bound. Override with COLLAB_MAX_CONNS_PER_ROOM;
+ * defaults to 50. Set to 0 to disable the cap.
+ */
+const MAX_CONNS_PER_ROOM = Number(process.env.COLLAB_MAX_CONNS_PER_ROOM ?? 50);
+
 const REDIS_CHANNEL_PREFIX = "atrium:collab:";
 
 interface DocEntry {
@@ -102,6 +117,12 @@ function initRedis(): void {
     if (entry) Y.applyUpdate(entry.ydoc, new Uint8Array(message), "redis");
   });
 }
+
+// Initialize Redis fan-out at module load, NOT per-document. ioredis retries the
+// connection internally (it never gives up), so a transient broker outage at boot
+// self-heals. Initializing inside getOrCreateDoc would instead permanently disable
+// fan-out for the process if the very first document's init raced a Redis hiccup.
+initRedis();
 
 // ---------------------------------------------------------------------------
 // Document lifecycle
@@ -212,16 +233,26 @@ async function getOrCreateDoc(docName: string): Promise<DocEntry> {
         // Fan out to other instances + persist (only for locally-originated edits;
         // redis-origin updates were already persisted by the originating instance).
         if (origin !== "redis") {
-          redisPub?.publish(
-            Buffer.from(`${REDIS_CHANNEL_PREFIX}${docName}`),
-            Buffer.from(update)
-          );
+          // Fire-and-forget, but never drop the rejection: a transient Redis
+          // disconnect would otherwise surface as an unhandledRejection (warn or
+          // crash depending on Node flags). `void` + `.catch` keeps fan-out
+          // best-effort while logging the failure.
+          void redisPub
+            ?.publish(
+              Buffer.from(`${REDIS_CHANNEL_PREFIX}${docName}`),
+              Buffer.from(update)
+            )
+            .catch((e) =>
+              log.warn("Redis publish failed", {
+                docName,
+                error: e instanceof Error ? e.message : String(e),
+              })
+            );
           schedulePersist(docName, entry);
         }
       });
 
       docs.set(docName, entry);
-      initRedis();
       return entry;
     } finally {
       // Always clear the in-flight cache whether the load succeeded or threw,
@@ -239,6 +270,21 @@ async function getOrCreateDoc(docName: string): Promise<DocEntry> {
 // ---------------------------------------------------------------------------
 function send(ws: WebSocket, data: Uint8Array): void {
   if (ws.readyState === 1) ws.send(data);
+}
+
+/**
+ * Reject (and close) a new connection when the room is already at the per-room
+ * connection cap. Returns true when the connection was rejected so the caller can
+ * bail. Disabled when MAX_CONNS_PER_ROOM is 0.
+ */
+function roomAtCapacity(entry: DocEntry, docName: string, ws: WebSocket): boolean {
+  if (MAX_CONNS_PER_ROOM <= 0 || entry.conns.size < MAX_CONNS_PER_ROOM) return false;
+  log.warn("Per-room connection limit reached, rejecting connection", {
+    docName,
+    limit: MAX_CONNS_PER_ROOM,
+  });
+  try { ws.close(4429, "Too many connections for this document"); } catch { /* already closing */ }
+  return true;
 }
 
 export async function handleCollabConnection(
@@ -293,6 +339,11 @@ export async function handleCollabConnection(
     try { ws.close(4500, "Server error"); } catch { /* already closing */ }
     return;
   }
+
+  // Per-room connection cap: bound DocEntry.conns so a single client cannot
+  // exhaust memory by repeatedly opening sockets to the same room.
+  if (roomAtCapacity(entry, docName, ws)) return;
+
   entry.conns.add(ws);
   entry.awarenessIds.set(ws, new Set());
 

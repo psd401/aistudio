@@ -52,6 +52,19 @@ const MESSAGE_SYNC = 0;
 const SYNC_STEP_2 = 1; // y-protocols/sync messageYjsSyncStep2
 const SYNC_TIMEOUT_MS = 10_000;
 
+/**
+ * Settle delay after dispatching the Yjs update before resolving the promise.
+ *
+ * KNOWN LIMITATION: this is heuristic, not acknowledgement-based. The y-protocols
+ * sync handshake gives us no application-level ack that the SERVER applied our
+ * update — only that we sent it. We therefore wait a fixed window for the update
+ * frame to flush over the socket before closing it. Under ECS load or Redis
+ * backpressure the default 500 ms may be insufficient; raise COLLAB_AGENT_SETTLE_MS
+ * (see .env.example) for those deployments. A future improvement would replace this
+ * with a real round-trip ack (server echoes a state vector covering our update).
+ */
+const AGENT_SETTLE_MS = Number(process.env.COLLAB_AGENT_SETTLE_MS) || 500;
+
 /** Apply the agent's markdown to the live document via a short-lived y-sync client. */
 export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
   const { objectId, markdown, agentId, mode = "replace" } = input;
@@ -137,7 +150,7 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
             setTimeout(() => {
               clearTimeout(timer);
               resolve();
-            }, 500);
+            }, AGENT_SETTLE_MS);
           }
         } catch (e) {
           log.error("Agent bridge sync message error", {
@@ -154,8 +167,9 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
       // Without a close listener, a server-side 4401 (expired/rejected token)
       // fires 'close' — not 'error' — and the promise hangs for the full
       // SYNC_TIMEOUT_MS before the timer fires.
-      // Guard: if the update was already dispatched and the 500 ms settle timer
-      // is running, a clean server-side close is not an error — the edit landed.
+      // Guard: if the update was already dispatched and the settle timer
+      // (AGENT_SETTLE_MS) is running, a clean server-side close is not an error —
+      // the edit landed.
       ws.addEventListener("close", () => {
         clearTimeout(timer);
         if (!applied) reject(new Error("collab websocket closed"));
