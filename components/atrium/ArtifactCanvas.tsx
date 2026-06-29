@@ -264,8 +264,18 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
   const handleSelectVersion = useCallback(
     async (versionId: string) => {
       setState("loading");
-      // loadCode's own seq token makes the latest selection win.
-      await loadCode(versionId);
+      try {
+        // loadCode's own seq token makes the latest selection win.
+        await loadCode(versionId);
+      } catch (err) {
+        // loadCode handles `isSuccess: false` internally, but a throw from the
+        // server action itself (non-2xx / network failure) escapes it. Without
+        // this catch the rejection is unhandled and the canvas stays stuck in
+        // "loading" with no error surfaced — mirror the initial useEffect's
+        // try/catch. Token-guard so a stale selection doesn't clobber a newer one.
+        setState((prev) => (prev === "loading" ? "error" : prev));
+        setMessage(err instanceof Error ? err.message : "Failed to load version");
+      }
     },
     [loadCode]
   );
@@ -330,6 +340,14 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }:
         <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
           {message ?? "Could not load this artifact."}
         </div>
+      ) : state === "loading" ? (
+        // While loading, `code` is still "" and `selectedVersionId` is null.
+        // Rendering <ArtifactSandbox> here would mount an iframe with empty code
+        // and key="" — if its onLoad races ahead of loadCode it posts an empty
+        // render, clearing the sandbox host's placeholder to a blank frame before
+        // the real key/code arrives. A stable-height placeholder avoids that
+        // empty-code mount and prevents layout shift when the real body lands.
+        <div style={{ minHeight: 360 }} aria-busy="true" />
       ) : tab === "preview" ? (
         // `key={selectedVersionId}` is the intentional version-switch mechanism:
         // it remounts <ArtifactSandbox> on every version change so each version
