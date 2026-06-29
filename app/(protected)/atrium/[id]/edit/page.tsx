@@ -23,6 +23,7 @@ import { visibilityService } from "@/lib/content/visibility-service";
 import { canEdit } from "@/lib/content/helpers";
 import { DocumentEditor } from "@/components/atrium/DocumentEditor";
 import { ArtifactCanvas } from "@/components/atrium/ArtifactCanvas";
+import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 
 export const dynamic = "force-dynamic";
 
@@ -64,7 +65,7 @@ export default async function AtriumEditPage({
             Interactive artifact · preview runs in an isolated sandbox
           </p>
         </header>
-        <ArtifactCanvas key={obj.id} idOrSlug={obj.id} canEdit={userCanEdit} />
+        <ArtifactCanvas key={obj.id} idOrSlug={obj.id} canEdit={userCanEdit} sandboxSrc={getArtifactSandboxRenderUrl()} />
       </main>
     );
   }

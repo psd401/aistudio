@@ -444,6 +444,7 @@ if (baseDomain) {
     customSubdomain: 'dev', // Creates dev.<baseDomain>
     documentsBucketName: devStorageStack.documentsBucketName,
     agentWorkspaceBucketName: devAgentPlatformStack.workspaceBucket.bucketName, // #925
+    atriumSandboxOrigin: devAtriumSandboxStack.sandboxOrigin, // #1052
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation
     setupDns, // Enable DNS/certificate setup (false for CI validation with example.com)
     env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
@@ -453,6 +454,7 @@ if (baseDomain) {
   devFrontendStack.addDependency(devAuthStack); // Need auth secret ARN export
   devFrontendStack.addDependency(devGuardrailsStack); // Need guardrails config exports
   devFrontendStack.addDependency(devAgentPlatformStack); // Need agent workspace bucket name (#925)
+  devFrontendStack.addDependency(devAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
   cdk.Tags.of(devFrontendStack).add('Environment', 'Dev');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(devFrontendStack).add(key, value));
 
@@ -465,6 +467,7 @@ if (baseDomain) {
     // No customSubdomain for prod - uses root baseDomain
     documentsBucketName: prodStorageStack.documentsBucketName,
     agentWorkspaceBucketName: prodAgentPlatformStack.workspaceBucket.bucketName, // #925
+    atriumSandboxOrigin: prodAtriumSandboxStack.sandboxOrigin, // #1052
     useExistingVpc: setupDns, // Use VPC sharing in real deployments, create new VPC for CI validation
     setupDns, // Enable DNS/certificate setup (false for CI validation with example.com)
     env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION },
@@ -474,6 +477,7 @@ if (baseDomain) {
   prodFrontendStack.addDependency(prodAuthStack); // Need auth secret ARN export
   prodFrontendStack.addDependency(prodGuardrailsStack); // Need guardrails config exports
   prodFrontendStack.addDependency(prodAgentPlatformStack); // Need agent workspace bucket name (#925)
+  prodFrontendStack.addDependency(prodAtriumSandboxStack); // Need sandbox origin for ATRIUM_SANDBOX_ORIGIN (#1052)
   cdk.Tags.of(prodFrontendStack).add('Environment', 'Prod');
   Object.entries(standardTags).forEach(([key, value]) => cdk.Tags.of(prodFrontendStack).add(key, value));
 

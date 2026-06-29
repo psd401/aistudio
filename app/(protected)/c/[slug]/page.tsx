@@ -59,6 +59,7 @@ import { getOptionalRequester } from "@/actions/db/atrium/requester";
 import { createLogger } from "@/lib/logger";
 import { ProvenanceFooter } from "@/components/atrium/ProvenanceFooter";
 import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
+import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 import "@/styles/atrium-content.css";
 import "katex/dist/katex.min.css";
 
@@ -208,7 +209,7 @@ export default async function ReaderPage({
         <header className="mb-6">
           <h1 className="text-3xl font-semibold">{published.title}</h1>
         </header>
-        <ArtifactSandbox code={code} className="atrium-artifact-preview" />
+        <ArtifactSandbox code={code} src={getArtifactSandboxRenderUrl()} className="atrium-artifact-preview" />
         <ProvenanceFooter objectId={published.id} />
       </main>
     );

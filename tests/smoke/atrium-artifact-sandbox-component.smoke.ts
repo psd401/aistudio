@@ -1,20 +1,21 @@
 /**
  * Atrium ArtifactSandbox component fail-closed smoke test (Bun + jsdom) — #1052, Phase 2
  *
- * The ArtifactSandbox component has a critical security branch: when
- * `getArtifactSandboxRenderUrl()` returns null (unconfigured or same-origin
- * sandbox), the component MUST render the "unavailable" notice rather than
- * falling back to any same-origin rendering of the untrusted code.
+ * The ArtifactSandbox component has a critical security branch: when its `src`
+ * prop is null (sandbox unconfigured or, server-side, resolved to the app origin),
+ * the component MUST render the "unavailable" notice rather than falling back to
+ * any same-origin rendering of the untrusted code.
  *
- * This smoke tests the fail-closed branch directly by:
- *  1. Stubbing `getArtifactSandboxRenderUrl` to return null (unconfigured).
- *  2. Rendering the component via React + ReactDOM into jsdom.
- *  3. Asserting that the unavailable notice (data-testid="artifact-sandbox-unavailable")
- *     is present and that no <iframe> (data-testid="artifact-sandbox-frame") is rendered.
+ * As of #1052 the render URL is resolved SERVER-SIDE (from `ATRIUM_SANDBOX_ORIGIN`)
+ * and passed in as the `src` prop — the component no longer reads env in the
+ * browser. So these checks drive the branches directly via the prop:
+ *  1. No `src` (or null) → fail closed: unavailable notice present, no <iframe>,
+ *     and the untrusted code string never appears in the app-origin DOM.
+ *  2. A valid `src` → the cross-origin iframe IS rendered (sandbox="allow-scripts")
+ *     and the unavailable notice is gone.
  *
- * The configured/happy-path branch (iframe present, code posted via postMessage)
- * is covered by the host-page smoke (atrium-artifact-sandbox-host.smoke.ts) and
- * the E2E guard spec (atrium-artifact.guard.spec.ts).
+ * The host-page CSP/origin behavior is covered by atrium-artifact-sandbox-host.smoke.ts
+ * and the E2E guard spec (atrium-artifact.guard.spec.ts).
  *
  * Why Bun and not jest: ArtifactSandbox imports React hooks + the config lib
  * which next/jest's SWC transform does not cleanly handle for component-level
@@ -58,18 +59,12 @@ g.Event = dom.window.Event as unknown as typeof globalThis.Event;
 g.MessageEvent = dom.window.MessageEvent as unknown as typeof globalThis.MessageEvent;
 
 // ---------------------------------------------------------------------------
-// Drive the component into its "sandbox not configured" branch WITHOUT a Bun
-// module mock (which would require a global `bun-types` reference that pollutes
-// the whole tsc program's `fetch` type and breaks unrelated DOM-typed tests).
-// The real config module reads these env vars at call time: with the sandbox
-// origin unset, getArtifactSandboxRenderUrl() returns null and the component
-// must render the fail-closed "unavailable" notice (no iframe).
+// The component takes the render URL as the `src` prop (resolved server-side),
+// so each branch is driven purely by props — no env manipulation or module
+// mocking required.
 // ---------------------------------------------------------------------------
 
-delete process.env.NEXT_PUBLIC_ATRIUM_SANDBOX_ORIGIN;
-delete process.env.ATRIUM_SANDBOX_ORIGIN;
-
-// Now import React and the component (after globals + env are set up).
+// Now import React and the component (after globals are set up).
 const React = await import("react");
 const ReactDOM = await import("react-dom/client");
 const { ArtifactSandbox } = await import("@/components/atrium/ArtifactSandbox");
@@ -138,6 +133,43 @@ await check(
 
     root2.unmount();
     container2.remove();
+  }
+);
+
+await check(
+  "renders the cross-origin sandbox iframe (allow-scripts) when a valid src is provided",
+  async () => {
+    const container3 = dom.window.document.createElement("div");
+    dom.window.document.body.appendChild(container3);
+    const root3 = ReactDOM.createRoot(container3 as unknown as Element);
+
+    const { act } = await import("react");
+    await act(async () => {
+      root3.render(
+        React.createElement(ArtifactSandbox, {
+          code: "<h1>hi</h1>",
+          src: "https://sandbox.example.com/render",
+        })
+      );
+    });
+
+    // The iframe must be present and point at the provided src.
+    const iframe = container3.querySelector('[data-testid="artifact-sandbox-frame"]');
+    assert.ok(iframe !== null, "iframe was not rendered for a configured src");
+    assert.equal(
+      iframe.getAttribute("src"),
+      "https://sandbox.example.com/render",
+      "iframe src does not match the provided prop"
+    );
+    // SECURITY: allow-scripts ONLY, never allow-same-origin.
+    assert.equal(iframe.getAttribute("sandbox"), "allow-scripts", "iframe sandbox attribute is not exactly allow-scripts");
+
+    // The unavailable notice must NOT be present in the configured case.
+    const notice = container3.querySelector('[data-testid="artifact-sandbox-unavailable"]');
+    assert.ok(notice === null, "unavailable notice rendered despite a configured src");
+
+    root3.unmount();
+    container3.remove();
   }
 );
 

@@ -33,7 +33,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getArtifactSandboxOrigin, getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
+import { normalizeOrigin } from "@/lib/content/artifact-sandbox-config";
 
 type FrameLoadStatus = "loading" | "loaded" | "error";
 
@@ -43,6 +43,15 @@ export interface ArtifactSandboxProps {
    * via postMessage and never touches the app-origin DOM.
    */
   code: string;
+  /**
+   * The sandbox render URL (`<origin>/render`), resolved SERVER-SIDE from the
+   * `ATRIUM_SANDBOX_ORIGIN` runtime env (via `getArtifactSandboxRenderUrl()`) and
+   * passed in as a prop. Resolving server-side avoids any build-time
+   * `NEXT_PUBLIC_*` value — the CDK deploy injects the origin and it flows through
+   * here. `null`/omitted means the sandbox is unconfigured (or resolved to the
+   * app origin) → the component fails CLOSED and renders no executable frame.
+   */
+  src?: string | null;
   /** Accessible title for the preview frame. */
   title?: string;
   /** Optional className for the iframe (sizing/styling). */
@@ -66,13 +75,16 @@ function isRenderAck(data: unknown): data is RenderAck {
 
 export function ArtifactSandbox({
   code,
+  src = null,
   title = "Artifact preview",
   className,
 }: ArtifactSandboxProps) {
   const iframeRef = useRef<HTMLIFrameElement | null>(null);
-  // Resolve once on mount; the env-derived origin is stable for the page life.
-  const [origin] = useState(() => getArtifactSandboxOrigin());
-  const [src] = useState(() => getArtifactSandboxRenderUrl());
+  // The render URL is resolved server-side and arrives via `src`. Derive the
+  // exact postMessage targetOrigin from it once on mount (the origin is stable
+  // for the frame's life). normalizeOrigin strips the `/render` path back to the
+  // bare origin and returns null for a missing/invalid value (→ fail closed).
+  const [origin] = useState(() => normalizeOrigin(src));
   // Whether the frame has loaded at least once (so a `code` change after load
   // re-posts without waiting for another `onLoad`, which fires only on navigation).
   const loadedRef = useRef(false);

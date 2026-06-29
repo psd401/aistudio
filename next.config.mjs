@@ -15,24 +15,14 @@ const s3RemotePatterns = S3_BUCKET
     ]
   : []
 
-// Atrium artifact sandbox (#1052): the app embeds an <iframe> pointing at a
-// SEPARATE origin that runs untrusted artifact code (spec §19.2/§28.1). The app's
-// own CSP `frame-src` must explicitly allow that origin, or the browser blocks the
-// frame. We add it only when configured, and only after validating it is an
-// absolute http(s) origin (never a wildcard — the frame source must be exact).
-function resolveSandboxFrameOrigin() {
-  const raw = process.env.NEXT_PUBLIC_ATRIUM_SANDBOX_ORIGIN || process.env.ATRIUM_SANDBOX_ORIGIN
-  if (!raw) return null
-  try {
-    const url = new URL(raw.trim())
-    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null
-    return url.origin
-  } catch {
-    return null
-  }
-}
-const SANDBOX_FRAME_ORIGIN = resolveSandboxFrameOrigin()
-const frameSrc = ["'self'", 'https://www.canva.com', ...(SANDBOX_FRAME_ORIGIN ? [SANDBOX_FRAME_ORIGIN] : [])].join(' ')
+// NOTE (#1052): the Content-Security-Policy header is intentionally NOT set here.
+// next.config `headers()` is evaluated at BUILD time, but the Atrium artifact
+// sandbox origin (`ATRIUM_SANDBOX_ORIGIN`) is only known at DEPLOY time (a
+// CloudFront domain injected by the CDK AtriumSandboxStack). Multiple CSP headers
+// combine by intersection, so the policy must have a single source — it is built
+// at request time in `middleware.ts`, which can read the runtime env. Do NOT
+// re-add a `Content-Security-Policy` entry below, or it will intersect with the
+// middleware policy and silently block the sandbox `frame-src`.
 
 const nextConfig = {
   reactCompiler: true,
@@ -104,11 +94,9 @@ const nextConfig = {
             // Applies globally — voice pages need mic access, other pages
             // won't trigger the permission prompt unless they call getUserMedia.
             value: 'camera=(), microphone=(self), geolocation=()'
-          },
-          {
-            key: 'Content-Security-Policy',
-            value: `default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.amazonaws.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; font-src 'self' data:; connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com; frame-src ${frameSrc}; frame-ancestors 'none';`
           }
+          // Content-Security-Policy is set in middleware.ts (runtime) — see note
+          // at the top of this file (#1052).
         ],
       },
     ];

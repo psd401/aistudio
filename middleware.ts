@@ -27,6 +27,42 @@ const PUBLIC_PATHS = [
   "/agent-connect", // Consent page and OAuth callback — signed JWT in URL
 ];
 
+// Atrium artifact sandbox (#1052): the app embeds an <iframe> pointing at a
+// SEPARATE origin that runs untrusted artifact code (spec §19.2/§28.1). The app's
+// own CSP `frame-src` must explicitly allow that origin, or the browser blocks
+// the frame. The origin (`ATRIUM_SANDBOX_ORIGIN`) is a CloudFront domain injected
+// by the CDK deploy — known only at runtime — so the CSP is built HERE (middleware
+// runs per request and can read runtime env) instead of in next.config (which is
+// evaluated at build time). Validated to an absolute http(s) origin; never a
+// wildcard — the frame source must be exact.
+function resolveSandboxFrameOrigin(): string | null {
+  const raw = process.env.ATRIUM_SANDBOX_ORIGIN || process.env.NEXT_PUBLIC_ATRIUM_SANDBOX_ORIGIN;
+  if (!raw) return null;
+  try {
+    const url = new URL(raw.trim());
+    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
+    return url.origin;
+  } catch {
+    return null;
+  }
+}
+
+// Built once at module init; the sandbox origin is stable for the process life.
+// frame-src keeps 'self' + the Canva embed origin and appends the sandbox origin
+// only when configured (otherwise the artifact preview frame is simply blocked,
+// matching the component's fail-closed behavior).
+const SANDBOX_FRAME_ORIGIN = resolveSandboxFrameOrigin();
+const FRAME_SRC = ["'self'", "https://www.canva.com", ...(SANDBOX_FRAME_ORIGIN ? [SANDBOX_FRAME_ORIGIN] : [])].join(" ");
+const CONTENT_SECURITY_POLICY =
+  "default-src 'self'; " +
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.amazonaws.com; " +
+  "style-src 'self' 'unsafe-inline'; " +
+  "img-src 'self' data: https: blob:; " +
+  "font-src 'self' data:; " +
+  "connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com; " +
+  `frame-src ${FRAME_SRC}; ` +
+  "frame-ancestors 'none';";
+
 export default authMiddleware((req) => {
   const { nextUrl, auth } = req;
   const isLoggedIn = !!auth;
@@ -82,6 +118,10 @@ export default authMiddleware((req) => {
   response.headers.set('X-Content-Type-Options', 'nosniff');
   response.headers.set('X-Frame-Options', 'DENY');
   response.headers.set('X-XSS-Protection', '1; mode=block');
+  // CSP is set here (not next.config) so frame-src can include the runtime-known
+  // Atrium sandbox origin. Single source → no intersection with a build-time
+  // policy. See next.config.mjs note (#1052).
+  response.headers.set('Content-Security-Policy', CONTENT_SECURITY_POLICY);
 
   // HSTS and Referrer-Policy: set only on direct responses (401s, redirects)
   // where next.config.mjs headers() does not apply. The ALB terminates TLS;

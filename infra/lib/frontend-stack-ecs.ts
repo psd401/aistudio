@@ -21,6 +21,7 @@ export interface FrontendStackEcsProps extends cdk.StackProps {
   customSubdomain?: string;
   documentsBucketName?: string; // Optional for backward compatibility
   agentWorkspaceBucketName?: string; // Optional for backward compatibility (#925)
+  atriumSandboxOrigin?: string; // Optional; falls back to SSM (#1052)
   /**
    * If true, will look up existing VPC from database stack.
    * If false, will create a new VPC for ECS (not recommended - prefer VPC sharing)
@@ -71,6 +72,15 @@ export class FrontendStackEcs extends cdk.Stack {
     const agentWorkspaceBucketName = props.agentWorkspaceBucketName ||
       ssm.StringParameter.valueForStringParameter(
         this, `/aistudio/${environment}/agent-workspace-bucket-name`
+      );
+
+    // Atrium artifact sandbox origin (#1052) — prefer the cross-stack prop from
+    // AtriumSandboxStack; fall back to the SSM param it publishes, mirroring
+    // documentsBucketName above. Injected into the task as ATRIUM_SANDBOX_ORIGIN
+    // so the app never needs a hand-set or build-time origin value.
+    const atriumSandboxOrigin = props.atriumSandboxOrigin ||
+      ssm.StringParameter.valueForStringParameter(
+        this, `/aistudio/${environment}/atrium-sandbox-origin`
       );
 
     // ============================================================================
@@ -160,6 +170,7 @@ export class FrontendStackEcs extends cdk.Stack {
       environment,
       documentsBucketName,
       agentWorkspaceBucketName,
+      atriumSandboxOrigin,
       enableContainerInsights: true,
       enableFargateSpot: true, // Enable Fargate Spot for cost optimization
       spotRatio: environment === 'prod' ? 50 : 100, // 50% Spot in prod, 100% in dev

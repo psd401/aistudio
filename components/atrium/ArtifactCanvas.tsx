@@ -143,9 +143,15 @@ export interface ArtifactCanvasProps {
   idOrSlug: string;
   /** Whether the current user may edit (save new versions). */
   canEdit?: boolean;
+  /**
+   * Sandbox render URL (`<origin>/render`), resolved SERVER-SIDE by the page from
+   * `ATRIUM_SANDBOX_ORIGIN` and threaded down to `<ArtifactSandbox>`. `null` when
+   * the sandbox is unconfigured → the preview frame fails closed. (#1052)
+   */
+  sandboxSrc?: string | null;
 }
 
-export function ArtifactCanvas({ idOrSlug, canEdit = false }: ArtifactCanvasProps) {
+export function ArtifactCanvas({ idOrSlug, canEdit = false, sandboxSrc = null }: ArtifactCanvasProps) {
   const [tab, setTab] = useState<Tab>("preview");
   const [state, setState] = useState<LoadState>("loading");
   const [message, setMessage] = useState<string | null>(null);
@@ -293,7 +299,7 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false }: ArtifactCanvasProp
           {message ?? "Could not load this artifact."}
         </div>
       ) : tab === "preview" ? (
-        <ArtifactSandbox key={selectedVersionId ?? ""} code={code} className="atrium-artifact-preview" />
+        <ArtifactSandbox key={selectedVersionId ?? ""} code={code} src={sandboxSrc} className="atrium-artifact-preview" />
       ) : (
         <CodeEditor
           value={code}
