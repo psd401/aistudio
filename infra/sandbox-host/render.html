@@ -94,6 +94,21 @@
           // Replace the entire root subtree with the artifact markup, then
           // execute any inline scripts. The CSP confines what those scripts can
           // reach; the cross-origin + sandbox confinement does the rest.
+          //
+          // CodeQL flags the innerHTML assignment below as client-side XSS. This
+          // is the INTENTIONAL untrusted-execution sink — rendering untrusted
+          // artifact code is the entire purpose of this isolated host page, and it
+          // is contained by four independent layers (see the file header):
+          //   1. served from a SEPARATE origin (no app cookies/storage in scope);
+          //   2. embedded only via <iframe sandbox="allow-scripts"> with NO
+          //      allow-same-origin, so the document runs in an opaque origin;
+          //   3. a strict CSP (default-src 'none'; connect-src 'none'; …) blocks
+          //      network exfiltration and first-party API calls;
+          //   4. render() runs only after isAllowedOrigin(event.origin) passes.
+          // There is no "sanitized" alternative that preserves the feature.
+          // Sanitizing here would break legitimate artifacts; the sandbox IS the
+          // mitigation. CodeQL cannot model the iframe-sandbox boundary, so this
+          // is a justified, reviewer-dismissable false positive.
           root.innerHTML = typeof code === "string" ? code : "";
           executeScripts(root);
         }
