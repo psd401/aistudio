@@ -7,6 +7,10 @@ yarn-error.log*
 # Next.js
 .next
 .next/cache
+# Isolated build dir used by the local E2E runner (scripts/test/e2e-local.sh sets
+# NEXT_DIST_DIR=.next-e2e). It is gitignored but was NOT dockerignored, so on any
+# machine that has run the E2E suite it shipped ~7GB into the build context.
+.next-e2e
 out
 
 # Testing
