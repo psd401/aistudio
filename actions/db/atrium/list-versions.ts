@@ -31,7 +31,10 @@ export interface VersionSummary {
   id: string;
   versionNumber: number;
   authorActor: "human" | "agent";
-  authorUserId: number | null;
+  // authorUserId is intentionally NOT exposed: it is a raw internal DB primary
+  // key. The UI only needs `authorActor` (human/agent) for the provenance label;
+  // returning the numeric user id to every viewer would leak a stable internal
+  // identifier (user-id enumeration) for no client benefit.
   summary: string | null;
   createdAt: string | null;
   /** True when this is the object's current working head. */
@@ -57,7 +60,6 @@ export async function listVersionsAction(
       id: v.id,
       versionNumber: v.versionNumber,
       authorActor: v.authorActor,
-      authorUserId: v.authorUserId,
       summary: v.summary,
       createdAt: v.createdAt,
       isCurrent: v.id === obj.currentVersionId,

@@ -62,10 +62,27 @@ export class AtriumSandboxStack extends cdk.Stack {
 
     // Normalize origins to canonical scheme+host (no trailing slash, no path).
     // Browsers report event.origin without a trailing slash or path component;
-    // the isAllowedOrigin check in render.html does exact string equality.
-    // A trailing slash passed here would silently break postMessage delivery.
+    // the isAllowedOrigin check in render.html does exact string equality, so a
+    // trailing slash or malformed entry would silently break postMessage delivery
+    // (the sandbox would be unreachable by the real app with no error). THROW at
+    // synth on an invalid entry rather than baking the raw string in — a
+    // misconfiguration must fail the deploy loudly, not produce a dead sandbox.
     function normalizeOriginStr(raw: string): string {
-      try { return new URL(raw).origin; } catch { return raw; }
+      let origin: string;
+      try {
+        origin = new URL(raw).origin;
+      } catch {
+        throw new Error(
+          `AtriumSandboxStack: allowedParentOrigins entry is not a valid absolute URL: "${raw}"`
+        );
+      }
+      // `new URL("data:...").origin` etc. yields the literal "null" (opaque) — reject it.
+      if (origin === 'null') {
+        throw new Error(
+          `AtriumSandboxStack: allowedParentOrigins entry resolves to an opaque origin: "${raw}"`
+        );
+      }
+      return origin;
     }
     const normalizedParentOrigins = props.allowedParentOrigins.map(normalizeOriginStr);
 
@@ -77,6 +94,13 @@ export class AtriumSandboxStack extends cdk.Stack {
     // them inline (data URLs) or load from an explicitly allowlisted CDN.
     // frame-ancestors restricts who can embed the host to the allowed parent origins.
     const scriptSrc = ["'unsafe-inline'", ...cdns].join(' ');
+    // style-src mirrors script-src: an allowlisted CDN (e.g. a Bootstrap/Tailwind
+    // stylesheet on cdnjs) must be loadable for an artifact that opts into it,
+    // matching the documented behavior that the CDN allowlist governs BOTH
+    // script-src and style-src. Without this, an operator who allowlists a CDN
+    // sees stylesheets silently blocked and may "fix" it by widening to https:/*,
+    // which would defeat the tight img-src/exfiltration controls.
+    const styleSrc = ["'unsafe-inline'", ...cdns].join(' ');
     const imgSrc = cdns.length > 0
       ? `data: ${cdns.join(' ')}`  // allowlisted CDN images + data URLs
       : "data:";                   // data URIs only when no CDNs configured
@@ -87,7 +111,7 @@ export class AtriumSandboxStack extends cdk.Stack {
     const cspPolicy = [
       "default-src 'none'",
       `script-src ${scriptSrc}`,
-      "style-src 'unsafe-inline'",
+      `style-src ${styleSrc}`,
       `img-src ${imgSrc}`,
       'font-src data:',
       "connect-src 'none'",

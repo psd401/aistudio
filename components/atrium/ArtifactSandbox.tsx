@@ -187,6 +187,11 @@ export function ArtifactSandbox({
       // SECURITY: allow-scripts ONLY. Never add allow-same-origin — together they
       // let framed code drop its own sandbox (see file header).
       sandbox="allow-scripts"
+      // Empty Permissions-Policy for the frame: pin it to NO feature grants
+      // regardless of what the parent page's Permissions-Policy allows (the app
+      // grants microphone=(self) for voice mode — `allow=""` stops that, or any
+      // future grant, from flowing into the untrusted artifact frame).
+      allow=""
       referrerPolicy="no-referrer"
       onLoad={handleLoad}
       onError={handleError}

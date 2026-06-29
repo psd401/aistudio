@@ -156,9 +156,15 @@ async function main(): Promise<void> {
     // The token must be fully substituted (no leftover placeholder ships).
     assert.doesNotMatch(html, /__ALLOWED_PARENT_ORIGINS__/);
     assert.doesNotMatch(html, /__CSP_POLICY__/);
-    // The allowlist JSON is present in the served page (substring, not regex, to
-    // avoid building a RegExp from a (constant) string).
-    assert.ok(html.includes(APP_ORIGIN), "allowed parent origin missing from host page");
+    // Assert the EXACT serialized allowlist array the stack bakes in
+    // (`ALLOWED_PARENT_ORIGINS = ["https://app.example.com"];`), not a bare
+    // substring of the origin — a precise, full-token check (also avoids the
+    // "substring could appear anywhere in a URL" sanitization-shaped pattern).
+    const expectedAllowlist = `ALLOWED_PARENT_ORIGINS = ${JSON.stringify([APP_ORIGIN])};`;
+    assert.ok(
+      html.includes(expectedAllowlist),
+      `host page is missing the exact allowlist assignment: ${expectedAllowlist}`
+    );
   });
 
   console.log(`\nartifact-sandbox-host smoke: ${passed} checks passed`);

@@ -23,7 +23,7 @@
  * atrium-publish-document-action.test.ts.
  */
 
-import { NotFoundError, ValidationError } from "@/lib/content/errors";
+import { NotFoundError } from "@/lib/content/errors";
 
 // ---------------------------------------------------------------------------
 // Module mocks — must be declared before any imports of the actions under test
@@ -294,13 +294,14 @@ describe("listVersionsAction", () => {
       ).data;
       expect(summaries).toHaveLength(2);
 
-      const current = summaries.find((s) => s.id === "v-3");
-      expect(current?.isCurrent).toBe(true);
-      expect(current?.authorActor).toBe("agent");
-
-      const prior = summaries.find((s) => s.id === "v-2");
-      expect(prior?.isCurrent).toBe(false);
-      expect(prior?.authorActor).toBe("human");
+      // Index by id with a for-loop (no nested array callback — keeps the
+      // it()/describe() callback depth within the linter's limit of 3).
+      const byId: Record<string, { id: string; isCurrent: boolean; authorActor: string }> = {};
+      for (const s of summaries) byId[s.id] = s;
+      expect(byId["v-3"]?.isCurrent).toBe(true);
+      expect(byId["v-3"]?.authorActor).toBe("agent");
+      expect(byId["v-2"]?.isCurrent).toBe(false);
+      expect(byId["v-2"]?.authorActor).toBe("human");
     });
 
     it("returns an empty array when the object has no versions", async () => {
