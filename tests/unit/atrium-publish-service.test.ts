@@ -28,7 +28,8 @@ let publishableRows: Array<{
   slug: string;
 }> = [];
 
-let applyGrantsCalls = 0;
+let setLevelInTxCalls = 0;
+let lastSetLevelVisibility: unknown = null;
 let canViewResult = true;
 
 jest.mock("@/lib/db/drizzle-client", () => ({
@@ -64,8 +65,13 @@ jest.mock("drizzle-orm", () => ({
 jest.mock("@/lib/content/visibility-service", () => ({
   visibilityService: {
     canView: jest.fn(async () => canViewResult),
-    applyGrants: jest.fn(async () => {
-      applyGrantsCalls += 1;
+    // Publish widens visibility via setLevelInTx (the guarded primitive that
+    // replaces level + grants atomically); track its invocation + the visibility
+    // it received so the happy-path assertions can distinguish "no visibility
+    // change" from "group widening".
+    setLevelInTx: jest.fn(async (_tx: unknown, _id: unknown, visibility: unknown) => {
+      setLevelInTxCalls += 1;
+      lastSetLevelVisibility = visibility;
     }),
   },
 }));
@@ -115,7 +121,8 @@ beforeEach(() => {
     { ownerUserId: 7, visibilityLevel: "private", currentVersionId: "v1", slug: "s1" },
   ];
   canViewResult = true;
-  applyGrantsCalls = 0;
+  setLevelInTxCalls = 0;
+  lastSetLevelVisibility = null;
   adapterPublishCalls = 0;
   txResults = [];
   jest.clearAllMocks();
@@ -175,17 +182,23 @@ describe("publishService.publish", () => {
     });
     expect(result).toEqual({ publicationId: "pub1", publishedVersionId: "v1" });
     expect(adapterPublishCalls).toBe(1);
-    // No group visibility provided -> applyGrants must NOT run.
-    expect(applyGrantsCalls).toBe(0);
+    // No visibility provided -> setLevelInTx must NOT run (publish doesn't widen).
+    expect(setLevelInTxCalls).toBe(0);
   });
 
-  it("applies grants only when group visibility is provided", async () => {
+  it("widens visibility via setLevelInTx only when visibility is provided", async () => {
     txResults = [[{ id: "pub2" }]];
     await publishService.publish(owner, "o1", {
       destination: "intranet",
       visibility: { level: "group", grants: [{ kind: "role", value: "staff" }] },
     });
-    expect(applyGrantsCalls).toBe(1);
+    expect(setLevelInTxCalls).toBe(1);
+    // The full visibility input (level + grants) is forwarded to the guarded
+    // primitive, which replaces the level and grants atomically in the tx.
+    expect(lastSetLevelVisibility).toEqual({
+      level: "group",
+      grants: [{ kind: "role", value: "staff" }],
+    });
   });
 
   it("throws ValidationError when the upsert returns no row", async () => {

@@ -249,6 +249,75 @@ describe("applyGrants — value validation", () => {
   });
 });
 
+describe("setLevelInTx — level + grant write semantics", () => {
+  /**
+   * A fake tx that records grant inserts AND the `update().set()` payload so we
+   * can assert both the grant replacement and the level write.
+   */
+  function fakeTx() {
+    const inserted: unknown[][] = [];
+    const updates: Record<string, unknown>[] = [];
+    const tx = {
+      delete: () => ({ where: async () => undefined }),
+      insert: () => ({
+        values: async (rows: unknown) => {
+          inserted.push(rows as unknown[]);
+        },
+      }),
+      update: () => ({
+        set: (values: Record<string, unknown>) => {
+          updates.push(values);
+          return { where: async () => undefined };
+        },
+      }),
+    };
+    return { tx: tx as never, inserted, updates };
+  }
+
+  it("rejects a group level with no grants", async () => {
+    const { tx, updates } = fakeTx();
+    await expect(
+      visibilityService.setLevelInTx(tx, "obj-1", { level: "group", grants: [] })
+    ).rejects.toThrow(/at least one grant/i);
+    // The guard fires before any level write.
+    expect(updates).toHaveLength(0);
+  });
+
+  it("writes a group level and inserts its grants", async () => {
+    const { tx, inserted, updates } = fakeTx();
+    await visibilityService.setLevelInTx(tx, "obj-1", {
+      level: "group",
+      grants: [{ kind: "role", value: "staff" }],
+    });
+    expect(inserted).toHaveLength(1);
+    expect((inserted[0] as unknown[]).length).toBe(1);
+    expect(updates[0]?.visibilityLevel).toBe("group");
+  });
+
+  it("clears grants when the level is not group (e.g. private)", async () => {
+    // A non-group level is not grant-keyed: setLevel must clear any prior grants
+    // (the delete runs) and insert none, so stale grants can't silently widen
+    // access if the level is later flipped back to group.
+    const { tx, inserted, updates } = fakeTx();
+    await visibilityService.setLevelInTx(tx, "obj-1", {
+      level: "private",
+      // grants are ignored for a non-group level.
+      grants: [{ kind: "role", value: "staff" }],
+    });
+    expect(inserted).toHaveLength(0);
+    expect(updates[0]?.visibilityLevel).toBe("private");
+  });
+
+  it("writes public/internal levels with no grants", async () => {
+    for (const level of ["public", "internal"] as const) {
+      const { tx, inserted, updates } = fakeTx();
+      await visibilityService.setLevelInTx(tx, "obj-1", { level });
+      expect(inserted).toHaveLength(0);
+      expect(updates[0]?.visibilityLevel).toBe(level);
+    }
+  });
+});
+
 describe("listVisible — limit/offset clamping", () => {
   /**
    * Drive listVisible with a given filter and capture the `.limit()` / `.offset()`
