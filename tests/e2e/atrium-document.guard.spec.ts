@@ -9,7 +9,7 @@ import { test, expect } from "./fixtures";
  * proves the new routes are wired and auth-gated without needing a session.
  *
  * The full reference flow (agent draft → human edit in the editor → publish →
- * HS-staff renders / out-of-building 403 / provenance footer) is the gated
+ * HS-staff renders / out-of-building 404 / provenance footer) is the gated
  * functional spec atrium-document-reference.spec.ts + the manual runbook in
  * docs/guides/atrium-phase1-verification.md (it needs the live collab server and
  * building-scoped seed users).

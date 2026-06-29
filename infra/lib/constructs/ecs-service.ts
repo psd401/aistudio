@@ -811,6 +811,12 @@ export class EcsServiceConstruct extends Construct {
     container.addEnvironment('REDIS_HOST', redisCache.endpointAddress);
     container.addEnvironment('REDIS_PORT', redisCache.endpointPort);
     container.addEnvironment('REDIS_TLS', '1');
+    // REDIS_PASSWORD is the ElastiCache AUTH token, injected from Secrets Manager.
+    // Required: without it the cache accepts unauthenticated VPC connections.
+    container.addSecret(
+      'REDIS_PASSWORD',
+      ecs.Secret.fromSecretsManager(redisCache.authSecret)
+    );
 
     this.service = new ecs.FargateService(this, 'Service', {
       cluster: this.cluster,

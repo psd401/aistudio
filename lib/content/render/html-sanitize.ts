@@ -95,6 +95,10 @@ export function sanitizeHtml(html: string): string {
   if (!html) return "";
   return getPurifier().sanitize(html, {
     FORBID_TAGS: ["base", "style", "iframe", "object", "embed", "form", "input", "button"],
-    FORBID_ATTR: ["style"],
+    // `ping` is a valid <a> attribute in DOMPurify v3 defaults: it silently POSTs
+    // to the listed URL(s) on click (a tracking/exfil vector). Rendered document
+    // HTML never needs it, so forbid it outright. `style` is forbidden to block
+    // CSS-based layout/exfiltration attacks.
+    FORBID_ATTR: ["style", "ping"],
   });
 }

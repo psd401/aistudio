@@ -7,7 +7,8 @@ import { authenticateContext } from "./helpers/session-auth";
  * Asserts the surface acceptance criteria of the reference E2E (spec §31.3): a
  * published group/intranet document
  *   (a) renders for an in-audience (High School) staff user,
- *   (b) 403s for an out-of-building user,
+ *   (b) 404s for an out-of-building user (existence-masking — a non-viewable doc
+ *       must NOT 403, or its slug could be enumerated),
  *   (c) shows the provenance footer (AI-drafted + human-reviewed).
  *
  * The live-editor leg of the reference flow (agent draft → human edits two lines
@@ -64,12 +65,14 @@ test.describe("Atrium reference flow — published intranet reader", () => {
     }
   });
 
-  test("403s for an out-of-building user", async ({ browser }) => {
+  test("404s for an out-of-building user (existence-masking, not 403)", async ({ browser }) => {
     const context = await browser.newContext();
     await authenticateContext(context, OUT_EMAIL, OUT_SUB);
     try {
       const res = await context.request.get(`/c/${SLUG}`);
-      expect(res.status()).toBe(403);
+      // A non-viewable published doc must 404, NOT 403: a 403 confirms the slug
+      // exists, letting an out-of-audience user enumerate private document slugs.
+      expect(res.status()).toBe(404);
     } finally {
       await context.close();
     }

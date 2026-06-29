@@ -1,6 +1,7 @@
 import * as cdk from "aws-cdk-lib"
 import * as ec2 from "aws-cdk-lib/aws-ec2"
 import * as elasticache from "aws-cdk-lib/aws-elasticache"
+import * as secretsmanager from "aws-cdk-lib/aws-secretsmanager"
 import { Construct } from "constructs"
 
 /**
@@ -17,18 +18,27 @@ import { Construct } from "constructs"
  *   service security group (passed in as `ingressSecurityGroup`).
  * - A CfnSubnetGroup over the VPC's Private-Data subnets (the tier the shared
  *   VPC reserves for data stores like RDS/ElastiCache).
- * - A single-node CfnCacheCluster (engine 'redis').
+ * - A Secrets Manager secret holding the Redis AUTH token.
+ * - A single-node CfnReplicationGroup (engine 'redis') with auth + encryption.
  *
- * Phase 1 is intentionally a single node (no replication / automatic failover).
- * Production HA — a CfnReplicationGroup with Multi-AZ + a replica, or a
- * Serverless cache — is a follow-up. The collab server tolerates a brief Redis
- * outage by falling back to per-task in-memory state, so a single node is
- * acceptable for the initial rollout.
+ * Phase 1 is intentionally a single node (`numCacheClusters: 1`, no automatic
+ * failover). Production HA — Multi-AZ + a replica, or a Serverless cache — is a
+ * follow-up. The collab server tolerates a brief Redis outage by falling back to
+ * per-task in-memory state, so a single node is acceptable for the initial rollout.
  *
- * Encryption: transit encryption is enabled (`transitEncryptionEnabled: true`)
- * so Y.Doc CRDT updates (which may contain PII) travel over TLS. At-rest
- * encryption requires migrating to CfnReplicationGroup (CfnCacheCluster does
- * not expose atRestEncryptionEnabled) — tracked as a follow-up for Phase 2 HA.
+ * Security:
+ * - **AUTH token** (`authToken`) is REQUIRED: without it, any process that can
+ *   reach 6379 inside the VPC security group — including a compromised co-tenant
+ *   container — could read/write all Yjs CRDT state. The token is generated into
+ *   Secrets Manager and injected into the ECS container as REDIS_PASSWORD. Adding
+ *   auth later would require a cluster recreation (downtime), so it is wired now.
+ *   Auth requires transit encryption, which is enabled.
+ * - **Transit encryption** (`transitEncryptionEnabled: true`): Y.Doc CRDT updates
+ *   (which may contain PII) travel over TLS.
+ * - **At-rest encryption** (`atRestEncryptionEnabled: true`): persisted/snapshotted
+ *   CRDT state is encrypted at rest. A standalone CfnCacheCluster cannot express
+ *   either auth or at-rest encryption — that is the reason this construct uses a
+ *   single-node CfnReplicationGroup rather than CfnCacheCluster.
  */
 export interface RedisCacheProps {
   /**
@@ -78,6 +88,13 @@ export class RedisCache extends Construct {
    */
   public readonly securityGroup: ec2.SecurityGroup
 
+  /**
+   * The Secrets Manager secret holding the Redis AUTH token. Inject its value
+   * into the ECS container as REDIS_PASSWORD (ecs.Secret.fromSecretsManager) so
+   * the collab server can authenticate to Redis. Never expose the plaintext.
+   */
+  public readonly authSecret: secretsmanager.Secret
+
   constructor(scope: Construct, id: string, props: RedisCacheProps) {
     super(scope, id)
 
@@ -114,20 +131,47 @@ export class RedisCache extends Construct {
     })
 
     // ========================================================================
-    // Single-node Redis cluster (Phase 1 — no replication / failover).
+    // AUTH token — generated into Secrets Manager. ElastiCache requires the
+    // token to be 16–128 printable chars and to EXCLUDE these characters:
+    // / @ " and whitespace. Restrict the generated set accordingly.
     // ========================================================================
-    const cluster = new elasticache.CfnCacheCluster(this, "RedisCluster", {
+    this.authSecret = new secretsmanager.Secret(this, "RedisAuthToken", {
+      secretName: `aistudio-${environment}-atrium-redis-auth`,
+      description: `Atrium Redis AUTH token (${environment})`,
+      generateSecretString: {
+        passwordLength: 64,
+        // ElastiCache AUTH forbids / @ " and whitespace; also drop : to keep the
+        // token URL/connection-string safe.
+        excludeCharacters: '/@"\\ :',
+        excludePunctuation: false,
+        includeSpace: false,
+      },
+    })
+
+    // ========================================================================
+    // Single-node Redis replication group (Phase 1 — no replica / failover).
+    // A replication group (not a bare CfnCacheCluster) is required because only
+    // it supports AUTH (authToken) and at-rest encryption.
+    // ========================================================================
+    const cluster = new elasticache.CfnReplicationGroup(this, "RedisCluster", {
+      replicationGroupDescription: `Atrium collab cache (${environment})`,
+      replicationGroupId: `aistudio-${environment}-atrium`,
       engine: "redis",
       cacheNodeType,
-      numCacheNodes: 1,
-      clusterName: `aistudio-${environment}-atrium`,
-      vpcSecurityGroupIds: [this.securityGroup.securityGroupId],
+      // Single node: 1 cluster, no replicas, no automatic failover (Phase 1).
+      numCacheClusters: 1,
+      automaticFailoverEnabled: false,
+      multiAzEnabled: false,
+      securityGroupIds: [this.securityGroup.securityGroupId],
       cacheSubnetGroupName: subnetGroup.ref,
       // Apply patches in a low-traffic window; minor versions auto-upgrade.
       autoMinorVersionUpgrade: true,
-      // Y.Doc CRDT updates may contain PII — enforce TLS for data in transit.
-      // Port stays 6379; ElastiCache TLS does not change the default port.
+      // Y.Doc CRDT updates may contain PII — enforce TLS for data in transit
+      // (required for AUTH) and encrypt persisted/snapshotted state at rest.
       transitEncryptionEnabled: true,
+      atRestEncryptionEnabled: true,
+      // AUTH token: every connection must present this. Requires transit encryption.
+      authToken: this.authSecret.secretValue.unsafeUnwrap(),
     })
     cluster.addDependency(subnetGroup)
 
@@ -136,13 +180,15 @@ export class RedisCache extends Construct {
     // L1 ElastiCache resources are tagged explicitly because stack-level
     // Tags.of() does not always propagate to every Cfn* property.
     // ========================================================================
-    for (const resource of [this.securityGroup, subnetGroup, cluster]) {
+    for (const resource of [this.securityGroup, subnetGroup, cluster, this.authSecret]) {
       cdk.Tags.of(resource).add("Environment", environment)
       cdk.Tags.of(resource).add("ManagedBy", "cdk")
     }
 
-    this.endpointAddress = cluster.attrRedisEndpointAddress
-    this.endpointPort = cluster.attrRedisEndpointPort
+    // CfnReplicationGroup exposes the primary endpoint via the PrimaryEndPoint
+    // attributes (a bare cache cluster used RedisEndpoint.*).
+    this.endpointAddress = cluster.attrPrimaryEndPointAddress
+    this.endpointPort = cluster.attrPrimaryEndPointPort
   }
 
   /**

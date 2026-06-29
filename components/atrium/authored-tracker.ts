@@ -40,11 +40,16 @@ export const AuthoredTracker = Extension.create<AuthoredTrackerOptions>({
         key: new PluginKey("atriumAuthoredTracker"),
         appendTransaction(transactions, _oldState, newState) {
           if (!transactions.some((t) => t.docChanged)) return null;
-          // Remote (Yjs) edits already carry their author's mark — never re-stamp.
-          if (transactions.some((t) => isChangeOrigin(t))) return null;
 
           const ranges: Array<[number, number]> = [];
           for (const tr of transactions) {
+            // Filter PER TRANSACTION, not per batch: a local keystroke and a
+            // remote (Yjs) edit can land in the same appendTransaction batch (the
+            // user types at the instant an agent edit arrives). Skipping the whole
+            // batch when ANY transaction is remote would drop the human's mark off
+            // their own keystroke, rendering it with no rail colour. Remote edits
+            // already carry their author's mark, so skip only those.
+            if (isChangeOrigin(tr)) continue;
             for (const map of tr.mapping.maps) {
               // ProseMirror StepMap.forEach (not array iteration) — its callback
               // exposes the mapped (oldStart,oldEnd,newStart,newEnd) ranges.

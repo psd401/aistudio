@@ -157,6 +157,13 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
       providerRef.current?.destroy();
       providerRef.current = null;
       docNameRef.current = null;
+      // Destroy the Y.Doc captured by THIS effect run so its CRDT state cannot
+      // leak into a later document. The parent mounts this component with
+      // `key={obj.id}`, so an id change fully remounts (fresh editor + fresh
+      // Y.Doc); this cleanup tears down the doc that the unmounting instance
+      // owned. Releasing it here also frees the Yjs structs eagerly instead of
+      // waiting on GC.
+      ydoc.destroy();
     };
   }, [idOrSlug]);
 

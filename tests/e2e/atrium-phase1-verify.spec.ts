@@ -90,11 +90,12 @@ test.describe("Atrium Phase 1 — authenticated surfaces", () => {
     }
   });
 
-  test("reader: out-of-building user is 403", async ({ browser }) => {
+  test("reader: out-of-building user is 404 (existence-masking, not 403)", async ({ browser }) => {
     const context = await ctx(browser, OUT);
     try {
       const res = await context.request.get(`/c/${SLUG}`);
-      expect(res.status()).toBe(403);
+      // Non-viewable published doc 404s so its slug cannot be enumerated via 403.
+      expect(res.status()).toBe(404);
     } finally {
       await context.close();
     }

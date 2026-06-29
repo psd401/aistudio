@@ -109,8 +109,18 @@ export class BedrockGuardrailsService {
       this.log.warn('Violation notifications enabled but GUARDRAIL_VIOLATION_TOPIC_ARN not set — violations will not notify');
     }
 
-    // Issue #727: Validate GUARDRAIL_HASH_SECRET is set for privacy protection
+    // Issue #727: Validate GUARDRAIL_HASH_SECRET is set for privacy protection.
+    // In production the default literal is a real privacy hole: it lets anyone who
+    // reads the open-source repo pre-compute the HMAC of a known session/user id and
+    // correlate guardrail-violation logs across requests for a K-12 student. Treat a
+    // missing secret as a STARTUP ERROR in production; keep it a warning in dev/test
+    // so local runs and unit tests work without the env var.
     if (!process.env.GUARDRAIL_HASH_SECRET && !config?.hashSecret) {
+      if (process.env.NODE_ENV === 'production') {
+        throw new Error(
+          'GUARDRAIL_HASH_SECRET must be set in production: the default secret lets violation logs be correlated by session/user id, breaking student privacy.'
+        );
+      }
       this.log.warn('GUARDRAIL_HASH_SECRET not configured - using default secret for session ID hashing (weakens privacy protection)');
     }
 
@@ -220,10 +230,12 @@ export class BedrockGuardrailsService {
       });
 
       // Graceful degradation - allow content if guardrails unavailable
-      // This ensures service continuity while logging the issue
+      // This ensures service continuity while logging the issue. `degraded`
+      // marks this as a fail-OPEN so stricter callers can fail closed instead.
       return {
         allowed: true,
         processedContent: content,
+        degraded: true,
       };
     }
   }
@@ -310,10 +322,13 @@ export class BedrockGuardrailsService {
         provider,
       });
 
-      // Graceful degradation - allow content if guardrails unavailable
+      // Graceful degradation - allow content if guardrails unavailable.
+      // `degraded` marks this as a fail-OPEN (vs a deliberate pass) so stricter
+      // callers can choose to fail closed.
       return {
         allowed: true,
         processedContent: content,
+        degraded: true,
       };
     }
   }

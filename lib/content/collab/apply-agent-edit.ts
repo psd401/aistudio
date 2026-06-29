@@ -53,6 +53,43 @@ const SYNC_STEP_2 = 1; // y-protocols/sync messageYjsSyncStep2
 const SYNC_TIMEOUT_MS = 10_000;
 
 /**
+ * Hostnames the agent bridge is permitted to connect to. The bridge always talks
+ * to the SAME process's collab websocket server, so the only legitimate target is
+ * loopback. ECS deployments that need a different host (rare) can extend this via
+ * COLLAB_INTERNAL_HOST_ALLOWLIST (comma-separated). This blocks SSRF: a tampered
+ * COLLAB_INTERNAL_URL (e.g. `ws://169.254.169.254/...` or an attacker WS host)
+ * would otherwise receive a valid signed collab JWT in the `?token=` query string.
+ */
+const DEFAULT_ALLOWED_HOSTS = ["127.0.0.1", "localhost", "[::1]", "::1"];
+
+function resolveCollabBaseUrl(): string {
+  const base = process.env.COLLAB_INTERNAL_URL ?? `ws://127.0.0.1:${process.env.PORT ?? "3000"}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(base);
+  } catch {
+    throw new Error(`COLLAB_INTERNAL_URL is not a valid URL: ${base}`);
+  }
+  // Only the websocket schemes — never http(s)/file/etc. — and the JWT must not
+  // be carried to anything but a vetted internal host.
+  if (parsed.protocol !== "ws:" && parsed.protocol !== "wss:") {
+    throw new Error(`COLLAB_INTERNAL_URL must use ws:// or wss:// (got ${parsed.protocol})`);
+  }
+  const extra = (process.env.COLLAB_INTERNAL_HOST_ALLOWLIST ?? "")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter(Boolean);
+  const allowed = new Set([...DEFAULT_ALLOWED_HOSTS, ...extra]);
+  if (!allowed.has(parsed.hostname.toLowerCase())) {
+    throw new Error(
+      `COLLAB_INTERNAL_URL host "${parsed.hostname}" is not allowed; ` +
+        `set COLLAB_INTERNAL_HOST_ALLOWLIST to permit it`
+    );
+  }
+  return base;
+}
+
+/**
  * Settle delay after dispatching the Yjs update before resolving the promise.
  *
  * KNOWN LIMITATION: this is heuristic, not acknowledgement-based. The y-protocols
@@ -72,8 +109,10 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
   const token = await signCollabToken({ sub: `agent:${agentId}`, oid: objectId, w: true });
 
   // COLLAB_INTERNAL_URL allows overriding the loopback target in ECS task definitions
-  // where PORT may differ from the value server.ts actually binds on.
-  const base = process.env.COLLAB_INTERNAL_URL ?? `ws://127.0.0.1:${process.env.PORT ?? "3000"}`;
+  // where PORT may differ from the value server.ts actually binds on. Validated to a
+  // ws(s):// scheme + allowlisted host so a tampered value cannot exfiltrate the
+  // signed collab JWT to an attacker-controlled or metadata-service endpoint (SSRF).
+  const base = resolveCollabBaseUrl();
   const url = `${base}${COLLAB_WS_PATH}/${objectId}?token=${encodeURIComponent(token)}`;
   const ydoc = new Y.Doc();
   // Use the runtime's native WebSocket (Node 22 / Bun) — the `ws` package has
@@ -103,6 +142,10 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
 
     // Send the resulting Yjs update to the server, which applies + broadcasts it.
     const onUpdate = (update: Uint8Array): void => {
+      // Guard readyState: if the socket is CLOSING/CLOSED when a Yjs update fires
+      // (e.g. server-side close races the transaction), ws.send() throws
+      // InvalidStateError outside the connect promise's try/catch. Only send when OPEN.
+      if (ws.readyState !== WebSocket.OPEN) return;
       const enc = encoding.createEncoder();
       encoding.writeVarUint(enc, MESSAGE_SYNC);
       syncProtocol.writeUpdate(enc, update);

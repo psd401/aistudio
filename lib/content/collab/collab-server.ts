@@ -98,6 +98,10 @@ function initRedis(): void {
     // REDIS_TLS=1 is set when the ElastiCache cluster has transitEncryptionEnabled.
     // `tls: {}` tells ioredis to wrap the connection in TLS (same port 6379).
     ...(process.env.REDIS_TLS === "1" ? { tls: {} } : {}),
+    // REDIS_PASSWORD is the ElastiCache AUTH token (injected from Secrets Manager).
+    // Without it, any process that can reach 6379 in the VPC could read/write all
+    // Yjs CRDT state. AUTH requires transit encryption, which REDIS_TLS provides.
+    ...(process.env.REDIS_PASSWORD ? { password: process.env.REDIS_PASSWORD } : {}),
   };
   redisPub = new Redis(opts);
   redisPub.on("error", (err: Error) =>
@@ -287,26 +291,26 @@ function roomAtCapacity(entry: DocEntry, docName: string, ws: WebSocket): boolea
   return true;
 }
 
-export async function handleCollabConnection(
+/**
+ * Pre-auth message buffering. Attaches a message listener SYNCHRONOUSLY (before
+ * the async token-verify/doc-load) so the client's immediate SyncStep1 frame is
+ * queued, not dropped, then replayed once the real handler is ready. Returns the
+ * pending buffer, a setter to install the real frame processor, and `rejectConn`
+ * — which MUST be called on every early-return rejection to detach the listener
+ * and drop the buffer (otherwise each rejected socket pins a listener + buffer
+ * until its fd closes: a connection-flood DoS lever).
+ */
+function attachPreAuthBuffer(
   ws: WebSocket,
-  req: IncomingMessage
-): Promise<void> {
-  const { pathname, query } = parseUrl(req.url || "", true);
-  const docName = decodeURIComponent(
-    (pathname || "").split("/").findLast((segment) => segment.length > 0) ?? ""
-  );
-  const rawToken = query.token;
-  const token = Array.isArray(rawToken) ? rawToken[0] : rawToken;
-
-  // CRITICAL: attach the message listener SYNCHRONOUSLY, before the async setup
-  // (token verify + doc load). A client sends its first SyncStep1 immediately on
-  // open; without this, that frame arrives during the awaits below with no listener
-  // attached and is dropped — the server never replies with SyncStep2, so a raw
-  // client (e.g. the agent bridge) never syncs. Frames are queued until the real
-  // handler is ready, then replayed.
-  let processFrame: ((u8: Uint8Array) => void) | null = null;
+  docName: string
+): {
+  pending: Uint8Array[];
+  setProcessFrame: (fn: (u8: Uint8Array) => void) => void;
+  rejectConn: (code?: number, reason?: string) => void;
+} {
   const MAX_PENDING_FRAMES = 16;
   const pending: Uint8Array[] = [];
+  let processFrame: ((u8: Uint8Array) => void) | null = null;
   const onMessage = (data: Buffer): void => {
     const u8 = new Uint8Array(data);
     if (processFrame) {
@@ -319,11 +323,37 @@ export async function handleCollabConnection(
     }
   };
   ws.on("message", onMessage);
+  return {
+    pending,
+    setProcessFrame: (fn) => { processFrame = fn; },
+    rejectConn: (code, reason) => {
+      ws.off("message", onMessage);
+      pending.length = 0;
+      if (code !== undefined) {
+        try { ws.close(code, reason); } catch { /* already closing */ }
+      }
+    },
+  };
+}
+
+export async function handleCollabConnection(
+  ws: WebSocket,
+  req: IncomingMessage
+): Promise<void> {
+  const { pathname, query } = parseUrl(req.url || "", true);
+  const docName = decodeURIComponent(
+    (pathname || "").split("/").findLast((segment) => segment.length > 0) ?? ""
+  );
+  const rawToken = query.token;
+  const token = Array.isArray(rawToken) ? rawToken[0] : rawToken;
+
+  // Buffer frames that arrive during the async auth/doc-load below (see helper).
+  const { pending, setProcessFrame, rejectConn } = attachPreAuthBuffer(ws, docName);
 
   const claims = await verifyCollabToken(token);
   if (!claims || !docName || claims.oid !== docName) {
     log.warn("Rejected collab connection", { docName, hasClaims: !!claims });
-    try { ws.close(4401, "Unauthorized"); } catch { /* already closed */ }
+    rejectConn(4401, "Unauthorized");
     return;
   }
   const canWrite = claims.w;
@@ -336,13 +366,17 @@ export async function handleCollabConnection(
       docName,
       error: err instanceof Error ? err.message : String(err),
     });
-    try { ws.close(4500, "Server error"); } catch { /* already closing */ }
+    rejectConn(4500, "Server error");
     return;
   }
 
   // Per-room connection cap: bound DocEntry.conns so a single client cannot
   // exhaust memory by repeatedly opening sockets to the same room.
-  if (roomAtCapacity(entry, docName, ws)) return;
+  // roomAtCapacity already closes the socket; just release the pre-auth listener.
+  if (roomAtCapacity(entry, docName, ws)) {
+    rejectConn();
+    return;
+  }
 
   entry.conns.add(ws);
   entry.awarenessIds.set(ws, new Set());
@@ -371,7 +405,7 @@ export async function handleCollabConnection(
   };
   entry.awareness.on("update", onAwarenessChange);
 
-  processFrame = (u8: Uint8Array): void => {
+  const processFrame = (u8: Uint8Array): void => {
     try {
       const decoder = decoding.createDecoder(u8);
       const messageType = decoding.readVarUint(decoder);
@@ -403,6 +437,8 @@ export async function handleCollabConnection(
       });
     }
   };
+  // Install the real frame processor; buffered pre-auth frames are replayed below.
+  setProcessFrame(processFrame);
 
   let cleaned = false;
   const cleanup = (): void => {

@@ -8,17 +8,21 @@
  * canonical markdown (`source.md`) through the sanitizing pipeline and shows a
  * provenance footer.
  *
- * ## Visibility gate (403 vs 404)
+ * ## Visibility gate (always 404, never 403)
  * - No object for the slug, or no live intranet publication -> `notFound()` (404).
  *   We do NOT leak "this exists but you can't see it" for the not-published case.
  * - Object exists and is published, but the requester fails `canView`
  *   (e.g. an out-of-building user for a building-scoped `group` document) ->
- *   `forbidden()` (403). Read access is bounded entirely by
- *   `visibilityService.canView` — the page is under `(protected)` so the route
- *   already requires a session, and `getOptionalRequester` resolves that session
- *   into the principal `canView` checks. (NOTE: `forbidden()` requires Next's
- *   `experimental.authInterrupts`, which is enabled separately; until then the
- *   import may not type-resolve — that wiring is out of scope for this page.)
+ *   ALSO `notFound()` (404). A non-viewable object must NOT 403: 403 confirms the
+ *   slug exists, letting an out-of-audience or unauthenticated probe enumerate
+ *   private document slugs by distinguishing 403 (exists) from 404 (absent). This
+ *   matches the existence-masking contract enforced everywhere else in the content
+ *   layer (see `publish-service.ts` `publish()` and `agent-bridge/route.ts`
+ *   `loadEditableObject`, which both 404 a non-viewable object). Read access is
+ *   bounded entirely by `visibilityService.canView` — the page is under
+ *   `(protected)` so the route already requires a session, and
+ *   `getOptionalRequester` resolves that session into the principal `canView`
+ *   checks.
  *
  * ## Rendering / security
  * The markdown is re-rendered on every request from `source.md` through
@@ -32,7 +36,7 @@
  * page must never be statically cached or shared across principals.
  */
 
-import { forbidden, notFound } from "next/navigation";
+import { notFound } from "next/navigation";
 import { and, eq } from "drizzle-orm";
 import type { Metadata } from "next";
 import { executeQuery } from "@/lib/db/drizzle-client";
@@ -140,9 +144,10 @@ export default async function ReaderPage({
     notFound();
   }
 
-  // (d) Visibility gate. `forbidden()` -> 403 for a published-but-not-viewable
-  // object (e.g. an out-of-building user). `getOptionalRequester` resolves the
-  // session into the principal `canView` evaluates.
+  // (d) Visibility gate. A published-but-not-viewable object (e.g. an
+  // out-of-building user) 404s — NOT 403 — so its slug cannot be enumerated by
+  // distinguishing "exists but forbidden" from "absent". `getOptionalRequester`
+  // resolves the session into the principal `canView` evaluates.
   const requester = await getOptionalRequester();
   const viewable = await visibilityService.canView(requester, {
     id: published.id,
@@ -150,7 +155,7 @@ export default async function ReaderPage({
     visibilityLevel: published.visibilityLevel,
   });
   if (!viewable) {
-    forbidden();
+    notFound();
   }
 
   // (e) Load the published version row for its version number, then read the
