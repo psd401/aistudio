@@ -75,6 +75,13 @@ const handleVoiceConnection = loadWsHandler()
  */
 function loadCollabHandler() {
   try {
+    // Requiring the bundle runs collab-server.ts's module init, which registers a
+    // process-global SIGTERM flush hook (globalThis.__atriumCollabShutdown). The
+    // Next.js standalone server's instrumentation.ts SIGTERM handler awaits that
+    // hook BEFORE closing the DB pool — so pending (debounced) room state is flushed
+    // on a rolling ECS deploy without this file owning a competing exit. We do NOT
+    // register a SIGTERM handler here: a second handler racing instrumentation's
+    // process.exit(0) could kill the in-flight collab writes.
     const mod = require(COLLAB_HANDLER_PATH)
     if (typeof mod.handleCollabConnection === 'function') {
       collabHandlerAvailable = true

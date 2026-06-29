@@ -56,8 +56,18 @@ const SYNC_STEP_1 = 0; // y-protocols/sync messageYjsSyncStep1
  * Persist debounce window. Each room writes at most one DB row per window during
  * active editing, so a smaller value means more writes/minute per room. Override
  * with COLLAB_PERSIST_DEBOUNCE_MS (see .env.example); defaults to 1500 ms.
+ *
+ * Parsed with the same strict IIFE pattern as MAX_CONNS_PER_ROOM / MAX_FRAME_BYTES:
+ * `Number(...) || 1500` would treat an explicit `0` (a valid "persist immediately"
+ * value) as falsy and silently restore 1500. Only unset / blank / non-numeric /
+ * negative fall back to the default; a deliberate 0 is honored.
  */
-const PERSIST_DEBOUNCE_MS = Number(process.env.COLLAB_PERSIST_DEBOUNCE_MS) || 1500;
+const PERSIST_DEBOUNCE_MS = ((): number => {
+  const raw = process.env.COLLAB_PERSIST_DEBOUNCE_MS;
+  if (raw === undefined || raw.trim() === "") return 1500;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 1500;
+})();
 
 /**
  * Max concurrent websocket connections per document room. A single client
@@ -164,8 +174,6 @@ function initRedis(): void {
   // Binary payloads arrive via the *Buffer event variant.
   sub.on("pmessageBuffer", (_pattern: Buffer, channel: Buffer, message: Buffer) => {
     const docName = channel.toString("utf8").slice(REDIS_CHANNEL_PREFIX.length);
-    const entry = docs.get(docName);
-    if (!entry) return;
     // Frames are `[16-byte instance id][update]`. Skip our OWN published frames
     // looping back through pub/sub — re-applying them would re-broadcast the
     // update to the local connection that originated it (self-echo flicker).
@@ -176,6 +184,27 @@ function initRedis(): void {
       return;
     }
     const update = new Uint8Array(message.subarray(INSTANCE_ID_LEN));
+    const entry = docs.get(docName);
+    if (!entry) {
+      // The document is not yet in `docs`, but it may be mid-load: getOrCreateDoc
+      // sets `loading` BEFORE the async Postgres hydrate completes and only then
+      // sets `docs`. A Redis update arriving in that window would otherwise be
+      // dropped (the originating instance has the edit, this one never does ->
+      // permanent CRDT divergence). Replay it onto the doc once loading resolves;
+      // CRDT updates are commutative + idempotent, so applying after hydrate is safe.
+      const inflight = loading.get(docName);
+      if (inflight) {
+        void inflight
+          .then((loaded) => Y.applyUpdate(loaded.ydoc, update, "redis"))
+          .catch((e) =>
+            log.warn("Deferred redis update apply failed", {
+              docName,
+              error: e instanceof Error ? e.message : String(e),
+            })
+          );
+      }
+      return;
+    }
     Y.applyUpdate(entry.ydoc, update, "redis");
     // Also schedule a (debounced) persist on the RECEIVING instance. The
     // ydoc "update" handler skips persist for origin === "redis" to avoid every
@@ -443,6 +472,17 @@ export async function handleCollabConnection(
   // Buffer frames that arrive during the async auth/doc-load below (see helper).
   const { pending, setProcessFrame, rejectConn } = attachPreAuthBuffer(ws, docName);
 
+  // Hoist the 'error' listener BEFORE the first await. The `ws` library emits
+  // 'error' before 'close' on a TCP RST or TLS error; a socket error during the
+  // async verifyCollabToken / getOrCreateDoc below would otherwise have NO listener,
+  // and Node's EventEmitter throws a synchronous ERR_UNHANDLED_ERROR that the
+  // Promise.resolve(...).catch(...) wrapper in server.ts cannot catch — crashing
+  // the task and dropping every active collab session. Registered once here; the
+  // 'cleaned' guard on the 'close' handler already prevents double-cleanup.
+  ws.on("error", (err: Error) =>
+    log.warn("Collab socket error", { docName, error: err.message })
+  );
+
   const claims = await verifyCollabToken(token);
   if (!claims || !docName || claims.oid !== docName) {
     log.warn("Rejected collab connection", { docName, hasClaims: !!claims });
@@ -577,12 +617,9 @@ export async function handleCollabConnection(
         });
     }
   };
-  // The `ws` library emits 'error' before 'close' on a TCP RST or TLS error.
-  // Without an 'error' listener, Node.js throws an unhandled ERR_UNHANDLED_ERROR
-  // and terminates the process. The 'cleaned' guard already prevents double-execution.
-  ws.on("error", (err: Error) =>
-    log.warn("Collab socket error", { docName, error: err.message })
-  );
+  // The 'error' listener was hoisted before the awaits above (a socket error
+  // during auth/doc-load must not throw ERR_UNHANDLED_ERROR). Only the close
+  // handler is registered here.
   ws.once("close", cleanup);
 
   // SyncStep1: ask the client for its state and offer ours.
@@ -607,3 +644,60 @@ export async function handleCollabConnection(
   for (const u8 of pending) processFrame(u8);
   pending.length = 0;
 }
+
+/**
+ * Graceful shutdown: flush every live room's pending state to Postgres.
+ *
+ * Persistence is normally trailing-edge debounced (PERSIST_DEBOUNCE_MS). On an
+ * ECS rolling deploy / scale-in / OOM, the process receives SIGTERM with pending
+ * debounce timers still queued — abandoning them would lose up to the last
+ * PERSIST_DEBOUNCE_MS window of edits for every actively-edited room. This cancels
+ * each room's timer and forces a final synchronous-best-effort save before exit.
+ *
+ * Called from the custom server's SIGTERM/SIGINT handler (server.ts / voice-server.js)
+ * BEFORE closeDatabase(), so the pool is still open for the final writes. Idempotent
+ * and best-effort: a failed save for one room is logged and does not block the others.
+ */
+export async function shutdownCollab(): Promise<void> {
+  // Snapshot first: saveDocState is async and other handlers may mutate `docs`
+  // (e.g. a closing connection's cleanup) while we await.
+  const entries = [...docs.entries()];
+  if (entries.length === 0) return;
+  log.info("Flushing collab rooms on shutdown", { rooms: entries.length });
+  await Promise.allSettled(
+    entries.map(async ([docName, entry]) => {
+      if (entry.persistTimer) {
+        clearTimeout(entry.persistTimer);
+        entry.persistTimer = null;
+      }
+      try {
+        await saveDocState(
+          docName,
+          Y.encodeStateAsUpdate(entry.ydoc),
+          entry.markdown ?? undefined
+        );
+      } catch (e) {
+        log.error("Shutdown persist failed", {
+          docName,
+          error: e instanceof Error ? e.message : String(e),
+        });
+      }
+    })
+  );
+}
+
+/**
+ * Register the collab flush on a process-global hook so instrumentation.ts's
+ * SIGTERM handler can AWAIT it before closeDatabase() — even though that handler
+ * lives in a different module instance (the prod collab code runs from a separate
+ * esbuild bundle, and `globalThis` is the only state both share within the process).
+ *
+ * Awaiting matters: instrumentation closes the DB pool and calls process.exit(0);
+ * a fire-and-forget flush would race the pool teardown and lose the final writes.
+ * The hook is idempotent (shutdownCollab snapshots `docs` and no-ops when empty),
+ * so it is safe for both instrumentation AND the custom-server handlers to invoke.
+ */
+declare global {
+  var __atriumCollabShutdown: (() => Promise<void>) | undefined;
+}
+globalThis.__atriumCollabShutdown = shutdownCollab;

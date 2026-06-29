@@ -41,7 +41,9 @@ async function getHandler(
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
 
-    const req = await getUserRequester(requestId);
+    // Thread the already-resolved session so getUserRequester reuses it instead of
+    // calling getServerSession() a second time (double JWT-verify per request).
+    const req = await getUserRequester(requestId, session);
     const obj = await contentService.loadByIdOrSlug(id);
     // 404 (not 403) when not viewable: a document object id/slug is not enumerable.
     if (!obj) {
@@ -69,6 +71,8 @@ async function getHandler(
     const token = await signCollabToken({
       sub: String(req.userId),
       oid: obj.id,
+      // JWT claim `w` = write permission (mirrored as the `canEdit` HTTP response
+      // field below; the short claim name keeps the token compact for the ?token= URL).
       w: mayWrite,
     });
 

@@ -51,8 +51,12 @@ export interface DocumentEditorProps {
 }
 
 export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
-  const ydocRef = useRef<Y.Doc>(undefined as unknown as Y.Doc);
+  // Lazily create the Y.Doc once (a null ref initializer reads clearer than the
+  // `undefined as unknown as Y.Doc` cast). The lazy init below runs on the first
+  // render before any consumer, so `ydoc` is always a live doc by use.
+  const ydocRef = useRef<Y.Doc | null>(null);
   if (!ydocRef.current) ydocRef.current = new Y.Doc();
+  const ydoc = ydocRef.current;
 
   const providerRef = useRef<WebsocketProvider | null>(null);
   const [status, setStatus] = useState<Status>("connecting");
@@ -74,7 +78,7 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
       extensions: [
         ...getSchemaExtensions(),
         Markdown,
-        Collaboration.configure({ document: ydocRef.current }),
+        Collaboration.configure({ document: ydoc }),
         AuthoredTracker.configure({ by: makeAuthorTag("human", userId) }),
         ProvenanceRail,
       ],
@@ -85,7 +89,11 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
   // Open the collab session once per document.
   useEffect(() => {
     let cancelled = false;
+    // Read the live Y.Doc from the ref inside the effect (a ref read needs no
+    // dep entry, unlike the render-body `ydoc` const). It is created lazily on
+    // first render, so it is always present here.
     const ydoc = ydocRef.current;
+    if (!ydoc) return;
 
     // Fetch a fresh collab token. Used both for the initial connect and to
     // re-mint before each reconnect (the token TTL is short — see collab-token.ts).

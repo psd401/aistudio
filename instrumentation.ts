@@ -22,6 +22,22 @@ async function handleShutdown(signal: string): Promise<void> {
   log.info(`Received ${signal}, initiating graceful shutdown...`);
 
   try {
+    // Flush live Atrium collab rooms BEFORE the DB pool closes. The collab server
+    // (#1051) runs in this same process but from a separate esbuild bundle in prod
+    // (voice-server.js), so it cannot be imported here directly — it registers a
+    // process-global flush hook (collab-server.ts) that we await. Best-effort: a
+    // flush failure is logged and must not block the DB-pool teardown / exit.
+    const flushCollab = globalThis.__atriumCollabShutdown;
+    if (typeof flushCollab === "function") {
+      try {
+        await flushCollab();
+      } catch (collabError) {
+        log.warn("Collab shutdown flush failed", {
+          error: collabError instanceof Error ? collabError.message : String(collabError),
+        });
+      }
+    }
+
     const { closeDatabase } = await import("@/lib/db/drizzle-client");
     await closeDatabase();
     log.info("Graceful shutdown completed successfully");

@@ -117,6 +117,17 @@ const classAllow: [string, ...string[]] = [
 
 const sanitizeSchema: typeof defaultSchema = {
   ...defaultSchema,
+  // Pin `img[src]` to http/https explicitly. `defaultSchema.protocols` already
+  // restricts `src` to http/https (and `href`/`cite`/`longDesc` to safe schemes),
+  // so a `data:`/`javascript:` URI in `![](data:…)` is stripped — verified by
+  // tests/smoke/atrium-markdown-render.smoke.ts. This explicit copy is
+  // defense-in-depth: it freezes the `src` contract here so a future
+  // `hast-util-sanitize` bump that loosened the default could not silently re-open
+  // a `data:`-URI img XSS hole. Other protocol entries inherit the default unchanged.
+  protocols: {
+    ...defaultSchema.protocols,
+    src: ["http", "https"],
+  },
   attributes: {
     ...defaultSchema.attributes,
     span: [...(defaultSchema.attributes?.span ?? []), classAllow],

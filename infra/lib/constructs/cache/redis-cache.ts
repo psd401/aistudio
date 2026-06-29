@@ -157,6 +157,11 @@ export class RedisCache extends Construct {
       replicationGroupDescription: `Atrium collab cache (${environment})`,
       replicationGroupId: `aistudio-${environment}-atrium`,
       engine: "redis",
+      // Pin the MAJOR engine version so a CloudFormation diff doesn't silently jump
+      // major versions (which can carry breaking changes) when ElastiCache rotates
+      // its default. Patch/minor versions still float via autoMinorVersionUpgrade
+      // below — "7.1" selects the latest 7.1.x patch line at create time.
+      engineVersion: "7.1",
       cacheNodeType,
       // Single node: 1 cluster, no replicas, no automatic failover (Phase 1).
       numCacheClusters: 1,
@@ -171,6 +176,12 @@ export class RedisCache extends Construct {
       transitEncryptionEnabled: true,
       atRestEncryptionEnabled: true,
       // AUTH token: every connection must present this. Requires transit encryption.
+      // `unsafeUnwrap()` here does NOT expose plaintext: CfnReplicationGroup.authToken
+      // is a string property, and `secretValue` synthesizes to a CloudFormation
+      // dynamic reference (`{{resolve:secretsmanager:<arn>:SecretString:...}}`) that
+      // CFN resolves at deploy time. The secret value is never materialized at synth
+      // time or written to the template — `unsafeUnwrap` only suppresses CDK's
+      // unresolved-token guard for this L1 prop that has no native secret integration.
       authToken: this.authSecret.secretValue.unsafeUnwrap(),
     })
     cluster.addDependency(subnetGroup)

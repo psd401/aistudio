@@ -99,8 +99,18 @@ function resolveCollabBaseUrl(): string {
  * backpressure the default 500 ms may be insufficient; raise COLLAB_AGENT_SETTLE_MS
  * (see .env.example) for those deployments. A future improvement would replace this
  * with a real round-trip ack (server echoes a state vector covering our update).
+ *
+ * Parsed with a strict IIFE rather than `Number(...) || 500`: an explicit `0`
+ * (a deliberate "no settle delay") is falsy and `|| 500` would silently restore
+ * 500, so the operator could never actually disable the delay. Only unset / blank /
+ * non-numeric / negative fall back to the default; a deliberate 0 is honored.
  */
-const AGENT_SETTLE_MS = Number(process.env.COLLAB_AGENT_SETTLE_MS) || 500;
+const AGENT_SETTLE_MS = ((): number => {
+  const raw = process.env.COLLAB_AGENT_SETTLE_MS;
+  if (raw === undefined || raw.trim() === "") return 500;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 500;
+})();
 
 /** Apply the agent's markdown to the live document via a short-lived y-sync client. */
 export async function applyAgentEdit(input: AgentEditInput): Promise<void> {

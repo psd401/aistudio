@@ -242,7 +242,9 @@ async function postHandler(
     const rawAgentId = (request.headers.get("x-agent-id") || "agent").trim();
     const agentId = /^[\w-]{1,128}$/.test(rawAgentId) ? rawAgentId : "agent";
 
-    const req = await getUserRequester(requestId);
+    // Thread the already-resolved session so getUserRequester reuses it instead of
+    // calling getServerSession() a second time (double JWT-verify per request).
+    const req = await getUserRequester(requestId, session);
     const loaded = await loadEditableObject(id, req);
     if ("error" in loaded) {
       timer({ status: "error" });

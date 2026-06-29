@@ -66,6 +66,29 @@ check("math renders via KaTeX after the sanitize gate", () => {
   assert.match(html, /class="katex/);
 });
 
+check("strips data: URI from img src (no XSS via image)", () => {
+  const html = renderMarkdownToHtml(
+    '![](data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)">)'
+  );
+  assert.doesNotMatch(html, /data:image/i);
+  assert.doesNotMatch(html, /onload/i);
+});
+
+check("strips javascript: URI from img src", () => {
+  const html = renderMarkdownToHtml("![alt](javascript:alert(1))");
+  assert.doesNotMatch(html, /javascript:/i);
+});
+
+check("strips javascript: URI from link href", () => {
+  const html = renderMarkdownToHtml("[link](javascript:alert(1))");
+  assert.doesNotMatch(html, /javascript:/i);
+});
+
+check("preserves https: img src", () => {
+  const html = renderMarkdownToHtml("![ok](https://example.com/x.png)");
+  assert.match(html, /src="https:\/\/example\.com\/x\.png"/);
+});
+
 check("empty input -> empty string", () => {
   assert.equal(renderMarkdownToHtml(""), "");
 });

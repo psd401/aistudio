@@ -78,6 +78,13 @@ async function main() {
   // a `await import()` in the connection path would delay attaching the
   // message listener past those first frames, dropping them so the protocol never
   // starts. Pre-loading lets us call the handler synchronously on 'connection'.
+  // Importing the collab module runs its init, which registers a process-global
+  // SIGTERM flush hook (globalThis.__atriumCollabShutdown). Next.js's
+  // instrumentation.ts SIGTERM/SIGINT handler (loaded by app.prepare() above)
+  // awaits that hook BEFORE closing the DB pool, so pending (debounced) collab room
+  // state is flushed on shutdown. No SIGTERM handler is registered here — a second
+  // handler would race instrumentation's process.exit(0) and could kill the
+  // in-flight collab writes.
   const { handleCollabConnection } = await import("@/lib/content/collab/collab-server")
 
   const server = createServer((req, res) => {
