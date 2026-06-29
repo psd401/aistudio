@@ -44,6 +44,12 @@ const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
 /** Upper bound on a grant value, mirroring the `grant_value varchar(255)` column. */
 const MAX_GRANT_VALUE_LENGTH = 255;
 
+/** Allowed grant kinds — mirrors the `grant_kind` DB enum. */
+const VALID_GRANT_KINDS = new Set(["role", "building", "department", "grade", "user"]);
+
+/** Allowed visibility levels — mirrors the `visibility_level` DB enum. */
+const VALID_VISIBILITY_LEVELS = new Set(["private", "group", "internal", "public"]);
+
 /**
  * Validate a grant before it is persisted. Only a `user` grant carries a numeric
  * id (the `users.id`, matched as `String(userId)` in §12.2). A `role` grant
@@ -61,6 +67,9 @@ const MAX_GRANT_VALUE_LENGTH = 255;
  * contract and what `canView` / `buildVisibilitySql` both match on.
  */
 function assertValidGrant(grant: VisibilityGrant): void {
+  if (!VALID_GRANT_KINDS.has(grant.kind)) {
+    throw new ValidationError(`Invalid grant kind: ${grant.kind}`, { kind: grant.kind });
+  }
   const value = grant.value;
   if (typeof value !== "string" || value.length === 0) {
     throw new ValidationError("Grant value is required", { kind: grant.kind });
@@ -226,6 +235,9 @@ async function setLevelInTx(
   visibility: VisibilityInput
 ): Promise<void> {
   const level = visibility.level;
+  if (!VALID_VISIBILITY_LEVELS.has(level)) {
+    throw new ValidationError(`Invalid visibility level: ${level}`, { level });
+  }
   const grants = level === "group" ? visibility.grants ?? [] : [];
 
   if (level === "group" && grants.length === 0) {

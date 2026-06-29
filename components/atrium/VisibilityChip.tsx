@@ -47,6 +47,8 @@ import { getVisibilityAction } from "@/actions/db/atrium/get-visibility";
 import { setVisibilityAction } from "@/actions/db/atrium/set-visibility";
 import { listGrantOptionsAction } from "@/actions/db/atrium/list-grant-options";
 
+const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
+
 /** The visibility levels, in widening order, with their picker labels. */
 const LEVELS = [
   { value: "private", label: "Private", help: "Only you (and admins)." },
@@ -119,8 +121,12 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
       const result = await getVisibilityAction(idOrSlug);
       if (cancelled) return;
       if (result.isSuccess) {
-        setLevel(result.data.visibilityLevel as Level);
-        setGrants(result.data.grants as Grant[]);
+        const loadedLevel = result.data.visibilityLevel as Level;
+        const loadedGrants = result.data.grants as Grant[];
+        setLevel(loadedLevel);
+        setGrants(loadedGrants);
+        savedLevelRef.current = loadedLevel;
+        savedGrantsRef.current = loadedGrants;
         setCanEdit(result.data.canEdit);
         setError(null);
       } else {
@@ -138,6 +144,8 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
   // successful load even though `roleOptions.length` is intentionally NOT a dep
   // (depending on it would re-run the effect on every option-list change).
   const roleOptionsLoaded = useRef(false);
+  const savedLevelRef = useRef<Level>("private");
+  const savedGrantsRef = useRef<Grant[]>([]);
   useEffect(() => {
     if (!open || !canEdit || roleOptionsLoaded.current) return;
     let cancelled = false;
@@ -188,17 +196,32 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
     });
     setSaving(false);
     if (result.isSuccess) {
+      const newLevel = result.data.visibilityLevel as Level;
+      savedLevelRef.current = newLevel;
+      savedGrantsRef.current = level === "group" ? grants : [];
       setOpen(false);
-      onChange?.(result.data.visibilityLevel as Level);
+      onChange?.(newLevel);
     } else {
       setError(result.message);
     }
   }, [idOrSlug, level, grants, onChange]);
 
+  // Discard unsaved edits whenever the dialog is dismissed without saving
+  // (Esc, outside-click, Dialog X button, or Cancel). Resets draft level/grants
+  // to the last-persisted values so the chip never shows unsaved state as saved.
+  const handleOpenChange = useCallback((next: boolean) => {
+    if (!next) {
+      setLevel(savedLevelRef.current);
+      setGrants(savedGrantsRef.current);
+      setError(null);
+    }
+    setOpen(next);
+  }, []);
+
   const chrome = levelChrome(level);
 
   return (
-    <Dialog open={open} onOpenChange={setOpen}>
+    <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
         <button
           type="button"
@@ -247,7 +270,7 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
             <Button
               type="button"
               variant="ghost"
-              onClick={() => setOpen(false)}
+              onClick={() => handleOpenChange(false)}
               disabled={saving}
             >
               Cancel
@@ -430,7 +453,11 @@ function GroupGrantEditor({
             type="button"
             variant="secondary"
             onClick={submit}
-            disabled={saving || !draftValue.trim()}
+            disabled={
+              saving ||
+              !draftValue.trim() ||
+              (draftKind === "user" && !POSITIVE_INT_RE.test(draftValue.trim()))
+            }
           >
             Add
           </Button>
