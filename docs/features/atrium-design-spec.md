@@ -983,7 +983,7 @@ app/(protected)/nexus/[conversationId]/page.tsx
 ```
 
 - The panel opens when chat creates or references an object (the agent's `create_*` tool result includes the object id/slug), or when the user opens one from the content library.
-- Shared chrome at the top of the panel (both kinds): `title`, version control, a **VisibilityChip** (opens the visibility editor, §10), and one **Publish** button (opens a destination picker; public-facing choices show the approval note).
+- Shared chrome at the top of the panel (both kinds): `title`, version control, a **VisibilityChip** (opens the visibility editor — level picker + group-grant builder, §12), and one **Publish** button (opens a destination picker; public-facing choices show the approval note).
 - The panel is resizable/collapsible; on mobile it stacks below chat.
 
 ```tsx
