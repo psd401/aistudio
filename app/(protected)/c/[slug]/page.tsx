@@ -25,12 +25,19 @@
  *   checks.
  *
  * ## Rendering / security
- * The markdown is re-rendered on every request from `source.md` through
- * `renderMarkdownToHtml`, which returns sanitized HTML (no `<script>`/`<style>`/
- * event handlers — see `lib/content/render/markdown-render.ts`). That output is
- * the only thing passed to `dangerouslySetInnerHTML`; raw author HTML never
- * reaches the DOM. If `source.md` is missing (e.g. S3 `NoSuchKey`), we render an
- * empty body rather than surfacing the raw S3 error.
+ * - DOCUMENTS: the markdown is re-rendered on every request from `source.md`
+ *   through `renderMarkdownToHtml`, which returns sanitized HTML (no
+ *   `<script>`/`<style>`/event handlers — see
+ *   `lib/content/render/markdown-render.ts`). That output is the only thing
+ *   passed to `dangerouslySetInnerHTML`; raw author HTML never reaches the DOM.
+ *   If `source.md` is missing (e.g. S3 `NoSuchKey`), we render an empty body
+ *   rather than surfacing the raw S3 error.
+ * - ARTIFACTS (#1052): the UNTRUSTED artifact code is loaded server-side
+ *   (inline or S3) and handed to the client `<ArtifactSandbox>`, which renders it
+ *   in a cross-origin sandboxed iframe (`sandbox="allow-scripts"`, no
+ *   `allow-same-origin`) served from a separate origin (§19.2 / §28.1). The code
+ *   is NEVER passed to `dangerouslySetInnerHTML` or served as text/html on the
+ *   app origin — the public reader applies the same containment.
  *
  * `dynamic = "force-dynamic"`: visibility depends on the caller's session, so the
  * page must never be statically cached or shared across principals.
@@ -43,14 +50,16 @@ import { executeQuery } from "@/lib/db/drizzle-client";
 import {
   contentObjects,
   contentPublications,
-  contentVersions,
 } from "@/lib/db/schema";
 import { renderMarkdownToHtml } from "@/lib/content/render/markdown-render";
 import { s3Store } from "@/lib/content/storage/s3-store";
 import { visibilityService } from "@/lib/content/visibility-service";
+import { versionService } from "@/lib/content/version-service";
 import { getOptionalRequester } from "@/actions/db/atrium/requester";
 import { createLogger } from "@/lib/logger";
 import { ProvenanceFooter } from "@/components/atrium/ProvenanceFooter";
+import { ArtifactSandbox } from "@/components/atrium/ArtifactSandbox";
+import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 import "@/styles/atrium-content.css";
 import "katex/dist/katex.min.css";
 
@@ -73,6 +82,7 @@ interface ReaderPageProps {
  */
 async function loadPublishedObject(slug: string): Promise<{
   id: string;
+  kind: "document" | "artifact";
   ownerUserId: number;
   visibilityLevel: "private" | "group" | "internal" | "public";
   title: string;
@@ -83,6 +93,7 @@ async function loadPublishedObject(slug: string): Promise<{
       db
         .select({
           id: contentObjects.id,
+          kind: contentObjects.kind,
           ownerUserId: contentObjects.ownerUserId,
           visibilityLevel: contentObjects.visibilityLevel,
           title: contentObjects.title,
@@ -165,19 +176,12 @@ export default async function ReaderPage({
     notFound();
   }
 
-  // (e) Load the published version row for its version number, then read the
-  // canonical markdown from S3 and render it through the sanitizing pipeline.
-  const [version] = await executeQuery(
-    (db) =>
-      db
-        .select({
-          objectId: contentVersions.objectId,
-          versionNumber: contentVersions.versionNumber,
-        })
-        .from(contentVersions)
-        .where(eq(contentVersions.id, published.publishedVersionId))
-        .limit(1),
-    "atrium.reader.publishedVersion"
+  // (e) Load the published version (object-scoped) for its body. Documents read
+  // their canonical markdown from S3; artifacts resolve their untrusted code
+  // (inline or S3) for the cross-origin sandbox.
+  const version = await versionService.getById(
+    published.id,
+    published.publishedVersionId
   );
   if (!version) {
     // The publication points at a version that no longer exists — treat as not
@@ -185,6 +189,34 @@ export default async function ReaderPage({
     notFound();
   }
 
+  // ARTIFACT reader: load the untrusted code server-side and render it ONLY in
+  // the cross-origin sandbox. The code is never placed in app-origin HTML.
+  if (published.kind === "artifact") {
+    let code = "";
+    try {
+      code = await versionService.loadArtifactCode(version);
+    } catch (error) {
+      // Missing/unreadable artifact body degrades to an empty preview rather than
+      // surfacing the raw S3 error to the reader.
+      log.warn("artifact body unavailable; rendering empty preview", {
+        objectId: version.objectId,
+        versionNumber: version.versionNumber,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+    return (
+      <main className="mx-auto max-w-4xl px-4 py-8">
+        <header className="mb-6">
+          <h1 className="text-3xl font-semibold">{published.title}</h1>
+        </header>
+        <ArtifactSandbox code={code} src={getArtifactSandboxRenderUrl()} className="atrium-artifact-preview" />
+        <ProvenanceFooter objectId={published.id} />
+      </main>
+    );
+  }
+
+  // DOCUMENT reader: read the canonical markdown from S3 and render it through
+  // the sanitizing pipeline.
   let markdown = "";
   try {
     const sourceKey = s3Store.key(

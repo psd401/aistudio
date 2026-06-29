@@ -24,6 +24,15 @@ export interface EcsServiceConstructProps {
    * documentsBucketName — so the dependency + Export/Import is explicit.
    */
   agentWorkspaceBucketName: string;
+  /**
+   * Atrium artifact sandbox origin (#1052) — the SEPARATE CloudFront origin that
+   * serves the locked-down artifact host page. Passed as a cross-stack prop from
+   * AtriumSandboxStack (same pattern as documentsBucketName) so the dependency +
+   * Export/Import is explicit. Injected as the `ATRIUM_SANDBOX_ORIGIN` runtime env
+   * var; the app resolves the iframe src server-side and the middleware CSP
+   * frame-src from it (no build-time NEXT_PUBLIC value required).
+   */
+  atriumSandboxOrigin: string;
   enableContainerInsights?: boolean;
   enableFargateSpot?: boolean;
   /**
@@ -690,6 +699,11 @@ export class EcsServiceConstruct extends Construct {
         // runtime — if absent, publishing falls back to a reviewable draft row.
         AGENT_WORKSPACE_BUCKET: agentWorkspaceBucketName,
         SKILL_BUILDER_LAMBDA_ARN: `arn:aws:lambda:${cdk.Stack.of(this).region}:${cdk.Stack.of(this).account}:function:psd-agent-skill-builder-${environment}`,
+        // Atrium artifact sandbox origin (#1052). Server-only runtime var (NOT
+        // NEXT_PUBLIC): the reader/edit Server Components resolve the iframe src
+        // from it and pass it down as a prop, and the middleware builds the CSP
+        // frame-src from it at request time. Sourced from AtriumSandboxStack.
+        ATRIUM_SANDBOX_ORIGIN: props.atriumSandboxOrigin,
       },
       // Secrets injected from Secrets Manager at runtime
       secrets: {

@@ -1,23 +1,29 @@
 /**
- * Atrium document authoring page (#1051)
+ * Atrium authoring page (#1051 documents, #1052 artifacts)
  *
- * The editing surface that mounts the live collaborative editor for one document.
- * Server component: resolves the session user, gates by the object's visibility,
- * then renders the client <DocumentEditor> bound to that user's identity (so their
- * edits stamp green on the rail). The reference E2E drives "human edits two lines"
- * here.
+ * The editing surface for one content object. Server component: resolves the
+ * session user, gates by the object's visibility, then renders the kind-specific
+ * client editor bound to that user's identity:
+ *  - `document` -> <DocumentEditor> (live collaborative Proof editor; #1051).
+ *  - `artifact` -> <ArtifactCanvas> (Preview|Code canvas + cross-origin sandbox;
+ *    #1052). The canvas re-fetches versions/code via canView-enforced actions.
  *
  * `forbidden()` (403) for a viewer who cannot see the object; `notFound()` for a
- * missing object. Edit permission is enforced again server-side by the collab
- * server (read-only token) and the snapshot/publish actions — this page only gates
- * visibility.
+ * missing object. Edit permission is enforced AGAIN server-side by the
+ * snapshot/create-version/publish actions (and, for documents, the collab
+ * server's read-only token) — this page only gates visibility and passes a
+ * `canEdit` hint to the artifact canvas so the Code-tab Save button is hidden for
+ * read-only viewers.
  */
 
 import { forbidden, notFound } from "next/navigation";
 import { getUserRequester } from "@/actions/db/atrium/requester";
 import { contentService } from "@/lib/content/content-service";
 import { visibilityService } from "@/lib/content/visibility-service";
+import { canEdit } from "@/lib/content/helpers";
 import { DocumentEditor } from "@/components/atrium/DocumentEditor";
+import { ArtifactCanvas } from "@/components/atrium/ArtifactCanvas";
+import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 
 export const dynamic = "force-dynamic";
 
@@ -42,8 +48,26 @@ export default async function AtriumEditPage({
   if (!viewable) forbidden();
 
   if (req.kind !== "user" || req.userId == null) {
-    // Phase 1 authoring is a logged-in-human surface.
+    // Authoring is a logged-in-human surface.
     forbidden();
+  }
+
+  // Whether this user may save new versions. The artifact canvas uses this only
+  // to show/hide the Save control; the create-version action re-checks server-side.
+  const userCanEdit = canEdit(req, obj.ownerUserId);
+
+  if (obj.kind === "artifact") {
+    return (
+      <main className="mx-auto max-w-4xl px-4 py-6">
+        <header className="mb-4">
+          <h1 className="text-2xl font-semibold">{obj.title}</h1>
+          <p className="text-xs text-gray-500">
+            Interactive artifact · preview runs in an isolated sandbox
+          </p>
+        </header>
+        <ArtifactCanvas key={obj.id} idOrSlug={obj.id} canEdit={userCanEdit} sandboxSrc={getArtifactSandboxRenderUrl()} />
+      </main>
+    );
   }
 
   return (

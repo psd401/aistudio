@@ -15,6 +15,15 @@ const s3RemotePatterns = S3_BUCKET
     ]
   : []
 
+// NOTE (#1052): the Content-Security-Policy header is intentionally NOT set here.
+// next.config `headers()` is evaluated at BUILD time, but the Atrium artifact
+// sandbox origin (`ATRIUM_SANDBOX_ORIGIN`) is only known at DEPLOY time (a
+// CloudFront domain injected by the CDK AtriumSandboxStack). Multiple CSP headers
+// combine by intersection, so the policy must have a single source — it is built
+// at request time in `middleware.ts`, which can read the runtime env. Do NOT
+// re-add a `Content-Security-Policy` entry below, or it will intersect with the
+// middleware policy and silently block the sandbox `frame-src`.
+
 const nextConfig = {
   reactCompiler: true,
   reactStrictMode: true,
@@ -85,11 +94,9 @@ const nextConfig = {
             // Applies globally — voice pages need mic access, other pages
             // won't trigger the permission prompt unless they call getUserMedia.
             value: 'camera=(), microphone=(self), geolocation=()'
-          },
-          {
-            key: 'Content-Security-Policy',
-            value: "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://*.amazonaws.com; style-src 'self' 'unsafe-inline'; img-src 'self' data: https: blob:; font-src 'self' data:; connect-src 'self' https://*.amazonaws.com wss://*.amazonaws.com https://api.anthropic.com https://api.openai.com; frame-src 'self' https://www.canva.com; frame-ancestors 'none';"
           }
+          // Content-Security-Policy is set in middleware.ts (runtime) — see note
+          // at the top of this file (#1052).
         ],
       },
     ];
