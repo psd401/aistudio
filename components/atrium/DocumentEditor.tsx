@@ -87,11 +87,17 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
     let cancelled = false;
     const ydoc = ydocRef.current;
 
+    // Fetch a fresh collab token. Used both for the initial connect and to
+    // re-mint before each reconnect (the token TTL is short — see collab-token.ts).
+    const fetchSession = async (): Promise<CollabSession> => {
+      const res = await fetch(`/api/content/${encodeURIComponent(idOrSlug)}/collab`);
+      if (!res.ok) throw new Error(`collab token request failed: ${res.status}`);
+      return (await res.json()) as CollabSession;
+    };
+
     (async () => {
       try {
-        const res = await fetch(`/api/content/${encodeURIComponent(idOrSlug)}/collab`);
-        if (!res.ok) throw new Error(`collab token request failed: ${res.status}`);
-        const session = (await res.json()) as CollabSession;
+        const session = await fetchSession();
         if (cancelled) return;
         // Capture the resolved UUID for the snapshot/publish action calls.
         docNameRef.current = session.docName;
@@ -104,8 +110,37 @@ export function DocumentEditor({ idOrSlug, userId }: DocumentEditorProps) {
         const provider = new WebsocketProvider(url, session.docName, ydoc, {
           params: { token: session.token },
         });
+
+        // The collab token has a short TTL (collab-token.ts). y-websocket reuses
+        // the constructor `params` on every reconnect, so after the TTL elapses a
+        // reconnect (network blip, ECS deploy, idle disconnect) would replay a dead
+        // token, the server would close with 4401, and the client would retry
+        // forever with the same expired credential — silently dropping every edit.
+        // `provider.params` is documented as safely mutable and is re-read on each
+        // connection attempt, so we re-mint the token whenever the socket drops and
+        // is about to reconnect. Guarded against overlap with a single in-flight
+        // promise so a flapping connection can't stack concurrent mint requests.
+        let reminting: Promise<void> | null = null;
+        const remintToken = async () => {
+          try {
+            const next = await fetchSession();
+            if (!cancelled && providerRef.current === provider) {
+              provider.params = { token: next.token };
+            }
+          } catch {
+            // Leave the existing (expired) token in place; the provider keeps
+            // retrying and a later disconnect will attempt another re-mint.
+          } finally {
+            reminting = null;
+          }
+        };
         provider.on("status", (event: { status: string }) => {
-          if (!cancelled && event.status === "connecting") setStatus("connecting");
+          if (cancelled) return;
+          if (event.status === "connecting") {
+            setStatus("connecting");
+          } else if (event.status === "disconnected" && !reminting) {
+            reminting = remintToken();
+          }
         });
         provider.on("sync", (synced: boolean) => {
           if (!cancelled && synced) setStatus("ready");

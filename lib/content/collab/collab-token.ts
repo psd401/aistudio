@@ -9,15 +9,22 @@
  * websocket itself carries no ambient cookie trust — authorization is an explicit,
  * per-document, expiring grant that also encodes write permission.
  *
- * Signed with HS256 using AUTH_SECRET (already present for Auth.js). Claims:
- *   sub = users.id (string), oid = content object id, w = may write (boolean).
+ * Signed with HS256 using COLLAB_JWT_SECRET, a key dedicated to collab tokens.
+ * Unlike NextAuth session cookies (HttpOnly, SameSite, never in a URL), collab
+ * tokens travel as a `?token=` query param and are therefore captured by ALB
+ * access logs, reverse proxies, and load balancers. A dedicated key means an
+ * AUTH_SECRET leak does not also hand an attacker the ability to forge collab
+ * tokens with arbitrary `oid`/`w` claims (write access to any document). Falls
+ * back to AUTH_SECRET only in development so existing deployments keep working;
+ * production MUST set COLLAB_JWT_SECRET (see .env.example / ECS task definition).
+ * Claims: sub = users.id (string), oid = content object id, w = may write (boolean).
  */
 
 import { SignJWT, jwtVerify } from "jose";
 
 const ISSUER = "atrium-collab";
 const AUDIENCE = "atrium-collab-ws";
-const TTL_SECONDS = 300; // 5 minutes; clients re-mint a token by reconnecting via the /collab REST endpoint.
+const TTL_SECONDS = 300; // 5 minutes; the client re-mints a fresh token on every websocket reconnect (DocumentEditor).
 
 export interface CollabClaims {
   /** users.id as a string. */
@@ -29,11 +36,22 @@ export interface CollabClaims {
 }
 
 function secretKey(): Uint8Array {
-  const secret = process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET;
-  if (!secret) {
-    throw new Error("AUTH_SECRET is not configured; cannot sign collab tokens");
+  // Dedicated key for collab tokens. Outside development, AUTH_SECRET is NOT an
+  // acceptable fallback — collab tokens ride in URLs and must not share the
+  // session-cookie signing key (see file header).
+  const dedicated = process.env.COLLAB_JWT_SECRET;
+  if (dedicated) {
+    return new TextEncoder().encode(dedicated);
   }
-  return new TextEncoder().encode(secret);
+  if (process.env.NODE_ENV !== "production") {
+    const fallback = process.env.AUTH_SECRET || process.env.NEXTAUTH_SECRET;
+    if (fallback) {
+      return new TextEncoder().encode(fallback);
+    }
+  }
+  throw new Error(
+    "COLLAB_JWT_SECRET is not configured; cannot sign collab tokens (AUTH_SECRET fallback is dev-only)"
+  );
 }
 
 /** Mint a collab session token for one document. */

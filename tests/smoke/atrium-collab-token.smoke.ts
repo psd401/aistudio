@@ -16,15 +16,17 @@
 import assert from "node:assert/strict";
 import { SignJWT } from "jose";
 
-// AUTH_SECRET must be present before importing the module (secretKey() reads it
-// lazily, but set it up-front so any eager read is satisfied too).
-process.env.AUTH_SECRET = process.env.AUTH_SECRET || "test-collab-secret-0123456789";
+// COLLAB_JWT_SECRET is the dedicated signing key (kept separate from AUTH_SECRET
+// so URL-borne collab tokens can't be forged from a session-key leak). Set it
+// before importing the module; secretKey() reads it lazily but set it up-front.
+process.env.COLLAB_JWT_SECRET =
+  process.env.COLLAB_JWT_SECRET || "test-collab-secret-0123456789";
 
 const { signCollabToken, verifyCollabToken } = await import(
   "@/lib/content/collab/collab-token"
 );
 
-const SECRET = new TextEncoder().encode(process.env.AUTH_SECRET);
+const SECRET = new TextEncoder().encode(process.env.COLLAB_JWT_SECRET);
 const OID = "11111111-1111-1111-1111-111111111111";
 
 let passed = 0;
@@ -135,6 +137,23 @@ await check("w defaults to false when the claim is absent/non-true", async () =>
   const claims = await verifyCollabToken(noW);
   assert.ok(claims);
   assert.equal(claims!.w, false);
+});
+
+await check("token signed with AUTH_SECRET is rejected (keys are separate)", async () => {
+  // Defense-in-depth: a token forged with the NextAuth session key must NOT
+  // verify against the dedicated collab key. Set a different AUTH_SECRET, sign
+  // with it, and confirm verifyCollabToken rejects it.
+  const authSecretValue = "auth-secret-distinct-from-collab-999";
+  const authKey = new TextEncoder().encode(authSecretValue);
+  const forgedWithAuth = await new SignJWT({ oid: OID, w: true })
+    .setProtectedHeader({ alg: "HS256" })
+    .setSubject("42")
+    .setIssuer("atrium-collab")
+    .setAudience("atrium-collab-ws")
+    .setIssuedAt()
+    .setExpirationTime("5m")
+    .sign(authKey);
+  assert.equal(await verifyCollabToken(forgedWithAuth), null);
 });
 
 console.log(`\natrium-collab-token smoke: ${passed} checks passed`);

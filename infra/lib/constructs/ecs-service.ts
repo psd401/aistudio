@@ -109,6 +109,12 @@ export interface EcsServiceConstructProps {
    */
   internalApiSecretArn: string;
   /**
+   * Atrium collab token signing secret ARN from Secrets Manager (#1051).
+   * Dedicated key for collab session tokens that ride in the websocket URL —
+   * kept separate from AUTH_SECRET so a session-key leak can't forge collab tokens.
+   */
+  collabJwtSecretArn: string;
+  /**
    * K-12 Content Safety: Bedrock Guardrail ARN (from GuardrailsStack)
    * If provided, enables precise IAM scoping instead of wildcard
    */
@@ -266,6 +272,7 @@ export class EcsServiceConstruct extends Construct {
         // Explicit permissions for both secrets
         props.authSecretArn,
         props.internalApiSecretArn,
+        props.collabJwtSecretArn,
       ],
     }));
 
@@ -301,6 +308,7 @@ export class EcsServiceConstruct extends Construct {
                 props.rdsSecretArn, // Include actual database secret ARN
                 props.authSecretArn, // Include auth secret
                 props.internalApiSecretArn, // Include internal API secret
+                props.collabJwtSecretArn, // Include Atrium collab token signing secret (#1051)
               ],
             }),
             // Agent Workspace OAuth secrets — read+update for refresh tokens (#912).
@@ -693,6 +701,13 @@ export class EcsServiceConstruct extends Construct {
         INTERNAL_API_SECRET: ecs.Secret.fromSecretsManager(
           secretsmanager.Secret.fromSecretCompleteArn(this, 'InternalApiSecret', props.internalApiSecretArn),
           'INTERNAL_API_SECRET'
+        ),
+        // Atrium collab token signing secret (#1051). Dedicated key so collab
+        // tokens (which ride in the websocket URL and land in ALB/proxy logs)
+        // don't share AUTH_SECRET; a session-key leak then can't forge them.
+        COLLAB_JWT_SECRET: ecs.Secret.fromSecretsManager(
+          secretsmanager.Secret.fromSecretCompleteArn(this, 'CollabJwtSecret', props.collabJwtSecretArn),
+          'COLLAB_JWT_SECRET'
         ),
         // Issue #603: Database credentials for postgres.js driver
         // The RDS secret contains a JSON object with: username, password, host, port, dbname
