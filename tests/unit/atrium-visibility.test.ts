@@ -211,11 +211,15 @@ describe("applyGrants — value validation", () => {
     ).rejects.toThrow(/positive-integer/i);
   });
 
-  it("rejects a non-positive 'role' grant value", async () => {
-    const { tx } = fakeTx();
-    await expect(
-      visibilityService.applyGrants(tx, "obj-1", [{ kind: "role", value: "0" }])
-    ).rejects.toThrow(/positive-integer/i);
+  it("accepts a non-numeric 'role' grant value (role grants match by NAME)", async () => {
+    // A role grant carries the role NAME (e.g. "staff"), matched against
+    // principal.roles in canView. It must NOT be validated as a numeric id —
+    // doing so (Phase 0 behaviour) made role-based group grants unmatchable.
+    const { tx, inserted } = fakeTx();
+    await visibilityService.applyGrants(tx, "obj-1", [
+      { kind: "role", value: "staff" },
+    ]);
+    expect(inserted).toHaveLength(1);
   });
 
   it("rejects a grant value over 255 chars", async () => {
@@ -227,11 +231,11 @@ describe("applyGrants — value validation", () => {
     ).rejects.toThrow(/maximum length/i);
   });
 
-  it("accepts valid numeric user/role and opaque building values", async () => {
+  it("accepts a numeric user id, a role NAME, and opaque building values", async () => {
     const { tx, inserted } = fakeTx();
     await visibilityService.applyGrants(tx, "obj-1", [
       { kind: "user", value: "42" },
-      { kind: "role", value: "7" },
+      { kind: "role", value: "staff" },
       { kind: "building", value: "High School" },
     ]);
     expect(inserted).toHaveLength(1);

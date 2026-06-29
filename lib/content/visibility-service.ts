@@ -42,10 +42,20 @@ const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
 const MAX_GRANT_VALUE_LENGTH = 255;
 
 /**
- * Validate a grant before it is persisted. `user`/`role` values are numeric IDs
- * stored as strings (§12.2); the rest are non-empty opaque tokens. Rejecting an
- * empty or malformed value here prevents, e.g., an empty-string role grant from
- * matching unintended principals once the `g.grant_value = ''` comparison runs.
+ * Validate a grant before it is persisted. Only a `user` grant carries a numeric
+ * id (the `users.id`, matched as `String(userId)` in §12.2). A `role` grant
+ * carries the role *name* (e.g. "staff"), because `canView` matches it against
+ * `principal.roles` — which are role NAMES (`getUserRoles` returns
+ * `roles.name`), never role ids. The remaining kinds (building / department /
+ * grade) carry the user-attribute string verbatim. Rejecting an empty or
+ * over-long value here prevents, e.g., an empty-string role grant from matching
+ * unintended principals once the `g.grant_value = ''` comparison runs.
+ *
+ * NOTE: a `role` grant value MUST NOT be validated as a numeric id. Doing so
+ * (the Phase 0 behaviour) made role-based group grants unmatchable end-to-end:
+ * any value that passed validation (a number) could never equal a role name, so
+ * the grant silently granted access to no one. role=name / user=id is the §12.2
+ * contract and what `canView` / `buildVisibilitySql` both match on.
  */
 function assertValidGrant(grant: VisibilityGrant): void {
   const value = grant.value;
@@ -57,12 +67,10 @@ function assertValidGrant(grant: VisibilityGrant): void {
       kind: grant.kind,
     });
   }
-  if (
-    (grant.kind === "user" || grant.kind === "role") &&
-    !POSITIVE_INT_RE.test(value)
-  ) {
+  // Only `user` grants are numeric ids; `role` matches by NAME (see above).
+  if (grant.kind === "user" && !POSITIVE_INT_RE.test(value)) {
     throw new ValidationError(
-      `Grant value for '${grant.kind}' must be a positive-integer id`,
+      `Grant value for 'user' must be a positive-integer id`,
       { kind: grant.kind, value }
     );
   }
