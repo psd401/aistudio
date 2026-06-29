@@ -30,7 +30,7 @@ import {
   yDocToProseMirrorJSON,
 } from "./markdown-bridge";
 import { COLLAB_FIELD, makeAuthorTag } from "./provenance";
-import { signCollabToken } from "./collab-token";
+import { signAgentCollabToken } from "./collab-token";
 import { createLogger } from "@/lib/logger";
 
 const log = createLogger({ context: "agent-bridge-client" });
@@ -106,7 +106,10 @@ const AGENT_SETTLE_MS = Number(process.env.COLLAB_AGENT_SETTLE_MS) || 500;
 export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
   const { objectId, markdown, agentId, mode = "replace" } = input;
   const by = makeAuthorTag("agent", agentId);
-  const token = await signCollabToken({ sub: `agent:${agentId}`, oid: objectId, w: true });
+  // Short-TTL token: this loopback bridge completes in ≤SYNC_TIMEOUT_MS (10s),
+  // so a 30s grant is ample and shrinks the ALB-access-log replay window vs. the
+  // 5-minute browser token (the token rides in the `?token=` URL — see collab-token.ts).
+  const token = await signAgentCollabToken({ sub: `agent:${agentId}`, oid: objectId, w: true });
 
   // COLLAB_INTERNAL_URL allows overriding the loopback target in ECS task definitions
   // where PORT may differ from the value server.ts actually binds on. Validated to a
@@ -164,9 +167,23 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
   try {
     await new Promise<void>((resolve, reject) => {
       let applied = false;
+      let settled = false;
+      let settleTimer: ReturnType<typeof setTimeout> | null = null;
       const timer = setTimeout(() => {
         reject(new Error("collab sync timeout"));
       }, SYNC_TIMEOUT_MS);
+      // Single resolution path so the settle timer and the close handler can't
+      // BOTH resolve. Once the close handler resolves (the normal case — the
+      // collab server closes the socket on last-conn cleanup before the settle
+      // window elapses), the still-armed settle timer is cancelled, so it does
+      // not fire a second (no-op) resolve after `finally` already tore down.
+      const settle = (): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        if (settleTimer) { clearTimeout(settleTimer); settleTimer = null; }
+        resolve();
+      };
 
       ws.addEventListener("open", () => {
         // Ask the server for its current state.
@@ -190,10 +207,7 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
           if (!applied && syncType === SYNC_STEP_2) {
             applied = true;
             applyEdit();
-            setTimeout(() => {
-              clearTimeout(timer);
-              resolve();
-            }, AGENT_SETTLE_MS);
+            settleTimer = setTimeout(settle, AGENT_SETTLE_MS);
           }
         } catch (e) {
           log.error("Agent bridge sync message error", {
@@ -216,7 +230,7 @@ export async function applyAgentEdit(input: AgentEditInput): Promise<void> {
       ws.addEventListener("close", () => {
         clearTimeout(timer);
         if (!applied) reject(new Error("collab websocket closed"));
-        else resolve();
+        else settle();
       });
     });
   } finally {

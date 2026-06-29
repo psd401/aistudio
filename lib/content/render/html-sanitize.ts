@@ -30,8 +30,14 @@ import { JSDOM } from "jsdom";
  * scheme is already normalized to its literal form here.
  *
  * NOTE: parent-traversal (`../`) is intentionally NOT allowed.
+ *
+ * The root-relative branch is `\/(?!\/)` — a single leading slash NOT followed
+ * by another. A bare `\/` would also match PROTOCOL-RELATIVE URLs (`//evil.com`),
+ * which the browser resolves to `https://evil.com` (inheriting the page protocol):
+ * an open-redirect / phishing vector via `<a href="//evil.com">`. The negative
+ * lookahead admits `/foo` (root-relative) while rejecting `//host`.
  */
-const SAFE_URL_SCHEME = /^(?:https?:|mailto:|tel:|#|\/|\.\/)/i;
+const SAFE_URL_SCHEME = /^(?:https?:|mailto:|tel:|#|\/(?!\/)|\.\/)/i;
 
 /** Plain URL-bearing attributes checked against the scheme allowlist. */
 const URL_ATTRS = ["href", "src"] as const;

@@ -14,7 +14,7 @@
  */
 
 import assert from "node:assert/strict";
-import { SignJWT } from "jose";
+import { SignJWT, decodeJwt } from "jose";
 
 // COLLAB_JWT_SECRET is the dedicated signing key (kept separate from AUTH_SECRET
 // so URL-borne collab tokens can't be forged from a session-key leak). Set it
@@ -22,7 +22,7 @@ import { SignJWT } from "jose";
 process.env.COLLAB_JWT_SECRET =
   process.env.COLLAB_JWT_SECRET || "test-collab-secret-0123456789";
 
-const { signCollabToken, verifyCollabToken } = await import(
+const { signCollabToken, signAgentCollabToken, verifyCollabToken } = await import(
   "@/lib/content/collab/collab-token"
 );
 
@@ -50,6 +50,20 @@ await check("valid read token round-trips with w=false", async () => {
   const claims = await verifyCollabToken(token);
   assert.ok(claims);
   assert.equal(claims!.w, false);
+});
+
+await check("agent-bridge token verifies and has a much shorter TTL", async () => {
+  // PR #1062 review: the loopback agent bridge mints a SHORT-TTL token to shrink
+  // the ALB-access-log replay window. It must still verify (same claim shape) but
+  // expire far sooner than the 300s browser token.
+  const agentToken = await signAgentCollabToken({ sub: "agent:x", oid: OID, w: true });
+  const claims = await verifyCollabToken(agentToken);
+  assert.ok(claims, "agent token verifies");
+  assert.equal(claims!.w, true);
+  const { iat, exp } = decodeJwt(agentToken) as { iat: number; exp: number };
+  const ttl = exp - iat;
+  assert.ok(ttl <= 30, `agent token TTL should be <=30s, got ${ttl}`);
+  assert.ok(ttl < 300, "agent token TTL must be shorter than the 300s browser token");
 });
 
 await check("missing token returns null (no throw)", async () => {

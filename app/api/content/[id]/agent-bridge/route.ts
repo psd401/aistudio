@@ -37,16 +37,25 @@ const UUID_RE =
 /**
  * Validate the attribution agent id. The `X-Agent-Id` header is stamped onto the
  * CRDT nodes the edit produces, so anything that trusts that mark (audit trail, UI
- * attribution, export) trusts this value. A caller must not be able to attribute
- * their edit to a REGISTERED agent identity they do not control.
+ * attribution, export) trusts this value.
  *
  * - A UUID-shaped id is treated as a claim of a registered `agent_identities` row:
  *   it MUST exist and be active, else we reject (403). This prevents spoofing
  *   `X-Agent-Id: <real-bot-uuid>`.
- * - A non-UUID free-form label (Phase 1 cosmetic attribution, e.g. "drafting-agent")
- *   carries no registered identity to impersonate and is accepted as-is. Autonomous
- *   agents authenticating as themselves (and binding label→identity) arrive in a
- *   later phase per the route header.
+ * - A non-UUID free-form label (e.g. a registered agent's `name` like
+ *   "ship-reporter", or an ad-hoc "drafting-agent") is accepted as-is.
+ *
+ * KNOWN LIMITATION (Phase 1, documented per PR #1062 review): the free-form-label
+ * branch performs NO identity verification. Because `agent_identities.id` is a
+ * `defaultRandom()` UUID not knowable at call sites, the legitimate way to attribute
+ * an edit to a registered agent in Phase 1 IS its name — so any logged-in human with
+ * edit rights can stamp `ai:<any-label>`, including the NAME of a registered agent.
+ * This is acceptable for Phase 1 because the route's authorization model is "a
+ * logged-in human with edit rights operates the agent; the session is the
+ * authorization conduit and X-Agent-Id is attribution" (see route header) — it is
+ * cosmetic, session-gated attribution, NOT authenticated agent identity. Autonomous
+ * agents authenticating as themselves (binding a verified identity to the label via
+ * API keys, which would let us reject by-name impersonation) arrive in a later phase.
  *
  * Returns true when the id may be used for attribution, false when it must be rejected.
  */

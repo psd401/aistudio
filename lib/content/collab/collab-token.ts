@@ -25,6 +25,14 @@ import { SignJWT, jwtVerify } from "jose";
 const ISSUER = "atrium-collab";
 const AUDIENCE = "atrium-collab-ws";
 const TTL_SECONDS = 300; // 5 minutes; the client re-mints a fresh token on every websocket reconnect (DocumentEditor).
+/**
+ * Tighter TTL for the server-side agent bridge. That path connects to loopback,
+ * completes within SYNC_TIMEOUT_MS (10s) and tears down — it never needs the
+ * 5-minute browser-reconnect window. Since the token rides in the `?token=` URL
+ * (captured by ALB access logs), a 30s grant shrinks the log-replay window from
+ * 5 minutes to seconds. 30s leaves margin over the 10s sync timeout.
+ */
+const AGENT_TTL_SECONDS = 30;
 
 export interface CollabClaims {
   /** users.id as a string. */
@@ -63,6 +71,23 @@ export async function signCollabToken(claims: CollabClaims): Promise<string> {
     .setAudience(AUDIENCE)
     .setIssuedAt()
     .setExpirationTime(`${TTL_SECONDS}s`)
+    .sign(secretKey());
+}
+
+/**
+ * Mint a SHORT-TTL collab token for the internal agent bridge (loopback only,
+ * completes in ≤10s). Shorter expiry shrinks the ALB-log replay window vs. the
+ * 5-minute browser token. Same claim shape, so the collab server verifies it
+ * with no special-casing.
+ */
+export async function signAgentCollabToken(claims: CollabClaims): Promise<string> {
+  return new SignJWT({ oid: claims.oid, w: claims.w })
+    .setProtectedHeader({ alg: "HS256" })
+    .setSubject(claims.sub)
+    .setIssuer(ISSUER)
+    .setAudience(AUDIENCE)
+    .setIssuedAt()
+    .setExpirationTime(`${AGENT_TTL_SECONDS}s`)
     .sign(secretKey());
 }
 

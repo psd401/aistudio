@@ -63,8 +63,19 @@ const PERSIST_DEBOUNCE_MS = Number(process.env.COLLAB_PERSIST_DEBOUNCE_MS) || 15
  * repeatedly opening sockets to one room would otherwise grow `DocEntry.conns`
  * (and its awareness map) without bound. Override with COLLAB_MAX_CONNS_PER_ROOM;
  * defaults to 50. Set to 0 to disable the cap.
+ *
+ * Parse explicitly rather than `Number(... ?? 50)`: `?? 50` only catches
+ * null/undefined, NOT an empty string, and `Number("") === 0` would SILENTLY
+ * disable the cap (a blank env var is a footgun, not an intentional "disable").
+ * Here, only an explicit numeric value (including a deliberate 0) is honored;
+ * unset / blank / non-numeric all fall back to 50.
  */
-const MAX_CONNS_PER_ROOM = Number(process.env.COLLAB_MAX_CONNS_PER_ROOM ?? 50);
+const MAX_CONNS_PER_ROOM = ((): number => {
+  const raw = process.env.COLLAB_MAX_CONNS_PER_ROOM;
+  if (raw === undefined || raw.trim() === "") return 50;
+  const n = Number(raw);
+  return Number.isFinite(n) && n >= 0 ? n : 50;
+})();
 
 const REDIS_CHANNEL_PREFIX = "atrium:collab:";
 
@@ -118,7 +129,18 @@ function initRedis(): void {
   sub.on("pmessageBuffer", (_pattern: Buffer, channel: Buffer, message: Buffer) => {
     const docName = channel.toString("utf8").slice(REDIS_CHANNEL_PREFIX.length);
     const entry = docs.get(docName);
-    if (entry) Y.applyUpdate(entry.ydoc, new Uint8Array(message), "redis");
+    if (!entry) return;
+    Y.applyUpdate(entry.ydoc, new Uint8Array(message), "redis");
+    // Also schedule a (debounced) persist on the RECEIVING instance. The
+    // ydoc "update" handler skips persist for origin === "redis" to avoid every
+    // instance writing the same update, relying on the ORIGINATING instance to
+    // persist. But if that instance crashes / is replaced (ECS rolling deploy,
+    // OOM) before its debounce fires, the edit lives only in memory on the
+    // receivers and is silently lost on the next cold load. Scheduling here too
+    // means whichever instance's debounce fires first persists the converged
+    // state; the trailing-edge debounce + idempotent saveDocState make the
+    // duplicate writes harmless (last writer wins on identical CRDT state).
+    schedulePersist(docName, entry);
   });
 }
 
@@ -311,6 +333,17 @@ function attachPreAuthBuffer(
   const MAX_PENDING_FRAMES = 16;
   const pending: Uint8Array[] = [];
   let processFrame: ((u8: Uint8Array) => void) | null = null;
+  // Hoisted so the buffer-overflow branch in onMessage can reuse the SAME
+  // detach-listener-and-close path as every other rejection. Closing the socket
+  // without detaching the listener (and dropping the buffer) would pin a listener
+  // + buffer on each rejected fd until it closes — a connection-flood DoS lever.
+  const rejectConn = (code?: number, reason?: string): void => {
+    ws.off("message", onMessage);
+    pending.length = 0;
+    if (code !== undefined) {
+      try { ws.close(code, reason); } catch { /* already closing */ }
+    }
+  };
   const onMessage = (data: Buffer): void => {
     const u8 = new Uint8Array(data);
     if (processFrame) {
@@ -319,20 +352,14 @@ function attachPreAuthBuffer(
       pending.push(u8);
     } else {
       log.warn("Pre-auth frame buffer exceeded, closing connection", { docName });
-      try { ws.close(4429, "Too many pending frames"); } catch { /* already closing */ }
+      rejectConn(4429, "Too many pending frames");
     }
   };
   ws.on("message", onMessage);
   return {
     pending,
     setProcessFrame: (fn) => { processFrame = fn; },
-    rejectConn: (code, reason) => {
-      ws.off("message", onMessage);
-      pending.length = 0;
-      if (code !== undefined) {
-        try { ws.close(code, reason); } catch { /* already closing */ }
-      }
-    },
+    rejectConn,
   };
 }
 
@@ -473,7 +500,15 @@ export async function handleCollabConnection(
             error: e instanceof Error ? e.message : String(e),
           })
         )
-        .finally(() => docs.delete(docName));
+        // Identity-checked delete: a connection arriving DURING the async save
+        // calls getOrCreateDoc, gets THIS still-live entry, and adds itself to
+        // entry.conns. An identity-blind `docs.delete(docName)` would then orphan
+        // that entry (docs no longer maps docName -> entry, so the next connection
+        // builds a fresh DocEntry from DB — split-brain: two in-memory instances
+        // for one document). Only evict if the map still points at us.
+        .finally(() => {
+          if (docs.get(docName) === entry) docs.delete(docName);
+        });
     }
   };
   // The `ws` library emits 'error' before 'close' on a TCP RST or TLS error.
