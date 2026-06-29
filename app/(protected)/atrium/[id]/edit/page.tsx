@@ -23,6 +23,7 @@ import { visibilityService } from "@/lib/content/visibility-service";
 import { canEdit } from "@/lib/content/helpers";
 import { DocumentEditor } from "@/components/atrium/DocumentEditor";
 import { ArtifactCanvas } from "@/components/atrium/ArtifactCanvas";
+import { VisibilityChip } from "@/components/atrium/VisibilityChip";
 import { getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 
 export const dynamic = "force-dynamic";
@@ -59,11 +60,14 @@ export default async function AtriumEditPage({
   if (obj.kind === "artifact") {
     return (
       <main className="mx-auto max-w-4xl px-4 py-6">
-        <header className="mb-4">
-          <h1 className="text-2xl font-semibold">{obj.title}</h1>
-          <p className="text-xs text-gray-500">
-            Interactive artifact · preview runs in an isolated sandbox
-          </p>
+        <header className="mb-4 flex items-start justify-between gap-3">
+          <div>
+            <h1 className="text-2xl font-semibold">{obj.title}</h1>
+            <p className="text-xs text-gray-500">
+              Interactive artifact · preview runs in an isolated sandbox
+            </p>
+          </div>
+          <VisibilityChip idOrSlug={obj.id} />
         </header>
         <ArtifactCanvas key={obj.id} idOrSlug={obj.id} canEdit={userCanEdit} sandboxSrc={getArtifactSandboxRenderUrl()} />
       </main>
@@ -72,11 +76,14 @@ export default async function AtriumEditPage({
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-6">
-      <header className="mb-4">
-        <h1 className="text-2xl font-semibold">{obj.title}</h1>
-        <p className="text-xs text-gray-500">
-          Live document · agent edits show purple, your edits show green
-        </p>
+      <header className="mb-4 flex items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold">{obj.title}</h1>
+          <p className="text-xs text-gray-500">
+            Live document · agent edits show purple, your edits show green
+          </p>
+        </div>
+        <VisibilityChip idOrSlug={obj.id} />
       </header>
       <DocumentEditor key={obj.id} idOrSlug={obj.id} userId={req.userId} />
     </main>
