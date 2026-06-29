@@ -16,7 +16,7 @@
 import { eq } from "drizzle-orm";
 import { executeQuery } from "@/lib/db/drizzle-client";
 import { users } from "@/lib/db/schema";
-import { getServerSession } from "@/lib/auth/server-session";
+import { getServerSession, type CognitoSession } from "@/lib/auth/server-session";
 import { getUserRoles } from "@/lib/db/user-roles";
 import { ErrorFactories } from "@/lib/error-utils";
 import { createLogger, generateRequestId } from "@/lib/logger";
@@ -52,7 +52,14 @@ const GUEST_REQUESTER: Requester = Object.freeze({
  * falls back to a guest).
  */
 async function resolveAuthenticatedRequester(
-  requestId?: string
+  requestId?: string,
+  /**
+   * Optional pre-resolved session. When the caller already resolved the session
+   * (and passes the same instance to `hasCapabilityAccess`), threading it here
+   * collapses what would otherwise be two `getServerSession()` calls per action
+   * into one — and guarantees both reads see the SAME session.
+   */
+  preResolvedSession?: CognitoSession | null
 ): Promise<Requester | null> {
   // Correlate with the calling action's request id when provided; fall back to
   // a fresh id only when called outside an action context.
@@ -61,7 +68,8 @@ async function resolveAuthenticatedRequester(
     action: "resolveAtriumRequester",
   });
 
-  const session = await getServerSession();
+  const session =
+    preResolvedSession !== undefined ? preResolvedSession : await getServerSession();
   if (!session?.sub) {
     log.debug("No active session resolving Atrium requester");
     return null;
@@ -108,8 +116,11 @@ async function resolveAuthenticatedRequester(
  * row (so server actions surface a 401-style error via handleError). Use for
  * write actions, where a session is mandatory.
  */
-export async function getUserRequester(requestId?: string): Promise<Requester> {
-  const requester = await resolveAuthenticatedRequester(requestId);
+export async function getUserRequester(
+  requestId?: string,
+  preResolvedSession?: CognitoSession | null
+): Promise<Requester> {
+  const requester = await resolveAuthenticatedRequester(requestId, preResolvedSession);
   if (!requester) {
     throw ErrorFactories.authNoSession();
   }

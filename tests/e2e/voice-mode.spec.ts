@@ -8,7 +8,7 @@
  * Issue #873, #876
  */
 
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures'
 
 test.describe('Voice Mode', () => {
   test.describe('Voice button visibility', () => {

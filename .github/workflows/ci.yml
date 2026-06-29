@@ -43,12 +43,23 @@ jobs:
       env:
         # Prevent tests from timing out in CI
         CI: true
+
+    # Atrium Bun smokes: these exercise pure-ESM modules (jose, dompurify+jsdom,
+    # unified/remark/rehype, yjs/y-protocols) that next/jest (SWC) cannot transform
+    # in node_modules, so they run under Bun, not jest. The DB-backed visibility
+    # smoke is excluded (it needs Postgres); the rest are self-contained.
+    - name: Run Atrium smokes (Bun)
+      run: bun run test:smoke:atrium
+      env:
+        CI: true
+        # Dedicated collab-token signing key (mirrors the smoke's own default).
+        COLLAB_JWT_SECRET: ci-collab-secret-0123456789
     
     # Optional: Upload test coverage if you generate it
     # - name: Upload coverage reports
     #   uses: codecov/codecov-action@v3
     #   if: always()
-  
+
   # CDK validation job - checks infrastructure code
   cdk-validate:
     name: Validate CDK Infrastructure

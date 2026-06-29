@@ -1,9 +1,9 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures'
 
 test.describe('Assistant Architect Tool Execution', () => {
   test.beforeEach(async ({ page }) => {
     // Go to assistant architect page
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
 
     // Wait for authentication if needed - try multiple selectors
     try {
@@ -431,7 +431,7 @@ test.describe('Assistant Architect Tool Execution', () => {
 
 test.describe('Assistant Architect Tool Performance', () => {
   test('should execute web search within performance limits', async ({ page }) => {
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
     await page.waitForTimeout(2000)
 
     const architectCards = page.locator('[data-testid="assistant-architect-card"], .assistant-architect-card, [class*="card"]')
@@ -524,7 +524,7 @@ test.describe('Assistant Architect Tool Performance', () => {
   })
 
   test('should handle multiple tool execution efficiently', async ({ page }) => {
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
     await page.waitForTimeout(2000)
 
     // Try to find an assistant with multiple tools
@@ -594,7 +594,7 @@ test.describe('Assistant Architect Tool Performance', () => {
 
 test.describe('Assistant Architect Tool Accessibility', () => {
   test('should support keyboard navigation for tool selection', async ({ page }) => {
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
     await page.waitForTimeout(2000)
 
     // Try to navigate to create form
@@ -643,7 +643,7 @@ test.describe('Assistant Architect Tool Accessibility', () => {
   })
 
   test('should have proper ARIA labels and screen reader support', async ({ page }) => {
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
     await page.waitForTimeout(2000)
 
     // Check for proper ARIA labeling
@@ -697,7 +697,7 @@ test.describe('Assistant Architect Tool Accessibility', () => {
   })
 
   test('should maintain proper focus management in dialogs', async ({ page }) => {
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
     await page.waitForTimeout(2000)
 
     // Look for dialogs or modals
@@ -759,7 +759,7 @@ test.describe('Assistant Architect Tool Security', () => {
     // This would test security aspects of tool validation
     // For now, we ensure that the UI properly validates tool inputs
 
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
     await page.waitForSelector('[data-testid="assistant-architect-page"]')
 
     const architectCards = page.locator('[data-testid="assistant-architect-card"]')
@@ -804,7 +804,7 @@ test.describe('Assistant Architect Tool Security', () => {
   })
 
   test('should handle extremely large inputs with proper truncation', async ({ page }) => {
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
     await page.waitForSelector('[data-testid="assistant-architect-page"]')
 
     const architectCards = page.locator('[data-testid="assistant-architect-card"]')
@@ -861,7 +861,7 @@ test.describe('Assistant Architect Tool Security', () => {
   })
 
   test('should validate and sanitize special Unicode characters', async ({ page }) => {
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
     await page.waitForSelector('[data-testid="assistant-architect-page"]')
 
     const architectCards = page.locator('[data-testid="assistant-architect-card"]')
@@ -923,7 +923,7 @@ test.describe('Assistant Architect Tool Security', () => {
   })
 
   test('should enforce rate limiting for excessive tool execution requests', async ({ page }) => {
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
     await page.waitForSelector('[data-testid="assistant-architect-page"]')
 
     const architectCards = page.locator('[data-testid="assistant-architect-card"]')
@@ -1011,7 +1011,7 @@ test.describe('Assistant Architect Tool Security', () => {
     // This test would ideally require multiple user accounts with different permissions
     // For now, we test that permission validation is enforced in the UI
 
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
     await page.waitForSelector('[data-testid="assistant-architect-page"]')
 
     // Try to access tool creation/editing features
@@ -1079,7 +1079,7 @@ test.describe('Assistant Architect Tool Security', () => {
   })
 
   test('should validate SQL injection attempts in tool inputs', async ({ page }) => {
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
     await page.waitForSelector('[data-testid="assistant-architect-page"]')
 
     const architectCards = page.locator('[data-testid="assistant-architect-card"]')

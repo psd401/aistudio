@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures'
 
 /**
  * E2E: admin-skill-review (Issue #925, AC#8 / AC#3).
@@ -9,6 +9,8 @@ import { test, expect } from '@playwright/test'
  * through the existing Epic #910 pipeline. Resilient skip-if-absent style — the
  * environment may lack admin auth or a pending skill.
  */
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
+
 test.describe('Admin skill review', () => {
   test('review queue exposes approve/reject for pending skills', async ({ page }) => {
     await page.goto('/admin/agents/skills/review')
@@ -33,7 +35,7 @@ test.describe('Admin skill review', () => {
     }
 
     // The review queue heading should be present for an admin.
-    await expect(page.locator('main, body')).toBeVisible()
+    await expect(page.locator('main').first()).toBeVisible()
 
     // If at least one skill is queued, the approve + reject controls must render.
     const approve = page.locator('button:has-text("Approve to Shared")')

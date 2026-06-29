@@ -19,8 +19,19 @@ const nextConfig = {
   reactCompiler: true,
   reactStrictMode: true,
   output: 'standalone',
+  // Allow an isolated build directory (default '.next'). The local E2E runner
+  // builds a production bundle to '.next-e2e' so it can run a prod server on a
+  // dedicated port WITHOUT clobbering a developer's running `next dev` (.next),
+  // and without the dev server's lazy per-route compilation falling over under
+  // parallel Playwright load. See scripts/test/e2e-local.sh.
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   transpilePackages: ['recharts'],
-  serverExternalPackages: ['winston', 'logform', '@colors/colors', 'argon2', 'postgres', 'mammoth', 'pdf-parse', 'oidc-provider', 'ws'],
+  serverExternalPackages: ['winston', 'logform', '@colors/colors', 'argon2', 'postgres', 'mammoth', 'pdf-parse', 'oidc-provider', 'ws',
+    // Atrium collab (#1051): the agent-bridge route opens a y-websocket client to
+    // the collab server. These pure-ESM Yjs libs must run as real Node modules on
+    // the server, not webpack-bundled (bundling breaks the y-websocket client —
+    // it connects but never syncs). Server-only; the browser editor still bundles them.
+    'y-websocket', 'yjs', 'y-prosemirror', 'y-protocols', 'lib0'],
   outputFileTracingIncludes: {
     '/**': [
       './node_modules/argon2/**/*',
@@ -88,6 +99,10 @@ const nextConfig = {
       bodySizeLimit: '100mb',
       timeout: 300,
     },
+    // Enables the `forbidden()` / `unauthorized()` navigation interrupts used by
+    // the Atrium reader (app/(protected)/c/[slug]) to return a true 403 for
+    // out-of-audience users (#1051).
+    authInterrupts: true,
   },
   webpack: (config, { isServer }) => {
     config.cache = {

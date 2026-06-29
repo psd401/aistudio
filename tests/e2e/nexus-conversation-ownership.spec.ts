@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures'
 
 /**
  * Security regression test: conversation ownership check in /api/nexus/chat.
@@ -19,6 +19,13 @@ test.describe('Nexus conversation ownership (security)', () => {
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires two authenticated Playwright contexts — set PLAYWRIGHT_AUTH_ENABLED=true to run'
+  )
+  // These cases create a conversation by sending a chat turn, which needs a live AI
+  // model to respond. Gate behind E2E_RUN_EXTERNAL like the other live-provider
+  // specs so the keyless default run doesn't fail here.
+  test.skip(
+    process.env.E2E_RUN_EXTERNAL !== '1',
+    'Creating a conversation via chat needs a live model — set E2E_RUN_EXTERNAL=1'
   )
 
   test('standard chat: POST with another user\'s conversationId returns 404', async ({ browser }) => {

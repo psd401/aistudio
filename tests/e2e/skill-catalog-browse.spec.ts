@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures'
 
 /**
  * E2E: skill-catalog-browse (Issue #925, AC#8).
@@ -9,6 +9,8 @@ import { test, expect } from '@playwright/test'
  * "Export as zip" actions. Resilient skip-if-absent style — the environment may
  * have no approved skills or no auth state.
  */
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
+
 test.describe('Skill catalog browse', () => {
   test('lists approved skills and opens a detail page', async ({ page }) => {
     await page.goto('/skills')

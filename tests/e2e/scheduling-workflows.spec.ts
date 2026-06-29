@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures'
 
 /**
  * End-to-End Scheduling Workflows Test Suite
@@ -6,13 +6,15 @@ import { test, expect } from '@playwright/test'
  * Part of Issue #271: Testing: End-to-End Scheduling Workflows
  */
 
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
+
 test.describe('Complete Scheduling Workflows', () => {
   let scheduleId: string | null = null
   let createdScheduleIds: string[] = []
 
   test.beforeEach(async ({ page }) => {
     // Navigate to assistant architect page
-    await page.goto('/assistant-architect')
+    await page.goto('/utilities/assistant-architect')
 
     // Wait for authentication and page load
     try {

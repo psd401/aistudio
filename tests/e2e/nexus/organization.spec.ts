@@ -1,7 +1,11 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from '../fixtures'
 import { gotoNexus, sendMessage, waitForStreamingComplete, getConversationIdFromUrl } from './utils'
 
 // Nexus conversation management E2E tests — CRUD, archive/pin, sidebar, pagination.
+
+// Authenticated describes load the seeded admin session minted by
+// tests/e2e/global-setup.ts. The "Unauthenticated" describe deliberately omits it.
+const AUTH_A = 'tests/e2e/.auth/user-a.json'
 
 // ── Conversations API — Auth-independent ─────────────────────────────────────
 
@@ -41,6 +45,7 @@ test.describe('Nexus Conversations API — Unauthenticated', () => {
 // ── Conversations API — Authenticated ────────────────────────────────────────
 
 test.describe('Nexus Conversations API — Authenticated', () => {
+  test.use({ storageState: AUTH_A })
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
@@ -288,12 +293,20 @@ test.describe('Nexus Conversations API — Authenticated', () => {
 // ── Sidebar UI — Authenticated ────────────────────────────────────────────────
 
 test.describe('Nexus Sidebar — Authenticated', () => {
+  test.use({ storageState: AUTH_A })
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'
   )
 
   test('conversation created via chat appears in sidebar', async ({ page }) => {
+    // Sending a chat message requires a live AI model to respond (the conversation
+    // is created by the streamed turn). Gate behind E2E_RUN_EXTERNAL like the other
+    // live-provider specs so the keyless default run doesn't fail here.
+    test.skip(
+      process.env.E2E_RUN_EXTERNAL !== '1',
+      'Creating a conversation via chat needs a live model — set E2E_RUN_EXTERNAL=1'
+    )
     await gotoNexus(page)
 
     const uniqueMsg = `Sidebar test ${Date.now()}`
@@ -352,6 +365,7 @@ test.describe('Nexus Sidebar — Authenticated', () => {
 // ── Input Validation ──────────────────────────────────────────────────────────
 
 test.describe('Nexus Conversations API — Input Validation', () => {
+  test.use({ storageState: AUTH_A })
   test.skip(
     !process.env.PLAYWRIGHT_AUTH_ENABLED,
     'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run'

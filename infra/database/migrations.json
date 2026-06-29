@@ -80,6 +80,7 @@
     "082-assistant-architect-agentic-mode.sql",
     "083-tool-version-deprecation.sql",
     "084-drop-legacy-tools-tables.sql",
-    "085-atrium-content.sql"
+    "085-atrium-content.sql",
+    "086-atrium-doc-state.sql"
   ]
 }

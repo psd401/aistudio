@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+#
+# Committed pre-push hook (travels with the repo via core.hooksPath=.githooks,
+# set by the package.json "prepare" script on `bun install`).
+#
+# Runs the authenticated Playwright E2E suite locally before every push — this
+# replaces the GitHub E2E job, which a clean CI runner cannot run without seeded
+# data, provider keys, and a committed AUTH_SECRET. See scripts/test/e2e-local.sh.
+#
+# Bypass one push intentionally: SKIP_E2E=1 git push
+set -uo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || exit 0
+exec bash "$ROOT/scripts/test/e2e-local.sh"

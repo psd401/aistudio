@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures'
 
 /**
  * E2E: publish-skill-from-architect (Issue #925).
@@ -8,6 +8,8 @@ import { test, expect } from '@playwright/test'
  * specs — the test environment may not have a seeded, edit-ready assistant,
  * so the test skips gracefully rather than failing on missing fixtures.
  */
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
+
 test.describe('Publish skill from Assistant Architect', () => {
   test('exposes a "Publish as Skill" action on the preview step', async ({ page }) => {
     // Navigate to the assistant architect list.
@@ -22,7 +24,7 @@ test.describe('Publish skill from Assistant Architect', () => {
 
     // Find an editable assistant (owned drafts have an Edit affordance).
     const editLink = page.locator(
-      'a[href*="/assistant-architect/"][href*="/edit"], a:has-text("Edit")'
+      'a[href*="/utilities/assistant-architect/"][href*="/edit"], a:has-text("Edit")'
     )
     if ((await editLink.count()) === 0) {
       test.skip(true, 'No editable assistant available to publish')

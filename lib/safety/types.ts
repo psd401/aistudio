@@ -22,6 +22,16 @@ export interface SafetyCheckResult {
   tokens?: TokenMapping[];
   /** Categories that triggered blocking */
   blockedCategories?: string[];
+  /**
+   * True when guardrails were ENABLED but the evaluation could not complete
+   * (AWS error/timeout/throttle) and the service fell open to `allowed: true`
+   * as graceful degradation. Lets stricter callers (e.g. the Atrium agent
+   * bridge writing into a live K-12 document) fail CLOSED on this signal while
+   * latency-sensitive paths like chat keep failing open. Never set when
+   * guardrails are simply disabled — that is a deliberate "allowed", not a
+   * degraded one.
+   */
+  degraded?: boolean;
 }
 
 /**
@@ -294,7 +304,7 @@ export const CONFIDENCE_GATED_PII_TYPES: ReadonlySet<ComprehendPIIType> = new Se
  */
 const envScore = parseFloat(process.env.PII_MIN_CONFIDENCE_SCORE ?? '');
 export const PII_MIN_CONFIDENCE_SCORE: number =
-  !isNaN(envScore) && envScore >= 0 && envScore <= 1 ? envScore : 0.90;
+  !Number.isNaN(envScore) && envScore >= 0 && envScore <= 1 ? envScore : 0.90;
 
 /**
  * Per-type confidence floors that override PII_MIN_CONFIDENCE_SCORE for

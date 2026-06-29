@@ -36,7 +36,10 @@ import {
   slugifyTitle,
 } from "@/lib/content/helpers";
 import { ForbiddenError } from "@/lib/content/errors";
-import { renderMarkdownToHtml, sanitizeHtml } from "@/lib/content/render/markdown-render";
+// sanitizeHtml lives in its own ESM-free module so jest can load it; the markdown
+// render pipeline (unified/remark/rehype) is pure-ESM and not jest-loadable under
+// next/jest — it is verified in tests/smoke/atrium-markdown-render.smoke.ts (Bun).
+import { sanitizeHtml } from "@/lib/content/render/html-sanitize";
 import type { Requester } from "@/lib/content/types";
 
 const userReq: Requester = {
@@ -346,17 +349,6 @@ describe("sanitizeHtml (§31.1)", () => {
   });
 });
 
-describe("renderMarkdownToHtml", () => {
-  it("renders markdown to sanitized HTML", () => {
-    const html = renderMarkdownToHtml("# Hello\n\n**bold**");
-    expect(html).toContain("<h1>Hello</h1>");
-    expect(html).toContain("<strong>bold</strong>");
-  });
-  it("strips embedded script even when authored in markdown", () => {
-    const html = renderMarkdownToHtml("text\n\n<script>evil()</script>");
-    expect(html).not.toMatch(/<script/i);
-  });
-  it("handles empty input", () => {
-    expect(renderMarkdownToHtml("")).toBe("");
-  });
-});
+// renderMarkdownToHtml is exercised in tests/smoke/atrium-markdown-render.smoke.ts
+// (Bun) — the unified/remark/rehype pipeline is pure-ESM and not jest-loadable
+// under next/jest (SWC does not transform those node_modules).

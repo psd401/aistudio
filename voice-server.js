@@ -28,14 +28,24 @@ const { parse } = require('url')
 
 const VOICE_WS_PATH = '/api/nexus/voice'
 
+// Atrium collaboration (#1051): Yjs sync frames can far exceed the 64KB voice cap,
+// so collab uses its own WS server + larger payload limit. Kept in sync with server.ts.
+// Dedicated path outside /api/content/* (see server.ts note).
+const COLLAB_WS_PATH = '/api/atrium-collab'
+const COLLAB_MAX_PAYLOAD = 16 * 1024 * 1024 // 16MB
+
 // WS handler module: pre-bundled CJS file built by esbuild during Docker build.
 // Next.js standalone output doesn't include ws-handler.ts (it's outside the
 // page/route dependency graph), so we bundle it separately in the Dockerfile.
 // See scripts/build-voice-ws-handler.mjs for the bundle definition.
 const WS_HANDLER_PATH = './ws-handler-bundle.cjs'
+// Atrium collab handler bundle (see scripts/build-collab-ws-handler.mjs).
+const COLLAB_HANDLER_PATH = './collab-handler-bundle.cjs'
 
 let wss = null
+let collabWss = null
 let wsHandlerAvailable = false
+let collabHandlerAvailable = false
 
 /**
  * Try to load the voice WS handler module at startup.
@@ -60,6 +70,35 @@ function loadWsHandler() {
 const handleVoiceConnection = loadWsHandler()
 
 /**
+ * Try to load the Atrium collab WS handler at startup. If it fails, collab is
+ * disabled but the app (and voice) continue running.
+ */
+function loadCollabHandler() {
+  try {
+    // Requiring the bundle runs collab-server.ts's module init, which registers a
+    // process-global SIGTERM flush hook (globalThis.__atriumCollabShutdown). The
+    // Next.js standalone server's instrumentation.ts SIGTERM handler awaits that
+    // hook BEFORE closing the DB pool — so pending (debounced) room state is flushed
+    // on a rolling ECS deploy without this file owning a competing exit. We do NOT
+    // register a SIGTERM handler here: a second handler racing instrumentation's
+    // process.exit(0) could kill the in-flight collab writes.
+    const mod = require(COLLAB_HANDLER_PATH)
+    if (typeof mod.handleCollabConnection === 'function') {
+      collabHandlerAvailable = true
+      return mod.handleCollabConnection
+    }
+    console.error(`[atrium-collab] handler loaded but handleCollabConnection is not a function`) // eslint-disable-line no-console
+    return null
+  } catch (err) {
+    console.error(`[atrium-collab] Collab WebSocket disabled: handler not found at ${COLLAB_HANDLER_PATH}`) // eslint-disable-line no-console
+    console.error(`[atrium-collab] Error: ${err.message}`) // eslint-disable-line no-console
+    return null
+  }
+}
+
+const handleCollabConnection = loadCollabHandler()
+
+/**
  * Validate origin to prevent cross-site WebSocket hijacking (CSWSH).
  * Logic mirrors server.ts:isAllowedOrigin() — duplicated because this
  * file is CJS (standalone) and cannot import from the ESM server.ts.
@@ -70,8 +109,15 @@ const handleVoiceConnection = loadWsHandler()
  */
 function isOriginAllowed(request) {
   const origin = request.headers.origin
-  // Browser WS requests always include Origin — missing = non-browser
-  if (!origin) return false
+
+  // Server-to-server loopback connections (e.g. the agent bridge calling the
+  // collab WS from within the same ECS task) send no Origin header. Validate
+  // by remote address instead — loopback is always trusted.
+  if (!origin) {
+    const addr = request.socket?.remoteAddress
+    const isLoopback = addr === '127.0.0.1' || addr === '::1' || addr === '::ffff:127.0.0.1'
+    return isLoopback
+  }
 
   const allowedOrigins = (process.env.ALLOWED_ORIGINS || '').split(',').map(o => o.trim()).filter(Boolean)
   const appUrl = process.env.NEXTAUTH_URL || process.env.APP_URL
@@ -100,6 +146,8 @@ http.createServer = function (...args) {
   if (!wss) {
     // maxPayload must match WS_MAX_PAYLOAD in lib/voice/constants.ts (64KB)
     wss = new WebSocketServer({ noServer: true, maxPayload: 65536 })
+    // Separate WS server for Atrium collab (larger payload for Yjs sync frames).
+    collabWss = new WebSocketServer({ noServer: true, maxPayload: COLLAB_MAX_PAYLOAD })
 
     server.on('upgrade', (request, socket, head) => {
       const { pathname } = parse(request.url || '/')
@@ -121,6 +169,24 @@ http.createServer = function (...args) {
         wss.handleUpgrade(request, socket, head, (ws) => {
           wss.emit('connection', ws, request)
         })
+      } else if (pathname === COLLAB_WS_PATH || pathname.startsWith(`${COLLAB_WS_PATH}/`)) {
+        // WebsocketProvider connects to `${url}/<docName>` — match the path as a
+        // prefix. The doc name is extracted from the URL path segment in
+        // handleCollabConnection, not from the Yjs protocol message.
+        if (!collabHandlerAvailable) {
+          socket.write('HTTP/1.1 503 Service Unavailable\r\n\r\n')
+          socket.destroy()
+          return
+        }
+        if (!isOriginAllowed(request)) {
+          console.warn(`[atrium-collab] Origin rejected: ${request.headers.origin || '(none)'}`) // eslint-disable-line no-console
+          socket.write('HTTP/1.1 403 Forbidden\r\n\r\n')
+          socket.destroy()
+          return
+        }
+        collabWss.handleUpgrade(request, socket, head, (ws) => {
+          collabWss.emit('connection', ws, request)
+        })
       }
     })
 
@@ -132,6 +198,21 @@ http.createServer = function (...args) {
         try { ws.close(4500, 'Internal error') } catch { /* already closed */ }
       }
     })
+
+    collabWss.on('connection', async (ws, req) => {
+      try {
+        await handleCollabConnection(ws, req)
+      } catch (err) {
+        console.error('[atrium-collab] Connection error:', err.message) // eslint-disable-line no-console
+        try { ws.close(4500, 'Internal error') } catch { /* already closed */ }
+      }
+    })
+
+    if (collabHandlerAvailable) {
+      console.log(`[atrium-collab] WebSocket handler registered for ${COLLAB_WS_PATH}`) // eslint-disable-line no-console
+    } else {
+      console.error(`[atrium-collab] ERROR: Collab WebSocket handler NOT available — collab disabled`) // eslint-disable-line no-console
+    }
 
     if (wsHandlerAvailable) {
       console.log(`[voice-server] WebSocket handler registered for ${VOICE_WS_PATH}`) // eslint-disable-line no-console

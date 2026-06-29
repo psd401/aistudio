@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test'
+import { test, expect, type Page } from './fixtures'
 
 /**
  * E2E tests for the User Management feature (Issue #579, PR #580)
@@ -39,6 +39,26 @@ async function gotoAdminUsers(page: Page): Promise<void> {
     }
     throw new Error(`gotoAdminUsers: user-management-page not found within 15s. Current URL: ${url}`)
   }
+  // Wait for the table rows to render.
+  await page
+    .locator('tbody tr')
+    .first()
+    .waitFor({ state: 'visible', timeout: 15_000 })
+    .catch(() => {})
+}
+
+/**
+ * Click a role tab and wait until it is the active tab. The page is server-rendered,
+ * so the tab buttons exist in the initial HTML before React attaches their click
+ * handlers — a click fired pre-hydration is silently dropped. Retry the click until
+ * it registers (the tab activates).
+ */
+async function activateRoleTab(page: Page, label: string): Promise<void> {
+  const tab = page.locator('[role="tab"]').filter({ hasText: label })
+  await expect(async () => {
+    await tab.click()
+    await expect(tab).toHaveAttribute('data-state', 'active', { timeout: 1_000 })
+  }).toPass({ timeout: 15_000 })
 }
 
 async function openRowActionsMenu(page: Page, rowIndex = 0): Promise<void> {
@@ -47,10 +67,17 @@ async function openRowActionsMenu(page: Page, rowIndex = 0): Promise<void> {
   await actionsBtn.click()
 }
 
+// All suites below the gating one require the seeded admin session minted by
+// tests/e2e/global-setup.ts. The Auth Gating suite overrides this back to no
+// session (it asserts unauthenticated redirects + 401s).
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
+
 // ---------------------------------------------------------------------------
 // Suite 1 — Auth gating (always runs)
 // ---------------------------------------------------------------------------
 test.describe('User Management — Auth Gating', () => {
+  test.use({ storageState: { cookies: [], origins: [] } })
+
   test('unauthenticated access to /admin/users is redirected', async ({
     page,
   }) => {
@@ -236,47 +263,29 @@ test.describe('User Management — Role Tab Navigation', () => {
   })
 
   test('clicking Admins tab makes it active', async ({ page }) => {
-    const adminsTab = page.locator('[role="tab"]').filter({ hasText: 'Admins' })
-    await adminsTab.click()
-    await expect(adminsTab).toHaveAttribute('data-state', 'active', {
-      timeout: 10_000,
-    })
+    await activateRoleTab(page, 'Admins')
   })
 
   test('clicking Admins tab hides the role filter', async ({ page }) => {
-    await page.locator('[role="tab"]').filter({ hasText: 'Admins' }).click()
+    await activateRoleTab(page, 'Admins')
     await expect(page.locator('[aria-label="Filter by role"]')).not.toBeVisible({
       timeout: 5_000,
     })
   })
 
   test('clicking Staff tab makes it active', async ({ page }) => {
-    const staffTab = page.locator('[role="tab"]').filter({ hasText: 'Staff' })
-    await staffTab.click()
-    await expect(staffTab).toHaveAttribute('data-state', 'active', {
-      timeout: 10_000,
-    })
+    await activateRoleTab(page, 'Staff')
   })
 
   test('clicking Students tab makes it active', async ({ page }) => {
-    const studentsTab = page.locator('[role="tab"]').filter({ hasText: 'Students' })
-    await studentsTab.click()
-    await expect(studentsTab).toHaveAttribute('data-state', 'active', {
-      timeout: 10_000,
-    })
+    await activateRoleTab(page, 'Students')
   })
 
   test('returning to All Users tab restores the role filter', async ({
     page,
   }) => {
-    // Navigate away
-    await page.locator('[role="tab"]').filter({ hasText: 'Admins' }).click()
-    // Navigate back
-    const allTab = page.locator('[role="tab"]').filter({ hasText: 'All Users' })
-    await allTab.click()
-    await expect(allTab).toHaveAttribute('data-state', 'active', {
-      timeout: 10_000,
-    })
+    await activateRoleTab(page, 'Admins')
+    await activateRoleTab(page, 'All Users')
     await expect(page.locator('[aria-label="Filter by role"]')).toBeVisible({
       timeout: 5_000,
     })
@@ -323,8 +332,10 @@ test.describe('User Management — Filters', () => {
     await page.locator('[aria-label="Filter by status"]').click()
 
     for (const label of ['All Statuses', 'Active', 'Inactive', 'Pending']) {
+      // Exact match — 'Active' is a substring of 'Inactive', so hasText would
+      // resolve to two options and trip Playwright strict mode.
       await expect(
-        page.locator('[role="option"]').filter({ hasText: label })
+        page.getByRole('option', { name: label, exact: true })
       ).toBeVisible({ timeout: 5_000 })
     }
 
@@ -333,7 +344,7 @@ test.describe('User Management — Filters', () => {
 
   test('selecting Active status shows Clear button', async ({ page }) => {
     await page.locator('[aria-label="Filter by status"]').click()
-    await page.locator('[role="option"]').filter({ hasText: 'Active' }).click()
+    await page.getByRole('option', { name: 'Active', exact: true }).click()
     await expect(
       page.locator('[aria-label="Clear all filters"]')
     ).toBeVisible({ timeout: 5_000 })

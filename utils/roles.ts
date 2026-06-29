@@ -76,36 +76,50 @@ export async function hasRole(roleName: string): Promise<boolean> {
  * which checks AI-model feature flags (image generation, web search, etc.).
  * See `docs/architecture/capabilities-and-scopes.md`.
  */
-export async function hasCapabilityAccess(capabilityIdentifier: string): Promise<boolean> {
+export async function hasCapabilityAccess(
+  capabilityIdentifier: string,
+  /**
+   * Optional pre-resolved Cognito sub. When the caller has already resolved the
+   * session (e.g. a server action that also builds a requester), passing the sub
+   * here avoids a second `getServerSession()` JWT-verify + cookie-parse, and
+   * removes the chance of reading a session that changed mid-action (token
+   * refresh). Omit to resolve the session internally as before.
+   */
+  cognitoSub?: string
+): Promise<boolean> {
   const requestId = generateRequestId();
   const timer = startTimer("hasCapabilityAccess");
   const log = createLogger({ requestId, function: "hasCapabilityAccess" });
 
   log.debug("Checking capability access", { capabilityIdentifier });
 
-  const session = await getServerSession();
-  if (!session) {
-    log.warn("Capability access check failed - no session", { capabilityIdentifier });
-    timer({ status: "failed", reason: "no_session" });
-    return false;
+  let sub = cognitoSub;
+  if (!sub) {
+    const session = await getServerSession();
+    if (!session) {
+      log.warn("Capability access check failed - no session", { capabilityIdentifier });
+      timer({ status: "failed", reason: "no_session" });
+      return false;
+    }
+    sub = session.sub;
   }
 
   log.debug("Session found, checking database", {
-    cognitoSub: session.sub,
+    cognitoSub: sub,
     capabilityIdentifier
   });
 
-  const hasAccess = await dbHasCapabilityAccess(session.sub, capabilityIdentifier);
+  const hasAccess = await dbHasCapabilityAccess(sub, capabilityIdentifier);
 
   if (hasAccess) {
     log.info("Capability access granted", {
-      cognitoSub: session.sub,
+      cognitoSub: sub,
       capabilityIdentifier
     });
     timer({ status: "success" });
   } else {
     log.warn("Capability access denied", {
-      cognitoSub: session.sub,
+      cognitoSub: sub,
       capabilityIdentifier
     });
     timer({ status: "denied" });

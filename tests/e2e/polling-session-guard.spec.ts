@@ -1,4 +1,4 @@
-import { test, expect, type Page } from '@playwright/test'
+import { test, expect, type Page } from './fixtures'
 
 /**
  * E2E tests for session-expiry polling guards (#837 / #845).
@@ -30,6 +30,8 @@ async function gotoNexus(page: Page) {
   // silently passing with route mocks that were never invoked.
   await page.waitForURL((url) => !url.pathname.startsWith('/login'), { timeout: 10000 })
 }
+
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
 
 test.describe('Polling Session Guards — useExecutionResults', () => {
   test.skip(!process.env.PLAYWRIGHT_AUTH_ENABLED, 'Requires authenticated Playwright context — set PLAYWRIGHT_AUTH_ENABLED=true to run')

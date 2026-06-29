@@ -12,6 +12,7 @@ import * as cloudwatch from 'aws-cdk-lib/aws-cloudwatch';
 import * as cloudwatch_actions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as autoscaling from 'aws-cdk-lib/aws-applicationautoscaling';
+import { RedisCache } from './cache/redis-cache';
 
 export interface EcsServiceConstructProps {
   vpc: ec2.IVpc;
@@ -107,6 +108,12 @@ export interface EcsServiceConstructProps {
    * Internal API secret ARN from Secrets Manager (for scheduled execution authentication)
    */
   internalApiSecretArn: string;
+  /**
+   * Atrium collab token signing secret ARN from Secrets Manager (#1051).
+   * Dedicated key for collab session tokens that ride in the websocket URL —
+   * kept separate from AUTH_SECRET so a session-key leak can't forge collab tokens.
+   */
+  collabJwtSecretArn: string;
   /**
    * K-12 Content Safety: Bedrock Guardrail ARN (from GuardrailsStack)
    * If provided, enables precise IAM scoping instead of wildcard
@@ -265,6 +272,7 @@ export class EcsServiceConstruct extends Construct {
         // Explicit permissions for both secrets
         props.authSecretArn,
         props.internalApiSecretArn,
+        props.collabJwtSecretArn,
       ],
     }));
 
@@ -300,6 +308,7 @@ export class EcsServiceConstruct extends Construct {
                 props.rdsSecretArn, // Include actual database secret ARN
                 props.authSecretArn, // Include auth secret
                 props.internalApiSecretArn, // Include internal API secret
+                props.collabJwtSecretArn, // Include Atrium collab token signing secret (#1051)
               ],
             }),
             // Agent Workspace OAuth secrets — read+update for refresh tokens (#912).
@@ -693,6 +702,13 @@ export class EcsServiceConstruct extends Construct {
           secretsmanager.Secret.fromSecretCompleteArn(this, 'InternalApiSecret', props.internalApiSecretArn),
           'INTERNAL_API_SECRET'
         ),
+        // Atrium collab token signing secret (#1051). Dedicated key so collab
+        // tokens (which ride in the websocket URL and land in ALB/proxy logs)
+        // don't share AUTH_SECRET; a session-key leak then can't forge them.
+        COLLAB_JWT_SECRET: ecs.Secret.fromSecretsManager(
+          secretsmanager.Secret.fromSecretCompleteArn(this, 'CollabJwtSecret', props.collabJwtSecretArn),
+          'COLLAB_JWT_SECRET'
+        ),
         // Issue #603: Database credentials for postgres.js driver
         // The RDS secret contains a JSON object with: username, password, host, port, dbname
         DB_USER: ecs.Secret.fromSecretsManager(
@@ -776,6 +792,30 @@ export class EcsServiceConstruct extends Construct {
       albSecurityGroup,
       ec2.Port.tcp(3000),
       'Allow traffic from ALB'
+    );
+
+    // ============================================================================
+    // Atrium collaboration Redis cache (#1051)
+    // ============================================================================
+    // The Atrium collab server (lib/content/collab/collab-server.ts) only enables
+    // Redis fan-out when REDIS_HOST is set, which is what lets Yjs document updates
+    // fan out across multiple ECS tasks. The cache is created here (after
+    // ecsSecurityGroup exists) so its ingress can be scoped to the ECS service only,
+    // then REDIS_HOST/REDIS_PORT/REDIS_TLS are injected into the container.
+    // REDIS_TLS=1 matches the transitEncryptionEnabled flag on the cluster.
+    const redisCache = new RedisCache(this, 'AtriumRedis', {
+      vpc,
+      environment,
+      ingressSecurityGroup: ecsSecurityGroup,
+    });
+    container.addEnvironment('REDIS_HOST', redisCache.endpointAddress);
+    container.addEnvironment('REDIS_PORT', redisCache.endpointPort);
+    container.addEnvironment('REDIS_TLS', '1');
+    // REDIS_PASSWORD is the ElastiCache AUTH token, injected from Secrets Manager.
+    // Required: without it the cache accepts unauthenticated VPC connections.
+    container.addSecret(
+      'REDIS_PASSWORD',
+      ecs.Secret.fromSecretsManager(redisCache.authSecret)
     );
 
     this.service = new ecs.FargateService(this, 'Service', {

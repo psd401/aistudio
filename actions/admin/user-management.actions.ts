@@ -107,7 +107,10 @@ export async function getUserStats(): Promise<ActionState<UserStats>> {
           db
             .select({ count: count() })
             .from(users)
-            .where(sql`${users.lastSignInAt} >= ${thirtyDaysAgo}`),
+            // Pass an ISO string, not a Date: the postgres.js driver rejects a raw
+            // Date interpolated into a sql`` template ("Received an instance of
+            // Date"), which made getUserStats throw and the stats grid never render.
+            .where(sql`${users.lastSignInAt} >= ${thirtyDaysAgo.toISOString()}`),
         "getUserStats-active"
       ),
       // Get pending users (never signed in)

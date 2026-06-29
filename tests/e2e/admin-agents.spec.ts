@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test'
+import { test, expect } from './fixtures'
 
 /**
  * E2E tests for the Agent Platform Telemetry Dashboard (Issue #890)
@@ -14,7 +14,11 @@ import { test, expect } from '@playwright/test'
  * PLAYWRIGHT_AUTH_ENABLED=true is set.
  */
 
+test.use({ storageState: 'tests/e2e/.auth/user-a.json' })
+
 test.describe('Agent Dashboard — Public Access', () => {
+  test.use({ storageState: { cookies: [], origins: [] } })
+
   test('non-admin user is redirected away from /admin/agents', async ({ page }) => {
     await page.goto('/admin/agents')
 
@@ -60,12 +64,14 @@ test.describe('Agent Dashboard — Admin', () => {
   })
 
   test('stats cards section renders', async ({ page }) => {
-    // Wait for stats to load — skeleton or actual cards
+    // AgentStatsCards renders a grid of shadcn <Card>s. shadcn cards carry the
+    // 'bg-card' class (lowercase) — the old [class*="Card"] (capital C) matched
+    // nothing. Match the lowercase card class.
     const statsSection = page
       .locator('[class*="grid"]')
-      .filter({ has: page.locator('[class*="Card"]') })
+      .filter({ has: page.locator('[class*="card"]') })
       .first()
-    await expect(statsSection).toBeVisible({ timeout: 10000 })
+    await expect(statsSection).toBeVisible({ timeout: 15000 })
   })
 
   test('tab navigation renders all tabs', async ({ page }) => {

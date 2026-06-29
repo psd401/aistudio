@@ -107,6 +107,28 @@ export class FrontendStackEcs extends cdk.Stack {
     });
 
     // ============================================================================
+    // Atrium Collab Token Signing Secret (#1051)
+    // ============================================================================
+    // Dedicated HS256 signing key for Atrium collab session tokens. These tokens
+    // ride in the collaboration websocket URL (?token=...) and therefore land in
+    // ALB access logs and any reverse proxy logs — unlike NextAuth session
+    // cookies, which are HttpOnly and never appear in a URL. Keeping this key
+    // separate from AUTH_SECRET means an AUTH_SECRET leak cannot be used to forge
+    // collab tokens with arbitrary oid/write claims. Read by lib/content/collab/
+    // collab-token.ts. Injected as the COLLAB_JWT_SECRET env var below.
+    const collabJwtSecret = new secretsmanager.Secret(this, 'CollabJwtSecret', {
+      secretName: `aistudio-${environment}-collab-jwt-secret`,
+      description: 'Atrium collab token signing secret (kept separate from AUTH_SECRET)',
+      generateSecretString: {
+        secretStringTemplate: JSON.stringify({}),
+        generateStringKey: 'COLLAB_JWT_SECRET',
+        excludePunctuation: true,
+        passwordLength: 32,
+      },
+      removalPolicy: environment === 'prod' ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // ============================================================================
     // MCP Token Encryption Key (AES-256-GCM DEK)
     // ============================================================================
     // Random 64-character alphanumeric password used as HKDF input key material.
@@ -157,6 +179,8 @@ export class FrontendStackEcs extends cdk.Stack {
       authSecretArn: cdk.Fn.importValue(`${environment}-AuthSecretArn`),
       // Internal API secret (created above)
       internalApiSecretArn: internalApiSecret.secretArn,
+      // Atrium collab token signing secret (#1051, created above)
+      collabJwtSecretArn: collabJwtSecret.secretArn,
       // K-12 Content Safety: Guardrails resources from GuardrailsStack
       // These enable precise IAM scoping and DynamoDB access for PII tokenization
       guardrailArn: cdk.Fn.importValue(`${environment}-GuardrailArn`),

@@ -1,0 +1,167 @@
+/*
+ * Atrium content stylesheet
+ *
+ * Issue #1051 (Epic #1059, Atrium Phase 1, spec §18.2). Shared styling for
+ * rendered document HTML (the internal reader + public_web) AND the live editor's
+ * provenance rail. Imported by the reader page and the DocumentEditor.
+ *
+ * Provenance palette: green = human-authored, purple = agent-authored. These vars
+ * drive both the editor's left gutter "rail" and the reader's provenance footer
+ * badges, so the loop reads consistently end to end.
+ */
+
+:root {
+  --atrium-human: #16a34a; /* green — human */
+  --atrium-human-soft: rgba(22, 163, 74, 0.16);
+  --atrium-agent: #7c3aed; /* purple — agent */
+  --atrium-agent-soft: rgba(124, 58, 237, 0.16);
+  --atrium-rail-width: 4px;
+}
+
+/* ----------------------------------------------------------------------------
+ * Rendered document typography (.atrium-content wraps reader/public_web output)
+ * -------------------------------------------------------------------------- */
+.atrium-content {
+  line-height: 1.65;
+  color: #1f2937;
+  font-size: 1rem;
+  word-break: break-word;
+}
+.atrium-content h1,
+.atrium-content h2,
+.atrium-content h3 {
+  font-weight: 600;
+  line-height: 1.25;
+  margin: 1.6em 0 0.6em;
+}
+.atrium-content h1 { font-size: 1.875rem; }
+.atrium-content h2 { font-size: 1.5rem; }
+.atrium-content h3 { font-size: 1.25rem; }
+.atrium-content p { margin: 0.75em 0; }
+.atrium-content ul,
+.atrium-content ol { margin: 0.75em 0; padding-left: 1.5rem; }
+.atrium-content li { margin: 0.25em 0; }
+.atrium-content a {
+  color: #2563eb;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.atrium-content blockquote {
+  margin: 1em 0;
+  padding: 0.25em 1rem;
+  border-left: 3px solid #d1d5db;
+  color: #4b5563;
+}
+.atrium-content pre {
+  background: #0f172a;
+  color: #e2e8f0;
+  padding: 1rem;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+}
+.atrium-content code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+}
+.atrium-content :not(pre) > code {
+  background: #f1f5f9;
+  padding: 0.1em 0.35em;
+  border-radius: 0.3rem;
+}
+.atrium-content table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 1em 0;
+}
+.atrium-content th,
+.atrium-content td {
+  border: 1px solid #e5e7eb;
+  padding: 0.5rem 0.75rem;
+  text-align: left;
+}
+.atrium-content th { background: #f9fafb; font-weight: 600; }
+.atrium-content img { max-width: 100%; height: auto; }
+
+/* ----------------------------------------------------------------------------
+ * Curated directives (:::callout / :::warn)
+ * -------------------------------------------------------------------------- */
+.atrium-callout {
+  margin: 1em 0;
+  padding: 0.85rem 1rem;
+  border-left: 4px solid #2563eb;
+  border-radius: 0.4rem;
+  background: #eff6ff;
+}
+.atrium-callout-warn {
+  border-left-color: #d97706;
+  background: #fffbeb;
+}
+.atrium-callout-title {
+  font-weight: 600;
+  margin-bottom: 0.25rem;
+}
+
+/* ----------------------------------------------------------------------------
+ * Editor provenance rail (left gutter). The editor paints one absolutely
+ * positioned segment per block, colored by the dominant authorship of that
+ * block (see DocumentEditor's provenance plugin).
+ * -------------------------------------------------------------------------- */
+.atrium-editor {
+  position: relative;
+}
+.atrium-editor .ProseMirror {
+  outline: none;
+  min-height: 12rem;
+}
+/*
+ * The rail: each top-level block gets a node decoration carrying
+ * data-author="human|agent" (see components/atrium/provenance-rail.ts). The
+ * colored left border IS the rail — green for human-dominant blocks, purple for
+ * agent-dominant. Padding leaves room for the border so text doesn't shift.
+ */
+.atrium-editor .ProseMirror > .atrium-rail-block {
+  padding-left: 0.75rem;
+  border-left: var(--atrium-rail-width) solid transparent;
+  margin-left: -0.75rem;
+}
+.atrium-editor .ProseMirror > .atrium-rail-block[data-author="human"] {
+  border-left-color: var(--atrium-human);
+}
+.atrium-editor .ProseMirror > .atrium-rail-block[data-author="agent"] {
+  border-left-color: var(--atrium-agent);
+}
+
+/* Optional subtle inline tint of authored ranges (the atriumAuthored mark span). */
+.atrium-authored[data-author="human"] { background: var(--atrium-human-soft); }
+.atrium-authored[data-author="agent"] { background: var(--atrium-agent-soft); }
+
+/* ----------------------------------------------------------------------------
+ * Provenance footer (reader) + badges
+ * -------------------------------------------------------------------------- */
+.atrium-provenance-footer {
+  margin-top: 2.5rem;
+  padding-top: 1rem;
+  border-top: 1px solid #e5e7eb;
+  font-size: 0.85rem;
+  color: #6b7280;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  align-items: center;
+}
+.atrium-provenance-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 9999px;
+  font-weight: 500;
+}
+.atrium-provenance-badge[data-author="human"] {
+  color: var(--atrium-human);
+  background: var(--atrium-human-soft);
+}
+.atrium-provenance-badge[data-author="agent"] {
+  color: var(--atrium-agent);
+  background: var(--atrium-agent-soft);
+}
