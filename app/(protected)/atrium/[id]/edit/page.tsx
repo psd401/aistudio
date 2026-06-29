@@ -8,8 +8,8 @@
  *  - `artifact` -> <ArtifactCanvas> (Preview|Code canvas + cross-origin sandbox;
  *    #1052). The canvas re-fetches versions/code via canView-enforced actions.
  *
- * `forbidden()` (403) for a viewer who cannot see the object; `notFound()` for a
- * missing object. Edit permission is enforced AGAIN server-side by the
+ * `notFound()` (404) for a missing object AND for a non-viewable object (existence
+ * masking: 403 would leak "this ID exists but you can't see it"). Edit permission is enforced AGAIN server-side by the
  * snapshot/create-version/publish actions (and, for documents, the collab
  * server's read-only token) — this page only gates visibility and passes a
  * `canEdit` hint to the artifact canvas so the Code-tab Save button is hidden for
@@ -46,10 +46,15 @@ export default async function AtriumEditPage({
     ownerUserId: obj.ownerUserId,
     visibilityLevel: obj.visibilityLevel,
   });
-  if (!viewable) forbidden();
+  // Existence-mask: a non-viewable object must NOT return 403 — that leaks existence
+  // (403 "exists but forbidden" vs 404 "absent"). Consistent with canView masking in
+  // publishService.publish, setVisibilityAction, getVisibilityAction, and /c/[slug].
+  if (!viewable) notFound();
 
   if (req.kind !== "user" || req.userId == null) {
-    // Authoring is a logged-in-human surface.
+    // Authoring is a logged-in-human surface. Existence is already confirmed above
+    // (viewable), so 403 is correct here — we're blocking the requester type, not
+    // hiding the object's existence.
     forbidden();
   }
 

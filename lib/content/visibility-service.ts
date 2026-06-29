@@ -179,12 +179,22 @@ async function applyGrantsInTx(
   grants: VisibilityGrant[]
 ): Promise<void> {
   for (const grant of grants) assertValidGrant(grant);
+  // Deduplicate on (kind, value) before INSERT — the uq_cvg constraint enforces
+  // uniqueness at the DB level, but a duplicate in the caller's input would throw
+  // a 23505 unique_violation and roll back the transaction with a confusing error.
+  // The delete-then-insert pattern means any prior duplicates are already gone,
+  // so deduping the incoming array is both safe and necessary.
+  const seen = new Set<string>();
+  const unique = grants.filter((g) => {
+    const key = `${g.kind}:${g.value}`;
+    return seen.has(key) ? false : (seen.add(key), true);
+  });
   await tx
     .delete(contentVisibilityGrants)
     .where(eq(contentVisibilityGrants.objectId, objectId));
-  if (grants.length > 0) {
+  if (unique.length > 0) {
     await tx.insert(contentVisibilityGrants).values(
-      grants.map((g) => ({
+      unique.map((g) => ({
         objectId,
         grantKind: g.kind,
         grantValue: g.value,
@@ -269,11 +279,16 @@ export const visibilityService = {
     // Unauthenticated (no user, no roles) can only ever see public.
     if (principal.userId == null && principal.roles.length === 0) return false;
 
+    // Admin short-circuit BEFORE level checks — mirrors the top-level guard in
+    // buildVisibilitySql. Keeping the ordering identical prevents latent divergence
+    // if a future level is inserted that could return false for admins before reaching
+    // the isAdmin check (e.g. a `restricted` level with sub-permission checks).
+    if (principal.isAdmin) return true;
+
     if (obj.visibilityLevel === "internal") {
       // Any authenticated principal (a user, or an agent with a role).
       return principal.userId != null || principal.roles.length > 0;
     }
-    if (principal.isAdmin) return true;
     if (principal.userId != null && principal.userId === obj.ownerUserId) {
       return true;
     }

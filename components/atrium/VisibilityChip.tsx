@@ -147,6 +147,10 @@ export function VisibilityChip({ idOrSlug, onChange }: VisibilityChipProps) {
       if (result.isSuccess) {
         roleOptionsLoaded.current = true;
         setRoleOptions(result.data.roles);
+      } else {
+        // Surface the failure so the user knows why the role dropdown is empty,
+        // rather than silently leaving them with zero role options.
+        setError(result.message);
       }
     })();
     return () => {

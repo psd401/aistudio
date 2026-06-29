@@ -75,12 +75,12 @@ jest.mock("drizzle-orm", () => ({
   eq: (...a: unknown[]) => a,
 }));
 
-const hasCapabilityAccessMock = jest.fn(async () => true);
+const hasCapabilityAccessMock = jest.fn(async (..._a: unknown[]) => true);
 jest.mock("@/utils/roles", () => ({
   hasCapabilityAccess: (...a: unknown[]) => hasCapabilityAccessMock(...a),
 }));
 
-const getServerSessionMock = jest.fn(async () => ({ sub: "cognito-sub-1" }));
+const getServerSessionMock = jest.fn(async (..._a: unknown[]): Promise<{ sub: string } | null> => ({ sub: "cognito-sub-1" }));
 jest.mock("@/lib/auth/server-session", () => ({
   getServerSession: () => getServerSessionMock(),
 }));
