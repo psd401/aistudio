@@ -166,6 +166,12 @@ const devAtriumSandboxStack = new AtriumSandboxStack(app, 'AIStudio-AtriumSandbo
   environment: 'dev',
   allowedParentOrigins: [
     ...(baseDomain ? [`https://dev.${baseDomain}`] : []),
+    // DEV ONLY — plain HTTP localhost is intentional for local development.
+    // This origin is baked into the sandbox's parent-origin allowlist and its
+    // CSP frame-ancestors directive. It must NEVER appear in staging or prod
+    // configs (the prod stack below enforces https-only). HTTP origins mean a
+    // local page at :3000 could drive the sandbox, but the sandbox serves no
+    // real user data and has no credentials in this dev deployment.
     'http://localhost:3000',
   ],
   allowedArtifactCdns: atriumAllowedArtifactCdns,

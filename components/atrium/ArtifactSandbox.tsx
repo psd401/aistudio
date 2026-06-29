@@ -35,6 +35,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getArtifactSandboxOrigin, getArtifactSandboxRenderUrl } from "@/lib/content/artifact-sandbox-config";
 
+type FrameLoadStatus = "loading" | "loaded" | "error";
+
 export interface ArtifactSandboxProps {
   /**
    * The untrusted artifact code (HTML/JS). It is sent to the cross-origin host
@@ -74,6 +76,9 @@ export function ArtifactSandbox({
   // Whether the frame has loaded at least once (so a `code` change after load
   // re-posts without waiting for another `onLoad`, which fires only on navigation).
   const loadedRef = useRef(false);
+  // Track whether the iframe load succeeded or failed (e.g. CSP blocked or
+  // sandbox origin returned 404) so we can show a meaningful error notice.
+  const [frameStatus, setFrameStatus] = useState<FrameLoadStatus>("loading");
 
   /**
    * Post the current code to the framed host with an EXACT target origin. Reads
@@ -112,8 +117,13 @@ export function ArtifactSandbox({
 
   const handleLoad = useCallback(() => {
     loadedRef.current = true;
+    setFrameStatus("loaded");
     postCode();
   }, [postCode]);
+
+  const handleError = useCallback(() => {
+    setFrameStatus("error");
+  }, []);
 
   // Fail closed: with no configured (separate) sandbox origin we render NOTHING
   // executable. We never fall back to rendering the untrusted code on the app
@@ -144,6 +154,31 @@ export function ArtifactSandbox({
     );
   }
 
+  if (frameStatus === "error") {
+    return (
+      <div
+        className={className}
+        role="status"
+        data-testid="artifact-sandbox-frame-error"
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          minHeight: 160,
+          border: "1px dashed var(--border, #d4d4d8)",
+          borderRadius: 8,
+          color: "#71717a",
+          fontSize: 13,
+          padding: 16,
+          textAlign: "center",
+        }}
+      >
+        Artifact preview could not load. The sandbox host may be unreachable or
+        blocked by the browser&apos;s content security policy.
+      </div>
+    );
+  }
+
   return (
     <iframe
       ref={iframeRef}
@@ -154,6 +189,7 @@ export function ArtifactSandbox({
       sandbox="allow-scripts"
       referrerPolicy="no-referrer"
       onLoad={handleLoad}
+      onError={handleError}
       data-testid="artifact-sandbox-frame"
       className={className}
       style={{ width: "100%", minHeight: 360, border: 0, background: "#fff" }}

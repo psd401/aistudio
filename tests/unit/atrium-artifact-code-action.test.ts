@@ -29,10 +29,10 @@ import { NotFoundError, ValidationError } from "@/lib/content/errors";
 // Module mocks — must be declared before any imports of the actions under test
 // ---------------------------------------------------------------------------
 
-const mockGet = jest.fn<(...args: unknown[]) => Promise<unknown>>();
-const mockGetById = jest.fn<(...args: unknown[]) => Promise<unknown>>();
-const mockLoadArtifactCode = jest.fn<(...args: unknown[]) => Promise<string>>();
-const mockList = jest.fn<(...args: unknown[]) => Promise<unknown[]>>();
+const mockGet = jest.fn();
+const mockGetById = jest.fn();
+const mockLoadArtifactCode = jest.fn();
+const mockList = jest.fn();
 
 jest.mock("@/lib/content", () => ({
   contentService: {

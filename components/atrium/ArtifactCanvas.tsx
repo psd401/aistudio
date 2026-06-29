@@ -55,9 +55,16 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false }: ArtifactCanvasProp
 
   // Load the code for a specific version (or the head when versionId is null).
   // Returns the resolved version id so callers can sync selection.
+  // Accepts an optional `cancelled` ref so the initial-load effect can prevent
+  // stale writes when `idOrSlug` changes before this resolves (prevents one
+  // artifact's state from landing in a second artifact's view).
   const loadCode = useCallback(
-    async (versionId: string | null): Promise<string | null> => {
+    async (
+      versionId: string | null,
+      cancelled?: { current: boolean }
+    ): Promise<string | null> => {
       const result = await getArtifactCodeAction(idOrSlug, versionId ?? undefined);
+      if (cancelled?.current) return null; // effect was torn down; discard result
       if (!result.isSuccess) {
         setState("error");
         setMessage(result.message ?? "Failed to load artifact");
@@ -88,19 +95,22 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false }: ArtifactCanvasProp
   // effect body) to avoid cascading renders; `state` already initializes to
   // "loading", so the first paint shows the loading state without a sync setState.
   useEffect(() => {
-    let cancelled = false;
+    // Use a ref (object) rather than a local `let` so `loadCode` can read the flag
+    // after its own `await` resolves — a closure over a primitive `let cancelled`
+    // would always see the stale `false` captured at call time.
+    const cancelledRef = { current: false };
     void (async () => {
       setState("loading");
       setMessage(null);
       const [, headVersionId] = await Promise.all([
         refreshVersions(),
-        loadCode(null),
+        loadCode(null, cancelledRef),
       ]);
-      if (cancelled) return;
+      if (cancelledRef.current) return;
       if (headVersionId) setSelectedVersionId(headVersionId);
     })();
     return () => {
-      cancelled = true;
+      cancelledRef.current = true;
     };
   }, [refreshVersions, loadCode]);
 
@@ -195,7 +205,7 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false }: ArtifactCanvasProp
           {message ?? "Could not load this artifact."}
         </div>
       ) : tab === "preview" ? (
-        <ArtifactSandbox code={code} className="atrium-artifact-preview" />
+        <ArtifactSandbox key={selectedVersionId ?? ""} code={code} className="atrium-artifact-preview" />
       ) : (
         <CodeEditor
           value={code}

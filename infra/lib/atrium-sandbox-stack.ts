@@ -60,25 +60,41 @@ export class AtriumSandboxStack extends cdk.Stack {
     const isProd = props.environment === 'prod';
     const cdns = props.allowedArtifactCdns ?? [];
 
+    // Normalize origins to canonical scheme+host (no trailing slash, no path).
+    // Browsers report event.origin without a trailing slash or path component;
+    // the isAllowedOrigin check in render.html does exact string equality.
+    // A trailing slash passed here would silently break postMessage delivery.
+    function normalizeOriginStr(raw: string): string {
+      try { return new URL(raw).origin; } catch { return raw; }
+    }
+    const normalizedParentOrigins = props.allowedParentOrigins.map(normalizeOriginStr);
+
     // STRICT CSP for the sandbox host. connect-src 'none' blocks first-party API
     // calls / exfiltration; script-src/style-src widen ONLY for allowlisted CDNs.
-    // img-src allows https/data so artifacts can show images. frame-ancestors
-    // restricts who can embed the host to the allowed parent app origins.
+    // img-src is intentionally restricted to data: only (no https: wildcard) to
+    // prevent artifact code from using pixel-tracker images for data exfiltration
+    // to arbitrary HTTPS hosts. Artifacts that need to display images must embed
+    // them inline (data URLs) or load from an explicitly allowlisted CDN.
+    // frame-ancestors restricts who can embed the host to the allowed parent origins.
     const scriptSrc = ["'unsafe-inline'", ...cdns].join(' ');
+    const imgSrc = cdns.length > 0
+      ? `data: ${cdns.join(' ')}`  // allowlisted CDN images + data URLs
+      : "data:";                   // data URIs only when no CDNs configured
     const frameAncestors =
-      props.allowedParentOrigins.length > 0
-        ? props.allowedParentOrigins.join(' ')
+      normalizedParentOrigins.length > 0
+        ? normalizedParentOrigins.join(' ')
         : "'none'";
     const cspPolicy = [
       "default-src 'none'",
       `script-src ${scriptSrc}`,
       "style-src 'unsafe-inline'",
-      'img-src https: data:',
-      'font-src https: data:',
+      `img-src ${imgSrc}`,
+      'font-src data:',
       "connect-src 'none'",
       `frame-ancestors ${frameAncestors}`,
       "base-uri 'none'",
       "form-action 'none'",
+      "worker-src 'none'",
     ].join('; ');
 
     // Render the static host page with deploy-time substitutions: the parent
@@ -90,7 +106,7 @@ export class AtriumSandboxStack extends cdk.Stack {
     // replaceAll (not replace): guard against a future edit reintroducing the
     // token elsewhere in the template — replace() would substitute only the first.
     const renderedHtml = template
-      .replaceAll('__ALLOWED_PARENT_ORIGINS__', JSON.stringify(props.allowedParentOrigins))
+      .replaceAll('__ALLOWED_PARENT_ORIGINS__', JSON.stringify(normalizedParentOrigins))
       .replaceAll('__CSP_POLICY__', cspPolicy);
 
     // Private bucket; CloudFront reads it via Origin Access Control. No public
@@ -116,14 +132,13 @@ export class AtriumSandboxStack extends cdk.Stack {
         securityHeadersBehavior: {
           contentSecurityPolicy: { contentSecurityPolicy: cspPolicy, override: true },
           contentTypeOptions: { override: true },
-          frameOptions: {
-            // The app embeds this in an iframe; SAMEORIGIN/DENY would block it.
-            // Embedding is restricted by the CSP frame-ancestors directive above
-            // instead, which is origin-precise (X-Frame-Options cannot list
-            // multiple allowed ancestors).
-            frameOption: cloudfront.HeadersFrameOption.SAMEORIGIN,
-            override: false,
-          },
+          // X-Frame-Options is intentionally OMITTED: SAMEORIGIN or DENY would block
+          // the cross-origin app from embedding this sandbox in an iframe. Embedding
+          // is already restricted to the allowed parent origins via the CSP
+          // frame-ancestors directive above (which is origin-precise and takes
+          // precedence over X-Frame-Options in all modern browsers). Older browsers
+          // that ignore frame-ancestors also cannot read app cookies from this
+          // cross-origin host, so the security boundary holds either way.
           referrerPolicy: {
             referrerPolicy: cloudfront.HeadersReferrerPolicy.NO_REFERRER,
             override: true,
@@ -180,6 +195,11 @@ export class AtriumSandboxStack extends cdk.Stack {
       ),
     });
     // Attach the rewrite to the /render behavior.
+    // L1 escape: the CloudFront L2 `Distribution` construct does not expose
+    // FunctionAssociations on non-default (additional) behaviors. We access the
+    // underlying CfnDistribution via `node.defaultChild` to add it via a property
+    // override. This is an intentional, scope-limited L1 escape — no other L1
+    // properties are modified.
     const cfnDist = distribution.node.defaultChild as cloudfront.CfnDistribution;
     // The additional behavior for /render is index 0 in CacheBehaviors.
     cfnDist.addPropertyOverride('DistributionConfig.CacheBehaviors.0.FunctionAssociations', [

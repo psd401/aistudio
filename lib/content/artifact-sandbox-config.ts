@@ -70,6 +70,11 @@ export function getArtifactSandboxOrigin(): SandboxOrigin | null {
   const appOrigin = normalizeOrigin(process.env.NEXT_PUBLIC_APP_URL);
   if (appOrigin && appOrigin === configured) {
     // Fail closed: a sandbox sharing the app origin defeats the isolation model.
+    // When NEXT_PUBLIC_APP_URL is not set we cannot verify the origins differ —
+    // but rather than fail all dev/CI environments that omit APP_URL, we only
+    // reject the provably-wrong case (same-origin detected). The iframe
+    // sandbox="allow-scripts" (never allow-same-origin) provides the opaque-origin
+    // backstop even if this guard is bypassed by a misconfiguration.
     return null;
   }
   return configured;

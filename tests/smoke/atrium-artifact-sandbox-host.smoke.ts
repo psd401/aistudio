@@ -60,7 +60,7 @@ function renderHostHtml(allowedParentOrigins: string[]): string {
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   const template = fs.readFileSync(templatePath, "utf8");
   // Mirror atrium-sandbox-stack.ts substitution.
-  const csp = "default-src 'none'; script-src 'unsafe-inline'; connect-src 'none'";
+  const csp = "default-src 'none'; script-src 'unsafe-inline'; connect-src 'none'; worker-src 'none'; img-src data:";
   return template
     .replaceAll("__ALLOWED_PARENT_ORIGINS__", JSON.stringify(allowedParentOrigins))
     .replaceAll("__CSP_POLICY__", csp);

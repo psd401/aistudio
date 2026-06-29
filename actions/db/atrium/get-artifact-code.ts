@@ -26,6 +26,7 @@ import {
 import { createSuccess, handleError, ErrorFactories } from "@/lib/error-utils";
 import { contentService } from "@/lib/content";
 import { versionService } from "@/lib/content/version-service";
+import type { BodyFormat } from "@/lib/content";
 import type { ActionState } from "@/types";
 import { getOptionalRequester } from "./requester";
 
@@ -33,7 +34,13 @@ export interface ArtifactCodeResult {
   objectId: string;
   versionId: string;
   versionNumber: number;
-  bodyFormat: "html" | "jsx";
+  /**
+   * The artifact body format. Will be "html" or "jsx" for artifacts (never
+   * "markdown" — those are rejected before this result is constructed). Typed as
+   * the full `BodyFormat` union so that future format additions do not require a
+   * change here; `CodeEditor` and `ArtifactSandbox` accept `BodyFormat` already.
+   */
+  bodyFormat: BodyFormat;
   /** UNTRUSTED artifact source — sandbox/editor only, never app-origin render. */
   code: string;
 }
