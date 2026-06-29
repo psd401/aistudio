@@ -34,6 +34,12 @@ import "@/styles/atrium-content.css";
 type Tab = "preview" | "code";
 type LoadState = "loading" | "ready" | "error";
 
+/** Label for a version in the dropdown: "v3 · AI (current)". */
+function versionLabel(v: VersionSummary): string {
+  const author = v.authorActor === "agent" ? " · AI" : " · you";
+  return `v${v.versionNumber}${author}${v.isCurrent ? " (current)" : ""}`;
+}
+
 export interface ArtifactCanvasProps {
   /** Content object id or slug for the artifact. */
   idOrSlug: string;
@@ -184,9 +190,7 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false }: ArtifactCanvasProp
             >
               {versions.map((v) => (
                 <option key={v.id} value={v.id}>
-                  v{v.versionNumber}
-                  {v.authorActor === "agent" ? " · AI" : " · you"}
-                  {v.isCurrent ? " (current)" : ""}
+                  {versionLabel(v)}
                 </option>
               ))}
             </select>

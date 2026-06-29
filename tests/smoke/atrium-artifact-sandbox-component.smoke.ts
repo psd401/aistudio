@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 /**
  * Atrium ArtifactSandbox component fail-closed smoke test (Bun + jsdom) — #1052, Phase 2
  *
@@ -59,19 +58,18 @@ g.Event = dom.window.Event as unknown as typeof globalThis.Event;
 g.MessageEvent = dom.window.MessageEvent as unknown as typeof globalThis.MessageEvent;
 
 // ---------------------------------------------------------------------------
-// Stub the config module so the component sees "sandbox not configured".
-// We use Bun's module mock to replace getArtifactSandboxRenderUrl with a
-// function returning null before the component module loads.
+// Drive the component into its "sandbox not configured" branch WITHOUT a Bun
+// module mock (which would require a global `bun-types` reference that pollutes
+// the whole tsc program's `fetch` type and breaks unrelated DOM-typed tests).
+// The real config module reads these env vars at call time: with the sandbox
+// origin unset, getArtifactSandboxRenderUrl() returns null and the component
+// must render the fail-closed "unavailable" notice (no iframe).
 // ---------------------------------------------------------------------------
 
-import { mock } from "bun:test";
+delete process.env.NEXT_PUBLIC_ATRIUM_SANDBOX_ORIGIN;
+delete process.env.ATRIUM_SANDBOX_ORIGIN;
 
-mock.module("@/lib/content/artifact-sandbox-config", () => ({
-  getArtifactSandboxOrigin: () => null,
-  getArtifactSandboxRenderUrl: () => null,
-}));
-
-// Now import React and the component (after globals and mock are set up).
+// Now import React and the component (after globals + env are set up).
 const React = await import("react");
 const ReactDOM = await import("react-dom/client");
 const { ArtifactSandbox } = await import("@/components/atrium/ArtifactSandbox");

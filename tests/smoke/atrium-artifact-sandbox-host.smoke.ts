@@ -1,4 +1,3 @@
-/// <reference types="bun-types" />
 /**
  * Atrium artifact sandbox HOST PAGE security smoke (Bun + jsdom) — #1052, Phase 2
  *
@@ -47,15 +46,17 @@ const EVIL_ORIGIN = "https://evil.example.com";
 
 /** Build the deployed host HTML the way the CDK stack does (token substitution). */
 function renderHostHtml(allowedParentOrigins: string[]): string {
+  // Resolve from the repo root (these smokes are run via `bun run tests/...`
+  // from the project root). Avoids the Bun-only `import.meta.dir`, which would
+  // need a global `bun-types` reference that pollutes the whole tsc program's
+  // `fetch` type and breaks unrelated DOM-typed tests.
   const templatePath = path.join(
-    import.meta.dir,
-    "..",
-    "..",
+    process.cwd(),
     "infra",
     "sandbox-host",
     "render.html"
   );
-  // Path is built from import.meta.dir + fixed literal segments (the repo's
+  // Path is built from process.cwd() + fixed literal segments (the repo's
   // committed host template) — no external input. The lint rule cannot see that.
   // eslint-disable-next-line security/detect-non-literal-fs-filename
   const template = fs.readFileSync(templatePath, "utf8");
