@@ -23,7 +23,7 @@
  */
 
 import { useEffect, useRef, useState } from "react";
-import { EditorState, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, type Extension } from "@codemirror/state";
 import { EditorView, keymap, lineNumbers, highlightActiveLine } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { html } from "@codemirror/lang-html";
@@ -69,29 +69,43 @@ export function CodeEditor({
 }: CodeEditorProps) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const viewRef = useRef<EditorView | null>(null);
+  // Compartments allow reconfiguring the language + editability of the live editor
+  // without recreating the view (which would drop undo history / cursor).
+  const langCompartment = useRef(new Compartment());
+  const editableCompartment = useRef(new Compartment());
   // The last value we pushed INTO the editor from props, so we only reseed the
   // document on a genuine external change (not on every parent re-render).
   const appliedValueRef = useRef<string>(value);
+  // Latest props captured in refs so the mount-only effect can read their INITIAL
+  // values without listing them as deps (subsequent changes flow through the
+  // reseed / reconfigure effects below). Updated synchronously each render.
+  const initialValueRef = useRef(value);
+  const bodyFormatRef = useRef(bodyFormat);
+  const editableRef = useRef(editable);
+  bodyFormatRef.current = bodyFormat;
+  editableRef.current = editable;
+
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
   // Create the editor once (on mount). Language + editability changes are applied
-  // via reconfiguration effects below rather than recreating the view (which
-  // would lose cursor/scroll state).
+  // via the reconfiguration effects below rather than recreating the view.
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
 
     const state = EditorState.create({
-      doc: value,
+      doc: initialValueRef.current,
       extensions: [
         lineNumbers(),
         highlightActiveLine(),
         history(),
         keymap.of([...defaultKeymap, ...historyKeymap]),
-        languageExtension(bodyFormat),
-        EditorView.editable.of(editable),
-        EditorState.readOnly.of(!editable),
+        langCompartment.current.of(languageExtension(bodyFormatRef.current)),
+        editableCompartment.current.of([
+          EditorView.editable.of(editableRef.current),
+          EditorState.readOnly.of(!editableRef.current),
+        ]),
         EditorView.theme({
           "&": { fontSize: "13px", maxHeight: "480px" },
           ".cm-scroller": { overflow: "auto", fontFamily: "var(--font-mono, monospace)" },
@@ -100,15 +114,12 @@ export function CodeEditor({
     });
     const view = new EditorView({ state, parent: host });
     viewRef.current = view;
-    appliedValueRef.current = value;
+    appliedValueRef.current = initialValueRef.current;
 
     return () => {
       view.destroy();
       viewRef.current = null;
     };
-    // Mount-only: subsequent prop changes are handled by the effects below so the
-    // editor is not torn down (which would drop undo history / cursor).
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Reseed the document when the incoming `value` genuinely changes (e.g. a new
@@ -123,6 +134,28 @@ export function CodeEditor({
       changes: { from: 0, to: view.state.doc.length, insert: value },
     });
   }, [value]);
+
+  // Reconfigure the syntax-highlighting language when the body format changes.
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: langCompartment.current.reconfigure(languageExtension(bodyFormat)),
+    });
+  }, [bodyFormat]);
+
+  // Reconfigure editability when the `editable` prop changes (e.g. permission
+  // resolves after mount).
+  useEffect(() => {
+    const view = viewRef.current;
+    if (!view) return;
+    view.dispatch({
+      effects: editableCompartment.current.reconfigure([
+        EditorView.editable.of(editable),
+        EditorState.readOnly.of(!editable),
+      ]),
+    });
+  }, [editable]);
 
   const handleSave = async () => {
     const view = viewRef.current;

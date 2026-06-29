@@ -83,12 +83,15 @@ export function ArtifactCanvas({ idOrSlug, canEdit = false }: ArtifactCanvasProp
     return [];
   }, [idOrSlug]);
 
-  // Initial load: versions + head code. Re-runs when the object changes.
+  // Initial load: versions + head code. Re-runs when the object changes. State
+  // resets and fetches happen inside the async task (not synchronously in the
+  // effect body) to avoid cascading renders; `state` already initializes to
+  // "loading", so the first paint shows the loading state without a sync setState.
   useEffect(() => {
     let cancelled = false;
-    setState("loading");
-    setMessage(null);
-    (async () => {
+    void (async () => {
+      setState("loading");
+      setMessage(null);
       const [, headVersionId] = await Promise.all([
         refreshVersions(),
         loadCode(null),
